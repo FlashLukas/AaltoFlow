@@ -44,6 +44,16 @@ this PC's file (not in git). The measurement suite in scan-core reads the same
 file, which is how it follows the launcher. Profiles are in `profiles.json`
 next to this script.
 
+**Export settings…** writes all of it into one `.zip`: `suite_local.json`,
+`profiles.json`, scan-core's panel layouts, and every module's `*.ini`,
+`*calibration*.json` and `Calibrations\` folder (the same "lab data" rule the
+installer protects, so a new module is covered automatically). **Import
+settings…** reads such a zip back on another PC or install folder: it lists
+what would be new, replaced or skipped (paths outside the suite, modules not
+installed here, anything that is not a settings file), asks, saves the files it
+replaces to `../.suite_cache/settings-backup-<time>.zip` (import that to undo),
+and rescans. Restart running services so they read their new `.ini`.
+
 ## Profiles
 
 A chip per named subset: click it and the launcher starts just those services, in

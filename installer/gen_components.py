@@ -32,6 +32,9 @@ the same protection without anyone remembering to add it here:
     <module>\*.ini                  settings tuned on the rig
     <module>\*calibration*.json     e.g. kim's px_calibration.json
     <module>\Calibrations\*         clMag's calibration folder
+
+The rule itself is suite_common.catalog.is_lab_data (see _lab_data_rule): the
+same function decides what Mission Control's "Export settings..." saves.
 """
 
 from __future__ import annotations
@@ -45,13 +48,29 @@ ALWAYS = ["suite-common", "mission-control"]   # component "core", fixed
 SCAN = "scan-core"                             # component "scan"
 
 
+def _lab_data_rule(stage: Path):
+    """suite_common.catalog.is_lab_data, imported from the STAGED suite-common.
+
+    One function decides what "lab data" is, and three things use it: this
+    installer (install only if missing, keep on uninstall), Mission Control's
+    "Add module" updates (never overwrite), and Mission Control's settings
+    export/import (settings_bundle.py). A second copy of the rule here could
+    drift, and then a backup would miss a file the installer protects. The
+    staged tree always contains suite-common (it is a fixed component), and it
+    is standard library only, so importing it from here needs nothing installed.
+    """
+    src = str(stage / "suite-common" / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from suite_common.catalog import is_lab_data
+    return is_lab_data
+
+
 def data_globs(module_dir: Path) -> list[str]:
     """Relative patterns inside `module_dir` that hold lab data, not code."""
-    globs: list[str] = []
-    for f in sorted(module_dir.glob("*.ini")):
-        globs.append(f.name)
-    for f in sorted(module_dir.glob("*calibration*.json")):
-        globs.append(f.name)
+    is_lab_data = _lab_data_rule(module_dir.parent)
+    globs = [f.name for f in sorted(module_dir.iterdir())
+             if f.is_file() and is_lab_data(f.name)]
     if (module_dir / "Calibrations").is_dir():
         globs.append(r"Calibrations\*")
     return globs

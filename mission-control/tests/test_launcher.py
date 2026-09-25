@@ -376,3 +376,52 @@ def test_gui_does_not_open_when_the_service_dies_first(env, monkeypatch):
     _pump(app, 2.0)
     assert launched == [] and not card._gui_waiting
     card.service_proc = None
+
+
+def test_export_then_import_settings(env, tmp_path):
+    """Export writes one zip; import restores a file tuned since, keeps a
+    backup of what it replaced, and the cards follow an imported
+    suite_local.json (here: the magnet's real-hardware flag)."""
+    mc, win, root, app = env
+    ini = root / "magnet-control" / "magnet.ini"
+    local = root / mc.LOCAL_FILE
+    had_local = local.exists()
+    old_local = local.read_bytes() if had_local else None
+    try:
+        ini.write_text("[hall]\noffset = 1\n", encoding="utf-8")
+        mc.set_real("magnet", True, root)
+        bundle = win.export_settings(str(tmp_path / "settings.zip"))
+        assert bundle is not None and bundle.is_file()
+        assert "exported" in win.logbox.toPlainText()
+
+        ini.write_text("[hall]\noffset = 2\n", encoding="utf-8")
+        mc.set_real("magnet", False, root)
+        win.rescan(force=True)
+        assert not win.cards["magnet"].spec.real
+
+        plan = win.import_settings(str(bundle), confirm=False)
+        assert {e.path for e in plan.overwrite} == {"magnet-control/magnet.ini",
+                                                    mc.LOCAL_FILE}
+        assert "offset = 1" in ini.read_text(encoding="utf-8")
+        assert win.cards["magnet"].spec.real                  # the card followed
+        backups = list((root / ".suite_cache").glob("settings-backup-*.zip"))
+        assert backups
+        assert "backed up in" in win.logbox.toPlainText()
+    finally:
+        ini.unlink(missing_ok=True)
+        if had_local:
+            local.write_bytes(old_local)
+        else:
+            local.unlink(missing_ok=True)
+        win.rescan(force=True)
+
+
+def test_import_of_a_non_bundle_is_refused(env, tmp_path, monkeypatch):
+    mc, win, root, app = env
+    bad = tmp_path / "not.zip"
+    bad.write_text("hello", encoding="utf-8")
+    shown = []
+    monkeypatch.setattr(mc.QtWidgets.QMessageBox, "warning",
+                        lambda *a, **k: shown.append(a[2]))
+    assert win.import_settings(str(bad)) is None
+    assert shown and "not a zip" in shown[0]

@@ -18,6 +18,12 @@ print(found.problems)
 
 Used by mission-control, scan-core and the tools in `../tools`.
 
+`suite_common.settings_bundle` backs up this PC's settings into one zip and
+restores them (Mission Control's Export / Import settings): `collect()`,
+`export_bundle()`, `read_bundle()` (plans, writes nothing, refuses unsafe
+paths), `apply_import()` (backup first, atomic writes). What counts as a
+setting is `catalog.is_lab_data` -- the installer's rule.
+
 ```powershell
 cd suite-common
 uv sync

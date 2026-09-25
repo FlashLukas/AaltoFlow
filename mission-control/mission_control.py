@@ -52,6 +52,9 @@ from suite_common.catalog import (DEFAULT_CATALOG_URL, CatalogError, InstallPlan
                                   plan_install, search, spec_from_entry)
 from suite_common.catalog import Step as catalog_Step  # noqa: F401  (tests build steps)
 from suite_common.catalog import find_uv as _find_uv
+from suite_common.settings_bundle import (ImportPlan, apply_import, default_bundle_name,
+                                          export_bundle, read_bundle)
+from suite_common.settings_bundle import summary as settings_summary
 from suite_common.modules import (CATEGORIES, LOCAL_FILE, MANIFEST, ManifestError,
                                   ModuleSpec, port_conflicts)
 
@@ -1591,7 +1594,18 @@ class MainWindow(QtWidgets.QMainWindow):
         add = QtWidgets.QPushButton("Add remote…")
         add.setToolTip("Add a service that runs on another PC")
         add.clicked.connect(self.add_remote)
+        # Settings backup: every tuned .ini, calibration and launcher choice in
+        # one .zip, to move to a new PC or keep safe (suite_common.settings_bundle).
+        exp = QtWidgets.QPushButton("Export settings…")
+        exp.setToolTip("Save every module's settings (.ini), calibrations, this PC's "
+                       f"{LOCAL_FILE}, the profiles and the panel layouts into one .zip")
+        exp.clicked.connect(lambda: self.export_settings())
+        imp = QtWidgets.QPushButton("Import settings…")
+        imp.setToolTip("Read a settings .zip back. Shows what would change first, "
+                       "and keeps a backup of every file it replaces.")
+        imp.clicked.connect(lambda: self.import_settings())
         mrow.addWidget(rescan); mrow.addWidget(add_mod); mrow.addWidget(add)
+        mrow.addWidget(exp); mrow.addWidget(imp)
         col.addLayout(mrow)
 
         self.problems_lbl = QtWidgets.QLabel(); self.problems_lbl.setWordWrap(True)
@@ -1735,6 +1749,91 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.added_id:
             self.log(f"added remote {dlg.added_id}")
             self.rescan(force=True)
+
+    # ---- settings backup ----------------------------------------------------
+    # The logic (what counts as a setting, zip-slip checks, the backup) lives in
+    # suite_common.settings_bundle, where it is tested without Qt. Here there are
+    # only file dialogs, a confirmation and log lines.
+
+    def export_settings(self, path: str | None = None) -> Path | None:
+        """Write this PC's settings into one .zip. `path` skips the file dialog."""
+        if path is None:
+            start = str(Path.home() / default_bundle_name())
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Export settings", start, "Settings bundle (*.zip)")
+            if not path:
+                return None
+        dest = Path(path)
+        try:
+            saved = export_bundle(dest, ROOT)
+        except OSError as e:
+            self.log(f"could not export settings: {e}", "error")
+            return None
+        self.log(f"exported {len(saved)} settings file(s) to {dest}")
+        return dest
+
+    def import_settings(self, path: str | None = None, confirm: bool = True) -> ImportPlan | None:
+        """Read a settings .zip back: plan, show, confirm, back up, write.
+        `path` skips the file dialog; confirm=False skips the question (tests)."""
+        if path is None:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Import settings", str(Path.home()), "Settings bundle (*.zip)")
+            if not path:
+                return None
+        try:
+            plan = read_bundle(path, ROOT)
+        except ValueError as e:
+            self.log(str(e), "error")
+            QtWidgets.QMessageBox.warning(self, "Import settings", str(e))
+            return None
+        for e in plan.skipped:
+            self.log(f"settings import: skipped {e.path} ({e.reason})", "warn")
+        if not plan.to_write:
+            self.log(f"settings import: nothing to change ({len(plan.unchanged)} file(s) "
+                     f"already identical, {len(plan.skipped)} skipped)")
+            if confirm:
+                QtWidgets.QMessageBox.information(self, "Import settings",
+                                                  settings_summary(plan))
+            return plan
+        if confirm and not self._confirm_import(plan):
+            self.log("settings import cancelled.")
+            return None
+        try:
+            backup = apply_import(plan, ROOT)
+        except OSError as e:
+            self.log(f"settings import failed: {e}", "error")
+            return None
+        self.log(f"imported {len(plan.to_write)} settings file(s) from {Path(path).name}"
+                 + (f"; the replaced ones are backed up in {backup}" if backup else ""))
+        if any(c.owns_service for c in self.local_cards()):
+            # Each service reads its .ini once, at start.
+            self.log("services that are running still use their old settings: "
+                     "restart them to load the imported ones.", "warn")
+        # The imported files may change ports, remotes, real flags (suite_local.json)
+        # and the profile chips (profiles.json): re-read both so the cards follow.
+        self.profiles = load_profiles()
+        self.rescan(force=True)
+        return plan
+
+    def _confirm_import(self, plan: ImportPlan) -> bool:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Import settings")
+        box.setIcon(QtWidgets.QMessageBox.Warning if plan.overwrite
+                    else QtWidgets.QMessageBox.Question)
+        text = (f"Write {len(plan.to_write)} settings file(s)"
+                + (f", replacing {len(plan.overwrite)}" if plan.overwrite else "") + "?")
+        if plan.overwrite:
+            text += ("\n\nThe files being replaced are first saved to a backup .zip in "
+                     ".suite_cache -- import that one to undo.")
+        if plan.touches_local_settings:
+            text += (f"\n\n{LOCAL_FILE} is included: it holds this PC's ports, "
+                     "real-hardware flags and remote hosts, and will be replaced by "
+                     "those of the PC the bundle came from.")
+        box.setText(text)
+        box.setDetailedText(settings_summary(plan))
+        box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(QtWidgets.QMessageBox.Cancel)
+        return box.exec() == QtWidgets.QMessageBox.Yes
 
     # ---- helpers ----------------------------------------------------------
 
