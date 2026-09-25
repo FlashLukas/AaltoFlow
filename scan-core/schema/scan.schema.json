@@ -145,7 +145,7 @@
       ]
     },
     "call_args": {
-      "title": "a routine: blocking sets (in order), then one blocking action",
+      "title": "a routine: blocking sets (in order), then one blocking action -- or an ordered list of steps",
       "type": "object",
       "properties": {
         "set": {
@@ -154,7 +154,22 @@
           "additionalProperties": {"type": "number"}
         },
         "action": {"type": "string",
-                   "description": "a registry action id, e.g. vna.take_reference"}
+                   "description": "a registry action id, e.g. vna.take_reference"},
+        "steps": {
+          "type": "array",
+          "description": "the ordered form: each step sets parameters or runs an action, in the order written; the restore runs once, after the last step",
+          "items": {"$ref": "#/$defs/call_step"}
+        }
+      },
+      "not": {"anyOf": [{"required": ["steps", "set"]}, {"required": ["steps", "action"]}]},
+      "additionalProperties": false
+    },
+    "call_step": {
+      "title": "one step of a routine: sets (in order), then an optional action",
+      "type": "object",
+      "properties": {
+        "set": {"type": "object", "additionalProperties": {"type": "number"}},
+        "action": {"type": "string"}
       },
       "additionalProperties": false
     }

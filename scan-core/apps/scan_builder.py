@@ -364,25 +364,177 @@ class FixedRow(QtWidgets.QFrame):
 #: The two moments the ROUTINES card edits, in the order they happen.
 ROUTINE_MOMENTS = (("before_scan", "BEFORE SCAN"), ("after_scan", "AFTER SCAN"))
 
-#: The label of the "no action" entry in a routine's action combo.
-NO_ACTION = "(none)"
+#: The label of the first entry of a routine's "add an action" combo. Picking
+#: any OTHER entry appends that action as a step and snaps back to this one.
+ADD_ACTION = "＋ run an action ..."
+
+
+def _step_frame(row) -> QtWidgets.QHBoxLayout:
+    """The shared left end of a routine step: a compact row and its NUMBER.
+
+    Compact on purpose (small margins and spacing): in the suite the three
+    routine columns share the card's width, ~350 px each, and a step wider
+    than its column has its buttons cut off (the scroll area has no
+    horizontal bar).
+    """
+    row.setObjectName("axis")
+    lay = QtWidgets.QHBoxLayout(row)
+    lay.setContentsMargins(8, 3, 6, 3); lay.setSpacing(4)
+    row.marker = QtWidgets.QLabel("")
+    row.marker.setStyleSheet(f"color:{C['accent']}; font-weight:800;")
+    row.marker.setFixedWidth(16)
+    lay.addWidget(row.marker)
+    return lay
+
+
+def _step_buttons(row, lay) -> None:
+    """up / down / remove at the right end of a routine step.
+
+    The order of the steps IS the order they run in, so moving a step is how
+    "save the picture AFTER the focus" is said.
+    """
+    row.up_btn = QtWidgets.QPushButton("↑")
+    row.down_btn = QtWidgets.QPushButton("↓")
+    for b, delta, tip in ((row.up_btn, -1, "Run this step earlier"),
+                          (row.down_btn, +1, "Run this step later")):
+        b.setFixedWidth(22)
+        # The suite's button padding would leave no room for the arrow in 22 px.
+        b.setStyleSheet("padding: 0px;")
+        b.setToolTip(tip)
+        b.clicked.connect(lambda _=False, d=delta: row.move.emit(row, d))
+        lay.addWidget(b)
+    rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger"); rm.setFixedWidth(24)
+    rm.setStyleSheet("padding: 0px;")
+    rm.setToolTip("Remove this step")
+    rm.clicked.connect(lambda: row.remove.emit(row))
+    lay.addWidget(rm)
+
+
+class SetStepRow(FixedRow):
+    """A routine step "set <parameter> = value".
+
+    Behaves as a FixedRow (the live limits under the name, the value clamped
+    to them, re-clamped by refresh_limits), because a routine's set IS a
+    setpoint -- held for a moment instead of for the whole scan -- and it is
+    checked exactly like one. Only the layout differs: narrower (the unit sits
+    in the value box), a step number instead of "=", and up / down buttons.
+    """
+
+    move = QtCore.Signal(object, int)
+
+    def __init__(self, param, value: float | None = None):
+        QtWidgets.QFrame.__init__(self)       # FixedRow's layout is not wanted
+        self.param = param
+        lay = _step_frame(self)
+
+        namebox = QtWidgets.QVBoxLayout(); namebox.setSpacing(0)
+        name = QtWidgets.QLabel(param.label)
+        name.setStyleSheet("font-weight:700;")
+        name.setToolTip(param.id)
+        self.limits_lbl = QtWidgets.QLabel()
+        self.limits_lbl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+        for w in (name, self.limits_lbl):
+            # May be CUT (full text in the tooltip), never widen the column.
+            w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            w.setMinimumWidth(96)
+            namebox.addWidget(w)
+        lay.addLayout(namebox, 1)
+
+        self.integer = bool(getattr(param, "integer", False))
+        lo, hi = self._finite_limits()
+        self.value_box = QtWidgets.QDoubleSpinBox()
+        self.value_box.setRange(lo, hi)
+        self.value_box.setDecimals(0 if self.integer else 3)
+        if param.unit:
+            self.value_box.setSuffix(f" {param.unit}")
+        self.value_box.setFixedWidth(104)
+        start = value if value is not None else self._default_value(lo, hi)
+        self.value_box.setValue(float(start))
+        self.value_box.valueChanged.connect(lambda *_: self.changed.emit())
+        lay.addWidget(self.value_box)
+        _step_buttons(self, lay)
+        self._sync_limits_label()
+        self.limits_lbl.setToolTip(self.limits_lbl.text())
+
+    def refresh_limits(self):
+        super().refresh_limits()
+        self.limits_lbl.setToolTip(self.limits_lbl.text())
+
+    def set_number(self, k: int) -> None:
+        self.marker.setText(str(k))
+
+    def to_step(self) -> dict:
+        return {"set": {self.param.id: self.value()}}
+
+    def text(self) -> str:
+        unit = f" {self.param.unit}" if self.param.unit else ""
+        return f"{self.param.label} = {self.value():g}{unit}"
+
+
+class ActionStepRow(QtWidgets.QFrame):
+    """A routine step "run <action>" -- one registry action, waited for.
+
+    The scan does not go on to the next step until the action has finished
+    (an autofocus has parked, a reference sweep is in), which is what makes
+    "find focus, then save the pattern, then save a picture" safe to write
+    down as three steps.
+    """
+
+    remove = QtCore.Signal(object)
+    move = QtCore.Signal(object, int)
+
+    def __init__(self, action):
+        super().__init__()
+        self.aid = action.id
+        lay = _step_frame(self)
+        run = QtWidgets.QLabel("run")
+        run.setStyleSheet(f"color:{C['muted']};")
+        lay.addWidget(run)
+        namebox = QtWidgets.QVBoxLayout(); namebox.setSpacing(0)
+        name = QtWidgets.QLabel(action.label)
+        name.setStyleSheet("font-weight:700;")
+        ident = QtWidgets.QLabel(action.id)
+        ident.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+        for w in (name, ident):
+            w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            w.setMinimumWidth(60)
+            w.setToolTip(f"{action.id}\n{action.help}" if action.help else action.id)
+            namebox.addWidget(w)
+        lay.addLayout(namebox, 1)
+        _step_buttons(self, lay)
+
+    def set_number(self, k: int) -> None:
+        self.marker.setText(str(k))
+
+    def to_step(self) -> dict:
+        return {"action": self.aid}
+
+    def text(self) -> str:
+        return self.aid
+
+    def refresh_limits(self) -> None:          # an action has none
+        pass
 
 
 class RoutineSection(QtWidgets.QFrame):
-    """One routine: parameters to set (in order), then ONE action to run.
+    """One routine: an ORDERED list of steps, each "set <param> = value" or
+    "run <action>", run top to bottom, every one waited for.
 
-    It is stored in the recipe as a `call` hook
-    ({when: before_scan, action: call, args: {set: {...}, action: ...}}), so a
-    routine is just data like the rest of the scan -- saved in the .yaml, carried
-    inside every .nc, restored on load.
+    Before 2026-09-25 a routine was "these sets, then ONE action". Lukas wanted
+    several actions at one moment in a given order -- before the scan: find
+    focus, then save the scan pattern, then save a camera picture -- so the
+    steps are now a list: add, remove, move up / down. Parameters come from the
+    palette ("+ Before" / "+ After" / "+ Throughout" append a set step);
+    actions from the "run an action" list under the steps (it lists
+    `registry.actions()`).
 
-    The rows are FixedRows (parameter = value, with the live limits under the
-    name), because a routine's set IS a setpoint, held for a moment instead of
-    for the whole scan; showing it any differently would suggest it is checked
-    differently, and it is not.
-
-    The layout reads top to bottom in the order things happen: the sets, then
-    "then run <action>". That is also the order the engine executes them in.
+    It is stored in the recipe as ONE `call` hook, so a routine is just data
+    like the rest of the scan -- saved in the .yaml, carried inside every .nc,
+    restored on load. to_hook() writes the ORIGINAL form {set: {...}, action:
+    X} whenever that says the same thing (sets, then at most one action; an
+    older scan-core reads it), and the ordered form {steps: [...]} otherwise.
+    One hook, not one per action, because the RESTORE (hooks._call) then runs
+    once, after the last step -- see hooks.py for why that matters.
     """
 
     changed = QtCore.Signal()
@@ -390,7 +542,8 @@ class RoutineSection(QtWidgets.QFrame):
     def __init__(self, when: str, title: str):
         super().__init__()
         self.when = when
-        self.rows: list[FixedRow] = []
+        self.steps: list = []                 # SetStepRow | ActionStepRow, in run order
+        self._actions: dict = {}              # action id -> Action the registry offers
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
 
@@ -398,7 +551,7 @@ class RoutineSection(QtWidgets.QFrame):
         tag = QtWidgets.QLabel(title); tag.setObjectName("tag")
         head.addWidget(tag)
         self.title_lbl = tag
-        self.empty_lbl = QtWidgets.QLabel("nothing -- set parameters, then run an action")
+        self.empty_lbl = QtWidgets.QLabel("nothing -- add parameters or actions, in order")
         self.empty_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.empty_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                      QtWidgets.QSizePolicy.Preferred)
@@ -418,112 +571,241 @@ class RoutineSection(QtWidgets.QFrame):
         self.rows_scroll = scroll
 
         act = QtWidgets.QHBoxLayout()
-        then = QtWidgets.QLabel("then run")
-        then.setStyleSheet(f"color:{C['muted']};")
-        act.addWidget(then)
-        self.action_combo = QtWidgets.QComboBox()
-        self.action_combo.setMinimumWidth(220)
-        self.action_combo.currentIndexChanged.connect(lambda *_: self._changed())
-        act.addWidget(self.action_combo)
+        # ONE combo instead of "combo + Add button": picking an action appends
+        # it as the last step and the combo returns to its "+ run an action"
+        # entry, ready for the next one. `activated` fires only on a USER pick,
+        # so refilling the list never adds a step by itself.
+        self.add_combo = QtWidgets.QComboBox()
+        self.add_combo.setMinimumWidth(200)
+        self.add_combo.activated.connect(self._picked)
+        act.addWidget(self.add_combo)
         act.addStretch(1)
         v.addLayout(act)
         self.set_actions([])
 
-    # ---- actions ----------------------------------------------------------
+    # ---- the steps -------------------------------------------------------------
 
-    def set_actions(self, actions) -> None:
-        """Refill the combo from `registry.actions()`, keeping the choice if it
-        is still offered."""
-        keep = self.action_id()
-        self.action_combo.blockSignals(True)
-        self.action_combo.clear()
-        self.action_combo.addItem(NO_ACTION, None)
-        for a in actions:
-            self.action_combo.addItem(f"{a.label}   ({a.id})", a.id)
-            i = self.action_combo.count() - 1
-            self.action_combo.setItemData(i, a.help or a.id, QtCore.Qt.ToolTipRole)
-        i = self.action_combo.findData(keep) if keep else 0
-        self.action_combo.setCurrentIndex(max(0, i))
-        # Disabled, with the reason, rather than a combo offering only "(none)"
-        # and leaving the operator to guess why the reference is not there.
-        self.action_combo.setEnabled(bool(actions))
-        self.action_combo.setToolTip(
-            "The action runs AFTER every parameter above has been set and has "
-            "settled, and the scan waits until it has finished."
-            if actions else
-            "No connected module offers an action a scan can wait on.\n"
-            "(A module offers one by giving the action a `wait` block in describe.)")
-        self.action_combo.blockSignals(False)
-        self._changed()
+    def minimumSizeHint(self):
+        """At least as wide as the widest step (+ the scroll bar).
 
-    def action_id(self) -> str | None:
-        return self.action_combo.currentData() if self.action_combo.count() else None
+        The steps sit in a scroll area, and a scroll area reports only its own
+        frame as its minimum -- so without this the RoutinesCard would measure
+        a column as narrow as its "run an action" list, put three of them side
+        by side in the standalone builder's narrow column, and cut every
+        step's buttons off.
+        """
+        hint = super().minimumSizeHint()
+        widest = max((st.minimumSizeHint().width() for st in self.steps), default=0)
+        if widest:
+            sc = self.rows_scroll
+            widest += sc.verticalScrollBar().sizeHint().width() + 2 * sc.frameWidth()
+        return QtCore.QSize(max(hint.width(), widest), hint.height())
 
-    def set_action(self, aid: str | None) -> bool:
-        """Select `aid` (None = no action). False if the registry lacks it."""
-        i = 0 if not aid else self.action_combo.findData(aid)
-        if i < 0:
-            return False
-        self.action_combo.setCurrentIndex(i)
-        return True
+    @property
+    def rows(self) -> list:
+        """The SET steps only (what limit refreshes and older callers want)."""
+        return [s for s in self.steps if isinstance(s, SetStepRow)]
 
-    # ---- sets ---------------------------------------------------------------
-
-    def add_set(self, param, value: float | None = None) -> FixedRow:
-        # One row per parameter, as with conditions: two rows would send two
-        # setpoints, and only the last one would be the one the routine means.
-        for row in self.rows:
-            if row.param.id == param.id:
-                if value is not None:
-                    row.value_box.setValue(float(value))
-                row.value_box.setFocus()
-                return row
-        row = FixedRow(param, value)
-        row.changed.connect(self._changed)
-        row.remove.connect(self.remove_set)
-        self.rows.append(row)
-        self.lay.insertWidget(self.lay.count() - 1, row)      # before the stretch
+    def _insert(self, row, at: int | None = None):
+        row.remove.connect(self.remove_step)
+        row.move.connect(self.move_step)
+        if isinstance(row, SetStepRow):
+            row.changed.connect(self._changed)
+        at = len(self.steps) if at is None else at
+        self.steps.insert(at, row)
+        self.lay.insertWidget(at, row)            # the stretch stays last
         self._changed()
         return row
 
-    def remove_set(self, row) -> None:
-        if row in self.rows:
-            self.rows.remove(row)
+    def add_set(self, param, value: float | None = None,
+                merge: bool = True) -> SetStepRow:
+        """Append "set param = value" (the palette's + Before / After / Throughout).
+
+        With `merge`, a parameter already set AFTER the last action is updated
+        in place instead: two sets of it with nothing run in between would just
+        be two setpoints, and only the last would count. After an action a new
+        step is added -- "field 190, take the reference, field 0" needs both.
+        Loading a file passes merge=False and reproduces it exactly.
+        """
+        if merge:
+            for row in reversed(self.steps):
+                if isinstance(row, ActionStepRow):
+                    break
+                if row.param.id == param.id:
+                    if value is not None:
+                        row.value_box.setValue(float(value))
+                    row.value_box.setFocus()
+                    return row
+        return self._insert(SetStepRow(param, value))
+
+    def add_action(self, aid: str) -> "ActionStepRow | None":
+        """Append "run aid". None if no connected module offers that action."""
+        a = self._actions.get(aid)
+        if a is None:
+            return None
+        return self._insert(ActionStepRow(a))
+
+    def remove_step(self, row) -> None:
+        if row in self.steps:
+            self.steps.remove(row)
             row.setParent(None)
             self._changed()
 
+    remove_set = remove_step                      # the pre-2026-09-25 name
+
+    def move_step(self, row, delta: int) -> None:
+        """Move a step earlier (-1) or later (+1): the order is the run order."""
+        i = self.steps.index(row); j = i + delta
+        if not 0 <= j < len(self.steps):
+            return
+        self.steps[i], self.steps[j] = self.steps[j], self.steps[i]
+        for s in self.steps:
+            self.lay.removeWidget(s)
+        for k, s in enumerate(self.steps):
+            self.lay.insertWidget(k, s)
+        self._changed()
+
     def clear(self) -> None:
-        for row in list(self.rows):
-            self.remove_set(row)
-        self.set_action(None)
+        for row in list(self.steps):
+            self.remove_step(row)
+
+    # ---- actions ----------------------------------------------------------
+
+    def set_actions(self, actions) -> None:
+        """Refill the "run an action" list from `registry.actions()`.
+
+        An action step whose action is no longer offered is dropped -- as a
+        set step is when its parameter goes -- and loading names it as missing.
+        """
+        self._actions = {a.id: a for a in actions}
+        for row in [s for s in self.steps if isinstance(s, ActionStepRow)]:
+            if row.aid not in self._actions:
+                self.remove_step(row)
+        self.add_combo.blockSignals(True)
+        self.add_combo.clear()
+        self.add_combo.addItem(ADD_ACTION, None)
+        for a in actions:
+            self.add_combo.addItem(f"{a.label}   ({a.id})", a.id)
+            i = self.add_combo.count() - 1
+            self.add_combo.setItemData(i, a.help or a.id, QtCore.Qt.ToolTipRole)
+        self.add_combo.setCurrentIndex(0)
+        # Disabled, with the reason, rather than a list offering nothing and
+        # leaving the operator to guess why the reference is not there.
+        self.add_combo.setEnabled(bool(actions))
+        self.add_combo.setToolTip(
+            "Adds the action as the LAST step. Steps run top to bottom; each\n"
+            "one is waited for (a set until it has settled, an action until it\n"
+            "has finished). Use the arrows to change the order."
+            if actions else
+            "No connected module offers an action a scan can wait on.\n"
+            "(A module offers one by giving the action a `wait` block in describe.)")
+        self.add_combo.blockSignals(False)
+        self._changed()
+
+    def _picked(self, index: int) -> None:
+        aid = self.add_combo.itemData(index)
+        self.add_combo.setCurrentIndex(0)
+        if aid:
+            self.add_action(aid)
+
+    def action_ids(self) -> list[str]:
+        """Every action the routine runs, in order."""
+        return [s.aid for s in self.steps if isinstance(s, ActionStepRow)]
+
+    def action_id(self) -> str | None:
+        """The LAST action (the only one, for a routine in the original form)."""
+        ids = self.action_ids()
+        return ids[-1] if ids else None
+
+    def set_action(self, aid: str | None) -> bool:
+        """The original one-action API: make `aid` THE action, run after every
+        set (None = no action). False if no module offers it. To run several
+        actions, use add_action()."""
+        if aid and aid not in self._actions:
+            return False
+        for row in [s for s in self.steps if isinstance(s, ActionStepRow)]:
+            self.remove_step(row)
+        if aid:
+            self.add_action(aid)
+        return True
 
     def _changed(self):
-        if not hasattr(self, "action_combo"):     # still being built
+        if not hasattr(self, "add_combo"):        # still being built
             return
-        self.empty_lbl.setVisible(not self.rows and not self.action_id())
+        for k, s in enumerate(self.steps, 1):
+            s.set_number(k)
+            s.up_btn.setEnabled(k > 1)
+            s.down_btn.setEnabled(k < len(self.steps))
+        self.empty_lbl.setVisible(not self.steps)
         self.changed.emit()
 
     # ---- recipe --------------------------------------------------------------
 
+    def to_args(self) -> dict | None:
+        """The `call` arguments these steps stand for; None when empty.
+
+        The ORIGINAL form -- {set: {...}, action: X} -- when it says exactly the
+        same thing: sets of different parameters, then at most one action. The
+        ordered form {steps: [...]} otherwise (two actions, a set after an
+        action, a parameter set twice). Both run the same way (hooks.py,
+        routine_steps); the original keeps simple routines readable by an
+        older scan-core and keeps existing files byte-identical on re-save.
+        """
+        if not self.steps:
+            return None
+        kinds = ["action" if isinstance(s, ActionStepRow) else "set" for s in self.steps]
+        n_act = kinds.count("action")
+        pids = [s.param.id for s in self.rows]
+        simple = (n_act == 0 or (n_act == 1 and kinds[-1] == "action")) \
+            and len(set(pids)) == len(pids)
+        if simple:
+            args = {}
+            if pids:
+                args["set"] = {s.param.id: s.value() for s in self.rows}
+            if n_act:
+                args["action"] = self.steps[-1].aid
+            return args
+        return {"steps": [s.to_step() for s in self.steps]}
+
     def to_hook(self) -> dict | None:
         """The `call` hook this section stands for, or None when it is empty
         (an empty routine is simply not written into the recipe)."""
-        args = {}
-        if self.rows:
-            args["set"] = {r.param.id: r.value() for r in self.rows}
-        if self.action_id():
-            args["action"] = self.action_id()
+        args = self.to_args()
         if not args:
             return None
         return {"when": self.when, "action": "call", "args": args}
 
+    def load_args(self, args, registry) -> list[str]:
+        """Append the steps of a `call` hook's args; return the ids missing here.
+
+        What is available loads, in order; a parameter or action this registry
+        lacks is left out and NAMED, exactly like a missing axis -- a
+        definition written against the lab must not come back on the simulator
+        quietly skipping its reference.
+        """
+        from scan_core.hooks import routine_steps
+        missing = []
+        for kind, ident, *value in routine_steps(args):
+            if kind == "action":
+                if self.add_action(ident) is None:
+                    missing.append(ident)
+                continue
+            p = registry.get(ident)
+            if p is None or getattr(p, "kind", "") != "settable":
+                missing.append(ident)
+                continue
+            self.add_set(p, float(value[0]), merge=False)
+        return missing
+
     def describe(self) -> str:
-        """One line for the summary: "field = 190 mT, then vna_reference"."""
-        parts = [f"{r.param.label} = {r.value():g}"
-                 + (f" {r.param.unit}" if r.param.unit else "") for r in self.rows]
-        text = ", ".join(parts)
-        if self.action_id():
-            text = (text + ", then " if text else "") + self.action_id()
+        """One line for the summary, in run order:
+        "field = 190 mT, then vna_reference, then field = 0 mT"."""
+        text, after_action = "", False
+        for s in self.steps:
+            is_action = isinstance(s, ActionStepRow)
+            sep = ", then " if (is_action or after_action) else ", "
+            text = (text + sep if text else "") + s.text()
+            after_action = is_action
         return text
 
 
@@ -540,7 +822,7 @@ THROUGHOUT_KEYS = {"when", "axis", "edge", "every", "n", "on_error", "action", "
 class ThroughoutSection(RoutineSection):
     """A routine that runs DURING the scan: every N points, or once per sweep.
 
-    Same body as before/after (sets, then one action, both waited for), plus a
+    Same body as before/after (an ordered list of steps, each waited for), plus a
     TRIGGER line. "Each sweep of y" = once every time y starts again from its
     first value, i.e. whenever an axis outside y steps (hooks.py explains why
     that and not "y changed"). The axis list is the scan's DIMS, so a raster
@@ -586,7 +868,7 @@ class ThroughoutSection(RoutineSection):
         trig.addWidget(rm)
         self.layout().insertLayout(1, trig)
 
-        # line 3 (after "then run"): how often, what it costs, what if it fails
+        # line 3 (after "run an action"): how often, what it costs, what if it fails
         foot = QtWidgets.QHBoxLayout(); foot.setSpacing(6)
         self.every_lbl = QtWidgets.QLabel("only every")
         self.every_lbl.setStyleSheet(f"color:{C['muted']};")
@@ -635,9 +917,13 @@ class ThroughoutSection(RoutineSection):
         self.n_spin.setVisible(not sweep)
         self.n_fill.setVisible(not sweep)
         self.every_unit.setText("sweep  ·" if self.every_spin.value() == 1 else "sweeps  ·")
-        # The set rows only take room when there are some.
-        self.rows_scroll.setVisible(bool(self.rows))
-        self.rows_scroll.setFixedHeight(min(3, len(self.rows)) * 46 + 4 if self.rows else 0)
+        # The steps only take room when there are some; up to three show
+        # without scrolling (a set step is taller than an action step, so the
+        # height is measured, not counted).
+        shown = self.steps[:3]
+        self.rows_scroll.setVisible(bool(shown))
+        self.rows_scroll.setFixedHeight(
+            sum(s.sizeHint().height() for s in shown) + 4 * len(shown) if shown else 0)
 
     def _changed(self):
         if hasattr(self, "trigger_combo"):          # not during the base __init__
@@ -721,8 +1007,8 @@ class RoutinesCard(QtWidgets.QFrame):
 
     Side by side in the suite's wide Scan tab, stacked in the standalone
     builder's narrow middle column. "Room" is MEASURED -- the columns' own
-    minimum widths, which grow when a routine gets parameter rows (a FixedRow
-    needs ~430 px) -- not a fixed pixel count.
+    minimum widths, which grow when a routine gets steps (a set step needs
+    ~330 px; see RoutineSection.minimumSizeHint) -- not a fixed pixel count.
 
     The card sets an explicit small minimum width on purpose. Otherwise Qt
     makes the side-by-side layout's minimum (the SUM of the columns) the
@@ -733,8 +1019,8 @@ class RoutinesCard(QtWidgets.QFrame):
 
     #: Heights (min, max) for the two arrangements: stacked, three routines
     #: need more room than side by side.
-    WIDE_HEIGHT = (206, 400)
-    STACKED_HEIGHT = (330, 380)
+    WIDE_HEIGHT = (250, 400)       # 250: a THROUGHOUT routine with one step fits
+    STACKED_HEIGHT = (330, 380)    # more squeezes the axis stack; the steps scroll
 
     def __init__(self):
         super().__init__()
@@ -754,14 +1040,39 @@ class RoutinesCard(QtWidgets.QFrame):
         lo, hi = self.WIDE_HEIGHT if wide else self.STACKED_HEIGHT
         self.setMinimumHeight(lo); self.setMaximumHeight(hi)
 
-    def resizeEvent(self, event):
+    def arrange(self) -> None:
+        """Side by side if the columns fit, else stacked. Called on a resize
+        AND whenever a routine's steps change (ScanBuilder._rebuild_summary):
+        a new step can make a column wider without the card changing size."""
         wide = self.width() >= self._needed_width()
         want = (QtWidgets.QBoxLayout.LeftToRight if wide
                 else QtWidgets.QBoxLayout.TopToBottom)
         if self.box.direction() != want:
             self.box.setDirection(want)
             self._apply_height(wide)
+
+    def resizeEvent(self, event):
+        self.arrange()
         super().resizeEvent(event)
+
+
+class _ThroughoutColumn(QtWidgets.QWidget):
+    """The THROUGHOUT column: its routines live in a scroll area, so -- as for
+    RoutineSection.minimumSizeHint -- it reports the widest routine itself, or
+    the RoutinesCard would think it fits where it does not."""
+
+    def __init__(self, sections_fn, scroll_fn):
+        super().__init__()
+        self._sections = sections_fn
+        self._scroll = scroll_fn
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        widest = max((s.minimumSizeHint().width() for s in self._sections()), default=0)
+        sc = self._scroll()
+        if widest and sc is not None:
+            widest += sc.verticalScrollBar().sizeHint().width() + 2 * sc.frameWidth()
+        return QtCore.QSize(max(hint.width(), widest), hint.height())
 
 
 # ───────────────────────────── axis point preview ─────────────────────────────
@@ -1231,10 +1542,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._queue_stop = ""                  # why the queue stops early, if it does
         self.queue_results: list[tuple[str, str]] = []   # (name, outcome)
         #: The hooks of the LOADED definition, with the routines the card edits
-        #: replaced by ("routine", when) placeholders. Hooks the UI does not
-        #: model (a wait_ms before every point, a second routine at the same
-        #: moment) are kept here and written back on save, in their own place --
-        #: a definition must not lose part of itself by passing through the UI.
+        #: replaced by ("routine", when) / ("throughout", section) placeholders.
+        #: Hooks the UI does not model (a wait_ms before every point, a routine
+        #: with an on_error before the scan) are kept here and written back on
+        #: save, in their own place -- a definition must not lose part of itself
+        #: by passing through the UI.
         self._hook_template: list = []
 
         self.setWindowTitle(suite_title("Scan Builder"))   # "TR-MOKE · Scan Builder"
@@ -1312,9 +1624,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         for when, text in (("before_scan", "＋ Before"), ("after_scan", "＋ After")):
             b = QtWidgets.QPushButton(text)
             b.setToolTip(
-                "Add this parameter to the " + when.replace("_", "-") + " ROUTINE.\n"
-                "The routine sets its parameters (each waits until settled), then\n"
-                "runs its action (e.g. take a VNA reference), "
+                "Add this parameter as the last step of the " + when.replace("_", "-")
+                + " ROUTINE.\nThe steps run top to bottom, each waited for (a set\n"
+                "until it has settled, an action such as a VNA reference until\n"
+                "it has finished), "
                 + ("then the scan starts.\nParameters the scan already holds are "
                    "put back before the first point."
                    if when == "before_scan" else
@@ -1456,6 +1769,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         the field, then field -> 0.
         """
         card = RoutinesCard()          # sizes itself: side by side or stacked
+        self.routines_card = card
         v = QtWidgets.QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
         head = QtWidgets.QHBoxLayout()
         head.addWidget(self._tag("ROUTINES  ·  before, during and after the scan"))
@@ -1482,7 +1796,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def _build_throughout(self, actions) -> QtWidgets.QWidget:
         """THROUGHOUT: any number of routines that fire during the scan."""
-        col = QtWidgets.QWidget()
+        col = _ThroughoutColumn(lambda: self.throughout,
+                                lambda: getattr(self, "throughout_scroll", None))
         v = QtWidgets.QVBoxLayout(col); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
         head = QtWidgets.QHBoxLayout()
         tag = QtWidgets.QLabel("THROUGHOUT SCAN"); tag.setObjectName("tag")
@@ -1509,6 +1824,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.throughout_lay.addStretch(1)
         scroll.setWidget(holder)
         v.addWidget(scroll, 1)
+        self.throughout_scroll = scroll
         self._throughout_actions = actions
         return col
 
@@ -1560,7 +1876,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def add_throughout_set(self, pid: str, value: float | None = None,
                            section=None) -> FixedRow | None:
-        """Set `pid` in a THROUGHOUT routine (`section`, else the active one,
+        """Append "set `pid`" to a THROUGHOUT routine (`section`, else the active one,
         else a new one). None if the registry has no settable of that id."""
         p = self.registry.get(pid)
         if p is None or getattr(p, "kind", "") != "settable":
@@ -1776,7 +2092,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def add_routine_set(self, when: str, pid: str,
                         value: float | None = None) -> FixedRow | None:
-        """Set `pid` to `value` in the before_scan / after_scan routine.
+        """Append "set `pid` = `value`" to the before_scan / after_scan routine
+        (or update it, if it is already set after the routine's last action).
 
         None if the registry has no SETTABLE of that id (the routine could not
         set it, so the row would be a promise nothing keeps).
@@ -1786,8 +2103,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
             return None
         return self.routines[when].add_set(p, value)
 
+    def add_routine_action(self, when: str, aid: str):
+        """Append "run `aid`" as the LAST step of the before_scan / after_scan
+        routine. None if no connected module offers that action."""
+        if when not in self.routines:
+            return None
+        return self.routines[when].add_action(aid)
+
     def set_routine_action(self, when: str, aid: str | None) -> bool:
-        """Choose the action a routine runs (None = none). False if unknown."""
+        """The one-action API: make `aid` the routine's only action, after its
+        sets (None = no action). False if unknown. add_routine_action() adds
+        one more instead."""
         return self.routines[when].set_action(aid)
 
     def has_definition(self) -> bool:
@@ -1881,62 +2207,80 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _load_hooks(self, hooks) -> list[str]:
         """Fill the ROUTINES card from a recipe's hooks; return missing ids.
 
-        The FIRST plain `call` hook at before_scan / after_scan is what the card
-        shows. Anything else -- other actions, other moments, a second routine at
-        the same moment, a call with arguments the card cannot show -- is kept
-        verbatim and saved back unchanged.
+        Every plain `call` hook becomes STEPS on the card, in either spelling
+        ({set, action} or {steps: [...]}, see hooks.routine_steps):
+
+        * BEFORE / AFTER SCAN show one ordered list each. Several call hooks at
+          the same moment -- how an older definition wrote "set A, run X, then
+          set B, run Y" -- are joined into that one list, in their order, as
+          long as no OTHER hook firing at that moment sits between them (that
+          hook would then run in the middle, and the list could not say so; it
+          is kept verbatim instead). Saved back, they become one routine, whose
+          restore runs once at the end rather than after each part; the state
+          the scan is left in is the same (hooks._call).
+        * THROUGHOUT: one section per hook, as before (two sections may share
+          a trigger on purpose).
+
+        Anything else -- other actions, other moments, a call with keys the
+        card cannot show (an on_error before the scan) or malformed args -- is
+        kept verbatim and saved back unchanged, in its place.
 
         Missing parameters and actions are FLAGGED, in every call hook, exactly
         like a missing axis: a definition written against the lab must not come
         back on the simulator quietly skipping its reference.
         """
+        from scan_core.hooks import routine_steps
         missing: list[str] = []
         for section in self.routines.values():
             section.clear()
         for section in list(self.throughout):
             self.remove_throughout(section)
         self._hook_template = []
-        taken = set()
+        # moment -> what the last hook that fires at that moment was: "routine"
+        # (the card's list, so a following call hook can join it) or "other".
+        last_at: dict[str, str] = {}
+        placed: set[str] = set()                   # moments whose list has its place
+        get_action = getattr(self.registry, "get_action", None)
         for h in hooks or []:
             if not isinstance(h, dict):
                 self._hook_template.append(h)
                 continue
-            args = h.get("args") if isinstance(h.get("args"), dict) else None
-            is_call = h.get("action") == "call" and args is not None
-            if is_call:
-                sets = args.get("set") or {}
-                for pid in (sets if isinstance(sets, dict) else {}):
-                    p = self.registry.get(pid)
-                    if p is None or getattr(p, "kind", "") != "settable":
-                        missing.append(pid)
-                aid = args.get("action")
-                get_action = getattr(self.registry, "get_action", None)
-                if aid and (get_action is None or get_action(aid) is None):
-                    missing.append(aid)
             when = h.get("when")
-            if (is_call and when in ("each_sweep", "every_n_points")
-                    and set(h) <= THROUGHOUT_KEYS
-                    and set(args) <= {"set", "action"}
-                    and isinstance(args.get("set") or {}, dict)):
+            args = h.get("args") if isinstance(h.get("args"), dict) else None
+            steps = None
+            if h.get("action") == "call" and args is not None:
+                try:
+                    steps = routine_steps(args)
+                except ValueError:
+                    steps = None            # malformed: kept verbatim, validate() says why
+            if steps is not None:
+                # Flag what is missing whether or not the card can show it.
+                for kind, ident, *_ in steps:
+                    if kind == "set":
+                        p = self.registry.get(ident)
+                        if p is None or getattr(p, "kind", "") != "settable":
+                            missing.append(ident)
+                    elif get_action is None or get_action(ident) is None:
+                        missing.append(ident)
+            if (steps is not None and when in ("each_sweep", "every_n_points")
+                    and set(h) <= THROUGHOUT_KEYS):
                 section = self.add_throughout(h)
                 self._hook_template.append(("throughout", section))
-                for pid, value in (args.get("set") or {}).items():
-                    self.add_throughout_set(pid, float(value), section=section)
-                if args.get("action"):
-                    section.set_action(args["action"])
+                section.load_args(args, self.registry)
                 continue
-            modelled = (is_call and when in self.routines and when not in taken
-                        and set(args) <= {"set", "action"}
-                        and isinstance(args.get("set") or {}, dict))
+            modelled = (steps is not None and when in self.routines
+                        and set(h) <= {"when", "action", "args"}
+                        and (when not in placed or last_at.get(when) == "routine"))
             if not modelled:
                 self._hook_template.append(copy.deepcopy(h))
+                if when:
+                    last_at[when] = "other"
                 continue
-            taken.add(when)
-            self._hook_template.append(("routine", when))
-            for pid, value in (args.get("set") or {}).items():
-                self.add_routine_set(when, pid, float(value))
-            if args.get("action"):
-                self.set_routine_action(when, args["action"])
+            if when not in placed:                    # the first part: its place
+                self._hook_template.append(("routine", when))
+                placed.add(when)
+            last_at[when] = "routine"
+            self.routines[when].load_args(args, self.registry)
         return missing
 
     def load_recipe(self, recipe: Recipe) -> list[str]:
@@ -2015,6 +2359,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
             section.set_dims(dim_names, labels)
         if hasattr(self, "throughout_empty"):
             self.throughout_empty.setVisible(not self.throughout)
+        if hasattr(self, "routines_card"):
+            self.routines_card.arrange()      # a new step may no longer fit side by side
         recipe = self.build_recipe()
         errs = recipe.validate(self.registry)
         conditions = ("   ·   " + ", ".join(

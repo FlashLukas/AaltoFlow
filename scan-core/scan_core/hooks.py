@@ -15,6 +15,15 @@ and a ROUTINE (the `call` action), which drives the registry itself:
      args: {set: {mag2d.field: 150, mag2d.angle: 45}, action: vna.take_reference}}
     {when: "after_scan",  action: "call", args: {set: {mag2d.field: 0}}}
 
+or, when a routine does SEVERAL things in a given order (2026-09-25), the same
+`call` with an ordered list of STEPS -- each step sets parameters or runs one
+action, and they run exactly in the order written:
+
+    {when: before_scan, action: call, args: {steps: [
+        {action: camera.autofocus},
+        {action: camera.save_scan_pattern},
+        {action: camera.save_picture}]}}
+
 and a routine THROUGHOUT the scan (2026-09-24), e.g. autofocus once per row:
 
     {when: each_sweep, axis: x, edge: start, every: 1, on_error: continue,
@@ -129,25 +138,78 @@ def _fmt(p, value) -> str:
     return f"{p.id} = {float(value):g}{(' ' + unit) if unit else ''}"
 
 
+def routine_steps(args) -> list[tuple]:
+    """The steps of a `call` routine, flattened, in the order they run.
+
+    Returns a list of ("set", param_id, value) and ("action", action_id).
+    A routine can be written two ways, and both come out the same here:
+
+    * the ORIGINAL form (2026-09-16): {set: {a: 1, b: 2}, action: X} -- every
+      set in the order written, then the one action;
+    * the ORDERED form (2026-09-25): {steps: [{set: {a: 1}}, {action: X},
+      {set: {a: 0}}, {action: Y}]} -- for a routine that runs several actions,
+      or sets something again after an action ("find focus, then save the
+      pattern, then save a picture"). A step holding both `set` and `action`
+      means "these sets, then that action", exactly like the original form.
+
+    The Scan Builder writes the original form whenever it says the same thing
+    (sets, then at most one action), so such files stay readable by an older
+    scan-core; the ordered form only when it is needed.
+
+    Raises ValueError on a malformed routine. recipe.validate() calls this too,
+    so the same problem is reported before a run, with the routine named.
+    """
+    if not isinstance(args, dict):
+        raise ValueError("args must be a mapping: {set, action} or {steps: [...]}")
+    if "steps" in args:
+        if "set" in args or "action" in args:
+            raise ValueError("use either 'steps' or 'set'/'action', not both")
+        raw = args.get("steps")
+        if not isinstance(raw, list):
+            raise ValueError("'steps' must be a list")
+    else:
+        raw = [args]                      # the original form is ONE step
+    out: list[tuple] = []
+    for k, st in enumerate(raw, 1):
+        if not isinstance(st, dict) or not set(st) <= {"set", "action"}:
+            raise ValueError(f"step {k} must be {{set: {{id: value}}}} or {{action: id}}")
+        sets = st.get("set") or {}
+        if not isinstance(sets, dict):
+            raise ValueError(f"step {k}: 'set' must map parameter ids to values")
+        out += [("set", pid, value) for pid, value in sets.items()]
+        if st.get("action"):
+            out.append(("action", st["action"]))
+    return out
+
+
 @action("call")
 def _call(ctx, **args):
-    """A ROUTINE: set some parameters, then run one action, then put things back.
+    """A ROUTINE: sets and actions in the order written, then put things back.
 
-    args: {"set": {param_id: value, ...}, "action": action_id}, both optional.
+    args: {"set": {param_id: value, ...}, "action": action_id} (both optional),
+    or {"steps": [{"set": {...}}, {"action": id}, ...]} for several actions or
+    any other order -- see routine_steps(). "Go to the reference field, THEN
+    take the reference"; "find focus, THEN save the pattern, THEN save a
+    picture". Each set is the Settable's BLOCKING set, so the magnet has
+    settled before the VNA sweeps; each action blocks until it has finished.
 
-    Order is fixed -- every set first, in the order written, then the action --
-    because the case this exists for is "go to the reference field, THEN take
-    the reference". Each set is the Settable's BLOCKING set, so the magnet has
-    settled before the VNA sweeps; the action blocks until it has finished.
+    THE RESTORE. Afterwards -- ONCE, after the last step, not between steps --
+    every parameter this routine touched that the scan had ALREADY set (a
+    condition, or an axis sitting at a value; the engine keeps them in
+    ctx["current"]) is set back. A reference taken at 150 mT in the middle of
+    a scan must not leave the scan at 150 mT: the engine only re-sets an axis
+    when its INDEX changes, so the next point -- and with zig-zag the whole
+    next row -- would be measured at 150 mT under coordinates that say
+    otherwise. Parameters the scan has not set yet (the axis at before_scan)
+    are left alone; the first point sets them anyway.
 
-    THE RESTORE. Afterwards, every parameter this routine touched that the scan
-    had ALREADY set (a condition, or an axis sitting at a value; the engine
-    keeps them in ctx["current"]) is set back. A reference taken at 150 mT in
-    the middle of a scan must not leave the scan at 150 mT: the engine only
-    re-sets an axis when its INDEX changes, so the next point -- and with
-    zig-zag the whole next row -- would be measured at 150 mT under coordinates
-    that say otherwise. Parameters the scan has not set yet (the axis at
-    before_scan) are left alone; the first point sets them anyway.
+    Why once, at the end: take [set field 190, run reference, set field 0] at
+    before_scan. With the field a CONDITION of 50 mT it runs 190 -> reference
+    -> 0 -> back to 50, because 50 is what the scan says it was measured at.
+    (Putting things back after EVERY action would add a pointless 190 -> 50
+    ramp in the middle.) With the field an AXIS it runs 190 -> reference -> 0,
+    and the first point then sets the field. A parameter set twice is compared
+    with its LAST value and restored once.
 
     Not at after_scan: nothing is measured afterwards, and "field -> 0 at the
     end" is exactly the thing that must NOT be undone.
@@ -165,27 +227,30 @@ def _call(ctx, **args):
     # than the engine moment it fires at ("before_point").
     label = ctx.get("hook_label") or moment
     say = ctx.get("log_fn") or (lambda msg: None)
-    sets = dict(args.get("set") or {})
-    act_id = args.get("action") or None
+    try:
+        steps = routine_steps(args)
+    except ValueError as exc:
+        raise KeyError(f"{label} routine: {exc}") from None
 
     # Check EVERY id before moving anything. Driving the magnet to 150 mT and
     # only then finding the action misspelled leaves the sample somewhere odd
     # with nothing measured. (validate() normally catches this before a run;
     # this is for a caller that did not validate.)
-    params = {}
-    for pid in sets:
-        p = registry.get(pid)
-        if p is None or getattr(p, "kind", "") != "settable":
-            raise KeyError(f"{label} routine: '{pid}' is not a settable parameter "
-                           f"here (is its module connected?)")
-        params[pid] = p
-    act = None
-    if act_id:
-        get_action = getattr(registry, "get_action", None)
-        act = get_action(act_id) if get_action else None
-        if act is None:
-            raise KeyError(f"{label} routine: no action '{act_id}' here "
-                           f"(is its module connected?)")
+    params, acts = {}, {}
+    get_action = getattr(registry, "get_action", None)
+    for kind, ident, *_ in steps:
+        if kind == "set":
+            p = registry.get(ident)
+            if p is None or getattr(p, "kind", "") != "settable":
+                raise KeyError(f"{label} routine: '{ident}' is not a settable parameter "
+                               f"here (is its module connected?)")
+            params[ident] = p
+        else:
+            act = get_action(ident) if get_action else None
+            if act is None:
+                raise KeyError(f"{label} routine: no action '{ident}' here "
+                               f"(is its module connected?)")
+            acts[ident] = act
 
     carry_on = ctx.get("on_error") == "continue"
 
@@ -208,13 +273,15 @@ def _call(ctx, **args):
             return
         say(f"{label}: {what} done")
 
-    applied = {}
-    for pid, value in sets.items():
-        p = params[pid]
-        step(f"set {_fmt(p, value)}", lambda p=p, v=value: p.set(float(v)))
-        applied[pid] = float(value)
-    if act is not None:
-        step(f"run {act.id}", lambda: act.run(context=action_context(ctx)))
+    applied = {}          # param -> the LAST value this routine set it to
+    for kind, ident, *value in steps:
+        if kind == "set":
+            p, v = params[ident], float(value[0])
+            step(f"set {_fmt(p, v)}", lambda p=p, v=v: p.set(v))
+            applied[ident] = v
+        else:
+            act = acts[ident]
+            step(f"run {act.id}", lambda act=act: act.run(context=action_context(ctx)))
 
     if moment == "after_scan":
         return

@@ -23,6 +23,10 @@ A ROUTINE is a hook with action `call` (see hooks.py):
   {when: before_scan, action: call,
    args: {set: {field: 190}, action: vna_reference}}
   {when: after_scan,  action: call, args: {set: {field: 0}}}
+and one with several steps in a given order (2026-09-25):
+  {when: before_scan, action: call,
+   args: {steps: [{action: sim_autofocus}, {set: {field: 190}},
+                  {action: vna_reference}, {set: {field: 0}}]}}
 
 Axis types (the `type` field discriminates)
 -------------------------------------------
@@ -285,14 +289,22 @@ class Recipe:
                 continue
             args = h.get("args") or {}
             where = f"{describe_trigger(h)} routine"
-            if not isinstance(args, dict):
-                errs.append(f"{where}: args must be a mapping with 'set' and/or 'action'")
+            # One reader for both spellings ({set, action} and {steps: [...]}),
+            # the same one the hook runs from -- a checker that read the steps
+            # differently from the runner would pass a routine that then fails.
+            from .hooks import routine_steps
+            try:
+                steps = routine_steps(args)
+            except ValueError as exc:
+                errs.append(f"{where}: {exc}")
                 continue
-            sets = args.get("set") or {}
-            if not isinstance(sets, dict):
-                errs.append(f"{where}: 'set' must map parameter ids to values")
-                sets = {}
-            for pid, value in sets.items():
+            for kind, pid, *rest in steps:
+                if kind == "action":
+                    get_action = getattr(registry, "get_action", None)
+                    if get_action is None or get_action(pid) is None:
+                        errs.append(f"{where} references unknown action '{pid}'")
+                    continue
+                value = rest[0]
                 p = registry.get(pid)
                 if p is None:
                     errs.append(f"{where} references unknown parameter '{pid}'")
@@ -312,11 +324,6 @@ class Recipe:
                 if lo is not None and not (lo <= v <= hi):
                     errs.append(f"{where}: '{pid}' = {v:g} is outside its "
                                 f"limits [{lo:g},{hi:g}]")
-            aid = args.get("action")
-            if aid:
-                get_action = getattr(registry, "get_action", None)
-                if get_action is None or get_action(aid) is None:
-                    errs.append(f"{where} references unknown action '{aid}'")
         return errs
 
     def compile(self, registry=None) -> CompiledScan:

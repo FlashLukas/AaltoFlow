@@ -396,12 +396,17 @@ def _stack_two_axes(win):
     for pid, value in (("field", 40.0), ("rf_power", 8.0), ("device_v", 0.0)):
         if b.registry.get(pid) is not None:
             b.add_fixed(pid, value)
-    # ...and the ROUTINES around it: a reference at a far-off field before the
-    # scan (the field goes back to its condition before the first point), and
-    # the field to 0 afterwards.
+    # ...and the ROUTINES around it, as ordered steps: before the scan find
+    # focus, then a reference at a far-off field (the field goes back to its
+    # condition before the first point); afterwards the field to 0.
     if getattr(b, "routines", None) and b.registry.get("field") is not None:
+        if hasattr(b, "add_routine_action"):          # several steps (2026-09-25)
+            b.add_routine_action("before_scan", "sim_autofocus")
         b.add_routine_set("before_scan", "field", 190.0)
-        b.set_routine_action("before_scan", "vna_reference")
+        if hasattr(b, "add_routine_action"):
+            b.add_routine_action("before_scan", "vna_reference")
+        else:
+            b.set_routine_action("before_scan", "vna_reference")
         b.add_routine_set("after_scan", "field", 0.0)
     # ...and one THROUGHOUT: autofocus before every row of the map.
     if hasattr(b, "add_throughout") and b.registry.get_action("sim_autofocus"):
