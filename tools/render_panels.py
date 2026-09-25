@@ -73,6 +73,7 @@ SIZES = {
     "hf2-aux": (1400, 900),
     "hf2-instrument": (1400, 900),
     "pm16": (1180, 780),
+    "ppms": (1180, 780),
     "vna": (1320, 900),
     "mag2d": (1320, 900),
     # Taller than mag2d: the sidebar gained the calibration card, and at 1020 the
@@ -643,6 +644,26 @@ def _pm16(theme):
     return lambda: gui.run_app(meter, cfg), warm_up, 4.0
 
 
+def _ppms(theme):
+    from ppms.config import Config
+    from ppms.sim_system import build_sim_system
+    from ppms.apps import gui
+
+    cfg = Config()
+    cfg.ui.theme = theme
+    cfg.hardware.poll_s = 0.1
+    # a cold sample in a field, as it would sit during an FMR run
+    cryo, _ = build_sim_system(cfg, field_mT=0.0, temperature_K=10.0, seed=3)
+
+    def warm_up(win):
+        # a ~5 s ramp to 100 mT (fills the field chart, reached before the
+        # grab) and a small temperature step that is still settling
+        win.ctrl.set_field(100.0)
+        win.ctrl.set_temperature(12.0)
+
+    return lambda: gui.run_app(cryo, cfg), warm_up, 9.0
+
+
 def _vna(theme):
     from vna.config import Config
     from vna.sim_system import build_sim_system
@@ -741,6 +762,7 @@ def _mag2dcal(theme):
 
 TARGETS = {
     "pm16": _pm16,
+    "ppms": _ppms,
     "mag2d": _mag2d,
     "mag2dcal": _mag2dcal,
     "vna": _vna,

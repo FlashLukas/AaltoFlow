@@ -21,6 +21,8 @@ Two magnets are understood:
              is therefore never negative: "-50 mT at 0 deg" arrives as
              "50 mT at 180 deg", which is the same field.
   * clMag -- the 1-axis magnet: measured_field_mT, signed, angle 0.
+  * ppms  -- the Quantum Design DynaCool (ppms-control): the same key, signed,
+             angle 0 (no rotator on the FMR setup).
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from dataclasses import dataclass
 import zmq
 
 #: the magnets a field can come from (plus "manual"), in the order a GUI lists them
-FIELD_SOURCES = ("mag2d", "mag2dcal", "clMag", "manual")
+FIELD_SOURCES = ("mag2d", "mag2dcal", "clMag", "ppms", "manual")
 
 
 @dataclass
@@ -86,7 +88,10 @@ def _parse_mag2d(frame: dict):
 # calibration + PI trim + freeze + stabilizer). It publishes the same status
 # keys as mag2d on purpose, so it reads with the same parser -- only the
 # endpoint differs. Which one is running is the operator's choice.
-_PARSERS = {"clMag": _parse_clMag, "mag2d": _parse_mag2d, "mag2dcal": _parse_mag2d}
+# ppms-control publishes `measured_field_mT` on purpose, the key clMag uses:
+# a 1-axis signed field reads with the same parser.
+_PARSERS = {"clMag": _parse_clMag, "mag2d": _parse_mag2d, "mag2dcal": _parse_mag2d,
+            "ppms": _parse_clMag}
 
 
 class RemoteField:
@@ -180,4 +185,7 @@ def make_field_source(cfg_field):
     if f.source == "clMag":
         return RemoteField(f.clMag_host, f.clMag_pub_port, f.stale_s, fallback_mT=manual,
                            kind="clMag", fallback_angle_deg=manual_angle)
+    if f.source == "ppms":
+        return RemoteField(f.ppms_host, f.ppms_pub_port, f.stale_s, fallback_mT=manual,
+                           kind="ppms", fallback_angle_deg=manual_angle)
     raise ValueError(f"field source must be one of {FIELD_SOURCES}, got {f.source!r}")

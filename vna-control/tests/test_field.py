@@ -249,3 +249,34 @@ def test_a_silent_mag2d_is_flagged_not_trusted():
         assert st.field_ok is False and "mag2d not heard" in st.field_source
     finally:
         vna.shutdown()
+
+
+def test_ppms_reads_the_dynacools_signed_field_at_angle_zero(magnet):
+    """ppms-control publishes `measured_field_mT` (the key clMag uses), signed,
+    and the DynaCool FMR setup has no rotator, so the angle is 0. A negative
+    field must stay negative: it is a field sweep through zero, not a rotation."""
+    from vna.field import FIELD_SOURCES, make_field_source
+
+    assert "ppms" in FIELD_SOURCES
+    cfg = Config()
+    cfg.field.source = "ppms"
+    cfg.field.ppms_pub_port = PUB_PORT            # the fake publisher stands in for it
+    src = make_field_source(cfg.field)
+    try:
+        magnet.field = -250.0
+        assert _wait(lambda: src.read().ok and src.read().field_mT == pytest.approx(-250.0))
+        r = src.read()
+        assert r.angle_deg == 0.0 and r.source == "ppms"
+    finally:
+        src.close()
+
+
+def test_the_ppms_default_port_is_the_modules_own():
+    """The default must point at where ppms-control really publishes."""
+    import pathlib
+    import tomllib
+    toml = pathlib.Path(__file__).resolve().parents[2] / "ppms-control" / "module.toml"
+    if not toml.is_file():
+        pytest.skip("ppms-control is not installed next to vna-control")
+    ports = tomllib.loads(toml.read_text(encoding="utf-8"))["ports"]
+    assert Config().field.ppms_pub_port == ports["pub"]

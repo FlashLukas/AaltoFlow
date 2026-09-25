@@ -104,6 +104,9 @@ DEFAULT_PROFILES = [
     # that freezes and stabilises. Tick "Exclusive" to swap one for the other.
     dict(name="VNA-FMR",         members=["mag2d", "vna"]),
     dict(name="VNA-FMR (cal)",   members=["mag2dcal", "vna"]),
+    # The same measurement in the DynaCool: the cryostat's magnet (ppms) and
+    # the VNA (the Copper Mountain on that PC, set in its vna.ini).
+    dict(name="VNA-FMR (DynaCool)", members=["ppms", "vna"]),
 ]
 FULL_SUITE = "Full suite"      # always present: every discovered local module
 

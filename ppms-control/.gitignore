@@ -1,0 +1,17 @@
+# virtual environments (kept OFF OneDrive on the lab PC -- see README)
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# uv
+.uv/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# this PC's own settings, loaded by run_service.py
+ppms.ini

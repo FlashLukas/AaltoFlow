@@ -1,0 +1,41 @@
+[project]
+name = "ppms-control"
+version = "0.1.0"
+license = "MIT"
+description = "Quantum Design DynaCool (PPMS family): magnetic field, temperature and chamber through MultiVu, or a simulator"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui                  the GUI (the headless core installs light)
+#   uv sync --extra gui --extra real     + MultiPyVu, for the real DynaCool (--real)
+#
+# Why MultiPyVu is an EXTRA and not commented out: it is Quantum Design's own
+# pure-Python package (it brings pywin32 on Windows, plus pandas/pillow/pyyaml
+# for its data-file helpers) and installs on any PC. What it NEEDS at run time
+# is MultiVu running on the same PC -- a separate program, only there on the
+# DynaCool's computer. So turning --real on should not mean editing (and
+# committing) this file. Trap (gotcha #29): `uv sync` REMOVES extras you do not
+# name, so on the DynaCool PC always sync with both.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the field / temperature history charts
+]
+real = [
+    "MultiPyVu>=3.6",    # MultiVu over COM (backends/multivu.py, imported only in open())
+]
+
+# Importable code lives under src/ -- the "src layout", same as every module.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

@@ -6,7 +6,8 @@ loaded from a plain-text .ini file so nothing is lost across a restart.
 Units are explicit in every field name: frequencies in Hz, fields in mT
 (meaning mu0*H), angles in degrees, powers in dBm, times in s.
 
-The module drives a REAL Keysight PNA-X N5222A (`hardware` group, `--real`) or
+The module drives a REAL analyser -- a Keysight PNA-X N5222A or a Copper
+Mountain C1209 (`hardware` group, `--real`, `hardware.driver`) -- or
 SIMULATES one: S-parameters through a coplanar waveguide with a YIG film on top.
 Next to the usual instrument groups (sweep, acquisition, hardware, limits) there
 are:
@@ -58,6 +59,9 @@ class Field:
     source = "mag2dcal" -- the parallel 2-axis module (calibration + freeze +
                          stabilizer); identical status keys, its own ports.
     source = "clMag"  -- the 1-axis magnet: its signed measured field, angle 0.
+    source = "ppms"   -- the Quantum Design DynaCool (ppms-control): its signed
+                         measured field along the magnet axis, angle 0 (no
+                         rotator). Same status key as clMag.
     source = "manual" -- manual_mT at manual_angle_deg; for running with no magnet.
 
     It matters in real mode too: the field (and angle, and whether it was live)
@@ -78,6 +82,8 @@ class Field:
     mag2dcal_pub_port: int = 5578     # the calibrated vector magnet, if that one is used
     clMag_host: str = "127.0.0.1"
     clMag_pub_port: int = 5556        # the magnet's STATUS stream; the VNA never commands it
+    ppms_host: str = "127.0.0.1"
+    ppms_pub_port: int = 5580         # the DynaCool's STATUS stream
     stale_s: float = 2.0
 
 
@@ -133,7 +139,17 @@ class Line:
 class Hardware:
     """The real analyser (used only with --real).
 
-    visa_resource -- VISA address or alias. "N5222A" is the alias the old
+    driver        -- WHICH real analyser: "pna" = Keysight PNA-X N5222A
+                     (backends/pna.py), "cmt" = Copper Mountain C1209
+                     (backends/cmt.py). A PC's choice lives in its own vna.ini
+                     (loaded by run_service.py when present) or `--driver`.
+    cmt_resource  -- the C1209's address: S2VNA's socket server. On the
+                     DynaCool setup S2VNA runs on the same PC, hence 127.0.0.1;
+                     5025 is S2VNA's default socket port.
+    visa_library  -- "" = the backend's default: the PNA uses the installed
+                     VISA library, the C1209 uses pyvisa-py ("@py", pure
+                     Python, no vendor VISA needed for a socket).
+    visa_resource -- (PNA) VISA address or alias. "N5222A" is the alias the old
                      LabVIEW program used. # VERIFY in Keysight Connection
                      Expert / NI MAX that this alias exists on the lab PC;
                      otherwise put the full "TCPIP0::<ip>::hislip0::INSTR" here.
@@ -147,6 +163,9 @@ class Hardware:
                      binary transfer misbehaves on the instrument.
     """
 
+    driver: str = "pna"
+    cmt_resource: str = "TCPIP0::127.0.0.1::5025::SOCKET"
+    visa_library: str = ""
     visa_resource: str = "N5222A"
     cal_set: str = ""
     timeout_s: float = 10.0

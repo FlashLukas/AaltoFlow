@@ -1,4 +1,4 @@
-"""Control GUI for the VNA -- the Keysight PNA-X, or its simulator.
+"""Control GUI for the VNA -- a Keysight PNA-X or Copper Mountain C1209, or the simulator.
 
     uv run scripts/run_gui.py                  # local simulator (follows mag2d if running)
     uv run scripts/run_gui.py --real           # the PNA-X, in this process
@@ -531,9 +531,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if simulated == self._simulated:
             return
         self._simulated = simulated
-        self.kind_label.setText("SIMULATED" if simulated else "PNA-X N5222A")
+        from ..backends import analyser_name
+        name = analyser_name(self.cfg)
+        self.kind_label.setText("SIMULATED" if simulated else name.split(" ", 1)[-1])
         self.setWindowTitle(("VNA - simulated (S-parameters of a YIG film)" if simulated
-                             else "VNA - Keysight PNA-X N5222A")
+                             else f"VNA - {name}")
                             + ("  (remote)" if self._remote else ""))
         # the model's Kittel curve describes the SIMULATED film only
         self.indicator.setVisible(simulated)

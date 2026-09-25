@@ -321,8 +321,9 @@ def build_manifest(vna) -> dict:
             if k in d and not (isinstance(d[k], (int, float)) and math.isfinite(d[k])):
                 del d[k]
 
+    from ..backends import analyser_name
     label = ("Vector network analyser (simulated)" if simulated
-             else "Keysight PNA-X N5222A")
+             else analyser_name(vna.cfg))
     manifest = {"schema": SCHEMA_VERSION, "module": "vna", "label": label,
                 "parameters": params}
     manifest["revision"] = manifest_revision(manifest)

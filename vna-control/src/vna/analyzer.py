@@ -730,8 +730,12 @@ class Analyzer:
         f = self.cfg.field
         if f.source == "mag2d":
             return f"mag2d at {f.mag2d_host}:{f.mag2d_pub_port}"
+        if f.source == "mag2dcal":
+            return f"mag2dcal at {f.mag2dcal_host}:{f.mag2dcal_pub_port}"
         if f.source == "clMag":
             return f"clMag at {f.clMag_host}:{f.clMag_pub_port}"
+        if f.source == "ppms":
+            return f"ppms at {f.ppms_host}:{f.ppms_pub_port}"
         return f"manual value {f.manual_mT:g} mT at {f.manual_angle_deg:g} deg"
 
     def _read_field(self) -> FieldReading:

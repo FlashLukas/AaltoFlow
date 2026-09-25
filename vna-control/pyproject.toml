@@ -2,7 +2,7 @@
 name = "vna-control"
 version = "0.1.0"
 license = "MIT"
-description = "Keysight PNA-X N5222A vector network analyser (or a simulator of one): S-parameters, reference, u"
+description = "Vector network analyser -- Keysight PNA-X N5222A or Copper Mountain C1209 (or a simulator): S-parameters, reference, u"
 requires-python = ">=3.11"
 dependencies = [
     "pyzmq>=25",    # the control service + client, and the magnet subscription
@@ -11,7 +11,7 @@ dependencies = [
 
 # Optional parts, each asked for by name:
 #   uv sync --extra gui                  the GUI (the headless core installs light)
-#   uv sync --extra gui --extra real     + pyvisa, for the real PNA-X (--real)
+#   uv sync --extra gui --extra real     + pyvisa (+ pyvisa-py), for a real analyser (--real)
 #
 # Why pyvisa is an EXTRA and not commented out like clMag's drivers: pyvisa is
 # pure Python and installs on any PC -- the VISA LIBRARY it needs (Keysight IO
@@ -26,7 +26,8 @@ gui = [
     "pyqtgraph>=0.13",   # the trace plots
 ]
 real = [
-    "pyvisa>=1.13",      # VISA to the PNA-X (backends/pna.py, imported only in open())
+    "pyvisa>=1.13",      # VISA to the PNA-X / C1209 (backends/pna.py, cmt.py; imported in open())
+    "pyvisa-py>=0.7",    # pure-Python VISA: the C1209's raw socket needs no vendor VISA library
 ]
 
 [tool.setuptools.packages.find]

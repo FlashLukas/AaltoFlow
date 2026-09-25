@@ -12,3 +12,6 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# this PC's own settings (driver, field source), loaded by run_service.py
+vna.ini

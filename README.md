@@ -51,6 +51,7 @@ flowchart TB
         V["vna<br/>5573/4"]
         M2["mag2d<br/>5575/6"]
         M2C["mag2dcal<br/>5577/8"]
+        PP["ppms<br/>5579/80"]
     end
     G["GUIs and consoles<br/><i>clients, not owners</i>"]
     SC -- "ZeroMQ" --> SVC
@@ -58,6 +59,7 @@ flowchart TB
     C -. "drives XY" .-> P
     C -. "drives Z" .-> Z
     V -. "listens to the field" .-> M2
+    V -. "or the DynaCool's" .-> PP
     MC -.->|spawns| SVC
     MC -.->|spawns| G
 ```
@@ -233,6 +235,7 @@ Each instrument has its own panel, shown in its own README:
 [vna](vna-control/README.md) ·
 [mag2d](mag2d-control/README.md) ·
 [mag2dcal](mag2dcal-control/README.md) ·
+[ppms](ppms-control/README.md) ·
 [zpiezo](zpiezo-control/README.md) (headless -- a console, not a window).
 
 They are rendered offscreen and reproducibly, so they do not go stale:
@@ -255,9 +258,10 @@ python tools/render_all.py clMag       # or just one
 | 6 | `kim-control` | `kim` | 5567/5568 | Thorlabs KIM101 + 3× PIA25 piezo-inertia stage |
 | 7 | `hf2-control` | `hf2` | 5569/5570 | Zurich Instruments HF2LI 50 MHz lock-in — 2 demodulator channels + aux inputs |
 | 8 | `pm16-control` | `pm16` | 5571/5572 | Thorlabs PM16 USB power meter (PM16-121) — **verified on hardware** |
-| 9 | `vna-control` | `vna` | 5573/5574 | Keysight PNA-X N5222A (untested) **or** a simulated YIG film: S-parameters, reference, permeability u and ln(S/S_ref) |
+| 9 | `vna-control` | `vna` | 5573/5574 | Keysight PNA-X N5222A **or** Copper Mountain C1209 (both untested on the instrument) **or** a simulated YIG film: S-parameters, reference, permeability u and ln(S/S_ref) |
 | 10 | `mag2d-control` | `mag2d` | 5575/5576 | 2-axis vector electromagnet on an NI DAQ: field + angle, PI in mT, water-cooling interlock |
 | 11 | `mag2dcal-control` | `mag2dcal` | 5577/5578 | the same magnet, controlled the way the 1-axis one is: measured B(V) calibration, PI trim, freeze, long-term stabilizer |
+| 12 | `ppms-control` | `ppms` | 5579/5580 | Quantum Design DynaCool through MultiVu (MultiPyVu): field, temperature, chamber (untested on the instrument) |
 
 Instrument *n* gets `cmd = 5555 + 2n` and `pub = cmd + 1` by default, declared in
 its `module.toml`; the launcher can change a module's ports on one PC.
@@ -338,13 +342,13 @@ uv run pytest -q
 |---|---|---|---|---|
 | clMag-control | 22 | | hf2-control | 52 |
 | smb-control | 29 | | pm16-control | 44 |
-| stage-control | 50 | | vna-control | 96 |
-| piezo-control | 37 | | scan-core | 180 |
-| camera-control | 97 | | mission-control | 8 |
-| zpiezo-control | 14 | | suite-common | 19 |
+| stage-control | 50 | | vna-control | 110 |
+| piezo-control | 37 | | scan-core | 262 |
+| camera-control | 111 | | mission-control | 12 |
+| zpiezo-control | 14 | | suite-common | 45 |
 | kim-control | 85 | | mag2d-control | 46 |
-| | | | mag2dcal-control | 96 |
-| | | | **total** | **875** |
+| ppms-control | 43 | | mag2dcal-control | 96 |
+| | | | **total** | **1058** |
 
 Beyond unit tests, `python tools/check_modules.py --live` starts every module's
 service on scratch ports and checks it against the module contract. The data

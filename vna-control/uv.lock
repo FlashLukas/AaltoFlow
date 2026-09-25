@@ -406,6 +406,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyvisa-py"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyvisa" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/8d/0f1af2b39feca8868d0692a2c5d0c47f4ad559a051fb678c441fe1e99536/pyvisa_py-0.8.1.tar.gz", hash = "sha256:db53d3219d971d16b8f7c764a93e08475875063635b9ad8ea3c988439833ccdd", size = 102061, upload-time = "2025-09-04T20:48:21.639Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/0b/06ccf917ce30d78d75e452d0afc89236b1d384b776c5c33d75c8cc55fbe7/pyvisa_py-0.8.1-py3-none-any.whl", hash = "sha256:31208a2933c1793b4e829ba5f07d265b83f280668df440ee7ee6ac505dea4ee9", size = 82206, upload-time = "2025-09-04T20:48:20.13Z" },
+]
+
+[[package]]
 name = "pyzmq"
 version = "27.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -507,6 +520,7 @@ gui = [
 ]
 real = [
     { name = "pyvisa" },
+    { name = "pyvisa-py" },
 ]
 
 [package.dev-dependencies]
@@ -520,6 +534,7 @@ requires-dist = [
     { name = "pyqtgraph", marker = "extra == 'gui'", specifier = ">=0.13" },
     { name = "pyside6", marker = "extra == 'gui'", specifier = ">=6.7" },
     { name = "pyvisa", marker = "extra == 'real'", specifier = ">=1.13" },
+    { name = "pyvisa-py", marker = "extra == 'real'", specifier = ">=0.7" },
     { name = "pyzmq", specifier = ">=25" },
 ]
 provides-extras = ["gui", "real"]

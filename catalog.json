@@ -230,14 +230,15 @@
     {
       "key": "vna",
       "name": "VNA",
-      "description": "Keysight PNA-X (or simulated): S-parameters, reference, permeability",
+      "description": "Keysight PNA-X or Copper Mountain C1209 (or simulated): S-parameters, reference, permeability",
       "category": "detector",
       "category_label": "Detectors & analyzers",
       "tags": [
         "VNA",
         "S-parameters",
         "FMR",
-        "Keysight"
+        "Keysight",
+        "Copper Mountain"
       ],
       "folder": "vna-control",
       "version": "0.1.0",
@@ -286,6 +287,27 @@
       "ports": {
         "cmd": 5577,
         "pub": 5578
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "ppms",
+      "name": "PPMS DynaCool",
+      "description": "Quantum Design DynaCool: magnetic field, temperature, chamber (MultiVu)",
+      "category": "environment",
+      "category_label": "Environment & safety",
+      "tags": [
+        "field",
+        "temperature",
+        "cryostat",
+        "Quantum Design"
+      ],
+      "folder": "ppms-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5579,
+        "pub": 5580
       },
       "gui": true,
       "start_after": []

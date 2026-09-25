@@ -16,6 +16,17 @@ corrupted numpy (`InvalidVersion: None`). `clMag-control\.venv` and
 OneDrive, but `dev.ps1` warns that mapped network drives can cause the same
 locking, so venvs should live on local disk either way.
 
+The most frequent form of it (2026-09-25, three projects in one afternoon): a
+re-sync after a `pyproject.toml` change fails with `failed to remove directory
+...\.venv\Lib\site-packages\<package>-0.1.0.dist-info: Access is denied`.
+The folder carries a READ-ONLY attribute (`attrib` shows `R`), which OneDrive
+sets. Clearing it is enough -- nothing has to be deleted:
+```powershell
+Get-ChildItem .venv\Lib\site-packages -Directory -Filter *.dist-info |
+    ForEach-Object { attrib -R $_.FullName /S /D }
+uv sync --extra gui --extra real
+```
+
 ### The `UV_PROJECT_ENVIRONMENT` gotcha (it has already bitten us)
 At one point a **User-level** `UV_PROJECT_ENVIRONMENT` was pinned to *one*
 project's venv (`%LOCALAPPDATA%\uv-venvs\kim-control`), so every other project
@@ -67,14 +78,16 @@ CLIENTS                              WIRE                      SERVICES (one pro
                                                            kim     KIM101 + 3x PIA25 inertia       5567/5568
                                                            hf2     Zurich HF2LI lock-in (detector) 5569/5570
                                                            pm16    Thorlabs PM16 power meter       5571/5572
-                                                           vna     PNA-X N5222A or simulated VNA   5573/5574
+                                                           vna     PNA-X, C1209 or simulated VNA   5573/5574
                                                            mag2d   2-axis vector magnet on NI DAQ  5575/5576
                                                            mag2dcal the same magnet, calibrated seek 5577/5578
+                                                           ppms    QD DynaCool: field, T, chamber  5579/5580
 
 ONE of mag2d / mag2dcal runs at a time (same coils): they speak the SAME verbs
 and status keys, so everything else is unchanged apart from the id prefix.
 
-vna is a SUBSCRIBER of a magnet's status stream (mag2d by default, mag2dcal or clMag): it
+vna is a SUBSCRIBER of a magnet's status stream (mag2d by default, mag2dcal, clMag or
+the DynaCool's ppms): it
 files the field + angle with every trace, and its simulated film sits in that
 field. It never commands the magnet.
 
@@ -146,7 +159,8 @@ still assumes piezo/zpiezo.
   | 9 | vna-control    | `vna`    | 5573 | 5574 | array detector, complex trace, real or sim (Analyzer) |
   | 10 | mag2d-control | `mag2d`  | 5575 | 5576 | closed-loop, continuous PI (VectorMagnet) |
   | 11 | mag2dcal-control | `mag2dcal` | 5577 | 5578 | closed-loop, calibrated seek + freeze + stabilizer |
-  | 12 | *next module* |          | 5579 | 5580 | |
+  | 12 | ppms-control  | `ppms`   | 5579 | 5580 | set-and-forget, MultiVu runs the loops (Cryostat) |
+  | 13 | *next module* |          | 5581 | 5582 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander
   (owns REP, `poll(200)`). The loop must never be allowed to die: catch the
@@ -426,6 +440,14 @@ zpiezo has no GUI.
     names the subsystem, since only the taskbar reads the AppID; and when every
     measurement says the code is right, vary one input at a time against a live
     system rather than re-reading the code.
+33. **A git dependency pinned by COMMIT breaks when its history is rewritten**
+    (2026-09-25). scan-core's `uv.lock` pinned AaltoView at `f1df823`; the
+    repo's history was rewritten for the public release (main is now
+    `dba8682`), and every `uv sync` of scan-core then failed with
+    `fatal: remote error: upload-pack: not our ref f1df823...` -- on every PC,
+    fresh installs included, while an EXISTING environment kept working, which
+    hides it. Fix: `uv lock --upgrade-package aaltoview` and commit the lock.
+    Rewriting a dependency's history means relocking every project that pins it.
 
 ---
 
@@ -441,9 +463,9 @@ cd "<root>\kim-control"
 ```
 
 Expected test counts (measured 2026-09-15; scan-core/vna/mag2d 2026-09-17): clMag 22 · smb 29 ·
-stage 50 · piezo 37 · camera 111 · zpiezo 14 · kim 85 · hf2 52 · pm16 44 · vna 96 · mag2d 46 ·
-mag2dcal 96 · scan-core 262 · mission-control 12 · suite-common 45 = **1001**
-(2026-09-24, evening)
+stage 50 · piezo 37 · camera 111 · zpiezo 14 · kim 85 · hf2 52 · pm16 44 · vna 110 · mag2d 46 ·
+mag2dcal 96 · ppms 43 · scan-core 262 · mission-control 12 · suite-common 45 = **1058**
+(2026-09-25: ppms added, vna +14 for the C1209 and the ppms field source)
 (+ aaltoview 42, own repo). Plus the contract check:
 `python tools/check_modules.py --live` (107 checks, 0 failed on 2026-09-19).
 
@@ -524,10 +546,27 @@ with `--real`, exercise it from the console first, then the GUI, and fix every
   most likely to be wrong); run the FIRST calibration at a small `v_max`, watched;
   check the measured legs really are separated; retune kp/ki/`trim_slew_V_per_s`;
   set `tolerance_mT` from what the VNA needs.
-- **vna:** NI-VISA/Keysight IO Libraries, the VISA alias, then the 10 # VERIFY in
+- **vna (PNA-X):** NI-VISA/Keysight IO Libraries, the VISA alias, then the 10 # VERIFY in
   `backends/pna.py` (sweep-done detection, byte order vs a front-panel marker,
   cal-set activation `,0` vs `,1`, SDATA of the corrected measurement, port power).
   `uv sync --extra gui --extra real` (gotcha #29).
+- **vna (Copper Mountain C1209):** S2VNA running with the C1209 plugged in, its
+  socket server ON (System > Misc Setup > Network Setup > Socket Server, port
+  5025). No vendor VISA needed (pyvisa-py). On that PC, `vna-control\vna.ini`
+  with `[hardware] driver = cmt` and `[field] source = ppms`, since the launcher
+  only passes `--real`. Then the # VERIFY in `backends/cmt.py`: `TRIG:SING` is
+  accepted (channel waiting for a trigger), `*OPC?` returns at the END of the
+  sweep, `ABOR` acts while a `TRIG:SING` is pending, one point of
+  `CALC1:TRAC1:DATA:SDAT?` against S2VNA's marker, power coupling for S12/S22,
+  the model's real frequency range.
+- **ppms (DynaCool):** MultiVu running on the same PC; `uv sync --extra gui
+  --extra real` (MultiPyVu + pywin32). First `run_service.py --real --scaffold`
+  (MultiPyVu's own simulation), then `--real` with MultiVu. Check: the adopted
+  setpoints match MultiVu's front panel (nothing may move at start or stop);
+  `field_max_mT` = YOUR magnet (9, 12 or 14 T) in `ppms-control\ppms.ini`; the
+  field status MultiVu reports at field is `Holding (driven)` (else add it to
+  `FIELD_HOLDING`); the accepted rate range; whether 0.1 mT / 3 s is the right
+  "reached" rule at high field.
 - **hf2:** LabOne (HF2 data server + USB driver) + `zhinst-core` matching its
   release. Device id from LabOne, `--real --device devNNNN`. Resolve the VERIFYs
   in `backends/zhinst_hf2.py` side by side with the LabOne UI: PLL nodes and

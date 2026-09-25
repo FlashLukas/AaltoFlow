@@ -124,8 +124,8 @@ def test_field_source_options_default_to_mag2d():
     v, _ = build_sim_system(cfg, realtime=False)
     p = {d["id"]: d for d in build_manifest(v)["parameters"]}
     # both vector magnets (mag2d and the calibrated parallel module), then the
-    # 1-axis magnet, then manual -- the order a GUI lists them in
-    assert p["field_source"]["options"] == ["mag2d", "mag2dcal", "clMag", "manual"]
+    # 1-axis magnet, the DynaCool, then manual -- the order a GUI lists them in
+    assert p["field_source"]["options"] == ["mag2d", "mag2dcal", "clMag", "ppms", "manual"]
 
 
 def test_every_setter_verb_exists_and_settles_on_a_status_key(vna):
