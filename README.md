@@ -343,12 +343,12 @@ uv run pytest -q
 | clMag-control | 22 | | hf2-control | 52 |
 | smb-control | 29 | | pm16-control | 44 |
 | stage-control | 50 | | vna-control | 110 |
-| piezo-control | 37 | | scan-core | 262 |
-| camera-control | 111 | | mission-control | 12 |
+| piezo-control | 37 | | scan-core | 265 |
+| camera-control | 119 | | mission-control | 12 |
 | zpiezo-control | 14 | | suite-common | 45 |
 | kim-control | 87 | | mag2d-control | 46 |
 | ppms-control | 43 | | mag2dcal-control | 96 |
-| | | | **total** | **1060** |
+| | | | **total** | **1071** |
 
 Beyond unit tests, `python tools/check_modules.py --live` starts every module's
 service on scratch ports and checks it against the module contract. The data

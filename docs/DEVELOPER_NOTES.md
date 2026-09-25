@@ -463,8 +463,8 @@ cd "<root>\kim-control"
 ```
 
 Expected test counts (measured 2026-09-15; scan-core/vna/mag2d 2026-09-17): clMag 22 · smb 29 ·
-stage 50 · piezo 37 · camera 111 · zpiezo 14 · kim 87 · hf2 52 · pm16 44 · vna 110 · mag2d 46 ·
-mag2dcal 96 · ppms 43 · scan-core 262 · mission-control 12 · suite-common 45 = **1060**
+stage 50 · piezo 37 · camera 119 · zpiezo 14 · kim 87 · hf2 52 · pm16 44 · vna 110 · mag2d 46 ·
+mag2dcal 96 · ppms 43 · scan-core 265 · mission-control 12 · suite-common 45 = **1071**
 (2026-09-25: ppms added, vna +14 for the C1209 and the ppms field source)
 (+ aaltoview 42, own repo). Plus the contract check:
 `python tools/check_modules.py --live` (116 checks, 0 failed on 2026-09-25).
