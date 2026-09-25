@@ -346,9 +346,9 @@ uv run pytest -q
 | piezo-control | 37 | | scan-core | 262 |
 | camera-control | 111 | | mission-control | 12 |
 | zpiezo-control | 14 | | suite-common | 45 |
-| kim-control | 85 | | mag2d-control | 46 |
+| kim-control | 87 | | mag2d-control | 46 |
 | ppms-control | 43 | | mag2dcal-control | 96 |
-| | | | **total** | **1058** |
+| | | | **total** | **1060** |
 
 Beyond unit tests, `python tools/check_modules.py --live` starts every module's
 service on scratch ports and checks it against the module contract. The data
