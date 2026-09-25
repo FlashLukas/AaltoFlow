@@ -330,3 +330,49 @@ def test_an_unreachable_catalog_is_explained_not_raised(env):
         assert dlg.tree.topLevelItemCount() == 0
     finally:
         dlg.close()
+
+
+def _running_proc(app, seconds):
+    """A QProcess that is alive for `seconds` -- plays our just-started service."""
+    from PySide6 import QtCore
+    p = QtCore.QProcess()
+    p.start(sys.executable, ["-c", f"import time; time.sleep({seconds})"])
+    assert p.waitForStarted(5000)
+    return p
+
+
+def test_gui_right_after_service_waits_and_connects(env, monkeypatch):
+    """Pressing GUI while our service is still starting must NOT open a private
+    simulator: it waits for the port and then opens the GUI connected."""
+    mc, win, root, app = env
+    card = win.cards["magnet"]
+    launched = []
+    monkeypatch.setattr(card, "_launch_gui", lambda connect: launched.append(connect))
+    card.up = False
+    card.service_proc = _running_proc(app, 6)
+    try:
+        card.open_gui()
+        _pump(app, 0.6)
+        assert launched == []                       # still waiting: port closed
+        svc = FakeService(16100, key="magnet")      # the service starts listening
+        try:
+            _pump(app, 1.5)
+        finally:
+            svc.stop()
+        assert launched == [True]                   # opened, and connected
+    finally:
+        card.service_proc.kill(); card.service_proc.waitForFinished(3000)
+        card.service_proc = None
+
+
+def test_gui_does_not_open_when_the_service_dies_first(env, monkeypatch):
+    mc, win, root, app = env
+    card = win.cards["magnet"]
+    launched = []
+    monkeypatch.setattr(card, "_launch_gui", lambda connect: launched.append(connect))
+    card.up = False
+    card.service_proc = _running_proc(app, 0.5)
+    card.open_gui()
+    _pump(app, 2.0)
+    assert launched == [] and not card._gui_waiting
+    card.service_proc = None

@@ -81,6 +81,8 @@ PREFER_VENV_PYTHON = False
 
 PROBE_PERIOD_S = 1.2          # how often every service's port is checked
 RESCAN_PERIOD_MS = 3000       # how often the folder is checked for new modules
+GUI_WAIT_S = 30.0             # how long "GUI" waits for a just-started service
+                              # (a real camera or KIM takes several seconds to open)
 
 
 def find_uv() -> str | None:
@@ -1143,6 +1145,7 @@ class ModuleCard(QtWidgets.QFrame):
         self.service_proc: QtCore.QProcess | None = None
         self.gui_procs: list[QtCore.QProcess] = []
         self._stopping = False        # True while WE are killing the service
+        self._gui_waiting = False     # True while "GUI" waits for our service's port
         self.manifest: dict | None = None
 
         self.setObjectName("card")
@@ -1343,9 +1346,47 @@ class ModuleCard(QtWidgets.QFrame):
             self.win.log(f"[{self.spec.id}] {self.spec.host}:{self.spec.cmd} is not reachable; "
                          f"not opening a GUI (it would silently run a local simulator).", "warn")
             return
-        mode = "connected to the live service" if self.up else "standalone simulator"
+        # A service we have just started is not listening yet, and `self.up` is
+        # the background prober's last answer (a few seconds old). Deciding from
+        # it opened the GUI as a private SIMULATOR right after "Service" -- the
+        # user sees a working window that is not connected to the instrument.
+        # So when our own service is still coming up, wait for its port first.
+        if not self.up and self._service_starting():
+            if self._gui_waiting:
+                return                          # a second click while we wait
+            self._gui_waiting = True
+            self.win.log(f"[{self.spec.id}] waiting for the service to answer before "
+                         f"opening the GUI…")
+            self._open_gui_when_up(time.monotonic() + GUI_WAIT_S)
+            return
+        self._launch_gui(self.up)
+
+    def _service_starting(self) -> bool:
+        p = self.service_proc
+        return p is not None and p.state() != QtCore.QProcess.NotRunning
+
+    def _open_gui_when_up(self, deadline: float):
+        """Poll our own service's port; open the GUI connected once it answers."""
+        if probe(self.spec.host, self.spec.cmd, 0.2):
+            self._gui_waiting = False
+            self._launch_gui(True)
+            self.win.prober.probe_now()         # the card's lamp catches up too
+        elif not self._service_starting():
+            self._gui_waiting = False
+            self.win.log(f"[{self.spec.id}] the service exited before it answered; "
+                         f"not opening a GUI (see its output above).", "warn")
+        elif time.monotonic() > deadline:
+            self._gui_waiting = False
+            self.win.log(f"[{self.spec.id}] the service did not answer within "
+                         f"{GUI_WAIT_S:.0f} s; not opening a GUI. Press GUI again "
+                         f"once its lamp is green.", "warn")
+        else:
+            QtCore.QTimer.singleShot(300, lambda: self._open_gui_when_up(deadline))
+
+    def _launch_gui(self, connect: bool):
+        mode = "connected to the live service" if connect else "standalone simulator"
         self.win.log(f"[{self.spec.id}] opening GUI ({mode})…")
-        self.gui_procs.append(self._spawn(self.spec.gui, gui_args(self.spec, connect=self.up),
+        self.gui_procs.append(self._spawn(self.spec.gui, gui_args(self.spec, connect=connect),
                                           gui=True, label="gui"))
 
     # ---- settings ---------------------------------------------------------
