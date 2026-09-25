@@ -164,6 +164,16 @@ QPushButton#danger {{
     font-weight: 700;
 }}
 QPushButton#danger:hover {{ background: {c['danger_hi']}; }}
+/* A disabled button must LOOK disabled: the stage controls grey out while the
+   stage service is not answering, and an amber "Find focus" that ignores
+   clicks reads as a bug. Last, so it wins over #primary / #danger. */
+QPushButton:disabled, QPushButton#primary:disabled, QPushButton#danger:disabled {{
+    background: {c['panel']};
+    color: {c['muted']};
+    border: 1px dashed {c['border']};
+    font-weight: 400;
+}}
+QDoubleSpinBox:disabled, QSpinBox:disabled {{ color: {c['muted']}; }}
 QCheckBox {{
     color: {c['text']};
     spacing: 8px;

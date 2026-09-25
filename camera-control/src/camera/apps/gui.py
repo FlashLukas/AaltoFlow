@@ -185,6 +185,7 @@ class MainWindow(QMainWindow):
         w = QWidget(); lay = QHBoxLayout(w)
         lay.addWidget(self.view, 3)
         right = QVBoxLayout(); lay.addLayout(right, 2)
+        right.addWidget(self._stage_bar())
 
         # Focus / Z card
         f, l = _card("Focus (Z)")
@@ -199,8 +200,9 @@ class MainWindow(QMainWindow):
         self.z_spin.setSuffix(" V")
         row = QHBoxLayout(); row.addWidget(QLabel("Z target"))
         row.addWidget(self.z_spin)
-        b_setz = QPushButton("Set"); b_setz.clicked.connect(lambda: self.ctrl.set_z(self.z_spin.value()))
-        row.addWidget(b_setz)
+        self.b_setz = QPushButton("Set")
+        self.b_setz.clicked.connect(lambda: self.ctrl.set_z(self.z_spin.value()))
+        row.addWidget(self.b_setz)
         self.lab_z = QLabel("at 0.00 V"); row.addWidget(self.lab_z)
         l.addLayout(row)
         # Focus steps: up = +Z by the step, down = -Z. The brain steps from the
@@ -442,6 +444,60 @@ class MainWindow(QMainWindow):
         v.addWidget(f)
         return w
 
+    # -- stage availability -------------------------------------------------
+    # The stage (kim) is its own service and can be off or restarting. The
+    # camera keeps imaging either way; what must not happen is a click that
+    # waits out a network timeout, or a control that looks usable and is not.
+    # So: every stage control is greyed out while the stage is not answering,
+    # and a bar says so, with a button to reconnect (Lukáš, 2026-09-25).
+    def _stage_bar(self) -> QWidget:
+        bar = QFrame(); row = QHBoxLayout(bar); row.setContentsMargins(0, 2, 0, 2)
+        lab = QLabel("stage: -"); lab.setWordWrap(True)
+        btn = QPushButton("Reconnect stage")
+        btn.setToolTip("Rebuild the connection to the stage service, e.g. after "
+                       "starting or restarting it.")
+        btn.clicked.connect(self._reconnect_stage)
+        row.addWidget(lab, 1); row.addWidget(btn)
+        self.__dict__.setdefault("_stage_bars", []).append((lab, btn))
+        return bar
+
+    def _stage_controls(self) -> list:
+        names = ("z_spin", "b_setz", "z_step", "b_z_up", "b_z_dn", "b_af", "chk_cont",
+                 "chk_stab", "chk_click", "xy_step", "b_x_up", "b_x_dn", "b_y_up",
+                 "b_y_dn", "sp_x", "sp_y", "b_move_abs")
+        return [getattr(self, n) for n in names if getattr(self, n, None) is not None]
+
+    def _sync_stage(self, s) -> None:
+        ok = bool(getattr(s, "stage_ok", True))
+        why = getattr(s, "stage_error", "") or "stage not answering"
+        for w in self._stage_controls():
+            w.setEnabled(ok)
+        if getattr(self, "b_datum", None) is not None:
+            self.b_datum.setEnabled(ok and s.xy_has_datum)
+        for lab, btn in getattr(self, "_stage_bars", []):
+            if ok:
+                lab.setText("stage: connected")
+                lab.setStyleSheet(f"color:{T.OK};")
+            else:
+                lab.setText(why)
+                lab.setStyleSheet(f"color:{T.DANGER}; font-weight:600;")
+            btn.setVisible(not ok)
+
+    def _reconnect_stage(self) -> None:
+        for _lab, btn in getattr(self, "_stage_bars", []):
+            btn.setEnabled(False); btn.setText("Reconnecting...")
+        QApplication.processEvents()
+        try:
+            res = self.ctrl.reconnect_stage()
+            ok, why = res.get("stage_ok", True), res.get("stage_error", "")
+            self._log_event("info" if ok else "warn",
+                            "stage reconnected" if ok else f"stage reconnect failed: {why}")
+        except Exception as exc:
+            self._log_event("error", f"reconnect stage: {exc}")
+        finally:
+            for _lab, btn in getattr(self, "_stage_bars", []):
+                btn.setEnabled(True); btn.setText("Reconnect stage")
+
     def _xy_subtab(self) -> QWidget:
         # Three columns side by side, so the whole thing fits the short strip
         # under the live view: where the stage IS | jog pad | go to + datum.
@@ -468,6 +524,7 @@ class MainWindow(QMainWindow):
         # it never changes the card's size either
         self.lab_moving = QLabel(" "); self.lab_moving.setStyleSheet(f"color:{T.ACCENT};")
         l.addWidget(self.lab_xy); l.addWidget(self.lab_pxsize); l.addWidget(self.lab_moving)
+        l.addWidget(self._stage_bar())
         l.addStretch(1)
         lay.addWidget(f, 0, Qt.AlignTop)
 
@@ -501,8 +558,9 @@ class MainWindow(QMainWindow):
             sp.setRange(-1e6, 1e6); sp.setDecimals(2); sp.setSuffix(" um")
             sp.setFixedWidth(BOX_W)
             g.addWidget(QLabel(name), r_, 0); g.addWidget(sp, r_, 1)
-        b = QPushButton("Move"); b.setFixedWidth(BTN_W); b.clicked.connect(self._move_xy_abs)
-        g.addWidget(b, 0, 2, 2, 1, Qt.AlignVCenter)
+        self.b_move_abs = QPushButton("Move"); self.b_move_abs.setFixedWidth(BTN_W)
+        self.b_move_abs.clicked.connect(self._move_xy_abs)
+        g.addWidget(self.b_move_abs, 0, 2, 2, 1, Qt.AlignVCenter)
         l.addLayout(g)
         self.b_datum = QPushButton("Datum XY  (zero here)"); self.b_datum.setObjectName("danger")
         self.b_datum.setToolTip("Reset the stage's X and Y step counters to 0 at the "
@@ -1083,6 +1141,7 @@ class MainWindow(QMainWindow):
             self.z_spin.setRange(s.z_min, s.z_max)
         self.lab_best.setText(f"{s.best_focus_v:.2f} {s.z_unit}")
         self._refresh_xy(s)
+        self._sync_stage(s)                 # after _refresh_xy: it may re-enable Datum
         self.lab_pxsize.setText(f"pixel: {s.pixel_size_x:.4f} um | obj: {s.objective_name}")
         self.lab_z.setText(f"at {s.z_voltage:.2f} {s.z_unit}")
         if not self._z_target_synced and s.connected:

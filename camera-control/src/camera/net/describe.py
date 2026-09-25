@@ -231,6 +231,13 @@ def build_manifest(brain) -> dict:
            read_path=["stage_y"]),
         _p("stage_moving", "Stage moving", "indicator", "bool",
            group="Position", order=92, read_path=["stage_moving"]),
+        _p("stage_ok", "Stage answering", "indicator", "bool",
+           group="Position", order=93, read_path=["stage_ok"],
+           help="False while the stage service (kim) does not answer: stage "
+                "controls are refused at once instead of waiting on a timeout."),
+        _p("reconnect_stage", "Reconnect stage", "action", "action",
+           group="Position", order=94,
+           help="Rebuild the connection to the stage service, e.g. after it was restarted."),
 
         # ---- housekeeping --------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",

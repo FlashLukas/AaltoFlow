@@ -158,6 +158,14 @@ class CameraClient:
     def datum_xy(self) -> None:
         self._rpc(cmd="datum_xy")
 
+    def reconnect_stage(self) -> dict:
+        rep = self._rpc(cmd="reconnect_stage")
+        return {"stage_ok": rep.get("stage_ok", True), "stage_error": rep.get("stage_error", "")}
+
+    def stage_state(self) -> tuple:
+        st = self.status()
+        return bool(getattr(st, "stage_ok", True)), getattr(st, "stage_error", "")
+
     def read_z(self) -> float:
         return self._rpc(cmd="read_z")["z"]
 

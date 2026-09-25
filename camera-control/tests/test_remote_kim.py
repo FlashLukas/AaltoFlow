@@ -423,3 +423,79 @@ def test_closed_loop_autofocus_is_unchanged():
     sets, _, st = _run_autofocus(open_loop=False)
     assert sets[:5] == [6.0, 7.0, 8.0, 9.0, 10.0]           # no detour
     assert sets[5:] == [pytest.approx(st.best_focus_v)]      # straight to the park
+
+
+# ---- the stage is off or restarting (Lukas, 2026-09-25) ----------------------
+
+def _dead_port():
+    s = zmq.Context.instance().socket(zmq.REP)
+    port = s.bind_to_random_port("tcp://127.0.0.1")
+    s.close(0)                       # bound once, now closed: nothing listens
+    return port
+
+
+def test_a_stage_that_is_off_is_reported_and_commands_fail_fast():
+    link = KimLink("127.0.0.1", _dead_port(), _dead_port(), timeout_ms=300)
+    xy = KimXYStage(link)
+    xy.open()
+    try:
+        ok, why = xy.available()
+        assert not ok and "not answered" in why
+        with pytest.raises(TimeoutError):          # the first attempt waits once
+            link.rpc(cmd="status")
+        t0 = time.monotonic()
+        with pytest.raises(ConnectionError, match="Reconnect stage"):
+            xy.move_to_steps(10, 10)               # ... every later one fails at once
+        assert time.monotonic() - t0 < 0.1
+        ok, why = xy.reconnect()
+        assert not ok and "still not answering" in why
+    finally:
+        xy.close()
+
+
+def test_status_and_reconnect_follow_the_stage(kim):
+    svc = kim[0]
+    link = KimLink("127.0.0.1", svc.cmd_port, svc.pub_port, timeout_ms=300)
+    link.ALIVE_S = 0.5
+    cam = SimCamera(SimXYStage(), SimZFocus(), pixel_size_x_um=0.1, pixel_size_y_um=0.1)
+    brain = Camera(cam, KimXYStage(link), KimZFocus(link), Config())
+    brain.start()
+    try:
+        assert _wait(lambda: brain.status().stage_ok), "stage should be seen"
+        svc._stop.set()                            # the stage service goes quiet
+        assert _wait(lambda: not brain.status().stage_ok, timeout=3.0)
+        assert "silent" in brain.status().stage_error
+        res = brain.reconnect_stage()
+        assert res["stage_ok"] is False
+        # the camera keeps imaging all the while
+        n = brain.status().frame_number
+        assert _wait(lambda: brain.status().frame_number > n + 2)
+    finally:
+        brain.shutdown()
+
+
+def test_the_window_greys_out_the_stage_and_offers_reconnect():
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from camera.apps.gui import MainWindow
+    from camera.camera import CameraStatus
+    QApplication.instance() or QApplication([])
+    from camera.sim_system import build_sim_system
+    brain, *_ = build_sim_system(Config())
+    win = MainWindow(brain, Config())
+    try:
+        down = CameraStatus(stage_ok=False, stage_error="stage (kim service) silent for 3 s",
+                            xy_has_datum=True)
+        win._sync_stage(down)
+        assert not win.b_af.isEnabled() and not win.b_x_up.isEnabled()
+        assert not win.b_datum.isEnabled() and not win.chk_stab.isEnabled()
+        labels = [lab.text() for lab, _b in win._stage_bars]
+        assert all("silent" in t for t in labels)
+        assert all(not b.isHidden() for _l, b in win._stage_bars)
+        win._sync_stage(CameraStatus(stage_ok=True, xy_has_datum=True))
+        assert win.b_af.isEnabled() and win.b_datum.isEnabled()
+        assert all(b.isHidden() for _l, b in win._stage_bars)
+    finally:
+        win.close()

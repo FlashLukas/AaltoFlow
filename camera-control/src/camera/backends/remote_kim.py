@@ -126,13 +126,70 @@ class KimLink:
                     continue
                 with self._cache_lock:
                     self._cache, self._cache_t = st, time.monotonic()
+                # kim is talking again: commands may go through at once
+                self._down_until = 0.0
         finally:
             sub.close(0)
+
+    # -- is kim there? ----------------------------------------------------- #
+    #: kim publishes status at ~8 Hz; this long without a frame means it is gone.
+    ALIVE_S = 2.0
+
+    def available(self) -> tuple:
+        """(True, "") while kim's status stream is live, else (False, why).
+
+        Read from the SUB cache only -- never a request -- so the camera can ask
+        every frame and a GUI can grey out the stage controls without anything
+        waiting on a timeout.
+        """
+        now = time.monotonic()
+        with self._cache_lock:
+            have, t = self._cache is not None, self._cache_t
+        if have and now - t <= self.ALIVE_S:
+            return True, ""
+        where = f"{self.host}:{self.cmd_port}"
+        if not have:
+            return False, f"stage (kim service at {where}) has not answered yet"
+        return False, f"stage (kim service at {where}) silent for {now - t:.0f} s"
+
+    def reconnect(self) -> tuple:
+        """Rebuild both sockets and ask kim once. Returns available()-style (ok, why).
+
+        For the GUI's "Reconnect stage": after kim was restarted (or started
+        after the camera), or when a link got stuck. Clears the "known down"
+        state so the next command is really sent.
+        """
+        with self._req_lock:
+            if self._req is not None:
+                self._req.close(0)
+            self._make_req()
+        self._down_until = 0.0
+        if self._users:                      # restart the status listener
+            self._stop.set()
+            if self._sub_thread is not None:
+                self._sub_thread.join(timeout=1.0)
+            self._stop.clear()
+            self._sub_thread = threading.Thread(target=self._sub_loop, name="kim-sub",
+                                                daemon=True)
+            self._sub_thread.start()
+        try:
+            self.fresh_status()
+        except Exception as exc:
+            self._down_until = time.monotonic() + self.retry_s
+            return False, f"stage still not answering: {exc}"
+        return True, ""
 
     # -- requests ---------------------------------------------------------- #
     def rpc(self, **req) -> dict:
         """Send one command; raise on timeout or on an ``{"ok": false}`` reply."""
         with self._req_lock:
+            # Known down (a timeout less than retry_s ago, and no status frame
+            # since): fail NOW instead of waiting out another timeout. Checked
+            # after taking the lock, so callers queued behind a timing-out
+            # request do not each wait their own 1.5 s in turn.
+            if time.monotonic() < self._down_until:
+                raise ConnectionError("stage (kim service) not answering -- "
+                                      "use 'Reconnect stage' once it runs")
             if self._req is None:
                 self._make_req()
             try:
@@ -142,6 +199,7 @@ class KimLink:
                 # A REQ socket that timed out is stuck mid-exchange: rebuild it.
                 self._req.close(0)
                 self._make_req()
+                self._down_until = time.monotonic() + self.retry_s
                 raise TimeoutError(f"kim service did not answer {req.get('cmd')!r}")
         if not reply.get("ok", False):
             raise RuntimeError(f"kim {req.get('cmd')}: {reply.get('error', 'failed')}")
@@ -193,6 +251,12 @@ class KimXYStage:
 
     def close(self) -> None:
         self.link.close()
+
+    def available(self) -> tuple:
+        return self.link.available()
+
+    def reconnect(self) -> tuple:
+        return self.link.reconnect()
 
     def read_xy(self) -> tuple:
         pos = self.link.status()["position_um"]
@@ -282,6 +346,12 @@ class KimZFocus:
 
     def close(self) -> None:
         self.link.close()
+
+    def available(self) -> tuple:
+        return self.link.available()
+
+    def reconnect(self) -> tuple:
+        return self.link.reconnect()
 
     def z_unit(self) -> str:
         return "um"

@@ -141,6 +141,11 @@ class CameraStatus:
     stage_steps_y: int = 0
     xy_has_datum: bool = False
     limits_from_stage: bool = False
+    # Is the motion hardware answering? A stage behind a service (kim) can be
+    # off or restarting; the GUI greys the stage controls and offers
+    # "Reconnect stage" instead of letting every click wait out a timeout.
+    stage_ok: bool = True
+    stage_error: str = ""
     x_min: float = 0.0
     x_max: float = 0.0
     y_min: float = 0.0
@@ -405,6 +410,7 @@ class Camera:
                 st.stage_steps_x, st.stage_steps_y = self.xy.read_steps()
         except Exception:
             pass
+        st.stage_ok, st.stage_error = self.stage_state()
         st.xy_step_unit = self.xy_step_unit()
         st.xy_has_datum = callable(getattr(self.xy, "zero_counter", None))
         st.limits_from_stage = bool(getattr(self.xy, "owns_limits", False))
@@ -1443,6 +1449,43 @@ class Camera:
         self._emit("info", f"XY jog ({float(dx):+g}, {float(dy):+g}) {unit} "
                            f"-> ({target[0]:g}, {target[1]:g}) {unit}")
         return target
+
+    def stage_state(self) -> tuple:
+        """(ok, why) for the motion hardware, from its cached state only.
+
+        Stages without an ``available()`` (the simulator, a local driver) are
+        always ok. XY and Z are asked separately: on the lab rig they share
+        one kim link, so they agree; on the piezo rig they are two services.
+        """
+        for dev in (self.xy, self.z if self.cfg.hardware.use_z else None):
+            fn = getattr(dev, "available", None)
+            if callable(fn):
+                try:
+                    ok, why = fn()
+                except Exception as exc:          # never let a probe kill the frame
+                    ok, why = False, f"stage state unknown: {exc}"
+                if not ok:
+                    return False, why
+        return True, ""
+
+    def reconnect_stage(self) -> dict:
+        """Rebuild the connection to the stage service(s) and try it once."""
+        seen, results = set(), []
+        for dev in (self.xy, self.z):
+            fn = getattr(dev, "reconnect", None)
+            link = getattr(dev, "link", dev)
+            if not callable(fn) or id(link) in seen:
+                continue
+            seen.add(id(link))
+            results.append(fn())
+        if not results:
+            return {"stage_ok": True, "stage_error": "", "note": "nothing to reconnect"}
+        ok = all(r[0] for r in results)
+        why = "; ".join(r[1] for r in results if r[1])
+        self._xy_target = None              # positions from before may be stale
+        self._emit("info" if ok else "warn",
+                   "stage reconnected" if ok else f"stage reconnect failed: {why}")
+        return {"stage_ok": ok, "stage_error": why}
 
     def datum_xy(self) -> None:
         """Datum: make the current XY position the stage's 0 (KIM step counters).
