@@ -104,6 +104,9 @@ def _widget_for_field(name: str, value):
 # --------------------------------------------------------------------------- #
 # main window
 # --------------------------------------------------------------------------- #
+COMPACT_COLS = 4          # label/field pairs per row in a compact settings form
+
+
 def _scrolled(widget: QWidget) -> QScrollArea:
     """Wrap a tab page so it scrolls instead of forcing the window taller."""
     area = QScrollArea()
@@ -183,9 +186,13 @@ class MainWindow(QMainWindow):
 
     def _camera_tab(self) -> QWidget:
         w = QWidget(); lay = QHBoxLayout(w)
-        lay.addWidget(self.view, 3)
-        right = QVBoxLayout(); lay.addLayout(right, 2)
-        right.addWidget(self._stage_bar())
+        # The controls sit in TWO columns beside the image, not one. In one
+        # column they were ~800 px tall and pushed the bottom tabs ("Define
+        # scanning", ...) below the screen, so the tab had to be scrolled to
+        # reach them (Lukas, 2026-09-25). Two columns halve that height; the
+        # image gives up the width, and keeps its aspect as it shrinks.
+        lay.addWidget(self.view, 4)
+        cards: list[QWidget] = []         # Focus, Pattern, Stabiliser, Imaging
 
         # Focus / Z card
         f, l = _card("Focus (Z)")
@@ -231,7 +238,7 @@ class MainWindow(QMainWindow):
         self.chk_cont = QCheckBox("Continuous focus")
         self.chk_cont.toggled.connect(lambda v: self.ctrl.set_continuous_focus(v))
         l.addWidget(self.chk_cont)
-        right.addWidget(f)
+        cards.append(f)
 
         # Pattern / tracking card
         f, l = _card("Pattern tracking")
@@ -257,7 +264,7 @@ class MainWindow(QMainWindow):
         b_load = QPushButton("Load pattern"); b_load.clicked.connect(self._load_pattern)
         b_save = QPushButton("Save pattern"); b_save.clicked.connect(self._save_pattern)
         r.addWidget(b_load); r.addWidget(b_save); l.addLayout(r)
-        right.addWidget(f)
+        cards.append(f)
 
         # Stabiliser card
         f, l = _card("Stabiliser")
@@ -308,7 +315,7 @@ class MainWindow(QMainWindow):
         self._stab_timer.timeout.connect(self._apply_stabiliser)
         for w_ in (self.stab_gain, self.stab_frames, self.stab_radius, self.stab_settle):
             w_.valueChanged.connect(lambda _v: self._stab_timer.start())
-        right.addWidget(f)
+        cards.append(f)
 
         # Imaging card
         f, l = _card("Imaging")
@@ -332,8 +339,17 @@ class MainWindow(QMainWindow):
                                    "shown or not")
         self.chk_points.toggled.connect(self.view.set_show_scan_points)
         l.addWidget(self.chk_points)
-        right.addWidget(f)
-        right.addStretch(1)
+        cards.append(f)
+        right_w = QWidget(); grid = QGridLayout(right_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(self._stage_bar(), 0, 0, 1, 2)
+        # column 1: what you do to the SAMPLE's image (focus, pattern);
+        # column 2: what runs on it (stabiliser) and what is drawn (imaging).
+        for (r, c), card in zip(((1, 0), (2, 0), (1, 1), (2, 1)), cards):
+            grid.addWidget(card, r, c)
+        grid.setRowStretch(3, 1)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
+        lay.addWidget(right_w, 5)
 
         # bottom sub-tabs
         sub = QTabWidget()
@@ -341,7 +357,7 @@ class MainWindow(QMainWindow):
         sub.addTab(self._scanning_subtab(), "Define scanning")
         sub.addTab(self._accuracy_subtab(), "Check alignment accuracy")
         outer = QWidget(); ov = QVBoxLayout(outer)
-        ov.addWidget(w, 3); ov.addWidget(sub, 1)
+        ov.addWidget(w, 3); ov.addWidget(sub, 2)
         return outer
 
     def _scanning_subtab(self) -> QWidget:
@@ -695,8 +711,17 @@ class MainWindow(QMainWindow):
         for gname, obj in groups:
             f, l = _card(gname)
             form = QFormLayout()
+            # compact: label/field pairs in COMPACT_COLS columns instead of one
+            # long list, so a form under the live view (Define scanning) fits
+            # without scrolling. Row-major in field order, which keeps the x/y
+            # pairs (points_x|points_y, dx_um|dy_um, ...) side by side.
+            grid = QGridLayout() if compact else None
+            if grid is not None:
+                grid.setHorizontalSpacing(10)
+                for c in range(COMPACT_COLS):
+                    grid.setColumnStretch(2 * c + 1, 1)
             getters = {}
-            for fld in fields(obj):
+            for i, fld in enumerate(fields(obj)):
                 if fld.name == "objective_name":
                     widget = QComboBox()
                     widget.addItems(self._objective_names)
@@ -712,7 +737,12 @@ class MainWindow(QMainWindow):
                 if fld.name == "xy_unit":
                     # a display choice: takes effect at once, no Apply needed
                     widget.currentTextChanged.connect(self._on_xy_unit_changed)
-                form.addRow(fld.name, widget)
+                if grid is not None:
+                    r, c = divmod(i, COMPACT_COLS)
+                    grid.addWidget(QLabel(fld.name), r, 2 * c)
+                    grid.addWidget(widget, r, 2 * c + 1)
+                else:
+                    form.addRow(fld.name, widget)
                 getters[fld.name] = getter
                 self._form_widgets.setdefault(gname.lower(), {})[fld.name] = widget
                 if fld.name == "pixel_size_x_um":
@@ -729,7 +759,7 @@ class MainWindow(QMainWindow):
                 l.addWidget(self.lab_limits_note)
                 self._limit_rows = {k: v for k, v in self._form_widgets["limits"].items()
                                     if k != "enforce"}
-            l.addLayout(form)
+            l.addLayout(grid if grid is not None else form)
             outer.addWidget(f)
         b = QPushButton("Apply settings"); b.setObjectName("primary")
         b.clicked.connect(lambda _=False, gs=groups: self._apply_settings(gs))
