@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- 2D vector magnet, CALIBRATED: the same four pole pieces as mag2d-control,
+       but the gap holds the measured hysteresis loop (the two legs of B against
+       drive volts) instead of a plain dashed circle, with the field arrow lying
+       along it. That loop is the whole difference between the two modules.
+       Colours are the DARK palette; the launcher swaps #ff9e2c / #ffb454 /
+       #e8eaed for the active theme. -->
+  <rect x="2" y="15" width="7" height="10" rx="1.5" fill="#5a626e"/>
+  <rect x="31" y="15" width="7" height="10" rx="1.5" fill="#5a626e"/>
+  <rect x="15" y="2" width="10" height="7" rx="1.5" fill="#5a626e"/>
+  <rect x="15" y="31" width="10" height="7" rx="1.5" fill="#5a626e"/>
+  <!-- the measured B(V) loop: an up leg and a down leg, a little apart -->
+  <path d="M11 28 C 16 27, 17 21, 20 18 C 23 15, 24 13, 29 12"
+        fill="none" stroke="#e8eaed" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M29 12 C 24 13, 23 19, 20 22 C 17 25, 16 27, 11 28"
+        fill="none" stroke="#e8eaed" stroke-width="1.6" stroke-linecap="round"
+        stroke-dasharray="2.4 2.2" opacity="0.75"/>
+  <!-- the field vector, on the curve -->
+  <line x1="13" y1="27" x2="24" y2="16" stroke="#ff9e2c" stroke-width="3"
+        stroke-linecap="round"/>
+  <polygon points="29,11 20.5,13.5 26.5,19.5" fill="#ffb454"/>
+</svg>

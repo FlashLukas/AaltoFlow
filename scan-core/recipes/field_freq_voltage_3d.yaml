@@ -1,0 +1,11 @@
+name: field_freq_voltage_cube
+comment: 3-D scan — device voltage (outer) x field x RF frequency (inner). Voltage shifts the resonance.
+axes:
+  - {type: linear, param: device_v, start: -4,  stop: 4,    num: 5}
+  - {type: linear, param: field,    start: 0,   stop: 120,  num: 31}
+  - {type: linear, param: rf_freq,  start: 800, stop: 2500, num: 61}
+detectors: [lockin_r]
+hooks:
+  - {when: every_n_points, n: 200, action: autofocus}   # demo: periodic action
+output: {dir: ., basename: field_freq_voltage_cube, format: netcdf}
+settle: {default_timeout_s: 20.0}

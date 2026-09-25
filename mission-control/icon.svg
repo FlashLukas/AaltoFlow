@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- mission control: a stack of module cards, each with a status light.
+       Same language as the module icons: grey chassis, amber for what is live. -->
+  <g stroke="#5a626e" stroke-width="2.2" fill="none" stroke-linejoin="round">
+    <rect x="6" y="7.5" width="28" height="7.5" rx="2"/>
+    <rect x="6" y="16.25" width="28" height="7.5" rx="2"/>
+    <rect x="6" y="25" width="28" height="7.5" rx="2"/>
+  </g>
+  <circle cx="11.5" cy="11.25" r="2" fill="#ff9e2c"/>
+  <circle cx="11.5" cy="20" r="2" fill="#ff9e2c"/>
+  <circle cx="11.5" cy="28.75" r="2" fill="#5a626e"/>
+  <g stroke="#5a626e" stroke-width="2" stroke-linecap="round">
+    <line x1="17.5" y1="11.25" x2="28.5" y2="11.25"/>
+    <line x1="17.5" y1="20" x2="28.5" y2="20"/>
+    <line x1="17.5" y1="28.75" x2="24" y2="28.75"/>
+  </g>
+</svg>

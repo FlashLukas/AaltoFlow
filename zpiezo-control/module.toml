@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "zpiezo"
+name = "Z focus piezo"
+description = "Thorlabs KCube piezo - Z focus (headless, no GUI)"
+category = "motion"
+tags = ["piezo", "focus", "Z", "Thorlabs", "KCube"]
+icon = "icon.svg"
+order = 50
+
+[ports]
+cmd = 5565
+pub = 5566
+
+[run]
+service = "scripts/run_service.py"
+gui = ""                      # headless: a service with a console, no window
+start_after = []

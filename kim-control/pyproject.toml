@@ -1,0 +1,40 @@
+[project]
+name = "kim-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a 3D piezo-inertia stage (Thorlabs KIM101 + 3x PIA25)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # Hardware driver, enabled on the lab PC 2026-09-13 (KIM101 S/N 97000000).
+    # Only backends/kinesis_kim.py imports it, lazily, so the simulator still
+    # runs without it. pylablib talks to the K-Cube over FTDI via pyft232,
+    # which needs ftd2xx.dll -- installed by Thorlabs Kinesis.
+    "pylablib>=1.4.5",
+    "pyft232>=0.12",
+    # Camera-frame calibration (kim/calibration.py): template matching on the
+    # camera service's frames. Imported lazily, only while calibrating.
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# pylablib lists PyQt5 as a hard dependency for its own GUI widgets, which the
+# Thorlabs driver never imports. Our GUI is PySide6, and two Qt bindings in one
+# environment is asking for trouble (and bloats a PyInstaller build), so this
+# override makes uv drop PyQt5: the marker can never be true.
+override-dependencies = ["pyqt5; sys_platform == 'never'"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

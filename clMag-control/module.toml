@@ -1,0 +1,25 @@
+# module.toml -- how the suite finds this module. The launcher (mission-control)
+# and scan-core read every <folder>/module.toml next to them; nothing else lists
+# modules by hand. Contract: INSTRUMENT_MODULE_GUIDE.md section 11.
+#
+# Only IDENTITY lives here. The controls and measured variables are NOT listed:
+# the running service reports them itself through `describe`, so they can never
+# go stale in a second place.
+
+[module]
+key = "clMag"                 # unique id; must equal the "module" in describe
+name = "Magnet field"
+description = "GMW 3470 dipole - Kepco BOP - Hall probe + AUX I/O"
+category = "field"
+tags = ["electromagnet", "Kepco", "Hall probe", "GMW", "NI DAQ"]
+icon = "icon.svg"
+order = 10                    # position in the launcher list
+
+[ports]                       # defaults; the launcher can override them per PC
+cmd = 5555
+pub = 5556
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"    # "" for a headless module
+start_after = []              # keys that must be up before this one starts

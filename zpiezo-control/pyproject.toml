@@ -1,0 +1,23 @@
+[project]
+name = "zpiezo-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a single-axis Z focus piezo (Thorlabs KCube)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # Hardware driver stays COMMENTED OUT until the lab PC (see the guide §3/§8).
+    # The simulator backend needs none of this; only the real KCube does.
+    # "pylablib>=1.4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

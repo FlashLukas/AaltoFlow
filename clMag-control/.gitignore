@@ -1,0 +1,19 @@
+# Python virtual environment created by `uv sync` -- never commit this;
+# it is rebuilt from pyproject.toml / uv.lock on any machine.
+.venv/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# uv's resolved lockfile IS worth committing (reproducible installs), so it is
+# intentionally NOT ignored here.
+
+# Local data / logs produced at runtime
+*.csv
+*.log
+
+# OS / editor cruft
+.vscode/
+.DS_Store
+Thumbs.db

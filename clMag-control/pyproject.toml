@@ -1,0 +1,37 @@
+[project]
+name = "clMag-control"
+version = "0.1.0"
+license = "MIT"
+description = "Magnetic field controller (Kepco BOP + NI Hall probe), Python port of a LabVIEW module"
+requires-python = ">=3.11"
+# Runtime dependencies. The hardware ones (pyvisa, nidaqmx) are commented out
+# for now so the project installs and the smoke test runs on ANY machine with
+# no NI drivers present. Uncomment them on the lab PC when you wire up real
+# hardware (Session 4+).
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+    # "pyvisa",     # talks to the Kepco over GPIB (VISA)
+    # "nidaqmx",    # reads the Hall probe voltage from the NI USB-6259
+]
+
+# The GUI stack is optional so the headless core installs light. Get it with
+#   uv sync --extra gui
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",
+]
+
+# This tells the build/packaging tools that our importable code lives under
+# src/  -- the "src layout". It is the modern, mistake-proof default: you can
+# only import `clMag` after it is installed, which catches packaging bugs early.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "vna"
+name = "VNA"
+description = "Keysight PNA-X (or simulated): S-parameters, reference, permeability"
+category = "detector"
+tags = ["VNA", "S-parameters", "FMR", "Keysight"]
+icon = "icon.svg"
+order = 100
+
+[ports]
+cmd = 5573
+pub = 5574
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

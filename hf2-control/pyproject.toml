@@ -1,0 +1,33 @@
+[project]
+name = "hf2-control"
+version = "0.1.0"
+license = "MIT"
+description = "Zurich Instruments HF2LI 50 MHz lock-in (two demodulator channels + aux inputs), sibling to smb-control"
+requires-python = ">=3.11"
+# Runtime dependencies. The hardware one (zhinst-core) is commented out for now
+# so the project installs and the tests run on ANY machine without LabOne. On
+# the lab PC: install LabOne (it brings the HF2 data server, ziServer, and the
+# USB driver), then uncomment zhinst-core and `uv sync`. The zhinst-core
+# version should match the installed LabOne release.
+dependencies = [
+    "pyzmq>=25",        # the control service + client (localhost / Ethernet)
+    # "zhinst-core",    # LabOne Python API: talks to the HF2 data server (port 8005)
+]
+
+# The GUI stack is optional so the headless core installs light. Get it with
+#   uv sync --extra gui
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the live R(t) strip chart
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

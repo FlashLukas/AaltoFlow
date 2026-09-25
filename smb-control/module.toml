@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "smb"
+name = "RF generator"
+description = "Rohde & Schwarz SMB100A signal generator"
+category = "source"
+tags = ["RF", "microwave", "signal generator", "Rohde & Schwarz"]
+icon = "icon.svg"
+order = 20
+
+[ports]
+cmd = 5557
+pub = 5558
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

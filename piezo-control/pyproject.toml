@@ -1,0 +1,26 @@
+[project]
+name = "piezo-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a 2D piezo stage (piezosystem jena d-Drive + PXY-200)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # Hardware driver stays COMMENTED OUT until the lab PC (see §3/§8 of the guide).
+    # The simulator backend needs none of this; only the real d-Drive does.
+    # "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

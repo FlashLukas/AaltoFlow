@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- stacked coarse-stage plates with an arrow -->
+  <g fill="none" stroke-width="2.2">
+    <rect x="8.8" y="14.4" width="22.4" height="4" stroke="#5a626e"/>
+    <rect x="8.8" y="20.8" width="22.4" height="4" stroke="#ff9e2c"/>
+    <rect x="8.8" y="27.2" width="22.4" height="4" stroke="#5a626e"/>
+  </g>
+  <g stroke="#ffb454" stroke-width="2.2" fill="none" stroke-linecap="round">
+    <line x1="20" y1="6.4" x2="20" y2="12"/>
+    <polyline points="17.6,9.2 20,6.4 22.4,9.2"/>
+  </g>
+</svg>

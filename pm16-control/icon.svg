@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- a beam landing on a photodiode can: accent (#ff9e2c / #ffb454) is
+       theme-swapped by the launcher; #5a626e is the metal -->
+  <rect x="18.2" y="3" width="3.6" height="14" rx="1.8" fill="#ffb454"/>
+  <circle cx="20" cy="25" r="11" fill="none" stroke="#5a626e" stroke-width="2.4"/>
+  <circle cx="20" cy="25" r="6.5" fill="#ff9e2c"/>
+  <rect x="17" y="22" width="6" height="6" fill="none" stroke="#e8eaed" stroke-width="1.4"/>
+</svg>

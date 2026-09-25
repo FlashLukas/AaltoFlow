@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "kim"
+name = "Inertia stage 3D"
+description = "Thorlabs KIM101 + 3x PIA25 - sample XY + Z"
+category = "motion"
+tags = ["piezo inertia", "Thorlabs", "KIM101", "XYZ"]
+icon = "icon.svg"
+order = 60
+
+[ports]
+cmd = 5567
+pub = 5568
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

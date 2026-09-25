@@ -1,0 +1,21 @@
+# How to cite AaltoFlow. GitHub shows this as "Cite this repository".
+# Add the DOI here once a release is archived (e.g. on Zenodo).
+cff-version: 1.2.0
+message: >-
+  If you publish scientific work with data measured or processed using
+  AaltoFlow, we would be grateful if you cited it as below.
+title: "AaltoFlow: lab automation built from independent instrument modules"
+type: software
+authors:
+  - family-names: "Flajšman"
+    given-names: "Lukáš"
+    affiliation: "NanoSpin group, Aalto University"
+repository-code: "https://github.com/FlashLukas/AaltoFlow"
+license: MIT
+keywords:
+  - lab automation
+  - experiment control
+  - instrument control
+  - magneto-optics
+  - ferromagnetic resonance
+  - ZeroMQ

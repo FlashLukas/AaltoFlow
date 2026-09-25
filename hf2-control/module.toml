@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "hf2"
+name = "Lock-in"
+description = "Zurich HF2LI 50 MHz - 2 demodulator channels + aux inputs"
+category = "detector"
+tags = ["lock-in", "Zurich Instruments", "HF2LI"]
+icon = "icon.svg"
+order = 80
+
+[ports]
+cmd = 5569
+pub = 5570
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

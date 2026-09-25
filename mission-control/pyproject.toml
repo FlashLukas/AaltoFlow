@@ -1,0 +1,22 @@
+[project]
+name = "mission-control"
+version = "0.1.0"
+license = "MIT"
+description = "AaltoFlow launcher: discovers every module, starts services, opens GUIs"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",     # the window
+    "pyzmq>=25",        # asks running services to `describe` themselves
+    "suite-common",     # module discovery + this PC's settings (../suite-common)
+]
+
+# suite-common is not on PyPI: it is the folder next door. `editable = true`
+# means the launcher always uses the CURRENT code in ../suite-common -- an edit
+# there needs no re-install, just a restart of the launcher.
+[tool.uv.sources]
+suite-common = { path = "../suite-common", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+# Run it with:  uv run python mission_control.py

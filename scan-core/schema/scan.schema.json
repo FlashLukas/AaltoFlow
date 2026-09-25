@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AaltoFlow scan recipe",
+  "type": "object",
+  "properties": {
+    "name": {"type": "string"},
+    "comment": {"type": "string"},
+    "fixed": {
+      "type": "object",
+      "description": "parameter_id -> value, set ONCE before sweeping (constant context)",
+      "additionalProperties": {"type": "number"}
+    },
+    "axes": {
+      "type": "array",
+      "description": "ordered OUTER->INNER; axes[0] is the slowest loop",
+      "items": {"$ref": "#/$defs/axis"}
+    },
+    "detectors": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "gettable parameter ids recorded at every point"
+    },
+    "hooks": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+    "output": {
+      "type": "object",
+      "properties": {
+        "dir": {"type": "string"},
+        "basename": {"type": "string"},
+        "format": {"type": "string", "enum": ["netcdf"]}
+      }
+    },
+    "settle": {
+      "type": "object",
+      "properties": {"default_timeout_s": {"type": "number"}}
+    },
+    "zigzag": {"type": "boolean",
+               "description": "serpentine order: reverse inner axes on every other pass"}
+  },
+  "required": ["axes", "detectors"],
+  "$defs": {
+    "linspec": {
+      "type": "object",
+      "properties": {
+        "start": {"type": "number"}, "stop": {"type": "number"},
+        "num": {"type": "integer", "minimum": 1}, "step": {"type": "number"}
+      }
+    },
+    "axis": {
+      "oneOf": [
+        {
+          "title": "linear",
+          "type": "object",
+          "properties": {
+            "type": {"const": "linear"},
+            "param": {"type": "string"},
+            "start": {"type": "number"}, "stop": {"type": "number"},
+            "num": {"type": "integer"}, "step": {"type": "number"},
+            "name": {"type": "string"}
+          },
+          "required": ["type", "param"]
+        },
+        {
+          "title": "array",
+          "type": "object",
+          "properties": {
+            "type": {"const": "array"},
+            "param": {"type": "string"},
+            "values": {"type": "array", "items": {"type": "number"}},
+            "name": {"type": "string"}
+          },
+          "required": ["type", "param", "values"]
+        },
+        {
+          "title": "file",
+          "type": "object",
+          "properties": {
+            "type": {"const": "file"},
+            "param": {"type": "string"},
+            "path": {"type": "string"},
+            "name": {"type": "string"}
+          },
+          "required": ["type", "param", "path"]
+        },
+        {
+          "title": "zip (several params in lockstep = one dimension)",
+          "type": "object",
+          "properties": {
+            "type": {"const": "zip"},
+            "name": {"type": "string"},
+            "members": {
+              "type": "array",
+              "items": {
+                "allOf": [{"$ref": "#/$defs/linspec"}],
+                "properties": {"param": {"type": "string"},
+                               "values": {"type": "array"}},
+                "required": ["param"]
+              }
+            }
+          },
+          "required": ["type", "members"]
+        },
+        {
+          "title": "raster (XY imaging = two dimensions)",
+          "type": "object",
+          "properties": {
+            "type": {"const": "raster"},
+            "x": {"allOf": [{"$ref": "#/$defs/linspec"}],
+                  "properties": {"param": {"type": "string"}}, "required": ["param"]},
+            "y": {"allOf": [{"$ref": "#/$defs/linspec"}],
+                  "properties": {"param": {"type": "string"}}, "required": ["param"]},
+            "fast": {"type": "string", "enum": ["x", "y"]}
+          },
+          "required": ["type", "x", "y"]
+        }
+      ]
+    },
+    "hook": {
+      "type": "object",
+      "properties": {
+        "when": {"type": "string",
+                 "description": "before_scan: after `fixed`, before the first point; after_scan: after the last point, also after an Abort (not after an error)",
+                 "enum": ["before_scan", "after_scan",
+                          "before_point", "after_point", "every_n_points",
+                          "each_sweep", "before_axis", "after_axis"]},
+        "n": {"type": "integer", "minimum": 1,
+              "description": "every_n_points: fire before point 0, n, 2n, ..."},
+        "axis": {"type": "string",
+                 "description": "each_sweep / before_axis / after_axis: a DIM name (a raster gives two)"},
+        "edge": {"enum": ["start", "end"],
+                 "description": "each_sweep: before the first point of each sweep (default), or after the last one (not the scan's last)"},
+        "every": {"type": "integer", "minimum": 1,
+                  "description": "each_sweep: only every m-th sweep (default 1)"},
+        "on_error": {"enum": ["stop", "continue"],
+                     "description": "continue = log the failure and carry on (e.g. an autofocus that finds no peak); default stop"},
+        "action": {"type": "string",
+                   "description": "a name registered in scan_core/hooks.py: call, wait_ms, autofocus, settle_extra"},
+        "args": {"type": "object"}
+      },
+      "required": ["when", "action"],
+      "allOf": [
+        {
+          "if": {"properties": {"action": {"const": "call"}}, "required": ["action"]},
+          "then": {"properties": {"args": {"$ref": "#/$defs/call_args"}}}
+        }
+      ]
+    },
+    "call_args": {
+      "title": "a routine: blocking sets (in order), then one blocking action",
+      "type": "object",
+      "properties": {
+        "set": {
+          "type": "object",
+          "description": "settable parameter_id -> value; params the scan already holds are restored afterwards (except at after_scan)",
+          "additionalProperties": {"type": "number"}
+        },
+        "action": {"type": "string",
+                   "description": "a registry action id, e.g. vna.take_reference"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

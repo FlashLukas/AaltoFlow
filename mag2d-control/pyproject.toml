@@ -1,0 +1,35 @@
+[project]
+name = "mag2d-control"
+version = "0.1.0"
+license = "MIT"
+description = "2-axis vector electromagnet on an NI DAQ: field magnitude + angle, PI in mT, water interlock"
+requires-python = ">=3.11"
+# Runtime dependencies. The hardware one (nidaqmx) is commented out so the
+# project installs and the simulator runs on ANY machine with no NI drivers.
+# Uncomment it on the lab PC for the hardware pass (it also needs the NI-DAQmx
+# runtime from ni.com), then `uv sync` again.
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+    # "nidaqmx",    # the AO/AI/DI/DO of the vector magnet (backends/nidaq.py)
+]
+
+# The GUI stack is optional so the headless service installs light. Get it with
+#   uv sync --extra gui
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",
+]
+
+# Our importable code lives under src/ -- the "src layout": you can only import
+# `mag2d` after it is installed, which catches packaging mistakes early.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

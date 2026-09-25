@@ -1,0 +1,32 @@
+[project]
+name = "smb-control"
+version = "0.1.0"
+license = "MIT"
+description = "Rohde & Schwarz SMB100A RF signal generator control (GPIB/SCPI), sibling to clMag-control"
+requires-python = ">=3.11"
+# Runtime dependencies. The hardware one (pyvisa) is commented out for now so the
+# project installs and the smoke test runs on ANY machine with no VISA drivers
+# present. Uncomment it on the lab PC when you wire up the real SMB100A.
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+    # "pyvisa",     # talks to the SMB100A over GPIB (VISA)
+]
+
+# The GUI stack is optional so the headless core installs light. Get it with
+#   uv sync --extra gui
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+]
+
+# Importable code lives under src/ -- the "src layout", same as clMag-control.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

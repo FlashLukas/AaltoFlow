@@ -1,0 +1,20 @@
+[project]
+name = "suite-common"
+version = "0.1.0"
+license = "MIT"
+description = "AaltoFlow suite: module discovery (module.toml) and this PC's launcher settings, shared by mission-control and scan-core"
+requires-python = ">=3.11"
+# NO dependencies on purpose -- only the standard library (tomllib, json,
+# socket). It is imported by the launcher and by scan-core, and must never pull
+# an instrument package or a GUI toolkit into either of them.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

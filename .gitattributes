@@ -1,0 +1,13 @@
+# Normalise line endings so the repo stores LF regardless of the machine that
+# commits. Windows checkouts still get CRLF in the working tree (core.autocrlf),
+# but the stored blobs stay consistent -- otherwise every file churns whenever
+# it is touched from a different OS.
+* text=auto
+
+# PowerShell is happiest with CRLF on disk.
+*.ps1 text eol=crlf
+
+# Binary: never touch these.
+*.png binary
+*.pdf binary
+*.nc  binary

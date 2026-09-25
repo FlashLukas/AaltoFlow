@@ -1,0 +1,37 @@
+[project]
+name = "camera-control"
+version = "0.1.0"
+license = "MIT"
+description = "Vision brain + coordinator: camera spot/pattern tracking, stabilisation and autofocus for the TRMOKE microscope"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # The vision engine runs on synthetic frames too, so these are REAL runtime
+    # deps (needed even for the simulator), not commented-out hardware drivers.
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+    "scipy>=1.10",
+    "pillow>=10",
+    # IDS camera driver, enabled on the lab PC 2026-09-13: the lab camera is a
+    # U3-386xCP-M (mono, S/N 0000000000) on IDS peak 2.17. Only backends/ids.py
+    # imports these, lazily, so the simulator still runs without the IDS runtime.
+    "ids-peak>=1.16",        # IDS peak GenICam API (device, node map, data stream)
+    "ids-peak-ipl>=1.17",    # IDS peak image conversion (buffer -> Mono8 numpy)
+    # Still off until needed:
+    # "harvesters>=1.4",     # generic GenICam / GigE-USB3 Vision camera (alt driver)
+    # "pylablib>=1.4",       # Thorlabs KCube piezo (own-Z path, if not using zpiezo)
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

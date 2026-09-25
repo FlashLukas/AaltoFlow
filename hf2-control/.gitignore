@@ -1,0 +1,14 @@
+# virtual environments
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# uv
+.uv/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

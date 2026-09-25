@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "piezo"
+name = "Piezo XY"
+description = "piezosystem jena d-Drive + PXY-200 XY flexure"
+category = "motion"
+tags = ["piezo", "flexure", "XY", "piezosystem jena"]
+icon = "icon.svg"
+order = 40
+
+[ports]
+cmd = 5561
+pub = 5562
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

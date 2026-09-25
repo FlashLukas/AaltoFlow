@@ -1,0 +1,5 @@
+qcodes>=0.58
+pyzmq
+matplotlib
+h5netcdf
+xarray

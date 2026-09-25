@@ -1,0 +1,294 @@
+{
+  "format": "aaltoflow-catalog/1",
+  "product": "AaltoFlow",
+  "categories": {
+    "motion": {
+      "label": "Motion & positioning",
+      "hint": "stages, piezos, rotators, focus"
+    },
+    "field": {
+      "label": "Magnetic field",
+      "hint": "electromagnets, vector magnets, field control"
+    },
+    "source": {
+      "label": "Signal sources",
+      "hint": "RF / microwave generators, lasers, AWGs"
+    },
+    "detector": {
+      "label": "Detectors & analyzers",
+      "hint": "lock-ins, power meters, VNAs, spectrometers"
+    },
+    "imaging": {
+      "label": "Cameras & imaging",
+      "hint": "cameras, vision, autofocus, tracking"
+    },
+    "environment": {
+      "label": "Environment & safety",
+      "hint": "temperature, cryostats, interlocks, vacuum"
+    },
+    "other": {
+      "label": "Other",
+      "hint": "anything else"
+    }
+  },
+  "modules": [
+    {
+      "key": "clMag",
+      "name": "Magnet field",
+      "description": "GMW 3470 dipole - Kepco BOP - Hall probe + AUX I/O",
+      "category": "field",
+      "category_label": "Magnetic field",
+      "tags": [
+        "electromagnet",
+        "Kepco",
+        "Hall probe",
+        "GMW",
+        "NI DAQ"
+      ],
+      "folder": "clMag-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5555,
+        "pub": 5556
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "smb",
+      "name": "RF generator",
+      "description": "Rohde & Schwarz SMB100A signal generator",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "RF",
+        "microwave",
+        "signal generator",
+        "Rohde & Schwarz"
+      ],
+      "folder": "smb-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5557,
+        "pub": 5558
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "stage",
+      "name": "Coarse stage 3D",
+      "description": "Thorlabs BSC203 3-axis stepper stage",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "stepper",
+        "stage",
+        "Thorlabs",
+        "XYZ"
+      ],
+      "folder": "stage-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5559,
+        "pub": 5560
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "piezo",
+      "name": "Piezo XY",
+      "description": "piezosystem jena d-Drive + PXY-200 XY flexure",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "piezo",
+        "flexure",
+        "XY",
+        "piezosystem jena"
+      ],
+      "folder": "piezo-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5561,
+        "pub": 5562
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "zpiezo",
+      "name": "Z focus piezo",
+      "description": "Thorlabs KCube piezo - Z focus (headless, no GUI)",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "piezo",
+        "focus",
+        "Z",
+        "Thorlabs",
+        "KCube"
+      ],
+      "folder": "zpiezo-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5565,
+        "pub": 5566
+      },
+      "gui": false,
+      "start_after": []
+    },
+    {
+      "key": "kim",
+      "name": "Inertia stage 3D",
+      "description": "Thorlabs KIM101 + 3x PIA25 - sample XY + Z",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "piezo inertia",
+        "Thorlabs",
+        "KIM101",
+        "XYZ"
+      ],
+      "folder": "kim-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5567,
+        "pub": 5568
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "camera",
+      "name": "Camera coordinator",
+      "description": "IDS camera - laser spot - autofocus - stabiliser",
+      "category": "imaging",
+      "category_label": "Cameras & imaging",
+      "tags": [
+        "camera",
+        "IDS",
+        "autofocus",
+        "stabiliser",
+        "tracking"
+      ],
+      "folder": "camera-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5563,
+        "pub": 5564
+      },
+      "gui": true,
+      "start_after": [
+        "kim",
+        "piezo",
+        "zpiezo"
+      ]
+    },
+    {
+      "key": "hf2",
+      "name": "Lock-in",
+      "description": "Zurich HF2LI 50 MHz - 2 demodulator channels + aux inputs",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "lock-in",
+        "Zurich Instruments",
+        "HF2LI"
+      ],
+      "folder": "hf2-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5569,
+        "pub": 5570
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "pm16",
+      "name": "Power meter",
+      "description": "Thorlabs PM16 USB photodiode power meter (PM16-121)",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "power meter",
+        "photodiode",
+        "Thorlabs",
+        "laser power"
+      ],
+      "folder": "pm16-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5571,
+        "pub": 5572
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "vna",
+      "name": "VNA",
+      "description": "Keysight PNA-X (or simulated): S-parameters, reference, permeability",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "VNA",
+        "S-parameters",
+        "FMR",
+        "Keysight"
+      ],
+      "folder": "vna-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5573,
+        "pub": 5574
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "mag2d",
+      "name": "2D vector magnet",
+      "description": "Two-axis electromagnet on an NI DAQ: field magnitude + angle, PI in mT, water interlock",
+      "category": "field",
+      "category_label": "Magnetic field",
+      "tags": [
+        "vector magnet",
+        "two-axis",
+        "NI DAQ",
+        "rotation"
+      ],
+      "folder": "mag2d-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5575,
+        "pub": 5576
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "mag2dcal",
+      "name": "2D vector magnet (calibrated)",
+      "description": "Two-axis electromagnet: measured B(V) calibration, PI trim, freeze + stabilizer",
+      "category": "field",
+      "category_label": "Magnetic field",
+      "tags": [
+        "vector magnet",
+        "two-axis",
+        "NI DAQ",
+        "calibrated"
+      ],
+      "folder": "mag2dcal-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5577,
+        "pub": 5578
+      },
+      "gui": true,
+      "start_after": []
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+name: field_freq_map
+comment: 2-D FMR-style map — sweep field (outer) and RF frequency (inner), record lock-in R.
+axes:
+  - {type: linear, param: field,   start: 0,   stop: 120,  num: 41}   # outer / slowest
+  - {type: linear, param: rf_freq, start: 800, stop: 2500, num: 81}   # inner / fastest
+detectors: [lockin_r, lockin_phi]
+hooks: []
+output: {dir: ., basename: field_freq_map, format: netcdf}
+settle: {default_timeout_s: 20.0}

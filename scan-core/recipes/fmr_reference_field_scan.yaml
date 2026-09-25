@@ -1,0 +1,18 @@
+name: fmr_reference_field_scan
+comment: >
+  VNA-FMR field sweep with ROUTINES, on the simulator. Before the scan the
+  magnet goes to a far-off field (190 mT, resonance well away from the scanned
+  ones) and a reference trace is stored; every point then records S21 and
+  u = (S21 - ref)/ref. After the scan (also after an Abort) the field goes to 0.
+  The lab version is the same file with module ids: mag2d.field, mag2d.angle,
+  vna.take_reference, vna.u, vna.s.
+fixed: {rf_power: -10}
+axes:
+  - {type: linear, param: field, start: 70, stop: 0, num: 36}   # down from 70 mT
+detectors: [u, s21]
+hooks:
+  # set every parameter first (each set blocks until settled), THEN the action
+  - {when: before_scan, action: call, args: {set: {field: 190}, action: vna_reference}}
+  - {when: after_scan,  action: call, args: {set: {field: 0}}}
+output: {dir: ., basename: fmr_reference_field_scan, format: netcdf}
+settle: {default_timeout_s: 20.0}

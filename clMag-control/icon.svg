@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- horseshoe magnet. Colours are the DARK palette; the launcher swaps
+       #ff9e2c / #ffb454 / #e8eaed for the active theme's accent / accent_hi / text. -->
+  <path d="M8.8 32 V18.4 A11.2 12 0 0 1 31.2 18.4 V32" fill="none" stroke="#ff9e2c" stroke-width="4"/>
+  <line x1="8.8" y1="32" x2="8.8" y2="34.4" stroke="#e8eaed" stroke-width="4"/>
+  <line x1="31.2" y1="32" x2="31.2" y2="34.4" stroke="#ffb454" stroke-width="4"/>
+</svg>

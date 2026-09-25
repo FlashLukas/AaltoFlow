@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# AaltoFlow suite -- one ignore file for all nine projects.
+# Each project also keeps its own .gitignore; this is the shared backstop.
+# ---------------------------------------------------------------------------
+
+# Virtual environments. NEVER commit these: they are rebuilt from
+# pyproject.toml + uv.lock on any machine, they are huge, and on OneDrive they
+# are the source of the `Access is denied (os error 5)` locking trouble.
+# (uv.lock IS committed -- that is what makes installs reproducible.)
+.venv/
+venv/
+.uv/
+
+# Python bytecode and build/packaging leftovers
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test + tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime output: scan datasets, figures and logs produced by run_demo.py,
+# the engine and the services. Data belongs in the lab archive, not in git.
+out/
+*.nc
+*.log
+*.csv
+
+# ...except the spike results, which are small (58 KB) and are the recorded
+# EVIDENCE that those QCoDeS experiments worked -- the memory cites them.
+!spikes/**/*.nc
+
+# Local machine state that should not follow the repo between PCs
+# suite_local.json = this PC's port overrides, real/sim flags and remote
+# services (written by the launcher, read by scan-core); .suite_cache = the last
+# `describe` seen from each module.
+suite_local.json
+.suite_local.*.tmp
+.suite_cache/
+mission-control/profiles.json
+mission-control/launcher.json
+scan-core/suite_layouts.json
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# offline packages copied in by "Add module..." from module packs
+wheelhouse/
+
+# Personal working notes (Claude Code loads them; they stay private)
+CLAUDE.local.md

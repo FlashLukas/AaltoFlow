@@ -1,0 +1,27 @@
+[project]
+name = "stage-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a 3D coarse stage (Thorlabs BSC203, 3 stepper motors)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # Hardware driver stays COMMENTED OUT until the lab PC (see §3/§8 of the guide).
+    # The simulator backend needs none of this; only the real BSC203 does.
+    # "pylablib>=1.4",
+]
+
+[project.optional-dependencies]
+# Pillow is only used as a fallback loader for TIFFs that Qt can't read itself.
+gui = ["PySide6>=6.7", "pillow>=10"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,40 @@
+[project]
+name = "vna-control"
+version = "0.1.0"
+license = "MIT"
+description = "Keysight PNA-X N5222A vector network analyser (or a simulator of one): S-parameters, reference, u"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client, and the magnet subscription
+    "numpy>=1.26",  # traces, averaging, and the simulator's model
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui                  the GUI (the headless core installs light)
+#   uv sync --extra gui --extra real     + pyvisa, for the real PNA-X (--real)
+#
+# Why pyvisa is an EXTRA and not commented out like clMag's drivers: pyvisa is
+# pure Python and installs on any PC -- the VISA LIBRARY it needs (Keysight IO
+# Libraries or NI-VISA) is a separate runtime install, and only needed when the
+# instrument is really opened. So there is nothing to hide from a PC without
+# hardware, and turning the real backend on should not mean editing (and
+# committing) this file. Trap: `uv sync` REMOVES extras you do not name, so
+# on the lab PC always sync with both extras, or --real says pyvisa is missing.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the trace plots
+]
+real = [
+    "pyvisa>=1.13",      # VISA to the PNA-X (backends/pna.py, imported only in open())
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- a VNA screen: a transmission trace with an FMR dip.
+       #ff9e2c / #ffb454 / #e8eaed are swapped for the active theme by the launcher. -->
+  <rect x="4" y="7" width="32" height="26" rx="4" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <path d="M8 14 L15 15.5 L19 16.5 C20.5 17 21 26 22 26 C23 26 23.5 17.5 25 17.5 L32 19"
+        fill="none" stroke="#ff9e2c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="22" cy="26" r="1.8" fill="#ffb454"/>
+</svg>

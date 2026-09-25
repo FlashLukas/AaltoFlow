@@ -1,0 +1,53 @@
+[project]
+name = "scan-core"
+version = "0.1.0"
+license = "MIT"
+description = "Data-first, N-dimensional scan engine + Scan Builder for the AaltoFlow suite"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "xarray>=2023.1",
+    "pyyaml>=6",
+    "pyzmq>=25",         # the generic instrument client in scan_core/instrument.py
+                         # -- scan-core talks to services over the wire and never
+                         # imports an instrument package.
+    "h5netcdf>=1.1",     # netCDF writing without a system netcdf lib
+    "h5py>=3.9",         # h5netcdf's actual HDF5 backend -- NOT an automatic
+                         # dependency of h5netcdf, so it must be named here or
+                         # every to_netcdf() call raises ImportError.
+    "suite-common",      # module discovery: which modules exist, where they listen
+    "aaltoview",         # AaltoView: reading .nc back, cube reduction, the Data tab
+                         # (its own repository since 2026-09-16)
+]
+
+# suite-common is the folder next door, installed editable (edits apply at once).
+[tool.uv.sources]
+suite-common = { path = "../suite-common", editable = true }
+# The data viewer is a separate PRIVATE repo, pinned in uv.lock to one commit. Pick
+# up a newer one with:  uv lock --upgrade-package aaltoview; uv sync --extra gui
+# (git needs access to GitHub -- on the lab PC the gh login provides it).
+aaltoview = { git = "https://github.com/FlashLukas/AaltoView", branch = "main" }
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",
+    "matplotlib>=3.7",   # headless demo figures
+]
+# Push curves and maps straight into a running Origin (Windows, Origin 2021+
+# installed). originpro drives Origin over COM from OUTSIDE it; without this extra
+# the viewer still exports .csv/.dat files that Origin imports.
+origin = [
+    "aaltoview[origin]",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scan_core*", "apps*"]

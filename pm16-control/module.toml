@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "pm16"
+name = "Power meter"
+description = "Thorlabs PM16 USB photodiode power meter (PM16-121)"
+category = "detector"
+tags = ["power meter", "photodiode", "Thorlabs", "laser power"]
+icon = "icon.svg"
+order = 90
+
+[ports]
+cmd = 5571
+pub = 5572
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

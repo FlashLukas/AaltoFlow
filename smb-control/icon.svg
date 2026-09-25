@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- broadcast tower -->
+  <g stroke="#5a626e" stroke-width="2.4" fill="none" stroke-linecap="round">
+    <line x1="20" y1="12" x2="12" y2="33"/>
+    <line x1="20" y1="12" x2="28" y2="33"/>
+    <line x1="15.2" y1="23" x2="24.8" y2="23"/>
+  </g>
+  <g stroke="#ff9e2c" stroke-width="2.4" fill="none" stroke-linecap="round">
+    <path d="M16.79 7.41 A5.6 5.6 0 0 1 23.21 7.41"/>
+    <path d="M14.84 4.63 A9 9 0 0 1 25.16 4.63"/>
+  </g>
+  <circle cx="20" cy="12" r="2.4" fill="#ffb454"/>
+</svg>

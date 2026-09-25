@@ -1,0 +1,22 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "camera"
+name = "Camera coordinator"
+description = "IDS camera - laser spot - autofocus - stabiliser"
+category = "imaging"
+tags = ["camera", "IDS", "autofocus", "stabiliser", "tracking"]
+icon = "icon.svg"
+order = 70
+
+[ports]
+cmd = 5563
+pub = 5564
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+# The camera drives the sample stages over the network, so when they start
+# together they must be up first (kim on the lab rig, piezo + zpiezo otherwise).
+start_after = ["kim", "piezo", "zpiezo"]
