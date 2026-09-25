@@ -13,6 +13,14 @@ DynaCool.
 
 Ports **5579 / 5580**.
 
+In the measurement suite, next to the VNA (both services live; the Control tab is
+built from their `describe`), and a field x frequency VNA-FMR scan in the
+DynaCool opened in the data viewer (`scan-core/run_ppms_vna_demo.py`, simulated):
+
+![suite control tab with ppms and vna](../front-panels/suite-control-dynacool.png)
+
+![VNA-FMR map from the DynaCool](../front-panels/viewer-dynacool.png)
+
 > **Not yet run on the instrument.** The real backend has been exercised against
 > Quantum Design's own MultiPyVu in its simulation mode (the real code path, no
 > MultiVu) and against a fake of it; the lines that still need a look on the

@@ -84,6 +84,7 @@ SIZES = {
     "scan-core": (1520, 840),
     "mission-control": (1180, 1150),
     "suite-control": (1500, 950),
+    "suite-control-dynacool": (1500, 950),
     "suite-scan": (1500, 950),
     "suite-measurement": (1500, 950),
     "suite-data": (1500, 950),
@@ -531,6 +532,38 @@ def _scan_3d_then_show_data(win):
         rows[0].slider.setValue(5)
 
 
+def _dynacool_controls(win):
+    """The DynaCool VNA-FMR setup (ppms + vna) on the Control tab: the
+    cryostat's own knobs, the "reached" flags a scan waits on, and the field
+    the VNA hears -- with a field ramp under way, so the chart shows it moving.
+
+    Needs the two services running (SUITE_RENDER_MODULES=ppms,vna); the ramp is
+    sent over the wire like any client would, before the settle time starts."""
+    import zmq
+    from PySide6 import QtWidgets, QtCore
+
+    wanted = {"ppms.field", "ppms.measured_field", "ppms.field_status", "ppms.field_stable",
+              "ppms.temperature", "ppms.measured_temperature", "ppms.temperature_stable",
+              "ppms.chamber", "vna.field", "vna.reference_field"}
+    panel = win.control
+    it = QtWidgets.QTreeWidgetItemIterator(panel.tree)
+    while it.value():
+        node = it.value()
+        if node.data(0, QtCore.Qt.UserRole) in wanted:
+            node.setCheckState(0, QtCore.Qt.Checked)
+        it += 1
+    panel._rebuild_panel()
+    req = zmq.Context.instance().socket(zmq.REQ)
+    req.setsockopt(zmq.RCVTIMEO, 3000)
+    req.setsockopt(zmq.LINGER, 0)
+    req.connect("tcp://127.0.0.1:5579")
+    for msg in ({"cmd": "set_field", "field_mT": 100.0},
+                {"cmd": "set_temperature", "temperature_K": 300.0}):
+        req.send_json(msg)
+        req.recv_json()
+    req.close(0)
+
+
 def _viewer(tab: str):
     """The data viewer on a folder of SIMULATED measurements (a temporary one).
 
@@ -767,6 +800,8 @@ TARGETS = {
     "mag2dcal": _mag2dcal,
     "vna": _vna,
     "suite-control": _suite("Control", _tick_some_controls, settle=4.0, follow=True),
+    # SUITE_RENDER_MODULES=ppms,vna with both services up
+    "suite-control-dynacool": _suite("Control", _dynacool_controls, settle=13.0, follow=True),
     "suite-scan": _suite("Scan", _stack_two_axes, settle=3.0),
     "suite-measurement": _suite("Measurement", _scan_then_show_run, settle=3.5),
     "suite-data": _suite("Data", _scan_3d_then_show_data, settle=3.5),
