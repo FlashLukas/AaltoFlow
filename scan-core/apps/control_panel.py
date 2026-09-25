@@ -50,6 +50,10 @@ LAYOUTS_PATH = Path(__file__).resolve().parent.parent / "suite_layouts.json"
 #: which is long enough to see a magnet settle and short enough to stay cheap.
 HISTORY = 1000
 
+#: Where a tree row keeps its kind (control / indicator / action). Qt lets a
+#: row carry extra data under numbered "roles"; UserRole already holds the pid.
+KIND_ROLE = QtCore.Qt.UserRole + 1
+
 
 # --------------------------------------------------------------------------- #
 # Turning whatever we are connected to into a flat list of panel items
@@ -101,6 +105,100 @@ def items_from_registry(registry) -> list[dict]:
             "_param": p,
         })
     return items
+
+
+# --------------------------------------------------------------------------- #
+# What KIND an entry is: a small marker in the "tick to show" tree
+# --------------------------------------------------------------------------- #
+
+#: One line per kind: (legend word, tooltip sentence). The manifest's `kind` is
+#: one of these three; anything else is drawn as an indicator, which is the safe
+#: reading ("you can look at it") of an entry we do not understand.
+KIND_TEXT = {
+    "control": ("set", "Control -- a value you can SET (and read back)."),
+    "indicator": ("read", "Indicator -- READ-ONLY, the module reports it."),
+    "action": ("run", "Action -- a button that RUNS something on the module."),
+}
+
+
+def kind_of(item: dict) -> str:
+    """The item's kind, normalised to one of the keys of KIND_TEXT."""
+    kind = item.get("kind")
+    return kind if kind in KIND_TEXT else "indicator"
+
+
+def kind_icon(kind: str, danger: bool = False, size: int = 12) -> QtGui.QIcon:
+    """A small marker for one kind, drawn in the ACTIVE theme's colours.
+
+    Why painted and not a Unicode glyph: the lab PC's fonts decide what a glyph
+    like a triangle looks like (or whether it exists at all), and a font glyph
+    takes the text colour, not a theme colour. Painting it ourselves gives the
+    same shape everywhere.
+
+    Why SHAPE as well as colour: about one man in twelve cannot tell amber from
+    green, so each kind also differs in form -- a filled dot (a knob you turn),
+    a hollow ring (a lamp you look at), a triangle (a play button).
+
+    The colours are read from COLORS at call time, so this must be called AFTER
+    set_theme -- which is the case, because the tree is filled only once the
+    window exists (suite gotcha #6: never cache a colour at import).
+    """
+    colour = {
+        "control": C["accent"],       # amber = the colour of things you drive
+        "indicator": C["ok"],         # green = a live readout / status lamp
+        "action": C["danger"] if danger else C["text"],
+    }.get(kind, C["ok"])
+
+    # Draw at twice the size and tell Qt so: the icon stays sharp on a
+    # high-DPI screen instead of being a blurry 12-pixel blob.
+    ratio = 2
+    pm = QtGui.QPixmap(size * ratio, size * ratio)
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    q = QtGui.QColor(colour)
+    m = size * 0.2                                   # margin around the mark
+    box = QtCore.QRectF(m, m, size - 2 * m, size - 2 * m)
+    if kind == "control":
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(q)
+        p.drawEllipse(box)
+    elif kind == "action":
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(q)
+        p.drawPolygon(QtGui.QPolygonF([
+            QtCore.QPointF(box.left() + 0.5, box.top()),
+            QtCore.QPointF(box.right() + 0.5, box.center().y()),
+            QtCore.QPointF(box.left() + 0.5, box.bottom())]))
+    else:
+        pen = QtGui.QPen(q)
+        pen.setWidthF(1.6)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawEllipse(box.adjusted(0.8, 0.8, -0.8, -0.8))
+    p.end()
+    return QtGui.QIcon(pm)
+
+
+def kind_legend() -> QtWidgets.QWidget:
+    """One line under the tree: the three markers with a word each."""
+    w = QtWidgets.QWidget()
+    h = QtWidgets.QHBoxLayout(w)
+    h.setContentsMargins(2, 0, 0, 0)
+    h.setSpacing(4)
+    for kind, (word, tip) in KIND_TEXT.items():
+        mark = QtWidgets.QLabel()
+        mark.setPixmap(kind_icon(kind).pixmap(12, 12))
+        mark.setToolTip(tip)
+        text = QtWidgets.QLabel(word)
+        text.setToolTip(tip)
+        text.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+        h.addWidget(mark)
+        h.addWidget(text)
+        h.addSpacing(8)
+    h.addStretch(1)
+    return w
 
 
 # --------------------------------------------------------------------------- #
@@ -411,6 +509,11 @@ class ControlPanel(QtWidgets.QWidget):
         self.lab = None
         self.registry = None
         self._revs: dict[str, int] = {}         # module -> last describe_rev
+        # Traces the operator switched off by clicking their legend entry. Kept
+        # HERE, not only on the curves, because every tick rebuilds the plot
+        # from scratch: without this set, ticking one more parameter would bring
+        # every hidden trace back. A layout saves and restores it too.
+        self.hidden: set[str] = set()
         self.layouts = _load_layouts()
 
         outer = QtWidgets.QHBoxLayout(self)
@@ -437,6 +540,10 @@ class ControlPanel(QtWidgets.QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.itemChanged.connect(self._on_tick)
         v.addWidget(self.tree, 1)
+        # "Find focus" (a button), "Stable" (a readout) and "Scan point X" (a
+        # value you set) otherwise look identical in the tree; the marker in
+        # front of each name says which, and this line says what they mean.
+        v.addWidget(kind_legend())
 
         self.layout_combo = QtWidgets.QComboBox()
         self.layout_combo.setEditable(True)
@@ -509,6 +616,9 @@ class ControlPanel(QtWidgets.QWidget):
     def _reload_tree(self):
         self.tree.blockSignals(True)
         self.tree.clear()
+        # One icon per (kind, danger), built now -- i.e. after set_theme -- and
+        # shared by every row, rather than painting a pixmap per parameter.
+        icons = {(k, d): kind_icon(k, d) for k in KIND_TEXT for d in (False, True)}
         by_module: dict[str, dict[str, list]] = {}
         for item in self.items.values():
             group = item.get("group") or "Other"
@@ -530,7 +640,16 @@ class ControlPanel(QtWidgets.QWidget):
                     node.setFlags(node.flags() | QtCore.Qt.ItemIsUserCheckable)
                     node.setCheckState(0, QtCore.Qt.Unchecked)
                     node.setData(0, QtCore.Qt.UserRole, item["pid"])
-                    node.setToolTip(0, item.get("help", ""))
+                    kind = kind_of(item)
+                    node.setData(0, KIND_ROLE, kind)
+                    node.setIcon(0, icons[(kind, bool(item.get("danger")))])
+                    # The tooltip leads with the kind, then the module's own help.
+                    tip = KIND_TEXT[kind][1]
+                    if kind == "action" and item.get("danger"):
+                        tip += " Moves hardware: it asks before running."
+                    if item.get("help"):
+                        tip += "\n" + item["help"]
+                    node.setToolTip(0, tip)
                     gnode.addChild(node)
             top.setExpanded(True)
         self.tree.blockSignals(False)
@@ -551,7 +670,36 @@ class ControlPanel(QtWidgets.QWidget):
     def _on_tick(self, *_):
         self._rebuild_panel()
 
-    def _rebuild_panel(self):
+    def _sync_hidden(self):
+        """Read the legend's on/off state off the curves into `self.hidden`.
+
+        pyqtgraph's legend hides a curve by calling setVisible(False) on it when
+        its entry is clicked, and tells nobody. So the curves ARE the truth for
+        whatever is plotted now. Parameters not plotted right now keep the state
+        they had (untick and re-tick a hidden trace: it comes back hidden).
+        """
+        for pid, curve in self.curves.items():
+            if curve.isVisible():
+                self.hidden.discard(pid)
+            else:
+                self.hidden.add(pid)
+
+    def hidden_traces(self) -> list[str]:
+        """The plotted traces that are switched off, in a stable order."""
+        self._sync_hidden()
+        return sorted(pid for pid in self.curves if pid in self.hidden)
+
+    def _rebuild_panel(self, hidden=None):
+        """Rebuild the widgets and the strip chart from the ticked parameters.
+
+        `hidden` (a set of pids) REPLACES the remembered hidden traces -- that
+        is what loading a layout does. Left as None, the current legend state is
+        carried over, so ticking one more parameter does not unhide the others.
+        """
+        if hidden is None:
+            self._sync_hidden()
+        else:
+            self.hidden = set(hidden)
         for w in list(self.widgets.values()):
             w.setParent(None)
         self.widgets.clear()
@@ -586,8 +734,12 @@ class ControlPanel(QtWidgets.QWidget):
                 gl.addWidget(w)
                 if item.get("plottable"):
                     pen = pg.mkPen(colours[n % len(colours)], width=2)
-                    self.curves[item["pid"]] = self.plot.plot(
+                    curve = self.plot.plot(
                         [], [], pen=pen, name=item.get("label", item["id"]))
+                    # Hidden before it is ever drawn; the legend entry still
+                    # exists (greyed), so one click brings it back.
+                    curve.setVisible(item["pid"] not in self.hidden)
+                    self.curves[item["pid"]] = curve
                     n += 1
             self.groups_lay.insertWidget(self.groups_lay.count() - 1, box)
 
@@ -692,7 +844,8 @@ class ControlPanel(QtWidgets.QWidget):
 
     def _load_layout(self):
         name = self.layout_combo.currentText().strip()
-        pids = set(self.layouts.get(name) or [])
+        entry = self.layouts.get(name)
+        pids = set(layout_pids(entry))
         if not pids:
             self.on_log("layout '" + name + "' is empty or unknown")
             return
@@ -706,7 +859,9 @@ class ControlPanel(QtWidgets.QWidget):
                                    else QtCore.Qt.Unchecked)
             it += 1
         self.tree.blockSignals(False)
-        self._rebuild_panel()
+        # The layout's hidden traces replace whatever was hidden before; an old
+        # layout without the field shows every trace, as it always did.
+        self._rebuild_panel(hidden=set(layout_hidden(entry)))
 
         missing = pids - set(self.items)
         if missing:
@@ -722,11 +877,14 @@ class ControlPanel(QtWidgets.QWidget):
         if not name:
             self.on_log("give the layout a name first")
             return
-        self.layouts[name] = self.selected_pids()
+        pids = self.selected_pids()
+        hidden = self.hidden_traces()
+        self.layouts[name] = {"pids": pids, "hidden": hidden}
         _save_layouts(self.layouts)
         if self.layout_combo.findText(name) < 0:
             self.layout_combo.addItem(name)
-        self.on_log(f"layout '{name}' saved ({len(self.layouts[name])} items)")
+        extra = f", {len(hidden)} trace(s) hidden" if hidden else ""
+        self.on_log(f"layout '{name}' saved ({len(pids)} items{extra})")
 
     def _delete_layout(self):
         name = self.layout_combo.currentText().strip()
@@ -737,6 +895,26 @@ class ControlPanel(QtWidgets.QWidget):
             if i >= 0:
                 self.layout_combo.removeItem(i)
             self.on_log("layout '" + name + "' deleted")
+
+
+# A layout on disk is either
+#   ["pid", "pid", ...]                               (before 2026-09-25), or
+#   {"pids": ["pid", ...], "hidden": ["pid", ...]}    (since: + hidden traces).
+# Both are read; only the second is written. An old suite_layouts.json must keep
+# loading -- it is this PC's collection of panels, and nobody wants to rebuild it.
+
+def layout_pids(entry) -> list[str]:
+    """The ticked parameters of one stored layout, old or new format."""
+    if isinstance(entry, dict):
+        return list(entry.get("pids") or [])
+    return list(entry or [])
+
+
+def layout_hidden(entry) -> list[str]:
+    """The hidden traces of one stored layout ([] for the old format)."""
+    if isinstance(entry, dict):
+        return list(entry.get("hidden") or [])
+    return []
 
 
 def _load_layouts() -> dict:

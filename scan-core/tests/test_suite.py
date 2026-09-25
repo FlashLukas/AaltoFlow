@@ -211,6 +211,14 @@ def test_control_tab_builds_widgets_from_a_live_manifest(qapp, fake_service, tmp
         # the spin box inherits the MODULE's limits
         spin = panel.widgets["fake.field"].editor
         assert (spin.minimum(), spin.maximum()) == (-95.0, 95.0)
+
+        # every tree row says what KIND it is (marker + tooltip), so a button,
+        # a readout and a settable value no longer look the same
+        assert _tree_kind(panel, "fake.demag") == "action"
+        assert _tree_kind(panel, "fake.measured_field") == "indicator"
+        assert _tree_kind(panel, "fake.field") == "control"
+        assert "Action" in _tree_node(panel, "fake.demag").toolTip(0)
+        assert not _tree_node(panel, "fake.demag").icon(0).isNull()
     finally:
         panel.timer.stop()
         lab.close()
@@ -286,6 +294,7 @@ def test_a_flat_trace_does_not_divide_by_zero(suite):
 # --------------------------------------------------------------------------- #
 
 def test_layouts_round_trip(suite, tmp_path):
+    import apps.control_panel as cp
     panel = suite.control
     assert _tick(panel, "field")
     assert _tick(panel, "rf_freq")
@@ -293,7 +302,7 @@ def test_layouts_round_trip(suite, tmp_path):
     panel.layout_combo.setEditText("alignment")
     panel._save_layout()
     assert "alignment" in panel.layouts
-    assert set(panel.layouts["alignment"]) == {"field", "rf_freq"}
+    assert set(cp.layout_pids(panel.layouts["alignment"])) == {"field", "rf_freq"}
 
     # clear the selection, then bring it back
     panel._load_layout()
@@ -314,3 +323,95 @@ def test_loading_a_layout_reports_parameters_that_are_not_connected(suite):
 
     assert any("not available" in n for n in notes), notes
     assert "field" in panel.widgets          # what IS there still appears
+
+
+# --------------------------------------------------------------------------- #
+# Kind markers in the tree, and hidden traces kept by layouts (2026-09-25)
+# --------------------------------------------------------------------------- #
+
+def _tree_node(panel, pid):
+    it = QtWidgets.QTreeWidgetItemIterator(panel.tree)
+    while it.value():
+        if it.value().data(0, QtCore.Qt.UserRole) == pid:
+            return it.value()
+        it += 1
+    return None
+
+
+def _tree_kind(panel, pid):
+    import apps.control_panel as cp
+    node = _tree_node(panel, pid)
+    return None if node is None else node.data(0, cp.KIND_ROLE)
+
+
+def test_simulated_items_are_marked_control_or_indicator(suite):
+    """No manifest: settables are controls, gettables are indicators."""
+    panel = suite.control
+    assert _tree_kind(panel, "field") == "control"
+    assert _tree_kind(panel, "lockin_r") == "indicator"
+    assert "SET" in _tree_node(panel, "field").toolTip(0)
+    assert "READ-ONLY" in _tree_node(panel, "lockin_r").toolTip(0)
+
+
+def _click_legend(panel, pid):
+    """Click a trace's legend entry the way the operator does."""
+    legend = panel.plot.plotItem.legend
+    curve = panel.curves[pid]
+    for sample, _label in legend.items:
+        if sample.item is curve:
+            class Ev:
+                def button(self):
+                    return QtCore.Qt.MouseButton.LeftButton
+
+                def accept(self):
+                    pass
+            sample.mouseClickEvent(Ev())
+            return
+    raise AssertionError(f"{pid} has no legend entry")
+
+
+def test_a_layout_remembers_hidden_traces(suite):
+    import apps.control_panel as cp
+    panel = suite.control
+    for pid in ("lockin_r", "lockin_x", "aux_in"):
+        assert _tick(panel, pid)
+    _click_legend(panel, "lockin_x")                 # hide one trace
+    assert not panel.curves["lockin_x"].isVisible()
+
+    panel.layout_combo.setEditText("quiet")
+    panel._save_layout()
+    assert cp.layout_hidden(panel.layouts["quiet"]) == ["lockin_x"]
+    # and it really reached the file
+    import json
+    on_disk = json.loads(cp.LAYOUTS_PATH.read_text(encoding="utf-8"))
+    assert on_disk["quiet"]["hidden"] == ["lockin_x"]
+
+    _click_legend(panel, "lockin_x")                 # show it again ...
+    _click_legend(panel, "aux_in")                   # ... and hide another
+    panel._load_layout()
+    assert not panel.curves["lockin_x"].isVisible(), "hidden trace came back"
+    assert panel.curves["aux_in"].isVisible(), "the layout did not hide aux_in"
+    assert panel.curves["lockin_r"].isVisible()
+
+
+def test_ticking_another_parameter_keeps_hidden_traces_hidden(suite):
+    """Every tick rebuilds the plot; a hidden trace must not reappear."""
+    panel = suite.control
+    assert _tick(panel, "lockin_r")
+    assert _tick(panel, "lockin_x")
+    _click_legend(panel, "lockin_r")
+    assert _tick(panel, "aux_in")
+    assert not panel.curves["lockin_r"].isVisible()
+    assert panel.curves["aux_in"].isVisible()
+
+
+def test_an_old_layout_without_hidden_traces_shows_everything(suite):
+    """suite_layouts.json from before 2026-09-25 is a plain list per layout."""
+    panel = suite.control
+    assert _tick(panel, "lockin_r")
+    _click_legend(panel, "lockin_r")                 # hidden before the load
+    panel.layouts["old"] = ["lockin_r", "lockin_x"]
+    panel.layout_combo.setEditText("old")
+    panel._load_layout()
+    assert set(panel.selected_pids()) == {"lockin_r", "lockin_x"}
+    assert all(c.isVisible() for c in panel.curves.values())
