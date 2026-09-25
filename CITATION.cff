@@ -1,11 +1,12 @@
 # How to cite AaltoFlow. GitHub shows this as "Cite this repository".
-# Add the DOI here once a release is archived (e.g. on Zenodo).
+# The DOI is Zenodo's CONCEPT DOI: it always resolves to the latest version.
 cff-version: 1.2.0
 message: >-
   If you publish scientific work with data measured or processed using
   AaltoFlow, we would be grateful if you cited it as below.
 title: "AaltoFlow: lab automation built from independent instrument modules"
 type: software
+doi: 10.5281/zenodo.22959230
 authors:
   - family-names: "Flajšman"
     given-names: "Lukáš"

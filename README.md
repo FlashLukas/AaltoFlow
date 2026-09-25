@@ -1,5 +1,7 @@
 # AaltoFlow
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22959230.svg)](https://doi.org/10.5281/zenodo.22959230)
+
 **Lab automation built from independent instrument modules.** Every instrument
 runs as its own small service with its own GUI; a launcher starts them, and one
 scan engine drives any combination of them through N-dimensional measurements.
@@ -394,9 +396,11 @@ has the details (GitHub's "Cite this repository" button gives it as BibTeX or
 APA); in short:
 
 > L. Flajšman, *AaltoFlow: lab automation built from independent instrument
-> modules*, NanoSpin group, Aalto University, https://github.com/FlashLukas/AaltoFlow
+> modules*, NanoSpin group, Aalto University, https://github.com/FlashLukas/AaltoFlow,
+> doi:10.5281/zenodo.22959230
 
-A citable DOI will be added with the first archived release. We are also happy to
+DOI: [10.5281/zenodo.22959230](https://doi.org/10.5281/zenodo.22959230) (always the latest version; Zenodo lists the DOI of each
+release too). We are also happy to
 hear what AaltoFlow was used for -- open an issue and tell us.
 
 ## Credits and license
