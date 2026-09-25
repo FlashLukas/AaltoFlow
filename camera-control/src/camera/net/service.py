@@ -258,6 +258,10 @@ class CameraService:
             return {"ok": True}
 
         # -- imaging ----------------------------------------------------- #
+        if cmd == "save_scan_pattern":
+            return {"ok": True, **b.save_scan_pattern(req.get("folder", ""), req.get("name", ""))}
+        if cmd == "save_picture":
+            return {"ok": True, **b.save_picture(req.get("folder", ""), req.get("name", ""))}
         if cmd == "snapshot":
             return {"ok": True, "path": b.snapshot(req.get("path"))}
         if cmd == "get_frame":

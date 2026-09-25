@@ -274,6 +274,28 @@ def build_manifest(brain) -> dict:
            read_path=["af_id"]),
         _p("kill_af", "Kill autofocus", "action", "action", group="Focus",
            order=101, danger=True),
+        # Saved NEXT TO the measurement when run as a scan routine: scan-core
+        # fills {data_dir} / {data_stem} / {moment}. The save is done when the
+        # command replies, so the wait is `immediate` -- the scan does not
+        # wait for anything else.
+        _p("save_scan_pattern", "Save pattern with the scan", "action", "action",
+           group="Imaging", order=108,
+           args=[{"name": "folder", "label": "Folder", "type": "string",
+                  "default": "{data_dir}"},
+                 {"name": "name", "label": "File name", "type": "string",
+                  "default": "{data_stem}_{moment}_pattern"}],
+           wait={"ready": {"policy": "immediate"}, "timeout_s": 10.0},
+           help="Save the pattern (with its scan array) and a .json record. In a "
+                "scan routine it goes into the measurement's folder."),
+        _p("save_picture", "Save camera picture", "action", "action",
+           group="Imaging", order=109,
+           args=[{"name": "folder", "label": "Folder", "type": "string",
+                  "default": "{data_dir}"},
+                 {"name": "name", "label": "File name", "type": "string",
+                  "default": "{data_stem}_{moment}_camera"}],
+           wait={"ready": {"policy": "immediate"}, "timeout_s": 10.0},
+           help="Save the current camera frame and a .json record (spot, pattern, "
+                "stage, focus). In a scan routine it goes into the measurement's folder."),
         _p("snapshot", "Snapshot", "action", "action", group="Imaging",
            order=110,
            args=[{"name": "path", "label": "File path", "type": "string",

@@ -391,6 +391,34 @@ def _acquire_from(d: dict, inst: Instrument, module: str, on_warn):
     return AcquireSpec(group, trigger_fn=trigger_fn, wait_fn=wait_fn)
 
 
+class _Blank(dict):
+    """format_map helper: an unknown {name} becomes "" instead of a KeyError."""
+    def __missing__(self, key):
+        return ""
+
+
+def fill_placeholders(args: dict, context: dict | None) -> dict:
+    """Fill {data_dir}, {data_stem}, {moment} in an action's TEXT arguments.
+
+    A module declares where a routine's output should go with placeholders in
+    its argument defaults -- the camera's "save pattern" defaults to
+    folder "{data_dir}", name "{data_stem}_{moment}_pattern" -- and scan-core,
+    which alone knows where the measurement is being written, fills them in
+    when the action runs as a routine. Outside a scan (no context) they become
+    "" and the module falls back to its own folder.
+    """
+    ctx = _Blank(context or {})
+    out = {}
+    for k, v in (args or {}).items():
+        if isinstance(v, str) and "{" in v:
+            try:
+                v = v.format_map(ctx)
+            except (ValueError, IndexError):      # a stray brace: send it as it is
+                pass
+        out[k] = v
+    return out
+
+
 def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
     """A registry Action from an action descriptor that has a `wait` block.
 
@@ -430,8 +458,8 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
     label = d.get("label", d["id"])
 
     def run_fn(_i=inst, _v=verb, _a=args, _key=target_key, _p=policy,
-               _t=timeout, _id=aid, _check=check):
-        reply = _i.command(_v, **_a)
+               _t=timeout, _id=aid, _check=check, context=None):
+        reply = _i.command(_v, **fill_placeholders(_a, context))
         target = None
         if _key is not None:
             if _key not in reply:

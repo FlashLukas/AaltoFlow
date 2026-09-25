@@ -158,6 +158,14 @@ class CameraClient:
     def datum_xy(self) -> None:
         self._rpc(cmd="datum_xy")
 
+    def save_scan_pattern(self, folder: str = "", name: str = "") -> dict:
+        rep = self._rpc(cmd="save_scan_pattern", folder=folder, name=name)
+        return {"path": rep.get("path"), "info": rep.get("info")}
+
+    def save_picture(self, folder: str = "", name: str = "") -> dict:
+        rep = self._rpc(cmd="save_picture", folder=folder, name=name)
+        return {"path": rep.get("path"), "info": rep.get("info")}
+
     def reconnect_stage(self) -> dict:
         rep = self._rpc(cmd="reconnect_stage")
         return {"stage_ok": rep.get("stage_ok", True), "stage_error": rep.get("stage_error", "")}

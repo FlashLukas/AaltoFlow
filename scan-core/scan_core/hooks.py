@@ -214,7 +214,7 @@ def _call(ctx, **args):
         step(f"set {_fmt(p, value)}", lambda p=p, v=value: p.set(float(v)))
         applied[pid] = float(value)
     if act is not None:
-        step(f"run {act.id}", act.run)
+        step(f"run {act.id}", lambda: act.run(context=action_context(ctx)))
 
     if moment == "after_scan":
         return
@@ -229,6 +229,24 @@ def _call(ctx, **args):
             continue
         p = params[pid]
         step(f"restore {_fmt(p, back)}", lambda p=p, v=back: p.set(float(v)))
+
+
+def action_context(ctx) -> dict:
+    """Where the scan is, for actions that save something next to the data.
+
+    data_dir / data_stem = the folder and file name (without .nc) the
+    measurement is written to, or "" when the run is not saved; moment =
+    "before" / "after" at before_scan / after_scan, else "p00042" (the point,
+    counting from 1), so several saves in one scan do not overwrite each other.
+    """
+    from pathlib import Path
+    p = ctx.get("data_path")
+    moment = ctx.get("moment", "")
+    tag = {"before_scan": "before", "after_scan": "after"}.get(
+        moment, f"p{int(ctx.get('flat', 0)) + 1:05d}")
+    return {"data_dir": str(Path(p).parent) if p else "",
+            "data_stem": Path(p).stem if p else "",
+            "moment": tag}
 
 
 def sweep_block(shape, dim_names, axis) -> int | None:

@@ -160,8 +160,18 @@ class Action:
         self.label = label
         self.help = help
         self._run = run_fn
+        import inspect
+        try:
+            self._takes_context = "context" in inspect.signature(run_fn).parameters
+        except (TypeError, ValueError):
+            self._takes_context = False
 
-    def run(self):
+    def run(self, context: dict | None = None):
+        """Run it. `context` = where the scan is ({data_dir, data_stem,
+        moment}); passed on only to actions that ask for it (a module's
+        action whose text arguments contain placeholders)."""
+        if self._takes_context:
+            return self._run(context=context)
         return self._run()
 
 

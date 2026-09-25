@@ -450,6 +450,29 @@ after a set, the service still reports the **previous** point, done-flag and all
 Watching the flag alone returns instantly at the old value and measures a whole
 grid one step behind — data that looks perfectly clean and is wrong.
 
+### Actions a scan can run (routines)
+
+An action becomes available to scan routines (before, during and after a scan)
+when its descriptor has a `wait` block: how the caller knows it has finished,
+with the same `ready` vocabulary as the settle policies, an optional
+`target_key` (the reply field holding the run's number, gotcha #17) and an
+optional `check` (`{"key": "af_error", "equals": "OK"}`: finished is not
+succeeded). An action that is done when its command replies declares
+`"wait": {"ready": {"policy": "immediate"}}`.
+
+A routine runs the action with the **defaults** of its `args` (there is no
+dialog). Text defaults may contain placeholders that scan-core fills in, so a
+module can save something of its own next to the measurement:
+
+| placeholder | becomes |
+|---|---|
+| `{data_dir}` | the folder of the `.nc` file being written ("" if the run is not saved) |
+| `{data_stem}` | its file name without `.nc`, e.g. `134501_fmr_map` |
+| `{moment}` | `before`, `after`, or `p00042` (the point number) during a scan |
+
+Example, the camera's "Save camera picture": `folder` = `"{data_dir}"`, `name` =
+`"{data_stem}_{moment}_camera"`. An empty folder means "use your own default".
+
 ### Checklist for adding `describe` to a module
 
 1. `src/<pkg>/net/describe.py` with `build_manifest(brain)` and

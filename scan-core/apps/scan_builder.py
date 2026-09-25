@@ -981,7 +981,8 @@ class ScanWorker(QtCore.QThread):
                      should_abort=lambda: self._abort,
                      on_point=self._live,
                      on_log=self.log.emit,
-                     created_iso="live")
+                     created_iso="live",
+                     data_path=self.save_path)
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the

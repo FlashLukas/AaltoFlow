@@ -47,7 +47,7 @@ def _zigzag(idx: tuple[int, ...], shape: tuple[int, ...]) -> tuple[int, ...]:
 
 def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
-        on_log=None) -> xr.Dataset:
+        on_log=None, data_path=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_progress(done, total, eta_s) : optional callback for a GUI/CLI.
@@ -86,7 +86,10 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     # parameter mid-scan uses it to put that parameter back (hooks.py, `call`).
     current: dict = {}
     ctx = {"registry": registry, "recipe": recipe, "current": current,
-           "log_fn": on_log or (lambda msg: None), "aborted": False}
+           "log_fn": on_log or (lambda msg: None), "aborted": False,
+           # where the measurement is written: actions that save something of
+           # their own (a camera picture, the pattern) put it next to it
+           "data_path": str(data_path) if data_path else None}
 
     compiled = recipe.compile(registry)
 

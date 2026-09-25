@@ -25,7 +25,9 @@ FIRE-AND-FORGET contract: setters return immediately; progress shows up in
 from __future__ import annotations
 
 import inspect
+import json
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -1354,6 +1356,63 @@ class Camera:
         cv2.imwrite(path, frame)
         self._emit("info", f"snapshot -> {path}")
         return path
+
+    # -- saving next to a measurement (scan routines) ---------------------- #
+    # Two actions a scan can run before / after (or during) a measurement, with
+    # folder and name filled in by scan-core from where the data is written
+    # (describe: defaults "{data_dir}" / "{data_stem}_{moment}_..."). Each
+    # writes its file AND a readable .json beside it: what the camera, the
+    # pattern, the scan array and the stage were at that moment.
+    def _out_path(self, folder: str, name: str, default_name: str, ext: str) -> str:
+        folder = (folder or "").strip() or self.cfg.image.save_path or "captures"
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", (name or "").strip()).strip("_") \
+            or default_name
+        os.makedirs(folder, exist_ok=True)
+        base = os.path.join(folder, name)
+        path, k = base + ext, 2
+        while os.path.exists(path):          # never overwrite an earlier save
+            path, k = f"{base}_{k}{ext}", k + 1
+        return path
+
+    def _record(self, kind: str, path: str) -> str:
+        st = self.status()
+        rec = {
+            "kind": kind,
+            "file": os.path.basename(path),
+            "saved": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "scanning": self._reference_meta(),
+            "status": {k: getattr(st, k) for k in (
+                "frame_number", "spot_x", "spot_y", "spot_calibrated", "spot_found",
+                "spot_area", "match_found", "match_score", "template_x", "template_y",
+                "template_w", "template_h", "selected_index_x", "selected_index_y",
+                "stage_x", "stage_y", "stage_steps_x", "stage_steps_y", "xy_step_unit",
+                "z_voltage", "z_unit", "stage_ok") if hasattr(st, k)},
+        }
+        info = os.path.splitext(path)[0] + ".json"
+        with open(info, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, indent=2, default=str)
+        return info
+
+    def save_scan_pattern(self, folder: str = "", name: str = "") -> dict:
+        """Save the pattern (template + backups, with the WHOLE scan-array
+        definition inside, as Load pattern restores it) plus a .json record."""
+        if self.reference is None:
+            raise RuntimeError("no pattern to save: draw or load one first")
+        path = self._out_path(folder, name, time.strftime("pattern_%Y%m%d_%H%M%S"), ".png")
+        self.save_pattern(path)
+        return {"path": path, "info": self._record("pattern", path)}
+
+    def save_picture(self, folder: str = "", name: str = "") -> dict:
+        """Save the current camera frame (full resolution) plus a .json record."""
+        frame = self.latest_frame()
+        if frame is None:
+            raise RuntimeError("no camera frame yet")
+        path = self._out_path(folder, name, time.strftime("camera_%Y%m%d_%H%M%S"), ".png")
+        if not cv2.imwrite(path, frame):
+            raise RuntimeError(f"could not write {path}")
+        info = self._record("picture", path)
+        self._emit("info", f"picture -> {path}")
+        return {"path": path, "info": info}
 
     def get_frame_png(self) -> bytes:
         with self._lock:
