@@ -33,6 +33,7 @@ gui = [
     "PySide6>=6.7",
     "pyqtgraph>=0.13",
     "matplotlib>=3.7",   # headless demo figures
+    "gdstk>=0.9",        # Navigator tab: reads GDS/OASIS design files (no KLayout needed)
 ]
 # Push curves and maps straight into a running Origin (Windows, Origin 2021+
 # installed). originpro drives Origin over COM from OUTSIDE it; without this extra

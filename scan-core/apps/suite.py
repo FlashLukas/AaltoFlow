@@ -1,6 +1,7 @@
 """suite.py -- the AaltoFlow measurement suite: one window, four tabs.
 
     Control      raw control of every connected module, built from `describe`
+    Navigator    a design file (GDS / image) registered to the stage: click, go
     Scan         define a recipe (the Scan Builder's palette + axis stack)
     Measurement  run it and watch it
     Settings     which modules to use, and where data goes
@@ -44,6 +45,7 @@ from suite_common import title as suite_title
 from scan_core import build_sim_registry
 from scan_core.lab import build_lab_registry
 from apps.control_panel import ControlPanel
+from apps.navigator import NavigatorWidget
 from aaltoview.apps.viewer import ViewerWidget
 from apps.scan_builder import ScanBuilder
 from apps.theme import C, DEFAULT_THEME, apply, set_theme
@@ -102,6 +104,8 @@ class Suite(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.control = ControlPanel(on_log=self.log)
         self.tabs.addTab(self._wrap(self.control), "Control")
+        self.navigator = NavigatorWidget(on_log=self.log, is_busy=self.scan_running)
+        self.tabs.addTab(self._wrap(self.navigator), "Navigator")
         self.tabs.addTab(self._wrap(self.builder.centralWidget()), "Scan")
         self.tabs.addTab(self._build_measurement(), "Measurement")
         self.tabs.addTab(self._build_data(), "Data")
@@ -118,6 +122,7 @@ class Suite(QtWidgets.QMainWindow):
         outer.addWidget(self.logbox)
 
         self.control.set_source(registry=self.registry)
+        self.navigator.set_source(registry=self.registry)
         self._sync_source_label()
         # Say where the first run will go, and whether it can go there, before
         # anyone presses Run.
@@ -554,6 +559,7 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.limits_refresher = self._refresh_limits
         self.builder.autosave_dir = self.out_dir
         self.control.set_source(registry=self.registry, lab=self.lab, prefix=True)
+        self.navigator.set_source(registry=self.registry, lab=self.lab)
         self._sync_source_label()
 
     def _sync_source_label(self):

@@ -67,7 +67,7 @@ def _tick(panel, pid) -> bool:
 
 def test_the_tabs_exist_and_start_on_the_simulator(suite):
     assert [suite.tabs.tabText(i) for i in range(suite.tabs.count())] == \
-        ["Control", "Scan", "Measurement", "Data", "Settings"]
+        ["Control", "Navigator", "Scan", "Measurement", "Data", "Settings"]
     assert suite.lab is None, "should not reach for hardware on startup"
     assert suite.registry is not None
     assert "simulator" in suite.source_lbl.text()
@@ -79,13 +79,14 @@ def test_the_run_pane_moved_to_the_measurement_tab(suite):
     So the widgets the Measurement tab shows must be the very ones the builder
     drives -- not copies, which would leave Run wired to nothing.
     """
-    measurement = suite.tabs.widget(2)
+    names = [suite.tabs.tabText(i) for i in range(suite.tabs.count())]
+    measurement = suite.tabs.widget(names.index("Measurement"))
     assert suite.builder.right_pane.parent() is not None
     assert suite.builder.right_pane.isAncestorOf(suite.builder.run_btn)
     assert measurement.isAncestorOf(suite.builder.right_pane)
 
     # ...and the Scan tab must NOT also contain it, or it would be in two places
-    scan = suite.tabs.widget(1)
+    scan = suite.tabs.widget(names.index("Scan"))
     assert not scan.isAncestorOf(suite.builder.right_pane)
 
 

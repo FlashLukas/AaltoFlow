@@ -89,6 +89,7 @@ SIZES = {
     "suite-measurement": (1500, 950),
     "suite-data": (1500, 950),
     "suite-settings": (1500, 860),
+    "suite-navigator": (1500, 950),
     "suite-queue": (1500, 950),
     "suite-queue-dialog": (760, 430),
     "viewer-map": (1600, 960),
@@ -412,6 +413,72 @@ def _stack_two_axes(win):
     if hasattr(b, "add_throughout") and b.registry.get_action("sim_autofocus"):
         b.add_throughout().set_action("sim_autofocus")
     b._rebuild_summary()
+
+
+def _demo_chip_gds(path: Path) -> Path:
+    """A made-up 4.6 mm test chip: a 4 x 4 dose matrix of dot arrays, a frame
+    and alignment crosses. Made up on purpose -- a real sample design is
+    somebody's unpublished work and does not belong in a public screenshot.
+    """
+    import gdstk
+    lib = gdstk.Library()
+    top = lib.new_cell("CHIP")
+    frame = gdstk.boolean(gdstk.rectangle((-2300, -2300), (2300, 2300)),
+                          gdstk.rectangle((-2250, -2250), (2250, 2250)), "not", layer=4)
+    top.add(*frame)
+    for cx, cy in ((-2100, -2100), (2100, -2100), (2100, 2100), (-2100, 2100)):
+        top.add(gdstk.rectangle((cx - 60, cy - 6), (cx + 60, cy + 6), layer=4),
+                gdstk.rectangle((cx - 6, cy - 60), (cx + 6, cy + 60), layer=4))
+    pitch = 1000
+    for i in range(4):
+        for j in range(4):
+            x0, y0 = -1950 + i * pitch, -1950 + j * pitch
+            top.add(*gdstk.text(f"{50 * (4 * j + i + 1)}", 60, (x0, y0 + 820), layer=42))
+            n = 3 + i + j                      # denser arrays at higher dose
+            for a in range(n):
+                for b in range(n):
+                    r = 6 + 3 * ((a + b) % 3)
+                    top.add(gdstk.ellipse((x0 + 80 + a * 640 / n, y0 + 80 + b * 640 / n), r,
+                                          layer=43))
+            top.add(gdstk.rectangle((x0 + 60, y0 + 740), (x0 + 700, y0 + 760), layer=62))
+    lib.write_gds(str(path))
+    return path
+
+
+def _navigator_demo(win):
+    """Navigator tab on a registered chip: two reference points, a selected
+    target, the camera field of view -- all against the SIMULATED stage.
+
+    NAV_RENDER_GDS=<file> renders a real design instead (for a look on this PC;
+    do not commit that picture).
+    """
+    import math
+    import tempfile
+    nav = win.navigator
+    p = nav.pair
+    # The simulator's stage travel is +-100 um (its patterned sample); a chip
+    # needs millimetres. Widened on these Settable objects only, for the picture.
+    p.x.limits = p.y.limits = (-3000.0, 3000.0)
+    gds = os.environ.get("NAV_RENDER_GDS") or str(
+        _demo_chip_gds(Path(tempfile.mkdtemp()) / "demo_chip.gds"))
+    nav.open_gds(gds)
+    rot, off = math.radians(2.5), (180.0, -120.0)     # how the chip "really" sits
+
+    def truth(x, y):
+        return (math.cos(rot) * x - math.sin(rot) * y + off[0],
+                math.sin(rot) * x + math.cos(rot) * y + off[1])
+
+    for feat in ((-2100, -2100), (2100, 2100)):
+        p.x.set(truth(*feat)[0]); p.y.set(truth(*feat)[1])
+        nav._on_click(*nav.reg.to_stage(*feat))
+        nav.add_reference()
+    here = (-1450.0, -1100.0)
+    p.x.set(truth(*here)[0]); p.y.set(truth(*here)[1])
+    nav.fov_w.setValue(420); nav.fov_h.setValue(320)
+    nav.approach.setValue(20)
+    nav._on_click(*nav.reg.to_stage(550.0, 700.0))
+    nav._poll()
+    nav.fit_design()
 
 
 def _scan_then_show_run(win):
@@ -811,6 +878,7 @@ TARGETS = {
     "suite-measurement": _suite("Measurement", _scan_then_show_run, settle=3.5),
     "suite-data": _suite("Data", _scan_3d_then_show_data, settle=3.5),
     "suite-settings": _suite("Settings", settle=2.0),
+    "suite-navigator": _suite("Navigator", _navigator_demo, settle=2.0),
     "suite-queue": _suite("Measurement", _queue_running, settle=2.5),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),
     "viewer-map": _viewer("map"),

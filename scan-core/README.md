@@ -234,6 +234,36 @@ every row, a reference every 100 points.
   a failure is logged and the scan goes on. A failed camera autofocus puts Z back
   where it started.
 
+## Navigator: find your way on a large sample
+
+The **Navigator** tab of the measurement suite puts the sample's design file
+under the stage. Open a **GDS/OASIS** layout (drawn as vectors, exact
+micrometres; read with `gdstk`, no KLayout needed) or an **image** whose real
+width you type in. Then register it:
+
+1. Put a feature under the laser, click it on the design, **I am here**. With
+   one point the rotation is the one you set by eye (+/-1, +/-90 buttons).
+2. A second point far from the first **fits** the rotation and the stage's
+   scale (the design's scale is exact, so a fitted scale that is not 1.000 is
+   the stage's error). From three points the residuals say how good it is and a
+   mirrored sample is detected; from four, X and Y may scale differently.
+3. Click anywhere: the stage coordinates are shown, **Go there** moves.
+4. An open-loop stage drifts: click the feature you actually see and
+   **correct offset only** -- rotation and scale are kept.
+
+It moves whichever stage is connected through the same parameters a scan uses
+(`position_x`/`position_y` from the module's `describe`): KIM in um, the BSC203
+in mm, or the simulator. **Final approach** makes every move end in +X/+Y over
+that distance, so an inertia stage arrives from the same side every time. A
+session (design path + reference points) saves next to the design as
+`.nav.json`.
+
+![navigator](../front-panels/suite-navigator.png)
+
+*A made-up 4.6 mm test chip registered with two reference points (diamonds),
+the stage position with the camera's field of view (green) and the selected
+target (amber). Simulated stage.*
+
 ## A queue of scans
 
 **Load scan…** with several files selected (recipes, `.nc` files, or a saved
@@ -251,7 +281,7 @@ starts; **Stop queue** ends all of it; an error stops the queue.
 ## Tests
 
 ```bash
-uv run pytest -q        # 262 tests, all offline
+uv run pytest -q        # 308 tests, all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so
