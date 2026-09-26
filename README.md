@@ -29,6 +29,9 @@ knob means registering one `Parameter`.
 > Elsewhere, every unverified hardware call is marked `# VERIFY`; each module's
 > README records its own hardware status. See [Hardware passes](#hardware-passes).
 
+One-page **flyers** (PDF and PNG) for the suite, the camera, clMag, the KIM stage
+and the Navigator are in [`docs/flyers/`](docs/flyers/).
+
 ## Architecture
 
 Three layers, each of which can be run, tested and replaced on its own.
@@ -369,6 +372,7 @@ Keep the simulation path working. The per-module checklists are in
 
 ```
 docs/DEVELOPER_NOTES.md      architecture, wire contract, conventions, gotchas
+docs/flyers/                 one-page flyers (PDF + PNG)
 INSTRUMENT_MODULE_GUIDE.md   the blueprint for building a new instrument module
 <instrument>-control/        eight instrument modules, one uv project each (each with module.toml)
 suite-common/                module discovery, shared by the launcher, scan-core and the tools
