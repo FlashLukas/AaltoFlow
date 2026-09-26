@@ -30,7 +30,8 @@ knob means registering one `Parameter`.
 > README records its own hardware status. See [Hardware passes](#hardware-passes).
 
 One-page **flyers** (PDF and PNG) for the suite, the camera, clMag, the KIM stage
-and the Navigator are in [`docs/flyers/`](docs/flyers/).
+and the Navigator are in [`docs/flyers/`](docs/flyers/); two demo **videos**, a short
+one and a screen recording on the lab setup, are in [`docs/video/`](docs/video/).
 
 ## Architecture
 
@@ -373,6 +374,7 @@ Keep the simulation path working. The per-module checklists are in
 ```
 docs/DEVELOPER_NOTES.md      architecture, wire contract, conventions, gotchas
 docs/flyers/                 one-page flyers (PDF + PNG)
+docs/video/                  demo videos (mp4)
 INSTRUMENT_MODULE_GUIDE.md   the blueprint for building a new instrument module
 <instrument>-control/        eight instrument modules, one uv project each (each with module.toml)
 suite-common/                module discovery, shared by the launcher, scan-core and the tools
