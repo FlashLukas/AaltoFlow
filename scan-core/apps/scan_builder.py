@@ -1842,6 +1842,48 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if self.routines:                    # not built yet on the first call
             self._refresh_routine_actions()
 
+    def _sync_fly_detectors(self) -> int:
+        """With a FLY axis in the stack, grey out the detectors that cannot fly.
+
+        A fly scan records its detectors continuously and bins them by
+        position, so only a detector its module can STREAM qualifies -- not a
+        one-value-at-a-time read, and not a whole trace (a VNA). Rather than
+        let a ticked one turn the whole scan "invalid", it is unticked and
+        greyed while any axis flies, and REMEMBERED: switch fly off and it is
+        ticked again, so trying fly on and off does not lose a detector
+        selection. Returns how many are set aside.
+        """
+        fly = any((r.raw or {}).get("type") == "fly" if r.raw is not None
+                  else r.is_fly() for r in self.rows)
+        parked = self.__dict__.setdefault("_fly_parked", set())
+        self.det_tree.blockSignals(True)        # itemChanged would call us again
+        try:
+            for it in self._det_items():
+                pid = it.data(0, QtCore.Qt.UserRole)
+                p = self.registry.get(pid) if pid else None
+                ok = (not fly) or (p is not None and getattr(p, "stream", None) is not None
+                                   and not getattr(p, "axes", None))
+                if not ok:
+                    if it.checkState(0) == QtCore.Qt.Checked:
+                        parked.add(pid)
+                        it.setCheckState(0, QtCore.Qt.Unchecked)
+                    if not it.isDisabled():
+                        it.setDisabled(True)
+                        why = ("returns a whole trace" if getattr(p, "axes", None)
+                               else "its module does not stream it")
+                        it.setToolTip(0, f"{pid}" + chr(10) + f"cannot be recorded in a FLY scan: {why}")
+                else:
+                    if it.isDisabled():
+                        it.setDisabled(False)
+                        it.setToolTip(0, pid)
+                    if pid in parked:
+                        parked.discard(pid)
+                        it.setCheckState(0, QtCore.Qt.Checked)
+        finally:
+            self.det_tree.blockSignals(False)
+        self.det_tree.viewport().update()
+        return len(parked) if fly else 0
+
     def _det_items(self) -> list[QtWidgets.QTreeWidgetItem]:
         """Every detector leaf, across all service branches."""
         out = []
@@ -2521,6 +2563,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.throughout_empty.setVisible(not self.throughout)
         if hasattr(self, "routines_card"):
             self.routines_card.arrange()      # a new step may no longer fit side by side
+        parked = self._sync_fly_detectors()
         recipe = self.build_recipe()
         errs = recipe.validate(self.registry)
         conditions = ("   ·   " + ", ".join(
@@ -2535,6 +2578,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 conditions += f"   ·   {when.replace('_', ' ')}: {text}"
             if when == "before_scan":        # in the order things happen
                 conditions += self._throughout_summary(recipe)
+        if parked:
+            conditions += (f"   ·   {parked} detector(s) set aside while flying "
+                           f"(they cannot be recorded continuously)")
         if not self.rows:
             self.summary.setText("no axes")
             self.detail.setText(conditions.strip(" ·") if conditions else "")

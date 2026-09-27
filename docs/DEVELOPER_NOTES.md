@@ -495,9 +495,9 @@ cd "<root>\kim-control"
 .\dev.ps1 run python scripts\smoke_test.py
 ```
 
-Expected test counts (all measured 2026-09-27): clMag 22 · smb 29 · stage 50 · piezo 37 · camera 127 · zpiezo 14 · kim 92 · hf2 60 · pm16 49 · vna 110 · mag2d 46 ·
-mag2dcal 96 · ppms 43 · scan-core 353 · mission-control 16 · suite-common 53 = **1197**
-(2026-09-27: fly scans -- scan-core +45 over 308, hf2 +8, kim +5, pm16 +5, camera +8)
+Expected test counts (all measured 2026-09-27): clMag 22 · smb 29 · stage 50 · piezo 37 · camera 128 · zpiezo 14 · kim 92 · hf2 60 · pm16 49 · vna 110 · mag2d 46 ·
+mag2dcal 96 · ppms 43 · scan-core 354 · mission-control 16 · suite-common 53 = **1199**
+(2026-09-27: fly scans -- scan-core +46 over 308, hf2 +8, kim +5, pm16 +5, camera +9)
 (+ aaltoview 42, own repo). Plus the contract check:
 `python tools/check_modules.py --live` (120 checks, 0 failed on 2026-09-27; since
 2026-09-27 it also exercises the stream verbs of every module that declares one).

@@ -139,3 +139,18 @@ def test_a_stage_position_gets_no_move_with_box(builder):
     builder.set_registry(_camera_rig())
     builder.add_axis("kim.position_x")
     assert builder.rows[-1].move_choices == []
+
+
+def test_ticking_fly_greys_the_detectors_that_cannot_fly_and_gives_them_back(builder):
+    from PySide6 import QtCore
+    items = {it.data(0, QtCore.Qt.UserRole): it for it in builder._det_items()}
+    items["s21"].setCheckState(0, QtCore.Qt.Checked)        # a whole trace: cannot fly
+    row = _fly_row(builder)
+    assert items["s21"].isDisabled() and items["s21"].checkState(0) == QtCore.Qt.Unchecked
+    assert "cannot be recorded in a FLY scan" in items["s21"].toolTip(0)
+    assert not items["lockin_r"].isDisabled()                # streams: stays available
+    assert "set aside while flying" in builder.detail.text()
+    assert builder.build_recipe().validate(builder.registry) == []
+    row.fly.setChecked(False)                                # back to stepping
+    assert not items["s21"].isDisabled()
+    assert items["s21"].checkState(0) == QtCore.Qt.Checked   # the selection came back

@@ -325,3 +325,53 @@ def test_xy_subtab_shows_position_and_jogs():
         win.close()
     finally:
         brain.shutdown()
+
+
+def test_laser_on_sample_card_places_the_laser_and_follows_the_brain():
+    """The Laser on sample card: live position, Here fills the target, Place
+    puts the laser there (the lamp lights), and the Stabilise box follows the
+    brain when placing switched the stabiliser off."""
+    from PySide6.QtWidgets import QApplication
+    from camera.apps.gui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    brain, cam, xy, z = build_sim_system(cfg)
+    brain.start()
+    try:
+        deadline = time.monotonic() + 5
+        while brain.status().frame_number < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        brain.calibrate_spot(10)
+        tcx, tcy = cam.template_center_px()
+        brain.capture_reference((tcx, tcy, 60, 60))
+        brain.set_tracking(True)
+        win = MainWindow(brain, cfg, remote=False)
+
+        def pump(cond, timeout=10.0):
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < timeout:
+                win._refresh(); app.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.03)
+            return False
+
+        assert pump(lambda: win.lab_laser.text() != "x -   y -  um")
+        win.chk_stab.setChecked(True)                  # the user had it on
+        assert brain.status().stabilize_on or pump(lambda: brain.status().stabilize_on)
+        win._laser_here()
+        win.laser_tx.setValue(win.laser_tx.value() + 5.0)
+        assert win.b_laser_place.isEnabled()
+        win._laser_place()
+        assert pump(lambda: win.led_laser.property("on") or brain.status().laser_settled)
+        assert pump(lambda: win.lab_laser_state.text() == "at the target")
+        s = brain.status()
+        assert abs(s.spot_from_template_x_um - win.laser_tx.value()) <= \
+            cfg.stabilizer.stable_radius_um + 0.05
+        assert not win.chk_stab.isChecked()            # placing switched it off
+        win.grab()                                     # paints the target diamond
+        win.close()
+    finally:
+        brain.shutdown()
