@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Agilis stick-slip stage: the moving platen (metal) carried along by the
+       slow ramps of the piezo sawtooth (accent); the arrow is the step. -->
+  <rect x="8" y="6" width="24" height="11" rx="2.5" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <path d="M13 11.5 H25" fill="none" stroke="#e8eaed" stroke-width="2" stroke-linecap="round"/>
+  <path d="M22.5 8.8 L26 11.5 L22.5 14.2" fill="none" stroke="#ffb454" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M5 33 L13 24 L13 33 L21 24 L21 33 L29 24 L29 33 L35 26" fill="none" stroke="#ff9e2c" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

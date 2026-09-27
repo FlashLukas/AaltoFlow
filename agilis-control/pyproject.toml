@@ -1,0 +1,28 @@
+[project]
+name = "agilis-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a Newport Agilis 2-axis piezo stick-slip stage on an AG-UC2 controller"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",        # the control service + client (localhost / Ethernet)
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+# The real controller: the AG-UC2 is a USB virtual COM port speaking ASCII, so
+# pyserial is all it needs (plus Newport's USB driver, installed with the
+# AG-UC2 software). Only backends/ag_uc2.py imports it, lazily, so the
+# simulator runs without it.  uv sync --extra gui --extra real
+real = ["pyserial>=3.5"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

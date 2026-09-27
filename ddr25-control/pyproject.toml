@@ -1,0 +1,29 @@
+[project]
+name = "ddr25-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a Thorlabs DDR25/M direct-drive rotation stage on a K-Cube brushless controller"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+# The real driver (backends/kinesis.py) talks to the K-Cube through pylablib,
+# which speaks Thorlabs' APT protocol over the FTDI USB serial port. It is the
+# ONLY file that imports it, lazily inside open(), so the simulator needs none
+# of this. Sync with BOTH extras on the lab PC (gotcha #29):
+#     .\dev.ps1 sync --extra gui --extra real
+real = ["pylablib>=1.4", "pyft232>=0.12"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

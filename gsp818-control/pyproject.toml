@@ -1,0 +1,39 @@
+[project]
+name = "gsp818-control"
+version = "0.1.0"
+license = "MIT"
+description = "Spectrum analyser -- GW Instek GSP-818 with tracking generator (or a simulator): spectrum in dBm, thru-normalised transmission"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client
+    "numpy>=1.26",  # traces, averaging, and the simulator's model
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui                  the GUI (the headless core installs light)
+#   uv sync --extra gui --extra real     + pyvisa, for the real GSP-818 (--real)
+#
+# Why pyvisa is an EXTRA and not commented out: pyvisa is pure Python and
+# installs on any PC -- the VISA LIBRARY it needs for USBTMC (NI-VISA or
+# Keysight IO Libraries) is a separate runtime install, and only needed when
+# the instrument is really opened. Trap: `uv sync` REMOVES extras you do not
+# name (gotcha #29), so on the lab PC always sync with both extras.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the trace plots
+]
+real = [
+    "pyvisa>=1.13",      # VISA to the GSP-818 (backends/gsp.py; imported in open())
+    "pyvisa-py>=0.7",    # pure-Python VISA: enough for a LAN socket; USBTMC wants NI-VISA
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,33 @@
+[project]
+name = "ccs200-control"
+version = "0.1.0"
+license = "MIT"
+description = "Thorlabs CCS200/M compact CCD spectrometer (or a simulator): spectra, dark subtraction, peak analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client
+    "numpy>=1.26",  # spectra, averaging, and the simulator's model
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui       the GUI (the headless core installs light)
+#
+# There is NO `real` extra: the real backend (backends/tlccs.py) calls Thorlabs'
+# TLCCS_64.dll through Python's built-in ctypes, like pm16's TLPMX backend. The
+# only thing a PC needs for --real is the Thorlabs CCS driver installed (it
+# brings the DLL and the USB driver), not a pip package.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the spectrum plot
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

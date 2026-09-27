@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Keithley 2450 SMU: the four-quadrant V-I plane the GUI draws.
+       Grey chassis, light axes, an amber diode IV curve running into the
+       compliance limit (the brighter amber line). -->
+  <rect x="4" y="4" width="32" height="32" rx="5" fill="none" stroke="#5a626e" stroke-width="2.4"/>
+  <line x1="8.5" y1="20" x2="31.5" y2="20" stroke="#e8eaed" stroke-width="1.4"/>
+  <line x1="20" y1="8.5" x2="20" y2="31.5" stroke="#e8eaed" stroke-width="1.4"/>
+  <line x1="8.5" y1="11.5" x2="31.5" y2="11.5" stroke="#ffb454" stroke-width="1.6" stroke-dasharray="2.4 1.6"/>
+  <path d="M9 20.6 L21 20.4 C24 20.2 25 17 26 13.6 L27 11.5 L31 11.5" fill="none"
+        stroke="#ff9e2c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="27" cy="11.5" r="2.2" fill="#ffb454"/>
+</svg>

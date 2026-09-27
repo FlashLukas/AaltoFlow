@@ -1,0 +1,31 @@
+[project]
+name = "sr7230-control"
+version = "0.1.0"
+license = "MIT"
+description = "Signal Recovery (Ametek) 7230 DSP lock-in amplifier: control service, GUI and simulator"
+requires-python = ">=3.11"
+# Runtime dependencies. The real instrument needs NOTHING extra: the 7230 speaks
+# plain ASCII over a TCP socket (port 50000), and Python's standard library
+# `socket` is all it takes -- no vendor DLL, no VISA. (An RS-232 transport,
+# not written yet, would add pyserial as an optional `real` extra.)
+dependencies = [
+    "pyzmq>=25",        # the control service + client (localhost / Ethernet)
+]
+
+# The GUI stack is optional so the headless core installs light. Get it with
+#   uv sync --extra gui
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the live R(t) strip chart
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

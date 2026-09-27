@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "cs260"
+name = "Monochromator"
+description = "Newport (Oriel) Cornerstone 260 1/4 m monochromator (GPIB): wavelength, grating, shutter, filter wheel"
+category = "source"
+tags = ["monochromator", "wavelength", "grating", "spectroscopy", "Newport", "Oriel", "GPIB"]
+icon = "icon.svg"
+order = 240
+
+[ports]
+cmd = 5601
+pub = 5602
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

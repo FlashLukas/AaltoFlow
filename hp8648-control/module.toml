@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "hp8648"
+name = "RF generator (HP 8648D)"
+description = "HP / Agilent 8648D CW RF signal generator, 9 kHz - 4 GHz (GPIB)"
+category = "source"
+tags = ["RF", "signal generator", "CW", "HP", "Agilent", "GPIB"]
+icon = "icon.svg"
+order = 330
+
+[ports]
+cmd = 5619
+pub = 5620
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

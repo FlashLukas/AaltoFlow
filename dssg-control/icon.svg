@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- dssg: a compact USB synthesiser box, a sine wave on its display and the
+       SMA RF output on the side. #5a626e metal, #ff9e2c accent,
+       #ffb454 accent_hi, #e8eaed text (the launcher swaps the last three). -->
+  <rect x="3" y="9" width="28" height="22" rx="4" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <path d="M7 20 C 9.5 11, 12 11, 14.5 20 S 19.5 29, 22 20 S 26.5 11, 27 14"
+        fill="none" stroke="#ff9e2c" stroke-width="2.4" stroke-linecap="round"/>
+  <line x1="7" y1="27" x2="16" y2="27" stroke="#e8eaed" stroke-width="1.6" stroke-linecap="round"/>
+  <rect x="31" y="16" width="4" height="8" rx="1" fill="#5a626e"/>
+  <circle cx="36.5" cy="20" r="2.6" fill="#ffb454"/>
+</svg>

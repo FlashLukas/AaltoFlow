@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- SmarAct linear stage: a long rail with its encoder scale, a carriage,
+       and the stick-slip sawtooth that drives it. -->
+  <!-- rail -->
+  <rect x="3" y="24" width="34" height="6" rx="2" fill="none" stroke="#5a626e" stroke-width="2"/>
+  <!-- encoder scale / reference marks on the rail -->
+  <path d="M8 26.2v1.6M13 26.2v1.6M18.6 26.2v1.6M24 26.2v1.6M29.6 26.2v1.6M34 26.2v1.6"
+        stroke="#5a626e" stroke-width="1.2" stroke-linecap="round"/>
+  <!-- carriage -->
+  <rect x="17" y="14" width="13" height="9" rx="2" fill="#ff9e2c"/>
+  <!-- stick-slip sawtooth trailing it -->
+  <path d="M15 21.5 L10.5 16 L10.5 21.5 L6 16 L6 21.5" fill="none" stroke="#ffb454"
+        stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- target tick -->
+  <path d="M33.5 9 L36.5 9 L35 12 Z" fill="#e8eaed"/>
+</svg>

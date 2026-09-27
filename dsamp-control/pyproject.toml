@@ -1,0 +1,36 @@
+[project]
+name = "dsamp-control"
+version = "0.1.0"
+license = "MIT"
+description = "DS Instruments GB/PA smart variable-gain RF amplifier (USB virtual COM port, SCPI)"
+requires-python = ">=3.11"
+# Runtime dependencies: only the wire. The serial library lives in the `real`
+# extra so the project installs and every test runs on a PC with no amplifier.
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+]
+
+# Optional extras:
+#   uv sync --extra gui                  the Qt front panel
+#   uv sync --extra gui --extra real     + pyserial, for the real amplifier (--real)
+# Name BOTH when you sync on the lab PC: `uv sync` removes every extra you do
+# not name (docs/DEVELOPER_NOTES.md gotcha #29).
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+]
+real = [
+    "pyserial>=3.5",   # the amplifier is a USB virtual COM port, 115200 8N1
+]
+
+# Importable code lives under src/ -- the "src layout", same as the other modules.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

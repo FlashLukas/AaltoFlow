@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "elliptec"
+name = "Elliptec rotation mount"
+description = "Thorlabs Elliptec ELL14 rotation mount(s): angle, home, speed; one axis per bus address"
+category = "motion"
+tags = ["rotation", "angle", "waveplate", "polarizer", "Elliptec", "Thorlabs"]
+icon = "icon.svg"
+order = 270
+
+[ports]
+cmd = 5607
+pub = 5608
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

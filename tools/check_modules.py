@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -116,7 +117,11 @@ class Report:
 
 
 def venv_python(d: Path) -> Path | None:
-    for cand in (d / ".venv" / "Scripts" / "python.exe", d / ".venv" / "bin" / "python"):
+    # A tree inside OneDrive keeps its venvs OUT of the project (dev.ps1 puts
+    # them in %LOCALAPPDATA%\uv-venvs\<folder>, gotcha #8), so look there too.
+    ext = Path(os.environ.get("LOCALAPPDATA", "")) / "uv-venvs" / d.name
+    for cand in (d / ".venv" / "Scripts" / "python.exe", d / ".venv" / "bin" / "python",
+                 ext / "Scripts" / "python.exe"):
         if cand.exists():
             return cand
     return None

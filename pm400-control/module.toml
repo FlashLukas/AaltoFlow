@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "pm400"
+name = "Power / energy meter (PM400)"
+description = "Thorlabs PM400 console: photodiode, thermal or pyroelectric head"
+category = "detector"
+tags = ["power meter", "energy meter", "optical power", "pulse energy", "Thorlabs"]
+icon = "icon.svg"
+order = 320
+
+[ports]
+cmd = 5617
+pub = 5618
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "agilis"
+name = "Agilis stage"
+description = "Newport Agilis 2-axis stick-slip piezo stage on an AG-UC2 controller (steps + measured um)"
+category = "motion"
+tags = ["stick-slip", "piezo", "open-loop", "Newport", "Agilis", "AG-UC2"]
+icon = "icon.svg"
+order = 210
+
+[ports]
+cmd = 5595
+pub = 5596
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

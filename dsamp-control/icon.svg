@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- RF amplifier: the schematic gain triangle, a small wave in, a big wave out.
+       Colours: #ff9e2c accent, #ffb454 accent_hi, #e8eaed text, #5a626e metal
+       (the launcher swaps the first three for the active theme). -->
+  <!-- input lead + small input wave -->
+  <path d="M2 20 q1.5 -2.2 3 0 t3 0" fill="none" stroke="#e8eaed" stroke-width="1.6" stroke-linecap="round"/>
+  <line x1="8" y1="20" x2="11" y2="20" stroke="#5a626e" stroke-width="2"/>
+  <!-- the gain stage -->
+  <path d="M11 9 L27 20 L11 31 Z" fill="#ff9e2c" fill-opacity="0.18" stroke="#ff9e2c" stroke-width="2.4" stroke-linejoin="round"/>
+  <!-- output: a larger wave -->
+  <path d="M27 20 q1.6 -8 3.2 0 t3.2 0 t3.2 0" fill="none" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
+  <!-- gain knob mark inside the triangle -->
+  <line x1="14.5" y1="20" x2="20" y2="20" stroke="#5a626e" stroke-width="2" stroke-linecap="round"/>
+  <line x1="17.25" y1="17.25" x2="17.25" y2="22.75" stroke="#5a626e" stroke-width="2" stroke-linecap="round"/>
+</svg>

@@ -240,6 +240,28 @@ Each instrument has its own panel, shown in its own README:
 [mag2d](mag2d-control/README.md) ·
 [mag2dcal](mag2dcal-control/README.md) ·
 [ppms](ppms-control/README.md) ·
+[kepco](kepco-control/README.md) ·
+[windfreak](windfreak-control/README.md) ·
+[gsp818](gsp818-control/README.md) ·
+[signalhound](signalhound-control/README.md) ·
+[dsphase](dsphase-control/README.md) ·
+[dssg](dssg-control/README.md) ·
+[dsamp](dsamp-control/README.md) ·
+[agilis](agilis-control/README.md) ·
+[smaract](smaract-control/README.md) ·
+[sr830](sr830-control/README.md) ·
+[cs260](cs260-control/README.md) ·
+[ccs200](ccs200-control/README.md) ·
+[ddr25](ddr25-control/README.md) ·
+[elliptec](elliptec-control/README.md) ·
+[chopper](chopper-control/README.md) ·
+[superk](superk-control/README.md) ·
+[tc200](tc200-control/README.md) ·
+[ls455](ls455-control/README.md) ·
+[pm400](pm400-control/README.md) ·
+[hp8648](hp8648-control/README.md) ·
+[sr7230](sr7230-control/README.md) ·
+[k2450](k2450-control/README.md) ·
 [zpiezo](zpiezo-control/README.md) (headless -- a console, not a window).
 
 They are rendered offscreen and reproducibly, so they do not go stale:
@@ -266,6 +288,28 @@ python tools/render_all.py clMag       # or just one
 | 10 | `mag2d-control` | `mag2d` | 5575/5576 | 2-axis vector electromagnet on an NI DAQ: field + angle, PI in mT, water-cooling interlock |
 | 11 | `mag2dcal-control` | `mag2dcal` | 5577/5578 | the same magnet, controlled the way the 1-axis one is: measured B(V) calibration, PI trim, freeze, long-term stabilizer |
 | 12 | `ppms-control` | `ppms` | 5579/5580 | Quantum Design DynaCool through MultiVu (MultiPyVu): field, temperature, chamber (untested on the instrument) |
+| 13 | `kepco-control` | `kepco` | 5581/5582 | Kepco BOP 20-10 bipolar power supply (GPIB), its own module -- not a field loop (simulation; untested on the instrument) |
+| 14 | `windfreak-control` | `windfreak` | 5583/5584 | Windfreak SynthHD PRO v2, two-channel RF synthesizer (USB serial) (simulation; untested on the instrument) |
+| 15 | `gsp818-control` | `gsp818` | 5585/5586 | GW Instek GSP-818 spectrum analyzer with tracking generator (simulation; untested on the instrument) |
+| 16 | `signalhound-control` | `signalhound` | 5587/5588 | Signal Hound SA44B / SA124B with USB-TG44A tracking generator (sa_api.dll) (simulation; untested on the instrument) |
+| 17 | `dsphase-control` | `dsphase` | 5589/5590 | DS Instruments 6 GHz digital RF phase shifter (USB) (simulation; untested on the instrument) |
+| 18 | `dssg-control` | `dssg` | 5591/5592 | DS Instruments SG12000L 12 GHz signal generator (USB or Ethernet) (simulation; untested on the instrument) |
+| 19 | `dsamp-control` | `dsamp` | 5593/5594 | DS Instruments 6 GHz variable-gain RF amplifier (USB) (simulation; untested on the instrument) |
+| 20 | `agilis-control` | `agilis` | 5595/5596 | Newport Agilis 2-axis piezo stage on an AG-UC2 (simulation; untested on the instrument) |
+| 21 | `smaract-control` | `smaract` | 5597/5598 | SmarAct CLL42 linear positioner on an SCU controller (simulation; untested on the instrument) |
+| 22 | `sr830-control` | `sr830` | 5599/5600 | Stanford Research SR830 DSP lock-in (GPIB) (simulation; untested on the instrument) |
+| 23 | `cs260-control` | `cs260` | 5601/5602 | Newport / Oriel Cornerstone 260 monochromator (GPIB) (simulation; untested on the instrument) |
+| 24 | `ccs200-control` | `ccs200` | 5603/5604 | Thorlabs CCS200/M CCD spectrometer (TLCCS) (simulation; untested on the instrument) |
+| 25 | `ddr25-control` | `ddr25` | 5605/5606 | Thorlabs DDR25/M direct-drive rotation stage on a K-Cube (simulation; untested on the instrument) |
+| 26 | `elliptec-control` | `elliptec` | 5607/5608 | Thorlabs ELL14K Elliptec rotation mount (simulation; untested on the instrument) |
+| 27 | `chopper-control` | `chopper` | 5609/5610 | Thorlabs MC2000B-EC optical chopper (MC1F10HP, MC1F60 blades) (simulation; untested on the instrument) |
+| 28 | `superk-control` | `superk` | 5611/5612 | NKT SuperK EXTREME EXW-12 + SELECT / SELECT2 AOTFs on one RF driver (simulation; untested on the instrument) |
+| 29 | `tc200-control` | `tc200` | 5613/5614 | Thorlabs TC200 heater controller with a PT100 (simulation; untested on the instrument) |
+| 30 | `ls455-control` | `ls455` | 5615/5616 | Lake Shore 455 DSP gaussmeter, axial Hall probe (simulation; untested on the instrument) |
+| 31 | `pm400-control` | `pm400` | 5617/5618 | Thorlabs PM400 power/energy meter console (TLPMX) (simulation; untested on the instrument) |
+| 32 | `hp8648-control` | `hp8648` | 5619/5620 | HP / Agilent 8648D RF generator (GPIB) (simulation; untested on the instrument) |
+| 33 | `sr7230-control` | `sr7230` | 5621/5622 | Ametek Signal Recovery 7230 DSP lock-in (simulation; untested on the instrument) |
+| 34 | `k2450-control` | `k2450` | 5623/5624 | Keithley 2450 SourceMeter (simulation; untested on the instrument) |
 
 Instrument *n* gets `cmd = 5555 + 2n` and `pub = cmd + 1` by default, declared in
 its `module.toml`; the launcher can change a module's ports on one PC.
@@ -352,7 +396,18 @@ uv run pytest -q
 | zpiezo-control | 14 | | suite-common | 45 |
 | kim-control | 87 | | mag2d-control | 46 |
 | ppms-control | 43 | | mag2dcal-control | 96 |
-| | | | **total** | **1071** |
+| kepco-control | 50 | | windfreak-control | 58 |
+| k2450-control | 65 | | gsp818-control | 60 |
+| signalhound-control | 77 | | dsphase-control | 96 |
+| dssg-control | 62 | | dsamp-control | 56 |
+| agilis-control | 76 | | smaract-control | 55 |
+| sr830-control | 92 | | sr7230-control | 95 |
+| cs260-control | 60 | | ccs200-control | 56 |
+| ddr25-control | 64 | | elliptec-control | 66 |
+| chopper-control | 55 | | superk-control | 54 |
+| tc200-control | 66 | | ls455-control | 71 |
+| pm400-control | 77 | | hp8648-control | 54 |
+| | | | **total** | **2536** |
 
 Beyond unit tests, `python tools/check_modules.py --live` starts every module's
 service on scratch ports and checks it against the module contract. The data

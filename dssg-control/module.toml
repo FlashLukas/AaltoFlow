@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "dssg"
+name = "RF generator (DS Instruments)"
+description = "DS Instruments SG12000L 25 MHz - 12 GHz signal generator, USB or Ethernet"
+category = "source"
+tags = ["RF", "microwave", "signal generator", "DS Instruments", "SCPI", "Ethernet"]
+icon = "icon.svg"
+order = 190
+
+[ports]
+cmd = 5591
+pub = 5592
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

@@ -169,7 +169,29 @@ still assumes piezo/zpiezo.
   | 10 | mag2d-control | `mag2d`  | 5575 | 5576 | closed-loop, continuous PI (VectorMagnet) |
   | 11 | mag2dcal-control | `mag2dcal` | 5577 | 5578 | closed-loop, calibrated seek + freeze + stabilizer |
   | 12 | ppms-control  | `ppms`   | 5579 | 5580 | set-and-forget, MultiVu runs the loops (Cryostat) |
-  | 13 | *next module* |          | 5581 | 5582 | |
+  | 13 | kepco-control | `kepco` | 5581 | 5582 | set-and-forget + software ramp + acquire (BipolarSupply) |
+  | 14 | windfreak-control | `windfreak` | 5583 | 5584 | set-and-forget, two channels (Synthesizer) |
+  | 15 | gsp818-control | `gsp818` | 5585 | 5586 | array detector, real dBm trace + TG thru reference (SpectrumAnalyzer) |
+  | 16 | signalhound-control | `signalhound` | 5587 | 5588 | array detector, real dBm trace + TG thru reference (SpectrumAnalyzer) |
+  | 17 | dsphase-control | `dsphase` | 5589 | 5590 | set-and-forget (PhaseShifter) |
+  | 18 | dssg-control | `dssg` | 5591 | 5592 | set-and-forget (Synthesizer) |
+  | 19 | dsamp-control | `dsamp` | 5593 | 5594 | set-and-forget, gain envelope (Amplifier) |
+  | 20 | agilis-control | `agilis` | 5595 | 5596 | set-and-forget, open-loop steps (AgilisStage) |
+  | 21 | smaract-control | `smaract` | 5597 | 5598 | set-and-forget, closed-loop encoder (1 axis) |
+  | 22 | sr830-control | `sr830` | 5599 | 5600 | set-and-forget + settle-aware acquire (DspLockIn) |
+  | 23 | cs260-control | `cs260` | 5601 | 5602 | set-and-forget, move-done settle (Monochromator) |
+  | 24 | ccs200-control | `ccs200` | 5603 | 5604 | array detector, spectrum + dark (Spectrometer) |
+  | 25 | ddr25-control | `ddr25` | 5605 | 5606 | set-and-forget, rotary (Rotator) |
+  | 26 | elliptec-control | `elliptec` | 5607 | 5608 | set-and-forget, rotary, bus of addresses (RotationMount) |
+  | 27 | chopper-control | `chopper` | 5609 | 5610 | set-and-forget, spin-up settle (Chopper) |
+  | 28 | superk-control | `superk` | 5611 | 5612 | set-and-forget, class 4 interlocked (SuperK) |
+  | 29 | tc200-control | `tc200` | 5613 | 5614 | closed-loop setpoint, reached = held in band (Heater) |
+  | 30 | ls455-control | `ls455` | 5615 | 5616 | fresh-reading acquire (Gaussmeter) |
+  | 31 | pm400-control | `pm400` | 5617 | 5618 | fresh-reading acquire (Pm400Meter) |
+  | 32 | hp8648-control | `hp8648` | 5619 | 5620 | set-and-forget (SignalSource) |
+  | 33 | sr7230-control | `sr7230` | 5621 | 5622 | set-and-forget + settle-aware acquire (lock-in) |
+  | 34 | k2450-control | `k2450` | 5623 | 5624 | set-and-forget + fresh-reading acquire (SourceMeter) |
+  | 35 | *next module* |          | 5625 | 5626 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander
   (owns REP, `poll(200)`). The loop must never be allowed to die: catch the

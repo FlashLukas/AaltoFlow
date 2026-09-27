@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "chopper"
+name = "Optical chopper"
+description = "Thorlabs MC2000B optical chopper: frequency, phase, blade, reference modes; waits for the PLL lock"
+category = "source"
+tags = ["chopper", "reference", "lock-in", "modulation", "Thorlabs", "MC2000B"]
+icon = "icon.svg"
+order = 280
+
+[ports]
+cmd = 5609
+pub = 5610
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

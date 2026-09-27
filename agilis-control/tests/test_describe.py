@@ -1,0 +1,162 @@
+"""Tests for the `describe` manifest -- this service's self-description.
+
+  * every bound is read LIVE from cfg or status, never copied into a literal
+  * `revision` changes when the STRUCTURE or the BOUNDS change, and not when a
+    measured value changes
+"""
+
+import time
+from dataclasses import asdict
+
+import pytest
+
+pytest.importorskip("zmq")
+
+from agilis.config import Config
+from agilis.net.client import AgilisClient
+from agilis.net.describe import build_manifest, read_path
+from agilis.net.service import AgilisService
+from agilis.sim_system import build_sim_system
+
+CMD, PUB = 17170, 17171
+
+
+def _brain():
+    cfg = Config()
+    cfg.hardware.poll_hz = 50
+    brain, sim = build_sim_system(cfg)
+    sim.pr_rate = 20000.0
+    brain.start()
+    return cfg, brain
+
+
+def _by_id(m):
+    return {p["id"]: p for p in m["parameters"]}
+
+
+def test_manifest_shape_and_required_fields():
+    _cfg, brain = _brain()
+    try:
+        m = build_manifest(brain)
+        assert m["module"] == "agilis" and isinstance(m["revision"], int)
+        ids = [p["id"] for p in m["parameters"]]
+        assert len(ids) == len(set(ids))
+        for p in m["parameters"]:
+            assert p["kind"] in ("control", "indicator", "action"), p["id"]
+            if p["kind"] == "control":
+                assert "set" in p and "verb" in p["set"] and "arg" in p["set"], p["id"]
+                assert "settle" in p, p["id"]
+            if p["kind"] == "indicator":
+                assert p["read_path"], p["id"]
+            if p["kind"] == "action":
+                assert p["wait"]["ready"]["policy"] == "immediate"
+        assert {"position_x", "position_y"} <= set(ids)
+        assert not any(i.endswith("_z") for i in ids)          # two axes only
+    finally:
+        brain.shutdown()
+
+
+def test_every_read_path_resolves_against_a_real_status():
+    _cfg, brain = _brain()
+    try:
+        st = asdict(brain.status())
+        for p in build_manifest(brain)["parameters"]:
+            if p.get("read_path"):
+                assert read_path(st, p["read_path"]) is not None, p["id"]
+        assert read_path({}, ["position_um", 0]) is None      # must not raise
+    finally:
+        brain.shutdown()
+
+
+def test_every_set_verb_and_action_exists_on_the_service():
+    """A control whose verb the service does not know is a dead button."""
+    _cfg, brain = _brain()
+    svc = AgilisService(brain, host="127.0.0.1", cmd_port=CMD + 4, pub_port=PUB + 4)
+    try:
+        for p in build_manifest(brain)["parameters"]:
+            if p["kind"] == "control":
+                s = p["set"]
+                value = 16 if "amplitude" in p["id"] else (False if p["type"] == "bool" else 1.0)
+                reply = svc._dispatch({"cmd": s["verb"], s["arg"]: value, **s.get("extra", {})})
+            elif p["kind"] == "action":
+                reply = svc._dispatch({"cmd": p["id"]})
+            else:
+                continue
+            assert reply["ok"], (p["id"], reply)
+            time.sleep(0.05)
+    finally:
+        brain.shutdown()
+
+
+def test_revision_tracks_bounds_but_not_values():
+    _cfg, brain = _brain()
+    try:
+        rev0 = build_manifest(brain)["revision"]
+        brain.move_steps(0, 500)
+        time.sleep(0.2)
+        assert build_manifest(brain)["revision"] == rev0, "a value moved the revision"
+        brain.set_leash(True, leash_steps=1000)
+        time.sleep(0.1)
+        assert build_manifest(brain)["revision"] != rev0
+        brain.set_leash(False)
+        time.sleep(0.1)
+        assert build_manifest(brain)["revision"] == rev0
+    finally:
+        brain.shutdown()
+
+
+def test_armed_leash_narrows_the_position_bounds():
+    _cfg, brain = _brain()
+    try:
+        w = _by_id(build_manifest(brain))["position_x"]
+        brain.set_leash(True, leash_steps=1000)
+        time.sleep(0.1)
+        t = _by_id(build_manifest(brain))["position_x"]
+        assert (t["min"], t["max"]) == pytest.approx((-50.0, 50.0))   # 1000 x 50 nm
+        assert (t["max"] - t["min"]) < (w["max"] - w["min"])
+        assert "LEASH" in t["help"]
+    finally:
+        brain.shutdown()
+
+
+def test_calibration_moves_the_um_bounds():
+    _cfg, brain = _brain()
+    try:
+        before = _by_id(build_manifest(brain))["position_y"]["max"]
+        brain.set_calibration(1, 0.1)
+        time.sleep(0.1)
+        after = _by_id(build_manifest(brain))["position_y"]["max"]
+        assert after == pytest.approx(2 * before)
+    finally:
+        brain.shutdown()
+
+
+def test_position_settle_is_adopt_then_flag_on_the_commanded_um():
+    _cfg, brain = _brain()
+    try:
+        p = _by_id(build_manifest(brain))["position_x"]
+        assert p["unit"] == "um" and p["set"]["verb"] == "move_to_um"
+        assert p["settle"] == {"policy": "adopt_then_flag", "setpoint_key": "target_um",
+                               "flag_key": "moving", "invert": True, "index": 0}
+        assert p["stream"] == {"group": "position", "channel": "x"}
+        brain.move_to_um(0, 12.345)            # kept verbatim, so adopt can match
+        time.sleep(0.1)
+        assert brain.status().target_um[0] == 12.345
+    finally:
+        brain.shutdown()
+
+
+def test_describe_over_the_wire_and_both_status_paths_agree():
+    brain, _ = build_sim_system(Config())
+    svc = AgilisService(brain, host="127.0.0.1", cmd_port=CMD, pub_port=PUB)
+    svc.start()
+    client = AgilisClient(host="127.0.0.1", cmd_port=CMD, pub_port=PUB)
+    try:
+        client.start()
+        m = client.describe()
+        assert m["module"] == "agilis"
+        direct = client._rpc(cmd="status")["status"]
+        assert direct["describe_rev"] == m["revision"]
+    finally:
+        client.close()
+        svc.stop()

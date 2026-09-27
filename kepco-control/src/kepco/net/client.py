@@ -1,0 +1,227 @@
+"""The client: talk to a KepcoService, present a BipolarSupply-compatible facade.
+
+A GUI, a script, or a coordinator can hold a KepcoClient exactly where it would
+hold a BipolarSupply: same method names, same status() shape, same
+get_config()/apply_config(), same `_on_event` hook. So the caller does not care
+whether the supply is in-process or across the lab -- only the address changes.
+
+A background thread owns the SUB socket and keeps the latest status; commands go
+out on a REQ socket guarded by a lock (REQ is strict request/reply, one at a
+time). The same thread sends a `ping` every second, which feeds the service's
+lost-client watchdog (`safety.watchdog_s`, off by default).
+
+Refusals: the brain raises ValueError for a request it will not do (a mode
+change with the output on, set_current in voltage mode). Over the wire that
+comes back as {"ok": false, "error": ...}; the client re-raises it as
+ValueError, so a GUI shows the same message locally and remotely.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import fields
+
+import zmq
+
+from ..config import Config
+from ..supply import Status
+from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
+                       TOPIC_EVENT, config_to_dict, apply_config_dict)
+
+_NAN = float("nan")
+
+
+class RemoteStatus:
+    """The same attributes a caller reads off the brain's Status."""
+
+    def __init__(self, d: dict):
+        blank = Status()
+        for f in fields(Status):
+            v = d.get(f.name)
+            if v is None:
+                # missing or null (the wire sends NaN as null): the blank
+                # Status default, with NaN for a float ("not measured yet")
+                default = getattr(blank, f.name)
+                v = _NAN if isinstance(default, float) else default
+            setattr(self, f.name, v)
+        # None from a service that predates `describe`.
+        self.describe_rev = d.get("describe_rev")
+
+
+class KepcoClient:
+    def __init__(self, host: str = "localhost",
+                 cmd_port: int = DEFAULT_CMD_PORT,
+                 pub_port: int = DEFAULT_PUB_PORT,
+                 timeout_ms: int = 3000, ping_s: float = 1.0):
+        self._timeout_ms = int(timeout_ms)
+        self._ctx = zmq.Context.instance()
+        self._req = self._ctx.socket(zmq.REQ)
+        self._req.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        self._req.setsockopt(zmq.LINGER, 0)
+        self._req.connect(f"tcp://{host}:{cmd_port}")
+        self._sub = self._ctx.socket(zmq.SUB)
+        self._sub.connect(f"tcp://{host}:{pub_port}")
+        self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+
+        self._latest: dict = {}
+        self._lock = threading.Lock()
+        self._req_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._ping_s = float(ping_s)
+        self.cfg = Config()          # kept in sync with the service via get/set_config
+        self._on_event = lambda level, msg: None
+
+        self._sub_t = threading.Thread(target=self._listen, name="cli-sub", daemon=True)
+        self._sub_t.start()
+
+    # ---- BipolarSupply-compatible surface ---------------------------------
+
+    def start(self) -> dict:
+        """Fetch static info and pull the service's config into self.cfg."""
+        info = self.info()
+        self.get_config()
+        return info
+
+    def get_config(self) -> Config:
+        r = self._cmd({"cmd": "get_config"})
+        if r.get("ok") and "config" in r:
+            apply_config_dict(self.cfg, r["config"])
+        return self.cfg
+
+    def apply_config(self) -> None:
+        self._checked({"cmd": "set_config", "config": config_to_dict(self.cfg)})
+
+    def describe(self) -> dict:
+        """The service's parameter manifest. Its shape follows the MODE, so
+        compare `status().describe_rev` with the manifest's `revision`."""
+        r = self._cmd({"cmd": "describe"})
+        return r.get("describe", {}) if r.get("ok") else {}
+
+    def status(self) -> RemoteStatus:
+        with self._lock:
+            d = dict(self._latest)
+        if not d:                       # no PUB frame yet -> ask directly
+            r = self._cmd({"cmd": "status"})
+            d = r.get("status", {})
+        return RemoteStatus(d)
+
+    @property
+    def mode(self) -> str:
+        return self.status().mode
+
+    def current_range(self):
+        lim = self.cfg.limits
+        return lim.current_min_A, lim.current_max_A
+
+    def voltage_range(self):
+        lim = self.cfg.limits
+        return lim.voltage_min_V, lim.voltage_max_V
+
+    def current_limit_max(self) -> float:
+        return max(abs(x) for x in self.current_range())
+
+    def voltage_limit_max(self) -> float:
+        return max(abs(x) for x in self.voltage_range())
+
+    def set_mode(self, mode: str):
+        self._checked({"cmd": "set_mode", "mode": str(mode)})
+
+    def set_output(self, on: bool):
+        self._checked({"cmd": "set_output", "on": bool(on)})
+
+    def output_off_now(self):
+        self._checked({"cmd": "output_off_now"})
+
+    def set_current(self, amps: float):
+        self._checked({"cmd": "set_current", "current_A": float(amps)})
+
+    def set_voltage(self, volts: float):
+        self._checked({"cmd": "set_voltage", "voltage_V": float(volts)})
+
+    def set_current_limit(self, amps: float):
+        self._checked({"cmd": "set_current_limit", "current_A": float(amps)})
+
+    def set_voltage_limit(self, volts: float):
+        self._checked({"cmd": "set_voltage_limit", "voltage_V": float(volts)})
+
+    def set_ramp(self, rate_A_per_s=None, rate_V_per_s=None, enabled=None):
+        msg = {"cmd": "set_ramp"}
+        if rate_A_per_s is not None:
+            msg["rate_A_per_s"] = float(rate_A_per_s)
+        if rate_V_per_s is not None:
+            msg["rate_V_per_s"] = float(rate_V_per_s)
+        if enabled is not None:
+            msg["enabled"] = bool(enabled)
+        self._checked(msg)
+
+    def set_acquisition(self, readings: int):
+        self._checked({"cmd": "set_acquisition", "readings": int(readings)})
+
+    def acquire(self) -> int:
+        return int(self._checked({"cmd": "acquire"}).get("acq_id", 0))
+
+    def get_sample(self) -> dict:
+        return self._checked({"cmd": "get_sample"}).get("sample", {})
+
+    def shutdown(self):
+        """Close the client. Does NOT stop the remote service."""
+        self._stop.set()
+        time.sleep(0.25)
+        with self._req_lock:
+            self._req.close(0)
+        self._sub.close(0)
+
+    # ---- internals -------------------------------------------------------
+
+    def info(self) -> dict:
+        return self._cmd({"cmd": "info"}).get("info", {})
+
+    def _checked(self, d: dict) -> dict:
+        r = self._cmd(d)
+        if not r.get("ok"):
+            raise ValueError(r.get("error", "request refused"))
+        return r
+
+    def _cmd(self, d: dict) -> dict:
+        with self._req_lock:
+            if self._stop.is_set():
+                return {"ok": False, "error": "client closed"}
+            self._req.send_json(d)
+            try:
+                return self._req.recv_json()
+            except zmq.Again:
+                # timed out; the REQ socket is now in a bad state -> rebuild it
+                self._reset_req()
+                return {"ok": False, "error": "service did not respond (timeout)"}
+
+    def _reset_req(self):
+        endpoint = self._req.LAST_ENDPOINT
+        self._req.close(0)
+        self._req = self._ctx.socket(zmq.REQ)
+        self._req.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        self._req.setsockopt(zmq.LINGER, 0)
+        if endpoint:
+            self._req.connect(endpoint.decode() if isinstance(endpoint, bytes) else endpoint)
+
+    def _listen(self):
+        poller = zmq.Poller()
+        poller.register(self._sub, zmq.POLLIN)
+        last_ping = time.monotonic()
+        while not self._stop.is_set():
+            if poller.poll(200):
+                topic, payload = self._sub.recv_multipart()
+                d = json.loads(payload)
+                if topic == TOPIC_STATUS:
+                    with self._lock:
+                        self._latest = d
+                elif topic == TOPIC_EVENT:
+                    self._on_event(d.get("level", "info"), d.get("msg", ""))
+            now = time.monotonic()
+            if self._ping_s > 0 and now - last_ping >= self._ping_s:
+                last_ping = now
+                try:
+                    self._cmd({"cmd": "ping"})
+                except zmq.ZMQError:
+                    pass

@@ -1,0 +1,29 @@
+[project]
+name = "elliptec-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for Thorlabs Elliptec ELL14 rotation mounts (ELL14K kit), one axis per bus address"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # The hardware driver (pyserial) is the optional extra `real` below: the
+    # simulator needs none of it.
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+# The real ELL14K interface board is an FTDI USB-serial port: pyserial is all
+# the real backend needs (no Thorlabs DLL).  Sync with BOTH extras, or a later
+# `sync --extra gui` removes pyserial again (gotcha #29).
+real = ["pyserial>=3.5"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

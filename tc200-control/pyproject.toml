@@ -1,0 +1,38 @@
+[project]
+name = "tc200-control"
+version = "0.1.0"
+license = "MIT"
+description = "Thorlabs TC200 heater controller (one heater, PT100 sensor) over USB serial, or a simulator"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui                  the GUI (the headless core installs light)
+#   uv sync --extra gui --extra real     + pyserial, for the real TC200 (--real)
+#
+# Why pyserial is an EXTRA and not commented out: it is pure Python and installs
+# anywhere, so turning --real on should not mean editing (and committing) this
+# file. Trap (gotcha #29): `uv sync` REMOVES extras you do not name, so on the
+# lab PC always sync with both.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the temperature history chart
+]
+real = [
+    "pyserial>=3.5",     # the TC200's USB virtual COM port (backends/serial_tc200.py, imported only in open())
+]
+
+# Importable code lives under src/ -- the "src layout", same as every module.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,34 @@
+[project]
+name = "hp8648-control"
+version = "0.1.0"
+license = "MIT"
+description = "HP / Agilent 8648D RF signal generator control (GPIB/SCPI), an AaltoFlow module"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+]
+
+[project.optional-dependencies]
+# The GUI stack is optional so the headless core installs light:
+#   uv sync --extra gui
+gui = [
+    "PySide6>=6.7",
+]
+# The real instrument. pyvisa talks to the GPIB card through NI-VISA (or
+# Keysight IO Libraries), which must be installed separately on the lab PC.
+#   uv sync --extra gui --extra real      (name BOTH, gotcha #29)
+real = [
+    "pyvisa>=1.13",
+]
+
+# Importable code lives under src/ -- the "src layout".
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

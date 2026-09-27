@@ -1,0 +1,38 @@
+[project]
+name = "sr830-control"
+version = "0.1.0"
+license = "MIT"
+description = "Stanford Research SR830 DSP lock-in amplifier (GPIB): one demodulator, four aux inputs, sine output"
+requires-python = ">=3.11"
+# Runtime dependencies. The hardware one (pyvisa) lives in the optional extra
+# `real`, so the project installs and the tests run on ANY machine -- no VISA,
+# no GPIB card needed for the simulator.
+dependencies = [
+    "pyzmq>=25",        # the control service + client (localhost / Ethernet)
+]
+
+[project.optional-dependencies]
+# The GUI stack is optional so the headless core installs light:
+#   uv sync --extra gui
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the live R(t) strip chart
+]
+# The real instrument, over GPIB:
+#   uv sync --extra gui --extra real      (name BOTH extras: gotcha #29)
+# pyvisa is only the Python front end. On Windows the GPIB card also needs a
+# VISA library + GPIB driver installed separately (NI-VISA + NI-488.2, or
+# Keysight IO Libraries). pyvisa-py alone cannot talk to a GPIB card there.
+real = [
+    "pyvisa>=1.13",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

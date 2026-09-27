@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "signalhound"
+name = "Spectrum analyser (Signal Hound)"
+description = "Signal Hound SA44B / SA124B spectrum analyser with USB-TG44A tracking generator: spectra, thru-normalised transmission"
+category = "detector"
+tags = ["spectrum analyser", "tracking generator", "RF", "Signal Hound"]
+icon = "icon.svg"
+order = 170
+
+[ports]
+cmd = 5587
+pub = 5588
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

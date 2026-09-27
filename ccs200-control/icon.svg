@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- CCS200 spectrometer: a white beam enters a prism and fans out into a
+       spectrum that lands on a linear detector (the CCD) on the right.
+       #e8eaed = the light in, #ff9e2c / #ffb454 = the dispersed rays,
+       #5a626e = metal (prism edge, detector). -->
+  <line x1="2" y1="22" x2="12" y2="20" stroke="#e8eaed" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M10 30 L17 8 L24 30 Z" fill="none" stroke="#5a626e" stroke-width="2.2" stroke-linejoin="round"/>
+  <line x1="21" y1="18" x2="33" y2="9" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
+  <line x1="21" y1="19" x2="33" y2="16" stroke="#ff9e2c" stroke-width="2" stroke-linecap="round"/>
+  <line x1="21" y1="20" x2="33" y2="23" stroke="#ff9e2c" stroke-width="2" stroke-linecap="round"/>
+  <line x1="21" y1="21" x2="33" y2="30" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
+  <rect x="34" y="6" width="4" height="28" rx="1.5" fill="#5a626e"/>
+</svg>
