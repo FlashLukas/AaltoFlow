@@ -21,6 +21,14 @@ real = ["pylablib>=1.4", "pyft232>=0.12"]
 [dependency-groups]
 dev = ["pytest>=8"]
 
+[tool.uv]
+# pylablib lists PyQt5 as a hard dependency for its own GUI widgets, which the
+# Thorlabs driver never imports. Our GUI is PySide6, two Qt bindings in one
+# environment is asking for trouble, and PyQt5-Qt5 has no wheel for this
+# Python on Windows (the sync failed). Same override as kim-control, which runs
+# pylablib on the rig: the marker can never be true, so uv drops PyQt5.
+override-dependencies = ["pyqt5; sys_platform == 'never'"]
+
 [build-system]
 requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
 build-backend = "setuptools.build_meta"
