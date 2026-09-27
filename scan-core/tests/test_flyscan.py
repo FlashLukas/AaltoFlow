@@ -318,3 +318,46 @@ def test_zigzag_rows_do_not_switch_speed_when_already_at_the_run_in(reg):
     ds = run(r, reg)
     assert np.all(ds["lockin_r_n"].values >= 2)
     assert sets == [40.0, 0.0], sets
+
+
+def test_the_already_there_check_uses_the_recorded_position_not_a_stale_status(reg):
+    """From the rig, 2026-09-28: KIM's status cache is refreshed 8 times a
+    second, so just after a row it can still show where the stage was ~0.1 s
+    earlier -- 0.25 um back at 2 um/s, outside half a pixel -- and the speed
+    round-trip between zig-zag rows came back. Here the position READ lags
+    0.2 s; the check must use the row's own stream, which does not."""
+    import collections
+    import threading
+    _fast(reg)
+    s = reg._state
+    hist = collections.deque(maxlen=2000)
+    stop = threading.Event()
+
+    def record():
+        while not stop.is_set():
+            hist.append((time.monotonic(), s.x_um))
+            time.sleep(0.002)
+
+    th = threading.Thread(target=record, daemon=True)
+    th.start()
+    time.sleep(0.25)
+
+    def lagged():
+        cut = time.monotonic() - 0.2
+        old = [x for t, x in hist if t <= cut]
+        return old[-1] if old else s.x_um
+
+    p = reg.get("pos_x")
+    p._get = lagged
+    sets = []
+    sp = reg.get("stage_speed")
+    orig = sp._set
+    sp._set = lambda v: (sets.append(v), orig(v))[1]
+    try:
+        r = _recipe(axes=[{"type": "array", "param": "pos_z", "values": [0.0, 0.0, 0.0]},
+                          _fly(start=-4, stop=4, num=9, speed=40)], zigzag=True)
+        ds = run(r, reg)
+    finally:
+        stop.set()
+    assert np.all(ds["lockin_r_n"].values >= 2)
+    assert sets == [40.0, 0.0], sets

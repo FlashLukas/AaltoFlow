@@ -420,7 +420,13 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # Already there? With zig-zag a row starts where the last one
             # ended: switching to the approach speed, "approaching" and
             # switching back cost ~0.9 s a row on the rig for nothing.
-            at_runin = move_p is None and state["fly_speed"] and _near(rb, a, 0.5 * width)
+            # Judged on where the last row's STREAM saw the stage stop, not on
+            # rb.get(): a status cache (kim: 8 Hz) can still show the stage a
+            # tenth of a second back along the row -- 0.25 um at 2 um/s, just
+            # outside half a pixel, so the round-trip came back (rig, 2026-09-28).
+            end = state.get("rb_end")
+            at_runin = (move_p is None and state["fly_speed"] and end is not None
+                        and abs(end - a) <= 0.5 * width)
             if not at_runin:
                 if state["fly_speed"]:
                     use_speed(orig_speed)
@@ -447,7 +453,9 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # has refused every per-point one)
             run_hooks(compiled.hooks, "before_point", ctx)
 
-            if outer_moved and not (at_runin and _near(rb, a, 0.5 * width)):
+            # (an outer axis in stage coordinates is another axis: it leaves the
+            # run-in where it was, so "already there" still holds)
+            if outer_moved and not at_runin:
                 # an outer axis that moves the same stage may have moved the
                 # run-in too: make sure (a no-op if it did not)
                 if state["fly_speed"]:
@@ -470,6 +478,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 current[pos_p.id] = approach(a)
                 use_speed(speed)
             current[pos_p.id] = b
+            state["rb_end"] = _last_value(chunks, rb)   # where the stream saw it stop
             _bin_into(chunks, rb, params, edges, lag, data, oidx)
             if not warned["lag"]:
                 warned["lag"] = True
@@ -736,15 +745,6 @@ def _stop_mover(move_p, drive, speed, log, quiet=False):
     except Exception as exc:
         if not quiet:
             log(f"fly: could not stop {move_p.id} ({exc})")
-
-
-def _near(rb, target, tol) -> bool:
-    """Is the readback within `tol` of `target` right now? (False if unknown)"""
-    try:
-        v = float(rb.get())
-    except Exception:
-        return False
-    return math.isfinite(v) and abs(v - target) <= tol
 
 
 def _await_position(rb, target, tol, timeout, log, rest_s=0.2, poll_s=0.05):
