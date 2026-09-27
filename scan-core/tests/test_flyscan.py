@@ -302,3 +302,19 @@ def test_the_first_row_warns_about_smearing(reg):
     run(_recipe(axes=[_fly(start=-5, stop=5, num=21, speed=40)]), reg,
         on_log=log.append)
     assert any("smeared" in m for m in log), log
+
+
+def test_zigzag_rows_do_not_switch_speed_when_already_at_the_run_in(reg):
+    """From the rig, 2026-09-28: with zig-zag every row starts where the last
+    ended, yet the speed went to the approach value and back each time
+    (~0.9 s a row). Count the speed changes: one to the fly speed, one back."""
+    _fast(reg)
+    sets = []
+    p = reg.get("stage_speed")
+    orig = p._set
+    p._set = lambda v: (sets.append(v), orig(v))[1]
+    r = _recipe(axes=[{"type": "array", "param": "pos_z", "values": [0.0, 0.0, 0.0]},
+                      _fly(start=-4, stop=4, num=9, speed=40)], zigzag=True)
+    ds = run(r, reg)
+    assert np.all(ds["lockin_r_n"].values >= 2)
+    assert sets == [40.0, 0.0], sets

@@ -417,9 +417,16 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # zig-zag a pointless trip to the far side before every backward row.
             a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
             a, b = min(max(a, lo), hi), min(max(b, lo), hi)
-            if state["fly_speed"]:
-                use_speed(orig_speed)
-            current[pos_p.id] = approach(a)           # blocking: AT the run-in, at rest
+            # Already there? With zig-zag a row starts where the last one
+            # ended: switching to the approach speed, "approaching" and
+            # switching back cost ~0.9 s a row on the rig for nothing.
+            at_runin = move_p is None and state["fly_speed"] and _near(rb, a, 0.5 * width)
+            if not at_runin:
+                if state["fly_speed"]:
+                    use_speed(orig_speed)
+                current[pos_p.id] = approach(a)       # blocking: AT the run-in, at rest
+            else:
+                current[pos_p.id] = a
 
             # -- the outer (stepped) dims, exactly as the odometer does them
             first_idx = tuple(oidx) + ((npix - 1) if backwards else 0,)
@@ -440,11 +447,14 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # has refused every per-point one)
             run_hooks(compiled.hooks, "before_point", ctx)
 
-            if outer_moved:
+            if outer_moved and not (at_runin and _near(rb, a, 0.5 * width)):
                 # an outer axis that moves the same stage may have moved the
                 # run-in too: make sure (a no-op if it did not)
+                if state["fly_speed"]:
+                    use_speed(orig_speed)
                 current[pos_p.id] = approach(a)
-            use_speed(speed)
+            if not state["fly_speed"]:
+                use_speed(speed)
 
             while True:
                 aborted, chunks, again = _fly_one_row(
@@ -726,6 +736,15 @@ def _stop_mover(move_p, drive, speed, log, quiet=False):
     except Exception as exc:
         if not quiet:
             log(f"fly: could not stop {move_p.id} ({exc})")
+
+
+def _near(rb, target, tol) -> bool:
+    """Is the readback within `tol` of `target` right now? (False if unknown)"""
+    try:
+        v = float(rb.get())
+    except Exception:
+        return False
+    return math.isfinite(v) and abs(v - target) <= tol
 
 
 def _await_position(rb, target, tol, timeout, log, rest_s=0.2, poll_s=0.05):
