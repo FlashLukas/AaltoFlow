@@ -139,8 +139,15 @@ Commands are JSON over a REQ/REP socket on port 5567; every reply is
 | display zero / clear            | `{"cmd":"set_zero"}` · `{"cmd":"clear_zero"}` |
 | stop                            | `{"cmd":"stop"}` (all) or `{"axis":"Y"}` |
 | position list                   | `store_position` / `goto_position` / `save_positions` / `load_positions` |
+| record the position (fly scan)  | `stream_start` (`rate_hz`, default 50) / `stream_read` / `stream_stop` → `{stream: {t, values: {x, y, z}}}` |
 
 Axes accept `"X"/"Y"/"Z"` or `0/1/2`.
+
+The stream is what scan-core's **fly scan** bins a detector by: the stage moves
+continuously and every detector sample gets the position recorded at that time.
+On this open-loop stage the position is the step counter -- the best readback
+there is, but it drifts from the true position over a long scan, exactly as it
+does in a stepped scan.
 
 ## Tests
 

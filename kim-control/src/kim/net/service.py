@@ -278,6 +278,14 @@ class KimService:
         if cmd == "set_step_size":
             return {"ok": True, "step": b.set_step_size(bool(req["large"]))}
 
+        # -- fly-scan stream: the position recorded continuously ----------- #
+        if cmd == "stream_start":
+            return {"ok": True, "stream_id": b.stream_start(req.get("rate_hz"))}
+        if cmd == "stream_read":
+            return {"ok": True, "stream": b.stream.read()}
+        if cmd == "stream_stop":
+            return {"ok": True, "stream": b.stream_stop()}
+
         # -- camera-frame calibration (image px per step) ------------------ #
         if cmd == "start_px_calibration":
             opts = {k: req[k] for k in ("camera_host", "camera_port", "voltages", "repeats")

@@ -21,7 +21,7 @@ from __future__ import annotations
 from .instrument import (Instrument, InstrumentError, adopt_then_flag, echoes,
                          flag_only, immediate)
 from .registry import (AcquireSpec, Action, AxisSpec, Gettable, Registry,
-                       Settable)
+                       Settable, StreamSpec)
 
 #: How a manifest's `settle` block maps onto a policy factory. Anything not
 #: listed falls back to `immediate()` with a warning, so an unknown policy from
@@ -114,6 +114,9 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
     # so it does not share ids -- or acquire groups -- with the local one.
     module = module_name or manifest.get("module", inst.name)
     added = []
+    # One StreamSpec per stream GROUP of this module, however many parameters
+    # are recorded in it -- they are started, read and stopped once together.
+    streams: dict = {}
 
     for d in manifest.get("parameters", []):
         kind = d.get("kind")
@@ -186,7 +189,7 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
 
             def setter(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
                        _id=pid, _u=unit, _bool=(dtype == "bool"), _scale=scale,
-                       _int=(dtype == "int")):
+                       _int=(dtype == "int"), timeout_s=None):
                 extra = dict(_s.get("extra") or {})
                 scale = _scale
                 # Send a bool as a bool. Settable hands us 0.0/1.0 after its
@@ -204,11 +207,15 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                     wire = int(round(wire))
                 _inst.command(_s["verb"], **{_s["arg"]: wire}, **extra)
                 shown = wire if _bool else f"{value:g} {_u}".strip()
-                _inst.wait_until(_settle(wire), timeout_s=_t,
+                # timeout_s: a fly scan's row is ONE long move, far slower
+                # than the ordinary step this timeout was declared for
+                _inst.wait_until(_settle(wire),
+                                 timeout_s=_t if timeout_s is None else timeout_s,
                                  what=f"{_id} = {shown}")
 
             param = reg.add(Settable(pid, label, unit, (lo, hi),
                                      set_fn=setter, get_fn=getter))
+            _attach_stream(param, d, inst, module, streams, on_warn)
             # An INT control only has whole-number settings (a scan-array index,
             # a filter order). The builder reads this to offer whole points
             # rather than 21 samples across 0..19.
@@ -224,9 +231,10 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             axes = _axes_from(d, inst, prefix, module, on_warn)
             if d.get("read"):
                 getter = _command_reader(d, inst)
-            reg.add(Gettable(pid, label, unit, getter, axes=axes,
-                             dtype=d.get("dtype", "float"),
-                             acquire=_acquire_from(d, inst, module, on_warn)))
+            param = reg.add(Gettable(pid, label, unit, getter, axes=axes,
+                                     dtype=d.get("dtype", "float"),
+                                     acquire=_acquire_from(d, inst, module, on_warn)))
+            _attach_stream(param, d, inst, module, streams, on_warn)
             added.append(pid)
 
     return added
@@ -389,6 +397,69 @@ def _acquire_from(d: dict, inst: Instrument, module: str, on_warn):
                                  what=f"acquisition '{_g}' to finish"))
 
     return AcquireSpec(group, trigger_fn=trigger_fn, wait_fn=wait_fn)
+
+
+def _attach_stream(param, d: dict, inst: Instrument, module: str,
+                   streams: dict, on_warn) -> None:
+    """Give `param` the module's stream, if its descriptor declares one.
+
+        "stream": {"group": "demod", "channel": "x1"}
+
+    Optional "start_verb" / "read_verb" / "stop_verb" (default stream_start,
+    stream_read, stream_stop). The read and stop replies carry
+
+        {"ok": true, "stream": {"t": [...], "values": {"x1": [...], ...},
+                                "delay_s": {"x1": 0.02, ...},
+                                "overflow": false, "now": <module time.time()>}}
+
+    `now` lets scan-core put the module's time stamps on THIS computer's
+    clock: a module on another PC stamps with its own clock, and two clocks
+    a few ms apart would shift one stream against the other -- the same error
+    as an uncorrected filter lag. The offset is estimated NTP-style from the
+    read with the shortest round trip (the one whose `now` is least blurred by
+    network delay).
+    """
+    spec = d.get("stream")
+    if not spec:
+        return
+    channel = spec.get("channel")
+    if not channel:
+        if on_warn:
+            on_warn(f"{d.get('id')}: `stream` names no channel; ignoring it")
+        return
+    group = f"{module}.{spec.get('group', 'stream')}"
+    key = (group, spec.get("start_verb"), spec.get("read_verb"), spec.get("stop_verb"))
+    if key not in streams:
+        streams[key] = _stream_from(group, spec, inst)
+    param.stream = streams[key]
+    param.stream_channel = channel
+
+
+def _stream_from(group: str, spec: dict, inst: Instrument) -> StreamSpec:
+    start_v = spec.get("start_verb", "stream_start")
+    read_v = spec.get("read_verb", "stream_read")
+    stop_v = spec.get("stop_verb", "stream_stop")
+    samples: list = []          # recent (round trip, offset) pairs
+
+    def fetch(verb):
+        import time as _time
+        t0 = _time.time()
+        reply = inst.command(verb)
+        t1 = _time.time()
+        chunk = dict(reply.get("stream") or {})
+        now = chunk.get("now")
+        if isinstance(now, (int, float)):
+            samples.append((t1 - t0, float(now) - 0.5 * (t0 + t1)))
+            del samples[:-20]
+        offset = min(samples)[1] if samples else 0.0
+        if offset and chunk.get("t"):
+            chunk["t"] = [None if t is None else t - offset for t in chunk["t"]]
+        return chunk
+
+    return StreamSpec(group,
+                      start_fn=lambda: inst.command(start_v),
+                      read_fn=lambda: fetch(read_v),
+                      stop_fn=lambda: fetch(stop_v))
 
 
 class _Blank(dict):

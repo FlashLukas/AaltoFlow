@@ -49,6 +49,12 @@ from dataclasses import dataclass, field
 from . import filters
 from .backends.base import LockInBackend
 from .config import Config, REF_MODES
+from .stream import StreamRecorder
+
+#: The channels of the fly-scan stream, named like the scan detectors in the
+#: manifest (x1 = channel 1's X ...), so a detector id IS its stream channel.
+STREAM_CHANNELS = ("x1", "y1", "r1", "theta1", "x2", "y2", "r2", "theta2",
+                   "aux1", "aux2")
 
 N_CHANNELS = 2
 
@@ -129,6 +135,11 @@ class LockIn:
         self._acq_id = 0
         self._acq: dict | None = None
         self._sample: dict = {}
+
+        # The fly-scan record: every reading the poll thread takes, time
+        # stamped, while a scan has it running (stream.py). Costs nothing
+        # when stopped.
+        self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -264,6 +275,26 @@ class LockIn:
                          "f": [0.0] * N_CHANNELS, "aux": [0.0, 0.0]}
             return self._acq_id
 
+    def stream_delays(self) -> dict:
+        """How late each streamed channel is, in seconds: the filter's GROUP
+        DELAY, order x tau, with the tau the hardware actually applied.
+
+        Why that number: a demodulator filter of order n is n identical RC
+        stages, whose impulse response has mean n*tau, and filtering (a
+        convolution) moves the centroid of any feature by exactly that mean.
+        A fly scan moves each sample back by it before looking up where the
+        stage was. AUX IN is sampled unfiltered: no delay. # VERIFY on the
+        HF2: that the demod sample's aux fields bypass the demod filter, and
+        what fixed transport delay USB adds on top of the filter.
+        """
+        out = {}
+        for i in range(N_CHANNELS):
+            d = float(self._order_actual[i]) * float(self._tc_actual[i])
+            for stem in ("x", "y", "r", "theta"):
+                out[f"{stem}{i + 1}"] = d
+        out["aux1"] = out["aux2"] = 0.0
+        return out
+
     def settle_time_s(self, i: int) -> float:
         """Settling time of channel index i with its APPLIED tau and order."""
         return filters.settle_time_s(self._tc_actual[i], self._order_actual[i],
@@ -323,8 +354,21 @@ class LockIn:
     # ---- polling --------------------------------------------------------------------
 
     def _poll_loop(self) -> None:
+        # Scheduled on deadlines with time.sleep, not `self._stop.wait(period)`:
+        # on Windows a timed Event.wait is rounded up to the 15.6 ms system
+        # tick, so "50 Hz" really ran at ~32 Hz -- found by counting a fly
+        # scan's samples per pixel. time.sleep uses a high-resolution timer.
         period = 1.0 / max(1.0, float(self.cfg.hardware.poll_hz))
-        while not self._stop.wait(period):
+        next_t = time.monotonic()
+        while not self._stop.is_set():
+            next_t += period
+            wait = next_t - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            else:
+                next_t = time.monotonic()        # fell behind: do not burst
+            if self._stop.is_set():
+                break
             self.poll_once()
 
     def poll_once(self) -> None:
@@ -349,6 +393,13 @@ class LockIn:
                 "theta_deg": [math.degrees(math.atan2(b, a)) for a, b in zip(x, y)],
                 "freq_Hz": f, "aux_in": aux}
         ref = [f[i] / max(1, int(chans[i].harmonic)) for i in range(N_CHANNELS)]
+        # Stamped with the WALL clock (not self._clock, which is monotonic and
+        # may be a test's fake): a fly scan lines this stream up with another
+        # instrument's, possibly on another PC, and only wall time is shared.
+        self.stream.append(time.time(),
+                           (x[0], y[0], live["r"][0], live["theta_deg"][0],
+                            x[1], y[1], live["r"][1], live["theta_deg"][1],
+                            aux[0], aux[1]))
         now = self._clock()
         recovered = False
         with self._lock:

@@ -23,7 +23,13 @@ Three things make this manifest more interesting than smb's:
    appears. The id stays `freq1` either way, so a recipe that records it works
    in both modes. The revision changes, so clients re-fetch.
 
-3. PER-CHANNEL SETTLE KEYS ARE LIST ENTRIES. Status carries two-element lists
+3. THE SAME DETECTORS CAN BE STREAMED. Each carries a `stream` block
+   (group "demod", channel = its own id): in a FLY scan scan-core records
+   them continuously with stream_start / stream_read / stream_stop instead of
+   acquiring one settled sample per point, and bins them by the stage's
+   measured position. The reply states each channel's lag (order x tau).
+
+4. PER-CHANNEL SETTLE KEYS ARE LIST ENTRIES. Status carries two-element lists
    (index 0 = channel 1), so each settle block names `key` plus `index`.
 """
 
@@ -39,7 +45,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, acquire=None, help=""):
+       settle=None, args=None, danger=False, acquire=None, stream=None, help=""):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -51,7 +57,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("acquire", acquire), ("help", help)):
+                 ("acquire", acquire), ("stream", stream), ("help", help)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -184,7 +190,9 @@ def build_manifest(lockin) -> dict:
                 f"{stem}{n}", f"Ch{n} {label}", "indicator", "float", unit=unit,
                 group="Measurement", order=100 + 10 * i + j,
                 decimals=dec, read_path=["sample", key, i], acquire=acquire,
-                help="Settled and latched by `acquire`: safe to record in a scan."))
+                stream={"group": "demod", "channel": f"{stem}{n}"},
+                help="Settled and latched by `acquire`: safe to record in a scan. "
+                     "In a FLY scan it is recorded continuously instead (stream)."))
             params.append(_p(
                 f"live_{stem}{n}", f"Ch{n} {label} (live, unsettled)", "indicator",
                 "float", unit=unit, group="Live", order=200 + 10 * i + j,
@@ -195,6 +203,7 @@ def build_manifest(lockin) -> dict:
             f"aux{k + 1}", f"AUX IN {k + 1}", "indicator", "float", unit="V",
             group="Measurement", order=150 + k, decimals=4,
             read_path=["sample", "aux_in", k], acquire=acquire,
+            stream={"group": "demod", "channel": f"aux{k + 1}"},
             help="Latched with the demodulator sample, averaged over the same window."))
         params.append(_p(
             f"live_aux{k + 1}", f"AUX IN {k + 1} (live)", "indicator", "float",

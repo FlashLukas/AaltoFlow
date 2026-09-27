@@ -32,7 +32,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help=""):
+       settle=None, args=None, danger=False, stream=None, help=""):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -44,7 +44,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("help", help)):
+                 ("stream", stream), ("help", help)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -135,6 +135,9 @@ def build_manifest(brain) -> dict:
                     "extra": {"axis": ax}},
                settle={"policy": "flag_only", "key": "moving", "invert": True,
                        "index": i},
+               # a fly scan records the counter position continuously and
+               # bins its detectors by it (stream_start / _read / _stop)
+               stream={"group": "position", "channel": low},
                help=("Bounds are the LEASH box around the datum."
                      if leashed else
                      "Bounds are the full symmetric travel; arming the leash "

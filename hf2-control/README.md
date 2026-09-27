@@ -65,8 +65,22 @@ reading. Use 99.9 % (or `extra_wait_s`) when signals change by large factors.
 `set_time_constant{channel, time_constant_s}` · `set_order{channel, order}` ·
 `set_reference{channel, mode}` · `set_frequency{channel, frequency_Hz}`
 (internal only; refused on external) · `acquire` → `{acq_id}` · `get_sample` ·
+`stream_start` / `stream_read` / `stream_stop` (below) ·
 plus the universal `status`, `info`, `describe`, `get_config`, `set_config`.
 Channels are 1 and 2.
+
+## Streaming, for a fly scan
+
+In a **fly scan** (scan-core) the stage does not stop at points, so there is
+no "settle, then acquire". Instead the poll thread's readings -- X, Y, R, θ of
+both channels and both AUX inputs, `poll_hz` times a second -- are recorded
+with their time stamps between `stream_start` and `stream_stop`, and scan-core
+bins them by the stage's measured position. Each reply states every channel's
+lag, **order × τ** with the τ actually applied: the output describes where the
+stage was that long ago, and scan-core moves each sample back by it. Choose τ
+so that speed × lag stays below a pixel, or fine detail is smeared (the run
+log warns). Average X and Y rather than θ: a mean of angles is wrong across
+±180°.
 
 ## Real hardware (not yet tested)
 

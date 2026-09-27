@@ -90,6 +90,8 @@ scan_core/
   registry.py   # Parameter/Settable/Gettable + build_sim_registry (toy physics)
   engine.py     # N-D odometer -> xarray.Dataset
   hooks.py      # named per-level actions (autofocus, wait, call = routines, …)
+  flyscan.py    # the fly axis: continuous rows binned by the measured position
+  sim_stream.py # the simulator's streams (a lagging lock-in, a moving stage)
   errors.py     # ScanAborted, RoutineError
   view.py       # re-exports aaltoview.view (N-D cube -> map / line)
   data.py       # re-exports aaltoview.data (read measurements back)
@@ -101,6 +103,7 @@ apps/
 recipes/        # example YAML recipes (2-D, 3-D, XY-raster)
 schema/scan.schema.json
 run_demo.py
+run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + hf2)
 ```
 
 ## Running against real instruments
@@ -264,6 +267,69 @@ session (design path + reference points) saves next to the design as
 the stage position with the camera's field of view (green) and the selected
 target (amber). Simulated stage.*
 
+## Fly scans: move without stopping, bin by the measured position
+
+A stepped scan visits every point: set, wait until settled, measure. For an
+image that is mostly waiting. A **fly scan** moves the stage slowly and
+continuously across each row while the detectors AND the stage position are
+recorded all the way (a *stream*: every reading with its time stamp). Each
+detector sample is then given the position the stage had at that moment, and
+the samples are averaged per pixel. The result is the same regular grid a
+stepped scan gives -- same coordinates, same file -- built from where the stage
+really was.
+
+In the Scan Builder, tick **fly** on the innermost axis and give a speed; `pts`
+become pixels. In a recipe:
+
+```yaml
+axes:
+  - {type: linear, param: kim.position_y, start: 0, stop: 20, num: 21}   # stepped
+  - {type: fly, param: kim.position_x, start: 0, stop: 50, num: 101,     # flown
+     speed: 5, speed_param: kim.velocity_x}
+detectors: [hf2.x1, hf2.y1]
+zigzag: true            # every other row flown backwards
+```
+
+![a fly scan](../front-panels/suite-fly.png)
+
+*A zig-zag fly scan over the simulated islands: Y stepped, X flown at 60 um/s,
+31 x 91 pixels in under a minute.*
+
+What it takes care of:
+
+* **The lock-in lag.** A lock-in's output describes where the stage was a few
+  time constants ago, so a flown image is shifted by speed x delay -- in
+  opposite directions on forward and backward rows. Each module states the lag
+  of every channel it streams (a lock-in: order x tau, the filter's group
+  delay), and every sample is moved back by it before its position is looked
+  up. `run_fly_demo.py` shows the difference:
+
+  ![lag correction](fly_demo.png)
+
+  The correction removes the SHIFT; features finer than speed x delay are still
+  smeared, and the run log says so after the first row.
+* **Only streamable parameters.** Every detector, and the position, must be one
+  its module can record continuously (a `stream` block in `describe`; hf2's scan
+  detectors and kim's positions so far). Anything else is refused before the
+  stage moves.
+* **Samples per pixel** (`<det>_n`) and their spread (`<det>_std`) are stored
+  next to every detector; a pixel no sample fell into is NaN, never 0.
+* **Rows end on the measured position**, not on the settle rule: a stage that
+  reports "not moving" from a stale status frame cannot cut a row short.
+* **The speed is put back** for the approach to each row and at the end; an
+  Abort mid-row stops the stage where it is and keeps what was measured.
+* Routines: `start/end of each sweep` works (a sweep of the fly axis is one
+  row); per-point routines are refused -- the stage never stops at a point.
+
+```bash
+uv run python run_fly_demo.py                          # the simulator, the figure above
+uv run python run_fly_demo.py --lab --from 0 --to 20   # the running kim + hf2 services
+```
+
+On the kim stage "measured position" means the step counter, the best readback
+an open-loop stage has; it drifts from the true position over long scans just as
+a stepped scan's does.
+
 ## A queue of scans
 
 **Load scan…** with several files selected (recipes, `.nc` files, or a saved
@@ -281,7 +347,7 @@ starts; **Stop queue** ends all of it; an error stops the queue.
 ## Tests
 
 ```bash
-uv run pytest -q        # 308 tests, all offline
+uv run pytest -q        # 346 tests, all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so

@@ -25,6 +25,9 @@ Live checks (--live), per module with a .venv:
     running lab service is not disturbed)
   * it answers `describe` within 30 s, the manifest's "module" equals the key,
     and it has parameters
+  * if any parameter declares a `stream` (for fly scans), the service answers
+    stream_start / stream_read / stream_stop, and the reply carries every
+    declared channel with as many values as time stamps
   * it answers `shutdown` and EXITS BY ITSELF within 15 s (the launcher asks
     for this before it kills a service; a killed service cannot close its
     hardware -- docs/DEVELOPER_NOTES.md gotcha #25)
@@ -57,6 +60,27 @@ s.connect(f"tcp://127.0.0.1:{sys.argv[1]}")
 try:
     s.send_json({"cmd": "describe"}); r = s.recv_json()
     print(json.dumps(r.get("describe") if r.get("ok") else None))
+except zmq.Again:
+    print("null")
+"""
+
+# The fly-scan stream verbs, for a module whose manifest declares a stream:
+# start, let it record, read, stop. Prints the two stream replies, or null.
+_STREAM = r"""
+import json, sys, time, zmq
+s = zmq.Context.instance().socket(zmq.REQ)
+s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 3000)
+s.connect(f"tcp://127.0.0.1:{sys.argv[1]}")
+out = []
+try:
+    for verb in ("stream_start", "stream_read", "stream_stop"):
+        s.send_json({"cmd": verb}); r = s.recv_json()
+        if not r.get("ok"):
+            out = None; break
+        if verb != "stream_start":
+            out.append(r.get("stream"))
+        time.sleep(0.3)
+    print(json.dumps(out))
 except zmq.Again:
     print("null")
 """
@@ -120,6 +144,40 @@ def free_port_pair() -> tuple[int, int]:
                 continue
 
 
+def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
+    """A declared `stream` must work: scan-core's fly scan relies on it."""
+    channels = {p["stream"].get("channel") for p in manifest.get("parameters", [])
+                if isinstance(p.get("stream"), dict)}
+    if not channels:
+        return
+    r = subprocess.run([str(py), "-c", _STREAM, str(cmd)], capture_output=True,
+                       text=True, timeout=30)
+    try:
+        chunks = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        chunks = None
+    problems = []
+    if not chunks:
+        problems.append("stream_start / stream_read / stream_stop not answered ok")
+    else:
+        for c in chunks:
+            c = c or {}
+            t = c.get("t") or []
+            vals = c.get("values") or {}
+            missing = channels - set(vals)
+            if missing:
+                problems.append(f"channels missing from the reply: {sorted(missing)}")
+            if any(len(v) != len(t) for v in vals.values()):
+                problems.append("a channel has a different length than its time stamps")
+            if "now" not in c:
+                problems.append("no `now` in the reply (clock offset cannot be estimated)")
+        if not problems and not (chunks[0] or {}).get("t"):
+            problems.append("recorded nothing in 0.3 s")
+    rep.add(m.key, "live: stream verbs work", "FAIL" if problems else "PASS",
+            "; ".join(sorted(set(problems))) if problems
+            else f"{len(channels)} channel(s), {len(chunks[0]['t'])} samples in 0.3 s")
+
+
 def live_check(rep: Report, m, py: Path):
     cmd, pub = free_port_pair()
     proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
@@ -150,6 +208,7 @@ def live_check(rep: Report, m, py: Path):
                 "PASS" if got == m.key else "FAIL", "" if got == m.key else f"says {got!r}")
         n = len(manifest.get("parameters", []))
         rep.add(m.key, "live: describe has parameters", "PASS" if n else "FAIL", f"{n}")
+        stream_check(rep, m, py, cmd, manifest)
 
         r = subprocess.run([str(py), "-c", _SHUTDOWN, str(cmd)], capture_output=True,
                            text=True, timeout=30)

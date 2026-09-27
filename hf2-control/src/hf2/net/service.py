@@ -141,6 +141,13 @@ class Hf2Service:
                 # Returns at once with the id. The caller waits for status to
                 # show THIS id with acquiring == false.
                 return {"ok": True, "acq_id": li.acquire()}
+            elif cmd == "stream_start":
+                # A fly scan: record every reading from now on (stream.py)
+                return {"ok": True, "stream_id": li.stream.start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": li.stream.read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": li.stream.stop()}
             elif cmd == "get_sample":
                 return {"ok": True, "sample": _json_safe(li.get_sample())}
             elif cmd == "status":

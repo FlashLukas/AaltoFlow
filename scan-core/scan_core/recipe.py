@@ -35,6 +35,10 @@ array  : {type, param, values:[...], [name]}              -> 1 dim
 file   : {type, param, path, [name]}                      -> 1 dim (values from CSV/txt)
 zip    : {type, name, members:[{param, ...spec}], }       -> 1 dim, several params in lockstep
 raster : {type, x:{param,start,stop,num}, y:{...}, fast}  -> 2 dims (spatial XY, first-class)
+fly    : {type, param, start, stop, num, speed, [speed_param, readback,
+          lag_correction, name]}                          -> 1 dim, INNERMOST only:
+          one continuous move per row, binned by the measured position
+          (flyscan.py). Same coordinates as a linear axis with that start/stop/num.
 
 `compile(registry)` turns the axis list into an ordered list of Dim objects
 (raster expands to two dims), which the engine iterates as an odometer. Keeping
@@ -200,6 +204,8 @@ class Recipe:
                 # to read it at all -- a write-only control, or an action.
                 errs.append(f"detector '{det}' cannot be read")
         errs += self._validate_hooks(registry)
+        from .flyscan import validate_fly
+        errs += validate_fly(self, registry)
         # range check against each settable's limits
         try:
             for dim in self.compile(registry).dims:
@@ -339,6 +345,10 @@ def _axis_param_ids(ax: dict) -> list[str]:
     t = ax["type"]
     if t in ("linear", "array", "file"):
         return [ax["param"]]
+    if t == "fly":
+        # the speed knob too: the scan drives it, so it must be settable and
+        # cannot also be held as a condition
+        return [ax["param"]] + ([ax["speed_param"]] if ax.get("speed_param") else [])
     if t == "zip":
         return [m["param"] for m in ax["members"]]
     if t == "raster":
@@ -352,6 +362,12 @@ def _compile_axis(ax: dict) -> list[Dim]:
         vals = _values_from_spec(ax)
         name = ax.get("name") or ax["param"]
         return [Dim(name=name, params=[(ax["param"], vals)], size=len(vals), kind=t)]
+
+    if t == "fly":
+        vals = _values_from_spec({k: ax[k] for k in ("start", "stop", "num")
+                                  if k in ax})
+        name = ax.get("name") or ax["param"]
+        return [Dim(name=name, params=[(ax["param"], vals)], size=len(vals), kind="fly")]
 
     if t == "zip":
         members = ax["members"]

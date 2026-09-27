@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,8 +69,21 @@ from .config import (
     set_axis_voltage,
 )
 from .positions import PositionList
+from .stream import StreamRecorder
 
 AXES = ("X", "Y", "Z")
+
+#: Fly-scan stream channels: the absolute position of each axis in um, the
+#: same number `position_um` in status (and the `position_x` control) reads.
+STREAM_CHANNELS = ("x", "y", "z")
+
+#: Default and highest position sampling rate of the stream, Hz. # VERIFY on
+#: the KIM101: each sample is three USB round trips under the backend's lock,
+#: shared with the status publisher and the moves; if the link cannot keep up
+#: the loop simply runs slower (every sample is time stamped, so a slower
+#: stream is coarser, never wrong).
+STREAM_HZ = 50.0
+STREAM_HZ_MAX = 500.0
 
 
 @dataclass
@@ -126,6 +140,12 @@ class Kim:
         self._calibrator = None
         self._calib_thread: threading.Thread | None = None
         self._calib_progress = ""
+        # The fly-scan position record (stream.py). This brain has no poll
+        # thread of its own (status is read on demand), so streaming starts a
+        # small sampler thread, and only while a scan wants it.
+        self.stream = StreamRecorder(STREAM_CHANNELS)
+        self._stream_thread: threading.Thread | None = None
+        self._stream_stop = threading.Event()
         try:
             self._pxcal = pxcal.load(self.px_file())
         except Exception as exc:
@@ -215,6 +235,7 @@ class Kim:
         """Stop all motion and close the backend.  Idempotent."""
         if not self._connected:
             return
+        self.stream_stop()
         self.abort_px_calibration()
         if self._calib_thread is not None:
             self._calib_thread.join(timeout=5.0)
@@ -228,6 +249,55 @@ class Kim:
             self.backend.close()
             self._connected = False
         self._emit("info", "kim shut down")
+
+    # ------------------------------------------------------------------ #
+    # fly-scan stream (position recorded continuously)
+    # ------------------------------------------------------------------ #
+    def stream_start(self, rate_hz: float | None = None) -> int:
+        """Record the position of all three axes from now on, time stamped.
+
+        For scan-core's fly scan, which bins a detector by where the stage
+        MEASURABLY was rather than where it was sent. On this open-loop
+        stage "measured" means the controller's step counter -- the best
+        readback it has, but not a sensor: slip-stick steps vary, so the
+        counter drifts from the true position over a long scan (seen on the
+        rig: ~26 um over a 525-point raster). A fly image is then regular
+        in COUNTS, which is exactly as true as a stepped image here.
+        """
+        self.stream_stop()
+        rate = min(max(float(rate_hz or STREAM_HZ), 1.0), STREAM_HZ_MAX)
+        sid = self.stream.start()
+        self._stream_stop.clear()
+        self._stream_thread = threading.Thread(
+            target=self._stream_loop, args=(1.0 / rate,), name="kim-stream", daemon=True)
+        self._stream_thread.start()
+        return sid
+
+    def stream_stop(self) -> dict:
+        """Stop the sampler and return what it recorded since the last read."""
+        self._stream_stop.set()
+        th, self._stream_thread = self._stream_thread, None
+        if th is not None and th is not threading.current_thread():
+            th.join(timeout=2.0)
+        return self.stream.stop()
+
+    def _stream_loop(self, period: float) -> None:
+        next_t = time.monotonic()
+        while not self._stream_stop.is_set():
+            try:
+                # the stamp is taken between the reads, so it sits in the
+                # middle of the three axes' sample times
+                steps = [self.backend.read_position(a) for a in range(3)]
+                t = time.time()
+                self.stream.append(t, [self.steps_to_um(a, steps[a]) for a in range(3)])
+            except Exception:
+                pass                      # a failed read is a gap, not a crash
+            next_t += period
+            wait = next_t - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)          # high-resolution on Windows, unlike Event.wait
+            else:
+                next_t = time.monotonic()
 
     def status(self) -> KimStatus:
         """Snapshot of live state.  NEVER raises."""

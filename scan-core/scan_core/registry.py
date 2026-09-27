@@ -15,12 +15,20 @@ show a real resonance line and a spatial spot — no hardware needed.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import numpy as np
 
 
 class Parameter:
+    #: A CONTINUOUS record of this parameter, for a fly scan (flyscan.py):
+    #: the StreamSpec that records it, and the name of its channel in that
+    #: stream. None = it can only be read one value at a time. Class-level
+    #: defaults, so every existing Parameter has them without being touched.
+    stream = None
+    stream_channel = None
+
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
         self.label = label
@@ -33,11 +41,26 @@ class Settable(Parameter):
         super().__init__(id, label, unit, "settable")
         self.limits = tuple(limits)     # (min, max) in `unit`
         self._set, self._get = set_fn, get_fn
+        import inspect
+        try:
+            self._takes_timeout = "timeout_s" in inspect.signature(set_fn).parameters
+        except (TypeError, ValueError):
+            self._takes_timeout = False
 
-    def set(self, value: float):
+    def set(self, value: float, timeout_s: float | None = None):
+        """Set and BLOCK until settled. Returns the (clamped) value sent.
+
+        `timeout_s` overrides the settle timeout for this one call, for a
+        set_fn that accepts it (the manifest's do). A fly scan needs it: its
+        "set" is a slow move across the whole row, which can take far longer
+        than the module's default wait for an ordinary step.
+        """
         lo, hi = self.limits
         value = max(lo, min(hi, float(value)))   # clamp: the safety envelope lives here
-        self._set(value)                          # (real adapter blocks until settled)
+        if timeout_s is not None and self._takes_timeout:
+            self._set(value, timeout_s=timeout_s)
+        else:
+            self._set(value)                      # (real adapter blocks until settled)
         return value
 
     def get(self) -> float:
@@ -104,6 +127,76 @@ class AcquireSpec:
     def wait(self):
         if self._wait:
             self._wait()
+
+
+class StreamSpec:
+    """A CONTINUOUS record of some channels of one instrument, for a fly scan.
+
+    An acquisition (AcquireSpec) answers "give me one settled value, now". A
+    stream answers "record everything you see, with the time you saw it, until
+    I ask for it" -- which is what a fly scan needs: the stage moves slowly and
+    without stopping, the lock-in and the position readback are both recorded
+    all the way, and flyscan.py then works out which samples fell into which
+    pixel from the MEASURED position.
+
+    One StreamSpec per instrument group, shared by every parameter recorded in
+    it (hf2's x1, y1, r1 ... all come off one demodulator stream), exactly as
+    detectors share an AcquireSpec: the engine starts, reads and stops it once.
+
+    read() and stop() return a dict with numpy arrays:
+
+        {"t": [...],                          # seconds, THIS PC's time.time()
+         "values": {channel: [...]},          # one array per channel, same length
+         "delay_s": {channel: seconds},       # how late each channel is (filter lag)
+         "overflow": bool}                    # samples were lost: buffer too small
+
+    Times are on this computer's clock: the module stamps them on its own
+    clock and the wire reader (manifest.py) converts, so two instruments on
+    two PCs still line up.
+
+    `delay_s` is the channel's own lag. A lock-in's output at time t is the
+    input averaged over the preceding few time constants, so it describes
+    where the stage WAS, not where it is; flyscan.py moves each sample back by
+    this much before looking up the position. A module states it because only
+    the module knows its filter settings as they are right now.
+    """
+
+    def __init__(self, group: str, start_fn, read_fn, stop_fn=None):
+        self.group = group
+        self._start, self._read, self._stop = start_fn, read_fn, stop_fn
+
+    def start(self):
+        """Clear anything recorded and start recording."""
+        self._start()
+
+    def read(self) -> dict:
+        """Everything recorded since the last read (or the start); drains it."""
+        return normalize_chunk(self._read())
+
+    def stop(self) -> dict:
+        """Stop recording; returns whatever was recorded since the last read."""
+        if self._stop is None:
+            return normalize_chunk(self._read())
+        return normalize_chunk(self._stop())
+
+
+def normalize_chunk(chunk) -> dict:
+    """A stream reply as numpy arrays; None (JSON's NaN) becomes nan."""
+    chunk = chunk or {}
+
+    def arr(xs):
+        return np.array([np.nan if v is None else v for v in (xs if xs is not None else [])],
+                        dtype=float)
+
+    t = arr(chunk.get("t"))
+    values = {str(k): arr(v) for k, v in (chunk.get("values") or {}).items()}
+    for k, v in values.items():
+        if len(v) != len(t):
+            raise ValueError(f"stream channel {k!r} has {len(v)} samples for "
+                             f"{len(t)} time stamps")
+    delay = {str(k): float(v or 0.0) for k, v in (chunk.get("delay_s") or {}).items()}
+    return {"t": t, "values": values, "delay_s": delay,
+            "overflow": bool(chunk.get("overflow", False))}
 
 
 class Gettable(Parameter):
@@ -266,6 +359,42 @@ class SimState:
         self._vna_freqs = np.linspace(500e6, 6.0e9, 401)
         self._vna_buffer = None
         self._vna_ref = None          # the stored reference trace (take_vna_reference)
+        # A stage that takes TIME to move, for fly scans. 0 = the old
+        # behaviour: a position setpoint is reached instantly. Above 0 a set
+        # of pos_x / pos_y blocks while the position travels there at this
+        # speed, and a stream sampling x_um meanwhile sees it move.
+        self.stage_speed_um_s = 0.0
+        # The time constant of the simulated lock-in's filter as seen by its
+        # STREAM (the one-value reads stay instant, as they always were).
+        self.lockin_tc_s = 0.01
+        self._move_gen = 0
+        self._move_lock = threading.Lock()
+
+    def move(self, attr: str, target: float) -> None:
+        """Set a position, and at a finite stage speed TRAVEL there (blocking).
+
+        A newer move of the same stage supersedes one in flight: that one stops
+        where it is and returns -- which is how a fly scan's Abort stops the
+        stage (it sends a move to wherever the stage is).
+        """
+        speed = float(self.stage_speed_um_s)
+        with self._move_lock:
+            self._move_gen += 1
+            me = self._move_gen
+        p0 = float(getattr(self, attr))
+        if speed <= 0 or p0 == target:
+            setattr(self, attr, float(target))
+            return
+        t0 = time.monotonic()
+        dur = abs(target - p0) / speed
+        while True:
+            frac = min(1.0, (time.monotonic() - t0) / dur)
+            if self._move_gen != me:
+                return                                  # superseded: stay put
+            setattr(self, attr, p0 + (target - p0) * frac)
+            if frac >= 1.0:
+                return
+            time.sleep(0.002)
 
     def _pattern(self) -> tuple[float, float]:
         """(coverage, resonance shift in MHz) at the current (x, y).
@@ -440,9 +569,16 @@ def build_sim_registry() -> Registry:
     settable("rf_power",  "RF power",       "dBm", (-30, 15),   "rf_power_dBm")
     settable("rf_phase",  "RF phase",       "deg", (-180, 180), "rf_phase_deg")
     settable("device_v",  "Device voltage", "V",   (-10, 10),   "device_V")
-    settable("pos_x",     "Position X",     "um",  (-100, 100), "x_um")
-    settable("pos_y",     "Position Y",     "um",  (-100, 100), "y_um")
+    # X and Y go through s.move(): instant at stage_speed 0 (as always), a real
+    # timed travel above it -- which is what a fly scan needs to fly over.
+    for pid, label, attr in (("pos_x", "Position X", "x_um"),
+                             ("pos_y", "Position Y", "y_um")):
+        reg.add(Settable(pid, label, "um", (-100, 100),
+                         set_fn=lambda v, a=attr: s.move(a, v),
+                         get_fn=lambda a=attr: getattr(s, a)))
     settable("pos_z",     "Position Z",     "um",  (-50, 50),   "z_um")
+    settable("stage_speed", "Stage speed (0 = instant)", "um/s", (0, 500),
+             "stage_speed_um_s")
 
     reg.add(Gettable("lockin_r",   "Lock-in R",   "V",   lambda: s.lockin()["R"]))
     reg.add(Gettable("lockin_x",   "Lock-in X",   "V",   lambda: s.lockin()["x"]))
@@ -479,5 +615,45 @@ def build_sim_registry() -> Registry:
                           help="Stands in for camera.autofocus: waits 50 ms. For "
                                "trying a THROUGHOUT routine without the rig."))
 
+    _attach_sim_streams(reg, s)
     reg._state = s     # handy for tests
     return reg
+
+
+def _attach_sim_streams(reg: Registry, s: SimState) -> None:
+    """Give the simulator what a fly scan needs: continuous records.
+
+    Two SEPARATE streams, as on the rig, where the stage and the lock-in are
+    two instruments with their own sampling clocks: the stage position at
+    500 Hz and the lock-in at 200 Hz behind a 2nd-order filter of
+    `lockin_tc_s`. flyscan.py has to line the two up by their time stamps and
+    undo the filter lag -- exactly the job it has on the real rig.
+    """
+    from .sim_stream import SimStreamer
+
+    stage = SimStreamer("sim.stage", lambda: {"x": s.x_um, "y": s.y_um},
+                        rate_hz=500.0)
+
+    def raw_lockin():
+        v = s.lockin()
+        return {"x": v["x"], "y": v["y"], "aux": v["aux"]}
+
+    def derive(v):
+        v = dict(v)
+        v["R"] = float(np.hypot(v["x"], v["y"]))
+        v["phi"] = float(np.rad2deg(np.arctan2(v["y"], v["x"])))
+        return v
+
+    lockin = SimStreamer("sim.lockin", raw_lockin, rate_hz=200.0,
+                         filtered=("x", "y"), tau_fn=lambda: s.lockin_tc_s,
+                         order=2, derive=derive)
+    lockin.derived = {"R", "phi"}
+
+    stage_spec, lockin_spec = stage.spec(), lockin.spec()
+    for pid, ch in (("pos_x", "x"), ("pos_y", "y")):
+        p = reg.get(pid)
+        p.stream, p.stream_channel = stage_spec, ch
+    for pid, ch in (("lockin_r", "R"), ("lockin_x", "x"), ("lockin_y", "y"),
+                    ("lockin_phi", "phi"), ("aux_in", "aux")):
+        p = reg.get(pid)
+        p.stream, p.stream_channel = lockin_spec, ch

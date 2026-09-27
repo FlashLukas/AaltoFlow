@@ -170,16 +170,24 @@ def run(recipe, registry, on_progress=None, should_abort=None,
             # magnet ramp and reference sweep would otherwise be spread over
             # the points as if every one of them were that slow.
             t0 = time.monotonic()
-            aborted = _sweep(recipe, registry, compiled, dims, shape, total,
-                             dets, det_axes, det_coords, data, acquire_groups,
-                             prev, ctx, t0, on_progress, should_abort, on_point,
-                             created_iso)
+            # A FLY axis (innermost, flyscan.py) is one continuous move per row
+            # instead of a point-by-point odometer. Every other scan takes
+            # _sweep, unchanged.
+            if dims and dims[-1].kind == "fly":
+                from .flyscan import fly_sweep as sweep
+            else:
+                sweep = _sweep
+            aborted = sweep(recipe, registry, compiled, dims, shape, total,
+                            dets, det_axes, det_coords, data, acquire_groups,
+                            prev, ctx, t0, on_progress, should_abort, on_point,
+                            created_iso)
     except ScanAborted:
         after_abort()
         raise
 
     ds = _to_dataset(recipe, compiled, registry, data, created_iso,
-                     time.monotonic() - t_start, det_axes, det_coords)
+                     time.monotonic() - t_start, det_axes, det_coords,
+                     var_attrs=ctx.get("var_attrs"))
     try:
         after_scan(aborted=aborted)
     except Exception as exc:
@@ -275,7 +283,10 @@ def _units(registry, pid: str) -> str:
 
 
 def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
-                det_axes=None, det_coords=None) -> xr.Dataset:
+                det_axes=None, det_coords=None, var_attrs=None) -> xr.Dataset:
+    """Build the Dataset. `var_attrs` = {name: {attr: value}} merged into a
+    variable's or coordinate's attributes (a fly scan's per-pixel count and
+    spread are not registry parameters, so their units come from here)."""
     dims = compiled.dims
     dim_names = [d.name for d in dims]
     det_axes = det_axes or {}
@@ -332,6 +343,11 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                            {"units": _units(registry, pid), "fixed": "true"})
         except (TypeError, ValueError):
             continue
+
+    for name, extra in (var_attrs or {}).items():
+        target = data_vars.get(name) or coords.get(name)
+        if target is not None and len(target) == 3:
+            target[2].update(extra)
 
     ds = xr.Dataset(data_vars=data_vars, coords=coords)
     ds.attrs.update(

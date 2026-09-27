@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # find scan_cor
 from scan_core import Recipe, build_sim_registry, run
 from scan_core.errors import RoutineError, ScanAborted
 from scan_core.preview import preview_axis, step_summary
+from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
 from scan_core import scan_queue
 from suite_common import title as suite_title
 from apps.data_view import DataView
@@ -81,7 +82,7 @@ class AxisRow(QtWidgets.QFrame):
     move = QtCore.Signal(object, int)      # (self, +1/-1)
     preview = QtCore.Signal(object)        # double-click: show the actual setpoints
 
-    def __init__(self, param, level_getter):
+    def __init__(self, param, level_getter, speed_param=None):
         super().__init__()
         self.param = param
         self.raw = None                    # set for non-editable (raster/zip) rows
@@ -130,6 +131,10 @@ class AxisRow(QtWidgets.QFrame):
             box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
             tl = QtWidgets.QLabel(t); tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
             box.addWidget(tl); box.addWidget(w); lay.addLayout(box)
+            if w is self.num:
+                self.num_lbl = tl
+
+        self._build_fly(lay, speed_param)
 
         # A spin box that silently refuses to go above 160 is baffling unless
         # you can see that 160 is the closed-loop ceiling -- and these limits
@@ -146,6 +151,73 @@ class AxisRow(QtWidgets.QFrame):
         dn.clicked.connect(lambda: self.move.emit(self, +1))
         rm.clicked.connect(lambda: self.remove.emit(self))
         lay.addWidget(up); lay.addWidget(dn); lay.addWidget(rm)
+
+    def _build_fly(self, lay, speed_param):
+        """The FLY option: move continuously across this axis instead of
+        stopping at every point (scan_core/flyscan.py).
+
+        Offered only for a position whose module STREAMS it -- binning by the
+        measured position is the whole idea, so without a recorded position
+        there is nothing to bin by -- and only meaningful on the innermost
+        axis (the summary says so if it is ticked anywhere else). With it
+        ticked, `pts` become pixels and a speed box appears.
+        """
+        #: the settable that sets this position's speed (find_speed_param);
+        #: None = the module offers none
+        self.speed_param = speed_param
+        self.fly = QtWidgets.QCheckBox()
+        streams = getattr(self.param, "stream", None) is not None
+        self.fly.setEnabled(streams)
+        self.fly.setToolTip(
+            "FLY: move continuously from 'from' to 'to' at the speed given,\n"
+            "recording the detectors and the MEASURED position all the way,\n"
+            "then average the samples per pixel. Innermost axis only; every\n"
+            "detector must be one its module can stream."
+            if streams else
+            f"{self.param.label} cannot be flown: its module does not record\n"
+            f"the position continuously (no stream in its describe).")
+        unit = self.param.unit or ""
+        self.speed = QtWidgets.QDoubleSpinBox()
+        self.speed.setDecimals(3)
+        lo, hi = 0.001, 1e4
+        if speed_param is not None:
+            slo, shi = speed_param.limits
+            lo = max(lo, float(slo)) if math.isfinite(slo) else lo
+            hi = min(hi, float(shi)) if math.isfinite(shi) else hi
+        self.speed.setRange(lo, max(lo, hi))
+        current = float("nan")
+        if speed_param is not None:
+            try:
+                current = float(speed_param.get())
+            except Exception:
+                pass
+        self.speed.setValue(current if math.isfinite(current) and current > 0
+                            else min(max(1.0, lo), hi))
+        self.speed.setFixedWidth(84)
+        self.speed.setToolTip(
+            (f"Set on {speed_param.id} for the fly move; the old speed is put\n"
+             f"back for the approach to each row and at the end.")
+            if speed_param is not None else
+            "The module offers no speed setting: the stage moves at whatever\n"
+            "speed it has. This number is then only used for the time estimate.")
+        for w, t in ((self.fly, "fly"), (self.speed, f"{unit}/s")):
+            box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
+            tl = QtWidgets.QLabel(t); tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+            box.addWidget(tl); box.addWidget(w); lay.addLayout(box)
+            if w is self.speed:
+                self.speed_lbl = tl
+        self.fly.toggled.connect(self._fly_toggled)
+        self.speed.valueChanged.connect(lambda *_: self.changed.emit())
+        self._fly_toggled(False)
+
+    def _fly_toggled(self, on):
+        self.speed.setVisible(on)
+        self.speed_lbl.setVisible(on)
+        self.num_lbl.setText("pixels" if on else "pts")
+        self.changed.emit()
+
+    def is_fly(self) -> bool:
+        return self.fly.isChecked()
 
     def _finite_limits(self):
         """The parameter's limits, with infinities replaced by a usable span.
@@ -269,6 +341,13 @@ class AxisRow(QtWidgets.QFrame):
     def to_axis(self) -> dict:
         if self.raw is not None:                 # loaded raster/zip: pass through
             return self.raw
+        if self.is_fly():
+            ax = {"type": "fly", "param": self.param.id,
+                  "start": self.start.value(), "stop": self.stop.value(),
+                  "num": self.num.value(), "speed": self.speed.value()}
+            if self.speed_param is not None:
+                ax["speed_param"] = self.speed_param.id
+            return ax
         return {"type": "linear", "param": self.param.id,
                 "start": self.start.value(), "stop": self.stop.value(),
                 "num": self.num.value()}
@@ -2044,7 +2123,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def add_axis(self, pid, raw=None):
         p = self.registry.get(pid)
-        row = AxisRow(p, self._level_of)
+        sp = find_speed_param(self.registry, pid)
+        row = AxisRow(p, self._level_of,
+                      speed_param=self.registry.get(sp) if sp else None)
         row.raw = raw
         row.changed.connect(self._rebuild_summary)
         row.remove.connect(self._remove_row)
@@ -2315,12 +2396,24 @@ class ScanBuilder(QtWidgets.QMainWindow):
             if not pid or self.registry.get(pid) is None:
                 missing.append(pid or f"<{ax.get('type', 'axis')}>")
                 continue
-            if ax.get("type") == "linear":
+            if ax.get("type") in ("linear", "fly"):
                 self.add_axis(pid)
                 row = self.rows[-1]
                 if "start" in ax: row.start.setValue(float(ax["start"]))
                 if "stop" in ax: row.stop.setValue(float(ax["stop"]))
                 if ax.get("num"): row.num.setValue(int(ax["num"]))
+                if ax.get("type") == "fly":
+                    sp = ax.get("speed_param")
+                    if sp and self.registry.get(sp) is None:
+                        missing.append(sp)
+                    row.fly.setChecked(True)
+                    if ax.get("speed") is not None:
+                        row.speed.setValue(float(ax["speed"]))
+                    if (ax.get("readback") or ax.get("lag_correction") is False
+                            or ax.get("timeout_s") or (sp and row.speed_param is not None
+                                                       and sp != row.speed_param.id)):
+                        # options the row has no box for: keep the axis as it was
+                        row.raw = dict(ax)
             else:
                 # raster/zip/array: keep as a pass-through row on the first member
                 self.add_axis(pid, raw=ax)
@@ -2387,11 +2480,21 @@ class ScanBuilder(QtWidgets.QMainWindow):
         comp = recipe.compile(self.registry)
         shape = "×".join(str(s) for s in comp.shape)
         n = comp.n_points
-        eta = n * self.per_pt.value()
-        self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} pts")
+        fly = fly_axis(recipe)
+        if fly is not None:
+            # A fly row is one move: its time is distance / speed, plus the
+            # approach to its start (a settle, costed like one point).
+            rows = max(1, n // max(1, comp.dims[-1].size))
+            eta = rows * (row_seconds(fly) + self.per_pt.value())
+            how = f"fly: {rows} row(s) × {row_seconds(fly):.3g} s"
+            self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} px (fly)")
+        else:
+            eta = n * self.per_pt.value()
+            how = f"@ {self.per_pt.value():g}s/pt"
+            self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} pts")
         self.detail.setText(f"dims: {', '.join(d.name for d in comp.dims)}   ·   "
                             f"ETA ≈ {int(eta // 60):d}m {int(eta % 60):02d}s "
-                            f"@ {self.per_pt.value():g}s/pt"
+                            f"{how}"
                             + ("   ·   zig-zag" if self.zigzag_box.isChecked() else "")
                             + conditions)
 

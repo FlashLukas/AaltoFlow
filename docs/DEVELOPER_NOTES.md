@@ -139,6 +139,15 @@ still assumes piezo/zpiezo.
   and is the first manifest whose SHAPE changes with a mode (freq is a control on
   internal reference, an indicator on external) and whose detectors use an
   `acquire` block keyed on the trigger reply (section 7.11).
+- **Streams (optional, 2026-09-27) -- for FLY SCANS.** A parameter whose
+  descriptor carries `"stream": {"group", "channel"}` can be recorded
+  continuously: verbs `stream_start` / `stream_read` / `stream_stop`, replies
+  `{"stream": {"t", "values", "delay_s", "overflow", "now"}}` with `time.time()`
+  stamps and each channel's lag (a lock-in: order x tau). scan-core's `fly` axis
+  moves a stage without stopping and bins the streamed detectors by the streamed
+  position. hf2 (all scan detectors) and kim (position_x/y/z) stream so far.
+  Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
+  checks the verbs wherever a stream is declared.
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the
   table below mirrors them) and can be overridden per PC in the launcher; every
@@ -448,6 +457,26 @@ zpiezo has no GUI.
     fresh installs included, while an EXISTING environment kept working, which
     hides it. Fix: `uv lock --upgrade-package aaltoview` and commit the lock.
     Rewriting a dependency's history means relocking every project that pins it.
+34. **On Windows a timed `Event.wait()` sleeps at least one 15.6 ms timer tick**
+    (2026-09-27, found building the fly scan). hf2's poll thread ran
+    `while not stop.wait(1 / poll_hz)`, and its "50 Hz" was really ~32 Hz; the
+    simulator's "200 Hz" stream was ~130 Hz. Nothing looked wrong until a fly
+    scan counted a third fewer samples per pixel than the arithmetic said.
+    `time.sleep()` uses a high-resolution timer on Windows (Python >= 3.11)
+    and is exact to ~1 ms. For a periodic loop: schedule on DEADLINES
+    (`next_t += period; time.sleep(next_t - now)`), and check the stop event
+    between iterations instead of sleeping on it. `threading.Event.wait`,
+    `Lock.acquire(timeout=)` and `Queue.get(timeout=)` all have the coarse
+    tick; `time.time()` itself is fine (precise since Python 3.13).
+35. **A settle rule that is right for a STEP can end a fly row before it
+    starts** (2026-09-27). kim declares its position's settle as
+    `flag_only(moving)`. Right after `move_to`, the cached status can still say
+    "not moving" (gotcha #2), so the blocking set returns at once -- for a step
+    that only costs a point measured early; for a fly scan it ended the ROW
+    before the stage had left, with every pixel empty. The fly engine therefore
+    ends a row on the MEASURED position (at the far end and at rest, or stalled
+    for 1 s -- logged), never on the settle rule alone. General lesson: a
+    "done" signal is only as good as the wait it was designed for.
 
 ---
 
@@ -462,12 +491,12 @@ cd "<root>\kim-control"
 .\dev.ps1 run python scripts\smoke_test.py
 ```
 
-Expected test counts (measured 2026-09-15; scan-core/vna/mag2d 2026-09-17): clMag 22 · smb 29 ·
-stage 50 · piezo 37 · camera 119 · zpiezo 14 · kim 87 · hf2 52 · pm16 44 · vna 110 · mag2d 46 ·
-mag2dcal 96 · ppms 43 · scan-core 265 · mission-control 12 · suite-common 45 = **1071**
-(2026-09-25: ppms added, vna +14 for the C1209 and the ppms field source)
+Expected test counts (all measured 2026-09-27): clMag 22 · smb 29 · stage 50 · piezo 37 · camera 119 · zpiezo 14 · kim 92 · hf2 60 · pm16 44 · vna 110 · mag2d 46 ·
+mag2dcal 96 · ppms 43 · scan-core 346 · mission-control 16 · suite-common 53 = **1177**
+(2026-09-27: fly scans -- scan-core +38 over 308, hf2 +8, kim +5)
 (+ aaltoview 42, own repo). Plus the contract check:
-`python tools/check_modules.py --live` (116 checks, 0 failed on 2026-09-25).
+`python tools/check_modules.py --live` (118 checks, 0 failed on 2026-09-27; since
+2026-09-27 it also exercises the stream verbs of every module that declares one).
 
 **Offscreen GUI render**: this is now a tool, not a recipe to retype ---
 `tools/render_panels.py` (one panel, run from inside that project) and

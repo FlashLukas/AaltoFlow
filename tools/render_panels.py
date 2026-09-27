@@ -92,6 +92,8 @@ SIZES = {
     "suite-navigator": (1500, 950),
     "suite-queue": (1500, 950),
     "suite-queue-dialog": (760, 430),
+    "suite-fly-scan": (1500, 950),
+    "suite-fly": (1500, 950),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
 }
@@ -568,6 +570,41 @@ def _queue_running(win):
                  fmr("FMR map 14 dBm", 41, 61, 14.0)])
 
 
+def _fly(run: bool):
+    """A FLY scan over the simulated islands: Y stepped, X flown continuously
+    at 60 um/s, every other row backwards (zig-zag). The simulator's stage
+    really travels and its lock-in stream really lags behind a filter, so the
+    image is what the lag correction makes of a genuinely flown scan.
+    `run=False` poses the Scan tab only (the ticked fly row and its summary)."""
+    def warm_up(win):
+        from PySide6 import QtCore
+        win.use_simulator()
+        b = win.builder
+        b.name_edit.setText("fly over the islands")
+        b.name_edit.setCursorPosition(0)
+        b.registry._state.lockin_tc_s = 0.003
+        b.add_fixed("field", 40.0)
+        b.add_fixed("rf_freq", 900.0)
+        b.add_fixed("rf_power", 8.0)
+        b.add_axis("pos_y")
+        b.rows[0].start.setValue(-45.0); b.rows[0].stop.setValue(45.0)
+        b.rows[0].num.setValue(31)
+        b.add_axis("pos_x")
+        row = b.rows[1]
+        row.start.setValue(-45.0); row.stop.setValue(45.0); row.num.setValue(91)
+        row.fly.setChecked(True)
+        # 1 um pixels at 60 um/s with the sim's 200 Hz stream: ~3 samples each
+        row.speed.setValue(60.0)
+        b.zigzag_box.setChecked(True)
+        for it in b._det_items():
+            it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole)
+                             == "lockin_r" else QtCore.Qt.Unchecked)
+        b.per_pt.setValue(0.05)
+        if run:
+            b.run_scan(block=True)
+    return warm_up
+
+
 def _scan_3d_then_show_data(win):
     """Frequency x Y x X over the simulated patterned sample.
 
@@ -881,6 +918,8 @@ TARGETS = {
     "suite-navigator": _suite("Navigator", _navigator_demo, settle=2.0),
     "suite-queue": _suite("Measurement", _queue_running, settle=2.5),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),
+    "suite-fly-scan": _suite("Scan", _fly(run=False), settle=2.0),
+    "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,

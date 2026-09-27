@@ -426,6 +426,62 @@ REQ socket and fails the scan. If a driver leaves you no choice, pass
 reports readiness in `status` is the suite's contract, and it keeps the command
 thread free.
 
+### Streams — recording continuously, for a fly scan
+
+A **fly scan** (scan-core, `type: fly` axis) does not stop at points: it moves
+a stage slowly across a whole row while the detectors AND the stage position are
+recorded continuously, then averages the detector samples per pixel of
+**measured** position. For that a module offers a *stream*: every reading it
+takes anyway, with the time it was taken. A parameter that can be recorded this
+way declares (added 2026-09-27):
+
+```python
+"stream": {"group": "demod", "channel": "x1"}
+```
+
+`group` = the parameters recorded together (one start / read / stop for all of
+them, like an acquire group); `channel` = this parameter's name in the stream
+reply. Declare it on the DETECTORS a fly scan should record and on the POSITION
+it should bin by (kim: `position_x/y/z`, group `position`). The same parameter
+keeps its `acquire` block for ordinary stepped scans.
+
+Three verbs, all optional -- a module without `stream` blocks needs none:
+
+    stream_start  -> {"ok": true, "stream_id": n}     clear the buffer, start recording
+    stream_read   -> {"ok": true, "stream": {...}}    everything since the last read (drains it)
+    stream_stop   -> {"ok": true, "stream": {...}}    the rest, and stop
+
+    "stream": {"id": n,
+               "t": [...],                            # time.time() of each reading
+               "values": {"x1": [...], ...},          # one list per channel, len(t) each; NaN -> null
+               "delay_s": {"x1": 0.04, ...},          # how LATE each channel is (see below)
+               "overflow": false,                     # the bounded buffer dropped samples
+               "now": 1790499384.81}                  # time.time() at the reply
+
+Rules that matter:
+
+* **Stamp with `time.time()`**, the wall clock, not `time.monotonic()`: the
+  coordinator lines this stream up with another instrument's, possibly on
+  another PC, and only wall time is shared. `now` lets scan-core estimate the
+  offset between the two clocks (from the read with the shortest round trip).
+* **`delay_s` is the channel's lag, stated live.** A lock-in's output at time t
+  is its input averaged over the preceding few time constants, so it describes
+  where the stage WAS. For n identical RC stages the right number is the
+  **group delay n·τ** (a convolution moves a feature's centroid by the kernel's
+  mean), with the τ the hardware actually applied. Unfiltered channels (a
+  position counter, AUX IN) say 0. scan-core moves every sample back by it.
+* **Record in the thread that already reads the hardware** (hf2's poll thread),
+  or in a small sampler thread started by `stream_start` (kim), under the same
+  lock as every other backend call. `append` must stay cheap.
+* **Bound the buffer** and say `overflow` when it drops samples.
+* **Time the loop with `time.sleep`, not `Event.wait(period)`**: on Windows a
+  timed wait rounds up to the 15.6 ms system tick (docs/DEVELOPER_NOTES.md
+  gotcha #34), and a "50 Hz" stream quietly runs at 32.
+
+The recorder is `stream.py` (`StreamRecorder`), copied into each module that
+streams, as `theme.py` is. `tools/check_modules.py --live` checks the verbs for
+every module that declares a stream.
+
 ### Settle policies
 
 A control declares how a caller knows it has arrived. This is the module's
