@@ -6,8 +6,9 @@ adding a module meant six edits and forgetting one broke something quietly.
 
 Now there are exactly two sources, and both are data, not code:
 
-1. `<root>/<folder>/module.toml` -- written by whoever builds the module, and
-   committed with it. Identity only: key, name, description, icon, default
+1. `<root>/modules/<category>/<folder>/module.toml` -- written by whoever
+   builds the module, and committed with it (see `manifest_paths` for where
+   they are looked for). Identity only: key, name, description, icon, default
    ports, which scripts to run. The module's VARIABLES are deliberately not
    here: the running service reports them through `describe`, and a second
    copy would go stale.
@@ -34,6 +35,10 @@ from pathlib import Path
 
 MANIFEST = "module.toml"
 LOCAL_FILE = "suite_local.json"
+#: The folder that holds the instrument modules, sorted by what they are FOR:
+#: <root>/modules/<category>/<key>-control. The suite's own projects
+#: (mission-control, scan-core, suite-common) stay directly in <root>.
+MODULES_DIR = "modules"
 
 #: The product. A PC can add the name of the SETUP it drives ("TR-MOKE",
 #: "VNA-FMR rig") with set_setup_name(); titles then lead with that, so a lab
@@ -77,7 +82,7 @@ class ManifestError(ValueError):
 
 
 def default_root() -> Path:
-    """The suite's root folder: where the <module>-control folders live.
+    """The suite's root folder: the one that holds modules/, scan-core, ...
 
     This file sits at <root>/suite-common/src/suite_common/modules.py, and the
     package is installed EDITABLE, so __file__ is the real source path and four
@@ -232,20 +237,72 @@ def parse_manifest(path: Path) -> ModuleSpec:
     )
 
 
+def manifest_paths(root: Path) -> list[Path]:
+    """Every module.toml of a suite root, in the order discovery trusts them.
+
+    Since 2026-09-27 a module lives at <root>/modules/<category>/<folder>/
+    (the canonical layout, searched FIRST). A module.toml directly one level
+    below the root is still found -- that is the layout before the move, and
+    what somebody gets by dropping a module folder into the root by hand -- but
+    it comes second, so when the same module is in both places the new copy
+    wins (discover_local reports the old one).
+
+    THE one place that knows where modules sit: discovery, the launcher's
+    rescan, the tools and the installer generator all call this.
+    """
+    root = Path(root)
+    nested = sorted(root.glob(f"{MODULES_DIR}/*/*/{MANIFEST}"))
+    flat = sorted(root.glob(f"*/{MANIFEST}"))
+    return nested + flat
+
+
+def module_home(root: Path, category: str, folder: str) -> Path:
+    """Where a module with this category and folder name belongs."""
+    return Path(root) / MODULES_DIR / category / folder
+
+
+def is_legacy_location(root: Path, folder: Path) -> bool:
+    """True for a module folder sitting directly in the root (the old layout)."""
+    try:
+        return Path(folder).resolve().parent == Path(root).resolve()
+    except OSError:
+        return False
+
+
+def rel_to_root(root: Path, folder: Path) -> str:
+    """`folder` relative to the suite root with / separators
+    ("modules/motion/kim-control"), or the absolute path if it is outside."""
+    try:
+        return Path(folder).resolve().relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        return str(folder)
+
+
 def discover_local(root: Path) -> tuple[list[ModuleSpec], list[str]]:
-    """Every <root>/<folder>/module.toml, one level deep."""
+    """Every module under `root` (see manifest_paths for where).
+
+    A key found twice is a PROBLEM, never silently resolved: the copy under
+    modules/ is used (it is searched first) and the message names both folders.
+    The usual cause is an old <key>-control folder left in the root after the
+    move to modules/ -- tools/migrate_layout.py tidies that up.
+    """
+    root = Path(root)
     specs, problems, seen = [], [], {}
-    for path in sorted(Path(root).glob(f"*/{MANIFEST}")):
+    for path in manifest_paths(root):
         try:
             spec = parse_manifest(path)
         except ManifestError as exc:
             problems.append(str(exc))
             continue
+        where = rel_to_root(root, path.parent)
         if spec.key in seen:
-            problems.append(f"{path}: key {spec.key!r} is already used by "
-                            f"{seen[spec.key]}; this one is ignored")
+            hint = (" (an old folder left over from before the move to modules/? "
+                    "run tools/migrate_layout.py)"
+                    if is_legacy_location(root, path.parent) else "")
+            problems.append(f"module {spec.key!r} exists twice: {seen[spec.key]} and "
+                            f"{where}; using {seen[spec.key]}, ignoring {where}{hint}")
             continue
-        seen[spec.key] = path.parent.name
+        seen[spec.key] = where
         specs.append(spec)
     return specs, problems
 

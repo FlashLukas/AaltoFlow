@@ -1,7 +1,7 @@
 """suite_common: what the AaltoFlow suite needs to know about its own modules.
 
     from suite_common import discover
-    found = discover()               # every <folder>/module.toml + remote services
+    found = discover()               # every modules/<category>/<folder>/module.toml + remotes
     for m in found.modules:
         print(m.id, m.name, m.host, m.cmd)
 
@@ -10,8 +10,9 @@ Used by mission-control (the launcher) and scan-core. Standard library only.
 
 from .catalog import (InstallPlan, ModuleSource, build_catalog, catalog_text,
                       env_steps, install, is_lab_data, plan_install, search)
-from .modules import (CATEGORIES, ENDPOINTS_ENV, PRODUCT, ROOT_ENV, getenv, set_setup_name,
-                      setup_name, title)
+from .modules import (CATEGORIES, ENDPOINTS_ENV, MODULES_DIR, PRODUCT, ROOT_ENV, getenv,
+                      is_legacy_location, manifest_paths, module_home, rel_to_root,
+                      set_setup_name, setup_name, title)
 from .modules import (Discovery, ManifestError, ModuleSpec, add_remote,
                       default_root, discover, endpoints_json, exclusion_conflicts,
                       exclusion_pairs, get_setting, mirror_excludes,
@@ -28,7 +29,8 @@ __all__ = [
     "port_conflicts", "probe", "remove_remote", "save_local", "service_args",
     "set_ports", "set_real", "set_setting", "start_order",
     "ENDPOINTS_ENV", "PRODUCT", "ROOT_ENV", "getenv", "set_setup_name",
-    "setup_name", "title",
+    "setup_name", "title", "MODULES_DIR", "manifest_paths", "module_home",
+    "is_legacy_location", "rel_to_root",
     "CATEGORIES", "InstallPlan", "ModuleSource", "build_catalog", "catalog_text",
     "env_steps", "install", "is_lab_data", "plan_install", "search",
     "ImportPlan", "apply_import", "export_bundle", "read_bundle",

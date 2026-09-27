@@ -14,8 +14,8 @@ Two modes.
 
   --lab: the running kim and hf2 services (Mission Control, or two terminals):
 
-      cd ..\\kim-control ; uv run scripts/run_service.py
-      cd ..\\hf2-control ; uv run scripts/run_service.py
+      cd ..\\modules\\motion\\kim-control ; uv run scripts/run_service.py
+      cd ..\\modules\\detector\\hf2-control ; uv run scripts/run_service.py
 
       uv run python run_fly_demo.py --lab --from 0 --to 20 --pixels 41 --speed 4
 

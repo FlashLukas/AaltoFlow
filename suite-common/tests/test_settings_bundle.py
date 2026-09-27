@@ -182,3 +182,57 @@ def test_summary_is_ascii(old, tmp_path):
     bundle = tmp_path / "b.zip"
     B.export_bundle(bundle, old)
     B.summary(B.read_bundle(bundle, old)).encode("ascii")
+
+
+# ---- the layout since 2026-09-27: modules/<category>/<folder> -------------
+
+def _nested(root: Path) -> Path:
+    kim = make_module(root, "modules/motion/kim-control", "kim", 5567)
+    (kim / "kim.ini").write_text("[limits]\nmax = 1\n", encoding="utf-8")
+    (root / "scan-core").mkdir(parents=True)
+    return root
+
+
+def test_a_nested_suite_stores_root_relative_paths(tmp_path):
+    old = _nested(tmp_path / "old")
+    assert B.collect(old) == ["modules/motion/kim-control/kim.ini"]
+    bundle = tmp_path / "b.zip"
+    B.export_bundle(bundle, old)
+    new = tmp_path / "new"
+    make_module(new, "modules/motion/kim-control", "kim", 5567)
+    plan = B.read_bundle(bundle, new)
+    assert [e.path for e in plan.new] == ["modules/motion/kim-control/kim.ini"]
+    B.apply_import(plan, new)
+    assert (new / "modules/motion/kim-control/kim.ini").read_text(
+        encoding="utf-8") == "[limits]\nmax = 1\n"
+
+
+def test_a_bundle_from_before_the_move_lands_in_the_new_folder(old, tmp_path):
+    """`old` is a flat suite (kim-control/..., clMag-control/...), i.e. what a
+    bundle exported before 2026-09-27 contains."""
+    bundle = tmp_path / "b.zip"
+    B.export_bundle(bundle, old)
+    new = tmp_path / "new"
+    make_module(new, "modules/motion/kim-control", "kim", 5567)
+    make_module(new, "modules/field/clMag-control", "clMag", 5555)
+    (new / "mission-control").mkdir()
+    (new / "scan-core").mkdir()
+    plan = B.read_bundle(bundle, new)
+    assert not plan.skipped
+    paths = [e.path for e in plan.new]
+    assert "modules/motion/kim-control/kim.ini" in paths
+    assert "modules/field/clMag-control/Calibrations/old/cal_2025.json" in paths
+    assert "suite_local.json" in paths
+    kim_ini = next(e for e in plan.new if e.path.endswith("kim.ini"))
+    assert "kim-control/kim.ini" in kim_ini.reason     # says where it came from
+    B.apply_import(plan, new)
+    assert (new / "modules/motion/kim-control/px_calibration.json").read_text(
+        encoding="utf-8") == '{"x": 21.1}'
+    assert not (new / "kim-control").exists()          # no stray flat folder
+
+
+def test_an_unknown_nested_module_is_skipped_by_name(tmp_path):
+    new = _nested(tmp_path / "new")
+    bundle = _handmade(tmp_path / "x.zip", {"modules/source/smb-control/smb.ini": "x"})
+    (e,) = B.read_bundle(bundle, new).skipped
+    assert e.reason == "modules/source/smb-control is not installed here"

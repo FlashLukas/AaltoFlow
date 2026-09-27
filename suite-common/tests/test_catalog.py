@@ -21,8 +21,8 @@ from test_modules import make_module
 @pytest.fixture
 def root(tmp_path):
     r = tmp_path / "suite"
-    make_module(r, "kim-control", "kim", 5567, extra="")
-    make_module(r, "hf2-control", "hf2", 5569)
+    make_module(r, "modules/other/kim-control", "kim", 5567, extra="")
+    make_module(r, "modules/other/hf2-control", "hf2", 5569)
     return r
 
 
@@ -71,8 +71,8 @@ def test_the_committed_catalog_is_up_to_date(monkeypatch):
 
 
 def test_search_by_function_and_words(root):
-    _cat(root / "hf2-control", "detector", ["lock-in", "Zurich"])
-    _cat(root / "kim-control", "motion", ["piezo"])
+    _cat(root / "modules/other/hf2-control", "detector", ["lock-in", "Zurich"])
+    _cat(root / "modules/other/kim-control", "motion", ["piezo"])
     mods = M.discover_local(root)[0]
     assert [m.key for m in K.search(mods, category="detector")] == ["hf2"]
     assert [m.key for m in K.search(mods, "LOCK-IN")] == ["hf2"]
@@ -156,7 +156,7 @@ def test_plan_new_update_and_conflicts(root, tmp_path):
     assert plans["lockin-control"].action == "conflict"
     assert "hf2-control" in plans["lockin-control"].reason
     assert plans["hf2-control"].action == "conflict"
-    with K.ModuleSource(root / "kim-control") as src:       # the installed copy itself
+    with K.ModuleSource(root / "modules/other/kim-control") as src:       # the installed copy itself
         assert K.plan_install(src.modules, root)[0].action == "same"
 
 
@@ -175,7 +175,7 @@ def test_a_new_module_whose_ports_are_taken_gets_free_ones(root, tmp_path):
 
 
 def test_install_copies_code_and_keeps_the_rigs_files(root, tmp_path):
-    kim = root / "kim-control"
+    kim = root / "modules/other/kim-control"
     (kim / "kim.ini").write_text("tuned on the rig")
     (kim / "px_calibration.json").write_text("{\"x\": 21.1}")
     (kim / "Calibrations").mkdir()
@@ -211,6 +211,49 @@ def test_install_copies_code_and_keeps_the_rigs_files(root, tmp_path):
     assert any("kept your kim.ini" in line for line in log)
 
 
+def test_a_module_in_the_old_flat_place_is_moved_not_copied(tmp_path):
+    """Updating a module that still sits in <root>/<folder> (the layout before
+    modules/) MOVES it -- tuned files included -- instead of making a second
+    copy that discovery would then have to choose between."""
+    root = tmp_path / "suite"
+    old = make_module(root, "kim-control", "kim", 5567)
+    (old / "kim.ini").write_text("tuned on the rig")
+    (old / "Calibrations").mkdir()
+    (old / "Calibrations" / "a.json").write_text("rig")
+    (old / ".venv").mkdir()
+    (old / ".venv" / "pyvenv.cfg").write_text("points at the old src")
+    shop = tmp_path / "shop"
+    new = make_module(shop, "kim-control", "kim", 5567, name="Kim v2")
+    _cat(new, "motion")
+    (new / "kim.ini").write_text("factory default")
+    with K.ModuleSource(shop) as src:
+        (plan,) = K.plan_install(src.modules, root)
+        assert plan.action == "update" and plan.move_from == old
+        assert any("moves the installed copy" in n for n in plan.notes)
+        log = K.install(plan, root)
+    home = root / "modules" / "motion" / "kim-control"
+    assert not old.exists()
+    assert (home / "kim.ini").read_text() == "tuned on the rig"
+    assert (home / "Calibrations" / "a.json").read_text() == "rig"
+    assert not (home / ".venv").exists()                 # rebuilt afterwards
+    assert M.parse_manifest(home / "module.toml").name == "Kim v2"
+    assert any(line.startswith("moved kim-control") for line in log)
+    found = M.discover(root)
+    assert found.problems == [] and found.by_key("kim").dir == home
+
+
+def test_a_whole_checkout_is_a_source(tmp_path):
+    """Pointing "Add module..." at a suite checkout finds modules three levels
+    down (modules/<category>/<folder>), not the suite's own projects."""
+    repo = tmp_path / "repo"
+    make_module(repo, "modules/motion/kim-control", "kim", 5567)
+    make_module(repo, "modules/detector/hf2-control", "hf2", 5569)
+    (repo / "scan-core" / "src").mkdir(parents=True)
+    with K.ModuleSource(repo) as src:
+        assert sorted(m.key for m in src.modules) == ["hf2", "kim"]
+        assert src.problems == []
+
+
 def test_a_conflict_is_never_installed(root, tmp_path):
     shop = tmp_path / "shop"
     make_module(shop, "lockin-control", "hf2", 5569)
@@ -218,7 +261,7 @@ def test_a_conflict_is_never_installed(root, tmp_path):
         (plan,) = K.plan_install(src.modules, root)
         with pytest.raises(ValueError, match="cannot install"):
             K.install(plan, root)
-    assert not (root / "lockin-control").exists()
+    assert not (root / "modules/other/lockin-control").exists()
 
 
 def test_lab_data_rule_matches_the_installer():
@@ -233,7 +276,7 @@ def test_lab_data_rule_matches_the_installer():
 # ─────────────────────────────── building the environment ─────────────────────
 
 def test_online_build_names_every_extra(root):
-    d = root / "kim-control"
+    d = root / "modules/other/kim-control"
     (d / "pyproject.toml").write_text(
         '[project]\nname="kim"\nversion="1.2"\n[project.optional-dependencies]\n'
         'gui=["PySide6"]\nreal=["pylablib"]\n', encoding="utf-8")
@@ -243,7 +286,7 @@ def test_online_build_names_every_extra(root):
 
 
 def test_offline_build_never_touches_an_index(root):
-    d = root / "kim-control"
+    d = root / "modules/other/kim-control"
     with pytest.raises(FileNotFoundError, match="--wheels"):
         K.env_steps(d, root, "uv", offline=True)
     (root / K.WHEELHOUSE).mkdir()

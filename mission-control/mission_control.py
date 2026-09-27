@@ -3,7 +3,8 @@ AaltoFlow · Mission Control
 ========================
 
 The launcher. It FINDS the suite's modules instead of listing them: every folder
-next to this one that contains a `module.toml` is a module (see
+modules/<category>/<folder> (and, for older installs, a folder next to this one)
+that contains a `module.toml` is a module (see
 suite-common/src/suite_common/modules.py). For each module it shows the name,
 description and icon from that file, and -- once the service runs -- the
 controls and measured variables the service reports through `describe`.
@@ -56,7 +57,7 @@ from suite_common.settings_bundle import (ImportPlan, apply_import, default_bund
                                           export_bundle, read_bundle)
 from suite_common.settings_bundle import summary as settings_summary
 from suite_common.modules import (CATEGORIES, LOCAL_FILE, MANIFEST, ManifestError,
-                                  ModuleSpec, port_conflicts)
+                                  ModuleSpec, manifest_paths, port_conflicts)
 
 # All colours come from theme.COLORS (aliased C); set_theme() swaps the palette
 # IN PLACE at startup, so every C[...] read follows the active theme.
@@ -1772,7 +1773,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _folder_signature(self):
         """Cheap fingerprint of everything discovery depends on."""
         parts = []
-        for path in sorted(ROOT.glob(f"*/{MANIFEST}")):
+        # the SAME search discovery does (modules/<category>/<folder> and the
+        # old flat place), so a module added anywhere discovery looks is seen
+        for path in manifest_paths(ROOT):
             try:
                 parts.append((str(path), path.stat().st_mtime_ns))
             except OSError:

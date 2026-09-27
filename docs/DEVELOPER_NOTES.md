@@ -59,12 +59,32 @@ look in `%LOCALAPPDATA%\uv-venvs\<project>\Scripts\python.exe` as well**.
   (PySide6 is a base dependency).
 - Python ≥ 3.11 (scan-core pins `>=3.11`; everything was verified on 3.11).
 
+### Folder layout (since 2026-09-27)
+```
+<root>/
+  modules/<category>/<key>-control/   every instrument module, sorted by what it is
+                                      FOR -- the `category` in its module.toml:
+                                      motion, imaging, detector, source, field,
+                                      environment (e.g. modules/motion/kim-control)
+  suite-common/  mission-control/  scan-core/     the suite's own projects
+  tools/  installer/  docs/  front-panels/  spikes/
+```
+Why: 35 modules in the root buried the few folders a newcomer should open
+first, and the category is already in each module.toml. Only the FOLDER moved:
+module keys, ports, package names and the environments'
+`%LOCALAPPDATA%\uv-venvs\<key>-control` names are unchanged. Everything finds
+modules through ONE function, `suite_common.modules.manifest_paths` (launcher,
+scan-core, tools, installer generator); it still accepts a module dropped
+straight into the root (the old layout), with a warning from `check_modules.py`.
+A module's README links up to the root with `../../../`. See gotcha #36 for
+checkouts and installs made before the move.
+
 ---
 
 ## 3. Architecture overview
 
 ```
-suite-common     ── module discovery: <root>/*/module.toml + suite_local.json (this PC)
+suite-common     ── module discovery: <root>/modules/<category>/*/module.toml + suite_local.json (this PC)
 mission-control  ── discovers modules, spawns run_service.py / run_gui.py (never imports them)
 scan-core suite  ── follows the launcher: connects to the discovered modules that are running
 
@@ -234,7 +254,7 @@ mechanism in section 6. Where they disagree, these notes wins.
   (+ pyqtgraph where plotted), `pytest` dev group. Package name is short and
   lowercase.
   ```
-  <inst>-control/  pyproject.toml  README.md  .gitignore
+  modules/<category>/<inst>-control/  pyproject.toml  README.md  .gitignore
     src/<inst>/  config.py  backends/{base,sim,<real>}.py  <brain>.py  sim_system.py
                  net/{protocol,service,client}.py  apps/{theme,gui,settings_dialog}.py
     scripts/  run_service.py  run_gui.py  <inst>_console.py  smoke_test.py
@@ -513,6 +533,26 @@ zpiezo has no GUI.
     ends a row on the MEASURED position (at the far end and at rest, or stalled
     for 1 s -- logged), never on the settle rule alone. General lesson: a
     "done" signal is only as good as the wait it was designed for.
+36. **An old flat module folder left behind after the move to modules/**
+    (2026-09-27). `git pull` moves the files git TRACKS into
+    `modules/<category>/<key>-control`, but the ignored ones -- a rig's tuned
+    `.ini`, `Calibrations\`, `px_calibration.json`, `CLAUDE.local.md`, data, a
+    `.venv` -- stay in the old `<key>-control` folder, where the module no
+    longer looks. Nothing fails; the module just quietly starts from factory
+    settings. And if a whole old copy survives (with its module.toml), there are
+    two modules with one key. Discovery never resolves that silently any more:
+    the `modules/` copy wins and the other is reported as a PROBLEM naming both
+    folders (launcher log, `check_modules.py`). The cure on a checkout: commit or
+    `git stash` locally edited tracked lab files BEFORE `git pull` (camera.ini,
+    objectives.ini, px_calibration.json, clMag's Calibrations), pull (then
+    `git stash pop`), run `python tools/migrate_layout.py` (dry run) and
+    `--apply` -- it moves the leftovers across without overwriting (a differing
+    file is kept as `*.old-layout`) -- then re-sync each module's environment,
+    because the editable install inside it still points at the old `src`. An
+    INSTALLED suite needs none of this: Setup moves each old module folder
+    whole before copying (`MigrateModuleLayout` in `installer/AaltoFlow.iss`),
+    and Mission Control's "Add module" moves an old copy instead of making a
+    second one.
 
 ---
 
@@ -521,7 +561,7 @@ zpiezo has no GUI.
 Verify **in place**, on the PC the suite runs on:
 
 ```powershell
-cd "<root>\kim-control"
+cd "<root>\modules\motion\kim-control"
 .\dev.ps1 sync --extra gui        # or: uv sync --extra gui   (copy dev.ps1 from clMag-control if missing)
 .\dev.ps1 run pytest -q
 .\dev.ps1 run python scripts\smoke_test.py

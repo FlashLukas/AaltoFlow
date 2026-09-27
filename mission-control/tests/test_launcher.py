@@ -78,9 +78,9 @@ class FakeService:
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
     root = tmp_path_factory.mktemp("suite")
-    _module(root, "magnet-control", "magnet", 16100, order=10)
-    _module(root, "lockin-control", "lockin", 16110, order=20)
-    _module(root, "focus-control", "focus", 16120, gui=False, order=30)
+    _module(root, "modules/other/magnet-control", "magnet", 16100, order=10)
+    _module(root, "modules/other/lockin-control", "lockin", 16110, order=20)
+    _module(root, "modules/other/focus-control", "focus", 16120, gui=False, order=30)
     os.environ["AALTOFLOW_ROOT"] = str(root)
     sys.path.insert(0, str(HERE))
     import mission_control as mc
@@ -123,13 +123,21 @@ def test_measurement_suite_button_is_not_a_module_card(env):
 
 def test_a_new_module_folder_appears_on_rescan(env):
     mc, win, root, app = env
-    _module(root, "vna-control", "vna", 16130, order=40)
+    _module(root, "modules/other/vna-control", "vna", 16130, order=40)
     win.rescan(force=False)                                     # signature changed
     assert "vna" in win.cards
     import shutil
-    shutil.rmtree(root / "vna-control")
+    shutil.rmtree(root / "modules/other/vna-control")
     win.rescan(force=False)
     assert "vna" not in win.cards
+    # a folder dropped straight into the root (the layout before modules/)
+    # is still seen by the rescan -- it uses the same search as discovery
+    _module(root, "scope-control", "scope", 16150, order=45)
+    win.rescan(force=False)
+    assert "scope" in win.cards
+    shutil.rmtree(root / "scope-control")
+    win.rescan(force=False)
+    assert "scope" not in win.cards
 
 
 def test_port_override_updates_the_card(env):
@@ -220,7 +228,7 @@ def test_add_module_from_a_folder(env, tmp_path):
 
         dlg.install_checked(build=False)
         _pump(app, 0.2)
-        assert (root / "pm-control" / "module.toml").is_file()
+        assert (root / "modules/detector/pm-control" / "module.toml").is_file()
         assert "pm" in win.cards                                  # rescanned
         assert win.cards["pm"].spec.cmd not in (16100, 16110, 16120)
         assert mc.port_conflicts(win.found.modules) == []
@@ -313,7 +321,7 @@ def test_add_module_from_the_online_catalog(env, tmp_path):
         _wait(app, lambda: not dlg.busy and "gauss" in win.cards)
         log = dlg.logbox.toPlainText()
         assert "verified (SHA-256)" in log and "files copied" in log
-        assert (root / "gauss-control" / "module.toml").is_file()
+        assert (root / "modules/field/gauss-control" / "module.toml").is_file()
         assert dlg.tree.topLevelItem(0).text(2) == "update"     # re-planned: now installed
     finally:
         dlg.close()
@@ -383,7 +391,7 @@ def test_export_then_import_settings(env, tmp_path):
     backup of what it replaced, and the cards follow an imported
     suite_local.json (here: the magnet's real-hardware flag)."""
     mc, win, root, app = env
-    ini = root / "magnet-control" / "magnet.ini"
+    ini = root / "modules/other/magnet-control" / "magnet.ini"
     local = root / mc.LOCAL_FILE
     had_local = local.exists()
     old_local = local.read_bytes() if had_local else None
@@ -400,7 +408,7 @@ def test_export_then_import_settings(env, tmp_path):
         assert not win.cards["magnet"].spec.real
 
         plan = win.import_settings(str(bundle), confirm=False)
-        assert {e.path for e in plan.overwrite} == {"magnet-control/magnet.ini",
+        assert {e.path for e in plan.overwrite} == {"modules/other/magnet-control/magnet.ini",
                                                     mc.LOCAL_FILE}
         assert "offset = 1" in ini.read_text(encoding="utf-8")
         assert win.cards["magnet"].spec.real                  # the card followed
@@ -434,8 +442,8 @@ def test_import_of_a_non_bundle_is_refused(env, tmp_path, monkeypatch):
 @pytest.fixture
 def bop(env, monkeypatch):
     mc, win, root, app = env
-    _module(root, "bop-control", "bop", 16140, order=50)
-    toml = root / "bop-control" / "module.toml"
+    _module(root, "modules/other/bop-control", "bop", 16140, order=50)
+    toml = root / "modules/other/bop-control" / "module.toml"
     toml.write_text(toml.read_text() + 'excludes = ["magnet"]\n')
     win.rescan(force=True)
     spawned = []
@@ -444,7 +452,7 @@ def bop(env, monkeypatch):
                             lambda *a, _c=card, **k: spawned.append(_c.spec.id))
     yield win.cards["bop"], win.cards["magnet"], spawned
     import shutil
-    shutil.rmtree(root / "bop-control")
+    shutil.rmtree(root / "modules/other/bop-control")
     win.rescan(force=True)
 
 

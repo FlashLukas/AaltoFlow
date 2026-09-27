@@ -42,8 +42,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .modules import (CATEGORIES, MANIFEST, PRODUCT, ManifestError, ModuleSpec,
-                      discover, discover_local, parse_manifest, set_ports)
+from .modules import (CATEGORIES, MANIFEST, MODULES_DIR, PRODUCT, ManifestError,
+                      ModuleSpec, discover, discover_local, module_home,
+                      parse_manifest, rel_to_root, set_ports)
 
 CATALOG_FILE = "catalog.json"
 CATALOG_FORMAT = "aaltoflow-catalog/1"
@@ -154,16 +155,29 @@ def search(modules: list[ModuleSpec], text: str = "", category: str = "") -> lis
 # ------------------------------------------------------------------ sources
 
 def _find_manifests(base: Path) -> list[Path]:
-    """module.toml at the top, else one level down, else two (a zip of a
-    folder of modules)."""
+    """module.toml at the top (one module folder), else every module up to
+    three levels down: a pack or a zip of module folders (1), a folder of such
+    folders (2), or a whole suite checkout, modules/<category>/<folder> (3).
+
+    A module.toml inside another module's folder is not a second module, and
+    environments/caches are never searched. Modules under modules/ come first,
+    so in a checkout that still has an old flat copy the new one wins.
+    """
     if (base / MANIFEST).is_file():
         return [base / MANIFEST]
-    for pattern in (f"*/{MANIFEST}", f"*/*/{MANIFEST}"):
-        found = sorted(p for p in base.glob(pattern)
-                       if not any(_skipped_dir(x) for x in p.relative_to(base).parts))
-        if found:
-            return found
-    return []
+    found = set()
+    for pattern in (f"*/{MANIFEST}", f"*/*/{MANIFEST}", f"*/*/*/{MANIFEST}"):
+        for p in base.glob(pattern):
+            parts = p.relative_to(base).parts
+            if any(_skipped_dir(x) for x in parts):
+                continue
+            # a folder above it that is itself a module owns this one
+            if any((base.joinpath(*parts[:i]) / MANIFEST).is_file()
+                   for i in range(1, len(parts) - 1)):
+                continue
+            found.add(p)
+    return sorted(found, key=lambda p: (p.relative_to(base).parts[0] != MODULES_DIR,
+                                        p.relative_to(base).as_posix().lower()))
 
 
 def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
@@ -254,12 +268,17 @@ def requirements_name(key: str) -> str:
 @dataclass
 class InstallPlan:
     spec: ModuleSpec                   # as found in the SOURCE
-    target: Path                       # <root>/<same folder name>
+    target: Path                       # <root>/modules/<category>/<same folder name>
     action: str                        # "new" | "update" | "conflict" | "same"
     reason: str = ""
     #: ports to give it on THIS PC when its defaults are taken (None = keep)
     ports: tuple[int, int] | None = None
     notes: list[str] = field(default_factory=list)
+    #: the SAME module already installed somewhere else on this PC (the flat
+    #: <root>/<folder> of the layout before 2026-09-27, or an older category):
+    #: install() moves that folder -- lab data included -- to `target` first,
+    #: so the PC never ends up with two copies of one module
+    move_from: Path | None = None
 
     @property
     def installable(self) -> bool:
@@ -286,15 +305,31 @@ def plan_install(specs: list[ModuleSpec], root: Path) -> list[InstallPlan]:
     used = {p for m in discover(root).modules if not m.remote for p in (m.cmd, m.pub)}
     plans = []
     for spec in specs:
-        target = root / spec.dir.name
+        # Modules are sorted by what they are for: modules/<category>/<folder>.
+        # A pack keeps its folders FLAT (older launchers can still read it),
+        # so the place comes from the manifest, not from the pack.
+        target = module_home(root, spec.category, spec.dir.name)
         plan = InstallPlan(spec=spec, target=target, action="new")
         have = by_key.get(spec.key)
-        if spec.dir.resolve() == target.resolve():
+        if spec.dir.resolve() == target.resolve() or (
+                have is not None and spec.dir.resolve() == have.dir.resolve()):
             plan.action, plan.reason = "same", "this is the installed copy itself"
         elif have is not None and have.dir.name != spec.dir.name:
             plan.action = "conflict"
             plan.reason = (f"key {spec.key!r} is already used by the folder "
-                           f"{have.dir.name}")
+                           f"{rel_to_root(root, have.dir)}")
+        elif (have is not None and have.dir.resolve() != target.resolve()
+              and not target.exists()):
+            # Same module, same folder name, but in the old place (or under an
+            # old category): MOVE it, then update it there -- never a 2nd copy.
+            plan.action = "update"
+            plan.move_from = have.dir
+            old, new = module_version(have.dir), spec.version or module_version(spec.dir)
+            plan.reason = (f"replaces version {old or '?'} with {new or '?'}; "
+                           "its settings and calibrations are kept")
+            plan.notes.append(f"moves the installed copy from {rel_to_root(root, have.dir)} "
+                              f"to {rel_to_root(root, target)} (the new layout); its "
+                              "environment is rebuilt afterwards")
         elif target.exists():
             try:
                 there = parse_manifest(target / MANIFEST) if (target / MANIFEST).is_file() else None
@@ -302,15 +337,21 @@ def plan_install(specs: list[ModuleSpec], root: Path) -> list[InstallPlan]:
                 there = None
             if there is None:
                 plan.action = "conflict"
-                plan.reason = f"a folder {target.name} exists and is not a working module"
+                plan.reason = (f"a folder {rel_to_root(root, target)} exists and is not "
+                               "a working module")
             elif there.key != spec.key:
                 plan.action = "conflict"
-                plan.reason = f"the folder {target.name} holds the module {there.key!r}"
+                plan.reason = (f"the folder {rel_to_root(root, target)} holds the "
+                               f"module {there.key!r}")
             else:
                 plan.action = "update"
                 old, new = module_version(target), spec.version or module_version(spec.dir)
                 plan.reason = (f"replaces version {old or '?'} with {new or '?'}; "
                                "its settings and calibrations are kept")
+                legacy = root / spec.dir.name
+                if (legacy / MANIFEST).is_file():
+                    plan.notes.append(f"an old copy is still in {legacy.name} (the layout "
+                                      "before modules/); tools/migrate_layout.py tidies it up")
         if plan.action == "new":
             if spec.default_cmd in used or spec.default_pub in used:
                 plan.ports = _next_free(used)
@@ -321,6 +362,26 @@ def plan_install(specs: list[ModuleSpec], root: Path) -> list[InstallPlan]:
             plan.reason = plan.reason or "new on this PC"
         plans.append(plan)
     return plans
+
+
+def _move_installed(src: Path, dst: Path, root: Path) -> list[str]:
+    """Move an installed module folder (lab data and all) to its new place.
+
+    Its .venv is deleted after the move: the environment holds an EDITABLE
+    install, i.e. the absolute path of the OLD src folder, so it would import
+    code that is no longer there. Rebuilding it (env_steps) is cheap; the
+    tuned .ini files and calibrations are what must survive, and they move.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    log = [f"moved {rel_to_root(root, src)} -> {rel_to_root(root, dst)} "
+           "(your settings and calibrations moved with it)"]
+    venv = dst / ".venv"
+    if venv.is_dir():
+        shutil.rmtree(venv, ignore_errors=True)
+        log.append(f"removed the old environment {rel_to_root(root, dst)}/.venv "
+                   "(it pointed at the old folder); build it again")
+    return log
 
 
 def _files(src: Path):
@@ -345,6 +406,9 @@ def install(plan: InstallPlan, root: Path, wheels: Path | None = None) -> list[s
         raise ValueError(f"{plan.spec.key}: cannot install ({plan.action}: {plan.reason})")
     root = Path(root)
     src, dst = plan.spec.dir, plan.target
+    moved = []
+    if plan.move_from is not None and not dst.exists():
+        moved = _move_installed(Path(plan.move_from), dst, root)
     log = []
     kept = copied = 0
     for path in _files(src):
@@ -358,8 +422,9 @@ def install(plan: InstallPlan, root: Path, wheels: Path | None = None) -> list[s
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, out)
         copied += 1
-    log.insert(0, f"{plan.spec.key}: {copied} files copied into {dst.name}"
+    log.insert(0, f"{plan.spec.key}: {copied} files copied into {rel_to_root(root, dst)}"
                   + (f", {kept} of your files kept" if kept else ""))
+    log[0:0] = moved
     if plan.ports:
         set_ports(plan.spec.key, plan.ports[0], plan.ports[1], root)
         log.append(f"{plan.spec.key}: ports {plan.ports[0]}/{plan.ports[1]} on this PC")

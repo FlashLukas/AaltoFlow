@@ -27,7 +27,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Root,
 
-    # Comma-separated project folder names. Empty = every installed project.
+    # Comma-separated project folders RELATIVE to -Root, e.g.
+    # "suite-common,modules\motion\kim-control". Empty = every installed project.
     [string]$Projects = "",
 
     # Close the window without waiting for Enter (used for silent installs).
@@ -108,10 +109,24 @@ function Resolve-ManagedPython {
 
 function Find-Projects($root) {
     # Every folder with a module.toml is a module (suite_common.discover), plus
-    # the always-present folders and scan-core.
+    # the always-present folders and scan-core. Returned as paths RELATIVE to
+    # the root, e.g. "modules\motion\kim-control": since 2026-09-27 the modules
+    # live in modules\<category>\<folder>. A module still sitting directly in
+    # the root (an older install that was not migrated, or a folder dropped in
+    # by hand) is found too -- the same two places the launcher looks.
     $found = @()
     foreach ($n in ($Always + @("scan-core"))) {
         if (Test-Path (Join-Path $root $n)) { $found += $n }
+    }
+    $mods = Join-Path $root "modules"
+    if (Test-Path $mods) {
+        foreach ($cat in (Get-ChildItem $mods -Directory | Sort-Object Name)) {
+            foreach ($d in (Get-ChildItem $cat.FullName -Directory | Sort-Object Name)) {
+                if (Test-Path (Join-Path $d.FullName "module.toml")) {
+                    $found += "modules\$($cat.Name)\$($d.Name)"
+                }
+            }
+        }
     }
     foreach ($d in (Get-ChildItem $root -Directory | Sort-Object Name)) {
         if ((Test-Path (Join-Path $d.FullName "module.toml")) -and ($found -notcontains $d.Name)) {

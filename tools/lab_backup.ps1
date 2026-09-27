@@ -71,6 +71,23 @@ function Get-MemoryDir($root) {
     return Join-Path $env:USERPROFILE ".claude\projects\$name\memory"
 }
 
+# Since 2026-09-27 the instrument modules live in modules\<category>\<key>-control.
+# A backup made BEFORE that stores a module's notes as <key>-control\CLAUDE.local.md;
+# restoring it must put them into the folder the module has NOW, not recreate
+# the old flat folder (which discovery would then report as a leftover).
+function Resolve-ModulePath($root, $rel) {
+    $first, $rest = $rel -split '\\', 2
+    if (-not $rest -or $first -notlike "*-control") { return $rel }
+    if (Test-Path (Join-Path $root $first)) { return $rel }     # still flat here
+    $mods = Join-Path $root "modules"
+    if (-not (Test-Path $mods)) { return $rel }
+    $hit = Get-ChildItem -Path $mods -Directory |
+        ForEach-Object { Join-Path $_.FullName $first } |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($hit) { return (Join-Path $hit.Substring($root.Length).TrimStart('\') $rest) }
+    return $rel
+}
+
 function Copy-One($from, $to) {
     New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
     Copy-Item -LiteralPath $from -Destination $to -Force
@@ -123,6 +140,7 @@ else {
         if (-not (Test-Path $src)) { continue }
         Get-ChildItem $src -Recurse -File | ForEach-Object {
             $rel = $_.FullName.Substring($src.Length).TrimStart('\')
+            if ($p.Name -eq "AaltoFlow") { $rel = Resolve-ModulePath $p.Root $rel }
             $dest = Join-Path $p.Root $rel
             if ((Test-Path $dest) -and -not $Force) { Write-Host "  kept (exists): $rel"; return }
             Copy-One $_.FullName $dest; $script:n++

@@ -12,6 +12,10 @@ those before the lab does.
 
 Static checks, per module:
   * module.toml parses; key, name, ports, scripts are valid
+  * it sits where it belongs, modules/<category>/<folder> with the category of
+    its module.toml (WARN, not FAIL: discovery still finds a module in the old
+    flat place or under another category folder -- it is just harder to find
+    for a person). A key found twice is a WARN naming both folders.
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
   * excludes (modules that drive the SAME instrument and must never run
@@ -33,7 +37,7 @@ Live checks (--live), per module with a .venv:
   * it answers `shutdown` and EXITS BY ITSELF within 15 s (the launcher asks
     for this before it kills a service; a killed service cannot close its
     hardware -- docs/DEVELOPER_NOTES.md gotcha #25)
-Exit code 0 when nothing failed.
+Exit code 0 when nothing failed (warnings do not count).
 """
 
 from __future__ import annotations
@@ -50,8 +54,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
-from suite_common.modules import (MANIFEST, discover_local, exclusion_pairs,  # noqa: E402
-                                  mirror_excludes, port_conflicts, start_order)
+from suite_common.modules import (MANIFEST, MODULES_DIR, discover_local,  # noqa: E402
+                                  exclusion_pairs, is_legacy_location,
+                                  mirror_excludes, port_conflicts, rel_to_root,
+                                  start_order)
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -111,6 +117,10 @@ class Report:
     @property
     def failed(self):
         return [r for r in self.rows if r[2] == "FAIL"]
+
+    @property
+    def warned(self):
+        return [r for r in self.rows if r[2] == "WARN"]
 
     def print(self):
         width = max([len(r[0]) for r in self.rows] + [6])
@@ -253,7 +263,15 @@ def main(argv=None) -> int:
     rep = Report()
     mods, problems = discover_local(args.root)
     for p in problems:
-        rep.add(Path(p.split(":")[0]).parent.name or "?", f"{MANIFEST} parses", "FAIL", p)
+        if " exists twice: " in p:
+            # discovery used one copy and says which; worth fixing, not fatal
+            rep.add(p.split("'")[1] if "'" in p else "?", "module found once", "WARN", p)
+            continue
+        # A problem reads "<folder>\module.toml: why". Cut at the file NAME,
+        # not at the first ':' -- that is the drive letter's colon in C:\...
+        cut = p.find(MANIFEST)
+        name = Path(p[:cut]).name if cut > 0 else ""
+        rep.add(name or "?", f"{MANIFEST} parses", "FAIL", p)
     keys = {m.key for m in mods}
     for c in port_conflicts(mods):
         rep.add("suite", "ports unique", "FAIL", c)
@@ -271,7 +289,17 @@ def main(argv=None) -> int:
 
     ordered = start_order(mods)
     for m in mods:
-        rep.add(m.key, f"{MANIFEST} parses", "PASS", f"{m.dir.name}, ports {m.cmd}/{m.pub}")
+        where = rel_to_root(args.root, m.dir)
+        rep.add(m.key, f"{MANIFEST} parses", "PASS", f"{where}, ports {m.cmd}/{m.pub}")
+        home = f"{MODULES_DIR}/{m.category}/{m.dir.name}"
+        if is_legacy_location(args.root, m.dir):
+            rep.add(m.key, "sits in modules/<category>/", "WARN",
+                    f"{where} is the old flat place; it belongs in {home} "
+                    "(git mv it, or run tools/migrate_layout.py)")
+        elif where != home:
+            rep.add(m.key, "sits in modules/<category>/", "WARN",
+                    f"{where}, but its {MANIFEST} says category {m.category!r}: "
+                    f"expected {home}")
         missing = [k for k in m.start_after if k not in keys]
         rep.add(m.key, "start_after names existing modules", "FAIL" if missing else "PASS",
                 ", ".join(missing))
@@ -319,7 +347,9 @@ def main(argv=None) -> int:
 
     rep.print()
     n_fail = len(rep.failed)
-    print(f"\n{len(rep.rows)} checks, {n_fail} failed")
+    n_warn = len(rep.warned)
+    print(f"\n{len(rep.rows)} checks, {n_fail} failed"
+          + (f", {n_warn} warning(s)" if n_warn else ""))
     return 1 if n_fail else 0
 
 

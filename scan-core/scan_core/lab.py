@@ -41,7 +41,7 @@ from .registry import Gettable, Registry, Settable
 
 
 # Which modules exist and where they listen is NOT typed here any more. It
-# comes from module discovery (suite-common): every <folder>/module.toml, plus
+# comes from module discovery (suite-common): every modules/<category>/<folder>/module.toml, plus
 # this PC's suite_local.json, which the launcher writes. So a port changed in
 # the launcher is the port scan-core dials, and a new module needs no edit here.
 

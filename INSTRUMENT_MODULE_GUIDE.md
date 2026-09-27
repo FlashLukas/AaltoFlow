@@ -34,7 +34,7 @@ measured quantity to a setpoint is closed-loop → copy `clMag-control`.
 ## 2. Package layout (src layout, always)
 
 ```
-<inst>-control/
+modules/<category>/<inst>-control/     # e.g. modules/source/smb-control (section 11)
   pyproject.toml            # name "<inst>-control", pyzmq dep, GUI extra, pytest dev group
   README.md                 # run instructions + the OneDrive venv gotcha (§8)
   .gitignore                # .venv/ *.egg-info/ __pycache__/ .pytest_cache/
@@ -648,9 +648,9 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
 1. Read this guide + the memory files. Decide closed-loop vs set-and-forget.
 2. Confirm with the user: connection/interface (GPIB/USB/LAN + VISA address),
    the quantities to control, and their safe limits.
-3. **Generate it:** `python tools/new_module.py x --like smb --name "..." --description "..."`
+3. **Generate it:** `python tools/new_module.py x --like smb --category source --name "..." --description "..."`
    (`--like clMag` for closed-loop, `--like hf2` for a detector with an
-   acquisition). This copies the template, renames package / classes / imports,
+   acquisition). It lands in `modules/<category>/x-control`. This copies the template, renames package / classes / imports,
    takes the next free port pair and writes `module.toml`, a placeholder
    `icon.svg`, a stub README and private notes (`CLAUDE.local.md`, not in git). `uv sync --extra gui; uv run pytest`
    passes at once. The launcher and scan-core already list it.
@@ -675,7 +675,20 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
 Nothing in the suite lists modules by hand. The launcher (mission-control),
 scan-core, the render and deploy tools all ask **module discovery**
 (`suite-common/src/suite_common/modules.py`), which reads every
-`<root>/<folder>/module.toml`. A folder with that file IS a module.
+`<root>/modules/<category>/<folder>/module.toml`. A folder with that file IS a
+module.
+
+**Where a module lives (since 2026-09-27).** In `modules/<category>/<key>-control`,
+where `<category>` is the `category` of its own `module.toml` -- so the folder
+tree reads like the Add-module wizard: `modules/motion/kim-control`,
+`modules/detector/hf2-control`, `modules/field/clMag-control`. The suite's own
+projects (`mission-control`, `scan-core`, `suite-common`) and `tools`,
+`installer`, `docs` stay in the root. A module folder dropped straight into the
+root is still found (the old layout), but `check_modules.py` warns about it, and
+if the same key exists in both places the `modules/` copy wins and the other is
+reported as a problem. Because a module sits three folders below the root, its
+README links back up with `../../../` (e.g. `../../../front-panels/kim.png`), and
+the tools are `python ../../../tools/check_modules.py <key>` from inside it.
 
 ```toml
 [module]

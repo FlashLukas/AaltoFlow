@@ -6,7 +6,7 @@ lab PC the only difference is that the services were started with `--real`.
 
 Start the magnet service first, in another terminal:
 
-    cd ..\\clMag-control
+    cd ..\\modules\\field\\clMag-control
     uv run scripts/run_service.py
 
 then, here:
@@ -49,7 +49,7 @@ def main() -> int:
         reg, lab = build_lab_registry(host=args.host, include=("clMag",))
     except InstrumentError as exc:
         print(f"\nFAILED: {exc}\n\nStart it with:  "
-              r"cd ..\clMag-control && uv run scripts/run_service.py")
+              r"cd ..\modules\field\clMag-control && uv run scripts/run_service.py")
         return 1
 
     try:

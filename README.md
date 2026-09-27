@@ -103,8 +103,8 @@ an instrument is a declaration in `scan_core/lab.py` — which verb sets the kno
 which status field reads it back, and how you know it has arrived — not new
 engine code.
 
-**3. mission-control.** The launcher. It *finds* the modules (every folder with a
-`module.toml`), starts their services, opens their GUIs, lets you change ports and
+**3. mission-control.** The launcher. It *finds* the modules (every folder
+`modules/<category>/<name>-control` with a `module.toml`), starts their services, opens their GUIs, lets you change ports and
 add services running on other PCs, and shows each module's variables as the
 service reports them. It never imports the instrument packages; it only spawns
 their scripts, so there is no version coupling. The measurement suite follows
@@ -117,12 +117,18 @@ icon, default ports, scripts) *is* a module, and the launcher, scan-core and the
 tools all find it. The module's controls and measured variables are not in that
 file: the running service reports them itself through `describe`.
 
+The modules are sorted by what they are for: `modules/<category>/<name>-control`,
+where the category (`motion`, `imaging`, `detector`, `source`, `field`,
+`environment`) is the one written in the module's `module.toml`. The suite's own
+projects -- `mission-control`, `scan-core`, `suite-common` -- and `tools`,
+`installer`, `docs` stay in the top folder.
+
 ```powershell
-python tools/new_module.py vna --like smb --name "Network analyser" --description "R&S ZNB"
-cd vna-control
+python tools/new_module.py vna --like smb --category detector --name "Network analyser" --description "R&S ZNB"
+cd modules\detector\vna-control
 uv sync --extra gui
 uv run pytest -q                      # passes as generated
-python ../tools/check_modules.py vna --live
+python ../../../tools/check_modules.py vna --live
 ```
 
 `new_module.py` copies a working template under the new name and takes the next
@@ -228,41 +234,41 @@ instruments on the bench:
 ![scan builder](front-panels/scan-core.png)
 
 Each instrument has its own panel, shown in its own README:
-[clMag](clMag-control/README.md) ·
-[smb](smb-control/README.md) ·
-[stage](stage-control/README.md) ·
-[piezo](piezo-control/README.md) ·
-[camera](camera-control/README.md) ·
-[kim](kim-control/README.md) ·
-[hf2](hf2-control/README.md) ·
-[pm16](pm16-control/README.md) ·
-[vna](vna-control/README.md) ·
-[mag2d](mag2d-control/README.md) ·
-[mag2dcal](mag2dcal-control/README.md) ·
-[ppms](ppms-control/README.md) ·
-[kepco](kepco-control/README.md) ·
-[windfreak](windfreak-control/README.md) ·
-[gsp818](gsp818-control/README.md) ·
-[signalhound](signalhound-control/README.md) ·
-[dsphase](dsphase-control/README.md) ·
-[dssg](dssg-control/README.md) ·
-[dsamp](dsamp-control/README.md) ·
-[agilis](agilis-control/README.md) ·
-[smaract](smaract-control/README.md) ·
-[sr830](sr830-control/README.md) ·
-[cs260](cs260-control/README.md) ·
-[ccs200](ccs200-control/README.md) ·
-[ddr25](ddr25-control/README.md) ·
-[elliptec](elliptec-control/README.md) ·
-[chopper](chopper-control/README.md) ·
-[superk](superk-control/README.md) ·
-[tc200](tc200-control/README.md) ·
-[ls455](ls455-control/README.md) ·
-[pm400](pm400-control/README.md) ·
-[hp8648](hp8648-control/README.md) ·
-[sr7230](sr7230-control/README.md) ·
-[k2450](k2450-control/README.md) ·
-[zpiezo](zpiezo-control/README.md) (headless -- a console, not a window).
+[clMag](modules/field/clMag-control/README.md) ·
+[smb](modules/source/smb-control/README.md) ·
+[stage](modules/motion/stage-control/README.md) ·
+[piezo](modules/motion/piezo-control/README.md) ·
+[camera](modules/imaging/camera-control/README.md) ·
+[kim](modules/motion/kim-control/README.md) ·
+[hf2](modules/detector/hf2-control/README.md) ·
+[pm16](modules/detector/pm16-control/README.md) ·
+[vna](modules/detector/vna-control/README.md) ·
+[mag2d](modules/field/mag2d-control/README.md) ·
+[mag2dcal](modules/field/mag2dcal-control/README.md) ·
+[ppms](modules/environment/ppms-control/README.md) ·
+[kepco](modules/source/kepco-control/README.md) ·
+[windfreak](modules/source/windfreak-control/README.md) ·
+[gsp818](modules/detector/gsp818-control/README.md) ·
+[signalhound](modules/detector/signalhound-control/README.md) ·
+[dsphase](modules/source/dsphase-control/README.md) ·
+[dssg](modules/source/dssg-control/README.md) ·
+[dsamp](modules/source/dsamp-control/README.md) ·
+[agilis](modules/motion/agilis-control/README.md) ·
+[smaract](modules/motion/smaract-control/README.md) ·
+[sr830](modules/detector/sr830-control/README.md) ·
+[cs260](modules/source/cs260-control/README.md) ·
+[ccs200](modules/detector/ccs200-control/README.md) ·
+[ddr25](modules/motion/ddr25-control/README.md) ·
+[elliptec](modules/motion/elliptec-control/README.md) ·
+[chopper](modules/source/chopper-control/README.md) ·
+[superk](modules/source/superk-control/README.md) ·
+[tc200](modules/environment/tc200-control/README.md) ·
+[ls455](modules/detector/ls455-control/README.md) ·
+[pm400](modules/detector/pm400-control/README.md) ·
+[hp8648](modules/source/hp8648-control/README.md) ·
+[sr7230](modules/detector/sr7230-control/README.md) ·
+[k2450](modules/source/k2450-control/README.md) ·
+[zpiezo](modules/motion/zpiezo-control/README.md) (headless -- a console, not a window).
 
 They are rendered offscreen and reproducibly, so they do not go stale:
 
@@ -311,8 +317,19 @@ python tools/render_all.py clMag       # or just one
 | 33 | `sr7230-control` | `sr7230` | 5621/5622 | Ametek Signal Recovery 7230 DSP lock-in (simulation; untested on the instrument) |
 | 34 | `k2450-control` | `k2450` | 5623/5624 | Keithley 2450 SourceMeter (simulation; untested on the instrument) |
 
+Each project folder lives in `modules/<category>/` (the links above go there).
 Instrument *n* gets `cmd = 5555 + 2n` and `pub = cmd + 1` by default, declared in
 its `module.toml`; the launcher can change a module's ports on one PC.
+
+**Updating a checkout from before 2026-09-27** (when the modules moved into
+`modules/<category>/`): if you changed tracked lab files on that PC
+(`camera.ini`, `objectives.ini`, `px_calibration.json`, clMag's `Calibrations`),
+commit them or `git stash` them before `git pull` (and `git stash pop` after).
+Then run `python tools/migrate_layout.py` (a dry run) and
+`python tools/migrate_layout.py --apply`: it carries the files git does not
+track (tuned `.ini` files, calibrations, notes, data) from each old
+`<name>-control` folder into the new one, and removes the old folder. Finally
+re-sync each module's environment.
 
 ## Quick start
 
@@ -328,7 +345,7 @@ uv run python mission_control.py
 Or drive one instrument on its own:
 
 ```powershell
-cd clMag-control
+cd modules\field\clMag-control
 uv sync --extra gui
 uv run scripts/run_service.py                      # add --real for hardware
 uv run scripts/run_gui.py --connect localhost      # add --theme light
