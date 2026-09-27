@@ -32,7 +32,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, acquire=None, help=""):
+       settle=None, args=None, danger=False, acquire=None, stream=None, help=""):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -44,7 +44,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("acquire", acquire), ("help", help)):
+                 ("acquire", acquire), ("stream", stream), ("help", help)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -150,7 +150,11 @@ def build_manifest(meter) -> dict:
         _p("power", "Power", "indicator", "float", unit="mW", group="Measurement",
            order=10, decimals=6, scale=1e-3, read_path=["sample", "power_W"],
            acquire=acquire,
-           help="Mean of fresh readings latched by `acquire`: safe to record in a scan."),
+           # a FLY scan records every reading instead (in W, like status;
+           # the scale above makes it mW) and bins it by the stage position
+           stream={"group": "power", "channel": "power"},
+           help="Mean of fresh readings latched by `acquire`: safe to record in a scan. "
+                "In a FLY scan every reading is recorded instead (~17 per second)."),
         _p("power_std", "Power std. dev.", "indicator", "float", unit="mW",
            group="Measurement", order=11, decimals=6, scale=1e-3,
            read_path=["sample", "std_W"], acquire=acquire,

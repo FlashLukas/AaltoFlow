@@ -544,12 +544,13 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
 
 def _last_value(chunks, rb):
     """The most recent finite readback position recorded, or None."""
+    scale = float(getattr(rb, "stream_scale", 1.0) or 1.0)
     for c in reversed(chunks.get(id(rb.stream), [])):
         v = c["values"].get(rb.stream_channel)
         if v is not None and len(v):
             fin = v[np.isfinite(v)]
             if len(fin):
-                return float(fin[-1])
+                return float(fin[-1]) / scale
     return None
 
 
@@ -576,8 +577,16 @@ def _stop_stage(pos_p, chunks, rb, log):
         log(f"fly: aborted mid-row, could not stop the stage ({exc})")
 
 
-def _joined(chunks, spec, channel):
-    """(t, values, delay) of one channel over all chunks read so far."""
+def _joined(chunks, p):
+    """(t, values, delay) of parameter p's channel over all chunks read so far.
+
+    Values come back in the PARAMETER's unit: a stream carries wire units, and
+    `stream_scale` (the descriptor's `scale`, wire = display x scale) converts
+    them exactly as the parameter's one-value getter does -- pm16 streams watts
+    and offers milliwatts.
+    """
+    spec, channel = p.stream, p.stream_channel
+    scale = float(getattr(p, "stream_scale", 1.0) or 1.0)
     ts, vs, delay = [], [], 0.0
     for c in chunks.get(id(spec), []):
         v = c["values"].get(channel)
@@ -588,14 +597,15 @@ def _joined(chunks, spec, channel):
         delay = c["delay_s"].get(channel, delay)
     if not ts:
         return np.array([]), np.array([]), 0.0
-    return np.concatenate(ts), np.concatenate(vs), float(delay)
+    vals = np.concatenate(vs)
+    return np.concatenate(ts), (vals / scale if scale != 1.0 else vals), float(delay)
 
 
 def _bin_into(chunks, rb, params, edges, lag, data, oidx):
     """Re-bin everything recorded on this row so far into its data row."""
-    t_pos, pos, pos_delay = _joined(chunks, rb.stream, rb.stream_channel)
+    t_pos, pos, pos_delay = _joined(chunks, rb)
     for det, p in params.items():
-        t, v, delay = _joined(chunks, p.stream, p.stream_channel)
+        t, v, delay = _joined(chunks, p)
         m, n, s = bin_samples(t_pos, pos, t, v, edges,
                               delay_s=delay if lag else 0.0,
                               pos_delay_s=pos_delay if lag else 0.0)
@@ -625,7 +635,7 @@ def _var_attrs(params, fly, ax, rb_id) -> dict:
 def _warn_quality(chunks, rb, params, data, oidx, speed, width, log):
     """After the first row: say so if the numbers make the image unreliable."""
     for det, p in params.items():
-        _, _, delay = _joined(chunks, p.stream, p.stream_channel)
+        _, _, delay = _joined(chunks, p)
         smear = speed * delay
         if width > 0 and smear > width:
             log(f"fly: {det} lags {delay * 1e3:.3g} ms = {smear:.3g} "

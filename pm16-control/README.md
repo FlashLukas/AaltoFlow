@@ -56,3 +56,10 @@ pushing its config (the meter remembers them across power cycles). Set
 
 In scan-core: settable `wavelength` (and `range` when auto-range is off),
 detectors `power` / `power_std` (mW, acquired) and `live_power`.
+
+**Fly scans:** `stream_start` / `stream_read` / `stream_stop` record every
+reading (~16 per second, in W) with its time stamp while a scan-core fly scan
+moves the stage; scan-core bins them by the stage's measured position. Each
+reading is stamped at the middle of its 60 ms averaging window, so no lag
+correction is needed, but anything finer than speed × 60 ms is smeared. An
+overrange reading is recorded as a gap, not as a clipped value.

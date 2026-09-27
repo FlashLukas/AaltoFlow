@@ -142,6 +142,13 @@ class Pm16Service:
                 m.cancel_zero()
             elif cmd == "acquire":
                 return {"ok": True, "acq_id": m.acquire()}
+            elif cmd == "stream_start":
+                # A fly scan: record every reading from now on (stream.py)
+                return {"ok": True, "stream_id": m.stream.start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": m.stream.read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": m.stream.stop()}
             elif cmd == "get_sample":
                 return {"ok": True, "sample": json_safe(m.get_sample())}
             elif cmd == "status":

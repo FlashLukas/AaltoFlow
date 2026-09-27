@@ -103,7 +103,7 @@ apps/
 recipes/        # example YAML recipes (2-D, 3-D, XY-raster)
 schema/scan.schema.json
 run_demo.py
-run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + hf2)
+run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + pm16 or hf2)
 ```
 
 ## Running against real instruments
@@ -310,7 +310,7 @@ What it takes care of:
   smeared, and the run log says so after the first row.
 * **Only streamable parameters.** Every detector, and the position, must be one
   its module can record continuously (a `stream` block in `describe`; hf2's scan
-  detectors and kim's positions so far). Anything else is refused before the
+  detectors, the PM16's power and kim's positions so far). Anything else is refused before the
   stage moves.
 * **Samples per pixel** (`<det>_n`) and their spread (`<det>_std`) are stored
   next to every detector; a pixel no sample fell into is NaN, never 0.
@@ -323,7 +323,7 @@ What it takes care of:
 
 ```bash
 uv run python run_fly_demo.py                          # the simulator, the figure above
-uv run python run_fly_demo.py --lab --from 0 --to 20   # the running kim + hf2 services
+uv run python run_fly_demo.py --lab --from 0 --to 20   # the running kim + pm16 (or --det hf2)
 ```
 
 On the kim stage "measured position" means the step counter, the best readback
