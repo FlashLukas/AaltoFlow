@@ -48,6 +48,8 @@ compatible) mode none of this parses. # VERIFY on the unit.
 
 from __future__ import annotations
 
+from ..hwlock import claim
+
 
 class Visa8648:
     """Drives a physical HP 8648D. Implements the SigGenBackend interface."""
@@ -66,10 +68,29 @@ class Visa8648:
         self._freq_ref_on = False
         self._freq_ref_Hz = 0.0
         self._notes: list[str] = []
+        # The claim on the GPIB address (see hwlock.py): held while the
+        # instrument is open, so no second service -- another hp8648, or any
+        # module pointed at the same address -- can talk to this generator.
+        self._hwlock = None
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
+        # CLAIM FIRST, before a single byte reaches the bus. The address is the
+        # physical identity of the generator ("GPIB::19" and "GPIB0::19::INSTR"
+        # are the same box). If another service holds it, HardwareBusy leaves
+        # here and we have touched nothing.
+        self._hwlock = claim(self._resource, "hp8648")
+        try:
+            self._open_claimed()
+        except BaseException:
+            # A failed open must not leave the address claimed (the next start
+            # would report "in use" against ourselves), and must not leave a
+            # half-open session that close() would later send RF OFF through.
+            self._release_session()
+            raise
+
+    def _open_claimed(self) -> None:
         import pyvisa                                   # lazy: only needed for real hw
         self._rm = pyvisa.ResourceManager()
         self._inst = self._rm.open_resource(self._resource)
@@ -88,6 +109,27 @@ class Visa8648:
         # the queue; drain it so it is not reported later as our fault.
         for err in self.drain_errors():
             self._notes.append(f"instrument error while reading its state: {err}")
+
+    def _release_session(self) -> None:
+        """Close whatever VISA objects exist and give the address back.
+        Sends nothing to the instrument. Safe to call more than once."""
+        try:
+            if self._inst is not None:
+                try:
+                    self._inst.close()
+                except Exception:
+                    pass
+            if self._rm is not None:
+                try:
+                    self._rm.close()
+                except Exception:
+                    pass
+        finally:
+            self._inst = None
+            self._rm = None
+            if self._hwlock is not None:
+                self._hwlock.release()
+                self._hwlock = None
 
     def _read_modes(self) -> None:
         """Read (never set) the modes that change what POW:AMPL? / FREQ:CW?
@@ -130,24 +172,26 @@ class Visa8648:
         return list(self._notes)
 
     def close(self) -> None:
+        # RF OFF only if we actually have a session -- i.e. only to a generator
+        # we claimed and opened. After a refused claim or a failed open there
+        # is no session and this sends nothing.
         try:
             if self._inst is not None:
                 self._inst.write("OUTP:STAT OFF")       # RF off on the way out
         finally:
-            if self._inst is not None:
-                try:
-                    # hand the front panel back to the operator: 6 is
-                    # pyvisa's RENLineOperation.address_gtl -- Go To Local for
-                    # THIS device only, leaving REN (and every other
-                    # instrument on the bus) alone.
-                    self._inst.control_ren(6)           # VERIFY the box leaves REMOTE
-                except Exception:
-                    pass
-                self._inst.close()
-            if self._rm is not None:
-                self._rm.close()
-            self._inst = None
-            self._rm = None
+            try:
+                if self._inst is not None:
+                    try:
+                        # hand the front panel back to the operator: 6 is
+                        # pyvisa's RENLineOperation.address_gtl -- Go To Local for
+                        # THIS device only, leaving REN (and every other
+                        # instrument on the bus) alone.
+                        self._inst.control_ren(6)       # VERIFY the box leaves REMOTE
+                    except Exception:
+                        pass
+            finally:
+                # closes the session and releases the GPIB address claim
+                self._release_session()
 
     # ---- small SCPI helpers ---------------------------------------------
 

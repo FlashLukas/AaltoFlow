@@ -34,6 +34,11 @@ from __future__ import annotations
 import re
 import time
 
+from ..hwlock import claim
+
+# The name other services see when they find the COM port taken.
+MODULE = "chopper"
+
 _PROMPT = b"> "
 _NUM = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 
@@ -56,11 +61,30 @@ class SerialMC2000B:
         self._baud = int(baud)
         self._timeout = float(timeout_s)
         self._ser = None
+        self._lock = None      # the hwlock claim on the COM port while open
         self._idn = ""
 
     # ---- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
+        # ONE INSTRUMENT, ONE SERVICE (Lukas's rule: "the same instrument has
+        # to be defined by the same physical address"). The COM port IS this
+        # chopper's physical address, so we claim it BEFORE a single byte goes
+        # out. If another AaltoFlow service already holds it, claim() raises
+        # HardwareBusy naming that service and we never open the port -- two
+        # programs sending freq= to one wheel would fight without knowing.
+        # "com5", "COM5" and "ASRL5::INSTR" are the same port (hwlock.normalize).
+        self._lock = claim(self._port, MODULE)
+        try:
+            self._open_claimed()
+        except BaseException:
+            # A failed open must not leave the address claimed, or the next
+            # attempt (after fixing the cable) would report "busy" against
+            # ourselves. Close whatever got opened, then drop the claim.
+            self.close()
+            raise
+
+    def _open_claimed(self) -> None:
         import serial                                    # lazy: only needed for real hw
         self._ser = serial.Serial(self._port, self._baud,          # VERIFY 115200 8N1
                                   bytesize=8, parity="N", stopbits=1,
@@ -85,11 +109,18 @@ class SerialMC2000B:
         self._idn = self._query("id?")                    # VERIFY reply "THORLABS MC2000B ..."
 
     def close(self) -> None:
-        if self._ser is not None:
-            try:
-                self._ser.close()
-            finally:
-                self._ser = None
+        # Close the port, then give the address back (in that order: the claim
+        # must outlive every byte we could still send). Safe to call twice.
+        try:
+            if self._ser is not None:
+                try:
+                    self._ser.close()
+                finally:
+                    self._ser = None
+        finally:
+            lock, self._lock = self._lock, None
+            if lock is not None:
+                lock.release()
 
     def idn(self) -> str:
         return self._idn

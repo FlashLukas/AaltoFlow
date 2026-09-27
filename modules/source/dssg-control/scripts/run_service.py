@@ -30,6 +30,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from dssg.config import Config
+from dssg.hwlock import HardwareBusy
 from dssg.synthesizer import Synthesizer
 from dssg.sim_system import build_sim_system, build_real_backend
 from dssg.net.service import DssgService
@@ -70,7 +71,14 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = DssgService(synth, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another dssg, or any module pointed at this COM
+        # port / IP) already holds the unit. We never opened it, so there is
+        # nothing to switch off or close: say who holds it, in one line, exit.
+        print(f"dssg: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

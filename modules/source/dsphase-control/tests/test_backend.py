@@ -144,6 +144,7 @@ def test_frequency_is_sent_only_with_a_template(fake_serial):
     n = len(FakeSerial.last.lines)
     dev.set_frequency(2400.0)
     assert len(FakeSerial.last.lines) == n            # nothing sent
+    dev.close()                                       # frees COM5 (hwlock) for dev2
     dev2 = PS6000L("COM5", freq_command="FREQ {mhz:.3f}MHZ")
     dev2.open()
     dev2.set_frequency(2400.0)

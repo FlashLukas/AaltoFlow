@@ -54,6 +54,7 @@ from __future__ import annotations
 import threading
 
 from ..config import Config, axis_channel
+from ..hwlock import claim
 
 # --------------------------------------------------------------------------- #
 # >>> THE ONE PLACE TO EDIT WIRE STRINGS <<<  (see banner above)
@@ -79,6 +80,8 @@ class DDrivePiezo:
         self.cfg = cfg
         self.n = 2
         self._ser = None
+        # The claim on our COM port (see open()); None while closed.
+        self._hw_lock = None
         # A lock so the publisher (status reads) and the commander (writes) never
         # interleave bytes on the one shared serial line.
         self._io_lock = threading.Lock()
@@ -91,28 +94,52 @@ class DDrivePiezo:
 
     # -- connection -------------------------------------------------------- #
     def open(self) -> None:
-        # LAZY import: nothing above module scope depends on pyserial.
-        import serial  # noqa: PLC0415  (intentional lazy import)
+        # ONE instrument, ONE service (Lukas: "the same instrument has to be
+        # defined by the same physical address").  The d-Drive IS its COM
+        # port, so we claim the port before opening it.  If another service --
+        # a second piezo, or any module pointed at the same port -- already
+        # holds it, claim() raises HardwareBusy naming the holder, and we have
+        # sent nothing.  "com3" and "COM3" are the same claim (hwlock
+        # normalises the spelling).
+        self._hw_lock = claim(self.cfg.hardware.port, "piezo")
+        try:
+            # LAZY import: nothing above module scope depends on pyserial.
+            import serial  # noqa: PLC0415  (intentional lazy import)
 
-        self._ser = serial.Serial(
-            port=self.cfg.hardware.port,
-            baudrate=self.cfg.hardware.baud,
-            timeout=0.5,        # read timeout (s)
-            write_timeout=0.5,
-        )
+            self._ser = serial.Serial(
+                port=self.cfg.hardware.port,
+                baudrate=self.cfg.hardware.baud,
+                timeout=0.5,        # read timeout (s)
+                write_timeout=0.5,
+            )
+        except BaseException:
+            # A failed open must not leave the port claimed, or the NEXT start
+            # (after fixing the cable or the port name) would find it "busy".
+            self._release_claim()
+            raise
         # Nothing is WRITTEN here (adopt rule, see the module docstring): the
         # brain reads the loop mode, setpoint and slew rate through the query
         # methods and adopts them.  The old version pushed the config's loop
         # mode and velocity at this point, which could flip a running stage
         # from open to closed loop (and jump it) just by starting the service.
 
+    def _release_claim(self) -> None:
+        lock, self._hw_lock = self._hw_lock, None
+        if lock is not None:
+            lock.release()
+
     def close(self) -> None:
-        if self._ser is not None:
-            try:
-                self._ser.close()
-            except Exception:
-                pass
-            self._ser = None
+        try:
+            if self._ser is not None:
+                try:
+                    self._ser.close()
+                except Exception:
+                    pass
+                self._ser = None
+        finally:
+            # Release AFTER the port is closed, so the next owner never sees
+            # the port still open in our process.
+            self._release_claim()
 
     def idn(self) -> str:
         # The d-Drive has no universal *IDN?; report the port we opened.

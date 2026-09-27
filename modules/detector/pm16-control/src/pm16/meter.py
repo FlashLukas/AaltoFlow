@@ -156,21 +156,18 @@ class PowerMeter:
         """
         s = self.cfg.sensor
         with self._hw:
+            # open() either succeeds fully (session + hardware claim held) or
+            # raises having released both -- e.g. HardwareBusy when another
+            # service already drives this meter. Nothing below runs then, so
+            # we never query or close a meter we do not own.
             self.backend.open()
-            self._idn = self.backend.idn()
-            self._sensor = self.backend.sensor_name()
-            self._dev_wl = self._try(self.backend.wavelength_range, self._dev_wl)
-            self._dev_range = self._try(self.backend.range_limits, self._dev_range)
-            self._avg_time = self._try(self.backend.average_time_s, _NAN)
-            # Queries only -- no set_* call may appear in this block.
-            s.wavelength_nm = float(self.backend.get_wavelength())
-            s.auto_range = bool(self.backend.get_auto_range())
-            # The range in use: on manual it is the setpoint; on auto it is
-            # what auto picked, which is also what a later switch to manual
-            # keeps (set_auto_range hands over without a jump).
-            s.range_W = float(self.backend.get_range())
-            self._read_back()
-            self._dark = self._try(self.backend.dark_offset, _NAN)
+            try:
+                self._adopt()
+            except BaseException:
+                # Opened but the first queries failed: close the session and
+                # release the claim, or a restarted service finds it "busy".
+                self.backend.close()
+                raise
             self._connected = True
         self._emit("info", f"connected: {self._idn or 'power meter'}"
                            + (f", sensor {self._sensor}" if self._sensor else ""))
@@ -182,6 +179,24 @@ class PowerMeter:
             self._thread = threading.Thread(target=self._poll_loop,
                                             name="pm16-poll", daemon=True)
             self._thread.start()
+
+    def _adopt(self) -> None:
+        """Read the meter's state into cfg (queries only). Caller holds _hw."""
+        s = self.cfg.sensor
+        self._idn = self.backend.idn()
+        self._sensor = self.backend.sensor_name()
+        self._dev_wl = self._try(self.backend.wavelength_range, self._dev_wl)
+        self._dev_range = self._try(self.backend.range_limits, self._dev_range)
+        self._avg_time = self._try(self.backend.average_time_s, _NAN)
+        # Queries only -- no set_* call may appear in this block.
+        s.wavelength_nm = float(self.backend.get_wavelength())
+        s.auto_range = bool(self.backend.get_auto_range())
+        # The range in use: on manual it is the setpoint; on auto it is
+        # what auto picked, which is also what a later switch to manual
+        # keeps (set_auto_range hands over without a jump).
+        s.range_W = float(self.backend.get_range())
+        self._read_back()
+        self._dark = self._try(self.backend.dark_offset, _NAN)
 
     def shutdown(self) -> None:
         """Stop polling and disconnect. Safe to call more than once. A power

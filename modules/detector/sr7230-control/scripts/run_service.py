@@ -32,6 +32,7 @@ from sr7230.lockin import LockIn
 from sr7230.sim_system import build_sim_system
 from sr7230.net.service import Sr7230Service
 from sr7230.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from sr7230.hwlock import HardwareBusy
 
 #: this PC's settings (the instrument's IP address above all); gitignored,
 #: and kept by the installer across upgrades
@@ -74,8 +75,18 @@ def main() -> int:
         lockin, _ = build_sim_system(cfg)
         print("SIMULATED backend (no hardware needed)")
 
-    Sr7230Service(lockin, host=args.host, cmd_port=args.cmd_port,
-                  pub_port=args.pub_port).serve_forever()
+    try:
+        Sr7230Service(lockin, host=args.host, cmd_port=args.cmd_port,
+                      pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this 7230 (same IP address). The
+        # backend refused BEFORE connecting, so there is nothing to close or
+        # make safe here -- in particular no "OSC OUT to 0 V": that box is
+        # not ours. The brain's start() raised before the service threads
+        # existed, so no stop()/shutdown() ran either. One line, no traceback,
+        # non-zero exit so the launcher shows the start as failed.
+        print(f"cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

@@ -23,6 +23,12 @@ reaches this backend, so here we simply forward commands and read back.
 
 from __future__ import annotations
 
+from .. import hwlock
+
+# The name written into the lock file, so a second service trying the same
+# GPIB address is told WHO holds it ("... already in use by smb (pid N)").
+MODULE = "smb"
+
 
 class VisaSMB100A:
     """Drives a physical SMB100A. Implements the RFSource interface."""
@@ -35,40 +41,69 @@ class VisaSMB100A:
         self._rm = None
         self._inst = None
         self._phase_in_rad = False                      # learned in open(), never set
+        self._lock = None                               # hwlock claim, held while open
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
-        import pyvisa                                   # lazy: only needed for real hw
-        self._rm = pyvisa.ResourceManager()
-        self._inst = self._rm.open_resource(self._resource)
-        self._inst.timeout = self._timeout_ms
-        # SCPI instruments are line-terminated; \n is the SMB100A default.
-        self._inst.write_termination = "\n"
-        self._inst.read_termination = "\n"
-        # *CLS only empties the status/error queue; it does not touch RF,
-        # level, frequency or phase, so it is allowed under the adopt rule.
-        self._inst.write("*CLS")
-        # Which unit will PHAS? answer in? READ it, do not set it.
-        # VERIFY on the SMB100A: the reply spelling of UNIT:ANGL? (expected
-        # "DEG" / "RAD") and that PHAS? follows this unit.
+        # ONE instrument, ONE service (Lukas's rule: an instrument is defined by
+        # its physical address). Claim the GPIB address BEFORE any byte goes out,
+        # so a second service pointed at the same SMB100A -- written as
+        # "GPIB0::28::INSTR" or "GPIB::28", it is the same box -- is refused here
+        # with HardwareBusy naming the holder, and never sends *CLS to a
+        # generator somebody else is driving.
+        self._lock = hwlock.claim(self._resource, MODULE)
         try:
-            unit = self._query("UNIT:ANGL?").upper()
-        except Exception:
-            unit = "DEG"                                # the factory default
-        self._phase_in_rad = unit.startswith("RAD")
+            import pyvisa                               # lazy: only needed for real hw
+            self._rm = pyvisa.ResourceManager()
+            self._inst = self._rm.open_resource(self._resource)
+            self._inst.timeout = self._timeout_ms
+            # SCPI instruments are line-terminated; \n is the SMB100A default.
+            self._inst.write_termination = "\n"
+            self._inst.read_termination = "\n"
+            # *CLS only empties the status/error queue; it does not touch RF,
+            # level, frequency or phase, so it is allowed under the adopt rule.
+            self._inst.write("*CLS")
+            # Which unit will PHAS? answer in? READ it, do not set it.
+            # VERIFY on the SMB100A: the reply spelling of UNIT:ANGL? (expected
+            # "DEG" / "RAD") and that PHAS? follows this unit.
+            try:
+                unit = self._query("UNIT:ANGL?").upper()
+            except Exception:
+                unit = "DEG"                            # the factory default
+            self._phase_in_rad = unit.startswith("RAD")
+        except BaseException:
+            # A failed open must not leave the address claimed (a later retry,
+            # or another service, would then be refused for nothing). Drop the
+            # VISA session WITHOUT the "RF off" of close(): we never got as far
+            # as adopting the instrument, so we send it nothing more.
+            self._drop_session()
+            raise
 
     def close(self) -> None:
         try:
             if self._inst is not None:
                 self._inst.write("OUTP:STAT OFF")       # RF off on the way out
         finally:
+            self._drop_session()
+
+    def _drop_session(self) -> None:
+        """Close VISA handles and give the address back. Sends no command."""
+        try:
             if self._inst is not None:
                 self._inst.close()
+        except Exception:
+            pass
+        try:
             if self._rm is not None:
                 self._rm.close()
-            self._inst = None
-            self._rm = None
+        except Exception:
+            pass
+        self._inst = None
+        self._rm = None
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
 
     # ---- small SCPI helpers ---------------------------------------------
 

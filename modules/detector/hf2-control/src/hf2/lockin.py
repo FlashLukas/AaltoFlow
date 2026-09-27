@@ -169,10 +169,24 @@ class LockIn:
         """
         self._sanitise_config()
         with self._hw:
+            # If open() itself fails (e.g. hwlock.HardwareBusy: another service
+            # holds this lock-in) the backend has already cleaned up after
+            # itself -- nothing was opened, so nothing is closed here. If open()
+            # worked but READING the channels fails, close the backend again:
+            # that drops the connection AND the claim on the device, so a failed
+            # start never leaves the lock-in reserved. close() only disconnects;
+            # it sends no settings (there is no output to make safe).
             self.backend.open()
-            self._idn = self.backend.idn()
-            for i in range(N_CHANNELS):
-                self._adopt_channel(i)
+            try:
+                self._idn = self.backend.idn()
+                for i in range(N_CHANNELS):
+                    self._adopt_channel(i)
+            except BaseException:
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
             self._connected = True
         self._emit("info", f"connected: {self._idn or 'HF2LI'} (settings read from "
                            f"the instrument, nothing changed)")

@@ -177,9 +177,16 @@ class Heater:
         `poll_once()`."""
         with self._hw:
             self.backend.open()
-            self._idn = self.backend.idn()
-            st = self.backend.read_status()
-            sp = self.backend.read_setpoint()
+            try:
+                self._idn = self.backend.idn()
+                st = self.backend.read_status()
+                sp = self.backend.read_setpoint()
+            except BaseException:
+                # The box opened but its state could not be read: close the port
+                # (and release its hwlock claim) without commanding anything --
+                # we never adopted a state, so there is no "safe state" to send.
+                self.backend.close()
+                raise
             with self._lock:
                 self._enabled = st.enabled
                 self._sp = float(sp)

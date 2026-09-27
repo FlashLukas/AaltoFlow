@@ -45,6 +45,10 @@ import time
 
 import numpy as np
 
+from .. import hwlock
+
+MODULE = "ccs200"                  # the name other services see when this one holds the device
+
 DEFAULT_DLL = r"C:\Program Files\IVI Foundation\VISA\Win64\Bin\TLCCS_64.dll"
 
 NUM_PIXELS = 3648                   # TLCCS_NUM_PIXELS
@@ -152,29 +156,60 @@ class TlccsSpectrometer:
         self._pending = False               # a scan was started and not read
         self._stale = False                 # ... and nobody wants it any more
         self._t_start = 0.0                 # clock() when that scan was started
+        self._lock = None                   # hwlock claim on the resource, while open
 
     # ---- lifecycle -------------------------------------------------------
     def open(self) -> None:
+        # Any failure below must leave NOTHING behind: no open TLCCS session
+        # and no claimed address, or the next attempt (or another service)
+        # would find the spectrometer "busy" although nobody is using it.
+        try:
+            self._open()
+        except BaseException:
+            self._close_session()
+            self._release_lock()
+            raise
+
+    def _open(self) -> None:
         self._dll = self._injected if self._injected is not None else load_dll(self.dll_path)
         candidates = [self.resource] if self.resource else (
             find_resources() if self._injected is None else [])
         if not candidates:
             raise TLCCSError("no CCS200 found. Is it plugged in, and is the Thorlabs CCS "
                              "driver installed? (or set hardware.resource / --resource)")
-        errors = []
+        errors, busy = [], []
         for resource in candidates:
+            # ONE instrument, ONE service (Lukas's rule): claim the physical
+            # address BEFORE tlccs_init sends anything to the device. The
+            # resource string carries the unit's serial number
+            # (USB0::0x1313::0x8089::M<serial>::RAW), so two services pointed at
+            # the same spectrometer collide here, however the string is spelt.
+            # An explicitly configured resource that is taken is a hard error;
+            # when we are merely trying every CCS200 VISA found, a taken one is
+            # skipped (it belongs to another service) and the next is tried.
+            try:
+                lock = hwlock.claim(resource, MODULE)
+            except hwlock.HardwareBusy as exc:
+                if self.resource:
+                    raise
+                busy.append(str(exc))
+                continue
             try:
                 # IDQuery on, reset OFF: a reset is not needed to measure and
                 # would throw away whatever the instrument was set to. # VERIFY
                 self._call("tlccs_init", resource.encode(), 1, 0, C.byref(self._vi))
             except TLCCSError as exc:
+                lock.release()      # not opened: do not keep it claimed
                 errors.append(f"{resource}: {exc}")
                 continue
+            self._lock = lock
             self.resource = resource
             break
         else:
+            if busy and not errors:
+                raise hwlock.HardwareBusy("; ".join(busy))
             raise TLCCSError("could not open the spectrometer (in use by ThorSpectra or "
-                             "another program?) -- " + "; ".join(errors))
+                             "another program?) -- " + "; ".join(errors + busy))
         self._idn = self._read_idn()
         self._wl = self._read_wavelengths()
         # ADOPT the integration time the CCS is already set to (queries only;
@@ -185,12 +220,25 @@ class TlccsSpectrometer:
         self._pending = self._stale = False
 
     def close(self) -> None:
+        try:
+            self._close_session()
+        finally:
+            # released even if tlccs_close failed: the process no longer uses
+            # the device, so another service may claim it
+            self._release_lock()
+
+    def _close_session(self) -> None:
         if self._dll is not None and self._vi.value:
             try:
                 self._dll.tlccs_close(self._vi)
             finally:
                 self._vi = ViSession(0)
         self._pending = False
+
+    def _release_lock(self) -> None:
+        if self._lock is not None:
+            self._lock, lock = None, self._lock
+            lock.release()
 
     def idn(self) -> str:
         return self._idn

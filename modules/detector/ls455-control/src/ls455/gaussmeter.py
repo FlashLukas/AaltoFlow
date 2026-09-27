@@ -199,23 +199,36 @@ class Gaussmeter:
         """
         m = self.cfg.meter
         with self._hw:
+            # open() claims the meter's address (hwlock) -- a HardwareBusy
+            # from it means another service owns the meter; we never talked
+            # to it, so there is nothing to close and it simply propagates.
             self.backend.open()
-            self._idn = self._try(self.backend.idn, "")
-            self._connected = True
-            self._read_probe()
-            # every one of these is a QUERY
-            mode, digits, band = self.backend.get_mode()
-            m.mode = mode if mode in MODES else "dc"
-            m.dc_digits, m.rms_band = int(digits), band
-            self._peak = tuple(self.backend.get_peak())
-            m.auto_range = bool(self.backend.get_auto_range())
-            if not m.auto_range:
-                m.range_mT = float(self.backend.get_range())
-            m.display_unit = self.backend.get_display_unit()
-            m.relative, m.rel_setpoint_mT = self.backend.get_relative()
-            m.relative = bool(m.relative)
-            m.rel_setpoint_mT = float(m.rel_setpoint_mT)
-            self._read_back()
+            try:
+                self._idn = self._try(self.backend.idn, "")
+                self._connected = True
+                self._read_probe()
+                # every one of these is a QUERY
+                mode, digits, band = self.backend.get_mode()
+                m.mode = mode if mode in MODES else "dc"
+                m.dc_digits, m.rms_band = int(digits), band
+                self._peak = tuple(self.backend.get_peak())
+                m.auto_range = bool(self.backend.get_auto_range())
+                if not m.auto_range:
+                    m.range_mT = float(self.backend.get_range())
+                m.display_unit = self.backend.get_display_unit()
+                m.relative, m.rel_setpoint_mT = self.backend.get_relative()
+                m.relative = bool(m.relative)
+                m.rel_setpoint_mT = float(m.rel_setpoint_mT)
+                self._read_back()
+            except BaseException:
+                # adoption failed half way: close the port so the address is
+                # released (a failed start must not keep the meter "busy")
+                self._connected = False
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
         self._next_sync = self._clock() + FRONT_PANEL_SYNC_S
         self._emit("info", f"connected: {self._idn or 'gaussmeter'}")
         self._emit_probe(first=True)

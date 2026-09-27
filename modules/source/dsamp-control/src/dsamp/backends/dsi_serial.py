@@ -43,6 +43,12 @@ from __future__ import annotations
 import re
 import time
 
+from ..hwlock import claim
+
+# The name this module's claims carry: another service that finds the COM port
+# busy is told "... already in use by dsamp (pid N)".
+MODULE = "dsamp"
+
 _NUMBER = re.compile(r"[-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?")
 
 
@@ -75,14 +81,28 @@ class DsiSerialAmp:
         self._buttons_on_exit = bool(buttons_on_exit)
         self._ser = None
         self._idn = ""
+        self._lock = None          # our claim on the COM port while it is open
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
         import serial                                    # lazy: only for real hardware
-        self._ser = serial.Serial(self._port, self._baud, bytesize=8, parity="N",
-                                  stopbits=1, timeout=self._timeout_s,
-                                  write_timeout=self._timeout_s)
+        # Claim the COM port FIRST (Lukas's rule: one physical instrument = one
+        # physical address = one service). Windows already refuses a second
+        # open of a COM port, but with a cryptic "Access is denied" and without
+        # saying WHO holds it; the claim names the holder, and "com5", "COM5"
+        # and "\\.\COM5" all count as the same amplifier. Raises HardwareBusy
+        # before a single byte goes to the device.
+        self._lock = claim(self._port, MODULE)
+        try:
+            self._ser = serial.Serial(self._port, self._baud, bytesize=8, parity="N",
+                                      stopbits=1, timeout=self._timeout_s,
+                                      write_timeout=self._timeout_s)
+        except BaseException:
+            # A failed open must not leave the port claimed, or the NEXT start
+            # (after fixing the cable / the port number) would be refused.
+            self._release()
+            raise
         time.sleep(0.2)                                  # VERIFY: boot/enumeration settle
         self._ser.reset_input_buffer()                   # local buffer only, not the device
         # NOTHING is written to the amplifier here except the *IDN? query: the
@@ -100,6 +120,9 @@ class DsiSerialAmp:
 
     def close(self) -> None:
         if self._ser is None:
+            # Never opened (or already closed): nothing is sent -- we do not
+            # own the device -- but a claim left from a half-done open goes.
+            self._release()
             return
         try:
             self._write("OUTP:STAT OFF")                 # stage off on the way out
@@ -110,6 +133,12 @@ class DsiSerialAmp:
                 self._ser.close()
             finally:
                 self._ser = None
+                self._release()                          # port free for the next service
+
+    def _release(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
 
     # ---- low-level -------------------------------------------------------
 

@@ -18,12 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ddr25.config import Config, load_config  # noqa: E402
+from ddr25.hwlock import HardwareBusy  # noqa: E402
 from ddr25.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from ddr25.net.service import Ddr25Service  # noqa: E402
 from ddr25.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="DDR25 rotation-stage service")
     ap.add_argument("--real", action="store_true",
                     help="use the real K-Cube + DDR25 (default: simulator)")
@@ -44,8 +45,19 @@ def main() -> None:
     kind = "REAL K-Cube + DDR25" if args.real else "SIMULATOR"
     print(f"ddr25 service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
     print("Ctrl-C to stop.")
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this K-Cube (same Kinesis serial,
+        # hwlock.py). Say so in ONE line -- the launcher shows it in its
+        # log -- and exit non-zero, without a traceback. Nothing to make
+        # safe: the claim failed BEFORE the controller was opened, so the
+        # brain never connected and its shutdown sends no stop command to a
+        # stage that belongs to the other service. (ASCII: gotcha #14.)
+        print(f"ddr25: cannot start: {exc}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

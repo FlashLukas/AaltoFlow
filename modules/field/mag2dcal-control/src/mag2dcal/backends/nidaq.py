@@ -28,7 +28,32 @@ first on every tick, so the temperatures are never more than one tick old.
 
 from __future__ import annotations
 
+from .. import hwlock
 from ..config import Hardware
+
+# The name this module claims hardware under (hwlock.py). It is what a second
+# service trying to open the same card is told ("... in use by mag2dcal").
+MODULE = "mag2dcal"
+
+
+def daq_devices(hw: Hardware) -> list[str]:
+    """The NI DAQ DEVICE names (e.g. "Dev1") that the configured channels live on.
+
+    WHY: the physical instrument is the CARD, not a channel. mag2d-control and
+    this module both drive "Dev1" -- the same coils -- so the lock is taken on
+    the device name, and a service using only Dev1/ai5 still collides with one
+    using Dev1/ao0 (one AI timing engine, one card). Normally every channel is
+    on one card and this returns one name; if the wiring were ever split over
+    two cards, both are claimed.
+    """
+    names: list[str] = []
+    for ch in (hw.ao_x, hw.ao_y, hw.ai_hall_x, hw.ai_hall_y, hw.ai_temp1,
+               hw.ai_temp2, hw.di_water, hw.do_enable):
+        # "Dev1/ao0", "/Dev1/ao0" (DAQmx accepts a leading slash) -> "Dev1"
+        dev = str(ch).strip().lstrip("/").partition("/")[0].strip()
+        if dev and dev.upper() not in (n.upper() for n in names):
+            names.append(dev)
+    return names
 
 
 class NidaqVectorMagnet:
@@ -41,10 +66,39 @@ class NidaqVectorMagnet:
         # None where it could not be read. See read_output().
         self._found: tuple = (None, None, None)
         self.found_notes: list[str] = []   # why something could not be read
+        # One hwlock.HardwareLock per DAQ device, held from open() to close().
+        self._locks: list = []
 
     # ---- lifecycle -------------------------------------------------------------
 
     def open(self) -> None:
+        # ONE PHYSICAL INSTRUMENT, ONE SERVICE (Lukas's rule). Claim the card
+        # BEFORE creating a single DAQmx task: mag2d-control drives the same
+        # coils through the same Dev1, and if both ran, two control loops would
+        # write the same AO pins. A second claim raises hwlock.HardwareBusy
+        # naming the holder, and we have touched nothing.
+        self._claim_devices()
+        try:
+            self._open_tasks()
+        except BaseException:
+            # A failed open must not leave the card "busy" for the next try.
+            self._release_locks()
+            raise
+
+    def _claim_devices(self) -> None:
+        try:
+            for dev in daq_devices(self.hw):
+                self._locks.append(hwlock.claim(dev, MODULE))
+        except BaseException:
+            self._release_locks()        # e.g. Dev1 claimed, Dev2 busy -> free Dev1
+            raise
+
+    def _release_locks(self) -> None:
+        locks, self._locks = self._locks, []
+        for lk in locks:
+            lk.release()
+
+    def _open_tasks(self) -> None:
         import nidaqmx                                   # lazy: only on --real
         from nidaqmx.constants import AcquisitionType, TerminalConfiguration
         self._nidaqmx = nidaqmx
@@ -162,6 +216,9 @@ class NidaqVectorMagnet:
         except Exception:
             pass
         self._close_tasks()
+        # Release the card LAST: the backstop writes above still happen while
+        # we own it, and only then may another service take it.
+        self._release_locks()
 
     def _close_tasks(self) -> None:
         for name in ("_ai", "_ao", "_di", "_do"):

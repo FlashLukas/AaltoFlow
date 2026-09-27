@@ -33,6 +33,7 @@ from ppms.cryostat import Cryostat
 from ppms.sim_system import build_sim_system
 from ppms.net.service import PpmsService
 from ppms.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from ppms.hwlock import HardwareBusy
 
 
 def main() -> int:
@@ -74,6 +75,13 @@ def main() -> int:
     service = PpmsService(cryo, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this DynaCool (hwlock.py). The claim
+        # is taken before anything is sent to MultiVu, so there is nothing of
+        # ours to close or make safe: one clear line and a non-zero exit code
+        # (the launcher shows it in its log), no traceback.
+        print(f"ppms service NOT started: {exc}", file=sys.stderr)
+        return 3
     except RuntimeError as exc:
         # most often: MultiVu not running, or the `real` extra not installed
         print(f"could not start: {exc}")

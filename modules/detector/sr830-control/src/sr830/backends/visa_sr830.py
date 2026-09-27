@@ -35,6 +35,12 @@ from __future__ import annotations
 
 import math
 
+from ..hwlock import claim
+
+# The name this module registers its claim under -- the holder another service
+# is told about when it tries to open the same GPIB address.
+MODULE_KEY = "sr830"
+
 
 class VisaSR830:
     """Drives a physical SR830. Implements the SR830Backend interface."""
@@ -47,6 +53,7 @@ class VisaSR830:
         self._rm = None
         self._inst = None
         self._idn = ""
+        self._lock = None      # our claim on the GPIB address (hwlock), held while open
 
     # ---- low level -------------------------------------------------------------
 
@@ -65,6 +72,21 @@ class VisaSR830:
     # ---- lifecycle ---------------------------------------------------------------
 
     def open(self) -> None:
+        # ONE INSTRUMENT, ONE SERVICE (Lukas: "the same instrument has to be
+        # defined by the same physical address"). Claim the GPIB address BEFORE
+        # the first byte goes out: if another service (another sr830, or any
+        # module pointed at the same address by mistake) already drives this
+        # box, HardwareBusy is raised here and we never talk to it. The claim
+        # is released in close() and on every failure below, so a failed open
+        # never leaves the address "busy".
+        self._lock = claim(self._resource, MODULE_KEY)
+        try:
+            self._open_instrument()
+        except BaseException:
+            self._drop_connection()
+            raise
+
+    def _open_instrument(self) -> None:
         import pyvisa                                   # lazy: only for real hardware
         self._rm = pyvisa.ResourceManager()
         self._inst = self._rm.open_resource(self._resource)
@@ -93,24 +115,39 @@ class VisaSR830:
         self._q("LIAS?")
 
     def close(self) -> None:
-        if self._inst is None:
-            return
         try:
-            # Hand the front panel back to the user: Go To Local.
-            # VERIFY: pyvisa constant name and that the NI-488.2 driver honours it.
-            try:
-                from pyvisa import constants
-                self._inst.control_ren(constants.RENLineOperation.address_gtl)
-            except Exception:
-                pass
-            self._inst.close()
+            if self._inst is not None:
+                # Hand the front panel back to the user: Go To Local.
+                # VERIFY: pyvisa constant name and that the NI-488.2 driver honours it.
+                try:
+                    from pyvisa import constants
+                    self._inst.control_ren(constants.RENLineOperation.address_gtl)
+                except Exception:
+                    pass
         finally:
-            self._inst = None
+            self._drop_connection()
+
+    def _drop_connection(self) -> None:
+        """Close the VISA session and give the address back. Sends NOTHING to
+        the instrument (used after a failed open too), and never raises past
+        the lock release: the claim must go whatever happened on the bus."""
+        try:
+            if self._inst is not None:
+                try:
+                    self._inst.close()
+                except Exception:
+                    pass
             if self._rm is not None:
                 try:
                     self._rm.close()
-                finally:
-                    self._rm = None
+                except Exception:
+                    pass
+        finally:
+            self._inst = None
+            self._rm = None
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
 
     def idn(self) -> str:
         return self._idn

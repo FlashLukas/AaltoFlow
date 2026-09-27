@@ -27,6 +27,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from sr830.config import Config
+from sr830.hwlock import HardwareBusy
 from sr830.lockin import DspLockIn
 from sr830.sim_system import build_sim_system
 from sr830.net.service import Sr830Service
@@ -62,8 +63,18 @@ def main() -> int:
         lockin, _ = build_sim_system(cfg)
         print("SIMULATED backend (no hardware needed)")
 
-    Sr830Service(lockin, host=args.host, cmd_port=args.cmd_port,
-                 pub_port=args.pub_port).serve_forever()
+    try:
+        Sr830Service(lockin, host=args.host, cmd_port=args.cmd_port,
+                     pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this GPIB address (hwlock). Say so in
+        # ONE line -- the launcher shows it in its log -- and exit non-zero.
+        # No shutdown/"make outputs safe" here on purpose: the claim failed
+        # BEFORE open() sent anything, so the SR830 belongs to the other
+        # service and we must not touch its SINE OUT or AUX OUTs.
+        # (The message is ASCII: gotcha #14.)
+        print(f"sr830: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

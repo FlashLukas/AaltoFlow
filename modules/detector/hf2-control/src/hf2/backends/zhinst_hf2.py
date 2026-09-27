@@ -34,6 +34,7 @@ import math
 from typing import Sequence
 
 from ..config import Channel
+from ..hwlock import HardwareLock, claim
 
 
 class ZhinstHF2:
@@ -49,6 +50,9 @@ class ZhinstHF2:
         self._daq = None
         self._idn = ""
         self._last_aux = [math.nan, math.nan]
+        # The claim on the physical HF2LI (hwlock.py): held from open() to
+        # close(), so a second service cannot drive the same lock-in.
+        self._lock: HardwareLock | None = None
 
     # ---- node helpers ---------------------------------------------------------
 
@@ -64,29 +68,51 @@ class ZhinstHF2:
     # ---- lifecycle ------------------------------------------------------------
 
     def open(self) -> None:
-        import zhinst.core                          # lazy: only needed for real hw
-        self._daq = zhinst.core.ziDAQServer(self._host, self._port, self._api_level)
-        # The HF2 data server attaches USB devices on its own; connectDevice is
-        # harmless if it already has. VERIFY on the lab PC.
+        # CLAIM THE INSTRUMENT FIRST (Lukas's rule: one physical instrument, one
+        # service). The HF2LI is identified by its device id (devNNNN, which is
+        # its serial number) -- NOT by the data server's host:port, because one
+        # ziServer can serve several lock-ins and two services talking to two
+        # different devices through it are fine. Two services on the SAME
+        # devNNNN are not: each would change the other's time constants.
+        # Claimed before ziDAQServer is even created, so a refused start never
+        # sends a byte to the server or the instrument.
+        self._lock = claim(self._dev, "hf2")
         try:
-            self._daq.connectDevice(self._dev, self._interface)
-        except RuntimeError:
-            pass
-        # A read that fails here means a wrong device id -- fail loudly now
-        # rather than returning zeros at 20 Hz later.
-        devtype = self._daq.getString(self._p("features/devtype"))    # VERIFY node
-        serial = self._daq.getString(self._p("features/serial"))      # VERIFY node
-        self._idn = f"Zurich Instruments,{devtype or 'HF2'},{serial or self._dev}"
-        # Deliberately NOT touching /sigouts: this module never drives an output.
-        # And nothing else is written here either: open() is queries only, the
-        # brain then READS each channel (read_channel) and adopts it.
+            import zhinst.core                      # lazy: only needed for real hw
+            self._daq = zhinst.core.ziDAQServer(self._host, self._port, self._api_level)
+            # The HF2 data server attaches USB devices on its own; connectDevice is
+            # harmless if it already has. VERIFY on the lab PC.
+            try:
+                self._daq.connectDevice(self._dev, self._interface)
+            except RuntimeError:
+                pass
+            # A read that fails here means a wrong device id -- fail loudly now
+            # rather than returning zeros at 20 Hz later.
+            devtype = self._daq.getString(self._p("features/devtype"))    # VERIFY node
+            serial = self._daq.getString(self._p("features/serial"))      # VERIFY node
+            self._idn = f"Zurich Instruments,{devtype or 'HF2'},{serial or self._dev}"
+            # Deliberately NOT touching /sigouts: this module never drives an output.
+            # And nothing else is written here either: open() is queries only, the
+            # brain then READS each channel (read_channel) and adopts it.
+        except BaseException:
+            # A failed open (no LabOne, server down, wrong id) must not leave
+            # the device claimed: drop the server connection and the claim.
+            self.close()
+            raise
 
     def close(self) -> None:
-        if self._daq is not None:
-            try:
-                self._daq.disconnect()
-            finally:
-                self._daq = None
+        try:
+            if self._daq is not None:
+                try:
+                    self._daq.disconnect()
+                finally:
+                    self._daq = None
+        finally:
+            # Released LAST, after the connection is gone, so a new service
+            # can never claim the device while this one still talks to it.
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
 
     def idn(self) -> str:
         return self._idn

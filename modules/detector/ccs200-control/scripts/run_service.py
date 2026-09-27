@@ -32,6 +32,7 @@ if os.path.isdir(_SRC):
 from pathlib import Path
 
 from ccs200.config import Config
+from ccs200.hwlock import HardwareBusy
 from ccs200.net.service import Ccs200Service
 from ccs200.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
@@ -81,6 +82,14 @@ def main() -> int:
     try:
         Ccs200Service(spec, host=args.host, cmd_port=args.cmd_port,
                       pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another service (this module or any other pointed at the same
+        # spectrometer) already holds it. One plain line, no traceback: the
+        # message already names the address and the holder. Nothing to close
+        # or make safe -- we never opened the device, and open() released
+        # whatever it had claimed.
+        print(f"ccs200 service: could not start: {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
         # Opening the instrument happens in serve_forever -> start. Say plainly
         # what went wrong (DLL missing, spectrometer busy, unplugged) rather

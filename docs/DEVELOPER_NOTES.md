@@ -105,6 +105,8 @@ CLIENTS                              WIRE                      SERVICES (one pro
 
 ONE of mag2d / mag2dcal runs at a time (same coils): they speak the SAME verbs
 and status keys, so everything else is unchanged apart from the id prefix.
+In real mode the second one is refused because its DAQ card's address is
+already claimed (the address lock, gotcha #37); in simulation both may run.
 
 vna is a SUBSCRIBER of a magnet's status stream (mag2d by default, mag2dcal, clMag or
 the DynaCool's ppms): it
@@ -127,20 +129,6 @@ still assumes piezo/zpiezo.
 - **camera-control owns no motion hardware.** It drives XY through
   piezo-control and Z through zpiezo-control over ZeroMQ.
 - **scan-core is THE coordinator** (homegrown, chosen over QCoDeS; see 7.8/7.10).
-- **Two modules, one instrument: `[run] excludes` (2026-09-27).** Some
-  modules are two programs for the SAME hardware -- kepco and clMag both open
-  the one Kepco BOP on the same GPIB address, mag2d and mag2dcal the same coils
-  and DAQ card. Two services commanding one supply would fight, and neither
-  knows the other exists, so a module declares its partners in `module.toml`
-  (`excludes = ["clMag"]`). Discovery makes it SYMMETRIC (naming it in one toml
-  is enough; `suite_common.mirror_excludes`) and only LOCAL modules take part (a
-  remote copy drives another PC's instrument). Mission Control then refuses to
-  start a service while a partner is up -- started from the launcher OR
-  answering on its port -- greys the Service button with the reason, refuses a
-  profile that holds both, and leaves the second of each pair out of "Full
-  suite" / "Start all". The profile "Exclusive" checkbox is a different thing
-  (stop everything not in the profile) and is unchanged. `check_modules.py`
-  fails an `excludes` key that names no module and lists every pair.
 
 ---
 
@@ -553,6 +541,40 @@ zpiezo has no GUI.
     whole before copying (`MigrateModuleLayout` in `installer/AaltoFlow.iss`),
     and Mission Control's "Add module" moves an old copy instead of making a
     second one.
+37. **One instrument is one PHYSICAL ADDRESS, not one module** (2026-09-27).
+    Two services commanding one supply fight, and neither knows the other
+    exists. The first fix listed pairs of module NAMES that must not run
+    together (`[run] excludes`: kepco <-> clMag, mag2d <-> mag2dcal). That was
+    the wrong key: clMag's Kepco sits on GPIB0::6 on one rig and could sit on
+    another address elsewhere, while any NEW module pointed at GPIB0::6 would
+    not be in anybody's list; and a module that drives two instruments on
+    different addresses was forbidden for nothing. Lukas: "the same instrument
+    has to be defined by the same physical address." So every real backend
+    claims its address with `hwlock.claim()` in `open()` (INSTRUMENT_MODULE_GUIDE
+    section 3) and a second claim -- from any module -- raises `HardwareBusy`
+    naming the holder; the name-based `excludes` is gone. What to know:
+    - **Per PC.** It is an operating-system file lock in
+      `%LOCALAPPDATA%\AaltoFlow\locks` (tests set `AALTOFLOW_LOCK_DIR`). GPIB,
+      USB and serial hang on one PC, so that covers them; a network instrument
+      shared between two PCs is NOT protected across the PCs.
+    - **A crash cannot leave an instrument "busy".** The OS drops the lock
+      when the process ends, however it ends; there is no stale-file cleanup to
+      get wrong. `held()` skips a lock file whose lock can be taken.
+    - **Windows frees a KILLED process's lock a moment later**, not at once.
+      A service restarted straight after a hard kill would be refused by its
+      own ghost, so `claim()` retries for up to 2 s (`wait_s`) before it
+      gives up.
+    - **The pid in the lock is not the pid the launcher started.** A venv's
+      `python.exe` is a small launcher that starts the real interpreter as a
+      CHILD (the same thing that makes `uv run` orphan services, gotcha #7), and
+      the child holds the lock. Mission Control therefore matches a card to its
+      locks by module KEY (what the backend passed to `claim`), with the pid only
+      as a second chance. The card shows "holds GPIB0::6"; a service refused its
+      address shows red "address busy: GPIB0::6 held by clMag (pid N)".
+    - **Every module carries a byte-identical copy** of the master
+      `suite-common/src/suite_common/hwlock.py`: two copies that normalise
+      addresses differently would each think they hold a different instrument.
+      `tools/check_modules.py` fails a differing copy.
 
 ---
 

@@ -115,8 +115,6 @@ def catalog_entry(m: ModuleSpec) -> dict:
         "version": module_version(m.dir) if m.dir else "",
         "ports": {"cmd": m.default_cmd, "pub": m.default_pub},
         "gui": bool(m.gui), "start_after": list(m.start_after),
-        # modules that drive the same instrument (symmetric, see modules.py)
-        "excludes": list(m.excludes),
     }
 
 
@@ -593,7 +591,6 @@ def spec_from_entry(entry: dict) -> ModuleSpec:
         category=entry.get("category", "other") if entry.get("category") in CATEGORIES
         else "other",
         tags=list(entry.get("tags", [])), start_after=list(entry.get("start_after", [])),
-        excludes=[str(k) for k in entry.get("excludes", []) or []],
         gui="gui" if entry.get("gui") else "", version=str(entry.get("version", "")),
     )
 

@@ -236,3 +236,104 @@ def test_start_issues_only_queries_and_adopts_multivus_state():
     finally:
         cryo.shutdown()
     assert FakeClient.instances[0].calls == ["open", "close_client"]
+
+
+# ---- one DynaCool, one service (hwlock) ---------------------------------------
+# Lukas's rule: the same instrument is defined by the same physical address, and
+# two services must never drive it at once. For this module the address is "the
+# MultiVu on this PC" (multivu.MULTIVU_ADDRESS). Locks go to a temp folder.
+
+from ppms import hwlock
+from ppms.backends import multivu as mv_mod
+from ppms.sim_system import build_sim_system
+
+
+@pytest.fixture
+def lockdir(tmp_path, monkeypatch):
+    monkeypatch.setenv("AALTOFLOW_LOCK_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_second_real_backend_is_refused_before_touching_multivu(lockdir):
+    a = MultiVuDynaCool(Config(), mpv=FakeMpv)
+    a.open()
+    b = MultiVuDynaCool(Config(), mpv=FakeMpv)
+    with pytest.raises(hwlock.HardwareBusy, match="ppms"):
+        b.open()
+    # The refused one never reached MultiPyVu: still ONE server, ONE client.
+    assert len(FakeServer.instances) == 1 and len(FakeClient.instances) == 1
+    a.close()
+
+
+def test_other_flavor_and_spelling_is_the_same_cryostat(lockdir):
+    # A second service with another flavor / MultiPyVu port still reaches the
+    # same MultiVu -> must conflict. And another module claiming "multivu"
+    # (lower case) is the same address after normalisation.
+    a = MultiVuDynaCool(Config(), mpv=FakeMpv)
+    a.open()
+    cfg = Config()
+    cfg.hardware.flavor, cfg.hardware.mpv_port = "", cfg.hardware.mpv_port + 1
+    with pytest.raises(hwlock.HardwareBusy):
+        MultiVuDynaCool(cfg, mpv=FakeMpv).open()
+    with pytest.raises(hwlock.HardwareBusy, match="ppms"):
+        hwlock.claim("multivu", "othermodule", wait_s=0.1)
+    assert hwlock.normalize("multivu") == hwlock.normalize(mv_mod.MULTIVU_ADDRESS)
+    a.close()
+
+
+def test_close_releases_the_claim(lockdir):
+    a = MultiVuDynaCool(Config(), mpv=FakeMpv)
+    a.open()
+    assert [h["module"] for h in hwlock.held()] == ["ppms"]
+    a.close()
+    assert hwlock.held() == []
+    b = MultiVuDynaCool(Config(), mpv=FakeMpv)
+    b.open()                                   # free again
+    b.close()
+
+
+def test_failed_open_releases_the_claim(lockdir):
+    FakeServer.exit_on_init = True             # MultiVu not running
+    with pytest.raises(RuntimeError):
+        MultiVuDynaCool(Config(), mpv=FakeMpv).open()
+    assert hwlock.held() == []
+    FakeServer.exit_on_init = False
+    b = MultiVuDynaCool(Config(), mpv=FakeMpv)
+    b.open()
+    b.close()
+
+
+def test_failed_client_open_releases_the_claim(lockdir, monkeypatch):
+    def boom(self):
+        raise ConnectionError("no server")
+    monkeypatch.setattr(FakeClient, "open", boom)
+    with pytest.raises(ConnectionError):
+        MultiVuDynaCool(Config(), mpv=FakeMpv).open()
+    assert hwlock.held() == []
+
+
+def test_busy_cryostat_start_sends_nothing(lockdir):
+    # The brain path the service uses: the refused start must not send any
+    # "safe state" to a cryostat it does not own, and shutdown after it is harmless.
+    holder = hwlock.claim(mv_mod.MULTIVU_ADDRESS, "ppms")
+    try:
+        cryo = Cryostat(MultiVuDynaCool(Config(), mpv=FakeMpv), Config())
+        with pytest.raises(hwlock.HardwareBusy):
+            cryo.start(poll=False)
+        cryo.shutdown()
+        assert FakeClient.instances == [] and FakeServer.instances == []
+    finally:
+        holder.release()
+
+
+def test_scaffolding_and_sim_claim_nothing(lockdir):
+    cfg = Config()
+    cfg.hardware.scaffolding = True            # MultiPyVu's own simulation
+    a = MultiVuDynaCool(cfg, mpv=FakeMpv)
+    a.open()
+    assert hwlock.held() == []
+    a.close()
+    cryo, _ = build_sim_system(Config())
+    cryo.start(poll=False)
+    assert hwlock.held() == []
+    cryo.shutdown()

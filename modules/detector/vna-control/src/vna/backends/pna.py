@@ -62,6 +62,7 @@ import numpy as np
 
 from .. import model
 from ..config import Config
+from . import claim as hwclaim      # the one-service-per-analyser lock
 from ..field import FieldReading
 
 #: the measurement this backend owns on the instrument
@@ -92,6 +93,7 @@ class PnaVna:
         self.cfg = cfg
         self._res = resource
         self._rm = None
+        self._hwlock = None               # our claim on the analyser (see open)
         self._clock = clock
         self._sleep = sleep
         self._idn = ""
@@ -108,6 +110,17 @@ class PnaVna:
     # ---- lifecycle -------------------------------------------------------------
 
     def open(self) -> None:
+        """Claim the analyser, connect, and LOOK (queries only).
+
+        A failed open releases everything it took -- above all the claim, or a
+        dead attempt would keep the analyser "busy" for every other service."""
+        try:
+            self._connect()
+        except BaseException:
+            self._abandon()
+            raise
+
+    def _connect(self) -> None:
         hw = self.cfg.hardware
         if self._res is None:
             try:
@@ -117,7 +130,14 @@ class PnaVna:
                     "pyvisa is not installed. In vna-control run: "
                     "uv sync --extra gui --extra real") from exc
             self._rm = pyvisa.ResourceManager()
+            # ONE SERVICE PER ANALYSER (Lukas, 2026-09-27): claim the address
+            # BEFORE the connection is opened. Another service holding it ->
+            # hwlock.HardwareBusy here, and not one byte reaches the analyser.
+            self._hwlock = hwclaim.claim(hw.visa_resource, self._rm)
             self._res = self._rm.open_resource(hw.visa_resource)
+        else:
+            # an injected resource (the tests' fake analyser) is claimed the same way
+            self._hwlock = hwclaim.claim(hw.visa_resource)
         r = self._res
         r.timeout = int(float(hw.timeout_s) * 1000)       # pyvisa counts milliseconds
         r.read_termination = "\n"
@@ -209,9 +229,33 @@ class PnaVna:
         self._check_errors("taking over the sweep")
         self._prepared = True
 
+    def _abandon(self) -> None:
+        """Undo a half-done open: drop the connection we made (an injected
+        resource belongs to the caller), close VISA, release the claim. Sends
+        nothing -- the analyser was never taken over."""
+        if self._res is not None and self._rm is not None:
+            try:
+                self._res.close()
+            except Exception:
+                pass
+            self._res = None
+        if self._rm is not None:
+            try:
+                self._rm.close()
+            except Exception:
+                pass
+            self._rm = None
+        self._release()
+
+    def _release(self) -> None:
+        lock, self._hwlock = self._hwlock, None
+        if lock is not None:
+            lock.release()
+
     def close(self) -> None:
         r, self._res = self._res, None
         if r is None:
+            self._release()                            # e.g. after a failed open
             return
         try:
             if self._pending:
@@ -235,6 +279,9 @@ class PnaVna:
                 except Exception:
                     pass
                 self._rm = None
+            # released LAST, after the connection is closed: until then this
+            # service still owns the analyser
+            self._release()
 
     def idn(self) -> str:
         return self._idn

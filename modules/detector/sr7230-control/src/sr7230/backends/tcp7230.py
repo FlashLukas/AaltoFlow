@@ -51,6 +51,12 @@ import re
 import socket
 import threading
 
+from ..hwlock import claim
+
+#: the name this module writes into a hardware lock, so a second service
+#: trying the same 7230 is told who holds it
+MODULE_KEY = "sr7230"
+
 # a number as the 7230 prints it: "+1.234E-03", "12", "-5.0E+00"
 _NUM = re.compile(r"[-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?")
 
@@ -118,6 +124,11 @@ class Tcp7230:
             raise ValueError("no IP address for the 7230: set hardware.host in the "
                              "config, or pass --address to run_service.py")
         self._t = transport or _TcpTransport(host, port, timeout_s)
+        # The PHYSICAL address of this box = its IP address (hwlock keys a
+        # network instrument by host only: port 50000 and 50001 are one box).
+        # Empty only when a test injects its own transport.
+        self._address = str(host or "")
+        self._hwlock = None     # held from open() to close(), see open()
         self._idn = ""
         self._last_status = 0
         self._last_overload = 0
@@ -156,6 +167,31 @@ class Tcp7230:
     # ---- lifecycle ------------------------------------------------------------------
 
     def open(self) -> None:
+        # ONE INSTRUMENT, ONE SERVICE (Lukas: "the same instrument has to be
+        # defined by the same physical address"). Claim the IP address BEFORE
+        # the first byte goes out: if another service -- this module started
+        # twice, or any other module pointed at the same box -- already drives
+        # it, hwlock raises HardwareBusy naming the holder and we never
+        # connect. The claim is kept until close(); if anything in the rest of
+        # open() fails, it is let go again, so a failed start never leaves the
+        # 7230 marked "busy".
+        if self._address and self._hwlock is None:
+            self._hwlock = claim(self._address, MODULE_KEY)
+        try:
+            self._open_connected()
+        except BaseException:
+            try:
+                self._t.close()
+            finally:
+                self._release()
+            raise
+
+    def _release(self) -> None:
+        lock, self._hwlock = self._hwlock, None
+        if lock is not None:
+            lock.release()
+
+    def _open_connected(self) -> None:
         self._t.open()
         ident = self._q("ID")                   # answers 7230
         ver = self._q("VER")                    # VERIFY: reply format of VER
@@ -180,7 +216,10 @@ class Tcp7230:
         # The brain reads the settings (read_settings) and adopts them.
 
     def close(self) -> None:
-        self._t.close()
+        try:
+            self._t.close()
+        finally:
+            self._release()     # the address is free for another service again
 
     def idn(self) -> str:
         return self._idn

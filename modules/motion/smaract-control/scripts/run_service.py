@@ -18,12 +18,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from smaract.config import Config, load_config  # noqa: E402
+from smaract.hwlock import HardwareBusy  # noqa: E402
 from smaract.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from smaract.net.service import SmaractService  # noqa: E402
 from smaract.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 
-def main() -> None:
+def _ascii(text: str) -> str:
+    """Printed text stays ASCII (gotcha #14): an error text from Windows can be
+    localised, and a non-ASCII character on a pipe kills the print itself."""
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def main() -> int:
     ap = argparse.ArgumentParser(description="SmarAct linear positioner service")
     ap.add_argument("--real", action="store_true", help="use the real SCU controller (default: simulator)")
     ap.add_argument("--config", help="INI config file to load")
@@ -43,8 +50,22 @@ def main() -> None:
     kind = "REAL SCU" if args.real else "SIMULATOR"
     print(f"smaract service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
     print("Ctrl-C to stop.")
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (a second smaract, or anything else pointed at this
+        # SCU) already holds it. We never got the controller, so there is
+        # nothing to stop or close: say who holds it, in ONE line, and exit.
+        # (serve_forever's cleanup is not reached: start() raised first.)
+        print(_ascii(f"smaract: cannot start: {exc}"), file=sys.stderr)
+        return 3
+    except RuntimeError as exc:
+        # ScuError (no DLL, no SCU, no sensor, wrong sensor type): one
+        # readable line in the launcher log instead of a traceback wall.
+        print(_ascii(f"smaract: cannot start: {type(exc).__name__}: {exc}"), file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

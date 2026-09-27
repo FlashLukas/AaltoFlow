@@ -47,7 +47,12 @@ Every call below that was not confirmed on the device is marked ``# VERIFY``.
 
 from __future__ import annotations
 
+from .. import hwlock
 from ..config import Config
+
+# The name written into the lock file, so a second service that finds the
+# K-Cube taken can say WHO holds it.
+MODULE_KEY = "ddr25"
 
 
 class KinesisRotator:
@@ -61,6 +66,11 @@ class KinesisRotator:
         # round trip) and is_homed reuses it, so a poll costs two round
         # trips, not three.
         self._status: list = []
+        # Hardware lock on the K-Cube's serial number (hwlock.py). Held from
+        # open() to close() so no other service -- say a second ddr25, or a
+        # generic Kinesis module pointed at the same serial -- can drive this
+        # stage at the same time. The sim backend never claims anything.
+        self._lock: hwlock.HardwareLock | None = None
 
     # -- connection -------------------------------------------------------- #
     def open(self) -> None:
@@ -72,8 +82,25 @@ class KinesisRotator:
                 "pylablib is not installed: run  .\\dev.ps1 sync --extra gui --extra real"
             ) from exc
         hw = self.cfg.hardware
-        # One K-Cube = one channel, so the default channel 1 is the stage.
-        self._m = Thorlabs.KinesisMotor(str(hw.serial), scale=hw.scale)  # VERIFY scale="DDR25" on a KBD101
+        serial = str(hw.serial).strip()
+        if not serial:
+            # No auto-discovery on purpose: "the first K-Cube found" could be
+            # another module's controller, and the lock must name the box.
+            raise RuntimeError("hardware.serial is empty: set the K-Cube's serial number")
+        # Claim the PHYSICAL address (the Kinesis serial) BEFORE the first
+        # byte goes to the controller. If another service already holds it,
+        # hwlock raises HardwareBusy naming that service, and we never talk
+        # to a controller that is not ours.
+        self._lock = hwlock.claim(serial, MODULE_KEY)
+        try:
+            # One K-Cube = one channel, so the default channel 1 is the stage.
+            self._m = Thorlabs.KinesisMotor(serial, scale=hw.scale)  # VERIFY scale="DDR25" on a KBD101
+        except BaseException:
+            # A failed open must not leave the serial claimed: otherwise a
+            # retry (or the other module) would be told "busy" by a service
+            # that never managed to connect.
+            self._release_lock()
+            raise
         # open() only CONNECTS and reads (adopt-on-start rule, 2026-09-27):
         # no enable, no profile, no homing. A brushless servo may power up
         # with its channel DISABLED (it then does not hold position and
@@ -95,12 +122,22 @@ class KinesisRotator:
             pass
 
     def close(self) -> None:
-        if self._m is not None:
-            try:
-                self._m.close()
-            except Exception:
-                pass
-        self._m = None
+        try:
+            if self._m is not None:
+                try:
+                    self._m.close()
+                except Exception:
+                    pass
+            self._m = None
+        finally:
+            # Release AFTER the connection is closed, so there is no moment
+            # where another service could open a controller we still talk to.
+            self._release_lock()
+
+    def _release_lock(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
 
     def idn(self) -> str:
         try:

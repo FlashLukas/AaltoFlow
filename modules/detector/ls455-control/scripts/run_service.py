@@ -26,6 +26,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from ls455.config import Config
+from ls455.hwlock import HardwareBusy
 from ls455.gaussmeter import Gaussmeter
 from ls455.sim_system import build_sim_system
 from ls455.net.service import Ls455Service
@@ -62,8 +63,18 @@ def main() -> int:
         meter, _ = build_sim_system(cfg, probe=args.sim_probe)
         print("SIMULATED backend (no hardware needed)")
 
-    Ls455Service(meter, host=args.host, cmd_port=args.cmd_port,
-                 pub_port=args.pub_port).serve_forever()
+    svc = Ls455Service(meter, host=args.host, cmd_port=args.cmd_port,
+                       pub_port=args.pub_port)
+    try:
+        svc.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (this module or another pointed at the same GPIB
+        # address / COM port) owns the meter. One clear line, no traceback,
+        # non-zero exit so the launcher shows the start failed. Nothing is
+        # sent to the meter: we never opened it, and the brain's start()
+        # failed before the poll thread or the ZeroMQ sockets existed.
+        print(f"ls455: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

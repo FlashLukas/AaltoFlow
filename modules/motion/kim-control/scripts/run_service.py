@@ -18,12 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kim.config import Config, load_config  # noqa: E402
+from kim.hwlock import HardwareBusy  # noqa: E402
 from kim.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from kim.net.service import KimService  # noqa: E402
 from kim.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="3D piezo-inertia stage service (KIM101/PIA25)")
     ap.add_argument("--real", action="store_true", help="use the real KIM101 (default: simulator)")
     ap.add_argument("--config", help="INI config file to load")
@@ -43,8 +44,19 @@ def main() -> None:
     kind = "REAL KIM101" if args.real else "SIMULATOR"
     print(f"kim service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
     print("Ctrl-C to stop.")
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (a second kim, or any module pointed at the same
+        # KIM101 serial) already drives this controller. One clear line, no
+        # traceback, non-zero exit so the launcher shows the start failed.
+        # Nothing is sent to the stage: the claim is taken in open() BEFORE
+        # the USB link is opened, and brain.start() failed before it marked
+        # itself connected, so its shutdown (stop every axis) never runs.
+        print(f"kim: cannot start: {exc}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

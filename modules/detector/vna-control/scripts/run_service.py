@@ -48,6 +48,7 @@ from pathlib import Path
 
 from vna.config import Config
 from vna.field import FIELD_SOURCES
+from vna.hwlock import HardwareBusy
 from vna.net.service import VnaService
 from vna.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
@@ -185,6 +186,19 @@ def main() -> int:
     try:
         VnaService(vna, host=args.host, cmd_port=args.cmd_port,
                    pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this analyser (the hardware lock,
+        # vna/hwlock.py). One clean line, no traceback: the message names the
+        # address and the holder, e.g. "LOCALHOST:5025 is already in use by
+        # vna (pid 1234) -- ...". Nothing was opened, so there is nothing to
+        # put in a safe state; shutdown() only releases what exists (the
+        # backend's close() sends no command when it never connected).
+        print(f"vna service: {exc}", file=sys.stderr)
+        try:
+            vna.shutdown()
+        except Exception:
+            pass
+        return 3
     except Exception as exc:
         # Opening the analyser happens in serve_forever -> start. Say plainly
         # what went wrong (VISA alias not found, pyvisa missing, instrument

@@ -24,6 +24,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from cs260.config import Config
+from cs260.hwlock import HardwareBusy
 from cs260.monochromator import Monochromator
 from cs260.sim_system import build_sim_system
 from cs260.net.service import Cs260Service
@@ -70,7 +71,17 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = Cs260Service(mono, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this GPIB address (hwlock). Say so in
+        # ONE line -- the launcher shows it in its log -- and exit non-zero.
+        # No shutdown here on purpose: the claim failed BEFORE open() sent a
+        # byte, so the CS260 belongs to the other service, and closing "our"
+        # shutter would close THEIRS. (serve_forever() only calls stop() once
+        # start() has succeeded.) ASCII message: gotcha #14.
+        print(f"cs260: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

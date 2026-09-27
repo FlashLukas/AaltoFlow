@@ -43,6 +43,11 @@ import sys
 from .base import (FLAG_NAN, FLAG_OK, FLAG_OVERRANGE, FLAG_UNDERRUN, HEAD_NONE,
                    HEAD_OTHER, HEAD_PHOTODIODE, HEAD_PYRO, HEAD_THERMAL,
                    empty_sensor_info)
+from ..hwlock import HardwareBusy, claim
+
+# The name this module signs its hardware claims with (suite rule: one
+# physical instrument, one service -- see hwlock.py).
+MODULE = "pm400"
 
 DEFAULT_DLL = r"C:\Program Files\IVI Foundation\VISA\Win64\Bin\TLPMX_64.dll"
 
@@ -208,6 +213,11 @@ class TLPMXConsole:
         self._dll = None
         self._vi = ViSession(0)
         self._idn = ""
+        # The claim on the console's physical address (hwlock). Held from
+        # just before TLPMX_init until close(): while we hold it, no other
+        # AaltoFlow service on this PC (pm16 opens "the first meter found"
+        # too) can open the same console behind our back.
+        self._lock = None
 
     # ---- lifecycle -------------------------------------------------------
     def open(self) -> None:
@@ -226,28 +236,59 @@ class TLPMXConsole:
             found.sort(key=lambda r: "PM400" not in r["model"].upper())
             candidates = [r["resource"] for r in found]
         errors = []
+        busy: list[HardwareBusy] = []
         for resource in candidates:
+            # Claim the address BEFORE the first byte goes to the console.
+            # The VISA resource (USB0::0x1313::0x807D::<serial>::INSTR) names
+            # one physical box: vendor, product and serial number. If another
+            # service holds it we do not touch it at all -- with several
+            # meters attached we simply move on to the next one.
+            try:
+                lock = claim(resource, MODULE)
+            except HardwareBusy as exc:
+                busy.append(exc)
+                continue
             try:
                 # IDQuery on, reset OFF: a reset would throw away the wavelength
                 # and range someone set on the console before we connected.
                 self._call("TLPMX_init", resource.encode(), 1, 0, C.byref(self._vi))
             except TLPMXError as exc:
+                lock.release()      # we never got it, so we must not keep it claimed
                 errors.append(f"{resource}: {exc}")
                 continue
             self.resource = resource
+            self._lock = lock
             break
         else:
+            if busy:
+                # Someone else's service owns the (only / every free) console:
+                # say WHO, in the lock's own words, so the fix is obvious.
+                raise HardwareBusy("; ".join(str(b) for b in busy)
+                                   + ("; other meters: " + "; ".join(errors) if errors else ""))
             raise TLPMXError("could not open a power meter (in use by Thorlabs OPM or "
                              "another program?) -- " + "; ".join(errors))
-        self._call("TLPMX_setTimeoutValue", self._vi, self.timeout_ms)
-        self._idn = self._read_idn()
+        try:
+            self._call("TLPMX_setTimeoutValue", self._vi, self.timeout_ms)
+            self._idn = self._read_idn()
+        except BaseException:
+            # A half-open session must not keep the address claimed (nor the
+            # USB session open), or a retry would find "our own" lock.
+            self.close()
+            raise
 
     def close(self) -> None:
-        if self._dll is not None and self._vi.value:
-            try:
-                self._dll.TLPMX_close(self._vi)
-            finally:
-                self._vi = ViSession(0)
+        try:
+            if self._dll is not None and self._vi.value:
+                try:
+                    self._dll.TLPMX_close(self._vi)
+                finally:
+                    self._vi = ViSession(0)
+        finally:
+            # Release the claim LAST, after the session is closed, so another
+            # service can never open the console while ours is still talking.
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
 
     def idn(self) -> str:
         return self._idn

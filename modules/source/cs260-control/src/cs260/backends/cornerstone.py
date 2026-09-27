@@ -68,7 +68,12 @@ from __future__ import annotations
 
 import time
 
+from ..hwlock import claim
 from .base import MonoState
+
+#: The name this module registers its claim under -- what another service is
+#: told ("... already in use by cs260 (pid N)") when it tries the same address.
+MODULE_KEY = "cs260"
 
 #: Error codes of ERROR? (manual 16.7) that mean "the move you asked for will
 #: not happen" -- the pending move is dropped instead of waited for forever.
@@ -124,6 +129,7 @@ class CornerstoneGPIB:
         self._clock = clock
         self._rm = None
         self._inst = None
+        self._lock = None                  # our claim on the GPIB address (hwlock), held while open
         self._idn = ""
         self.units = "NM"                  # what UNITS? said at open(); see to_nm()
         #: messages for the brain to show once after start (warn events)
@@ -141,6 +147,23 @@ class CornerstoneGPIB:
     # ---- lifecycle -------------------------------------------------------------
 
     def open(self) -> None:
+        # ONE INSTRUMENT, ONE SERVICE (Lukas: "the same instrument has to be
+        # defined by the same physical address"). Claim the GPIB address BEFORE
+        # the first byte goes out. If another service (a second cs260, or any
+        # module pointed at the same address by mistake) already drives this
+        # box, HardwareBusy is raised HERE and we never talk to it -- not even
+        # the harmless STB?/ERROR? queries, which would clear the other
+        # service's pending error. "GPIB::4" and "GPIB0::4::INSTR" are the same
+        # box: hwlock normalises the spelling. The claim is released in close()
+        # and on every failure below, so a failed open never leaves it "busy".
+        self._lock = claim(self._resource, MODULE_KEY)
+        try:
+            self._open_instrument()
+        except BaseException:
+            self._drop_connection()
+            raise
+
+    def _open_instrument(self) -> None:
         import pyvisa                                   # lazy: only needed for real hw
         self._rm = pyvisa.ResourceManager()
         self._inst = self._rm.open_resource(self._resource)
@@ -218,14 +241,29 @@ class CornerstoneGPIB:
             self._inst.timeout = self._timeout_ms
 
     def close(self) -> None:
+        self._drop_connection()
+
+    def _drop_connection(self) -> None:
+        """Close the VISA session and give the address back. Sends NOTHING to
+        the instrument (it is also the clean-up after a failed open), and the
+        claim is released whatever happens on the bus."""
         try:
             if self._inst is not None:
-                self._inst.close()
-        finally:
+                try:
+                    self._inst.close()
+                except Exception:
+                    pass
             if self._rm is not None:
-                self._rm.close()
+                try:
+                    self._rm.close()
+                except Exception:
+                    pass
+        finally:
             self._inst = None
             self._rm = None
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
 
     def idn(self) -> str:
         return self._idn

@@ -149,9 +149,21 @@ class Rotator:
         sets them (set_velocity / set_acceleration / set_config).
         """
         with self._hw:
+            # If open() fails (HardwareBusy: another service holds this
+            # K-Cube; or no driver), _connected stays False, so shutdown()
+            # sends NOTHING -- no "safe stop" to a controller we do not own.
             self.backend.open()
+            try:
+                v, a = self.backend.read_velocity_params()
+            except BaseException:
+                # Opened but could not even read it: close again (which also
+                # releases the hardware lock) instead of leaving it half-open.
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
             self._connected = True
-            v, a = self.backend.read_velocity_params()
         v, a = float(v), float(a)
         with self._st:
             self._velocity, self._acceleration = v, a

@@ -59,6 +59,11 @@ hardware carries `# VERIFY`.
 from __future__ import annotations
 
 from ..config import REFERENCE_SOURCES
+from ..hwlock import claim
+
+#: The name this module writes into the lock file, so a second service that
+#: finds the COM port taken can say WHO holds it.
+MODULE_KEY = "windfreak"
 
 
 class SerialSynthHD:
@@ -73,6 +78,11 @@ class SerialSynthHD:
         self._phase_relative = (str(phase_command).lower() != "absolute")
         self._ser = None
         self._idn = ""
+        # Our claim on the COM port (hwlock), held from open() to close().
+        # The SynthHD is identified by its COM port: that is the one physical
+        # box. A second service (another windfreak, or any module pointed at
+        # the same port) is refused BEFORE it sends a byte.
+        self._lock = None
         # The phase command is a STEP ([API]: "These adjustments are relative
         # adjustments that add the phase amount to the current phase"). There
         # is no absolute readback, so we remember what we have added so far and
@@ -92,15 +102,42 @@ class SerialSynthHD:
         in front of per-channel queries (read_state): they choose which
         channel the NEXT query addresses and change no output.
         """
-        import serial                                    # lazy: pyserial, extra "real"
-        self._ser = serial.Serial(port=self._port, timeout=self._timeout_s)
-        self._ser.reset_input_buffer()                   # drop any stale reply bytes (PC side only)
-        model = self._query("+")                         # VERIFY: reply format on v2
-        fw = self._query("v0")                           # VERIFY
-        hw = self._query("v1")                           # VERIFY
-        # The serial number ("-") is deliberately NOT part of the id string:
-        # the id travels in every status frame and into data files.
-        self._idn = f"Windfreak {model} (fw {fw}, hw {hw})".strip()
+        # Claim the COM port FIRST (Lukas's rule: one physical address, one
+        # service). If another service holds it, HardwareBusy is raised here
+        # and not a single byte has gone to the instrument.
+        self._lock = claim(self._port, MODULE_KEY)
+        try:
+            import serial                                # lazy: pyserial, extra "real"
+            self._ser = serial.Serial(port=self._port, timeout=self._timeout_s)
+            self._ser.reset_input_buffer()               # drop any stale reply bytes (PC side only)
+            model = self._query("+")                     # VERIFY: reply format on v2
+            fw = self._query("v0")                       # VERIFY
+            hw = self._query("v1")                       # VERIFY
+            # The serial number ("-") is deliberately NOT part of the id string:
+            # the id travels in every status frame and into data files.
+            self._idn = f"Windfreak {model} (fw {fw}, hw {hw})".strip()
+        except BaseException:
+            # A failed open must not leave the port claimed (or open). No
+            # "RF off" here: we never got as far as knowing what is on the
+            # other end, and a read-only start sends no writes anyway.
+            self._abandon()
+            raise
+
+    def _abandon(self) -> None:
+        """Close the port WITHOUT sending anything, and give up the claim."""
+        try:
+            if self._ser is not None:
+                self._ser.close()
+        except Exception:
+            pass
+        finally:
+            self._ser = None
+            self._release_lock()
+
+    def _release_lock(self) -> None:
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
 
     def read_state(self) -> dict:
         """Read both channels and the reference with queries only (see
@@ -157,9 +194,13 @@ class SerialSynthHD:
                 for ch in (0, 1):
                     self.set_output(ch, False)           # RF off on the way out
         finally:
-            if self._ser is not None:
-                self._ser.close()
-            self._ser = None
+            try:
+                if self._ser is not None:
+                    self._ser.close()
+            finally:
+                self._ser = None
+                # the port is free for the next service only once it is closed
+                self._release_lock()
 
     # ---- the two primitives ----------------------------------------------
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import time
 
+from .. import hwlock
 from .base import (DC_DIGITS, FLAG_NO_PROBE, FLAG_OK, FLAG_OVERLOAD, MODES,
                    PEAK_DISPLAYS, PEAK_MODES, PROBE_RANGES_mT, PROBE_TYPE_CODES,
                    RMS_BANDS, UNIT_CODES, from_mT, pick_peak, to_mT)
@@ -77,6 +78,11 @@ class LakeShore455:
         self.zero_time_s = float(zero_time_s)
         self._rm = resource_manager          # tests inject a fake one
         self._inst = None
+        # The claim on this meter's physical address (hwlock.py). Held from
+        # open() to close(), so a second service -- this module or any other
+        # pointed at the same GPIB address / COM port -- is refused instead of
+        # talking to the same box behind our back.
+        self._lock = None
         self._unit = "G"
         self._family = ""
         self._mode = "dc"                    # cached so read_field knows DC/RMS vs peak
@@ -112,6 +118,28 @@ class LakeShore455:
 
     # ---- lifecycle -----------------------------------------------------------
     def open(self) -> None:
+        # Claim the address BEFORE anything reaches the instrument (Lukas: "the
+        # same instrument has to be defined by the same physical address").
+        # hwlock.normalize makes GPIB::12 / GPIB0::12::INSTR, or COM3 /
+        # ASRL3::INSTR, one and the same key. HardwareBusy propagates: the
+        # meter is someone else's, we have not sent it a single byte.
+        if self._lock is None:
+            self._lock = hwlock.claim(self.resource, "ls455")
+        try:
+            self._open_claimed()
+        except BaseException:
+            # a failed open must not leave the port open or the address
+            # claimed, or the next attempt (or another module) would see a
+            # phantom "busy"
+            self.close()
+            raise
+
+    def _release(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
+
+    def _open_claimed(self) -> None:
         if self._rm is None:
             try:
                 import pyvisa                      # lazy: only the real backend needs it
@@ -122,6 +150,7 @@ class LakeShore455:
             except (OSError, ValueError):
                 self._rm = pyvisa.ResourceManager("@py")     # pure-Python fallback
         inst = self._rm.open_resource(self.resource)
+        self._inst = inst                          # so a failure below still closes it
         inst.timeout = self.timeout_ms
         inst.read_termination = "\r\n"             # manual table 6-6 / IEEE default CR LF
         inst.write_termination = "\r\n"
@@ -132,27 +161,31 @@ class LakeShore455:
             inst.data_bits = 7
             inst.parity = constants.Parity.odd
             inst.stop_bits = constants.StopBits.one
-        self._inst = inst
-        try:
-            # QUERIES ONLY (see the module docstring): the unit, so readings can
-            # be converted to mT in software whatever the display shows; the
-            # probe, so the range list is right; the mode, so read_field asks
-            # for the right reading (RDGFIELD? or RDGPEAK?).
-            self.get_display_unit()
-            self.probe_info()
-            self.get_mode()
-            self.get_peak()
-        except Exception:
-            self.close()
-            raise
+        # QUERIES ONLY (see the module docstring): the unit, so readings can
+        # be converted to mT in software whatever the display shows; the
+        # probe, so the range list is right; the mode, so read_field asks
+        # for the right reading (RDGFIELD? or RDGPEAK?). If one fails, open()
+        # closes the port and releases the claim.
+        self.get_display_unit()
+        self.probe_info()
+        self.get_mode()
+        self.get_peak()
 
-    def close(self) -> None:
+    def _close_port(self) -> None:
         inst, self._inst = self._inst, None
         if inst is not None:
             try:
                 inst.close()
             except Exception:
                 pass
+
+    def close(self) -> None:
+        # Close the port FIRST, then give the address back: releasing earlier
+        # would let another service in while our session is still open.
+        try:
+            self._close_port()
+        finally:
+            self._release()
 
     def idn(self) -> str:
         return self.query("*IDN?")                 # 'LSCI,MODEL455,<serial>,<date>'

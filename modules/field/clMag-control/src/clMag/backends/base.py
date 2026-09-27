@@ -6,6 +6,12 @@ the real Kepco or the simulator. The control code depends ONLY on these
 interfaces, so swapping real hardware for the simulator changes nothing above
 this line. (This is how you develop and test the whole controller with no
 instruments plugged in.)
+
+ONE INSTRUMENT, ONE SERVICE: a REAL backend must never send a byte to an
+instrument whose address is not claimed. Because the Hall probe and the AUX
+I/O share one DAQ card, the claims are taken once for the whole module, before
+any backend is opened -- see backends/claims.py (HardwareClaims,
+physical_addresses). Simulators claim nothing.
 """
 
 from __future__ import annotations

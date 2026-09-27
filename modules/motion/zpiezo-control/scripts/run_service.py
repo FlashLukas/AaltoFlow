@@ -14,11 +14,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from zpiezo.config import Config, load_config       # noqa: E402
+from zpiezo.hwlock import HardwareBusy              # noqa: E402
 from zpiezo.net import protocol as P                # noqa: E402
 from zpiezo.net.service import ZPiezoService        # noqa: E402
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="Z-piezo service")
     ap.add_argument("--real", action="store_true")
     ap.add_argument("--config", default="")
@@ -43,8 +44,21 @@ def main() -> None:
                         pub_port=args.pub, status_hz=args.status_hz)
     print(f"  commands tcp://{args.host}:{args.cmd}   status tcp://{args.host}:{args.pub}")
     print("  Ctrl-C to stop.")
-    svc.serve_forever()
+    try:
+        svc.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another zpiezo, or any module pointed at this
+        # KCube's serial) already drives it.  We never opened the KCube, so
+        # there is nothing to park or close: one line naming the holder, exit.
+        print(f"zpiezo: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except RuntimeError as exc:
+        # pylablib missing, no KCube found, USB open failed: one readable
+        # line in the launcher log instead of a traceback wall.
+        print(f"zpiezo: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

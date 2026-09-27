@@ -48,6 +48,7 @@ from ctypes import POINTER, byref, c_bool, c_char_p, c_double, c_float, c_int
 
 import numpy as np
 
+from .. import hwlock
 from ..config import Config
 from ..instruments import Grid, SweepSettings, estimate_sweep_time_s
 
@@ -95,6 +96,20 @@ _PROTOTYPES = {
 }
 
 
+#: The module name written into the hardware lock (the other service sees it).
+LOCK_MODULE = "signalhound"
+
+
+def lock_address(serial: int) -> str:
+    """The PHYSICAL address of one analyser, for hwlock.
+
+    A Signal Hound SA44B/SA124B has no VISA resource, COM port or IP: the API
+    finds it on USB by its SERIAL NUMBER, which is therefore what names the
+    box. Every service that could open this analyser must build the same
+    string from the same serial, so it lives in one function."""
+    return f"SIGNALHOUND::{int(serial)}"
+
+
 class SaApiError(RuntimeError):
     """A negative saStatus from the DLL, with the API's own words for it."""
 
@@ -123,6 +138,7 @@ class SaApiAnalyzer:
         self._detector = "average"
         self._warnings: set[int] = set()
         self._pending = False
+        self._lock: hwlock.HardwareLock | None = None   # our claim on the analyser
 
     # ---- plumbing ------------------------------------------------------------
     def _load(self):
@@ -166,16 +182,46 @@ class SaApiAnalyzer:
 
     # ---- lifecycle -------------------------------------------------------------
     def open(self) -> None:
-        self._dll = self._load()
-        self._bind(self._dll)
+        """Claim the analyser, open it, ask what it is.
+
+        ONE INSTRUMENT, ONE SERVICE (Lukas's rule): the analyser is claimed in
+        hwlock by its serial number before we talk to it, so a second service
+        (another copy of this module on a second port pair, say) cannot drive
+        the same box. With `hardware.serial` set the claim comes BEFORE the
+        device is opened. With serial 0 ("the first analyser found") we only
+        learn WHICH box it is after saOpenDevice, so we ask its serial -- a pure
+        identity query -- and claim right then, before any other call; if that
+        box is already claimed we close the handle again without sending
+        saAbort (the box is not ours to stop).
+
+        Every failure path releases the claim: a failed open must not leave the
+        analyser marked busy."""
         hw = self.cfg.hardware
-        h = c_int(-1)
-        if int(hw.serial):
-            self._call("saOpenDeviceBySerialNumber", byref(h), int(hw.serial))
-        else:
-            self._call("saOpenDevice", byref(h))        # the first unopened analyser
-        self._h = int(h.value)
         try:
+            if int(hw.serial):
+                self._lock = hwlock.claim(lock_address(hw.serial), LOCK_MODULE)
+            self._dll = self._load()
+            self._bind(self._dll)
+            h = c_int(-1)
+            if int(hw.serial):
+                self._call("saOpenDeviceBySerialNumber", byref(h), int(hw.serial))
+            else:
+                self._call("saOpenDevice", byref(h))    # the first unopened analyser
+            self._h = int(h.value)
+        except BaseException:
+            self._release()
+            raise
+        try:
+            sn = c_int(0)
+            self._call("saGetSerialNumber", self._h, byref(sn))
+            if self._lock is None:
+                # Auto-discovered: claim the box we actually got. On HardwareBusy
+                # close the handle WITHOUT saAbort (see the docstring).
+                try:
+                    self._lock = hwlock.claim(lock_address(sn.value), LOCK_MODULE)
+                except hwlock.HardwareBusy:
+                    self._close_handle(abort=False)
+                    raise
             t = c_int(0)
             self._call("saGetDeviceType", self._h, byref(t))
             model = DEVICE_TYPES.get(int(t.value), "")
@@ -183,8 +229,6 @@ class SaApiAnalyzer:
             if hw.model not in ("", "auto") and self._model != hw.model:
                 raise SaApiError(f"connected analyser is a {model or 'unknown model'}, "
                                  f"but hardware.model asks for a {hw.model}")
-            sn = c_int(0)
-            self._call("saGetSerialNumber", self._h, byref(sn))
             self._idn = f"Signal Hound {model} S/N {sn.value}"
             try:
                 v = self._dll.saGetAPIVersion()
@@ -194,8 +238,10 @@ class SaApiAnalyzer:
             self._tg = False
             if hw.attach_tg:
                 self._attach_tg()
-        except Exception:
-            self.close()
+        except BaseException:
+            # saAbort only if the box is ours (claimed); then drop the claim.
+            self._close_handle(abort=self._lock is not None)
+            self._release()
             raise
 
     def _attach_tg(self) -> None:
@@ -214,18 +260,33 @@ class SaApiAnalyzer:
         # try to force one (start-up rule).
 
     def close(self) -> None:
-        """Abort (which also stops a TG sweep, i.e. the TG output) and close.
-        Errors are swallowed: this runs on crashes too."""
+        """Abort (which also stops a TG sweep, i.e. the TG output), close, and
+        release our claim on the analyser. Errors are swallowed: this runs on
+        crashes too."""
+        try:
+            self._close_handle(abort=True)
+        finally:
+            self._release()
+
+    def _close_handle(self, abort: bool) -> None:
+        """Close the device handle; `abort=False` sends ONLY saCloseDevice --
+        used when the box turned out to belong to another service."""
         if self._h is None or self._dll is None:
             self._h = None
             return
-        for name in ("saAbort", "saCloseDevice"):
+        names = ("saAbort", "saCloseDevice") if abort else ("saCloseDevice",)
+        for name in names:
             try:
                 getattr(self._dll, name)(self._h)   # VERIFY: TG output stops on abort
             except Exception:
                 pass
         self._h = None
         self._pending = False
+
+    def _release(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
 
     def idn(self) -> str:
         return self._idn

@@ -16,6 +16,10 @@ WATER CHECK AT START: if the cooling water is off and the interlock is not
 bypassed, the service prints why and exits with code 3 -- before it opens a
 socket, so nothing can command a magnet that must not run.
 
+ONE CARD, ONE SERVICE: with --real the service claims the DAQ device (Dev1)
+before it opens anything. If mag2d or mag2dcal already holds it, the service
+prints one line naming the holder and exits with code 4, touching nothing.
+
 Stop it with Ctrl+C, the launcher, or the `shutdown` command: all three ramp the
 output to 0 V at the slew rate and release the enable line. A hard kill cannot
 (the DAQ keeps its last output) -- avoid taskkill.
@@ -36,8 +40,13 @@ from mag2d.controller import Controller, WaterInterlockError
 from mag2d.sim_system import build_sim_system
 from mag2d.net.service import Mag2dService
 from mag2d.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from mag2d.hwlock import HardwareBusy
 
 EXIT_WATER = 3
+# The DAQ card is already driven by another service (mag2d started twice, or
+# mag2dcal on the same coils). Its own code so a launcher can tell it apart
+# from 2 (no NI backend) and 3 (no water).
+EXIT_HARDWARE_BUSY = 4
 
 
 def main() -> int:
@@ -78,6 +87,16 @@ def main() -> int:
         print("mag2d: NOT STARTED -- cooling water interlock.")
         print(f"  {exc}")
         return EXIT_WATER
+    except HardwareBusy as exc:
+        # ONE line on stderr, no traceback: the reader needs the address and
+        # the holder, e.g. "DEV1 is already in use by mag2dcal (pid 1234) ...".
+        # Safety: this comes out of ctrl.start() -> backend.open(), i.e. from
+        # service.start(), BEFORE serve_forever's try/finally -- so stop() ->
+        # ctrl.shutdown() (ramp to 0 V, enable off) is NOT run, and the backend
+        # never created a task. The coils belong to the other service; zeroing
+        # them would wreck its measurement.
+        print(f"mag2d: cannot start: {exc}", file=sys.stderr)
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

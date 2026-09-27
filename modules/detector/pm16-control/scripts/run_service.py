@@ -25,6 +25,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from pm16.config import Config
+from pm16.hwlock import HardwareBusy
 from pm16.meter import PowerMeter
 from pm16.sim_system import build_sim_system
 from pm16.net.service import Pm16Service
@@ -57,8 +58,21 @@ def main() -> int:
         meter, _ = build_sim_system(cfg)
         print("SIMULATED backend (no hardware needed)")
 
-    Pm16Service(meter, host=args.host, cmd_port=args.cmd_port,
-                pub_port=args.pub_port).serve_forever()
+    service = Pm16Service(meter, host=args.host, cmd_port=args.cmd_port,
+                          pub_port=args.pub_port)
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another pm16, or any module pointed at this meter)
+        # already holds its USB address. We never opened the meter, so there
+        # is nothing to close: say who holds it, in one line, and exit.
+        print(f"pm16: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except RuntimeError as exc:
+        # TLPMXError (DLL missing, no meter, I/O error) is a RuntimeError:
+        # one readable line in the launcher log instead of a traceback.
+        print(f"pm16: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

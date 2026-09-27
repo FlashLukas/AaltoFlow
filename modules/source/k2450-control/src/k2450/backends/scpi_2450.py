@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 
+from .. import hwlock
 from .base import InstrumentState, Reading, other
 
 # SCPI mnemonics per function
@@ -55,6 +56,11 @@ class VisaK2450:
         self._fn = "voltage"
         self._src_auto = {"voltage": True, "current": True}
         self._meas_auto = {"voltage": True, "current": True}
+        # The claim on this 2450's VISA address (see hwlock.py): held from
+        # open() to close(), so a second service -- another k2450, or any module
+        # pointed at the same resource -- is refused instead of sending
+        # commands to an instrument we are driving.
+        self._claim: hwlock.HardwareLock | None = None
 
     # ---- lifecycle -----------------------------------------------------------
     def open(self) -> None:
@@ -65,42 +71,91 @@ class VisaK2450:
                                "--extra real") from exc
         self._rm = (pyvisa.ResourceManager(self.visa_library)
                     if self.visa_library else pyvisa.ResourceManager())
-        inst = self._rm.open_resource(self.resource)
-        inst.timeout = self.timeout_ms
-        inst.read_termination = "\n"                          # VERIFY (LAN socket needs it; USB/GPIB default EOI)
-        inst.write_termination = "\n"                         # VERIFY
-        self._inst = inst
-        self._idn = self._q("*IDN?")                          # VERIFY
-        lang = self._q("*LANG?").upper()                      # VERIFY: returns SCPI | TSP | SCPI2400
-        if lang != "SCPI":
-            raise RuntimeError(
-                f"the 2450 is in the {lang!r} command set; this module needs SCPI. "
-                "Front panel: MENU > System > Settings > Command Set > SCPI, "
-                "then power-cycle the instrument.")
-        # QUERIES ONLY from here on (Lukas, 2026-09-27: "read the instrument
-        # state on startup, not to change anything"). No :OUTP OFF, no
-        # :ROUT:TERM, no :READ:BACK ON -- whatever the instrument is doing, it
-        # keeps doing; read_state() tells the brain what that is.
-        # *CLS only empties the error queue (and the event registers), so that
-        # an old error left by someone at the front panel is not blamed on
-        # our first command. It changes no source or measure setting.
-        self._w("*CLS")                                      # VERIFY: clears the error queue only
+        try:
+            # CLAIM THE ADDRESS BEFORE THE FIRST BYTE GOES OUT. If another
+            # service holds it, HardwareBusy leaves here and the 2450 has not
+            # been opened, let alone written to.
+            self._claim = hwlock.claim(self._address(), "k2450")
+            inst = self._rm.open_resource(self.resource)
+            self._inst = inst
+            inst.timeout = self.timeout_ms
+            inst.read_termination = "\n"                          # VERIFY (LAN socket needs it; USB/GPIB default EOI)
+            inst.write_termination = "\n"                         # VERIFY
+            self._idn = self._q("*IDN?")                          # VERIFY
+            lang = self._q("*LANG?").upper()                      # VERIFY: returns SCPI | TSP | SCPI2400
+            if lang != "SCPI":
+                raise RuntimeError(
+                    f"the 2450 is in the {lang!r} command set; this module needs SCPI. "
+                    "Front panel: MENU > System > Settings > Command Set > SCPI, "
+                    "then power-cycle the instrument.")
+            # QUERIES ONLY from here on (Lukas, 2026-09-27: "read the instrument
+            # state on startup, not to change anything"). No :OUTP OFF, no
+            # :ROUT:TERM, no :READ:BACK ON -- whatever the instrument is doing, it
+            # keeps doing; read_state() tells the brain what that is.
+            # *CLS only empties the error queue (and the event registers), so that
+            # an old error left by someone at the front panel is not blamed on
+            # our first command. It changes no source or measure setting.
+            self._w("*CLS")                                      # VERIFY: clears the error queue only
+        except BaseException:
+            # A failed open must leave nothing behind: not the VISA session
+            # (the brain never marks us connected, so close() would not run)
+            # and above all not the claim, or this 2450 would look "busy"
+            # until the process exits. No :OUTP OFF here -- we either never
+            # reached the instrument or found it in a state we do not drive.
+            self._drop_connection()
+            raise
+
+    def _address(self) -> str:
+        """The address to claim: VISA's canonical name for the resource.
+
+        A VISA ALIAS (NI MAX lets you call the 2450 "SMU1") would otherwise be
+        a different string for the same box. resource_info() asks only the
+        VISA library, not the instrument, so it is safe before the claim.
+        If it is unavailable or fails (pyvisa-py, an unknown alias), the text
+        from the config is claimed as written; hwlock.normalize still merges
+        spellings like GPIB::18 / GPIB0::18::INSTR.
+        """
+        try:
+            info = self._rm.resource_info(self.resource)              # VERIFY: pyvisa ResourceInfo
+            name = getattr(info, "resource_name", "") or ""
+            if name:
+                return str(name)
+        except Exception:
+            pass
+        return self.resource
+
+    def _drop_connection(self) -> None:
+        """Close VISA and release the claim, whatever state open() reached."""
+        try:
+            if self._inst is not None:
+                try:
+                    self._inst.close()
+                except Exception:
+                    pass
+            if self._rm is not None:
+                try:
+                    self._rm.close()
+                except Exception:
+                    pass
+        finally:
+            self._inst = None
+            self._rm = None
+            if self._claim is not None:
+                self._claim.release()
+                self._claim = None
 
     def close(self) -> None:
         if self._inst is None:
+            # never opened (or already closed): nothing to switch off, but a
+            # half-finished open may still hold the claim -- let it go
+            self._drop_connection()
             return
         try:
             self._w(":OUTP OFF")                              # VERIFY
         finally:
-            try:
-                self._inst.close()
-            finally:
-                self._inst = None
-                if self._rm is not None:
-                    try:
-                        self._rm.close()
-                    finally:
-                        self._rm = None
+            # the address is released only AFTER the output-off went out, so
+            # no other service can grab the 2450 while it is still sourcing
+            self._drop_connection()
 
     def idn(self) -> str:
         return self._idn

@@ -64,6 +64,9 @@ import os
 from pathlib import Path
 
 from ..config import N_LINES
+from ..hwlock import claim
+
+MODULE_KEY = "superk"          # the name other services see in "already in use by ..."
 
 # ---- module type codes (register 0x61 of every module) ---------------------
 TYPE_EXTREME = 0x60           # SuperK EXTREME main module          # VERIFY
@@ -112,6 +115,8 @@ class NktpSuperK:
         self._dll = None
         self._port_b = port.encode("ascii")
         self._types = {}
+        # The claim on our COM port (see open()). None while not open.
+        self._lock = None
         # bus addresses of the SELECT housings, lowest first: NKT numbers the
         # crystals 1, 2 in the first and 3, 4 in the second (register 75h).
         self.select_addrs: list[int] = []
@@ -119,16 +124,45 @@ class NktpSuperK:
     # ---- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
-        self._dll = self._load_dll()
-        r = self._dll.openPorts(self._port_b, 1, 0)       # autoMode 1, liveMode 0  # VERIFY
-        if r != 0:
-            raise NKTError(f"openPorts({self.port}) failed, result {r}")
-        if self.autodetect:
-            self._find_modules()
-        # Deliberately NO emission / RF writes here: open() only connects.
+        """Claim the COM port, load the DLL, open the port, find the modules.
+
+        WHY the claim: the EXTREME, the RF driver and both SELECT housings all
+        hang on ONE Interbus behind ONE USB virtual COM port, so that port IS
+        the physical address of the whole laser system. If a second service
+        (another superk, or anything else pointed at this COM port) is already
+        driving it, hwlock.claim raises HardwareBusy naming that service, and
+        we stop here -- before the DLL is even loaded, so not one byte reaches
+        a laser that someone else is driving.
+
+        A failed open must not leave the port claimed (a retry would then be
+        refused by our own stale claim), nor leave the DLL "connected" (close()
+        would then send emission/RF OFF to a system we never took over), so
+        every failure path below undoes what was done so far."""
+        self._lock = claim(self.port, MODULE_KEY)
+        try:
+            self._dll = self._load_dll()
+            r = self._dll.openPorts(self._port_b, 1, 0)   # autoMode 1, liveMode 0  # VERIFY
+            if r != 0:
+                raise NKTError(f"openPorts({self.port}) failed, result {r}")
+            try:
+                if self.autodetect:
+                    self._find_modules()
+            except BaseException:
+                # the port IS open here: close it, but send nothing else
+                try:
+                    self._dll.closePorts(self._port_b)
+                except Exception:
+                    pass
+                raise
+            # Deliberately NO emission / RF writes here: open() only connects.
+        except BaseException:
+            self._dll = None
+            self._release()
+            raise
 
     def close(self) -> None:
         if self._dll is None:
+            self._release()               # e.g. never opened: nothing to send
             return
         # emission OFF and RF OFF first; each guarded so one failure cannot
         # stop the other or the port from closing.
@@ -141,6 +175,12 @@ class NktpSuperK:
             self._dll.closePorts(self._port_b)
         finally:
             self._dll = None
+            self._release()               # only now may another service take it
+
+    def _release(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
 
     def identify(self) -> str:
         if self._dll is None:

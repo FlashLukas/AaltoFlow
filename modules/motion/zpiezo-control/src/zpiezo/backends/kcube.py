@@ -14,6 +14,13 @@ To finish at the microscope:
 
 from __future__ import annotations
 
+from .. import hwlock
+
+# KPZ101 (KCube piezo) serial numbers start with "29" -- used only when no
+# serial is configured, to pick the controller out of every Kinesis device on
+# the USB bus.  VERIFY: the prefix on the lab's unit (Kinesis shows it).
+_KPZ_PREFIX = "29"
+
 
 class KCubeZ:
     def __init__(self, serial: str = "", v_min: float = 0.0, v_max: float = 75.0):
@@ -22,6 +29,11 @@ class KCubeZ:
         self._vmax = float(v_max)
         self._dev = None
         self._v = 0.0
+        # The claim on this KCube's serial number (hwlock).  Lukas's rule: the
+        # same instrument is defined by the same physical address, and only ONE
+        # service may drive it -- two programs setting one focus voltage would
+        # each think they know where the focus is.  Held from open() to close().
+        self._hw_lock: hwlock.HardwareLock | None = None
 
     def open(self) -> None:
         try:
@@ -31,17 +43,50 @@ class KCubeZ:
                 "pylablib not installed. `pip install pylablib` and install "
                 "Thorlabs Kinesis (see kcube.py header)."
             ) from exc
-        # Opening must NOT change the output (adopt-on-start rule): only the
-        # constructor here, no set_*/zero/enable call.  The brain then READS
-        # the voltage the KCube is already holding and adopts it as the focus.
-        # VERIFY: that pylablib's KinesisPiezoController() constructor sends no
-        # state-changing message (it should only open the USB handle).
-        self._dev = Thorlabs.KinesisPiezoController(self.serial)  # pragma: no cover
+        # Which physical box?  The configured serial, else the first KPZ101 on
+        # the bus.  Listing devices opens none of them, so claiming right after
+        # it still comes before the first byte goes to the controller.
+        serial = (self.serial or "").strip() or self._find_kcube(Thorlabs)
+        self.serial = serial
+        # Claim BEFORE opening.  Raises hwlock.HardwareBusy (naming the holder)
+        # when any other service already drives this KCube; we then never touch it.
+        self._hw_lock = hwlock.claim(serial, "zpiezo")
+        try:
+            # Opening must NOT change the output (adopt-on-start rule): only the
+            # constructor here, no set_*/zero/enable call.  The brain then READS
+            # the voltage the KCube is already holding and adopts it as the focus.
+            # VERIFY: that pylablib's KinesisPiezoController() constructor sends no
+            # state-changing message (it should only open the USB handle).
+            self._dev = Thorlabs.KinesisPiezoController(serial)
+        except BaseException:
+            # A failed open must not leave the serial claimed -- the next start
+            # would otherwise report the KCube "busy", held by ourselves.
+            self.close()
+            raise
 
-    def close(self) -> None:  # pragma: no cover - only on a real PC
-        if self._dev is not None:
-            self._dev.close()
-            self._dev = None
+    @staticmethod
+    def _find_kcube(thorlabs) -> str:
+        # VERIFY: list_kinesis_devices() returns (serial, description) pairs.
+        found = [str(conn) for conn, _desc in thorlabs.list_kinesis_devices()
+                 if str(conn).startswith(_KPZ_PREFIX)]
+        if not found:
+            raise RuntimeError(
+                f"no KCube piezo found (serials starting with {_KPZ_PREFIX}). "
+                "Is it plugged in and closed in the Kinesis app? Or set "
+                "hardware.serial in the config.")
+        return found[0]
+
+    def close(self) -> None:
+        try:
+            if self._dev is not None:
+                dev, self._dev = self._dev, None
+                dev.close()
+        finally:
+            # Release the claim LAST, after the handle is closed, so no other
+            # service can open the KCube while we still hold the USB link.
+            if self._hw_lock is not None:
+                self._hw_lock.release()
+                self._hw_lock = None
 
     def idn(self) -> str:
         return f"Thorlabs KCube piezo {self.serial!r}"

@@ -25,6 +25,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from chopper.config import Config
+from chopper.hwlock import HardwareBusy
 from chopper.chopper import Chopper
 from chopper.sim_system import build_sim_system
 from chopper.net.service import ChopperService
@@ -59,7 +60,15 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = ChopperService(ch, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this chopper (same COM port). One
+        # clear line, no traceback, non-zero exit. We never opened the port,
+        # so there is nothing to put in standby or close here -- the brain's
+        # shutdown() is not called and no command reaches the other's unit.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

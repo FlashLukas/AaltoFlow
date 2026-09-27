@@ -20,6 +20,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from pm400.backends.tlpmx import TLPMXConsole, TLPMXError, list_resources
+from pm400.hwlock import HardwareBusy
 
 
 def main() -> int:
@@ -56,7 +57,9 @@ def main() -> int:
                     print(f"    {'auto' if m.get_auto_range() else 'manual'} range "
                           f"{m.get_range():.4g} W, averaging {m.get_avg_time() * 1e3:.4g} ms")
                     print(f"    power {p:.4e} W {flag}")
-        except TLPMXError as exc:
+        except (TLPMXError, HardwareBusy) as exc:
+            # HardwareBusy: a running AaltoFlow service owns this console; we
+            # leave it alone rather than talk to it behind the service's back.
             print(f"    could not read: {exc}")
         finally:
             m.close()

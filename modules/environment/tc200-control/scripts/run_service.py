@@ -28,6 +28,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from tc200.config import Config
+from tc200.hwlock import HardwareBusy
 from tc200.heater import Heater
 from tc200.sim_system import build_sim_system
 from tc200.net.service import Tc200Service
@@ -69,6 +70,12 @@ def main() -> int:
                            pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (tc200 or any other module) already holds this COM
+        # port. We never opened the instrument, so there is nothing to switch
+        # off or close: one clean line on stderr and a non-zero exit.
+        print(f"tc200 service: could not start: {exc}", file=sys.stderr)
+        return 3
     except RuntimeError as exc:
         # most often: wrong COM port, or the `real` extra not installed
         print(f"could not start: {exc}")

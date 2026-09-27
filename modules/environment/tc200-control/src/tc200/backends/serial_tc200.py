@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import re
 
+from .. import hwlock
 from ..config import SENSORS
 from .base import StatusBits
 
@@ -129,10 +130,28 @@ class SerialTC200:
         self._factory = serial_factory
         self._ser = None
         self._idn = ""
+        # The claim on the COM port (hwlock). One TC200 = one COM port, so the
+        # port IS the instrument's physical address: a second service pointed
+        # at the same port must be refused before it sends a single byte.
+        self._lock = None
 
     # ---- lifecycle -------------------------------------------------------------
 
     def open(self) -> None:
+        """Claim the COM port, open it, prove the link. Any failure after the
+        claim closes the port and RELEASES the claim, so a failed start never
+        leaves the instrument marked "busy"."""
+        hw = self.cfg.hardware
+        # Claim BEFORE opening: HardwareBusy (a RuntimeError) propagates with
+        # the holder's name, and nothing has been sent to the box.
+        self._lock = hwlock.claim(str(hw.port), "tc200")
+        try:
+            self._open_claimed()
+        except BaseException:
+            self.close()                            # closes the port + releases the claim
+            raise
+
+    def _open_claimed(self) -> None:
         hw = self.cfg.hardware
         factory = self._factory
         if factory is None:
@@ -176,6 +195,10 @@ class SerialTC200:
                 s.close()
             except Exception:
                 pass
+        # release the COM-port claim last, once the port really is closed
+        lk, self._lock = self._lock, None
+        if lk is not None:
+            lk.release()
 
     def idn(self) -> str:
         return self._idn

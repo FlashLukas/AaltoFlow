@@ -244,3 +244,4 @@ def test_real_backend_start_is_queries_only(fake_visa):
     finally:
         smu._connected = False                                  # skip the shutdown writes
         backend._inst = None
+        backend._drop_connection()                              # and give the address back

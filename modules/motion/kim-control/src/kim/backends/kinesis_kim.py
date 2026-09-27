@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import threading
 
+from .. import hwlock
 from ..config import Config
 
 
@@ -83,6 +84,10 @@ class KinesisKim:
         # axis -> TPZMotorDriveParams(max_voltage, velocity, acceleration),
         # refreshed from the controller after every write.
         self._drive: dict[int, object] = {}
+        # The claim on this KIM101's serial number (hwlock). One physical
+        # controller, one service: a second kim service -- or any other module
+        # pointed at the same serial -- is refused before it sends a byte.
+        self._lock_hw: hwlock.HardwareLock | None = None
         # Resolve axis -> physical channel, honouring the swap_xy convenience.
         chans = [cfg.hardware.ch_x, cfg.hardware.ch_y, cfg.hardware.ch_z]
         if cfg.hardware.swap_xy:
@@ -95,22 +100,36 @@ class KinesisKim:
         from pylablib.devices import Thorlabs  # noqa: PLC0415  (intentional)
 
         # A single handle for the whole K-Cube; channels addressed per call.
+        # With no serial configured, _find_kim101 only LISTS the Kinesis
+        # devices on the USB bus (it opens none of them), so claiming right
+        # after it still comes before the first byte to the controller.
         serial = (self.cfg.hardware.serial or "").strip() or self._find_kim101(Thorlabs)
-        with self._lock:
-            # VERIFY: that pylablib's constructor only opens the link and
-            # queries (device info), and sends no drive-parameter / enable
-            # command of its own.
-            self._dev = Thorlabs.KinesisPiezoMotor(serial)
-            # ADOPT, do not push (Lukas, 2026-09-27: "all modules should read
-            # the instrument state on startup, not to change anything"). Until
-            # then open() wrote the .ini's 85 V / 300 / 5000 to every channel,
-            # silently replacing what the controller had been set to (112 V /
-            # 500 / 1000 in Kinesis on the lab unit). Now we only READ the drive
-            # parameters; this fills the cache, and the brain copies them into
-            # its config so the GUI shows what the controller really does.
-            # get_drive_parameters is a query (verified on the lab unit).
-            for axis in range(3):
-                self._refresh_drive(axis)
+        # Claim the physical controller by its serial BEFORE opening it. Raises
+        # hwlock.HardwareBusy (naming the holder) when another service -- any
+        # module -- already drives this KIM101; we then never touch it.
+        self._lock_hw = hwlock.claim(serial, "kim")
+        try:
+            with self._lock:
+                # VERIFY: that pylablib's constructor only opens the link and
+                # queries (device info), and sends no drive-parameter / enable
+                # command of its own.
+                self._dev = Thorlabs.KinesisPiezoMotor(serial)
+                # ADOPT, do not push (Lukas, 2026-09-27: "all modules should read
+                # the instrument state on startup, not to change anything"). Until
+                # then open() wrote the .ini's 85 V / 300 / 5000 to every channel,
+                # silently replacing what the controller had been set to (112 V /
+                # 500 / 1000 in Kinesis on the lab unit). Now we only READ the drive
+                # parameters; this fills the cache, and the brain copies them into
+                # its config so the GUI shows what the controller really does.
+                # get_drive_parameters is a query (verified on the lab unit).
+                for axis in range(3):
+                    self._refresh_drive(axis)
+        except BaseException:
+            # A failed open must not leave the controller claimed (the next
+            # start would then report it "busy" -- by ourselves), nor a
+            # half-open USB handle behind.
+            self.close()
+            raise
 
     @staticmethod
     def _find_kim101(thorlabs) -> str:
@@ -141,6 +160,11 @@ class KinesisKim:
             self._dev = None
             self._drive.clear()
             self._enabled = None
+            # Release the claim LAST, after the handle is closed, so no other
+            # service can open the controller while we still hold the link.
+            if self._lock_hw is not None:
+                self._lock_hw.release()
+                self._lock_hw = None
 
     def idn(self) -> str:
         if self._dev is None:

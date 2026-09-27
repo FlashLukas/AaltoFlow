@@ -62,10 +62,15 @@ class ZPiezo:
                                f"{lim.v_min:g}..{lim.v_max:g} V; left as it is")
 
     def shutdown(self) -> None:
-        try:
-            self.set_voltage(self.cfg.limits.v_min)   # park low = safe
-        except Exception:
-            pass
+        # Park ONLY a KCube we actually opened.  If open() failed -- e.g. the
+        # serial is claimed by another service (hwlock.HardwareBusy) -- that
+        # other service owns the focus, and "parking" it at v_min from here
+        # would defocus somebody else's measurement.
+        if self._connected:
+            try:
+                self.set_voltage(self.cfg.limits.v_min)   # park low = safe
+            except Exception:
+                pass
         try:
             self.backend.close()
         except Exception:

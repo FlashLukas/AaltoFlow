@@ -18,12 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from piezo.config import Config, load_config  # noqa: E402
+from piezo.hwlock import HardwareBusy  # noqa: E402
 from piezo.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from piezo.net.service import PiezoService  # noqa: E402
 from piezo.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="2D piezo stage service")
     ap.add_argument("--real", action="store_true", help="use the real d-Drive (default: simulator)")
     ap.add_argument("--config", help="INI config file to load")
@@ -43,8 +44,20 @@ def main() -> None:
     kind = "REAL d-Drive" if args.real else "SIMULATOR"
     print(f"piezo service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
     print("Ctrl-C to stop.")
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (a second piezo, or any module pointed at the same
+        # COM port) already holds the d-Drive.  We never opened the port, so
+        # there is nothing to close and no command was sent: say who holds
+        # it, in one line (the launcher shows stderr in its log), and exit.
+        # serve_forever's cleanup calls brain.shutdown(), which returns at
+        # once because the brain never connected -- no "safe state" is sent
+        # to an instrument we do not own.
+        print(f"piezo: cannot start: {exc}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -42,8 +42,12 @@ from __future__ import annotations
 import ctypes
 import threading
 
+from .. import hwlock
 from ..config import Config
 from .base import CHANNEL_STATES
+
+#: The name other services see when this SCU is ours (hwlock).
+MODULE = "smaract"
 
 SA_OK = 0
 SA_SYNCHRONOUS_COMMUNICATION = 0
@@ -64,6 +68,13 @@ class ScuError(RuntimeError):
     pass
 
 
+def scu_address(device_id: int) -> str:
+    """The hwlock address of one SCU: its device ID, which the controller
+    reports itself (SA_GetDeviceID) and which stays the same when the box is
+    replugged or the USB order changes -- unlike hardware.device_index."""
+    return f"SMARACT-SCU::{int(device_id)}"
+
+
 class ScuStage:
     """One channel of a SmarAct SCU driving a linear positioner with a sensor."""
 
@@ -76,6 +87,9 @@ class ScuStage:
         # from one lock, this one is a second belt.
         self._lock = threading.RLock()
         self._freq = 0
+        # Our claim on the physical SCU (Lukas's rule: one instrument, one
+        # service). Held from open() until close().
+        self._hwlock: hwlock.HardwareLock | None = None
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -133,13 +147,39 @@ class ScuStage:
             fn.argtypes = argtypes
             fn.restype = ctypes.c_uint
         self._lib = lib
+        try:
+            self._open_session()
+        except BaseException:
+            # A failed open must leave nothing behind: release the library
+            # session AND the claim on the SCU, so a retry (or another
+            # service) can have it. close() does both; a failure inside it is
+            # swallowed so the ORIGINAL reason (e.g. HardwareBusy) is reported.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
 
+    def _open_session(self) -> None:
         self._call("SA_InitDevices", SA_SYNCHRONOUS_COMMUNICATION)  # VERIFY
         n = ctypes.c_uint(0)
         self._call("SA_GetNumberOfDevices", ctypes.byref(n))  # VERIFY
         if self._dev >= n.value:
-            self.close()
             raise ScuError(f"SCU device index {self._dev} not found ({n.value} connected)")
+        # ONE INSTRUMENT, ONE SERVICE (Lukas's rule, 2026-09-27). The config
+        # only says "the N-th SCU on the USB bus", which is not a physical
+        # identity (the order can change when boxes are replugged). The SCU's
+        # device ID is: read it and claim "SMARACT-SCU::<id>" BEFORE any query
+        # of the channel. A second smaract service on this SCU is then refused
+        # with a message naming the holder. SA_InitDevices has to run first --
+        # it is how the library finds the boxes at all -- but it only opens the
+        # library's session, it moves nothing and changes no setting.
+        # # VERIFY: whether a second process's SA_InitDevices disturbs an SCU
+        # another process already has open (USB is usually exclusive, so it
+        # probably just fails; the claim then gives the readable reason).
+        dev_id = ctypes.c_uint(0)
+        self._call("SA_GetDeviceID", self._dev, ctypes.byref(dev_id))  # VERIFY
+        self._hwlock = hwlock.claim(scu_address(dev_id.value), MODULE)
         # Startup READS and never writes (Lukas's rule, 2026-09-27): the
         # sensor type is a setting stored in the SCU, so it is only CHECKED
         # here. A wrong type means every position reading is wrong, hence the
@@ -151,14 +191,12 @@ class ScuStage:
             self._call("SA_GetSensorType_S", self._dev, self._ch,
                        ctypes.byref(have))  # VERIFY (newly used query)
             if have.value != want:
-                self.close()
                 raise ScuError(
                     f"the SCU channel is configured for sensor type {have.value}, "
                     f"hardware.sensor_type asks for {want}. The service does not "
                     "change it at start; set it with the SmarAct software, or set "
                     "hardware.sensor_type = 0 to accept the controller's setting.")
         if not self.sensor_present():
-            self.close()
             raise ScuError("the SCU reports NO position sensor on this channel; "
                            "closed-loop control is impossible")
         # Only QUERIES from here on: the brain adopts the frequency, position,
@@ -166,13 +204,18 @@ class ScuStage:
         self._freq = self.get_max_frequency()
 
     def close(self) -> None:
-        if self._lib is None:
-            return
         try:
-            with self._lock:
-                self._lib.SA_ReleaseDevices()  # VERIFY
+            if self._lib is not None:
+                with self._lock:
+                    self._lib.SA_ReleaseDevices()  # VERIFY
         finally:
             self._lib = None
+            # Release the claim even if SA_ReleaseDevices failed: the session
+            # is gone from our side either way, and a stuck claim would block
+            # the restart of this very service.
+            if self._hwlock is not None:
+                self._hwlock.release()
+                self._hwlock = None
 
     def idn(self) -> str:
         if self._lib is None:

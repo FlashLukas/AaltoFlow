@@ -44,6 +44,10 @@ after pulling the move on another checkout run `python tools/migrate_layout.py`
 - **Simulation first**: every module runs without hardware. The real driver is
   the ONLY file that imports the vendor library, lazily inside `open()`, and
   every unverified hardware call is marked `# VERIFY`.
+- **One physical address, one service**: every real backend claims its
+  address with hwlock in `open()` (and releases it in `close()`; the simulator
+  never claims). `src/<pkg>/hwlock.py` is a byte-identical copy of
+  `suite-common/src/suite_common/hwlock.py` (gotcha #37).
 - **Threads** (gotcha #1): status snapshots are rebuilt by a worker thread;
   setters change brain attributes, never the snapshot.
 - **Theme**: never rebind `COLORS`; set the theme before building widgets.

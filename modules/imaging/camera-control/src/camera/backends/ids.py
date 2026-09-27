@@ -44,6 +44,8 @@ import threading
 
 import numpy as np
 
+from . import claim as hwclaim
+
 # Which GenICam visibilities to surface in the GUI (skip Guru clutter).
 _VISIBILITIES = {"Beginner", "Expert"}
 # A friendly default order for the common controls (others appended after).
@@ -67,6 +69,7 @@ class IDSCamera:
         self._peak = None               # ids_peak module
         self._ext = None                # ids_peak_ipl_extension module
         self._lock = threading.Lock()   # serialise node-map access vs. grab
+        self._hwlock = None             # our claim on this camera's serial (hwlock)
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
@@ -82,29 +85,45 @@ class IDSCamera:
 
         ids_peak.Library.Initialize()
         self._lib_open = True
-        dm = ids_peak.DeviceManager.Instance()
-        dm.Update()
-        devices = dm.Devices()
-        if not devices:
-            raise RuntimeError("no IDS camera found (check USB3 + IDS peak Cockpit)")
-        descr = self._pick_device(devices)
-        self._dev = descr.OpenDevice(ids_peak.DeviceAccessType_Control)
-        self._nodemap = self._dev.RemoteDevice().NodeMaps()[0]
+        # Any failure below must leave nothing behind: not the IDS library, not
+        # a half-open stream and above all not our claim on the camera -- a
+        # failed start must not make the camera look "in use" to the next try.
+        try:
+            dm = ids_peak.DeviceManager.Instance()
+            dm.Update()
+            devices = dm.Devices()
+            if not devices:
+                raise RuntimeError("no IDS camera found (check USB3 + IDS peak Cockpit)")
+            descr = self._pick_device(devices)
+            # CLAIM before OpenDevice, i.e. before the first byte goes to the
+            # camera. Enumerating devices (above) is the host listing the USB
+            # bus; it does not talk to the camera's control channel. The claim
+            # is the serial of the device actually FOUND, so "first found" and
+            # "picked by display name" lock the same camera as "picked by serial".
+            self._hwlock = hwclaim.claim(hwclaim.camera_address(descr.SerialNumber()))
+            self._dev = descr.OpenDevice(ids_peak.DeviceAccessType_Control)
+            self._nodemap = self._dev.RemoteDevice().NodeMaps()[0]
 
-        # ADOPT, DO NOT RESET (Lukas, 2026-09-27: "all modules should read the
-        # instrument state on startup, not to change anything"). This used to
-        # load the factory Default UserSet and force PixelFormat = Mono8, which
-        # threw away whatever exposure / gain / ROI the camera was running with
-        # (the Default set is 15 ms = a saturated image on the microscope). Now
-        # the camera keeps its settings; we only READ them. The pixel format is
-        # read, not set: grab() converts any format to Mono8 in SOFTWARE (IDS
-        # peak IPL), so the vision engine still gets 8-bit grayscale.
-        self.pixel_format = self._read_pixel_format()
+            # ADOPT, DO NOT RESET (Lukas, 2026-09-27: "all modules should read the
+            # instrument state on startup, not to change anything"). This used to
+            # load the factory Default UserSet and force PixelFormat = Mono8, which
+            # threw away whatever exposure / gain / ROI the camera was running with
+            # (the Default set is 15 ms = a saturated image on the microscope). Now
+            # the camera keeps its settings; we only READ them. The pixel format is
+            # read, not set: grab() converts any format to Mono8 in SOFTWARE (IDS
+            # peak IPL), so the vision engine still gets 8-bit grayscale.
+            self.pixel_format = self._read_pixel_format()
 
-        # Opening the data stream + AcquisitionStart is the ONE write left at
-        # start: without it the camera delivers no frames at all. It changes no
-        # camera parameter (exposure, gain, ROI, format all stay as found).
-        self._start_stream()
+            # Opening the data stream + AcquisitionStart is the ONE write left at
+            # start: without it the camera delivers no frames at all. It changes no
+            # camera parameter (exposure, gain, ROI, format all stay as found).
+            self._start_stream()
+        except BaseException:
+            # close() only talks to the camera if the stream was opened (then the
+            # camera is ours); after a HardwareBusy nothing was opened, so it only
+            # closes our own IDS library handle. It also releases the claim.
+            self.close()
+            raise
 
     def _read_pixel_format(self) -> str:
         """The camera's current PixelFormat, read only ("" if unreadable)."""
@@ -132,7 +151,7 @@ class IDSCamera:
         self._stream.StartAcquisition()
         self._nodemap.FindNode("AcquisitionStart").Execute()
 
-    def close(self) -> None:  # pragma: no cover - only on a real PC
+    def close(self) -> None:
         try:
             if self._stream is not None:
                 self._nodemap.FindNode("AcquisitionStop").Execute()
@@ -149,6 +168,11 @@ class IDSCamera:
             except Exception:
                 pass
             self._lib_open = False
+        # Release LAST: the camera is only free for another service once we
+        # have stopped using it.
+        if self._hwlock is not None:
+            self._hwlock.release()
+            self._hwlock = None
 
     def idn(self) -> str:
         try:

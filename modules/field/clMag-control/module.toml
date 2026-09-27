@@ -23,4 +23,3 @@ pub = 5556
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"    # "" for a headless module
 start_after = []              # keys that must be up before this one starts
-excludes = ["kepco"]                 # never run together: kepco drives the SAME Kepco BOP (same GPIB address)

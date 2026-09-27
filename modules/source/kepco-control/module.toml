@@ -18,4 +18,3 @@ pub = 5582
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
-excludes = ["clMag"]                 # never run together: clMag drives the SAME Kepco BOP (same GPIB address)

@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from camera.config import Config, load_config  # noqa: E402
+from camera.hwlock import HardwareBusy         # noqa: E402
 from camera.net import protocol as P           # noqa: E402
 from camera.net.service import CameraService   # noqa: E402
 
@@ -59,7 +60,7 @@ def apply_launcher_endpoints(cfg) -> None:
         print(f"camera service: {key} at {host}:{cmd}/{pub} (from the launcher)")
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="camera vision service")
     ap.add_argument("--real", action="store_true", help="use real hardware backends")
     ap.add_argument("--config", default="", help="INI config file to load")
@@ -93,8 +94,22 @@ def main() -> None:
                         pub_port=args.pub, status_hz=args.status_hz)
     print(f"  commands tcp://{args.host}:{args.cmd}   status tcp://{args.host}:{args.pub}")
     print("  Ctrl-C to stop.")
-    svc.serve_forever()
+    try:
+        svc.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another camera service, or zpiezo on the same KCube)
+        # already holds the camera or the KCube. We never opened it, so there
+        # is nothing to close or park: serve_forever's cleanup only closes what
+        # this process opened itself. One line in the launcher log, not a
+        # traceback, and a non-zero exit so the launcher shows the card as down.
+        print(f"camera service: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except RuntimeError as exc:
+        # SDK missing, no camera found, ... -- also one readable line.
+        print(f"camera service: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

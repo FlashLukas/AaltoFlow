@@ -24,6 +24,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from dsphase.config import Config
+from dsphase.hwlock import HardwareBusy
 from dsphase.shifter import PhaseShifter
 from dsphase.sim_system import build_sim_system
 from dsphase.net.service import DsphaseService
@@ -69,7 +70,18 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = DsphaseService(brain, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this phase shifter (same COM port).
+        # One clear line instead of a traceback, and a non-zero exit so the
+        # launcher shows the start as failed. Nothing is sent to the unit on
+        # the way out: the claim failed BEFORE the port was opened, the brain
+        # never became "connected", and serve_forever's stop() is not reached
+        # (start() raised before its try), so no RF-off goes to a box that
+        # belongs to the other service.
+        print(f"dsphase: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

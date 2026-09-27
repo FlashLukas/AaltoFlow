@@ -49,6 +49,12 @@ What the manual says that shapes this file:
 
 from __future__ import annotations
 
+from ..hwlock import claim
+
+# The name this module signs its hardware claims with. Another service that
+# finds the address taken reads it in its error message ("... in use by kepco").
+MODULE = "kepco"
+
 
 class VisaBOP:
     """Drives a physical Kepco BOP with a BIT 4886 card. Implements
@@ -62,10 +68,30 @@ class VisaBOP:
         self._rm = None
         self._inst = None
         self._idn = ""
+        self._lock = None      # our claim on the GPIB address (see open())
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
+        # ONE INSTRUMENT, ONE SERVICE (Lukas: "the same instrument has to be
+        # defined by the same physical address"). This BOP is the same box
+        # clMag-control drives on GPIB0::6. Claim the address BEFORE a single
+        # byte goes on the bus: if clMag (or a second kepco) already holds it,
+        # claim() raises HardwareBusy naming the holder and we never touch the
+        # instrument. hwlock normalises the spelling, so "GPIB::6" and
+        # "GPIB0::6::INSTR" are recognised as the same unit.
+        self._lock = claim(self._resource, MODULE)
+        try:
+            self._open_claimed()
+        except BaseException:
+            # A failed open must not leave the address claimed (nor a VISA
+            # session dangling). _disconnect() writes NOTHING: we may have
+            # failed before learning the instrument's state, and it may be
+            # driving a coil.
+            self._disconnect()
+            raise
+
+    def _open_claimed(self) -> None:
         try:
             import pyvisa                                   # lazy: real hardware only
         except ImportError as exc:                          # pragma: no cover
@@ -116,18 +142,33 @@ class VisaBOP:
             if self._inst is not None:
                 self._write("OUTP OFF")                     # VERIFY B.20
         finally:
-            if self._inst is not None:
-                try:
-                    self._inst.close()
-                except Exception:
-                    pass
-            if self._rm is not None:
-                try:
-                    self._rm.close()
-                except Exception:
-                    pass
-            self._inst = None
-            self._rm = None
+            self._disconnect()
+
+    def disconnect(self) -> None:
+        """Let go of the instrument WITHOUT writing anything: close the VISA
+        session and release the address claim. For the brain's "could not read
+        the state at start" path, where close() (which sends OUTP OFF) would
+        de-energise a coil we never took control of."""
+        self._disconnect()
+
+    def _disconnect(self) -> None:
+        if self._inst is not None:
+            try:
+                self._inst.close()
+            except Exception:
+                pass
+        if self._rm is not None:
+            try:
+                self._rm.close()
+            except Exception:
+                pass
+        self._inst = None
+        self._rm = None
+        # Release LAST: only once our session is closed may another service
+        # open the instrument.
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
 
     # ---- programming -----------------------------------------------------
 

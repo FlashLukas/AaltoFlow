@@ -113,13 +113,6 @@ class ModuleSpec:
     service: str = ""                # script path relative to dir; "" = cannot start here
     gui: str = ""                    # script path relative to dir; "" = headless
     start_after: list = field(default_factory=list)
-    #: keys of modules that must NEVER run at the same time as this one,
-    #: because both drive the SAME physical instrument (kepco and clMag talk to
-    #: one Kepco BOP on one GPIB address; mag2d and mag2dcal drive the same
-    #: coils). Two services sending setpoints to one power supply fight each
-    #: other, and neither knows the other exists. After discover() this list is
-    #: SYMMETRIC: if A names B, B also lists A, even when B's toml says nothing.
-    excludes: list = field(default_factory=list)
     category: str = DEFAULT_CATEGORY  # a CATEGORIES key: what the module is FOR
     tags: list = field(default_factory=list)   # free search words: "lock-in", "Thorlabs"
     #: set for a module known only from an ONLINE catalog (not downloaded yet);
@@ -206,16 +199,6 @@ def parse_manifest(path: Path) -> ModuleSpec:
     after = run.get("start_after", [])
     if not isinstance(after, list):
         raise ManifestError(f"{path}: [run] start_after must be a list of keys")
-    excludes = run.get("excludes", [])
-    if not isinstance(excludes, list) or not all(isinstance(k, str) for k in excludes):
-        raise ManifestError(f"{path}: [run] excludes must be a list of module keys, "
-                            f'e.g. excludes = ["clMag"]')
-    excludes = [k.strip() for k in excludes if k.strip()]
-    for k in excludes:
-        if not _KEY.match(k):
-            raise ManifestError(f"{path}: [run] excludes names {k!r}, which is not a valid key")
-        if k == key:
-            raise ManifestError(f"{path}: [run] excludes names the module itself ({k!r})")
     category = str(mod.get("category", DEFAULT_CATEGORY)).strip().lower()
     if category not in CATEGORIES:
         raise ManifestError(f"{path}: [module] category {category!r} is not one of "
@@ -232,7 +215,6 @@ def parse_manifest(path: Path) -> ModuleSpec:
         cmd=cmd, pub=pub, default_cmd=cmd, default_pub=pub,
         service=service, gui=gui,
         start_after=[str(k) for k in after],
-        excludes=list(dict.fromkeys(excludes)),      # drop repeats, keep order
         category=category, tags=[t.strip() for t in tags if t.strip()],
     )
 
@@ -505,7 +487,6 @@ def discover(root: Path | None = None) -> Discovery:
             remote=True,
         ))
 
-    mirror_excludes(local)
     modules = sorted(local, key=lambda m: (m.order, m.name.lower()))
     modules += sorted(remote, key=lambda m: (m.order, m.name.lower(), m.id))
     _assign_slugs(modules)
@@ -545,64 +526,6 @@ def port_conflicts(modules: list[ModuleSpec]) -> list[str]:
                            f"{used[slot]} and {m.id}")
             else:
                 used[slot] = m.id
-    return out
-
-
-# ------------------------------------------------ shared-hardware exclusion
-#
-# Some modules are two different programs for ONE physical instrument: kepco
-# (the Kepco BOP as a plain bipolar supply) and clMag (the same Kepco as a
-# field controller), or mag2d and mag2dcal (two control strategies for the
-# same coils). Only one of each pair may run: a second service would open the
-# same GPIB address / DAQ card and send its own setpoints on top of the first.
-# `[run] excludes` declares the pair; these helpers are the one place that
-# interprets it, so the launcher and the tools cannot disagree.
-#
-# It is about the hardware on THIS PC, so only LOCAL modules take part: a kepco
-# service on another PC drives that PC's supply, not ours.
-
-def mirror_excludes(modules: list[ModuleSpec]) -> None:
-    """Make `excludes` symmetric in place: A excludes B  =>  B excludes A.
-
-    Writing it in only one of the two manifests must be enough -- whoever adds
-    the second module may not think of editing the first one's toml.
-    """
-    local = [m for m in modules if not m.remote]
-    keys = {m.key for m in local}
-    for m in local:
-        for other in list(m.excludes):
-            if other not in keys:
-                continue                          # unknown key: check_modules reports it
-            partner = next(p for p in local if p.key == other)
-            if m.key not in partner.excludes:
-                partner.excludes.append(m.key)
-
-
-def exclusion_pairs(modules: list[ModuleSpec]) -> list[tuple[str, str]]:
-    """Every excluded pair among the local modules, each once, sorted."""
-    keys = {m.key for m in modules if not m.remote}
-    pairs = set()
-    for m in modules:
-        if m.remote:
-            continue
-        for other in m.excludes:
-            if other in keys:
-                pairs.add(tuple(sorted((m.key, other), key=str.lower)))
-    return sorted(pairs, key=lambda p: (p[0].lower(), p[1].lower()))
-
-
-def exclusion_conflicts(modules: list[ModuleSpec]) -> list[str]:
-    """Messages for every excluded pair that is BOTH in `modules`.
-
-    Used to validate a set that is about to be started together (a launcher
-    profile): an empty list means the set is safe.
-    """
-    out = []
-    for a, b in exclusion_pairs(modules):
-        ma = next(m for m in modules if m.key == a and not m.remote)
-        mb = next(m for m in modules if m.key == b and not m.remote)
-        out.append(f"{ma.name} ({a}) and {mb.name} ({b}) drive the same instrument "
-                   f"and must not run together")
     return out
 
 

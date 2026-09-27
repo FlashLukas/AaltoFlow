@@ -28,7 +28,10 @@ import ctypes as C
 import os
 import sys
 
+from .. import hwlock
 from .base import FLAG_NAN, FLAG_OK, FLAG_OVERRANGE, FLAG_UNDERRUN
+
+MODULE = "pm16"                     # the name other services see when this meter is ours
 
 DEFAULT_DLL = r"C:\Program Files\IVI Foundation\VISA\Win64\Bin\TLPMX_64.dll"
 
@@ -151,9 +154,20 @@ class TLPMXPowerMeter:
         self._vi = ViSession(0)
         self._idn = ""
         self._sensor = ""
+        self._lock: hwlock.HardwareLock | None = None   # our claim on the USB address
 
     # ---- lifecycle -------------------------------------------------------
     def open(self) -> None:
+        """Claim the meter's USB address, then open a TLPMX session on it.
+
+        Why the claim (Lukas's rule, 2026-09-27: one physical instrument = one
+        service): the physical box is identified by its USB resource, which
+        carries the serial number (USB0::0x1313::0x807B::<serial>::INSTR).
+        We claim THAT before TLPMX_init sends the first byte, so a second
+        pm16 service -- or any other module pointed at the same meter -- is
+        refused with a message naming who holds it, instead of two programs
+        fighting over one USB session. The lock is held until close().
+        """
         self._dll = load_dll(self.dll_path)
         if self.resource:
             candidates = [self.resource]
@@ -165,31 +179,60 @@ class TLPMXPowerMeter:
             # process that has created a ZeroMQ context (every service does),
             # TLPMX reports the free PM16 as unavailable, yet TLPMX_init opens
             # it fine. Trying to open is the only honest availability test.
+            # (Listing resources only enumerates USB descriptors; it does not
+            # talk to a meter, so it may happen before the claim.)
             candidates = [r["resource"] for r in found]
         errors = []
+        busy: list[hwlock.HardwareBusy] = []
         for resource in candidates:
+            try:
+                lock = hwlock.claim(resource, MODULE)
+            except hwlock.HardwareBusy as exc:
+                # Held by another service. With an explicit resource that is
+                # the answer; while auto-discovering, try the next meter.
+                busy.append(exc)
+                errors.append(f"{resource}: {exc}")
+                continue
             try:
                 # IDQuery on, reset OFF: a reset would throw away the wavelength
                 # and range someone set on the meter before we connected.
                 self._call("TLPMX_init", resource.encode(), 1, 0, C.byref(self._vi))
             except TLPMXError as exc:
+                lock.release()            # we never opened it: do not keep it claimed
                 errors.append(f"{resource}: {exc}")
                 continue
+            self._lock = lock
             self.resource = resource
             break
         else:
+            # Every meter we found is held by another service: say THAT (the
+            # service turns HardwareBusy into one clear line), not "I/O error".
+            if busy and len(busy) == len(errors):
+                raise busy[0] if len(busy) == 1 else hwlock.HardwareBusy("; ".join(errors))
             raise TLPMXError("could not open a power meter (in use by Thorlabs OPM or "
                              "another program?) -- " + "; ".join(errors))
-        self._call("TLPMX_setTimeoutValue", self._vi, self.timeout_ms)
-        self._idn = self._read_idn()
-        self._sensor = self._read_sensor()
+        try:
+            self._call("TLPMX_setTimeoutValue", self._vi, self.timeout_ms)
+            self._idn = self._read_idn()
+            self._sensor = self._read_sensor()
+        except BaseException:
+            # A half-open session must not keep the meter (or its claim).
+            self.close()
+            raise
 
     def close(self) -> None:
-        if self._dll is not None and self._vi.value:
-            try:
-                self._dll.TLPMX_close(self._vi)
-            finally:
-                self._vi = ViSession(0)
+        try:
+            if self._dll is not None and self._vi.value:
+                try:
+                    self._dll.TLPMX_close(self._vi)
+                finally:
+                    self._vi = ViSession(0)
+        finally:
+            # Release the claim even if TLPMX_close failed: the session is gone
+            # from our side either way, and a stuck claim would block a restart.
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
 
     def idn(self) -> str:
         return self._idn

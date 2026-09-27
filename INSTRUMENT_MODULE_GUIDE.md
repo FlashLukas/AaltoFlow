@@ -41,6 +41,7 @@ modules/<category>/<inst>-control/     # e.g. modules/source/smb-control (sectio
   src/<inst>/
     __init__.py             # docstring describing the module + __version__
     config.py               # dataclasses + INI save/load (§4)
+    hwlock.py               # EXACT copy of suite-common/src/suite_common/hwlock.py (§3)
     backends/
       __init__.py
       base.py               # typing.Protocol interface for the hardware (§3)
@@ -94,6 +95,67 @@ ONLY on this Protocol, so the simulator and the real driver are interchangeable.
 
 Setters command directly; ramping/sequencing/clamping is the brain's job, not the
 backend's.
+
+### One physical address, one service (`hwlock.py`, 2026-09-27)
+
+An instrument is identified by its PHYSICAL ADDRESS (`GPIB0::6`, `COM5`, a USB
+serial number, an IP address), not by the module that drives it: clMag and
+kepco can both be pointed at the same Kepco BOP, mag2d and mag2dcal at the same
+DAQ card. So every real backend claims its address before it touches the
+instrument, and a second claim of the same address -- from ANY module on this
+PC -- is refused with `HardwareBusy`, whose message names the holder
+(`GPIB0::6 is already in use by clMag (pid 4242) -- ...`). The recipe:
+
+```python
+from .. import hwlock                      # the module's own copy, see below
+MODULE = "smb"                             # the module key: the launcher matches on it
+
+class VisaScpiBackend:
+    def __init__(self, resource: str):
+        self.resource = resource
+        self._lock: hwlock.HardwareLock | None = None
+
+    def open(self) -> None:
+        # 1. claim FIRST: a refused claim must leave the instrument untouched
+        self._lock = hwlock.claim(self.resource, MODULE)   # raises HardwareBusy
+        try:
+            import pyvisa                  # 2. the lazy vendor import, as above
+            ...                            # 3. open the session, adopt its state
+        except Exception:
+            self._lock.release()           # never opened it: do not keep it claimed
+            self._lock = None
+            raise
+
+    def close(self) -> None:
+        try:
+            ...                            # close the session
+        finally:
+            if self._lock is not None:     # release even if closing failed:
+                self._lock.release()       # a stuck claim would block a restart
+                self._lock = None
+```
+
+- **Claim in `open()`, release in `close()`.** Keep the returned lock for as
+  long as the instrument is open.
+- **The simulator never claims.** Ten simulated services can run side by side;
+  only hardware is exclusive.
+- **Claim the address the user configured**, spelled any way VISA accepts it:
+  `normalize()` makes `GPIB::6`, `gpib0::6::INSTR` and `GPIB0::6` one
+  instrument, `ASRL5::INSTR` and `COM5` another. A network instrument is keyed
+  by its HOST (two ports on one box are one box). A backend that discovers its
+  device (a USB meter with no address set) claims each candidate before
+  opening it and moves on to the next one when it is busy.
+- **Let the refusal reach the user.** The service prints the one-line message
+  and exits; Mission Control recognises "is already in use by" and shows the
+  card as *address busy: GPIB0::6 held by clMag* instead of a generic crash.
+- **Keep the copy identical.** Every module carries its own `src/<pkg>/hwlock.py`
+  (a module installs without suite-common, the same convention as `theme.py`).
+  Edit only the master `suite-common/src/suite_common/hwlock.py`, then copy it
+  into every module; `tools/check_modules.py` FAILS a missing or differing copy
+  and WARNS about a real backend file that never calls `claim(`.
+  `tools/new_module.py` refreshes the copy from the master.
+- The lock is **per PC** and the operating system releases it when the process
+  ends, even on a crash -- details in docs/DEVELOPER_NOTES.md, gotcha #37.
 
 ---
 
@@ -656,7 +718,9 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
    passes at once. The launcher and scan-core already list it.
 4. Rewrite `config.py` groups for X's quantities + a `Limits` envelope.
 5. Rewrite `backends/base.py` Protocol; write `sim.py`; write the real driver with
-   a lazy hardware import and the right SCPI/API.
+   a lazy hardware import and the right SCPI/API, claiming its address with
+   `hwlock.claim()` in `open()` and releasing it in `close()` (§3). Do not edit
+   `hwlock.py` in the module: it is a copy of the suite-common master.
 6. Trim/extend the brain: set-and-forget → strip loop/PID/state; closed-loop →
    keep and retune.
 7. `net/protocol.py` `*_to_dict` helpers; `service.py` `_dispatch` verbs;
@@ -709,17 +773,7 @@ pub = 5570
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"    # "" for a headless module
 start_after = []              # keys to start first when started together
-excludes = []                 # OPTIONAL: keys that must never run at the same time
 ```
-
-**`excludes` -- two modules for one instrument.** If your module drives
-hardware another module also drives (kepco and clMag share one Kepco BOP;
-mag2d and mag2dcal share one set of coils), list the other module's key:
-`excludes = ["clMag"]`. Two services sending setpoints to one supply would
-fight each other, so the launcher then refuses to start yours while the other
-is up (and vice versa -- the rule is symmetric, one toml is enough), refuses a
-profile that contains both, and `check_modules.py` fails a key that names no
-module. Leave it out when the module owns its hardware alone.
 
 **Identity only.** The controls and measured variables are NOT in this file: the
 running service reports them through `describe` (section 6b), and a copy here

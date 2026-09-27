@@ -26,6 +26,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from hp8648.config import Config
+from hp8648.hwlock import HardwareBusy
 from hp8648.source import SignalSource
 from hp8648.sim_system import build_sim_system
 from hp8648.net.service import Hp8648Service
@@ -57,7 +58,20 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = Hp8648Service(src, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (a second hp8648, or any module pointed at this GPIB
+        # address) already drives the generator. We never opened it, so there
+        # is nothing to switch off: say who holds it, in one line, and exit.
+        print(f"hp8648: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        # A failed open (no VISA, nothing at the address, timeout) has already
+        # released the address and closed the session inside the backend. One
+        # readable line in the launcher log instead of a traceback.
+        print(f"hp8648: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

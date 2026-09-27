@@ -27,6 +27,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from superk.config import Config
+from superk.hwlock import HardwareBusy
 from superk.laser import SuperK
 from superk.sim_system import build_sim_system
 from superk.net.service import SuperkService
@@ -66,7 +67,21 @@ def main() -> int:
 
     service = SuperkService(laser, host=args.host, cmd_port=args.cmd_port,
                             pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another superk, or any module pointed at this COM
+        # port) already holds the laser. The claim comes BEFORE the port is
+        # opened, so we never talked to the laser: the shutdown that
+        # serve_forever runs on the way out sends nothing to it (the brain is
+        # not connected, the backend has no open port). One line, no traceback.
+        print(f"superk: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except RuntimeError as exc:
+        # NKTError (DLL missing, openPorts failed) is a RuntimeError: one
+        # readable line in the launcher log instead of a traceback.
+        print(f"superk: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

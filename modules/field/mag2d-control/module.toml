@@ -18,4 +18,3 @@ pub = 5576
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
-excludes = ["mag2dcal"]              # never run together: mag2dcal drives the SAME coils and DAQ card

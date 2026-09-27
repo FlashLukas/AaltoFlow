@@ -28,7 +28,8 @@ def test_open_reads_model_serial_and_attaches_the_tg():
     b, dll, _ = _open()
     assert b.device_model() == "SA44B" and b.tg_attached()
     assert "SA44B" in b.idn() and "17040001" in b.idn() and "3.0.99" in b.idn()
-    assert dll.names()[:4] == ["saOpenDevice", "saGetDeviceType", "saGetSerialNumber",
+    # serial first: with no serial configured it names the box to claim (hwlock)
+    assert dll.names()[:4] == ["saOpenDevice", "saGetSerialNumber", "saGetDeviceType",
                                "saGetAPIVersion"]
     assert dll.mode == -1                                   # nothing initiated: TG silent
 

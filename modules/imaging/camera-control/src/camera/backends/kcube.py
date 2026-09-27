@@ -20,6 +20,8 @@ Implements the :class:`camera.backends.base.ZFocus` Protocol.
 
 from __future__ import annotations
 
+from . import claim as hwclaim
+
 
 class KCubeZFocus:
     def __init__(self, serial: str = "", vmin: float = 0.0, vmax: float = 75.0):
@@ -28,6 +30,7 @@ class KCubeZFocus:
         self._vmax = float(vmax)
         self._dev = None
         self._v = 0.0
+        self._hwlock = None    # our claim on this KCube's serial (hwlock)
 
     def open(self) -> None:
         try:
@@ -37,13 +40,32 @@ class KCubeZFocus:
                 "pylablib not installed. `pip install pylablib` and install "
                 "Thorlabs Kinesis (see kcube.py header)."
             ) from exc
-        # KinesisPiezoController wraps KPZ/KCube devices.
-        self._dev = Thorlabs.KinesisPiezoController(self.serial)  # pragma: no cover
+        # CLAIM the KCube's serial before the first byte goes to it. The same
+        # KCube may be configured in zpiezo-control too (the camera's own-KCube
+        # path is the FALLBACK for exactly that controller); both claim the bare
+        # Kinesis serial, so only one of the two can drive it. An empty serial
+        # is refused here: pylablib needs one anyway, and "whichever KCube
+        # answers first" is not an address anybody could check against.
+        self._hwlock = hwclaim.claim(hwclaim.kinesis_address(self.serial))
+        try:
+            # KinesisPiezoController wraps KPZ/KCube devices.
+            self._dev = Thorlabs.KinesisPiezoController(self.serial)  # VERIFY on the rig
+        except BaseException:
+            self._release()
+            raise
 
-    def close(self) -> None:  # pragma: no cover - only on a real PC
-        if self._dev is not None:
-            self._dev.close()
+    def close(self) -> None:
+        try:
+            if self._dev is not None:
+                self._dev.close()
+        finally:
             self._dev = None
+            self._release()
+
+    def _release(self) -> None:
+        if self._hwlock is not None:
+            self._hwlock.release()
+            self._hwlock = None
 
     def set_z(self, volts: float) -> None:  # pragma: no cover - only on a real PC
         v = max(self._vmin, min(self._vmax, float(volts)))

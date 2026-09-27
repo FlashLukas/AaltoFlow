@@ -20,11 +20,44 @@ separate temperature task would fail (or have to be created and destroyed every
 tick). read_hall() therefore acquires all four channels and CACHES the two
 temperature means; read_temps() returns that cache. The brain calls read_hall()
 first on every tick, so the temperatures are never more than one tick old.
+
+ONE INSTRUMENT, ONE SERVICE (Lukas: "the same instrument has to be defined by
+the same physical address"): mag2d and mag2dcal drive the SAME coils through
+the SAME DAQ card. The physical address of that box is the DAQmx DEVICE NAME
+("Dev1" -- the part of every channel string before the "/"). open() claims
+every device the configured channels name (normally just Dev1) through
+hwlock.py BEFORE the first task is created, so a second service -- this one
+started twice, or mag2dcal -- is refused instead of fighting over the coils.
+The claims are released in close() and on every failed open().
 """
 
 from __future__ import annotations
 
+from .. import hwlock
 from ..config import Hardware
+
+# The name this module claims addresses under; the refusal message of the
+# OTHER service names it ("DEV1 is already in use by mag2d (pid ...)").
+MODULE = "mag2d"
+
+
+def daq_devices(hw: Hardware) -> list[str]:
+    """The DAQmx device names (physical boxes) the configured channels use.
+
+    "Dev1/ao0" -> "Dev1"; "/Dev1/port0/line1" -> "Dev1"; a comma list
+    "Dev1/ai0, Dev2/ai1" names two cards. Sorted and de-duplicated
+    case-insensitively (DAQmx itself ignores case: dev1 IS Dev1), so the claim
+    order is fixed -- two processes claiming two cards in different orders
+    could otherwise each get one and block the other.
+    """
+    found: dict[str, str] = {}
+    for spec in (hw.ao_x, hw.ao_y, hw.ai_hall_x, hw.ai_hall_y, hw.ai_temp1,
+                 hw.ai_temp2, hw.di_water, hw.do_enable):
+        for part in str(spec).split(","):
+            dev = part.strip().lstrip("/").partition("/")[0].strip()
+            if dev:
+                found.setdefault(hwlock.normalize(dev), dev)
+    return [found[k] for k in sorted(found)]
 
 
 class NidaqVectorMagnet:
@@ -34,6 +67,7 @@ class NidaqVectorMagnet:
         self._ao = self._ai = self._di = self._do = None
         self._temps = (float("nan"), float("nan"))
         self._ao_readback: tuple[float, float] | None = None
+        self._locks: list[hwlock.HardwareLock] = []
 
     # ---- lifecycle -------------------------------------------------------------
 
@@ -52,6 +86,12 @@ class NidaqVectorMagnet:
             "diff": TerminalConfiguration.DIFF,
         }[hw.ai_terminal.strip().lower()]
 
+        # Claim the card(s) BEFORE the first DAQmx task exists: creating a task
+        # already reserves channels on the card, and the other service may be in
+        # the middle of a ramp. HardwareBusy propagates to the service, which
+        # prints one line and exits WITHOUT closing anything (close() of a card
+        # we never claimed would write 0 V onto somebody else's magnet).
+        self._claim_devices()
         try:
             # ADOPT ON START (Lukas, 2026-09-27): NOTHING is written here. The
             # old code forced enable False and AO 0 V -- a magnet left energized
@@ -90,9 +130,26 @@ class NidaqVectorMagnet:
 
             self._di = nidaqmx.Task("mag2d_water")
             self._di.di_channels.add_di_chan(hw.di_water)
-        except Exception:
+        except BaseException:
+            # A failed open must not leave the card claimed: the next start
+            # (or mag2dcal) would be refused for a box nobody is driving.
             self._close_tasks()
+            self._release_devices()
             raise
+
+    def _claim_devices(self) -> None:
+        """Claim every DAQ device, all or nothing."""
+        try:
+            for dev in daq_devices(self.hw):
+                self._locks.append(hwlock.claim(dev, MODULE))
+        except BaseException:
+            self._release_devices()          # e.g. got Dev1, Dev2 was busy
+            raise
+
+    def _release_devices(self) -> None:
+        locks, self._locks = self._locks, []
+        for lock in locks:
+            lock.release()
 
     def _read_ao_internal(self, nidaqmx) -> tuple[float, float] | None:
         """Measure what the two AO channels are putting out now, or None.
@@ -150,6 +207,9 @@ class NidaqVectorMagnet:
         except Exception:
             pass
         self._close_tasks()
+        # Release the card only AFTER the backstop writes and the task closes:
+        # the moment it is free, another service may open it.
+        self._release_devices()
 
     def _close_tasks(self) -> None:
         for name in ("_ai", "_ao", "_di", "_do"):

@@ -38,8 +38,13 @@ from __future__ import annotations
 
 import time
 
+from .. import hwlock
 from ..config import Config
 from .base import AxisReading
+
+# The name written into the lock file, so the OTHER service's error message
+# can say who holds the port ("COM5 is already in use by elliptec (pid N)").
+MODULE_KEY = "elliptec"
 
 
 def encode_s32(value: int) -> str:
@@ -95,17 +100,45 @@ class EllSerialBus:
         self._ser = None
         self._buf = b""
         self._axes: dict[str, _Axis] = {}
+        # The claim on the COM port (hwlock.py).  Held for exactly as long as
+        # the port is open; None whenever it is not.
+        self._lock = None
 
     # ------------------------------------------------------------------ #
     # connection
     # ------------------------------------------------------------------ #
     def open(self, addresses: list) -> None:
+        """Claim the COM port, open it and QUERY every mount on the bus.
+
+        One physical instrument = one address (Lukas's rule): the ELL14K board
+        IS its COM port -- every mount on the bus hangs behind that one port --
+        so the port is the address claimed.  The claim comes BEFORE the first
+        byte is sent, and any failure below releases it again, so a failed
+        open never leaves the port marked busy for the next service.
+        """
         try:
             import serial  # lazy: only the real path needs pyserial
         except ImportError as exc:  # pragma: no cover - depends on the PC
             raise RuntimeError(
                 "pyserial is not installed: run  .\\dev.ps1 sync --extra gui --extra real"
             ) from exc
+        # Re-opening an open bus (e.g. after a config change) closes the old
+        # port and drops its claim first; otherwise we would refuse ourselves.
+        self.close()
+        hw = self.cfg.hardware
+        # Raises hwlock.HardwareBusy (naming the holder) if another service --
+        # this module or any other -- has this COM port.  "com5" and "COM5"
+        # (and ASRL5::INSTR) are the same port: normalize() handles that.
+        self._lock = hwlock.claim(str(hw.port), MODULE_KEY)
+        try:
+            self._open_claimed(serial, addresses)
+        except BaseException:
+            # Close the port and drop the claim: nothing half-open stays behind.
+            self.close()
+            raise
+
+    def _open_claimed(self, serial, addresses: list) -> None:
+        """The body of open(), run only while the port is claimed."""
         hw = self.cfg.hardware
         self._ser = serial.Serial(
             port=hw.port, baudrate=int(hw.baudrate), bytesize=serial.EIGHTBITS,
@@ -137,11 +170,19 @@ class EllSerialBus:
             self._read_position(a)
 
     def close(self) -> None:
-        if self._ser is not None:
-            try:
-                self._ser.close()
-            finally:
-                self._ser = None
+        """Close the port and release its claim.  Idempotent."""
+        try:
+            if self._ser is not None:
+                try:
+                    self._ser.close()
+                finally:
+                    self._ser = None
+        finally:
+            # Release even if closing the port raised: the claim must never
+            # outlive our use of the port.
+            if self._lock is not None:
+                lock, self._lock = self._lock, None
+                lock.release()
 
     def idn(self) -> str:
         models = ", ".join(f"{a}:{ax.info.get('model', '?')}" for a, ax in self._axes.items())

@@ -31,6 +31,8 @@ import re
 import threading
 import time
 
+from .. import hwlock
+
 _NUMBER = re.compile(r"[-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?")
 
 
@@ -65,6 +67,7 @@ class PS6000L:
         self.freq_command = freq_command or ""
         self._ser = None
         self._idn = ""
+        self._hw_lock = None                    # hwlock.HardwareLock while open
         # One serial line, many callers (the brain's setter and its poll
         # thread): a query's write and its read must not be interleaved with
         # another command, or answers get swapped.
@@ -79,20 +82,51 @@ class PS6000L:
             raise RuntimeError(
                 "pyserial is not installed: run `uv sync --extra gui --extra real`"
             ) from exc
-        self._ser = serial.Serial(self.port, self.baud, timeout=self.timeout_s,
-                                  write_timeout=self.timeout_s)
-        time.sleep(0.2)                         # let the CDC port settle after open  # VERIFY
-        pong = self._query("*PING?")            # VERIFY: reply is exactly "PONG!"
-        if "PONG" not in pong.upper():
-            raise RuntimeError(f"{self.port}: no PONG from the phase shifter (got {pong!r})")
-        self._idn = self._query("*IDN?")        # VERIFY: reply format
+        # ONE INSTRUMENT, ONE SERVICE (Lukas's rule): claim the COM port before
+        # a single byte goes to the unit. If another service (a second dsphase,
+        # or any module pointed at the same port) already holds it, this raises
+        # HardwareBusy naming the holder and we never touch the box. "com5",
+        # "COM5" and "ASRL5::INSTR" are the same port to the lock.
+        self._hw_lock = hwlock.claim(self.port, "dsphase")
+        try:
+            self._ser = serial.Serial(self.port, self.baud, timeout=self.timeout_s,
+                                      write_timeout=self.timeout_s)
+            time.sleep(0.2)                     # let the CDC port settle after open  # VERIFY
+            pong = self._query("*PING?")        # VERIFY: reply is exactly "PONG!"
+            if "PONG" not in pong.upper():
+                raise RuntimeError(f"{self.port}: no PONG from the phase shifter (got {pong!r})")
+            self._idn = self._query("*IDN?")    # VERIFY: reply format
+        except BaseException:
+            # A failed open must leave nothing behind: close the port WITHOUT
+            # sending OUTP:STAT OFF (we never established that this is our
+            # unit, so no "safe state" command goes to it) and give the
+            # address back, so a retry -- or another service -- can have it.
+            self._abandon()
+            raise
         # NOTHING is written here (Lukas's rule, 2026-09-27): no *RST, no
         # OUTP:STAT OFF, no PHASE/ATT. The brain reads the unit back right after
         # open() and adopts what it holds, so a service restart leaves the RF
         # path exactly as it was. (close() still switches the output off.)
 
+    def _abandon(self) -> None:
+        """Drop the port and the address claim without talking to the unit."""
+        ser, self._ser = self._ser, None
+        try:
+            if ser is not None:
+                ser.close()
+        except Exception:
+            pass
+        finally:
+            self._release_lock()
+
+    def _release_lock(self) -> None:
+        lock, self._hw_lock = self._hw_lock, None
+        if lock is not None:
+            lock.release()
+
     def close(self) -> None:
         if self._ser is None:
+            self._release_lock()                # harmless if nothing is held
             return
         try:
             self.set_output(False)              # RF off on the way out
@@ -101,6 +135,9 @@ class PS6000L:
                 self._ser.close()
             finally:
                 self._ser = None
+                # released LAST: the RF-off above must reach the unit while it
+                # is still ours, before another service may claim the port.
+                self._release_lock()
 
     # ---- phase -----------------------------------------------------------
 

@@ -173,9 +173,22 @@ class Chopper:
         """Connect, ADOPT the controller's state (command nothing), start
         polling. `poll=False` is for tests that step `poll_once()` by hand."""
         with self._hw:
+            # open() either succeeds (and, on real hardware, holds the COM
+            # port's hwlock claim) or raises having released everything --
+            # e.g. HardwareBusy when another service drives this chopper.
             self.backend.open()
-            idn = self.backend.idn()
-            state = self._read_config_locked()
+            try:
+                idn = self.backend.idn()
+                state = self._read_config_locked()
+            except BaseException:
+                # Opened but could not read it: close, so the port and its
+                # claim are not left held by a brain that never started. Only
+                # close() -- no "safe state" command to a unit we never adopted.
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
         with self._lock:
             self._idn = idn
             self._apply_read(state)

@@ -47,6 +47,8 @@ from __future__ import annotations
 import re
 import time
 
+from .. import hwlock
+
 _UNITS = {"HZ": 1.0, "KHZ": 1e3, "MHZ": 1e6, "GHZ": 1e9,
           "DBM": 1.0, "DEG": 1.0, "V": 1.0}
 _NUM = re.compile(r"([-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)\s*([A-Za-z]*)")
@@ -177,17 +179,56 @@ class DsiSG12000L:
         self._link = None
         self._has_phase = False
         self._idn = ""
+        # The claim on this unit's physical address (hwlock.py): held from
+        # open() to close() so no second service -- another dssg, or any
+        # module pointed at the same COM port / IP -- can talk to it meanwhile.
+        self._lock = None
 
     # ---- lifecycle -------------------------------------------------------
 
+    def address(self) -> str:
+        """The PHYSICAL address of the unit this backend drives: the COM port
+        (USB) or the host (Ethernet). hwlock keys a network box by its host
+        only, so the TCP port does not matter."""
+        if self._transport == "tcp":
+            if not self._host:
+                raise ValueError("hardware.host is empty: set the SG12000L's IP address")
+            return self._host
+        if self._transport == "serial":
+            return self._com_port
+        raise ValueError(f"hardware.transport must be 'serial' or 'tcp', "
+                         f"not {self._transport!r}")
+
     def open(self) -> None:
+        # Claim the address BEFORE the first byte goes out: if another service
+        # holds this unit, HardwareBusy is raised here and we never touch it.
+        address = self.address()
+        self._lock = hwlock.claim(address, "dssg")
+        try:
+            self._open_link()
+        except BaseException:
+            # A failed open must not leave the unit "claimed" by a process
+            # that is about to report the error (or exit): drop the half-open
+            # link WITHOUT sending anything, then release the claim.
+            link, self._link = self._link, None
+            if link is not None:
+                try:
+                    link.close()
+                except Exception:
+                    pass
+            self._release()
+            raise
+
+    def _release(self) -> None:
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()
+
+    def _open_link(self) -> None:
         if self._transport == "tcp":
             self._link = _TcpLink(self._host, self._tcp_port, self._timeout_s)
-        elif self._transport == "serial":
-            self._link = _SerialLink(self._com_port, self._baud, self._timeout_s)
         else:
-            raise ValueError(f"hardware.transport must be 'serial' or 'tcp', "
-                             f"not {self._transport!r}")
+            self._link = _SerialLink(self._com_port, self._baud, self._timeout_s)
         # ADOPT, don't initialise (Lukas's rule, 2026-09-27): the unit keeps
         # whatever RF state, frequency, power, reference, buzzer and display
         # it had -- the brain READS them afterwards. The only write is *CLS,
@@ -217,6 +258,7 @@ class DsiSG12000L:
     def close(self, rf_off: bool = True) -> None:
         link, self._link = self._link, None
         if link is None:
+            self._release()                                    # nothing open; drop any claim
             return
         try:
             if rf_off:
@@ -225,7 +267,10 @@ class DsiSG12000L:
                 link.write("*DISPLAY ON")                      # leave the front panel usable
                 self._display_turned_off = False
         finally:
-            link.close()
+            try:
+                link.close()
+            finally:
+                self._release()                                # the unit is free for others
 
     def idn(self) -> str:
         return self._idn

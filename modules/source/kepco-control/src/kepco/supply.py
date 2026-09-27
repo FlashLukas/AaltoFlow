@@ -172,6 +172,16 @@ class BipolarSupply:
                 # Without the state we cannot know whether a coil is energised,
                 # so taking control would be guessing. Refuse, and say why.
                 # (backend.close() is NOT called: it sends OUTP OFF.)
+                # But DO let go of the connection and the address claim
+                # (hwlock), without writing, if the backend can: otherwise a
+                # GUI or test that survives this error keeps the BOP "busy"
+                # for every other service until the process exits.
+                disconnect = getattr(self.backend, "disconnect", None)
+                if callable(disconnect):
+                    try:
+                        disconnect()
+                    except Exception:
+                        pass
                 raise RuntimeError(f"could not read the supply's state at start "
                                    f"({type(exc).__name__}: {exc}); not taking "
                                    f"control of an instrument in an unknown state") from exc

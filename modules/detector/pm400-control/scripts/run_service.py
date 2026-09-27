@@ -29,6 +29,7 @@ from pm400.meter import Pm400Meter
 from pm400.sim_system import build_sim_system
 from pm400.net.service import Pm400Service
 from pm400.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from pm400.hwlock import HardwareBusy
 
 
 def main() -> int:
@@ -58,8 +59,17 @@ def main() -> int:
         meter, _ = build_sim_system(cfg)
         print(f"SIMULATED backend (no hardware needed), head: {cfg.sim.head}")
 
-    Pm400Service(meter, host=args.host, cmd_port=args.cmd_port,
-                pub_port=args.pub_port).serve_forever()
+    try:
+        Pm400Service(meter, host=args.host, cmd_port=args.cmd_port,
+                    pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another AaltoFlow service already drives this console (suite rule:
+        # one physical instrument, one service). This is an expected situation,
+        # not a bug, so ONE readable line instead of a traceback. The meter was
+        # never opened (the claim comes before TLPMX_init), so there is nothing
+        # to close and nothing is sent to a console that is not ours.
+        print(f"pm400: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 

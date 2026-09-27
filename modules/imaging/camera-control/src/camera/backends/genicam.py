@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import claim as hwclaim
+
 
 class GenICamCamera:
     def __init__(self, device: str = "0", cti_path: str = "",
@@ -28,6 +30,7 @@ class GenICamCamera:
         self.video_mode = video_mode
         self._h = None      # Harvester
         self._ia = None     # ImageAcquirer
+        self._hwlock = None # our claim on this camera's serial (hwlock)
 
     def open(self) -> None:
         # Lazy import: keeps the package importable without the SDK installed.
@@ -40,29 +43,60 @@ class GenICamCamera:
             ) from exc
 
         self._h = Harvester()
-        if self.cti_path:
-            self._h.add_file(self.cti_path)
-        self._h.update()
-        if not self._h.device_info_list:
-            raise RuntimeError("no GenICam devices found (check the .cti path)")
-        # Select by index if the id is numeric, else by serial/id string.
+        # Any failure below must release everything, the claim included, so a
+        # failed start never leaves the camera looking "in use".
         try:
-            idx = int(self.device)
-            self._ia = self._h.create(idx)
-        except ValueError:
-            self._ia = self._h.create({"id_": self.device})
-        self._ia.start()
-
-    def close(self) -> None:  # pragma: no cover - only on a real PC
-        if self._ia is not None:
+            if self.cti_path:
+                self._h.add_file(self.cti_path)
+            self._h.update()
+            if not self._h.device_info_list:
+                raise RuntimeError("no GenICam devices found (check the .cti path)")
+            # Select by index if the id is numeric, else by serial/id string.
             try:
-                self._ia.stop()
-            finally:
-                self._ia.destroy()
-                self._ia = None
-        if self._h is not None:
-            self._h.reset()
-            self._h = None
+                selector = int(self.device)
+            except ValueError:
+                selector = {"id_": self.device}
+            # CLAIM before create(): create() opens the device's control
+            # channel, the first contact with the camera itself. The claim is
+            # the SERIAL of the device the selector resolves to -- the same
+            # address the IDS backend claims for the same camera.
+            info = self._resolve(selector)
+            self._hwlock = hwclaim.claim(hwclaim.camera_address(_serial_of(info)))
+            self._ia = self._h.create(selector)
+            self._ia.start()
+        except BaseException:
+            self.close()
+            raise
+
+    def _resolve(self, selector):
+        """The device_info entry `selector` will open (index or {"id_": ...})."""
+        infos = self._h.device_info_list
+        if isinstance(selector, int):
+            if not 0 <= selector < len(infos):
+                raise RuntimeError(f"no GenICam device #{selector} ({len(infos)} found)")
+            return infos[selector]
+        want = selector["id_"]
+        for info in infos:
+            if getattr(info, "id_", None) == want:
+                return info
+        raise RuntimeError(f"no GenICam device with id {want!r}")
+
+    def close(self) -> None:
+        try:
+            if self._ia is not None:
+                try:
+                    self._ia.stop()
+                finally:
+                    self._ia.destroy()
+                    self._ia = None
+            if self._h is not None:
+                self._h.reset()
+                self._h = None
+        finally:
+            # Release LAST, and even if the SDK teardown raised.
+            if self._hwlock is not None:
+                self._hwlock.release()
+                self._hwlock = None
 
     def idn(self) -> str:
         return f"GenICam camera {self.device!r}"
@@ -98,3 +132,16 @@ class GenICamCamera:
 
     def set_feature(self, name: str, value) -> None:  # pragma: no cover - real PC
         getattr(self._ia.remote_device.node_map, name).value = value
+
+
+def _serial_of(info) -> str:
+    """Serial number from a Harvester device_info, falling back to its id.
+
+    VERIFY: harvesters exposes ``serial_number`` on device_info (1.x); a GenTL
+    producer that leaves it empty still gives a unique ``id_`` per device.
+    """
+    for attr in ("serial_number", "id_"):
+        v = getattr(info, attr, None)
+        if v:
+            return str(v)
+    return ""

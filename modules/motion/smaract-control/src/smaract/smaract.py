@@ -138,17 +138,31 @@ class Positioner:
         that changes the instrument).
         """
         with self._lock:
+            # If open() fails (HardwareBusy: another service holds this SCU;
+            # or no DLL / no device) we never owned the controller: _connected
+            # stays False, so shutdown() sends it NOTHING (no stop, no close).
             self.backend.open()
             self._connected = True
-            self._adopt_velocity()
-            # hold time is NOT an instrument setting on the SCU: it travels
-            # with every move command, so clamping the config value writes
-            # nothing to the controller.
-            self.cfg.motion.hold_time_ms = self._clamp_hold(self.cfg.motion.hold_time_ms)
-            self._pos = self.backend.read_position_mm()
-            self._known = self.backend.physical_position_known()
-            self._target = self._pos       # "where it is" is the first target
-            self._poll_once()
+            try:
+                self._adopt_velocity()
+                # hold time is NOT an instrument setting on the SCU: it travels
+                # with every move command, so clamping the config value writes
+                # nothing to the controller.
+                self.cfg.motion.hold_time_ms = self._clamp_hold(self.cfg.motion.hold_time_ms)
+                self._pos = self.backend.read_position_mm()
+                self._known = self.backend.physical_position_known()
+                self._target = self._pos       # "where it is" is the first target
+                self._poll_once()
+            except BaseException:
+                # The first READS failed: close the session so the claim on
+                # the SCU does not outlive a start that never finished. Only
+                # reads were sent, so there is no motion to stop.
+                self._connected = False
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="smaract-poll",
                                         daemon=True)

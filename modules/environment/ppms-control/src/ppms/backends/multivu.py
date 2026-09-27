@@ -33,7 +33,20 @@ be exercised WITHOUT the cryostat in MultiPyVu's own simulation
 
 from __future__ import annotations
 
+from .. import hwlock
+
 OE_PER_MT = 10.0          # 1 mT (mu0*H) = 10 Oe
+
+# The PHYSICAL ADDRESS claimed in the suite's hardware lock (hwlock.py).
+# Lukas's rule: "the same instrument has to be defined by the same physical
+# address". This module never sees a GPIB/COM/USB address -- MultiVu owns the
+# cryostat and one PC runs one MultiVu, which drives one cryostat. So "the
+# MultiVu on this PC" IS the address. It is deliberately NOT the flavor or the
+# MultiPyVu port: a second service with flavor "" or another mpv_port would
+# still reach the SAME DynaCool, and must still be refused. Any future module
+# that talks to MultiVu (another MultiPyVu client) should claim this same name.
+MULTIVU_ADDRESS = "MultiVu"
+MODULE_KEY = "ppms"
 
 
 class MultiVuDynaCool:
@@ -47,6 +60,7 @@ class MultiVuDynaCool:
         self._server = None
         self._client = None
         self._idn = ""
+        self._lock = None                          # hwlock.HardwareLock while open
 
     # ---- lifecycle -------------------------------------------------------------
 
@@ -62,6 +76,22 @@ class MultiVuDynaCool:
                     "uv sync --extra gui --extra real") from exc
             self._mpv = mpv
 
+        # Claim the cryostat BEFORE anything reaches MultiVu. A second ppms
+        # service (or any other MultiVu client module) would otherwise send
+        # setpoints to the same magnet as this one. HardwareBusy is raised
+        # here, before a single command goes out, naming the holder.
+        # Scaffolding (MultiPyVu's own simulation) touches no instrument, so
+        # it claims nothing -- like the sim backend.
+        if not hw.scaffolding:
+            self._lock = hwlock.claim(MULTIVU_ADDRESS, MODULE_KEY)
+        try:
+            self._connect(mpv, hw)
+        except BaseException:
+            # A failed open must not leave the cryostat marked "in use".
+            self._release()
+            raise
+
+    def _connect(self, mpv, hw) -> None:
         flags = []
         if hw.flavor.strip():
             flags.append(hw.flavor.strip().upper())
@@ -101,6 +131,12 @@ class MultiVuDynaCool:
             except BaseException:
                 pass                               # closing must not raise on a dead link
         self._stop_server()
+        self._release()
+
+    def _release(self) -> None:
+        lk, self._lock = self._lock, None
+        if lk is not None:
+            lk.release()
 
     def _stop_server(self) -> None:
         s, self._server = self._server, None

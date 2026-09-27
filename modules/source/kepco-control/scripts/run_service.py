@@ -34,6 +34,12 @@ from kepco.supply import BipolarSupply
 from kepco.sim_system import build_sim_system
 from kepco.net.service import KepcoService
 from kepco.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from kepco.hwlock import HardwareBusy
+
+# Exit code when the BOP is already driven by another service (clMag, or a
+# second kepco). Distinct from 2 (bad arguments) so a launcher can tell them
+# apart -- the same code clMag uses.
+EXIT_HARDWARE_BUSY = 3
 
 
 def main() -> int:
@@ -64,7 +70,22 @@ def main() -> int:
 
     service = KepcoService(supply, host=args.host, cmd_port=args.cmd_port,
                            pub_port=args.pub_port)
-    service.serve_forever()
+    # The real backend claims GPIB0::6 before it sends anything (hwlock). If
+    # clMag -- which drives the SAME physical BOP -- or another kepco holds it,
+    # open() raises HardwareBusy. We end with ONE plain line on stderr (it
+    # names the address and the holder) and no traceback: the launcher log
+    # needs the reason, not a stack.
+    #
+    # Safety: HardwareBusy comes out of service.start() -> supply.start(),
+    # which serve_forever calls BEFORE its try/finally, so stop() ->
+    # supply.shutdown() -> "ramp to zero + OUTP OFF" is NOT run. Deliberate:
+    # we never opened the instrument, it belongs to the other service, and
+    # switching its output off would wreck that service's run.
+    try:
+        service.serve_forever()
+    except HardwareBusy as e:
+        print(f"kepco: cannot start: {e}", file=sys.stderr)
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

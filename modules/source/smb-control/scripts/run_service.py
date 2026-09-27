@@ -29,6 +29,7 @@ from smb.generator import Generator
 from smb.sim_system import build_sim_system
 from smb.net.service import SmbService
 from smb.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from smb.hwlock import HardwareBusy
 
 
 def main() -> int:
@@ -58,7 +59,26 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = SmbService(gen, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this SMB100A (hwlock: one physical
+        # instrument, one service). One clear line on stderr, no traceback.
+        # Nothing is shut down: open() stopped at the claim, before the first
+        # byte, so the "RF off" of a normal stop must NOT go to a generator
+        # that somebody else owns (and Generator.shutdown only sends it when
+        # the backend really opened).
+        print(f"smb service: not started: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        # Opening the generator happens in serve_forever -> start. Say plainly
+        # what went wrong instead of a traceback in the launcher log. The
+        # backend already dropped its VISA session and its address claim.
+        print(f"smb service: could not start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if args.real:
+            print("  check: the SMB100A is on, the GPIB address is right (NI MAX), "
+                  "and pyvisa is installed", file=sys.stderr)
+        return 2
     return 0
 
 

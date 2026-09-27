@@ -19,12 +19,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from elliptec.config import Config, load_config  # noqa: E402
+from elliptec.hwlock import HardwareBusy  # noqa: E402
 from elliptec.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from elliptec.net.service import ElliptecService  # noqa: E402
 from elliptec.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="Elliptec rotation mount service")
     ap.add_argument("--real", action="store_true", help="use the real mounts over pyserial (default: simulator)")
     ap.add_argument("--config", help="INI config file to load")
@@ -50,8 +51,19 @@ def main() -> None:
     kind = f"REAL, {cfg.hardware.port}" if args.real else "SIMULATOR"
     print(f"elliptec service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
     print(f"mounts on bus addresses: {cfg.axes.addresses}.  Ctrl-C to stop.")
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (this module or any other pointed at the same
+        # ELL14K board) already holds the COM port. One plain line, no
+        # traceback: the message names the port and the holder. Nothing to
+        # stop or close -- the claim failed BEFORE the port was opened, so no
+        # byte went to the mounts; the brain never became "connected", so its
+        # shutdown sends no stop commands to a bus that is not ours.
+        print(f"elliptec service: could not start: {exc}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

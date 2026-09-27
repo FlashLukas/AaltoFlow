@@ -96,9 +96,18 @@ def main() -> int:
     else:
         print("SIMULATED Signal Hound " + (hw.model if hw.model != "auto" else "SA44B")
               + " with a tracking generator")
+    from signalhound.hwlock import HardwareBusy
     try:
         SignalhoundService(signalhound, host=args.host, cmd_port=args.cmd_port,
                            pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives THIS analyser (same serial number).
+        # One clean line naming the holder, no traceback. Nothing to shut
+        # down: the backend never opened the device (or closed its handle
+        # without sending anything), so no abort/"safe state" is sent to a box
+        # that belongs to someone else.
+        print(f"signalhound service: could not start: {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
         # Opening the analyser happens in serve_forever -> start. Say plainly
         # what went wrong (DLL not found, no analyser plugged in, wrong model)

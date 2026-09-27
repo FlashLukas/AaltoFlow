@@ -32,6 +32,7 @@ if os.path.isdir(_SRC):
 from pathlib import Path
 
 from gsp818.config import Config
+from gsp818.hwlock import HardwareBusy
 from gsp818.net.service import Gsp818Service
 from gsp818.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
@@ -83,6 +84,14 @@ def main() -> int:
     try:
         Gsp818Service(sa, host=args.host, cmd_port=args.cmd_port,
                       pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this analyser (hwlock: one physical
+        # instrument, one service). One clear line on stderr, no traceback.
+        # Nothing to shut down: open() never reached the instrument, and the
+        # backend's close() sends nothing when it holds no session -- so the
+        # "TG off" of a normal stop does NOT go to a box somebody else owns.
+        print(f"gsp818 service: not started: {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
         # Opening the analyser happens in serve_forever -> start. Say plainly
         # what went wrong rather than dying with a traceback in the launcher log.

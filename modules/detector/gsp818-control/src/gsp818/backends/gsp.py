@@ -58,6 +58,7 @@ import time
 import numpy as np
 
 from ..config import Config
+from ..hwlock import HardwareBusy, HardwareLock, claim
 from ..model import SweepSettings
 
 GW_INSTEK_USB_VID = "0x2184"      # USB vendor id of Good Will Instrument  # VERIFY in NI MAX
@@ -165,6 +166,13 @@ class GspAnalyzer:
         self._inst = resource
         self._own = resource is None
         self._rm = None
+        # Hardware claims (hwlock, Lukas's rule: one physical instrument = one
+        # service). The analyser's VISA address is claimed BEFORE the first
+        # byte goes to it and held until close(), so no second service --
+        # another gsp818, or any module pointed at the same USB/LAN address --
+        # can send it commands at the same time. An injected `resource`
+        # (the tests' fake) claims nothing: we did not open it.
+        self._locks: list[HardwareLock] = []
         self._sleep = sleep
         self._idn = ""
         self._applied: dict = {}          # SCPI header -> value last sent (send only changes)
@@ -191,17 +199,36 @@ class GspAnalyzer:
                                    "uv sync --extra gui --extra real") from exc
             self._rm = pyvisa.ResourceManager(hw.visa_library) if hw.visa_library \
                 else pyvisa.ResourceManager()
-            name = hw.resource or self._find_usb(self._rm)
-            self._inst = self._rm.open_resource(name)
+            try:
+                if hw.resource:
+                    # A configured address: claim it first. HardwareBusy here
+                    # means another service owns this analyser.
+                    self._claim(hw.resource)
+                    name = hw.resource
+                else:
+                    # Auto-discovery claims each candidate before asking it
+                    # *IDN?, and keeps the claim on the one it returns.
+                    name = self._find_usb(self._rm)
+                self._inst = self._rm.open_resource(name)
+            except BaseException:
+                self._abandon_open()               # a failed open leaves nothing claimed
+                raise
         inst = self._inst
         try:
-            # VISA session settings: OUR side of the cable, not instrument state
-            inst.timeout = int(hw.timeout_s * 1000)
-            inst.read_termination = "\n"           # PM p.23: LF terminates a message
-            inst.write_termination = "\n"
-        except Exception:
-            pass
-        self._idn = self._query("*IDN?").strip()   # PM p.31
+            try:
+                # VISA session settings: OUR side of the cable, not instrument state
+                inst.timeout = int(hw.timeout_s * 1000)
+                inst.read_termination = "\n"       # PM p.23: LF terminates a message
+                inst.write_termination = "\n"
+            except Exception:
+                pass
+            self._idn = self._query("*IDN?").strip()   # PM p.31
+        except BaseException:
+            # The analyser did not answer: close the session WITHOUT writing
+            # anything (start-up never writes) and give the address back, so
+            # a retry -- or another service -- can have it.
+            self._abandon_open()
+            raise
         self._applied = {}
         self._sweep_rb_s = 0.0
         self._extra_wait_s = 0.0
@@ -338,6 +365,10 @@ class GspAnalyzer:
         inst, self._inst = self._inst, None
         self._pending = False
         if inst is None:
+            # Never opened (e.g. HardwareBusy) or already closed: nothing to
+            # switch off -- and "TG off" must NOT go to an analyser that
+            # another service owns.
+            self._release_locks()
             return
         try:
             inst.write(":OUTP:TRAC OFF")           # never leave the TG driving a DUT
@@ -356,6 +387,38 @@ class GspAnalyzer:
                 except Exception:
                     pass
                 self._rm = None
+        self._release_locks()          # only after the session is closed
+
+    # ---- hardware claims (hwlock) -------------------------------------------
+
+    def _claim(self, address: str) -> HardwareLock:
+        lock = claim(address, "gsp818")
+        self._locks.append(lock)
+        return lock
+
+    def _release_locks(self) -> None:
+        locks, self._locks = self._locks, []
+        for lock in locks:
+            lock.release()
+
+    def _abandon_open(self) -> None:
+        """Undo a half-done open(): close what WE opened, send nothing, and
+        release every claim. An injected resource (tests) is left open."""
+        inst = self._inst
+        if self._own:
+            self._inst = None
+            if inst is not None:
+                try:
+                    inst.close()
+                except Exception:
+                    pass
+            if self._rm is not None:
+                try:
+                    self._rm.close()
+                except Exception:
+                    pass
+                self._rm = None
+        self._release_locks()
 
     def idn(self) -> str:
         return self._idn
@@ -504,16 +567,32 @@ class GspAnalyzer:
         """The first USB instrument of GW Instek whose *IDN? says GSP-818."""
         candidates = [r for r in rm.list_resources("USB?*INSTR")
                       if GW_INSTEK_USB_VID.lower() in r.lower() or f"::{GW_INSTEK_USB_VID_DEC}::" in r]
+        busy: list[HardwareBusy] = []
         for name in candidates:
+            # Claim BEFORE asking *IDN?: an analyser another service owns must
+            # not receive even a query from us. Busy -> skip it.
+            try:
+                lock = claim(name, "gsp818")
+            except HardwareBusy as exc:
+                busy.append(exc)
+                continue
+            keep = False
             try:
                 inst = rm.open_resource(name)
                 try:
                     inst.timeout = 2000
-                    if "GSP-818" in inst.query("*IDN?").upper():
-                        return name
+                    keep = "GSP-818" in inst.query("*IDN?").upper()
                 finally:
                     inst.close()
             except Exception:
-                continue
+                keep = False
+            if keep:
+                self._locks.append(lock)            # held until close()
+                return name
+            lock.release()                          # not ours to keep
+        if busy:
+            # The only GSP-818(s) on USB belong to another service: say so,
+            # naming the holder, rather than "not found".
+            raise busy[0]
         raise RuntimeError("no GSP-818 found on USB (is the VISA USB driver installed? "
                            "set hardware.resource to its VISA address)")

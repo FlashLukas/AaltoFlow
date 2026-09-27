@@ -32,6 +32,11 @@ with ``scale="stage"`` (pylablib loads the actuator calibration).
 from __future__ import annotations
 
 from ..config import Config
+from ..hwlock import claim
+
+# The module name written into the lock file, so a refused second service
+# can tell you WHO holds the controller.
+MODULE_KEY = "stage"
 
 
 class KinesisStage:
@@ -47,21 +52,42 @@ class KinesisStage:
         if cfg.hardware.swap_xy:
             chans[0], chans[1] = chans[1], chans[0]
         self._channels = chans
+        # The hardware claim on the BSC203's Kinesis serial number (see
+        # open()).  None while the controller is not ours.
+        self._lock = None
 
     # -- connection -------------------------------------------------------- #
     def open(self) -> None:
-        # LAZY import: nothing above module scope depends on pylablib.
-        from pylablib.devices import Thorlabs  # noqa: PLC0415  (intentional)
-
-        serial = self.cfg.hardware.serial
+        serial = str(self.cfg.hardware.serial).strip()
         scale = self.cfg.hardware.scale
+        if not serial:
+            # pylablib cannot pick "the first BSC203" for us, and an empty
+            # address could not be claimed meaningfully either.
+            raise ValueError("hardware.serial is empty: set the BSC203's Kinesis "
+                             "serial number (starts with 70...) in the config")
 
-        for axis, channel in enumerate(self._channels):
-            # --- style A: one handle per (serial, channel) tuple ----------- #
-            motor = Thorlabs.KinesisMotor((serial, channel), scale=scale)
-            # --- style B (if your pylablib wants a single multi-channel
-            #     handle) would instead open once and pass channel= to calls.
-            self._motors[axis] = motor
+        # ONE INSTRUMENT, ONE SERVICE (Lukas's rule): the BSC203 is identified
+        # by its Kinesis serial number, whatever module points at it.  Claim it
+        # BEFORE the first byte goes to the controller; a second stage service
+        # (or any other module configured with this serial) gets HardwareBusy
+        # naming the holder, and never touches the motors.  The three axes are
+        # three channels of ONE box, so one claim covers them all.
+        self._lock = claim(serial, MODULE_KEY)
+        try:
+            # LAZY import: nothing above module scope depends on pylablib.
+            from pylablib.devices import Thorlabs  # noqa: PLC0415  (intentional)
+
+            for axis, channel in enumerate(self._channels):
+                # --- style A: one handle per (serial, channel) tuple ------- #
+                motor = Thorlabs.KinesisMotor((serial, channel), scale=scale)  # VERIFY
+                # --- style B (if your pylablib wants a single multi-channel
+                #     handle) would instead open once and pass channel= to calls.
+                self._motors[axis] = motor
+        except BaseException:
+            # A failed open must not leave the serial claimed (the next start
+            # would then report "busy" against ourselves) nor half-open handles.
+            self.close()
+            raise
 
         # NO writes here (Lukas's adopt-on-start rule, 2026-09-27): opening the
         # stage must not change it.  The old code pushed cfg velocity and
@@ -81,6 +107,11 @@ class KinesisStage:
                 except Exception:
                     pass
         self._motors = [None, None, None]
+        # Release the claim LAST, after the handles are closed, so no other
+        # service can open the controller while we still hold it.
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
 
     def idn(self) -> str:
         parts = []

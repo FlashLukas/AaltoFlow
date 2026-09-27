@@ -23,6 +23,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from hf2.config import Config
+from hf2.hwlock import HardwareBusy
 from hf2.lockin import LockIn
 from hf2.sim_system import build_sim_system
 from hf2.net.service import Hf2Service
@@ -56,8 +57,17 @@ def main() -> int:
         lockin, _ = build_sim_system(cfg)
         print("SIMULATED backend (no hardware needed)")
 
-    Hf2Service(lockin, host=args.host, cmd_port=args.cmd_port,
-               pub_port=args.pub_port).serve_forever()
+    try:
+        Hf2Service(lockin, host=args.host, cmd_port=args.cmd_port,
+                   pub_port=args.pub_port).serve_forever()
+    except HardwareBusy as e:
+        # Another service (hf2 or any other module) already drives this very
+        # HF2LI. The claim is taken BEFORE LabOne is contacted, so nothing was
+        # opened and there is nothing to close or make safe: just say who holds
+        # it, in one ASCII line (the launcher shows stderr in its log), and exit
+        # non-zero so the launcher marks the start as failed.
+        print(f"hf2: cannot start -- {e}", file=sys.stderr)
+        return 3
     return 0
 
 

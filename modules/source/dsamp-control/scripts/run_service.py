@@ -9,8 +9,10 @@ The service owns the amplifier and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 5 Hz)
 
-The amplifier stage is switched OFF when the service starts and when it stops
-(Ctrl-C, the launcher's Stop, the `shutdown` verb). Drive it with:
+At start the service only READS the amplifier (stage on/off, gain) and adopts
+it; it switches the stage OFF when it stops (Ctrl-C, the launcher's Stop, the
+`shutdown` verb). If another service already holds the COM port (hwlock), it
+exits at once with one line on stderr and exit code 3. Drive it with:
     uv run scripts/dsamp_console.py --connect <host>
 
 --real needs pyserial:  uv sync --extra gui --extra real
@@ -28,6 +30,7 @@ if os.path.isdir(_SRC):
 
 from dsamp.amplifier import Amplifier
 from dsamp.config import Config
+from dsamp.hwlock import HardwareBusy
 from dsamp.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from dsamp.net.service import DsampService
 from dsamp.sim_system import build_sim_system
@@ -61,7 +64,19 @@ def main() -> int:
         print("SIMULATED backend (no hardware needed)")
 
     service = DsampService(amp, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another dsamp, or any module pointed at this COM
+        # port) already holds the amplifier. We never opened it, so there is
+        # nothing to switch off: say who holds it, in one line, and exit.
+        print(f"dsamp: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except OSError as exc:
+        # pyserial's SerialException is an OSError: wrong COM port, cable out,
+        # port held by a non-AaltoFlow program. One readable line, no traceback.
+        print(f"dsamp: cannot open the amplifier: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

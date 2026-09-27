@@ -29,6 +29,7 @@ from k2450.smu import SourceMeter
 from k2450.sim_system import build_sim_system
 from k2450.net.service import K2450Service
 from k2450.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from k2450.hwlock import HardwareBusy
 
 
 def main() -> int:
@@ -58,7 +59,20 @@ def main() -> int:
         print(f"SIMULATED backend (no hardware needed), pretend sample: {cfg.sim.load}")
 
     service = K2450Service(smu, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service (another k2450, or any module pointed at this VISA
+        # address) already drives this 2450. We never opened it, so there is
+        # nothing to switch off or close: serve_forever only reaches its
+        # shutdown (output OFF) AFTER a successful start. One line, and exit.
+        print(f"k2450: cannot start: {exc}", file=sys.stderr)
+        return 3
+    except RuntimeError as exc:
+        # pyvisa missing, wrong command set (*LANG), resource not found ...:
+        # one readable line in the launcher log instead of a traceback.
+        print(f"k2450: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

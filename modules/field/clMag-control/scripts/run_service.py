@@ -24,6 +24,11 @@ from clMag.config import Config
 from clMag.sim_system import build_sim_system
 from clMag.net.service import ClMagService
 from clMag.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
+from clMag.hwlock import HardwareBusy
+
+# Exit code when an instrument is already driven by another service. Distinct
+# from 2 (bad arguments / --real not available) so a launcher can tell them apart.
+EXIT_HARDWARE_BUSY = 3
 
 
 def main() -> int:
@@ -42,10 +47,27 @@ def main() -> int:
               "(only the simulator). Untick 'real' to run the simulated magnet.")
         return 2
 
-    cfg = Config()
-    ctrl, *_ = build_sim_system(cfg)
-    service = ClMagService(ctrl, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
-    service.serve_forever()
+    # The real system (not written yet) claims the Kepco's GPIB address and the
+    # DAQ card through clMag.backends.claims BEFORE it opens anything; the sim
+    # claims nothing. If another service already holds one of them, that claim
+    # raises HardwareBusy. We end with ONE plain line on stderr (it names the
+    # address and the holder, e.g. "GPIB0::6 is already in use by kepco (pid
+    # 1234) ...") and no traceback, because a physicist reading the launcher log
+    # needs the reason, not a stack.
+    #
+    # Safety: HardwareBusy comes out of the controller's start() (or before
+    # it), i.e. BEFORE serve_forever's try/finally is entered, so stop() ->
+    # controller.shutdown() -> "ramp to zero + OUTP OFF" is NOT run. That is
+    # deliberate: we never opened the instrument, it belongs to the other
+    # service, and switching its output off would sabotage that service's run.
+    try:
+        cfg = Config()
+        ctrl, *_ = build_sim_system(cfg)
+        service = ClMagService(ctrl, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
+        service.serve_forever()
+    except HardwareBusy as e:
+        print(f"clMag: cannot start: {e}", file=sys.stderr)
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

@@ -10,3 +10,13 @@ import sys
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _private_lock_dir(tmp_path, monkeypatch):
+    """Every test gets its own hwlock folder, so a test that opens the REAL
+    backend (on a fake serial port) never touches the PC's real lock folder
+    and never collides with a service Lukas has running."""
+    monkeypatch.setenv("AALTOFLOW_LOCK_DIR", str(tmp_path / "locks"))

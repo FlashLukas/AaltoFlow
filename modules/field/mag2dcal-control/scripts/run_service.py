@@ -26,6 +26,10 @@ The service owns the magnet and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 10 Hz)
 
+ONE SERVICE PER MAGNET: with --real the service claims the DAQ card (Dev1)
+before touching it. If another service (mag2d-control, or a second mag2dcal)
+already holds it, it prints who and exits with code 4, having sent nothing.
+
 WATER CHECK AT START: if the cooling water is off and the interlock is not
 bypassed, the service prints why and exits with code 3 -- before it opens a
 socket, so nothing can command a magnet that must not run.
@@ -48,11 +52,13 @@ if os.path.isdir(_SRC):
 from mag2dcal.calibration import Calibration
 from mag2dcal.config import Config
 from mag2dcal.controller import Controller, WaterInterlockError
+from mag2dcal.hwlock import HardwareBusy
 from mag2dcal.sim_system import build_sim_system
 from mag2dcal.net.service import Mag2dcalService
 from mag2dcal.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 EXIT_WATER = 3
+EXIT_BUSY = 4     # the DAQ card is claimed by another service (hwlock.py)
 
 
 def main() -> int:
@@ -114,6 +120,22 @@ def main() -> int:
         print("mag2dcal: NOT STARTED -- cooling water interlock.")
         print(f"  {exc}")
         return EXIT_WATER
+    except HardwareBusy as exc:
+        # Another service (typically mag2d-control, which drives the SAME coils
+        # through the same card) already holds the DAQ device. The backend
+        # raised before creating any DAQmx task, the controller never marked
+        # itself open, and no socket was bound -- so nothing sends a "safe
+        # state" to a magnet that the OTHER service is driving. One line, no
+        # traceback, a non-zero exit the launcher shows as a failed start.
+        print(f"mag2dcal: NOT STARTED -- {exc}", file=sys.stderr)
+        return EXIT_BUSY
+    except ImportError as exc:
+        # nidaqmx is imported lazily inside open(), so a missing NI-DAQmx
+        # surfaces HERE, not at construction. The backend has already released
+        # its claim on the card.
+        print(f"mag2dcal: NOT STARTED -- cannot load nidaqmx ({exc}). Install NI-DAQmx "
+              "and uncomment nidaqmx in pyproject.toml, then uv sync.", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -47,6 +47,7 @@ from __future__ import annotations
 import re
 import threading
 
+from .. import hwlock
 from ..config import Config
 
 _INT = re.compile(r"[-+]?\d+")
@@ -84,6 +85,10 @@ class AgUC2:
         # True once WE switched the controller to remote mode: close() hands
         # the buttons back (ML) and stops the axes only if we took them.
         self._remote_by_us = False
+        # The claim on the COM port (hwlock.py): held from open() to close(),
+        # so a second service pointed at the same AG-UC2 is refused before it
+        # sends a single byte. None while not open.
+        self._hwlock = None
 
     # -- low level --------------------------------------------------------- #
     def _write(self, cmd: str) -> None:
@@ -124,11 +129,22 @@ class AgUC2:
         if not hw.port:
             raise RuntimeError("hardware.port is empty: set the AG-UC2's COM port "
                                "(Device Manager > Ports) in Settings or the .ini")
-        self._ser = serial.Serial(
-            port=hw.port, baudrate=int(hw.baud),                 # VERIFY 921600 works
-            bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE, xonxoff=False, rtscts=False,
-            timeout=float(hw.timeout_s), write_timeout=float(hw.timeout_s))
+        # Claim the PHYSICAL address before the first byte goes out (Lukas's
+        # rule: one instrument = one physical address = one service). The COM
+        # port IS the AG-UC2's identity on this PC; "com5", "COM5" and
+        # "ASRL5::INSTR" are the same box (hwlock.normalize). Raises
+        # HardwareBusy naming the holder -- then nothing below runs, so a
+        # controller owned by another service is never touched.
+        self._hwlock = hwlock.claim(hw.port, "agilis")
+        try:
+            self._ser = serial.Serial(
+                port=hw.port, baudrate=int(hw.baud),             # VERIFY 921600 works
+                bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE, xonxoff=False, rtscts=False,
+                timeout=float(hw.timeout_s), write_timeout=float(hw.timeout_s))
+        except Exception:
+            self._release_claim()      # a failed open must not keep the address "busy"
+            raise
         try:
             # a QUERY: works in local mode and changes nothing
             self._version = self.query("VE")                     # VERIFY reply text
@@ -140,7 +156,13 @@ class AgUC2:
                 self._ser.close()
             finally:
                 self._ser = None
+                self._release_claim()
             raise
+
+    def _release_claim(self) -> None:
+        lk, self._hwlock = self._hwlock, None
+        if lk is not None:
+            lk.release()
 
     def enable_remote(self) -> None:
         """MR (+ CC on an AG-UC8): the writes needed to READ the controller.
@@ -157,6 +179,7 @@ class AgUC2:
 
     def close(self) -> None:
         if self._ser is None:
+            self._release_claim()      # nothing open; make sure no claim lingers
             return
         try:
             if not self._remote_by_us:
@@ -177,6 +200,8 @@ class AgUC2:
             finally:
                 self._ser = None
                 self._remote_by_us = False
+                # released LAST: until the port is shut, the box is still ours
+                self._release_claim()
 
     def idn(self) -> str:
         return f"Newport {self._version or 'AG-UC2'} on {self.cfg.hardware.port}"

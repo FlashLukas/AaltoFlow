@@ -15,6 +15,8 @@ What it does, so you know what you get:
    against every module.toml so it cannot clash.
 4. Writes `module.toml` (the launcher shows the module at once), a placeholder
    `icon.svg`, and stub README.md / CLAUDE.local.md (private notes, not in git) saying what is still template.
+5. Refreshes `src/<key>/hwlock.py` from the master copy in suite-common (the
+   address lock must stay byte-identical; check_modules.py fails it otherwise).
 
 The copy RUNS and its tests PASS before you change anything: it is the template
 instrument under a new name. Then you replace its insides -- config, backends,
@@ -145,6 +147,17 @@ def main(argv=None) -> int:
         if new != text:
             path.write_text(new, "utf-8")
             changed += 1
+
+    # The address lock (one physical address, one service) must be a BYTE-EXACT
+    # copy of the master in suite-common: check_modules.py fails a module whose
+    # copy differs. Refresh it AFTER the renaming above, which would otherwise
+    # rewrite the template's key inside it (hwlock.py mentions clMag by name),
+    # and in case the template's copy is older than the master.
+    master = root / "suite-common" / "src" / "suite_common" / "hwlock.py"
+    if master.is_file():
+        shutil.copyfile(master, dest / "src" / key / "hwlock.py")
+    else:
+        print(f"warning: {master} not found; copy it to src/{key}/hwlock.py by hand")
 
     name = args.name or key.upper()
     today = dt.date.today().isoformat()

@@ -52,10 +52,7 @@
         "pub": 5556
       },
       "gui": true,
-      "start_after": [],
-      "excludes": [
-        "kepco"
-      ]
+      "start_after": []
     },
     {
       "key": "smb",
@@ -76,8 +73,7 @@
         "pub": 5558
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "stage",
@@ -98,8 +94,7 @@
         "pub": 5560
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "piezo",
@@ -120,8 +115,7 @@
         "pub": 5562
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "zpiezo",
@@ -143,8 +137,7 @@
         "pub": 5566
       },
       "gui": false,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "kim",
@@ -165,8 +158,7 @@
         "pub": 5568
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "camera",
@@ -192,8 +184,7 @@
         "kim",
         "piezo",
         "zpiezo"
-      ],
-      "excludes": []
+      ]
     },
     {
       "key": "hf2",
@@ -213,8 +204,7 @@
         "pub": 5570
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "pm16",
@@ -235,8 +225,7 @@
         "pub": 5572
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "vna",
@@ -258,8 +247,7 @@
         "pub": 5574
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "mag2d",
@@ -280,10 +268,7 @@
         "pub": 5576
       },
       "gui": true,
-      "start_after": [],
-      "excludes": [
-        "mag2dcal"
-      ]
+      "start_after": []
     },
     {
       "key": "mag2dcal",
@@ -304,10 +289,7 @@
         "pub": 5578
       },
       "gui": true,
-      "start_after": [],
-      "excludes": [
-        "mag2d"
-      ]
+      "start_after": []
     },
     {
       "key": "ppms",
@@ -328,8 +310,7 @@
         "pub": 5580
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "kepco",
@@ -351,10 +332,7 @@
         "pub": 5582
       },
       "gui": true,
-      "start_after": [],
-      "excludes": [
-        "clMag"
-      ]
+      "start_after": []
     },
     {
       "key": "windfreak",
@@ -378,8 +356,7 @@
         "pub": 5584
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "gsp818",
@@ -399,8 +376,7 @@
         "pub": 5586
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "signalhound",
@@ -421,8 +397,7 @@
         "pub": 5588
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "dsphase",
@@ -444,8 +419,7 @@
         "pub": 5590
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "dssg",
@@ -468,8 +442,7 @@
         "pub": 5592
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "dsamp",
@@ -491,8 +464,7 @@
         "pub": 5594
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "agilis",
@@ -515,8 +487,7 @@
         "pub": 5596
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "smaract",
@@ -539,8 +510,7 @@
         "pub": 5598
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "sr830",
@@ -561,8 +531,7 @@
         "pub": 5600
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "cs260",
@@ -586,8 +555,7 @@
         "pub": 5602
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "ccs200",
@@ -609,8 +577,7 @@
         "pub": 5604
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "ddr25",
@@ -633,8 +600,7 @@
         "pub": 5606
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "elliptec",
@@ -657,8 +623,7 @@
         "pub": 5608
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "chopper",
@@ -681,8 +646,7 @@
         "pub": 5610
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "superk",
@@ -704,8 +668,7 @@
         "pub": 5612
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "tc200",
@@ -728,8 +691,7 @@
         "pub": 5614
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "ls455",
@@ -752,8 +714,7 @@
         "pub": 5616
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "pm400",
@@ -775,8 +736,7 @@
         "pub": 5618
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "hp8648",
@@ -799,8 +759,7 @@
         "pub": 5620
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "sr7230",
@@ -823,8 +782,7 @@
         "pub": 5622
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     },
     {
       "key": "k2450",
@@ -846,8 +804,7 @@
         "pub": 5624
       },
       "gui": true,
-      "start_after": [],
-      "excludes": []
+      "start_after": []
     }
   ]
 }

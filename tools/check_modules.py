@@ -18,8 +18,14 @@ Static checks, per module:
     for a person). A key found twice is a WARN naming both folders.
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
-  * excludes (modules that drive the SAME instrument and must never run
-    together) names modules that exist; every excluded pair is listed
+  * src/<pkg>/hwlock.py exists and is byte-identical to the master copy
+    suite-common/src/suite_common/hwlock.py (FAIL otherwise: a stale copy may
+    normalise addresses differently, and then two modules would not see that
+    they hold the same instrument)
+  * every real backend (src/<pkg>/backends/*.py except base.py, sim*.py and the
+    remote_*.py ZeroMQ clients) calls claim( somewhere -- a plain text search,
+    so it is a WARN, not a FAIL: the one physical address, one service rule
+    (docs/DEVELOPER_NOTES.md, "one address, one service")
   * icon.svg exists and is well-formed XML
   * run_service.py accepts --cmd-port, --pub-port and --real
   * run_gui.py (if any) accepts --connect, --cmd-port and --pub-port
@@ -55,9 +61,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
 from suite_common.modules import (MANIFEST, MODULES_DIR, discover_local,  # noqa: E402
-                                  exclusion_pairs, is_legacy_location,
-                                  mirror_excludes, port_conflicts, rel_to_root,
+                                  is_legacy_location, port_conflicts, rel_to_root,
                                   start_order)
+
+# The address lock. Every module carries its OWN copy (modules are installed
+# without suite-common, like theme.py), so the copies must stay identical to
+# this master or two modules could disagree on what "the same address" is.
+HWLOCK_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "hwlock.py"
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -137,6 +147,49 @@ def venv_python(d: Path) -> Path | None:
         if cand.exists():
             return cand
     return None
+
+
+def package_dir(d: Path) -> Path | None:
+    """src/<pkg>: the one folder under src/ that is a Python package."""
+    src = d / "src"
+    if not src.is_dir():
+        return None
+    pkgs = sorted(p for p in src.iterdir() if (p / "__init__.py").is_file())
+    return pkgs[0] if len(pkgs) == 1 else None
+
+
+def hwlock_check(rep: Report, m, master: bytes | None):
+    """The module's hwlock.py is the master copy, and its real backends claim."""
+    pkg = package_dir(m.dir)
+    if pkg is None:
+        rep.add(m.key, "hwlock.py is the master copy", "FAIL", "no single package under src/")
+        return
+    copy = pkg / "hwlock.py"
+    fix = "copy suite-common/src/suite_common/hwlock.py"
+    if not copy.is_file():
+        rep.add(m.key, "hwlock.py is the master copy", "FAIL", f"src/{pkg.name}/hwlock.py missing: {fix}")
+    elif master is not None and copy.read_bytes() != master:
+        rep.add(m.key, "hwlock.py is the master copy", "FAIL", f"src/{pkg.name}/hwlock.py differs: {fix}")
+    else:
+        rep.add(m.key, "hwlock.py is the master copy", "PASS")
+
+    # Static text check: a real backend that opens an instrument must claim
+    # its address first. The simulator never claims; base.py is the Protocol;
+    # remote_*.py talk to ANOTHER service over ZeroMQ and own no hardware.
+    backends = pkg / "backends"
+    if not backends.is_dir():
+        return
+    silent = []
+    for f in sorted(backends.glob("*.py")):
+        if f.name in ("__init__.py", "base.py") or f.name.startswith(("sim", "remote_")):
+            continue
+        if "claim(" not in f.read_text(encoding="utf-8", errors="replace"):
+            silent.append(f.name)
+    if silent:
+        rep.add(m.key, "real backends claim their address", "WARN",
+                "no claim( in backends/" + ", backends/".join(silent))
+    else:
+        rep.add(m.key, "real backends claim their address", "PASS")
 
 
 def help_text(py: Path, d: Path, script: str) -> str:
@@ -275,11 +328,9 @@ def main(argv=None) -> int:
     keys = {m.key for m in mods}
     for c in port_conflicts(mods):
         rep.add("suite", "ports unique", "FAIL", c)
-    # Checked on what each toml DECLARES (a typo must be caught in the file
-    # that has it), then mirrored the way discover() does it to list the pairs.
-    bad_excludes = {m.key: [k for k in m.excludes if k not in keys] for m in mods}
-    mirror_excludes(mods)
-    pairs = exclusion_pairs(mods)
+    master = HWLOCK_MASTER.read_bytes() if HWLOCK_MASTER.is_file() else None
+    if master is None:
+        rep.add("suite", "hwlock master copy present", "FAIL", str(HWLOCK_MASTER))
 
     if args.modules:
         unknown = set(args.modules) - keys
@@ -303,12 +354,6 @@ def main(argv=None) -> int:
         missing = [k for k in m.start_after if k not in keys]
         rep.add(m.key, "start_after names existing modules", "FAIL" if missing else "PASS",
                 ", ".join(missing))
-        if bad_excludes.get(m.key):
-            rep.add(m.key, "excludes names existing modules", "FAIL",
-                    ", ".join(bad_excludes[m.key]))
-        elif m.excludes:
-            rep.add(m.key, "excludes names existing modules", "PASS",
-                    "never runs with " + ", ".join(m.excludes))
         before = {x.key for x in ordered[:ordered.index(m)]}
         cyc = [k for k in m.start_after if k in keys and k not in before
                and m.key in next((x.start_after for x in mods if x.key == k), [])]
@@ -323,6 +368,7 @@ def main(argv=None) -> int:
                 rep.add(m.key, "icon.svg well-formed", "PASS")
             except ET.ParseError as exc:
                 rep.add(m.key, "icon.svg well-formed", "FAIL", str(exc))
+        hwlock_check(rep, m, master)
 
         py = venv_python(m.dir)
         if py is None:
@@ -339,11 +385,6 @@ def main(argv=None) -> int:
                     "FAIL" if miss else "PASS", "missing " + ", ".join(miss) if miss else "")
         if args.live:
             live_check(rep, m, py)
-
-    shown = {m.key for m in mods}
-    for a, b in pairs:
-        if a in shown or b in shown:
-            rep.add("suite", "shared-instrument pair", "PASS", f"{a} <-> {b} never run together")
 
     rep.print()
     n_fail = len(rep.failed)

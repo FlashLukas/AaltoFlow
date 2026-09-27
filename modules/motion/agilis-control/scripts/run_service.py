@@ -18,12 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agilis.config import Config, load_config  # noqa: E402
+from agilis.hwlock import HardwareBusy  # noqa: E402
 from agilis.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from agilis.net.service import AgilisService  # noqa: E402
 from agilis.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 
-def main() -> None:
+def main() -> int:
     ap = argparse.ArgumentParser(description="Newport Agilis stage service (AG-UC2, 2 axes)")
     ap.add_argument("--real", action="store_true", help="use the real AG-UC2 (default: simulator)")
     ap.add_argument("--config", help="INI config file to load")
@@ -46,8 +47,19 @@ def main() -> None:
     kind = f"REAL AG-UC2 {cfg.hardware.port}" if args.real else "SIMULATOR"
     print(f"agilis service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
     print("Ctrl-C to stop.")
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this COM port (hwlock.py). Say so in
+        # ONE line -- the launcher shows stderr in its log -- and exit
+        # non-zero, without a traceback wall. Nothing to make safe here: the
+        # claim failed BEFORE the port was opened, so the AG-UC2 belongs to
+        # the other service and we must not send it ST/ML (and brain.shutdown
+        # is a no-op, since start() never connected). ASCII only: gotcha #14.
+        print(f"agilis: cannot start: {exc}", file=sys.stderr)
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

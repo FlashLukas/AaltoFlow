@@ -26,6 +26,7 @@ if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
 from windfreak.config import Config
+from windfreak.hwlock import HardwareBusy
 from windfreak.synthesizer import Synthesizer
 from windfreak.sim_system import build_sim_system
 from windfreak.net.service import WindfreakService
@@ -62,7 +63,17 @@ def main() -> int:
 
     service = WindfreakService(synth, host=args.host, cmd_port=args.cmd_port,
                                pub_port=args.pub_port)
-    service.serve_forever()
+    try:
+        service.serve_forever()
+    except HardwareBusy as exc:
+        # Another service already drives this COM port (hwlock). Say so in ONE
+        # line -- the launcher shows it in its log -- and exit non-zero.
+        # No shutdown / "RF off" here on purpose: the claim failed BEFORE the
+        # port was opened (serve_forever's start() raised before its try), so
+        # the SynthHD belongs to the other service and we must not touch its
+        # outputs. ASCII only (gotcha #14).
+        print(f"windfreak: cannot start: {exc}", file=sys.stderr)
+        return 3
     return 0
 
 
