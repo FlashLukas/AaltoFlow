@@ -55,8 +55,20 @@ Every reading is converted to **mT** in the driver (1 G = 0.1 mT; Oe and A/m
 are H, converted with B = µ0 H as in air). The front-panel unit is only what the
 meter's own display shows.
 
-At start the module **adopts** the meter's own mode, resolution and range
-instead of pushing its config. Set `hardware.push_on_start = true` to push.
+At start the module **only reads** the meter and adopts what it finds --
+probe (type HSE/HST/UHS, serial, sensitivity), mode (DC, RMS **or peak**),
+resolution, band, range, front-panel unit and relative setpoint. It writes
+nothing: a measurement set up on the front panel is never changed by starting
+the service. The config values are applied only when you ask (a setter, or
+Settings > Apply). The probe's geometry (axial / transverse) is not reported
+by the 455 and comes from `hardware.probe_geometry` (default axial). After
+swapping the probe, **Re-read probe** (verb `reread_probe`) makes the ranges
+follow it; a probe that was unplugged and comes back is re-read automatically.
+In peak mode the readings are the peak the meter's peak display selects, and
+the detectors' labels say so. The front panel stays in charge while the
+service runs: unit, mode and range mode are re-read every 5 s and before each
+acquisition, so a setting changed by hand is adopted (and logged) instead of
+silently mis-scaling the readings.
 
 ## Why an acquisition waits
 
@@ -73,7 +85,7 @@ not a blend of old and new.
 `set_auto_range{on}` · `set_range{range_mT}` (switches auto off) ·
 `set_display_unit{unit}` · `set_relative{on?, setpoint_mT?}` · `relative_here` ·
 `set_acquisition{readings}` · `acquire` → `{acq_id}` · `get_sample` · `zero` ·
-`clear_zero` · `shutdown` · plus the universal `status`, `info`, `describe`,
+`clear_zero` · `reread_probe` · `shutdown` · plus the universal `status`, `info`, `describe`,
 `get_config`, `set_config`.
 
 In scan-core: settables `mode`, `dc_digits` (DC) / `rms_band` (RMS),

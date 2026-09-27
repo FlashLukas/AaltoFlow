@@ -63,10 +63,10 @@ class Camera:
     frame_rate: float = 15.0           # frames/s the engine tries to hold
     extra_delay_ms: float = 0.0        # optional extra pause per frame
     running_avg_frames: int = 1        # rolling temporal average (1 = off)
-    # Exposure applied when the camera opens (0 = leave the camera's own). The IDS
-    # driver loads the Default UserSet on open = 15 ms, which saturates every
-    # pixel on the lab microscope; setting ExposureTime live also updates this,
-    # so "Save camera settings" keeps it across restarts (and launcher starts).
+    # The camera's exposure as last READ from it. Since 2026-09-27 (adopt rule)
+    # it is NEVER pushed at start: start() replaces it with the camera's own
+    # ExposureTime. It is written to the camera only when the user changes it
+    # (live parameter panel, or set_config with a different value). 0 = unknown.
     exposure_us: float = 0.0
 
 

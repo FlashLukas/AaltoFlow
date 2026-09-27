@@ -312,13 +312,27 @@ class TLPMXConsole:
         # The console rounds to a multiple of its internal sample period. The
         # USB timeout must stay longer than one reading, so it follows.
         self._call("TLPMX_setAvgTime", self._vi, float(seconds), self.channel)    # VERIFY
-        need = int(seconds * 1000) + 2000
+        self._fit_timeout(seconds)
+
+    def get_avg_time(self) -> float:
+        # Also called at start to ADOPT the console's averaging time. If someone
+        # left it longer than our USB timeout allows, every measPower would time
+        # out, so the timeout follows the value READ here too. The timeout is a
+        # setting of the driver's session on this PC, not of the console, so
+        # this does not change the instrument (adopt-on-start rule).
+        v = self._get_real("TLPMX_getAvgTime", ATTR_SET_VAL)
+        self._fit_timeout(v)
+        return v
+
+    def _fit_timeout(self, avg_s: float) -> None:
+        """Keep the session timeout longer than one reading (avg + 2 s)."""
+        try:
+            need = int(float(avg_s) * 1000) + 2000
+        except (TypeError, ValueError):
+            return
         if need > self.timeout_ms:
             self.timeout_ms = need
             self._call("TLPMX_setTimeoutValue", self._vi, self.timeout_ms)
-
-    def get_avg_time(self) -> float:
-        return self._get_real("TLPMX_getAvgTime", ATTR_SET_VAL)
 
     def avg_time_limits(self) -> tuple[float, float]:
         return (self._get_real("TLPMX_getAvgTime", ATTR_MIN_VAL),                 # VERIFY

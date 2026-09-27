@@ -13,7 +13,9 @@ The service exposes the analyser over ZeroMQ:
   * commands on tcp://0.0.0.0:5585   (REP)
   * status   on tcp://0.0.0.0:5586   (PUB, 10 Hz)
 
-The tracking generator is OFF when the service starts and when it stops.
+At start the analyser's settings (span, RBW, reference level, tracking
+generator, ...) are READ and adopted; nothing is written to it. The tracking
+generator is switched OFF when the service stops.
 Output is ASCII only: the launcher reads it through a pipe (suite gotcha #14).
 """
 

@@ -9,9 +9,13 @@ The service owns the supply and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 10 Hz)
 
-The output is OFF when the service starts, and every way the service stops
-(Ctrl-C, the `shutdown` command, the launcher's Stop) ramps the output to zero
-and switches it off first. Drive it with:
+At start the service READS the BOP (mode, setpoint, limit, output on/off) and
+adopts it -- nothing is written, so a live output stays live. Every way the
+service stops (Ctrl-C, the `shutdown` command, the launcher's Stop) ramps the
+output to zero and switches it off first.
+
+This is the SAME physical BOP that clMag-control drives (GPIB0::6::INSTR):
+never run the two services at the same time. Drive it with:
     uv run scripts/kepco_console.py --connect <host>
 """
 

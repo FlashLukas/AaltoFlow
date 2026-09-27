@@ -25,9 +25,21 @@ FLAG_OK = ""
 FLAG_OVERLOAD = "overload"      # field above the present range (manual range too low)
 FLAG_NO_PROBE = "no probe"      # the meter cannot see a probe
 
-#: measurement modes this module offers (the 455's third, "peak", is not wired up yet)
-MODES = ("dc", "rms")
+#: measurement modes. "peak" was added 2026-09-27 so that a meter somebody left
+#: in PEAK mode on the front panel is ADOPTED (read as it is) instead of being
+#: switched to DC behind their back -- Lukas's rule: start-up reads, never changes.
+MODES = ("dc", "rms", "peak")
 RMS_BANDS = ("wide", "narrow")
+#: the 455's peak sub-settings (RDGMODE fields 4 and 5, manual p. 6-33, VERIFY):
+#:   peak mode    1 = periodic (repetitive signal), 2 = pulse (single event, latched)
+#:   peak display 1 = positive peak, 2 = negative peak, 3 = both
+PEAK_MODES = ("periodic", "pulse")
+PEAK_DISPLAYS = ("positive", "negative", "both")
+#: probe geometry: the Hall element faces along the probe (axial: measures the
+#: field component ALONG the stem) or across it (transverse: the component
+#: perpendicular to the flat blade). The 455 does NOT report this (no query in
+#: the command list, VERIFY on the Probe menu), so it comes from the config.
+PROBE_GEOMETRIES = ("axial", "transverse")
 DC_DIGITS = (3, 4, 5)
 
 #: The DC filter per resolution, from the manual's specification table (section
@@ -46,6 +58,11 @@ DC_RATE_HZ = {3: 30.0, 4: 30.0, 5: 10.0}
 #: The RMS reading's averaging is not specified as a time constant (it updates
 #: at 30 rdg/s); treat it like the 4-digit DC filter. VERIFY on the meter.
 RMS_TIME_CONSTANT_S = 0.1
+#: The peak detector: not specified as a time constant either; same guess. VERIFY.
+#: (In PULSE peak mode the meter latches the largest peak until it is reset, so
+#: a "fresh" reading there is the largest peak since the reset, not since the
+#: trigger -- the help text of the detector says so.)
+PEAK_TIME_CONSTANT_S = 0.1
 
 #: front-panel field units and their 455 codes (UNIT command, manual p. 6-36)
 UNIT_CODES = {"G": 1, "T": 2, "Oe": 3, "A/m": 4}
@@ -87,6 +104,18 @@ def from_mT(value_mT: float, unit: str) -> float:
     return value_mT / to_mT(1.0, unit)
 
 
+def pick_peak(pos_mT: float, neg_mT: float, display: str) -> float:
+    """The one number a peak reading reports, following the meter's own peak
+    display: the positive peak, the negative peak, or -- with "both" -- the
+    one of the two that is larger in magnitude (sign kept), so a scan records
+    the excursion the front panel draws attention to."""
+    if display == "positive":
+        return pos_mT
+    if display == "negative":
+        return neg_mT
+    return pos_mT if abs(pos_mT) >= abs(neg_mT) else neg_mT
+
+
 @runtime_checkable
 class GaussmeterBackend(Protocol):
     """A single-channel Hall-probe gaussmeter."""
@@ -102,7 +131,9 @@ class GaussmeterBackend(Protocol):
 
     def probe_info(self) -> dict:
         """{'family': 'HST'|'HSE'|'UHS'|'', 'type_code': int, 'serial': str,
-        'sensitivity_mV_per_kG': float} -- whatever the probe reports."""
+        'sensitivity_mV_per_kG': float} -- whatever the probe reports.
+        QUERIES THE METER AGAIN on every call (a probe may have been swapped),
+        and the range list returned by ranges_mT() follows the new answer."""
 
     def ranges_mT(self) -> list[float]:
         """Full-scale ranges of the connected probe, mT, lowest first."""
@@ -110,6 +141,9 @@ class GaussmeterBackend(Protocol):
     # ---- measurement mode ------------------------------------------------
     def set_mode(self, mode: str, dc_digits: int, rms_band: str) -> None: ...
     def get_mode(self) -> tuple[str, int, str]: ...
+    def get_peak(self) -> tuple[str, str]:
+        """(peak_mode, peak_display), see PEAK_MODES / PEAK_DISPLAYS. Read only:
+        this module never changes the peak sub-settings."""
 
     # ---- range -----------------------------------------------------------
     def set_auto_range(self, on: bool) -> None: ...
@@ -123,10 +157,14 @@ class GaussmeterBackend(Protocol):
     def set_display_unit(self, unit: str) -> None: ...
     def get_display_unit(self) -> str: ...
     def set_relative(self, on: bool, setpoint_mT: float) -> None: ...
+    def get_relative(self) -> tuple[bool, float]:
+        """(relative mode on?, setpoint in mT) as the meter has them now."""
 
     # ---- the measurement -------------------------------------------------
     def read_field(self) -> tuple[float, str]:
-        """One reading, (mT, flag). In rms mode the value is the RMS field."""
+        """One reading, (mT, flag). In rms mode the value is the RMS field; in
+        peak mode the peak the meter's peak display selects (positive, negative,
+        or with "both" the larger in magnitude, sign kept)."""
 
     # ---- probe zero (needs the zero-gauss chamber) ------------------------
     def start_zero(self) -> None:

@@ -78,6 +78,8 @@ class ZhinstHF2:
         serial = self._daq.getString(self._p("features/serial"))      # VERIFY node
         self._idn = f"Zurich Instruments,{devtype or 'HF2'},{serial or self._dev}"
         # Deliberately NOT touching /sigouts: this module never drives an output.
+        # And nothing else is written here either: open() is queries only, the
+        # brain then READS each channel (read_channel) and adopts it.
 
     def close(self) -> None:
         if self._daq is not None:
@@ -89,7 +91,62 @@ class ZhinstHF2:
     def idn(self) -> str:
         return self._idn
 
-    # ---- per-channel set-up -----------------------------------------------------
+    # ---- reading the instrument's state (start-up adoption) ---------------------
+
+    def _get_d(self, rel: str) -> float:
+        return float(self._daq.getDouble(self._p(rel)))
+
+    def _get_i(self, rel: str) -> int:
+        return int(self._daq.getInt(self._p(rel)))
+
+    def read_channel(self, demod: int) -> dict:
+        """Queries only (getInt/getDouble). Called at start so the module
+        ADOPTS whatever LabOne / the last user left on the instrument, instead
+        of overwriting it with the .ini. Every node here is the read twin of a
+        node setup_channel()/set_reference() writes; the ones not yet seen on
+        the real HF2LI are marked VERIFY like their write twins."""
+        d = int(demod)
+        i = self._get_i(f"demods/{d}/adcselect")                        # VERIFY
+        o = self._get_i(f"demods/{d}/oscselect")                        # VERIFY
+        pll_on = False
+        ref_input = o
+        try:
+            pll_on = bool(self._get_i(f"plls/{o}/enable"))              # VERIFY
+            ref_input = self._get_i(f"plls/{o}/adcselect")              # VERIFY
+        except RuntimeError:
+            # No PLL option on this unit: then it cannot be on external reference.
+            pass
+        # The input front end. adcselect 0/1 are the two signal inputs; other
+        # values (aux inputs, VERIFY the numbering) have no sigins node, and a
+        # read of one would abort the whole start. Then report None and the
+        # brain keeps its configured front-end values (and says so).
+        front = {"input_range_V": None, "input_ac": None,
+                 "input_50ohm": None, "input_diff": None}
+        try:
+            front = {
+                "input_range_V": self._get_d(f"sigins/{i}/range"),          # VERIFY
+                "input_ac": bool(self._get_i(f"sigins/{i}/ac")),             # VERIFY
+                "input_50ohm": bool(self._get_i(f"sigins/{i}/imp50")),       # VERIFY
+                "input_diff": bool(self._get_i(f"sigins/{i}/diff")),         # VERIFY
+            }
+        except RuntimeError:
+            pass
+        return {
+            **front,
+            "enabled": bool(self._get_i(f"demods/{d}/enable")),         # VERIFY
+            "signal_input": i,
+            "oscillator": o,
+            "harmonic": self._get_i(f"demods/{d}/harmonic"),
+            "phase_deg": self._get_d(f"demods/{d}/phaseshift"),
+            "rate_Sa_s": self._get_d(f"demods/{d}/rate"),               # VERIFY
+            "time_constant_s": self._get_d(f"demods/{d}/timeconstant"),
+            "order": self._get_i(f"demods/{d}/order"),
+            "frequency_Hz": self._get_d(f"oscs/{o}/freq"),
+            "reference": "external" if pll_on else "internal",
+            "ref_input": ref_input,
+        }
+
+    # ---- per-channel set-up (only on an explicit Apply, never at start) -----------
 
     def setup_channel(self, ch: Channel, rate_Sa_s: float) -> None:
         d, i = int(ch.demod), int(ch.signal_input)

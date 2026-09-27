@@ -425,3 +425,95 @@ def test_import_of_a_non_bundle_is_refused(env, tmp_path, monkeypatch):
                         lambda *a, **k: shown.append(a[2]))
     assert win.import_settings(str(bad)) is None
     assert shown and "not a zip" in shown[0]
+
+
+# ─────────────────── shared-hardware exclusion (2026-09-27) ───────────────────
+# "bop" plays kepco: a second program for the SAME supply as "magnet" (clMag).
+# Only bop's toml names the pair; discovery makes it symmetric.
+
+@pytest.fixture
+def bop(env, monkeypatch):
+    mc, win, root, app = env
+    _module(root, "bop-control", "bop", 16140, order=50)
+    toml = root / "bop-control" / "module.toml"
+    toml.write_text(toml.read_text() + 'excludes = ["magnet"]\n')
+    win.rescan(force=True)
+    spawned = []
+    for card in win.cards.values():            # nothing may really start in a test
+        monkeypatch.setattr(card, "_spawn",
+                            lambda *a, _c=card, **k: spawned.append(_c.spec.id))
+    yield win.cards["bop"], win.cards["magnet"], spawned
+    import shutil
+    shutil.rmtree(root / "bop-control")
+    win.rescan(force=True)
+
+
+def test_exclusion_is_mirrored_onto_the_partner(env, bop):
+    card_bop, card_mag, _ = bop
+    assert card_bop.spec.excludes == ["magnet"]
+    assert card_mag.spec.excludes == ["bop"]
+    assert card_bop.blocking_partners(fresh=True) == []          # nothing up yet
+
+
+def test_service_refused_while_the_partner_is_up(env, bop):
+    """magnet was started elsewhere (a console): its port answers. Starting bop
+    must be refused, logged by name, and its Service button greyed with a reason."""
+    mc, win, root, app = env
+    card_bop, card_mag, spawned = bop
+    svc = FakeService(16100, key="magnet")
+    try:
+        card_bop.start_service()
+        assert spawned == [] and card_bop.service_proc is None
+        log = win.logbox.toPlainText()
+        assert "[bop] NOT started" in log and "magnet module (magnet)" in log
+
+        win._on_probed({"magnet": True, "bop": False})
+        assert not card_bop.btn_service.isEnabled()
+        assert "magnet module (magnet)" in card_bop.btn_service.toolTip()
+        assert "same instrument" in card_bop.btn_service.toolTip()
+    finally:
+        svc.stop()
+    win._on_probed({"magnet": False, "bop": False})
+    assert card_bop.btn_service.isEnabled()                      # free again
+
+
+def test_a_profile_holding_both_is_refused_and_starts_nothing(env, bop):
+    mc, win, root, app = env
+    card_bop, card_mag, spawned = bop
+    ok = win.activate_profile({"name": "Both", "members": ["magnet", "bop", "lockin"]},
+                              open_guis=False)
+    _pump(app, 0.3)
+    assert ok is False and spawned == []
+    assert "profile 'Both' refused" in win.logbox.toPlainText()
+    assert mc.profile_problems([card_mag.spec, card_bop.spec])
+    assert mc.profile_problems([card_mag.spec, win.cards["lockin"].spec]) == []
+
+
+def test_profile_editor_will_not_save_a_clashing_profile(env, bop):
+    mc, win, root, app = env
+    from PySide6 import QtWidgets
+    dlg = mc.ProfileEditor([{"name": "Both", "members": ["magnet"]}], win.found.modules, win)
+    dlg.checks["bop"].setChecked(True)                           # user ticks the partner
+    assert dlg.warning.isVisibleTo(dlg) and "bop" in dlg.warning.text()
+    dlg.accept()
+    assert dlg.result() != QtWidgets.QDialog.Accepted            # refused
+    dlg.checks["bop"].setChecked(False)
+    assert not dlg.warning.isVisibleTo(dlg)
+    dlg.accept()
+    assert dlg.result() == QtWidgets.QDialog.Accepted
+
+
+def test_full_suite_keeps_the_first_of_each_pair(env, bop):
+    mc, win, root, app = env
+    keep, notes = mc.full_suite_members(win.found.modules)
+    keys = [m.key for m in keep]
+    assert "magnet" in keys and "bop" not in keys                # lower order wins
+    assert len(notes) == 1 and "bop" in notes[0] and "magnet" in notes[0]
+    assert mc.profile_problems(keep) == []
+
+
+def test_exclusive_checkbox_is_unchanged(env):
+    """The profile 'Exclusive' checkbox still exists and is off by default."""
+    mc, win, root, app = env
+    assert win.exclusive_check.text() == "Exclusive"
+    assert not win.exclusive_check.isChecked()

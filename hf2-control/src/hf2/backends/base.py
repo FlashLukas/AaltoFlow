@@ -29,7 +29,8 @@ class LockInBackend(Protocol):
     """A multi-demodulator lock-in amplifier (the Zurich Instruments HF2LI)."""
 
     def open(self) -> None:
-        """Connect. Must not enable any signal OUTPUT."""
+        """Connect. Queries only: must not change ANY instrument setting
+        (and in particular never enable a signal output)."""
 
     def close(self) -> None:
         """Disconnect. Safe to call on shutdown or after a crash."""
@@ -37,7 +38,30 @@ class LockInBackend(Protocol):
     def idn(self) -> str:
         """Identification string ('' if unknown)."""
 
+    # ---- reading what the instrument is doing (used at start) -------------
+    def read_channel(self, demod: int) -> dict:
+        """READ (never write) everything one demodulator is set to, so the
+        brain can ADOPT the instrument's state at start instead of pushing its
+        config over it (Lukas's rule, 2026-09-27: "read the instrument state on
+        startup, not change anything"). Keys:
+
+            enabled          bool   demodulator data stream on
+            signal_input     int    which signal input it demodulates (adcselect)
+            oscillator       int    which oscillator it follows (oscselect)
+            harmonic         int
+            phase_deg        float
+            rate_Sa_s        float  data-stream rate
+            time_constant_s  float  as APPLIED by the hardware
+            order            int
+            input_range_V, input_ac, input_50ohm, input_diff   (of signal_input)
+            frequency_Hz     float  the oscillator's frequency
+            reference        "internal" | "external" (PLL on that oscillator)
+            ref_input        int    the PLL's reference input
+        """
+
     # ---- per-channel set-up (routing, input, harmonic, phase, rate) ------
+    # Only called when the USER applies settings (Settings > Apply, or
+    # set_config over the wire) -- never at start.
     def setup_channel(self, ch: Channel, rate_Sa_s: float) -> None:
         """Route demodulator ch.demod to ch.signal_input and ch.oscillator,
         apply input range/coupling/impedance, harmonic and phase, and enable

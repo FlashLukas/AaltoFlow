@@ -46,7 +46,9 @@ def test_info_and_config(service_and_client):
     info = cli.start()
     assert info["simulated"] is True and info["pixels"] == 3648
     assert info["integration_min_s"] == 1e-5 and info["integration_max_s"] == 60.0
-    assert cli.cfg.scan.integration_time_s == 0.01
+    # the service ADOPTED the sim instrument's own 5 ms, not the config's 10 ms
+    assert cli.cfg.scan.integration_time_s == 0.005
+    assert cli.status().integration_time_s == 0.005
 
 
 def test_continuous_scans_arrive(service_and_client):

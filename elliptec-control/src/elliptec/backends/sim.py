@@ -27,13 +27,13 @@ from .base import AxisReading
 
 
 class _SimMount:
-    def __init__(self, start_deg: float):
+    def __init__(self, start_deg: float, velocity_pct: int = 100):
         self.pos = float(start_deg)   # continuous angle (not wrapped), degrees
         self.start = self.pos
         self.target = self.pos
         self.t0 = 0.0
         self.moving = False
-        self.velocity_pct = 100
+        self.velocity_pct = int(velocity_pct)
         self.error = 0
 
 
@@ -49,7 +49,10 @@ class SimEllBus:
     def open(self, addresses: list) -> None:
         for i, a in enumerate(addresses):
             # Stagger the start angles so two simulated mounts are told apart.
-            self._mounts[a] = _SimMount(self.cfg.sim.start_deg + 50.0 * i)
+            # ... and at a non-default speed, as a real mount left at some
+            # speed by an earlier session would be (the adoption test).
+            self._mounts[a] = _SimMount(self.cfg.sim.start_deg + 50.0 * i,
+                                        self.cfg.sim.start_velocity_pct)
         self._opened = True
 
     def close(self) -> None:

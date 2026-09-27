@@ -3,7 +3,7 @@
 Local simulator (default):
     uv sync --extra gui
     uv run scripts/run_gui.py
-    uv run scripts/run_gui.py --demo          # starts with the output ramping to 2 A
+    uv run scripts/run_gui.py --demo          # sim BOP found live at 2.5 A (adopted)
 
 Connect to a running service (same PC or across the lab network):
     uv run scripts/run_gui.py --connect localhost
@@ -33,7 +33,7 @@ def main() -> int:
     ap.add_argument("--theme", choices=["dark", "light"], default=None,
                     help="override the start-up theme for this launch (default: from config)")
     ap.add_argument("--demo", action="store_true",
-                    help="local simulator only: switch the output on at 2 A to show it working")
+                    help="local simulator only: the sim BOP is found live at 2.5 A and adopted")
     args = ap.parse_args()
 
     if not args.connect:

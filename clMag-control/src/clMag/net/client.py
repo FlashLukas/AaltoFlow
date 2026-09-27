@@ -41,6 +41,7 @@ class RemoteStatus:
         self.current_A = d.get("current_A", 0.0)
         self.field_stable = d.get("field_stable", False)
         self.locked = d.get("locked", False)
+        self.output_on = d.get("output_on", False)
         self.aux = d.get("aux") or {}
         self.describe_rev = d.get("describe_rev")   # None from an older service
 

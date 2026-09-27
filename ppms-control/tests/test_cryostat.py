@@ -216,3 +216,72 @@ def test_commands_refused_when_not_connected():
     cryo = Cryostat(SimulatedDynaCool(), Config())
     with pytest.raises(RuntimeError):
         cryo.set_field(1.0)
+
+
+# ---- adopt-on-start (Lukas's rule 2026-09-27: read the state, change nothing) ----
+
+def test_start_adopts_multivus_rates_and_approaches_not_the_configs():
+    """A DynaCool someone left at 5 T / 2 K, ramping at 3 mT/s with oscillate
+    and 1 K/min no_overshoot: the status and the config (what the GUI and the
+    next setpoint use) must show THAT, not the ppms.ini defaults."""
+    clock = Clock()
+    sim = RecordingSim(field_mT=5000.0, temperature_K=2.0, clock=clock, noise=False,
+                       field_rate_mT_per_s=3.0, field_approach="oscillate",
+                       temperature_rate_K_per_min=1.0,
+                       temperature_approach="no_overshoot")
+    cfg = Config()
+    assert (cfg.field.rate_mT_per_s, cfg.field.approach) == (22.0, "linear")
+    cryo = Cryostat(sim, cfg, clock=clock)
+    cryo.start(poll=False)
+    try:
+        s = cryo.status()
+        assert s.setpoint_field_mT == 5000.0 and s.measured_field_mT == 5000.0
+        assert s.field_rate_mT_per_s == 3.0 and s.field_approach == "oscillate"
+        assert s.setpoint_temperature_K == 2.0 and s.temperature_K == 2.0
+        assert s.temperature_rate_K_per_min == 1.0
+        assert s.temperature_approach == "no_overshoot"
+        assert sim.commands == []
+        # the adopted settings are what the next setpoint is sent with
+        cryo.set_field(4000.0)
+        assert sim.commands == [("field", 4000.0, 3.0, "oscillate")]
+    finally:
+        cryo.shutdown()
+
+
+def test_a_multivu_error_answer_is_not_adopted_as_a_setpoint():
+    """MultiPyVu returns (0.0, 0.0, <error text>) instead of raising. That must
+    not become 'setpoint 0 K' on a cryostat at 300 K: fall back to the measured
+    value and keep the config's rate/approach."""
+    clock = Clock()
+    sim = RecordingSim(field_mT=100.0, temperature_K=300.0, clock=clock, noise=False)
+    sim.read_temperature_setpoint = lambda: (0.0, 0.0, "MultiVu error: timeout")
+    cryo = Cryostat(sim, Config(), clock=clock)
+    events = []
+    cryo._on_event = lambda lvl, msg: events.append((lvl, msg))
+    cryo.start(poll=False)
+    try:
+        s = cryo.status()
+        assert s.setpoint_temperature_K == 300.0
+        assert s.temperature_rate_K_per_min == 20.0 and s.temperature_approach == "fast_settle"
+        assert s.setpoint_field_mT == 100.0
+        assert any(lvl == "warn" and "temperature setpoint" in m for lvl, m in events)
+        assert sim.commands == []
+    finally:
+        cryo.shutdown()
+
+
+def test_an_adopted_rate_outside_the_limits_is_shown_then_clamped_on_use():
+    clock = Clock()
+    sim = RecordingSim(clock=clock, noise=False, field_rate_mT_per_s=500.0)
+    cryo = Cryostat(sim, Config(), clock=clock)
+    events = []
+    cryo._on_event = lambda lvl, msg: events.append((lvl, msg))
+    cryo.start(poll=False)
+    try:
+        assert cryo.status().field_rate_mT_per_s == 500.0     # the truth, not a guess
+        assert any(lvl == "warn" and "outside the limits" in m for lvl, m in events)
+        assert sim.commands == []
+        cryo.set_field(10.0)
+        assert sim.commands[-1][2] == cryo.cfg.limits.field_rate_max_mT_per_s
+    finally:
+        cryo.shutdown()

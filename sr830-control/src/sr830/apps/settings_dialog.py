@@ -2,7 +2,8 @@
 
 Like every module's Settings pane it never talks to hardware: it edits the
 shared `cfg` IN PLACE and calls `lockin.apply_config()`, which re-validates and
-re-pushes (locally, or over the socket for a remote client).
+writes to the SR830 only the settings that differ from what it is set to
+(locally, or over the socket for a remote client).
 
 The forms are GENERATED from the dataclasses rather than written by hand, so a
 field added to config.py appears here without another edit. Floats use a text
@@ -37,7 +38,9 @@ _HINTS = {
     "demod": "Sensitivity and time constant are the SR830's fixed steps. The "
              "instrument may change the time constant on its own (above 200 Hz, "
              "or with reserve / slope); the panel shows what it applied.",
-    "aux_out": "The four rear-panel AUX OUT voltages, applied at start.",
+    "aux_out": "The four rear-panel AUX OUT voltages. At start the service "
+               "ADOPTS what the SR830 outputs; a value here is written only "
+               "when you change it and Apply.",
     "acquisition": "`acquire` waits until a step has reached settle_percent at the "
                    "filter output (computed from time constant and slope), then "
                    "averages over average_tc time constants. Raise timeout_s for "
@@ -60,6 +63,17 @@ def _copy_config_into(dst: Config, src: Config) -> None:
         d, s = getattr(dst, group), getattr(src, group)
         for f in dataclass_fields(d):
             setattr(d, f.name, getattr(s, f.name))
+
+
+def _raw(w):
+    """A widget's value as shown (text for number fields: compared, not parsed)."""
+    if isinstance(w, QtWidgets.QCheckBox):
+        return bool(w.isChecked())
+    if isinstance(w, QtWidgets.QComboBox):
+        return w.currentText()
+    if isinstance(w, QtWidgets.QSpinBox):
+        return int(w.value())
+    return w.text()
 
 
 class SettingsPanel(QtWidgets.QWidget):
@@ -97,6 +111,7 @@ class SettingsPanel(QtWidgets.QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(tabs, 1)
         root.addWidget(self.error)
+        self._remember_shown()
         root.addLayout(self.bar)
 
     @staticmethod
@@ -114,14 +129,30 @@ class SettingsPanel(QtWidgets.QWidget):
         return btn
 
     def apply(self) -> bool:
-        """Copy the fields into cfg and push them to the lock-in."""
-        if not self._pull_into_cfg():
+        """Apply the fields the user EDITED -- and only those.
+
+        Why not copy every field into cfg: the form was filled when the tab was
+        opened. Since then a front-panel control, the console or a scan may have
+        changed, say, the sensitivity; copying the whole (stale) form would
+        quietly set it back. So: note which widgets differ from what they were
+        filled with, fetch the settings in use NOW (get_config: the brain's cfg,
+        or the service's over the socket), put only the edited fields on top,
+        and apply. The brain then writes to the SR830 only what differs.
+        """
+        edited = {key for key, (w, _t) in self.w.items()
+                  if _raw(w) != self._shown.get(key)}
+        staged = self._parse_widgets(edited)
+        if staged is None:
             return False
         try:
+            self.ctrl.get_config()              # the settings in use right now
+            for (group, name), v in staged.items():
+                setattr(getattr(self.cfg, group), name, v)
             self.ctrl.apply_config()
         except ValueError as exc:
             self.error.setText(str(exc))
             return False
+        self.reload()                           # show what was really applied
         self.on_applied()
         return True
 
@@ -169,8 +200,21 @@ class SettingsPanel(QtWidgets.QWidget):
 
     def _pull_into_cfg(self) -> bool:
         """Copy every widget into cfg. Returns False (and says why) on bad input."""
+        staged = self._parse_widgets(set(self.w))
+        if staged is None:
+            return False
+        for (group, name), v in staged.items():
+            setattr(getattr(self.cfg, group), name, v)
+        self.error.setText("")
+        return True
+
+    def _parse_widgets(self, keys) -> dict | None:
+        """{(group, name): typed value} for the widgets in `keys`; None (and the
+        reason in the error label) if a number field does not parse."""
         staged = {}
         for (group, name), (w, type_name) in self.w.items():
+            if (group, name) not in keys:
+                continue
             if isinstance(w, QtWidgets.QCheckBox):
                 v = bool(w.isChecked())
             elif isinstance(w, QtWidgets.QComboBox):
@@ -183,14 +227,12 @@ class SettingsPanel(QtWidgets.QWidget):
                 except ValueError:
                     self.error.setText(f"{_TAB_TITLES.get(group, group)}: '{name}' "
                                        f"is not a number")
-                    return False
+                    return None
             else:
                 v = w.text().strip()
             staged[(group, name)] = v
-        for (group, name), v in staged.items():
-            setattr(getattr(self.cfg, group), name, v)
         self.error.setText("")
-        return True
+        return staged
 
     def _refresh_widgets_from_cfg(self):
         for (group, name), (w, type_name) in self.w.items():
@@ -205,6 +247,11 @@ class SettingsPanel(QtWidgets.QWidget):
                 w.setText(f"{float(val):.10g}")
             else:
                 w.setText(str(val))
+        self._remember_shown()
+
+    def _remember_shown(self):
+        """What each widget was filled with, so apply() can tell an edit."""
+        self._shown = {key: _raw(w) for key, (w, _t) in self.w.items()}
 
     # ---- actions -------------------------------------------------------------------
 

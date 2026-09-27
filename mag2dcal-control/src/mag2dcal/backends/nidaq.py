@@ -13,6 +13,10 @@ Tasks (one per signal kind, created in open(), closed in close()):
   ai   -- hall X, hall Y, temp 1, temp 2  ONE finite task, n samples at rate
   di   -- water flow switch
   do   -- output enable
+  ao_readback -- a throw-away AI task in open() only: reads the two AO pins
+                 through the card's internal loopback channels, so the brain
+                 can ADOPT what a previous run left driving (nothing is written
+                 at open()).
 
 WHY ONE AI TASK FOR ALL FOUR INPUTS: an M-series / X-series card has one AI
 timing engine. Two AI tasks with sample clocks cannot both be reserved, so a
@@ -33,6 +37,10 @@ class NidaqVectorMagnet:
         self._nidaqmx = None
         self._ao = self._ai = self._di = self._do = None
         self._temps = (float("nan"), float("nan"))
+        # What the card was driving when open() found it: (x_V, y_V, enabled),
+        # None where it could not be read. See read_output().
+        self._found: tuple = (None, None, None)
+        self.found_notes: list[str] = []   # why something could not be read
 
     # ---- lifecycle -------------------------------------------------------------
 
@@ -51,16 +59,40 @@ class NidaqVectorMagnet:
             "diff": TerminalConfiguration.DIFF,
         }[hw.ai_terminal.strip().lower()]
 
+        # ADOPT, DON'T RESET (Lukas, 2026-09-27). This used to write DO False
+        # and AO 0 V here "to be safe"; that de-energized a magnet a previous
+        # run had left holding a field. Now open() only CREATES the tasks and
+        # READS what the lines are doing; the brain decides from that. The
+        # card keeps its last AO/DO values between programs, so what we read is
+        # what the coils are really getting.
+        self.found_notes = []
+        x_V = y_V = enabled = None
+        # The AO values first, BEFORE the main AI task exists, because the
+        # read-back borrows the card's one AI timing engine for a moment.
+        try:
+            x_V, y_V = self._read_ao_loopback(nidaqmx)
+        except Exception as exc:
+            self.found_notes.append(f"AO read-back failed ({type(exc).__name__}: {exc})")
         try:
             self._do = nidaqmx.Task("mag2d_enable")
             self._do.do_channels.add_do_chan(hw.do_enable)
-            self._do.write(False)                        # safe first: output off
+            # VERIFY: on an M-/X-series card a static DO task can be READ and
+            # returns the state the line is driving (DAQmx keeps it from the
+            # last program). VERIFY too that creating this task does not itself
+            # drive the line (a tristated line after power-up reads False).
+            try:
+                enabled = bool(self._do.read())
+            except Exception as exc:
+                self.found_notes.append(f"enable line read failed "
+                                        f"({type(exc).__name__}: {exc})")
 
             self._ao = nidaqmx.Task("mag2d_ao")
             for ch in (hw.ao_x, hw.ao_y):
+                # VERIFY: adding the channels (no write, no start) leaves the
+                # output at its present value -- DAQmx only changes an AO when
+                # a sample is written.
                 self._ao.ao_channels.add_ao_voltage_chan(ch, min_val=hw.ao_min_V,
                                                          max_val=hw.ao_max_V)
-            self._ao.write([0.0, 0.0])                   # VERIFY: list = one sample per channel
 
             self._ai = nidaqmx.Task("mag2d_ai")
             for ch in (hw.ai_hall_x, hw.ai_hall_y, hw.ai_temp1, hw.ai_temp2):
@@ -77,6 +109,43 @@ class NidaqVectorMagnet:
         except Exception:
             self._close_tasks()
             raise
+        self._found = (x_V, y_V, enabled)
+
+    def _read_ao_loopback(self, nidaqmx) -> tuple[float, float]:
+        """The two AO voltages, measured by the card itself.
+
+        An AO cannot be read back as such (the 6259 has no AO "read"), but M-
+        and X-series cards route every AO to an INTERNAL AI channel,
+        `<Dev>/_ao0_vs_aognd`: the AI measures the output pin. One on-demand
+        sample each, in a throw-away task. This is the only honest way to
+        learn what a previous run left on the coils without writing anything.
+        VERIFY: the internal channel names in NI MAX (Device > Channels >
+        "Show internal channels"), and that the card allows them in an AI task.
+        """
+        hw = self.hw
+        chans = []
+        for phys in (hw.ao_x, hw.ao_y):
+            dev, _, ch = phys.strip().partition("/")
+            chans.append(f"{dev}/_{ch}_vs_aognd")
+        task = nidaqmx.Task("mag2d_ao_readback")
+        try:
+            for ch in chans:
+                task.ai_channels.add_ai_voltage_chan(ch, min_val=hw.ao_min_V,
+                                                     max_val=hw.ao_max_V)
+            data = task.read()                  # on demand: one sample per channel
+        finally:
+            task.close()
+        # Undo the wiring polarity (see write_ao): the brain thinks in
+        # "positive volts = positive field".
+        x = float(data[0]) / (float(hw.ao_sign_x) or 1.0)
+        y = float(data[1]) / (float(hw.ao_sign_y) or 1.0)
+        return x, y
+
+    def read_output(self) -> tuple:
+        """(x_V, y_V, enabled) as found at open(); None where unreadable.
+        Cached, because the AO read-back needs the AI engine that the main
+        Hall task owns from then on."""
+        return self._found
 
     def close(self) -> None:
         # Backstop only: the brain has already ramped to 0 V at the slew rate.

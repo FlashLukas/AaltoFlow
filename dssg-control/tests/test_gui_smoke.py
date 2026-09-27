@@ -34,8 +34,10 @@ def test_window_builds_and_refreshes(app):
         assert win.freq_value.text() not in ("", "—")
         # entry fields start at what the unit holds (a spin box's default
         # range once clamped 1000 MHz to 99.99 here)
-        assert win.freq_spin.value() == pytest.approx(cfg.signal.frequency_Hz / 1e6)
-        assert win.power_spin.value() == pytest.approx(cfg.signal.power_dBm)
+        # ...and that is the ADOPTED state of the (simulated) box, not the preset
+        assert win.freq_spin.value() == pytest.approx(cfg.sim.state_frequency_Hz / 1e6)
+        assert win.power_spin.value() == pytest.approx(cfg.sim.state_power_dBm)
+        assert win.ref_combo.currentText() == cfg.sim.state_reference
         # the spin range follows the UNIT's range (12 GHz), not cfg's 13 GHz
         win._change_freq_unit("GHz")
         assert win.freq_spin.maximum() == pytest.approx(12.0)

@@ -122,10 +122,14 @@ def test_on_a_real_analyser_the_model_is_hidden(app):
     from vna.backends.pna import PnaVna
     cfg = Config()
     cfg.field.source = "manual"
-    cfg.sweep.points = 11
     vna = Analyzer(PnaVna(cfg, resource=FakePna(sweep_polls=0), sleep=lambda s: None), cfg)
     win = MainWindow(_NoThreadVna(vna), cfg)
     try:
+        # a real analyser starts hands-off with ITS sweep adopted (201 points);
+        # a user sets ours and switches Continuous on
+        assert vna.status().continuous is False and vna.status().points == 201
+        vna.set_points(11)
+        vna.set_continuous(True)
         vna.step()
         win._refresh()
         assert not win.indicator.isVisibleTo(win) and not win.model_label.isVisibleTo(win)

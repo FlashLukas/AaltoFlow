@@ -89,3 +89,82 @@ def test_backend_module_does_not_import_pyvisa_at_import_time():
     src = open(kepco.backends.bop_gpib.__file__, encoding="utf-8").read()
     top = src.split("class VisaBOP", 1)[0]
     assert "import pyvisa" not in top      # lazy: only inside open()
+
+
+# ---- start-up reads only (Lukas, 2026-09-27) --------------------------------
+
+class StrictInst(FakeInst):
+    """Fails the test on ANY write except *CLS (which only clears the error
+    queue): opening the connection must not change the instrument."""
+
+    ALLOWED = {"*CLS"}
+
+    def write(self, cmd):
+        if cmd not in self.ALLOWED:
+            raise AssertionError(f"state-changing write at start: {cmd!r}")
+        super().write(cmd)
+
+
+def test_open_and_read_state_issue_no_state_changing_writes(monkeypatch):
+    import sys
+    import types
+    replies = {"*IDN?": "KEPCO,BIT 4886 20-10,E1234,2.0-1.0",
+               "FUNC:MODE?": "1", "OUTP?": "1",
+               "VOLT?": "8.00000E+00", "CURR?": "-1.20000E+00"}
+    inst = StrictInst(replies)
+
+    class RM:
+        def open_resource(self, name):
+            return inst
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pyvisa",
+                        types.SimpleNamespace(ResourceManager=RM))
+    b = VisaBOP("GPIB0::6::INSTR")
+    b.open()
+    state = b.read_state()
+    assert state == {"mode": "current", "output": True,
+                     "voltage_V": 8.0, "current_A": -1.2}
+    assert [w for w in inst.writes if not w.endswith("?")] == ["*CLS"]
+    assert b.idn().startswith("KEPCO")
+
+
+def test_brain_on_the_real_backend_writes_nothing_at_start(monkeypatch):
+    """The whole start path -- VisaBOP.open(), read_state(), the brain's
+    adoption and several worker steps (which measure) -- against a fake GPIB
+    instrument that fails on any write but *CLS. A live 1.2 A output found in
+    current mode must be adopted and left exactly as it is."""
+    import sys
+    import types
+    from kepco.config import Config
+    from kepco.supply import BipolarSupply
+    replies = {"*IDN?": "KEPCO,BIT 4886 20-10,E1234,2.0-1.0",
+               "FUNC:MODE?": "1", "OUTP?": "1",
+               "VOLT?": "8.00000E+00", "CURR?": "1.20000E+00",
+               "MEAS:VOLT?": "2.40000E+00", "MEAS:CURR?": "1.19900E+00"}
+    inst = StrictInst(replies)
+
+    class RM:
+        def open_resource(self, name):
+            return inst
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pyvisa",
+                        types.SimpleNamespace(ResourceManager=RM))
+    cfg = Config()
+    cfg.output.mode = "voltage"            # an .ini that disagrees with the unit
+    cfg.output.voltage_V = 3.0
+    supply = BipolarSupply(VisaBOP("GPIB0::6::INSTR"), cfg)
+    supply.start(poll=False)
+    for _ in range(5):
+        supply.step(dt=0.05)
+    assert [w for w in inst.writes if not w.endswith("?")] == ["*CLS"]
+    s = supply.status()
+    assert s.mode == "current" and s.output is True
+    assert s.current_set_A == 1.2 and s.programmed == 1.2
+    assert s.voltage_limit_V == 8.0
+    assert s.current_A == pytest.approx(1.199)

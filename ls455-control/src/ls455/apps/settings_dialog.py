@@ -22,17 +22,18 @@ _TABS = [("meter", "Meter"), ("acquisition", "Acquisition"), ("limits", "Limits"
          ("hardware", "Hardware"), ("ui", "Appearance")]
 
 _HINTS = {
-    "meter": "Pushed to the meter on Apply. mode: dc or rms; dc_digits 3/4/5; "
-             "rms_band wide/narrow; display_unit G, T, Oe or A/m (front panel "
-             "only -- readings here are always mT). At start-up the meter's own "
-             "settings are adopted unless Hardware > push_on_start is on.",
+    "meter": "Pushed to the meter on Apply. mode: dc, rms or peak; dc_digits "
+             "3/4/5; rms_band wide/narrow; display_unit G, T, Oe or A/m (front "
+             "panel only -- readings here are always mT). At start-up nothing is "
+             "pushed: the meter's own settings are read and shown here.",
     "acquisition": "An acquisition averages this many readings, all started at least "
                    "settle_time_constants filter time constants after the trigger.",
     "limits": "The envelope every setpoint is clamped to; the range is narrowed "
               "further by the ranges of the connected probe.",
     "hardware": "Used by the real pyvisa backend. resource: GPIB0::12::INSTR or "
                 "ASRL<n>::INSTR (serial: 7 data bits, odd parity, fixed). "
-                "Takes effect on the next start.",
+                "Takes effect on the next start. probe_geometry: axial or "
+                "transverse (the meter does not report it).",
     "ui": "theme: dark or light. Applies the next time the GUI starts.",
 }
 

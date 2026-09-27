@@ -43,9 +43,11 @@ install. Why not pyvisa/SCPI like smb: Thorlabs gives the PM16 its own USB
 driver by default, and NI-VISA cannot see a device on it; TLPMX works with
 either driver.
 
-At start the module **adopts** the meter's stored wavelength and range instead of
-pushing its config (the meter remembers them across power cycles). Set
-`hardware.push_on_start = true` to push the config instead.
+At start the module **only reads** the meter: it adopts the stored wavelength,
+auto/manual range and range in use (the meter remembers them across power
+cycles) and writes nothing. The config's sensor values reach the meter only when
+you set them (a setter, `set_config`, or Settings > Apply). The old
+`hardware.push_on_start` option is gone; an old .ini that has it is fine.
 
 ## Commands (wire verbs)
 

@@ -25,21 +25,34 @@ from ..config import HallProbe
 
 
 class SimulatedKepco:
-    """Pretends to be a Kepco BOP in constant-current mode."""
+    """Pretends to be a Kepco BOP in constant-current mode.
 
-    def __init__(self, current_max_A: float = 3.0):
-        self._current = 0.0
+    It has a state of its own BEFORE anyone connects (`initial_current_A`,
+    `output_on`), like a real supply someone left running, so the tests can
+    check that the controller ADOPTS that state instead of resetting it.
+    It keeps the programmed current apart from the current actually flowing:
+    with the output off the programmed value is remembered but 0 A flows --
+    which is why the controller must reprogram the present current before it
+    switches the output on.
+    """
+
+    def __init__(self, current_max_A: float = 3.0, initial_current_A: float = 0.0,
+                 output_on: bool = True):
+        self._current = float(initial_current_A)   # PROGRAMMED current
+        self._output_on = bool(output_on)
         self._direction = 1       # +1 if last move raised current, -1 if lowered
         self._max = current_max_A
         self._open = False
 
     def open(self) -> None:
+        # Connecting changes nothing (adopt-on-start rule): the old version
+        # zeroed the current here, which a real supply would never do by itself.
         self._open = True
-        self._current = 0.0
 
     def close(self) -> None:
-        # mirror the real shutdown: ramp to zero, output off
+        # mirror the real shutdown: the controller has ramped to zero, output off
         self._current = 0.0
+        self._output_on = False
         self._open = False
 
     def set_current(self, amps: float) -> None:
@@ -53,7 +66,14 @@ class SimulatedKepco:
         self._current = amps
 
     def read_current(self) -> float:
-        return self._current
+        # the current actually FLOWING (MEAS:CURR?): nothing with the output off
+        return self._current if self._output_on else 0.0
+
+    def read_output(self) -> bool:
+        return self._output_on
+
+    def enable_output(self) -> None:
+        self._output_on = True
 
     # exposed so the simulated probe can see the magnet state
     @property
@@ -120,9 +140,13 @@ class SimulatedAux:
     panel shows live values you can watch move (in the lab these would be whatever
     you have plugged into those BNCs)."""
 
-    def __init__(self, seed: int = 1, noise_V: float = 0.01, v_min: float = -10.0, v_max: float = 10.0):
+    def __init__(self, seed: int = 1, noise_V: float = 0.01, v_min: float = -10.0, v_max: float = 10.0,
+                 initial_do: dict | None = None):
+        # _ao holds only what was COMMANDED this session: like the real 6259,
+        # the sim cannot tell what an AO was driving before we connected.
         self._ao: dict[str, float] = {}
-        self._do: dict[str, bool] = {}
+        # DO lines CAN be read back, so a state set before start is adopted.
+        self._do: dict[str, bool] = {k: bool(v) for k, v in (initial_do or {}).items()}
         self._rng = random.Random(seed)
         self._noise = noise_V
         self._v_min, self._v_max = v_min, v_max
@@ -130,7 +154,7 @@ class SimulatedAux:
         self._open = False
 
     def open(self) -> None:
-        self._open = True
+        self._open = True      # writes nothing: outputs keep what they drive
 
     def close(self) -> None:
         self._open = False
@@ -138,8 +162,8 @@ class SimulatedAux:
     def set_ao(self, channel: str, volts: float) -> None:
         self._ao[channel] = max(self._v_min, min(self._v_max, volts))
 
-    def read_ao(self, channel: str) -> float:
-        return self._ao.get(channel, 0.0)
+    def read_ao(self, channel: str):
+        return self._ao.get(channel)      # None = not commanded since start
 
     def read_ai(self, channel: str) -> float:
         # a slow sine (phase fixed per channel name) + noise -> looks "live"

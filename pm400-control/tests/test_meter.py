@@ -36,18 +36,6 @@ def test_start_adopts_the_consoles_settings(system):
     assert s.quantity == "power" and s.unit == "W"
 
 
-def test_push_on_start_pushes_config():
-    cfg = Config()
-    cfg.hardware.push_on_start = True
-    cfg.sensor.wavelength_nm = 1064.0
-    cfg.sensor.avg_time_s = 0.3
-    meter, sim = build_sim_system(cfg, realtime=False)
-    meter.start(poll=False)
-    assert sim.get_wavelength() == 1064.0
-    assert sim.get_avg_time() == pytest.approx(0.3)
-    meter.shutdown()
-
-
 def test_limits_come_from_the_head(system):
     meter, sim, cfg, _ = system
     assert meter.wavelength_limits() == (400.0, 1100.0)       # Si photodiode

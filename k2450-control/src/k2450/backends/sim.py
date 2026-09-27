@@ -29,7 +29,8 @@ import threading
 import time
 
 from ..config import Sim
-from .base import (OVERRANGE, Reading, auto_range_for, other, snap_range)
+from .base import (FUNCS, OVERRANGE, InstrumentState, Reading, auto_range_for,
+                   other, snap_range)
 
 #: kT/q at room temperature, the diode's thermal voltage.
 _VT = 0.025852
@@ -59,11 +60,62 @@ class SimulatedK2450:
         self._nplc = {"voltage": 1.0, "current": 1.0}
         self._four_wire = False
         self._output = False
+        self._terminals = "front"
+        self._sense = "current"         # what it measures (the real one can differ)
+        # Every call that CHANGES the instrument is logged here, so a test can
+        # prove that connecting wrote nothing (the adopt-on-start rule).
+        self.writes: list[tuple] = []
+
+    def preset(self, *, function: str | None = None, level: dict | None = None,
+               limit: dict | None = None, output: bool | None = None,
+               nplc: float | None = None, four_wire: bool | None = None,
+               src_auto: bool | None = None, src_range: dict | None = None,
+               meas_auto: bool | None = None, meas_range: dict | None = None,
+               terminals: str | None = None, sense: str | None = None) -> None:
+        """Put the pretend instrument in a state BEFORE the module connects --
+        as if someone had used the front panel, or a previous session left it
+        sourcing. Tests use it to check the brain ADOPTS that state instead of
+        overwriting it. Not logged in `writes` (it is not the module talking)."""
+        if function is not None:
+            self._fn = function
+            self._sense = other(function)
+        if level:
+            self._level.update({k: float(v) for k, v in level.items()})
+        if limit:
+            self._limit.update({k: abs(float(v)) for k, v in limit.items()})
+        if output is not None:
+            self._output = bool(output)
+        if nplc is not None:
+            self._nplc = {f: float(nplc) for f in FUNCS}
+        if four_wire is not None:
+            self._four_wire = bool(four_wire)
+        if src_auto is not None:
+            self._src_auto = {f: bool(src_auto) for f in FUNCS}
+        if src_range:
+            self._src_range.update({k: snap_range(k, v) for k, v in src_range.items()})
+        if meas_auto is not None:
+            self._meas_auto = {f: bool(meas_auto) for f in FUNCS}
+        if meas_range:
+            self._meas_range.update({k: snap_range(k, v) for k, v in meas_range.items()})
+        if terminals is not None:
+            self._terminals = terminals
+        if sense is not None:
+            self._sense = sense
 
     # ---- lifecycle -----------------------------------------------------------
     def open(self) -> None:
+        # Like the real one: connecting changes nothing (no output off).
         self._open = True
-        self._output = False            # mirror :OUTP OFF on connect
+
+    def read_state(self) -> InstrumentState:
+        return InstrumentState(
+            function=self._fn, sense_function=self._sense,
+            level=dict(self._level), limit=dict(self._limit),
+            src_auto=dict(self._src_auto),
+            src_range={f: self.get_source_range(f) for f in FUNCS},
+            meas_auto=dict(self._meas_auto), meas_range=dict(self._meas_range),
+            nplc=dict(self._nplc), four_wire={f: self._four_wire for f in FUNCS},
+            output=self._output, terminals=self._terminals, readback=True)
 
     def close(self) -> None:
         self._output = False            # output off on the way out
@@ -75,15 +127,20 @@ class SimulatedK2450:
 
     # ---- source --------------------------------------------------------------
     def set_source_function(self, fn: str) -> None:
+        self.writes.append(("function", fn))
+        self._sense = other(fn)
         self._fn = fn
 
     def set_limit(self, fn: str, value: float) -> None:
+        self.writes.append(("limit", fn, value))
         self._limit[fn] = abs(float(value))
 
     def set_level(self, fn: str, value: float) -> None:
+        self.writes.append(("level", fn, value))
         self._level[fn] = float(value)
 
     def set_source_range(self, fn: str, auto: bool, value: float) -> None:
+        self.writes.append(("source_range", fn, auto, value))
         self._src_auto[fn] = bool(auto)
         if not auto:
             self._src_range[fn] = snap_range(fn, value)
@@ -95,6 +152,7 @@ class SimulatedK2450:
 
     # ---- measure ---------------------------------------------------------------
     def set_measure_range(self, mfn: str, auto: bool, value: float) -> None:
+        self.writes.append(("measure_range", mfn, auto, value))
         self._meas_auto[mfn] = bool(auto)
         if not auto:
             self._meas_range[mfn] = snap_range(mfn, value)
@@ -103,14 +161,22 @@ class SimulatedK2450:
         return self._meas_range[mfn]
 
     def set_nplc(self, mfn: str, nplc: float) -> None:
+        self.writes.append(("nplc", mfn, nplc))
         self._nplc[mfn] = float(nplc)
 
     def set_four_wire(self, on: bool) -> None:
+        self.writes.append(("four_wire", on))
         self._four_wire = bool(on)
 
     # ---- output and readings -----------------------------------------------------
     def set_output(self, on: bool) -> None:
+        self.writes.append(("output", on))
         self._output = bool(on)
+
+    def set_terminals(self, where: str) -> None:
+        self.writes.append(("terminals", where))
+        self._terminals = "rear" if str(where).lower() == "rear" else "front"
+        self._output = False            # the 2450 drops the output on a terminal change
 
     def get_output(self) -> bool:
         return self._output

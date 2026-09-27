@@ -696,7 +696,17 @@ pub = 5570
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"    # "" for a headless module
 start_after = []              # keys to start first when started together
+excludes = []                 # OPTIONAL: keys that must never run at the same time
 ```
+
+**`excludes` -- two modules for one instrument.** If your module drives
+hardware another module also drives (kepco and clMag share one Kepco BOP;
+mag2d and mag2dcal share one set of coils), list the other module's key:
+`excludes = ["clMag"]`. Two services sending setpoints to one supply would
+fight each other, so the launcher then refuses to start yours while the other
+is up (and vice versa -- the rule is symmetric, one toml is enough), refuses a
+profile that contains both, and `check_modules.py` fails a key that names no
+module. Leave it out when the module owns its hardware alone.
 
 **Identity only.** The controls and measured variables are NOT in this file: the
 running service reports them through `describe` (section 6b), and a copy here

@@ -31,34 +31,106 @@ def _fresh(a):
 
 # ---- lifecycle and safety ----------------------------------------------------
 
-def test_start_leaves_the_stage_off_and_gain_at_startup_value(amp):
+def test_start_adopts_the_simulators_default_leftover_state(amp):
+    """The simulator starts at a plausible leftover (6 dB, off), NOT the device
+    minimum, so every test run exercises adoption."""
     s = amp.status()
     assert s.connected is True
     assert s.amp_on is False
-    assert s.gain_dB == 0.0
+    assert s.gain_dB == 6.0 and s.gain_set_dB == 6.0
     assert "SIMULATED" in s.idn
 
 
-def test_start_forces_off_even_if_the_device_was_left_on():
+class _NoWriteDuringStart:
+    """Wraps a backend and FAILS on any state-changing call while `armed`.
+    Only open(), the reads and idn() are allowed at start."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.armed = True
+        self.writes = []
+
+    def __getattr__(self, name):
+        attr = getattr(self.inner, name)
+        if name.startswith("set_") or name in ("close",):
+            def guarded(*a, **kw):
+                if self.armed:
+                    raise AssertionError(f"start wrote to the amplifier: {name}{a}")
+                self.writes.append((name, a))
+                return attr(*a, **kw)
+            return guarded
+        return attr
+
+
+def _adopting_system(gain=12.5, on=True):
+    """A simulator left ON at 12.5 dB -- above the 10 dB safety ceiling."""
+    from dsamp.amplifier import Amplifier
+    from dsamp.backends.sim import SimulatedGB6000L
     cfg = Config()
-    a, backend = build_sim_system(cfg)
-    backend._output = True            # someone left it on from the front panel
-    backend.open = lambda: None       # an open() that does NOT switch it off
+    hw = cfg.hardware
+    sim = SimulatedGB6000L(hw.gain_min_dB, hw.gain_max_dB, hw.gain_step_dB,
+                           initial_gain_dB=gain, initial_on=on)
+    guard = _NoWriteDuringStart(sim)
+    a = Amplifier(guard, cfg)
+    events = []
+    a._on_event = lambda lvl, msg: events.append((lvl, msg))
+    return a, sim, guard, events
+
+
+def test_start_issues_no_state_changing_writes_and_adopts():
+    a, sim, guard, events = _adopting_system()
+    a.start()                                    # the guard raises on any set_*
+    try:
+        guard.armed = False
+        s = a.status()
+        # the status tells the truth: ON, 12.5 dB -- even above the ceiling
+        assert s.amp_on is True
+        assert s.gain_dB == 12.5 and s.gain_set_dB == 12.5
+        assert sim._output is True and sim._gain == 12.5      # untouched
+        assert guard.writes == []
+        msgs = " ".join(m for _, m in events)
+        assert "adopted" in msgs and "left as found" in msgs and "already ON" in msgs
+        # the ceiling still protects the NEXT explicit setting
+        a.set_gain(12.5)
+        assert _fresh(a).gain_dB == a.cfg.limits.gain_max_dB
+    finally:
+        guard.armed = False
+        a.shutdown()
+    # shutdown behaviour is unchanged: off + minimum gain
+    assert sim._output is False and sim._gain == a.cfg.limits.gain_min_dB
+
+
+def test_start_adopts_off_state_without_writing():
+    a, sim, guard, _ = _adopting_system(gain=3.0, on=False)
     a.start()
     try:
-        assert backend.read_output() is False
+        guard.armed = False
+        s = a.status()
+        assert s.amp_on is False and s.gain_dB == 3.0 and s.gain_set_dB == 3.0
+        assert guard.writes == []
     finally:
+        guard.armed = False
         a.shutdown()
 
 
-def test_startup_gain_is_clamped_to_the_ceiling():
-    cfg = Config()
-    cfg.amp.startup_gain_dB = 30.0    # above the 10 dB safety ceiling
-    a, backend = build_sim_system(cfg)
+def test_failed_startup_read_is_retried_and_then_adopted():
+    """If the device does not answer at start, nothing is written and nothing is
+    guessed into it: the poll adopts the state as soon as reads work."""
+    a, sim, guard, events = _adopting_system(gain=4.5, on=True)
+    sim.fail_reads = True
     a.start()
     try:
-        assert backend.read_gain() == cfg.limits.gain_max_dB
+        assert a.status().hw_error
+        assert sum("could not read" in m for _, m in events) == 1
+        a.poll_once()                            # still failing: no second error event
+        assert sum("could not read" in m for _, m in events) == 1
+        sim.fail_reads = False
+        a.poll_once()
+        s = a.status()
+        assert s.amp_on is True and s.gain_dB == 4.5 and s.gain_set_dB == 4.5
+        assert guard.writes == []
     finally:
+        guard.armed = False
         a.shutdown()
 
 

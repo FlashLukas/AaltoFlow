@@ -93,12 +93,54 @@ class Reading:
     source_range: float = float("nan")
 
 
+@dataclass
+class InstrumentState:
+    """What the 2450 is doing RIGHT NOW, as read back from it at start-up.
+
+    Lukas's rule (2026-09-27): a module READS the instrument on start and
+    adopts that state; it never changes anything just because it connected.
+    So the brain fills its settings from this instead of pushing the config.
+
+    Per-function values are dicts keyed "voltage" / "current" (see `FUNCS`):
+      level      -- the source level of that function (V / A)
+      limit      -- its compliance: ILIM (A) for "voltage", VLIM (V) for "current"
+      src_auto / src_range   -- source autorange and range of that function
+      meas_auto / meas_range -- measure autorange and range of that MEASURED quantity
+      nplc / four_wire       -- per measured quantity
+    sense_function -- what the instrument actually MEASURES ("voltage",
+                      "current", or anything else it reports, e.g. "resistance").
+                      This module assumes source V -> measure I and vice versa;
+                      a mismatch is reported, not silently corrected.
+    readback       -- source readback on (the `source` column is measured) or off
+                      (it is then just the setpoint).
+    """
+
+    function: str
+    sense_function: str
+    level: dict
+    limit: dict
+    src_auto: dict
+    src_range: dict
+    meas_auto: dict
+    meas_range: dict
+    nplc: dict
+    four_wire: dict
+    output: bool
+    terminals: str = "front"
+    readback: bool = True
+
+
 @runtime_checkable
 class SourceMeterBackend(Protocol):
     """A source-measure unit (the Keithley 2450)."""
 
     def open(self) -> None:
-        """Connect and initialise. MUST leave the output OFF."""
+        """Connect. QUERIES ONLY: must not change anything on the instrument
+        (not the output, not a range, not a unit). Clearing the error queue
+        (*CLS) is the one allowed write."""
+
+    def read_state(self) -> InstrumentState:
+        """Read the instrument's present settings (queries only)."""
 
     def close(self) -> None:
         """Output off and disconnect. Safe to call on shutdown/crash, twice."""
@@ -139,6 +181,9 @@ class SourceMeterBackend(Protocol):
     # ---- output and readings -------------------------------------------------
     def set_output(self, on: bool) -> None:
         """Output relay on/off."""
+
+    def set_terminals(self, where: str) -> None:
+        """"front" or "rear" terminals (only when the user asks for it)."""
 
     def get_output(self) -> bool:
         """True when the output is on."""

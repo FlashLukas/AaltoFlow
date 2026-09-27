@@ -25,7 +25,10 @@ What is different from the Keysight PNA-X, and why this is a file of its own:
   * Triggering is Copper Mountain's documented single-sweep recipe: trigger
     source BUS with continuous initiation ON puts the channel in "waiting for
     trigger"; `TRIG:SING` starts ONE sweep and stays pending until it ends, and
-    `*OPC?` answers "1" when it has. Only a sweep the brain triggered, after the
+    `*OPC?` answers "1" when it has. This set-up happens at the FIRST sweep
+    somebody asks this module for, never on connect: connecting only QUERIES
+    (Lukas, 2026-09-27), and the brain adopts the sweep S2VNA already holds.
+    Only a sweep the brain triggered, after the
     magnet settled, is ever read -- the same guarantee the PNA backend gets from
     SING/HOLD. On close the trigger source goes back to INTernal, so S2VNA's
     window is left sweeping for whoever uses it next.
@@ -110,6 +113,7 @@ class CmtVna:
         self._sparam = None
         self._correction = None
         self._pending = False
+        self._prepared = False            # set up for single sweeps yet? (see _take_over)
         self._points = 0
         self._started_at = math.nan
         self.warnings: list[str] = []
@@ -143,10 +147,55 @@ class CmtVna:
         r.write_termination = "\n"
         self._applied, self._readback, self._sparam = {}, {}, None
 
+        self._prepared = False
+        # CONNECT = LOOK (Lukas, 2026-09-27: read the state at start, change
+        # nothing). Queries and *CLS only; S2VNA keeps sweeping as it was
+        # until somebody asks THIS module for a trace (`_take_over`).
         self._idn = r.query("*IDN?").strip()               # "CMT,C1209,<serial>,<sw>/<hw>"
         if "C1209" not in self._idn.upper():
             self.warnings.append(f"expected a C1209, the analyser says {self._idn!r}")
         self._write("*CLS")                                # start with an empty error queue
+
+    def read_state(self) -> dict:
+        """What S2VNA is doing now, by queries only (see base.read_state). A
+        query it does not know becomes a warning and its key is left out. The
+        values read are what the analyser HOLDS, so the first sweep writes only
+        what the brain changed."""
+        r = self._res
+        st: dict = {}
+        for key, setter, cast in (("start_Hz", "start", float), ("stop_Hz", "stop", float),
+                                  ("points", "points", int), ("ifbw_Hz", "ifbw", float),
+                                  ("power_dBm", "power", float)):
+            try:
+                v = cast(float(r.query(_SETTERS[setter][1].format(ch=CH)).strip()))
+            except Exception as exc:
+                self.warnings.append(f"reading {key}: {exc}")
+                continue
+            st[key] = v
+            self._applied[setter] = v
+            self._readback[setter] = v
+        try:
+            p = r.query(f":CALC{CH}:PAR{TR}:DEF?").strip().upper()     # VERIFY: e.g. "S21"
+            st["sparam"] = p if p in model.SPARAMS else None
+        except Exception as exc:
+            self.warnings.append(f"reading the measured S-parameter: {exc}")
+            st["sparam"] = None
+        try:
+            st["trigger_source"] = r.query(":TRIG:SOUR?").strip().upper()   # VERIFY: INT|EXT|MAN|BUS
+        except Exception as exc:
+            self.warnings.append(f"reading the trigger source: {exc}")
+        st["averaging_on"] = self._query_bool(f":SENS{CH}:AVER?")        # VERIFY: 0/1 reply
+        st["correction_on"] = self._query_bool(f":SENS{CH}:CORR:STAT?")
+        # Driving S2VNA means taking over its trigger (a change), so the brain
+        # starts hands-off.
+        st["continuous"] = False
+        self.warnings.extend(self._errors())               # reading the queue changes nothing
+        return st
+
+    def _take_over(self) -> None:
+        """Set S2VNA up for single sweeps on demand. Runs at the FIRST
+        start_sweep, i.e. only when somebody asks this module to measure --
+        never on connect (see open)."""
         # one trace on channel 1, active, showing what we measure
         self._write(f":CALC{CH}:PAR:COUN 1")
         self._write(f":CALC{CH}:PAR{TR}:SEL")
@@ -160,8 +209,8 @@ class CmtVna:
         # channel waits for our TRIG:SING (manual 5.1, example 1).
         self._write(":TRIG:SOUR BUS")
         self._write(f":INIT{CH}:CONT ON")
-        self._check_errors("connecting")
-        self._ensure_sparam(self.cfg.sweep.sparam)
+        self._check_errors("taking over the sweep")
+        self._prepared = True
 
     def close(self) -> None:
         r, self._res = self._res, None
@@ -170,12 +219,15 @@ class CmtVna:
         try:
             if self._pending:
                 r.write(":ABOR")
-            # Hand S2VNA back sweeping on its own, like a front panel.
-            r.write(":TRIG:SOUR INT")
+            if self._prepared:
+                # Hand S2VNA back sweeping on its own, like a front panel --
+                # only if we took it over; one we only looked at stays as it was.
+                r.write(":TRIG:SOUR INT")
         except Exception:
             pass                                           # closing must not raise on a dead link
         finally:
             self._pending = False
+            self._prepared = False
             try:
                 r.close()
             except Exception:
@@ -202,10 +254,15 @@ class CmtVna:
                     sparam: str = "S21", field: FieldReading | None = None) -> None:
         if self._res is None:
             raise RuntimeError("C1209 is not connected")
+        first = not self._prepared
+        if first:
+            self._take_over()                  # the first sweep asked of this module
         f = np.asarray(freqs_Hz, dtype=float)
         want = {"start": float(f[0]), "stop": float(f[-1]), "points": int(f.size),
                 "ifbw": float(ifbw_Hz), "power": float(power_dBm)}
-        changed = self._apply(want)
+        # `first`: even with nothing to write, check the grid and learn the
+        # correction state once
+        changed = self._apply(want) or first
         if sparam != self._sparam:
             self._ensure_sparam(sparam)
             changed = True

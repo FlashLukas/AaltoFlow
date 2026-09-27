@@ -25,11 +25,14 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class Amp:
-    """Start-up values and the operating point.
+    """The operating point.
 
-    There is deliberately NO "amplifier on at start-up" option: the amplifier is
-    always switched off when the service starts (and when it stops). Turning it
-    on is always an explicit act.
+    There is deliberately NO start-up gain and NO "amplifier on at start-up"
+    option: at start the module READS the gain and the on/off state the
+    amplifier already holds and adopts them, writing nothing (Lukas,
+    2026-09-27). The old `startup_gain_dB` (pushed at every start) was removed
+    for that reason; an .ini that still has it loads fine, the key is ignored.
+    Changing the gain or switching the stage is always an explicit act.
 
     `frequency_Hz` and `input_dBm` are BOOKKEEPING: the amplifier has no
     frequency or input-level command. You tell the module what goes through it,
@@ -37,7 +40,6 @@ class Amp:
     power (and warns before the output approaches compression).
     """
 
-    startup_gain_dB: float = 0.0           # gain pushed at start (clamped to the envelope)
     frequency_Hz: float = 2_000_000_000.0  # signal frequency through the amp (2 GHz)
     input_dBm: float = -20.0               # expected input level
 

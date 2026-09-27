@@ -194,6 +194,28 @@ def test_brain_runs_on_the_real_backend_code_path():
     assert port.state["enabled"] is False
 
 
+def test_start_on_the_real_code_path_sends_only_queries():
+    """The exact bytes at start: a bare CR (framing flush) and queries ending in
+    '?'. Nothing with '=' and no `ens` -- the box is left heating at 55 C with
+    its own gains, and the status shows exactly that."""
+    port = FakeTC200Port()
+    port.state.update({"tact": 54.8, "tset": 55.0, "enabled": True, "pid": (70, 4, 1),
+                       "pmax": 6.0, "tmax": 90.0})
+    cfg = Config()
+    cfg.device.p_gain, cfg.device.pmax_W = 125, 18.0     # stored values that differ
+    heater = Heater(SerialTC200(cfg, serial_factory=lambda p, b, t: port), cfg)
+    heater.start(poll=False)
+    heater.poll_once()
+    assert port.sent, "nothing was sent at all?"
+    for cmd in port.sent:
+        assert cmd == "" or cmd.endswith("?"), f"start sent a non-query: {cmd!r}"
+    s = heater.status()
+    assert s.enabled is True and s.setpoint_C == 55.0 and s.temperature_C == 54.8
+    assert (s.p_gain, s.i_gain, s.d_gain, s.pmax_W, s.tmax_C) == (70, 4, 1, 6.0, 90.0)
+    assert port.state["enabled"] is True and port.state["pid"] == (70, 4, 1)
+    heater.shutdown()
+
+
 def test_missing_pyserial_is_a_clear_error(monkeypatch):
     import builtins
     real_import = builtins.__import__

@@ -214,6 +214,19 @@ class SimulatedSR830:
                     "slope": self.slope, "phase_deg": self.phase_deg,
                     "harmonic": self.harmonic, "sine_out_V": self.sine_V}
 
+    def read_state(self) -> dict:
+        with self._lock:
+            self._advance()
+            self._refuse_if_busy()
+            return {"internal": self.internal, "freq_Hz": self._ref_hz(),
+                    "harmonic": self.harmonic, "phase_deg": self.phase_deg,
+                    "trigger": self.trigger, "sine_out_V": self.sine_V,
+                    "source": self.source, "ground": self.ground,
+                    "coupling": self.coupling, "line": self.line,
+                    "sens": self.sens, "reserve": self.reserve, "tc": self.tc,
+                    "slope": self.slope, "sync": self.sync,
+                    "aux_out_V": list(self.aux_out)}
+
     def read_outputs(self) -> dict:
         with self._lock:
             self._advance()

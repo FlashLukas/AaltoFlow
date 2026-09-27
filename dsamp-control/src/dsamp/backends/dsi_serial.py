@@ -17,7 +17,7 @@ From [CL], the commands we use:
     GAIN <v>        set the gain, "0.5dB steps - 0 to 31"
     GAIN?           return the gain value
     OUTP:STAT ON|OFF / OUTP:STAT?   amplifier stage on/off / state
-    *IDN?  *CLS  *TEMP? (C)  *SYSVOLTS? (USB volts)  SYST:ERR?
+    *IDN?  *CLS (not used at start)  *TEMP? (C)  *SYSVOLTS? (USB volts)  SYST:ERR?
     *BUTTONS ON     re-enable the front-panel buttons after remote control
 COM settings: 115200 bps, 8 data bits, 1 stop, no parity, no flow control,
 command terminator = linefeed.
@@ -31,13 +31,11 @@ What [CL] does NOT say, and is therefore marked # VERIFY below:
     query helper therefore flushes the input buffer first.
   * whether GAIN accepts a fractional value in 0.5 dB steps ("GAIN 10.5") or
     wants an index. The example in [CL] is "GAIN 10".
-  * the real gain range of YOUR unit: [CL] says 0..31, the GB6000L web page
-    says 0..+28 dB typical, the PA6000L 3..34 dB in 0.25 dB steps. It lives in
-    config.hardware, not here.
-  * If your unit is the OLDER GB6000 ([DS]), none of GAIN/OUTP applies: it
-    speaks `AMP ON|OFF` and `VATT 0-1000` (an input attenuator, 0-25 dB).
-    This backend would then fail at the first GAIN?. Tell us, and it becomes a
-    second backend class.
+  * the real gain range of the unit: [CL] says 0..31, the GB6000L web page
+    says 0..+28 dB typical. It lives in config.hardware, not here.
+  * The unit on the bench is a GB6000L (confirmed by Lukas, 2026-09-27), so
+    the GAIN/OUTP command list applies. (The OLDER GB6000 of [DS] spoke
+    `AMP ON|OFF` + `VATT 0-1000` instead; not supported, not needed.)
 """
 
 from __future__ import annotations
@@ -86,9 +84,15 @@ class DsiSerialAmp:
                                   stopbits=1, timeout=self._timeout_s,
                                   write_timeout=self._timeout_s)
         time.sleep(0.2)                                  # VERIFY: boot/enumeration settle
-        self._ser.reset_input_buffer()
-        self._write("*CLS")                              # VERIFY [CL]: clears error codes
-        self._write("OUTP:STAT OFF")                     # the module's rule: OFF on connect
+        self._ser.reset_input_buffer()                   # local buffer only, not the device
+        # NOTHING is written to the amplifier here except the *IDN? query: the
+        # brain reads OUTP:STAT? and GAIN? next and ADOPTS them (Lukas's rule,
+        # 2026-09-27: read the state at start, change nothing). The *CLS and
+        # OUTP:STAT OFF that used to be here are gone; *CLS was harmless but
+        # served no purpose, since we do not read the error queue at start.
+        # VERIFY: does the firmware lock the front-panel buttons as soon as it
+        # gets ANY command, a query included (remote mode)? If so, that is the
+        # only state a start-up changes; close() gives them back (*BUTTONS ON).
         try:
             self._idn = self._query("*IDN?")             # VERIFY: reply format
         except Exception:

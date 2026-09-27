@@ -107,7 +107,8 @@ def build_manifest(src) -> dict:
            read_path=["rf_on"],
            set={"verb": "set_rf", "arg": "on"},
            settle={"policy": "echoes", "key": "rf_on"},
-           help="Master RF on/off. Always OFF when the service starts. "
+           help="Master RF on/off. Adopted from the instrument at start "
+                "(never switched by connecting); OFF when the service stops. "
                 "Switching ON also re-arms a tripped reverse-power protection."),
 
         # Scanned in MHz, commanded and published in Hz. `scale` sits on the

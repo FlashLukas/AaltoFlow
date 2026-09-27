@@ -70,7 +70,7 @@ def test_an_abandoned_scan_still_exposing_is_waited_out():
 def test_the_brain_waits_for_an_abandoned_scan():
     cfg = Config()
     cfg.scan.continuous = False
-    dll = FakeTlccs(polls_until_ready=2)
+    dll = FakeTlccs(polls_until_ready=2, t_int=0.01)
     spec = Spectrometer(TlccsSpectrometer(resource="USB0::x", dll=dll), cfg)
     spec.start(run=False)
     n1 = spec.acquire()
@@ -103,7 +103,61 @@ def test_the_brain_runs_on_the_real_backend():
     while spec.status().acquiring:
         spec.step()
     t = spec.get_trace("sample")
-    assert t["acq_id"] == n and np.allclose(t["spectrum"], 0.25)
+    # the fake unit was left at 50 ms: adopted, so 5x the 10 ms level, and
+    # scanning at the adopted time needed no setIntegrationTime at all
+    assert spec.status().integration_time_s == pytest.approx(0.05)
+    assert t["acq_id"] == n and np.allclose(t["spectrum"], 1.25)
+    assert "setIntegrationTime" not in dll.calls
     with pytest.raises(ValueError, match="simulator"):
         spec.set_light(False)
+    spec.shutdown()
+
+
+# ---- adopt-on-start (Lukas's rule 2026-09-27: read the state, change nothing) ----
+
+def test_open_issues_no_state_changing_writes():
+    """open() may only QUERY: the fake raises on any write (setIntegrationTime)."""
+    dll = FakeTlccs(t_int=0.25, forbid_writes=True)
+    b = TlccsSpectrometer(resource="USB0::x", dll=dll)
+    b.open()
+    assert set(dll.calls) <= {"init", "getWavelengthData(0)", "getIntegrationTime"}
+    assert b.integration_time() == pytest.approx(0.25)
+
+
+def test_brain_start_and_first_scan_write_nothing():
+    """Through the brain: start, then continuous scanning at the ADOPTED time.
+    Starting a scan is a measurement; no setting is sent."""
+    cfg = Config()                       # config says 10 ms; the unit is at 0.25 s
+    dll = FakeTlccs(polls_until_ready=0, t_int=0.25, forbid_writes=True)
+    spec = Spectrometer(TlccsSpectrometer(resource="USB0::x", dll=dll), cfg)
+    spec.start(run=False)
+    assert spec.status().integration_time_s == pytest.approx(0.25)
+    assert spec.step() and spec.status().hw_error == ""
+    assert "setIntegrationTime" not in dll.calls
+    spec.shutdown()
+
+
+def test_an_explicit_change_is_still_written():
+    """The config value is a default for when the USER sets one, and then it IS sent."""
+    dll = FakeTlccs(polls_until_ready=0, t_int=0.25)
+    cfg = Config()
+    cfg.scan.continuous = False
+    spec = Spectrometer(TlccsSpectrometer(resource="USB0::x", dll=dll), cfg)
+    spec.start(run=False)
+    spec.set_integration_time(0.02)
+    spec.acquire()
+    while spec.status().acquiring:
+        spec.step()
+    assert dll.calls.count("setIntegrationTime") == 1 and dll.t_int == pytest.approx(0.02)
+    spec.shutdown()
+
+
+def test_unreadable_integration_time_keeps_the_config_value():
+    """If getIntegrationTime fails, the brain keeps its config time (and the
+    first scan sends it, as before) rather than guessing."""
+    dll = FakeTlccs(polls_until_ready=0, t_int=0.25)
+    dll.tlccs_getIntegrationTime = lambda vi, pt: -1074001000
+    spec = Spectrometer(TlccsSpectrometer(resource="USB0::x", dll=dll), Config())
+    spec.start(run=False)
+    assert spec.status().integration_time_s == pytest.approx(0.01)
     spec.shutdown()

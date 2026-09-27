@@ -27,8 +27,15 @@ class BipolarSupplyBackend(Protocol):
     """A four-quadrant bipolar power supply (Kepco BOP 20-10)."""
 
     def open(self) -> None:
-        """Connect and initialise. Must leave the OUTPUT OFF and both channels
-        programmed to 0."""
+        """Connect. Must NOT change the instrument's state: no output switching,
+        no programming, no mode or range change (Lukas, 2026-09-27). Clearing
+        the error queue (*CLS) is the one write allowed."""
+
+    def read_state(self) -> dict:
+        """The instrument's present state, from queries only:
+        {"mode": "current"|"voltage", "output": bool,
+         "voltage_V": programmed VOLT, "current_A": programmed CURR}.
+        The brain adopts it at start (main channel + limit channel + output)."""
 
     def close(self) -> None:
         """Output off and disconnect. Safe to call on shutdown/crash. The brain

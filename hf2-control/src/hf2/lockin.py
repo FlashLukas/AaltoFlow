@@ -75,6 +75,7 @@ class Status:
     order: list = field(default_factory=list)
     pll_locked: list = field(default_factory=list)     # bool, or None in internal mode
     settle_s: list = field(default_factory=list)       # computed settling time
+    demod_enabled: list = field(default_factory=list)  # demodulator data stream on
     live: dict = field(default_factory=dict)           # x, y, r, theta_deg, freq_Hz, aux_in
     acq_id: int = 0
     acquiring: bool = False
@@ -125,6 +126,10 @@ class LockIn:
         # what the hardware reports back after a set (it may round the tau)
         self._tc_actual = [self.cfg.channel(i).time_constant_s for i in range(N_CHANNELS)]
         self._order_actual = [self.cfg.channel(i).order for i in range(N_CHANNELS)]
+        # Is each channel's demodulator streaming data? Read at start; only an
+        # explicit Apply (setup_channel) switches one on. A switched-off demod
+        # is not read by the poll thread (its values show as NaN / null).
+        self._demod_on = [True] * N_CHANNELS
 
         # written only by the polling thread (under _lock)
         self._live = _empty_live()
@@ -149,7 +154,16 @@ class LockIn:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the backend, push both channels' settings, start polling.
+        """Open the backend, READ both channels' settings, start polling.
+
+        Nothing is written to the instrument here (Lukas's rule, 2026-09-27:
+        "read the instrument state on startup, not change anything"). The
+        lock-in may be in the middle of someone's measurement, set up by hand
+        in LabOne; a start that pushed the .ini would silently change its time
+        constants, reference or input range. So the brain ADOPTS what it finds:
+        the values read become cfg (the live desired state), and the .ini is
+        only a set of defaults that reaches the instrument when the user applies
+        it (Settings > Apply / set_config) or uses a setter.
 
         `poll=False` skips the thread, so a test can drive `poll_once()` by hand.
         """
@@ -157,10 +171,17 @@ class LockIn:
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
-            self._connected = True
             for i in range(N_CHANNELS):
-                self._push_channel(i)
-        self._emit("info", f"connected: {self._idn or 'HF2LI'}")
+                self._adopt_channel(i)
+            self._connected = True
+        self._emit("info", f"connected: {self._idn or 'HF2LI'} (settings read from "
+                           f"the instrument, nothing changed)")
+        for i in range(N_CHANNELS):
+            ch = self.cfg.channel(i)
+            if not self._demod_on[i]:
+                self._emit("warn", f"ch{i + 1}: demodulator {ch.demod + 1} is switched off "
+                                   f"on the instrument, so it has no data. Enable it in "
+                                   f"LabOne, or press Apply in Settings.")
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._poll_loop,
@@ -329,6 +350,7 @@ class LockIn:
                 order=list(self._order_actual),
                 pll_locked=list(self._locked),
                 settle_s=settle,
+                demod_enabled=list(self._demod_on),
                 live={k: list(v) for k, v in self._live.items()},
                 acq_id=self._acq_id,
                 acquiring=a is not None,
@@ -349,6 +371,7 @@ class LockIn:
             with self._hw:
                 for i in range(N_CHANNELS):
                     self._push_channel(i)
+                    self._demod_on[i] = True       # setup_channel enables it
         self._emit("info", "settings applied")
 
     # ---- polling --------------------------------------------------------------------
@@ -375,9 +398,16 @@ class LockIn:
         """One read of both demodulators + aux, then advance any acquisition.
         Public so tests (and a single-threaded script) can drive it."""
         chans = [self.cfg.channel(i) for i in range(N_CHANNELS)]
+        on = list(self._demod_on)
         try:
             with self._hw:
-                rd = self.backend.read_demods([c.demod for c in chans])
+                # Only demodulators that stream data: asking a switched-off one
+                # for a sample would time out on the real HF2 every poll.
+                got = iter(self.backend.read_demods(
+                    [c.demod for c, e in zip(chans, on) if e]))
+                nan = float("nan")
+                rd = [next(got) if e else {"x": nan, "y": nan, "freq_Hz": nan}
+                      for e in on]
                 aux = list(self.backend.read_aux())
                 locked = [self.backend.pll_locked(c.oscillator)
                           if c.reference == "external" else None for c in chans]
@@ -472,6 +502,66 @@ class LockIn:
             ch.time_constant_s = _clamp(float(ch.time_constant_s), lim.tc_min_s, lim.tc_max_s)[0]
             ch.order = int(_clamp(int(ch.order), lim.order_min, lim.order_max)[0])
             ch.frequency_Hz = _clamp(float(ch.frequency_Hz), lim.freq_min_Hz, lim.freq_max_Hz)[0]
+
+    def _adopt_channel(self, i: int) -> None:
+        """READ channel i's demodulator (and its input, oscillator, PLL) and
+        make those values cfg -- the start-up half of "adopt, don't push".
+
+        Only the demodulator INDEX comes from cfg: which of the six demods is
+        "channel 1" is this module's choice, not instrument state. Everything
+        that demod is set to (input, oscillator, tau, order, reference ...) is
+        taken from the instrument. Values outside cfg.limits are adopted as
+        they are (clamping them here would make the status lie about what the
+        instrument does) and reported with a warning; a setter or Apply clamps.
+        """
+        ch = self.cfg.channel(i)
+        with self._hw:
+            r = self.backend.read_channel(ch.demod)
+        ch.signal_input = int(r["signal_input"])
+        ch.oscillator = int(r["oscillator"])
+        ch.harmonic = max(1, int(r["harmonic"]))
+        ch.phase_deg = float(r["phase_deg"])
+        # The input front end can be unreadable (None) when the demod listens to
+        # something that is not a signal input (e.g. an aux input); then the
+        # configured values stay, and the user is told they were not read.
+        front_unread = r.get("input_range_V") is None
+        if not front_unread:
+            ch.input_range_V = float(r["input_range_V"])
+            ch.input_ac = bool(r["input_ac"])
+            ch.input_50ohm = bool(r["input_50ohm"])
+            ch.input_diff = bool(r["input_diff"])
+        ch.reference = _parse_mode(r["reference"])
+        ch.ref_input = int(r["ref_input"])
+        f = float(r["frequency_Hz"])
+        if math.isfinite(f) and f > 0:
+            # On external reference this is the PLL's last frequency; keeping it
+            # means a later switch to internal stays where the signal was.
+            ch.frequency_Hz = f
+        ch.time_constant_s = float(r["time_constant_s"])
+        ch.order = int(r["order"])
+        self._tc_actual[i] = ch.time_constant_s
+        self._order_actual[i] = ch.order
+        self._demod_on[i] = bool(r["enabled"])
+        rate = float(r.get("rate_Sa_s", float("nan")))
+        if i == 0 and math.isfinite(rate) and rate > 0:
+            # One rate in cfg for both demods (hardware group); channel 1's wins.
+            # It is only written back on an explicit Apply.
+            self.cfg.hardware.demod_rate_Sa_s = rate
+        lim = self.cfg.limits
+        odd = []
+        if not lim.tc_min_s <= ch.time_constant_s <= lim.tc_max_s:
+            odd.append(f"time constant {_fmt_s(ch.time_constant_s)}")
+        if not lim.order_min <= ch.order <= lim.order_max:
+            odd.append(f"order {ch.order}")
+        if ch.reference == "internal" and not lim.freq_min_Hz <= f <= lim.freq_max_Hz:
+            odd.append(f"frequency {f:g} Hz")
+        if front_unread:
+            self._emit("warn", f"ch{i + 1}: demodulator {ch.demod + 1} is on input "
+                               f"{ch.signal_input}, whose range/coupling could not be "
+                               f"read; the Settings values are shown instead")
+        if odd:
+            self._emit("warn", f"ch{i + 1}: the instrument's " + ", ".join(odd)
+                               + " is outside this module's limits (adopted as is)")
 
     def _push_channel(self, i: int) -> None:
         """Send one channel's whole configuration to the hardware (with _hw held)."""

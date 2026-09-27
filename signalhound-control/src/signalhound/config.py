@@ -73,6 +73,14 @@ class Acquisition:
 
     timeout_s: float = 600.0          # a client gives up after this (narrow RBW sweeps are slow)
     continuous: bool = True           # sweep on its own between acquisitions (front-panel mode)
+    # Lukas's rule (2026-09-27): starting the software must not change the
+    # instrument. Sweeping means CONFIGURING the analyser with this file's
+    # settings, so at start the analyser is left exactly as saOpenDevice left
+    # it (idle, nothing configured) and `continuous` is switched off -- unless
+    # this is True. Turning continuous on, a setter, or an acquire configures
+    # it; that is a deliberate act. (The in-process simulator GUI sets it True:
+    # there is no instrument to disturb, and an empty screen explains nothing.)
+    sweep_on_start: bool = False
 
 
 @dataclass

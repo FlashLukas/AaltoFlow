@@ -161,3 +161,26 @@ def test_all_rf_off_waits_on_the_instrument_not_on_the_reply(brain):
     cfg, synth = brain
     a = _by_id(build_manifest(synth))["all_rf_off"]
     assert a["wait"]["ready"] == {"policy": "flag_only", "key": "rf_all_off"}
+
+
+def test_adopted_external_reference_shapes_the_manifest():
+    """Read-only start: a SynthHD found on its external reference must be
+    DESCRIBED that way (ext_ref a control), although the config default is
+    internal -- and the revision must differ from the internal case."""
+    from windfreak.backends.sim import SIM_BOOT_STATE
+    boot = dict(SIM_BOOT_STATE, reference="external", ext_MHz=10.0)
+    synth, _ = build_sim_system(Config(), external_ref_MHz=10.0, boot=boot)
+    synth.start()
+    try:
+        m = build_manifest(synth)
+        assert _by_id(m)["ext_ref"]["kind"] == "control"
+    finally:
+        synth.shutdown()
+    synth2, _ = build_sim_system(Config())            # boots on internal 10 MHz
+    synth2.start()
+    try:
+        m2 = build_manifest(synth2)
+        assert _by_id(m2)["ext_ref"]["kind"] == "indicator"
+        assert m2["revision"] != m["revision"]
+    finally:
+        synth2.shutdown()

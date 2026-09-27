@@ -31,11 +31,7 @@ with ``scale="stage"`` (pylablib loads the actuator calibration).
 
 from __future__ import annotations
 
-from ..config import (
-    Config,
-    axis_acceleration,
-    axis_velocity,
-)
+from ..config import Config
 
 
 class KinesisStage:
@@ -67,10 +63,15 @@ class KinesisStage:
             #     handle) would instead open once and pass channel= to calls.
             self._motors[axis] = motor
 
-        # Push the configured motion parameters straight away.
-        for axis in range(3):
-            self.set_velocity(axis, axis_velocity(self.cfg, axis))
-            self.set_acceleration(axis, axis_acceleration(self.cfg, axis))
+        # NO writes here (Lukas's adopt-on-start rule, 2026-09-27): opening the
+        # stage must not change it.  The old code pushed cfg velocity and
+        # acceleration to every axis at this point; now the brain READS them
+        # (read_velocity / read_acceleration) and adopts them into the config.
+        # VERIFY: that constructing KinesisMotor itself sends nothing that
+        # changes the controller (pylablib may enable the channel or query the
+        # stage scale on open -- a query is fine, an enable/parameter write is
+        # not).  Check by comparing velocity/position in the Kinesis GUI before
+        # and after starting the service.
 
     def close(self) -> None:
         for motor in self._motors:

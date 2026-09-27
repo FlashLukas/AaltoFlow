@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from superk import config as C
 from superk.config import Config, N_LINES
 from superk.laser import SafetyError
 from superk.sim_system import build_sim_system
@@ -44,17 +45,239 @@ def test_start_never_emits_and_rf_is_off(rig):
     assert backend.read_emission() is False
 
 
-def test_start_switches_off_emission_left_on():
+def test_emission_off_on_start_is_an_opt_in():
+    """Default: an emitting laser is ADOPTED. The old behaviour (switch it off)
+    is still there, but only when asked for."""
     cfg = Config()
+    cfg.hardware.emission_off_on_start = True
     laser, backend = build_sim_system(cfg)
-    backend.open()
-    backend.warmup_s = 0.0
-    backend.set_emission(True)                 # someone used the front panel
-    assert backend.read_emission()
+    backend.preset(emission=True)              # someone used the front panel
     laser.start()
     try:
         assert backend.read_emission() is False
         assert laser.status().emission_set is False
+    finally:
+        laser.shutdown()
+
+
+# ---- adopt on start (Lukas, 2026-09-27: "read the state, change nothing") ------
+
+#: a laser left in a state NOTHING in the config would produce: emitting, RF on,
+#: 23.4 %, the nIR2 crystal, line 1 at 1234.5 nm / 42 %, line 4 at 1000 nm / 7 %
+LEFT = dict(emission=True, rf=True, power_pct=23.4, crystal=2,
+            wavelengths_nm=[1234.5, 900, 950, 1000, 1100, 1200, 1300, 1350],
+            amplitudes_pct=[42, 0, 0, 7, 0, 0, 0, 0], watchdog_s=10)
+
+# the only write a start may do: arm the laser's watchdog (safety, see laser.py)
+ALLOWED_AT_START = {"set_watchdog"}
+
+
+def _started(preset, **hw):
+    cfg = Config()
+    cfg.hardware.poll_hz = 20.0
+    for k, v in hw.items():
+        setattr(cfg.hardware, k, v)
+    laser, backend = build_sim_system(cfg)
+    backend.preset(**preset)
+    backend.writes.clear()                     # the world before the service
+    events = []
+    laser._on_event = lambda lvl, msg: events.append((lvl, msg))
+    laser.start()
+    return laser, backend, events
+
+
+def test_start_writes_nothing_to_the_laser():
+    laser, backend, _ = _started(LEFT)
+    try:
+        assert backend.writes == []            # watchdog already right -> not even that
+    finally:
+        laser.shutdown()
+
+
+def test_start_only_arms_the_watchdog_when_it_differs():
+    laser, backend, events = _started({**LEFT, "watchdog_s": 0})
+    try:
+        assert backend.writes == [("set_watchdog", 10)]
+        assert {w[0] for w in backend.writes} <= ALLOWED_AT_START
+        assert any("watchdog" in m for _, m in events)
+    finally:
+        laser.shutdown()
+
+
+def test_start_with_a_strict_backend_that_refuses_writes():
+    """A backend whose every state-changing method raises: start() must still
+    succeed (it only reads)."""
+    cfg = Config()
+    laser, backend = build_sim_system(cfg)
+    backend.preset(**LEFT)
+
+    def refuse(name):
+        def f(*a, **k):
+            raise AssertionError(f"start() wrote {name}{a}")
+        return f
+    for name in ("set_emission", "set_rf", "set_power", "select_crystal",
+                 "set_wavelength", "set_amplitude", "reset_interlock"):
+        setattr(backend, name, refuse(name))
+    laser.start()
+    try:
+        assert laser.status().connected
+    finally:
+        laser._stop.set()
+        laser._thread.join(2)
+        laser._connected = False               # shutdown would write (and must)
+        laser.shutdown()
+
+
+def test_status_after_start_is_the_laser_as_it_was_left():
+    laser, backend, events = _started(LEFT)
+    try:
+        s = laser.status()
+        assert s.emission_on and s.emission_set and s.emission_state == "on"
+        assert s.emission_guarded is False     # nobody here switched it on
+        assert s.rf_on and s.rf_set
+        assert s.power_pct == 23.4 and s.power_set_pct == 23.4
+        assert s.filter == "nIR2" and s.crystal == 2
+        assert (s.filter_min_nm, s.filter_max_nm) == (800.0, 1400.0)
+        assert laser.wavelength_range() == (800.0, 1400.0)
+        assert s.wavelength_set_nm[0] == 1234.5 and s.amplitude_set_pct[0] == 42.0
+        assert s.wavelength_set_nm[3] == 1000.0 and s.amplitude_set_pct[3] == 7.0
+        assert s.wavelength_nm == s.wavelength_set_nm
+        assert any("already EMITTING" in m for lvl, m in events if lvl == "warn")
+        time.sleep(0.3)                        # and the poll does not "fix" anything
+        assert backend.writes == []
+        assert backend.read_emission() and backend.read_rf()
+    finally:
+        laser.shutdown()
+
+
+def test_adopted_power_above_the_limit_is_announced_not_changed():
+    laser, backend, events = _started({**LEFT, "power_pct": 80.0})
+    try:
+        assert laser.status().power_pct == 80.0
+        assert backend.writes == []
+        assert any("outside this module's limits" in m for lvl, m in events if lvl == "warn")
+        laser.set_power(80.0)                  # an explicit request IS clamped
+        assert backend.read_power() == laser.cfg.limits.power_max_pct
+    finally:
+        laser.shutdown()
+
+
+def test_unknown_crystal_is_announced_not_switched():
+    """The driver reaches a crystal the table does not list: say so, and do
+    not touch the RF switch at start."""
+    cfg = Config()
+    laser, backend = build_sim_system(cfg)
+    backend._ranges[3] = (600.0, 1000.0)
+    backend.preset(**{**LEFT, "crystal": 3})
+    backend.writes.clear()
+    events = []
+    laser._on_event = lambda lvl, msg: events.append((lvl, msg))
+    laser.start()
+    try:
+        assert backend.writes == [] and backend.read_crystal() == 3
+        assert laser.status().crystal == 3
+        assert any("not in the filter table" in m for lvl, m in events if lvl == "warn")
+    finally:
+        laser.shutdown()
+
+
+def test_unchanged_settings_apply_writes_nothing():
+    laser, backend, _ = _started(LEFT)
+    try:
+        laser.apply_config()
+        assert backend.writes == []
+    finally:
+        laser.shutdown()
+
+
+def test_a_changed_preset_is_sent_and_only_that_one():
+    laser, backend, _ = _started({**LEFT, "emission": False})
+    try:
+        laser.cfg.startup.power_pct = 12.5
+        wl = C.floats(laser.cfg.startup.wavelengths_nm, N_LINES)
+        wl[1] = 1111.0                          # line 2 only
+        laser.cfg.startup.wavelengths_nm = C.join(wl)
+        laser.apply_config()
+        assert ("set_power", 12.5) in backend.writes
+        assert [w for w in backend.writes if w[0] == "set_wavelength"] == \
+            [("set_wavelength", 1, 1111.0)]
+        assert not any(w[0] in ("set_amplitude", "select_crystal", "set_rf",
+                                "set_emission") for w in backend.writes)
+        laser.apply_config()                    # the same again: nothing new
+        n = len(backend.writes)
+        laser.apply_config()
+        assert len(backend.writes) == n
+    finally:
+        laser.shutdown()
+
+
+# ---- lost-client guard (Lukas, 2026-09-27) ------------------------------------------
+
+def _guard_rig(timeout=0.3):
+    return _started({**LEFT, "emission": False}, client_timeout_s=timeout)
+
+
+def test_silent_owner_loses_emission():
+    laser, backend, events = _guard_rig()
+    try:
+        laser.set_emission(True, owner="gui-1")
+        assert wait_for(lambda: laser.status().emission_guarded)
+        assert wait_for(lambda: backend.writes[-1] == ("set_emission", False), 3.0)
+        assert laser.status().emission_set is False or wait_for(
+            lambda: laser.status().emission_set is False)
+        assert any("silent" in m for lvl, m in events if lvl == "warn")
+    finally:
+        laser.shutdown()
+
+
+def test_pinging_owner_keeps_emission_and_others_do_not_count():
+    laser, backend, _ = _guard_rig()
+    try:
+        laser.set_emission(True, owner="gui-1")
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end:           # 3x the timeout, owner pinging
+            laser.touch("gui-1")
+            laser.touch("someone-else")
+            time.sleep(0.05)
+        assert laser.status().emission_set is True
+        end = time.monotonic() + 1.0            # only the OTHER client talks now
+        while time.monotonic() < end and laser.status().emission_set:
+            laser.touch("someone-else")
+            time.sleep(0.05)
+        assert laser.status().emission_set is False
+    finally:
+        laser.shutdown()
+
+
+def test_emission_without_owner_is_never_cut():
+    """A scan routine (scan-core sends no owner) must survive an hour of
+    silence -- here 4x the timeout."""
+    laser, backend, _ = _guard_rig()
+    try:
+        laser.set_emission(True)
+        time.sleep(1.2)
+        s = laser.status()
+        assert s.emission_set is True and s.emission_guarded is False
+    finally:
+        laser.shutdown()
+
+
+def test_scan_takes_over_ownership_from_a_gui():
+    laser, _, _ = _guard_rig()
+    try:
+        laser.set_emission(True, owner="gui-1")
+        laser.set_emission(True)                # before_scan routine: emission_on
+        time.sleep(1.0)                         # the GUI is gone
+        assert laser.status().emission_set is True
+    finally:
+        laser.shutdown()
+
+
+def test_adopted_emission_has_no_guard():
+    laser, _, _ = _started(LEFT, client_timeout_s=0.3)
+    try:
+        time.sleep(1.0)
+        assert laser.status().emission_set is True
     finally:
         laser.shutdown()
 
@@ -269,21 +492,6 @@ def test_unreachable_crystal_keeps_old_one_and_leaves_rf_off(rig):
     assert wait_for(lambda: laser.status().rf_set is False)
 
 
-def test_unreachable_startup_crystal_adopts_the_connected_one():
-    cfg = Config()
-    cfg.startup.filter = "IR"
-    laser, backend = build_sim_system(cfg)
-    del backend._ranges[4]
-    events = []
-    laser._on_event = lambda lvl, msg: events.append((lvl, msg))
-    laser.start()                               # must not refuse to start
-    try:
-        assert laser.active_filter() == "VIS-nIR"
-        assert any("start-up crystal" in m for lvl, m in events if lvl == "warn")
-    finally:
-        laser.shutdown()
-
-
 def test_numeric_filter_is_an_index_and_bad_index_refused(rig):
     laser, _, _ = rig
     laser.set_filter("1")
@@ -388,3 +596,37 @@ def test_real_backend_refuses_switch_under_rf_and_names_the_cable():
     bus.regs[(b.rf_addr, nktp.REG_RF_POWER)] = 0
     with pytest.raises(nktp.NKTError, match="move the RF cable to SuperK SELECT #2"):
         b.select_crystal(4)                                   # cable is at SELECT #1
+
+
+def test_real_backend_start_is_read_only():
+    """The REAL backend + brain start against a fake register map: no register
+    is written at start when the watchdog already has the configured value."""
+    from superk.backends import nktp
+    from superk.laser import SuperK
+    b = nktp.NktpSuperK("COM99")
+    bus = _FakeBus(cable_at_select=0)
+    bus.attach(b)
+    b.open = lambda: None                      # no DLL here; attach() connected it
+    bus.regs[(b.extreme_addr, nktp.REG_WATCHDOG)] = 10
+    bus.regs[(b.extreme_addr, nktp.REG_POWER)] = 234        # 23.4 %
+    bus.regs[(b.rf_addr, nktp.REG_RF_POWER)] = 1
+    bus.regs[(b.rf_addr, nktp.REG_WL0)] = 700000            # 700 nm
+    bus.regs[(b.rf_addr, nktp.REG_AMP0)] = 555              # 55.5 %
+    cfg = Config()
+    laser = SuperK(b, cfg)
+    laser.start()
+    try:
+        assert bus.writes == []
+        s = laser.status()
+        assert s.power_pct == 23.4 and s.rf_on and s.crystal == 1
+        assert s.wavelength_set_nm[0] == 700.0 and s.amplitude_set_pct[0] == 55.5
+    finally:
+        laser._stop.set()
+        laser._thread.join(2)
+    bus.regs[(b.extreme_addr, nktp.REG_WATCHDOG)] = 0      # now it differs
+    bus.writes.clear()
+    laser2 = SuperK(b, cfg)
+    laser2.start()
+    laser2._stop.set()
+    laser2._thread.join(2)
+    assert bus.writes == [(b.extreme_addr, nktp.REG_WATCHDOG, 10)]

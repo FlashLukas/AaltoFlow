@@ -37,7 +37,13 @@ AXES = ("X", "Y", "Z")
 # --------------------------------------------------------------------------- #
 @dataclass
 class Motion:
-    """Default motion parameters pushed to each motor on start."""
+    """Motion parameters per axis.
+
+    Since 2026-09-27 these are NOT pushed at start: the brain reads the
+    controller's own velocity/acceleration and copies them in here, so this
+    group always shows what the motors really do.  The .ini values are only
+    defaults that reach the controller when a user sets them (set_velocity,
+    Settings > OK, set_config)."""
 
     # Max (target) velocity per axis, mm/s.
     vel_x: float = 2.0
@@ -50,6 +56,8 @@ class Motion:
     # Default jog step used by the GUI +/- buttons, mm.
     jog_step: float = 0.5
     # If True, every axis is homed automatically when the service starts.
+    # Default False and should stay so: homing MOVES the stage, and the suite
+    # rule is that starting the software changes nothing on the instrument.
     home_on_start: bool = False
 
 

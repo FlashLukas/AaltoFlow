@@ -33,7 +33,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, stream=None, help=""):
+       settle=None, args=None, danger=False, stream=None, help="", wait=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -45,7 +45,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("stream", stream), ("help", help)):
+                 ("stream", stream), ("help", help), ("wait", wait)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -92,6 +92,25 @@ def read_path(status: dict, path):
 
 
 AXES = ("X", "Y")
+
+
+def _routine_wait(timeout_s: float) -> dict:
+    """How a scan waits for a numbered routine (gotcha #17): the reply's
+    `routine_id` must show up in status, then routine_running must fall, then
+    routine_error must read "OK"."""
+    return {"target_key": "routine_id",
+            "ready": {"policy": "adopt_then_flag", "setpoint_key": "routine_id",
+                      "flag_key": "routine_running", "invert": True},
+            "check": {"key": "routine_error", "equals": "OK"},
+            "timeout_s": round(float(timeout_s), 0)}
+
+
+def _step_size_timeout(brain, axis: int) -> float:
+    """Three limit-to-limit legs at MV4's 666 steps/s at the smallest
+    calibrated step, with margin (the brain's own per-leg limit is the same)."""
+    k = min(brain.um_per_step(axis, +1), brain.um_per_step(axis, -1))
+    leg = float(brain.cfg.hardware.travel_um) / max(k, 0.005) / 666.0 * 3.0 + 30.0
+    return 3 * leg
 
 
 def build_manifest(brain) -> dict:
@@ -177,6 +196,29 @@ def build_manifest(brain) -> dict:
                     "this open-loop stage has to a home. Not the same as "
                     "'Zero here', which only moves the display origin."),
         ]
+        if cfg.hardware.has_limit_switch:
+            # Limit-switch stage (AG-LS25). These run as ROUTINES: the reply
+            # carries a routine number, status shows it with routine_running,
+            # and routine_error must be "OK" -- finished is not succeeded.
+            params += [
+                _p(f"measured_um_{low}", f"Measured position {ax}", "indicator", "float",
+                   unit="um", group="Limit switch", order=80 + i, decimals=0,
+                   read_path=["measured_um", i],
+                   help="Last absolute position from MA / PA / the step-size run, um "
+                        "from the negative limit (datasheet accuracy 100 um)."),
+                _p(f"measure_step_size_{low}", f"Measure step size {ax}", "action",
+                   "action", group="Limit switch", order=110 + i, danger=True,
+                   wait=_routine_wait(_step_size_timeout(brain, i)),
+                   help="Limit to limit and back at the amplitudes in force: stores "
+                        "the forward and backward step size and leaves the stage at "
+                        "the NEGATIVE limit with the datum there. Travels the whole "
+                        "stage (minutes)."),
+                _p(f"measure_position_{low}", f"Measure position {ax} (MA)", "action",
+                   "action", group="Limit switch", order=112 + i, danger=True,
+                   wait=_routine_wait(float(cfg.hardware.limit_op_timeout_s) + 30.0),
+                   help="The controller finds the absolute position by counting steps "
+                        "between the limits (it cuts the USB link up to 2 min)."),
+            ]
 
     params += [
         _p("step_large", "Steps: large", "control", "bool", group="Presets",
@@ -197,11 +239,12 @@ def build_manifest(brain) -> dict:
            danger=True),
     ]
     # Actions are fired by their id (the control panel and scan routines send
-    # the id as the verb). Both finish when the reply comes back, which a
-    # `wait` block says, so a scan routine may use them (e.g. Datum X before a
-    # scan).
+    # the id as the verb). Datum and STOP finish when the reply comes back,
+    # which an `immediate` wait block says, so a scan routine may use them
+    # (e.g. Datum X before a scan). The limit-switch routines above carry
+    # their own wait block.
     for p in params:
-        if p["kind"] == "action":
+        if p["kind"] == "action" and "wait" not in p:
             p["wait"] = {"ready": {"policy": "immediate"}}
     manifest = {"schema": SCHEMA_VERSION, "module": "agilis",
                 "label": "Agilis stage", "parameters": params}

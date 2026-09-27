@@ -30,7 +30,7 @@ def main() -> int:
     src.start()
     s = src.status()
     print("IDN:", s.idn)
-    assert s.rf_on is False, "RF must be off after start"
+    assert s.rf_on is False, "the sim powers up with RF off and start() must adopt it"
 
     src.set_frequency(1.5e9)
     src.set_power(-10.0)

@@ -309,7 +309,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.event.connect(self._on_event)
         self.ctrl._on_event = lambda lvl, msg: self.bridge.event.emit(lvl, msg)
 
-        # start the brain (opens the backend, RF off) and the refresh timer
+        # start the brain (opens the backend, adopts the instrument's state)
+        # and the refresh timer
         self.ctrl.start()
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(60)
@@ -363,6 +364,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rf_btn.clicked.connect(self._toggle_rf)
         col.addWidget(self.rf_btn)
         self._rf_on = False
+        self._spins_seeded = False
 
         # frequency (spin + unit + set)
         fcard, flay = _card("Frequency")
@@ -518,6 +520,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh(self):
         s = self.ctrl.status()
         self._rf_on = bool(s.rf_on)
+
+        # The entry boxes start at the ADOPTED setpoints (what the instrument
+        # was doing when we connected), not at the config defaults -- once,
+        # at the first frame from a connected brain/service, so typing is
+        # never overwritten afterwards.
+        if not self._spins_seeded and getattr(s, "connected", False):
+            self._spins_seeded = True
+            self._apply_freq_unit_range(initial_hz=s.frequency_set_Hz)
+            self.power_spin.setValue(s.power_set_dBm)
 
         self.freq_value.setText(f"{s.frequency_Hz / 1e6:.5f}")
         self.power_value.setText(f"{s.power_dBm:+.1f}")

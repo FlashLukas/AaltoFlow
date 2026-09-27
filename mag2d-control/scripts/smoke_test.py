@@ -57,7 +57,8 @@ def main() -> int:
     cfg = Config()
     clock = FakeClock()
     ctrl, sim = build_sim_system(cfg, clock=clock, sleep=clock.sleep, seed=1)
-    ctrl.start(run_thread=False)
+    ctrl.start(run_thread=False)        # adopts the magnet's state: OFF here
+    ctrl.set_output(True)
     ctrl.set_field(150.0, 45.0)
     t = run_until_stable(ctrl, clock)
     s = ctrl.status()

@@ -7,8 +7,10 @@ Its jobs:
   * CLAMP every gain request to the safety envelope -- the intersection of what
     the device accepts and your `limits` -- and QUANTISE it to the device step
     (0.5 dB), announcing a clamp as a warn event;
-  * keep the amplifier OFF at start and switch it OFF (and to minimum gain) on
-    shutdown, crash or Ctrl-C;
+  * ADOPT the amplifier's state at start -- read the gain and the on/off state
+    the device already holds and write NOTHING (Lukas, 2026-09-27: "all modules
+    should read the instrument state on startup, not to change anything"); and
+    switch it OFF (and to minimum gain) on shutdown, crash or Ctrl-C;
   * own the ONE poll thread that reads the hardware, and publish a status
     snapshot built from those reads.
 
@@ -76,8 +78,13 @@ class Amplifier:
         self.cfg = cfg or Config()
         a = self.cfg.amp
         # desired state -- the ONLY things setters touch
-        self._gain_set = float(a.startup_gain_dB)
-        self._amp_on = False                     # never on at start, whatever the config
+        # Until start() has READ the device these are placeholders only: the
+        # minimum gain, stage off. start() replaces them with what the amplifier
+        # really holds (adoption); nothing here is ever written to it at start.
+        self._gain_set = float(self.cfg.hardware.gain_min_dB)
+        self._amp_on = False
+        self._adopted = False                    # True once the device state was read
+        self._adopt_failed = False               # the "could not read" event is sent once
         self._freq = float(a.frequency_Hz)
         self._input = float(a.input_dBm)
         self._connected = False
@@ -128,24 +135,60 @@ class Amplifier:
     # ---- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Open the backend, force the stage OFF, push the start-up gain, start polling."""
+        """Open the backend, ADOPT what the amplifier is doing, start polling.
+
+        Queries only. Why no writes: the amplifier may be in use (driven from the
+        front panel, or left running by a measurement) when the service starts,
+        and a restart of the software must not change the experiment. So the
+        stage stays on if it was on, and the gain stays where it was -- even
+        above your safety ceiling: the ceiling limits what THIS module sets, it
+        is not a reason to change the device behind your back. It is enforced
+        on the next set_gain (or set_config), and a warn event says so now.
+        """
         with self._hw:
             self.backend.open()
             self._connected = True
-            self.backend.set_output(False)           # belt and braces: OFF at start
-            self._amp_on = False
-            lo, hi = self.gain_range()
-            g, _ = _clamp(self._gain_set, lo, hi)
-            self._gain_set = self._quantise(g)
-            self.backend.set_gain(self._gain_set)
             self._idn = self.backend.idn()
-        self._emit("info", f"connected: {self._idn or 'amplifier'} "
-                           f"(stage OFF, gain {self._gain_set:g} dB)")
+        self._adopt()
         self.poll_once()                             # a real snapshot before anyone asks
         self._stop.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="dsamp-poll",
                                         daemon=True)
         self._thread.start()
+
+    def _adopt(self) -> bool:
+        """Read the on/off state and the gain from the device and take them as
+        the brain's own (desired = actual). Returns False if the read failed;
+        poll_once() then retries on every cycle until it works, so a device that
+        answers late is still adopted, never overwritten with a guess."""
+        try:
+            with self._hw:
+                on = bool(self.backend.read_output())
+                gain = float(self.backend.read_gain())
+                self._amp_on = on
+                self._gain_set = gain
+                self._adopted = True
+        except Exception as exc:
+            if self._adopt_failed:                   # said once; poll_once shows hw_error
+                return False
+            self._adopt_failed = True
+            self._emit("error", f"could not read the amplifier state at start "
+                                f"({type(exc).__name__}: {exc}); nothing was written, "
+                                f"will retry")
+            return False
+        self._emit("info", f"connected: {self._idn or 'amplifier'} -- adopted its "
+                           f"state: stage {'ON' if on else 'OFF'}, gain {gain:g} dB "
+                           f"(nothing written)")
+        lo, hi = self.gain_range()
+        if gain > hi + 1e-9 or gain < lo - 1e-9:
+            self._emit("warn", f"the amplifier holds {gain:g} dB, outside the allowed "
+                               f"{lo:g}..{hi:g} dB -- left as found; the next gain "
+                               f"setting will be clamped")
+        if on:
+            self._emit("warn", "the amplifier stage was already ON -- left on "
+                               "(the output must be terminated, 50 ohm)")
+            self._check_output_level()
+        return True
 
     def shutdown(self) -> None:
         """Stage OFF, gain to minimum, disconnect. Safe to call twice / on a crash."""
@@ -252,6 +295,8 @@ class Amplifier:
         this; tests may call it to avoid waiting a poll period."""
         if not self._connected:
             return
+        if not self._adopted:                           # start-up read failed: retry
+            self._adopt()
         err = ""
         try:
             with self._hw:

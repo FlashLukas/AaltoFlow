@@ -68,12 +68,7 @@ from __future__ import annotations
 
 import threading
 
-from ..config import (
-    Config,
-    axis_acceleration,
-    axis_rate,
-    axis_voltage,
-)
+from ..config import Config
 
 
 class KinesisKim:
@@ -102,13 +97,20 @@ class KinesisKim:
         # A single handle for the whole K-Cube; channels addressed per call.
         serial = (self.cfg.hardware.serial or "").strip() or self._find_kim101(Thorlabs)
         with self._lock:
+            # VERIFY: that pylablib's constructor only opens the link and
+            # queries (device info), and sends no drive-parameter / enable
+            # command of its own.
             self._dev = Thorlabs.KinesisPiezoMotor(serial)
-            # Push the configured drive parameters straight away (this also
-            # fills the drive-parameter cache for every axis).
+            # ADOPT, do not push (Lukas, 2026-09-27: "all modules should read
+            # the instrument state on startup, not to change anything"). Until
+            # then open() wrote the .ini's 85 V / 300 / 5000 to every channel,
+            # silently replacing what the controller had been set to (112 V /
+            # 500 / 1000 in Kinesis on the lab unit). Now we only READ the drive
+            # parameters; this fills the cache, and the brain copies them into
+            # its config so the GUI shows what the controller really does.
+            # get_drive_parameters is a query (verified on the lab unit).
             for axis in range(3):
-                self.set_step_rate(axis, axis_rate(self.cfg, axis))
-                self.set_acceleration(axis, axis_acceleration(self.cfg, axis))
-                self.set_voltage(axis, axis_voltage(self.cfg, axis))
+                self._refresh_drive(axis)
 
     @staticmethod
     def _find_kim101(thorlabs) -> str:

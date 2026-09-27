@@ -23,10 +23,13 @@ _TABS = [("sweep", "Sweep"), ("tracking", "Tracking gen."), ("acquisition", "Acq
          ("ui", "Appearance")]
 
 _HINTS = {
-    "sweep": "Applied at the next sweep. A change during an acquisition restarts it. "
+    "sweep": "Read FROM the instrument at start (nothing is written then); a value "
+             "here is sent only when you apply it. "
+             "Applied at the next sweep. A change during an acquisition restarts it. "
              "detector: auto, normal, pos_peak, neg_peak or sample. A *_auto flag "
              "on = the instrument's coupling decides that value.",
-    "tracking": "The tracking generator. tg_on is forced OFF at every start. "
+    "tracking": "The tracking generator. Read from the instrument at start (left as it "
+                "is); switched OFF when the service stops. "
                 "level_dBm: -30 ... 0 dBm.",
     "acquisition": "An acquisition power-averages `averages` sweeps that all started after "
                    "the trigger. continuous = sweep on its own between acquisitions.",

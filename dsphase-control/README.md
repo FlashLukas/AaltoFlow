@@ -14,8 +14,15 @@ Ports **5589 / 5590**.
 |---|---|
 | Phase | `set_phase{phase_deg}` -- rounded to the device step, wrapped into -180..+180, reported back in *your* branch (ask 270, the unit holds -90, status says 270) |
 | Output attenuator | `set_attenuation{attenuation_dB}` -- 0..30 dB, 0.25 dB steps |
-| RF output | `set_output{on}` -- OFF at start and on shutdown |
+| RF output | `set_output{on}` -- left as found at start (read, never written), OFF on shutdown |
 | Carrier | `set_frequency{frequency_MHz}` -- bookkeeping (the V3 command list has no frequency command); selects the datasheet accuracy band |
+
+**Start-up reads, never writes.** When the service starts it only asks the
+unit (`*PING?`, `*IDN?`, `PHASE?`, `ATT?`, `OUTP:STAT?`) and adopts what it
+holds as its setpoints -- phase, attenuation and RF on/off (ON included, with a
+warning in the log). Nothing is sent until you set something, so restarting the
+service never disturbs the RF path. The carrier frequency has no query; it
+starts from `signal.frequency_MHz` in the config and is not sent at start.
 
 Everything in status is a **readback** from the unit, taken by a worker thread,
 so a scan-core "echoes" settle on `phase_deg` really means "the unit holds it".

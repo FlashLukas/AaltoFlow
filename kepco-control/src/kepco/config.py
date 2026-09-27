@@ -31,9 +31,15 @@ MODES = ("current", "voltage")
 @dataclass
 class Output:
     """The operating point. The service mirrors the LIVE values in here (so
-    get_config / Save config capture what the supply is doing now); at start-up
-    they are the initial values. The OUTPUT ITSELF always starts OFF -- there is
-    deliberately no "output on at start" option."""
+    get_config / Save config capture what the supply is doing now).
+
+    Nothing in here is PUSHED to the instrument at start (Lukas, 2026-09-27:
+    "read the instrument state on startup, not change anything"). At start the
+    brain READS the BOP's mode, main setpoint, limit and output switch and
+    overwrites the active mode's values here with what it found. The values
+    reach the instrument only when a user sets them (a setter, set_config or
+    the Settings dialog). The other mode's setpoint and limit (which the BOP
+    does not hold) stay as loaded, for when that mode is selected."""
 
     mode: str = "current"            # "current" or "voltage"
     current_A: float = 0.0           # main-channel setpoint in current mode
@@ -84,6 +90,9 @@ class Safety:
         (a `ping` counts) has arrived for this long, ramp to zero and switch the
         output off. The GUI client pings every second; scan-core does not, so it
         is OFF (0) by default -- enable it only for GUI-driven sessions.
+        It arms only once a client has switched the output on or sent a
+        setpoint: an output found live at start (adopted) is never ramped down
+        by the watchdog alone.
     """
 
     shutdown_ramp_s: float = 5.0
@@ -106,12 +115,17 @@ class Acquisition:
 class Hardware:
     """Where the instrument lives. Only the REAL backend reads these (apart from
     the poll rate). GPIB address 6 is the BIT 4886 factory default (manual sec.
-    2.2.1) -- but clMag's Kepco also sits at 6, so check which unit this is."""
+    2.2.1). On the rig this is the SAME physical BOP clMag-control drives
+    (Lukas, 2026-09-27): never run the two services at once.
+
+    full_range pins the DAC range (CURR:RANG 1 / VOLT:RANG 1) after an
+    EXPLICIT mode change only -- never at start, where the range is left as
+    found (start-up reads, it does not write)."""
 
     visa: str = "GPIB0::6::INSTR"
     visa_timeout_ms: int = 5000
     poll_hz: float = 5.0             # how often V and I are measured
-    full_range: bool = True          # VOLT:RANG 1 -- no transient at 1/4 scale
+    full_range: bool = True          # pin range 1 on a mode change -- no transient at 1/4 scale
 
 
 @dataclass
@@ -123,6 +137,16 @@ class Sim:
     load_L_H: float = 0.1
     noise_V: float = 0.002           # rms measurement noise
     noise_A: float = 0.001
+    # How the simulated BOP is FOUND when the service starts -- the state a
+    # previous session (or clMag-control, which drives the same unit) left it
+    # in. The brain adopts it and writes nothing (start-up reads only), so set
+    # e.g. found_output = True and found_current_A = 1.2 to see adoption of a
+    # live output. VOLT is the voltage LIMIT in current mode, CURR the current
+    # limit in voltage mode (manual 4.1.1.1).
+    found_mode: str = "current"
+    found_output: bool = False
+    found_current_A: float = 0.0
+    found_voltage_V: float = 10.0
 
 
 @dataclass

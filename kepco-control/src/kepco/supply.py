@@ -12,7 +12,10 @@ What it does, in the order a physicist would worry about it:
     0 V / 0 A in one step (manual B.20). So "output off" means: ramp the main
     channel to 0, THEN send OUTP OFF. The same happens on shutdown (sped up so it
     ends within `safety.shutdown_ramp_s`), on a watchdog timeout, and when the
-    service stops after a crash. The output is OFF at start, always.
+    service stops after a crash.
+  * CHANGES NOTHING AT START. start() reads the mode, the setpoint, the limit
+    and the output switch and adopts them (see start()); a live output stays
+    live and the ramp continues from where the instrument is.
   * MEASURES V and I at `hardware.poll_hz` and publishes them live.
   * ACQUIRES for a scan: `acquire()` returns a number at once; the worker then
     waits `acquisition.settle_s` (the BIT 4886 averages its last 16 readings,
@@ -100,8 +103,16 @@ class BipolarSupply:
         o = self.cfg.output
         # ---- what the user asked for (setters write these) -------------------
         self._mode = o.mode if o.mode in MODES else "current"
-        self._out_req = False              # the output always starts OFF
+        self._out_req = False              # replaced by what start() finds
         self._kill = False                 # output_off_now() pending
+        # The lost-client watchdog guards an output that a client of THIS
+        # service drove. An output ADOPTED live at start was energised by
+        # somebody else (a previous session, clMag-control): if the watchdog
+        # were armed from the start, a service left running with nobody
+        # talking to it would ramp that coil to zero on its own -- a change
+        # nobody asked for. So it arms on set_output(True) / set_current /
+        # set_voltage, i.e. once a client has taken charge of the output.
+        self._wd_armed = False
         self._i_set = self._v_set = 0.0
         self._i_lim = self._v_lim = 0.0
         # ---- what the worker has applied to the instrument (worker only) -----
@@ -140,27 +151,107 @@ class BipolarSupply:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the instrument (output OFF), program the mode and 0 on the main
-        channel, start the worker. `poll=False` skips the thread so a test can
-        drive `step()` by hand."""
+        """Open the instrument, READ its state and ADOPT it, start the worker.
+        `poll=False` skips the thread so a test can drive `step()` by hand.
+
+        Nothing is written that changes the BOP (Lukas, 2026-09-27: "read the
+        instrument state on startup, not change anything"). This matters here
+        more than anywhere: the BOP may be driving a coil at several amperes --
+        it is the same physical unit clMag-control drives -- and switching it
+        off, re-programming it or changing its mode would put a step on that
+        coil. So the mode, the main setpoint, the limit and the output switch
+        are taken over exactly as found; a live output stays live, at the value
+        it has, and the software ramp continues from there when a user asks
+        for a new setpoint."""
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
-            self.backend.set_output(False)
-            self._out_hw = False
-            self._apply_mode_locked(self._mode)
+            try:
+                found = self.backend.read_state()
+            except Exception as exc:
+                # Without the state we cannot know whether a coil is energised,
+                # so taking control would be guessing. Refuse, and say why.
+                # (backend.close() is NOT called: it sends OUTP OFF.)
+                raise RuntimeError(f"could not read the supply's state at start "
+                                   f"({type(exc).__name__}: {exc}); not taking "
+                                   f"control of an instrument in an unknown state") from exc
+            self._adopt(found)
         self._connected = True
         self._last_touch = self._clock()
         self._t_step = None
         with self._lock:
             self._snapshot = self._build_snapshot()
-        self._emit("info", f"connected: {self._idn or 'Kepco BOP'}; output OFF, "
-                           f"{self._mode} mode")
+        main = self._prog if self._out_hw else (
+            self._i_set if self._mode == "current" else self._v_set)
+        unit = "A" if self._mode == "current" else "V"
+        lim_txt = (f"voltage limit {self._v_lim:g} V" if self._mode == "current"
+                   else f"current limit {self._i_lim:g} A")
+        self._emit("info", f"connected: {self._idn or 'Kepco BOP'}; found {self._mode} "
+                           f"mode, output {'ON' if self._out_hw else 'OFF'}, "
+                           f"setpoint {main:g} {unit}, {lim_txt} -- adopted, "
+                           f"nothing changed")
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, name="kepco-worker",
                                             daemon=True)
             self._thread.start()
+
+    def _adopt(self, found: dict) -> None:
+        """Take the instrument's state as the brain's own (called with _hw held,
+        before the worker exists). After this, the worker sees nothing to do:
+        mode, limit and main channel all equal what is already programmed, so
+        its first step writes nothing.
+
+        The found values are adopted UNCLAMPED. Clamping them into cfg.limits
+        would make the worker ramp the output to the clamped value at once --
+        a change nobody asked for. An out-of-envelope value is reported with a
+        warn event instead; the next setpoint a user sends is clamped as usual."""
+        mode = str(found.get("mode", "")).strip().lower()
+        if mode not in MODES:
+            raise RuntimeError(f"the supply reported an unknown mode {mode!r}")
+        out = bool(found.get("output", False))
+        prog_v = float(found.get("voltage_V", 0.0))
+        prog_i = float(found.get("current_A", 0.0))
+        if not (math.isfinite(prog_v) and math.isfinite(prog_i)):
+            raise RuntimeError(f"the supply reported non-finite setpoints "
+                               f"(VOLT {prog_v!r}, CURR {prog_i!r})")
+        # 4.1.1.1: the mode's own quantity is the main channel; the other one
+        # is the limit, used as an ABSOLUTE value
+        main, limit = (prog_i, abs(prog_v)) if mode == "current" else (prog_v, abs(prog_i))
+        o = self.cfg.output
+        with self._lock:
+            self._mode = mode
+            self._out_req = out            # a live output stays live
+            if mode == "current":
+                self._i_set, self._v_lim = main, limit
+            else:
+                self._v_set, self._i_lim = main, limit
+        # what is ON the instrument (worker-only attributes; no worker yet)
+        self._mode_hw = mode
+        self._out_hw = out
+        # With the output OFF the BOP drives 0 whatever is programmed (B.20),
+        # and our next OUTP ON programs 0 first anyway -- so the ramp starts
+        # from 0. With the output ON the ramp continues from the found value.
+        self._prog = main if out else 0.0
+        self._lim_hw = limit
+        # mirror into the config, so get_config / Save config show the truth
+        o.mode = mode
+        if mode == "current":
+            o.current_A, o.voltage_limit_V = main, limit
+        else:
+            o.voltage_V, o.current_limit_A = main, limit
+        # say so if the found state sits outside our safety envelope
+        if mode == "current":
+            checks = [("current", main, "A", *self.current_range()),
+                      ("voltage limit", limit, "V", 0.0, self.voltage_limit_max())]
+        else:
+            checks = [("voltage", main, "V", *self.voltage_range()),
+                      ("current limit", limit, "A", 0.0, self.current_limit_max())]
+        for what, val, unit, lo, hi in checks:
+            if val < lo or val > hi:
+                self._emit("warn", f"found {what} {val:g} {unit} outside the "
+                                   f"envelope {lo:g}..{hi:g} {unit}; left as it "
+                                   f"is (the next setpoint is clamped)")
 
     def shutdown(self) -> None:
         """Ramp to zero, output off, disconnect. Safe to call more than once and
@@ -237,6 +328,8 @@ class BipolarSupply:
         on = bool(on)
         with self._lock:
             self._out_req = on
+            if on:
+                self._wd_armed = True      # a client now owns this output
         if on:
             self._emit("info", "output ON requested: ramping to the setpoint")
         else:
@@ -262,6 +355,7 @@ class BipolarSupply:
         value, clamped = self._clamp_i(amps)
         with self._lock:
             self._i_set = value
+            self._wd_armed = True          # a client now drives the output
         self.cfg.output.current_A = value
         lo, hi = self.current_range()
         self._report("current", value, "A", clamped, lo, hi)
@@ -275,6 +369,7 @@ class BipolarSupply:
         value, clamped = self._clamp_v(volts)
         with self._lock:
             self._v_set = value
+            self._wd_armed = True          # a client now drives the output
         self.cfg.output.voltage_V = value
         lo, hi = self.voltage_range()
         self._report("voltage", value, "V", clamped, lo, hi)
@@ -537,7 +632,8 @@ class BipolarSupply:
         if wd <= 0:
             return
         with self._lock:
-            live = self._out_req
+            live = self._out_req and self._wd_armed
+        # not armed = an adopted output nobody here has touched: leave it
         if live and now - self._last_touch > wd:
             with self._lock:
                 self._out_req = False

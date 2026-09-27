@@ -17,6 +17,9 @@ Contract notes
   closed loop, or the drive-derived estimate in open loop.
 * Loop switching and slew-rate limiting are per axis.  Clamping, ramping and
   sequencing are the brain's job -- the backend just does what it's told.
+* ``open()`` must NOT change the instrument (adopt rule, 2026-09-27): no loop
+  mode, slew rate or setpoint writes.  The brain reads ``get_closed_loop``,
+  ``read_setpoint`` and ``read_slew_rate`` afterwards and adopts the answers.
 """
 
 from __future__ import annotations
@@ -34,6 +37,9 @@ class PiezoBackend(Protocol):
     # -- position (fire-and-forget setpoint, polled read) ------------------ #
     def set_setpoint(self, axis: int, position: float) -> None: ...
     def read_position(self, axis: int) -> float: ...
+    # The controller's current TARGET (what it is holding), read at start so
+    # the brain adopts it instead of commanding a new one.
+    def read_setpoint(self, axis: int) -> float: ...
 
     # -- loop mode --------------------------------------------------------- #
     def set_closed_loop(self, axis: int, enabled: bool) -> None: ...

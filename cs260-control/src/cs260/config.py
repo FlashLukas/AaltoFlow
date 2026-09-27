@@ -89,11 +89,14 @@ class Accessories:
 
 @dataclass
 class Shutter:
-    """The built-in shutter. Nothing here is forced: closing at start is a
-    choice (a detector that must not see light, or an experiment that wants the
-    light left on through a restart)."""
+    """The built-in shutter.
 
-    close_on_start: bool = False
+    There is deliberately NO "close on start" option any more (removed
+    2026-09-27, Lukas's rule for every module: starting the service READS the
+    instrument and changes nothing). The shutter is found as it is -- an
+    experiment that left the light on keeps it on through a restart. An old
+    .ini that still has `close_on_start` loads fine: unknown keys are ignored."""
+
     close_on_shutdown: bool = True
     # A grating change sweeps the drive PAST ZERO ORDER (white light) -- the
     # manual advises closing the shutter so a detector does not saturate. The
@@ -162,8 +165,14 @@ class Sim:
     grating_change_s: float = 4.0
     filter_move_s: float = 1.2
     port_move_s: float = 0.6
+    # Where the simulated instrument IS when the service starts -- the state
+    # the brain must ADOPT (nothing is moved at start). Tests set these to
+    # non-default values to prove the adoption really happens.
     start_nm: float = 532.0
     start_shutter_open: bool = True
+    start_grating: int = 1
+    start_filter: int = 1                    # only if a filter wheel is fitted
+    start_port: int = 1                      # only if two exit ports are fitted
 
 
 @dataclass

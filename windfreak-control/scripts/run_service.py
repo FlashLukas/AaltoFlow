@@ -9,7 +9,9 @@ The service owns the synthesizer and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 5 Hz)
 
-Both RF outputs are OFF when it starts and when it stops. Drive it with:
+At start the service only READS the synthesizer (RF on/off, frequency, power,
+reference) and adopts it -- nothing is changed, a running output keeps
+running. When it stops, both RF outputs are switched OFF. Drive it with:
     uv run scripts/windfreak_console.py --connect <host>
 """
 
@@ -51,8 +53,7 @@ def main() -> int:
         port = args.port or hw.port
         backend = SerialSynthHD(port, timeout_s=hw.timeout_s,
                                 pll_off_when_rf_off=hw.pll_off_when_rf_off,
-                                phase_command=hw.phase_command,
-                                channel_spacing_Hz=hw.channel_spacing_Hz)
+                                phase_command=hw.phase_command)
         synth = Synthesizer(backend, cfg)
         print(f"REAL backend -> {port}")
     else:

@@ -175,19 +175,24 @@ class Monochromator:
     # ---- lifecycle -----------------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Connect, read where everything is, ADOPT it as the target (nothing is
-        moved), optionally close the shutter, and start the worker.
-        `poll=False` is for tests that step `poll_once()` themselves."""
+        """Connect, READ where everything is and ADOPT it as the target, then
+        start the worker. `poll=False` is for tests that step `poll_once()`.
+
+        Lukas's rule (2026-09-27, every module): starting the service must not
+        change the instrument. So nothing is written here -- no move, no shutter,
+        no filter, no config push. Wavelength, grating, shutter, filter wheel and
+        exit port are whatever the box says; the GUI and describe (whose
+        wavelength envelope follows the adopted grating) show that state. A
+        setting only reaches the instrument when someone asks for it."""
         with self._hw:
-            self.backend.open()
+            self.backend.open()             # queries only (see backends/cornerstone.py)
             self._idn = self.backend.idn()
             for n in range(1, self._n_gratings() + 1):
                 got = self.backend.grating_info(n)
                 if got:
                     self._info[n] = got
             st = self.backend.read_state()
-            if self.cfg.shutter.close_on_start:
-                self.backend.set_shutter(False)
+            notes = list(getattr(self.backend, "startup_notes", []) or [])
         with self._lock:
             self._st = st
             self._target_nm = st.wavelength_nm
@@ -195,10 +200,12 @@ class Monochromator:
             self._filter_target = st.filter
             self._port_target = st.port or 1
             self._connected = True
-        self._emit("info", f"connected: {self._idn or 'Cornerstone 260'}; at "
-                           f"{st.wavelength_nm:.3f} nm on grating {st.grating} (nothing moved)")
-        if self.cfg.shutter.close_on_start:
-            self._emit("info", "shutter closed (close_on_start)")
+        self._emit("info", f"connected: {self._idn or 'Cornerstone 260'}; found it at "
+                           f"{st.wavelength_nm:.3f} nm on grating {st.grating}, shutter "
+                           f"{'open' if st.shutter_open else 'closed'} (nothing changed)")
+        # e.g. "the box works in um; converted in software" -- worth seeing once
+        for msg in notes:
+            self._emit("warn", msg)
         self.poll_once()
         if poll:
             self._stop.clear()

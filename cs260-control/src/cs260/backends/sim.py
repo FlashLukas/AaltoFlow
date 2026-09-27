@@ -49,11 +49,15 @@ class SimulatedCS260:
         self._clock = clock
         s = self.cfg.sim
         self._open = False
-        self._grating = 1
+        # The pre-existing state of the "instrument" (config group `sim`); the
+        # brain has to find and adopt it, exactly as on the real box.
+        self._grating = max(1, min(int(self.cfg.gratings.count), int(s.start_grating)))
         self._wl = self._quantise(float(s.start_nm))
         self._shutter = bool(s.start_shutter_open)
-        self._filter = 1 if self.cfg.accessories.filter_wheel else 0
-        self._port = 1
+        acc = self.cfg.accessories
+        self._filter = (max(1, min(int(acc.filter_count), int(s.start_filter)))
+                        if acc.filter_wheel else 0)
+        self._port = max(1, min(2, int(s.start_port))) if acc.dual_port else 1
         self._error: int | None = None
         # the one move in progress: (kind, t0, t1, from, to) or None
         self._move = None

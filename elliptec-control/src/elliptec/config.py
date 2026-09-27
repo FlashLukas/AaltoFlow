@@ -55,13 +55,18 @@ class Axes:
 
 @dataclass
 class Motion:
-    """Motion defaults pushed to every mount at start."""
+    """Motion defaults.  NOTHING here is pushed at start (adopt-on-start rule,
+    2026-09-27): the service reads each mount's speed and angle and shows them."""
 
     # Drive speed as a percentage of the mount's maximum (the ELL14's own unit:
-    # the `sv` command takes a percentage, not deg/s).
+    # the `sv` command takes a percentage, not deg/s).  A DEFAULT, sent to the
+    # mounts only when the user changes it (Settings / set_config); at start
+    # each mount keeps the speed it has.
     velocity_pct: int = 100
-    # Home every axis when the service starts.  Off by default: homing spins
-    # the optic, and the ELL14 keeps its encoder position while powered anyway.
+    # Home every axis when the service starts.  Off by default and should stay
+    # off: homing spins the optic, which breaks the rule that starting a
+    # service never changes the instrument.  The ELL14 keeps its encoder
+    # position while powered anyway.
     home_on_start: bool = False
     # Homing direction for a rotary mount: "cw" or "ccw" (the `ho0` / `ho1`
     # argument).  Only matters if something limits which way it may turn.
@@ -139,6 +144,9 @@ class Sim:
     # Where the simulated mounts sit at power-up (device degrees): not 0, so
     # the panel shows that homing actually does something.
     start_deg: float = 37.0
+    # The speed the simulated mounts run at at power-up, percent.  Not 100 on
+    # purpose: the service must ADOPT it, and a test proves it does.
+    start_velocity_pct: int = 60
 
 
 @dataclass

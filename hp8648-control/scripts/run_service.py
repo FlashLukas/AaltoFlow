@@ -9,8 +9,9 @@ The service owns the generator and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 5 Hz)
 
-The RF output is OFF when the service starts and is switched OFF when it stops
-(Ctrl-C, the `shutdown` verb, or the launcher's Stop). Drive it with:
+At start the service READS the generator and adopts its state (RF, frequency,
+level, modulation) without changing anything. The RF output is switched OFF
+when the service stops (Ctrl-C, the `shutdown` verb, or the launcher's Stop). Drive it with:
     uv run scripts/hp8648_console.py --connect <host>
 """
 
@@ -48,8 +49,7 @@ def main() -> int:
     if args.real:
         from hp8648.backends.visa_8648 import Visa8648
         resource = args.visa or cfg.hardware.visa_resource
-        backend = Visa8648(resource, timeout_ms=cfg.hardware.visa_timeout_ms,
-                           reset_on_open=cfg.hardware.reset_on_open)
+        backend = Visa8648(resource, timeout_ms=cfg.hardware.visa_timeout_ms)
         src = SignalSource(backend, cfg)
         print(f"REAL backend -> {resource}")
     else:

@@ -33,6 +33,7 @@ class NidaqVectorMagnet:
         self._nidaqmx = None
         self._ao = self._ai = self._di = self._do = None
         self._temps = (float("nan"), float("nan"))
+        self._ao_readback: tuple[float, float] | None = None
 
     # ---- lifecycle -------------------------------------------------------------
 
@@ -52,15 +53,30 @@ class NidaqVectorMagnet:
         }[hw.ai_terminal.strip().lower()]
 
         try:
+            # ADOPT ON START (Lukas, 2026-09-27): NOTHING is written here. The
+            # old code forced enable False and AO 0 V -- a magnet left energized
+            # by a crashed run would have dropped to zero field in one step.
+            # Now the brain reads the state (read_output_state) and takes over
+            # from it. The first write happens only when the control loop or a
+            # command actually wants a different value.
+            #
+            # VERIFY: creating a DO task on an output line does not change the
+            # line's level before the first write (on M/X-series a line keeps
+            # its last driven state, but a line that was never an output since
+            # power-up may float/pull until the task commits).
             self._do = nidaqmx.Task("mag2d_enable")
             self._do.do_channels.add_do_chan(hw.do_enable)
-            self._do.write(False)                        # safe first: output off
 
+            # VERIFY: creating (not writing) an AO task leaves the output at its
+            # last value -- DAQmx holds AO after a task closes or a process exits.
             self._ao = nidaqmx.Task("mag2d_ao")
             for ch in (hw.ao_x, hw.ao_y):
                 self._ao.ao_channels.add_ao_voltage_chan(ch, min_val=hw.ao_min_V,
                                                          max_val=hw.ao_max_V)
-            self._ao.write([0.0, 0.0])                   # VERIFY: list = one sample per channel
+
+            # Read the present drive BEFORE the main AI task reserves the AI
+            # timing engine (one per card, see the module docstring).
+            self._ao_readback = self._read_ao_internal(nidaqmx)
 
             self._ai = nidaqmx.Task("mag2d_ai")
             for ch in (hw.ai_hall_x, hw.ai_hall_y, hw.ai_temp1, hw.ai_temp2):
@@ -78,7 +94,48 @@ class NidaqVectorMagnet:
             self._close_tasks()
             raise
 
+    def _read_ao_internal(self, nidaqmx) -> tuple[float, float] | None:
+        """Measure what the two AO channels are putting out now, or None.
+
+        An NI card cannot read an AO value back directly (clMag's 6259 note),
+        but M- and X-series cards route each AO to an INTERNAL AI channel,
+        "<dev>/_ao0_vs_aognd". One on-demand read of those is a pure
+        measurement: nothing on the output changes. If the card has no such
+        channel the brain is told None and estimates the drive from the field.
+
+        VERIFY: the internal channel names on the lab card (NI MAX > Device >
+        "Show internal channels"), and that an on-demand read needs no timing.
+        """
+        hw = self.hw
+        try:
+            names = []
+            for ch in (hw.ao_x, hw.ao_y):
+                dev, _, line = ch.strip().partition("/")
+                names.append(f"{dev}/_{line}_vs_aognd")
+            task = nidaqmx.Task("mag2d_ao_readback")
+            try:
+                for name in names:
+                    task.ai_channels.add_ai_voltage_chan(
+                        name, min_val=hw.ao_min_V, max_val=hw.ao_max_V)
+                vx, vy = task.read()                     # VERIFY: one value per channel
+            finally:
+                task.close()
+            # undo the wiring polarity: the brain thinks "+V = +B"
+            return (float(vx) * float(hw.ao_sign_x), float(vy) * float(hw.ao_sign_y))
+        except Exception:
+            return None
+
+    def read_output_state(self) -> tuple[bool | None, tuple[float, float] | None]:
+        # VERIFY: reading a DO task returns the level the line is DRIVEN at
+        # (supported for port0 lines on M/X-series); None if the card refuses.
+        try:
+            enable = bool(self._do.read())
+        except Exception:
+            enable = None
+        return enable, self._ao_readback
+
     def close(self) -> None:
+        # (Shutdown behaviour, unchanged by the adopt-on-start rule.)
         # Backstop only: the brain has already ramped to 0 V at the slew rate.
         # If it could not (a crash), a step to 0 V is still safer than leaving
         # the coils driven.

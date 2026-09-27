@@ -30,13 +30,11 @@ def test_bool_fields_survive_both_ways(tmp_path):
     for value in (True, False):
         cfg = Config()
         cfg.limits.enforce = value
-        cfg.motion.home_on_start = value
         cfg.motion.require_home = value
         path = tmp_path / f"cfg_{value}.ini"
         save_config(cfg, str(path))
         loaded = load_config(str(path))
         assert loaded.limits.enforce is value
-        assert loaded.motion.home_on_start is value
         assert loaded.motion.require_home is value
 
 

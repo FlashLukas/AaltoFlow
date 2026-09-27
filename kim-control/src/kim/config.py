@@ -56,7 +56,13 @@ AXES = ("X", "Y", "Z")
 # --------------------------------------------------------------------------- #
 @dataclass
 class Motion:
-    """Default drive parameters pushed to each KIM101 channel on start.
+    """Drive parameters per KIM101 channel.
+
+    NOT pushed on start (adopt-on-start rule, 2026-09-27): at start the brain
+    READS the controller's rate / acceleration / voltage and overwrites these
+    fields with them, so they always describe what the controller is doing.
+    The .ini values reach the controller only when the user applies them
+    (Settings OK, set_config, a preset button, a set_* verb).
 
     All in the controller's NATIVE units (steps), plus the drive voltage that
     governs the physical size of a step.

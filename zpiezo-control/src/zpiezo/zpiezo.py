@@ -31,9 +31,35 @@ class ZPiezo:
 
     # -- lifecycle --------------------------------------------------------- #
     def start(self) -> None:
+        """Open the KCube and ADOPT the voltage it is already holding.
+
+        Lukas's rule (2026-09-27): a module reads the instrument's state at
+        start and changes nothing.  For a focus piezo this matters directly --
+        whatever voltage the KCube holds IS the current focus, and writing
+        anything here (e.g. the old default target 0 V) would throw the sample
+        out of focus the moment the service starts.  So: query only.  The read
+        voltage becomes the target, which is also what a later ``set_config``
+        re-clamp starts from.  A voltage outside the configured envelope is
+        adopted AS IS (with a warning) -- it is not moved into range; the next
+        explicit ``set_voltage`` is clamped as usual.
+        """
         self.backend.open()
         self._connected = True
         self._emit("info", f"z piezo started ({self.backend.idn()})")
+        try:
+            v = float(self.backend.read_voltage())
+        except Exception as exc:
+            # Cannot read it -> we do not know the focus.  Still write nothing.
+            self._emit("warn", f"could not read the drive voltage at start "
+                               f"({exc}); target unknown, nothing was written")
+            return
+        with self._lock:
+            self._target = v
+        self._emit("info", f"adopted drive voltage {v:.3f} V from the instrument")
+        lim = self.cfg.limits
+        if lim.enforce and not (lim.v_min <= v <= lim.v_max):
+            self._emit("warn", f"instrument holds {v:.3f} V, outside the limits "
+                               f"{lim.v_min:g}..{lim.v_max:g} V; left as it is")
 
     def shutdown(self) -> None:
         try:
@@ -76,8 +102,16 @@ class ZPiezo:
         return self.cfg
 
     def apply_config(self) -> None:
-        # re-clamp the current target into the (possibly changed) envelope
-        self.set_voltage(self._target)
+        """Re-clamp the target into a (possibly changed) envelope.
+
+        Writes to the KCube ONLY if the new limits actually move the target;
+        a ``set_config`` that changes, say, the jog step must not re-send the
+        voltage (it used to, every time -- harmless once the target was
+        adopted, but a write the user did not ask for).
+        """
+        lim = self.cfg.limits
+        if lim.enforce and not (lim.v_min <= self._target <= lim.v_max):
+            self.set_voltage(self._target)
 
     def set_config(self, data: dict) -> None:
         groups = {"limits": self.cfg.limits, "hardware": self.cfg.hardware}

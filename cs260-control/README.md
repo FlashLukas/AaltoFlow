@@ -84,7 +84,7 @@ Watch `shutter_open` / `moving` in the status for the effect.
 | stop          | `ABORT`            |                           |
 | errors        |                    | `STB?` (non-zero = error), `ERROR?` |
 
-On connect: `HANDSHAKE 0`, `UNITS NM`, `STB?` + `ERROR?` (clear old errors), `INFO?`.
+On connect it only READS (starting the service changes nothing on the instrument): `STB?` + `ERROR?` (clear old errors), `HANDSHAKE?`, `UNITS?`, `INFO?`, then the position, grating, shutter, filter and port, which become the targets. The box's own wavelength unit (nm, um or wavenumbers) is converted in software, never changed. The one possible write is `HANDSHAKE 0`, and only if the box is in handshake mode.
 Nothing is moved. Factory GPIB address is 4 (`GPIB0::4::INSTR`). The hand
 controller must be off (LOCAL), or the instrument ignores the PC.
 

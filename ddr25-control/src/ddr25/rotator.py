@@ -137,18 +137,42 @@ class Rotator:
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Open the controller, push the motion profile, start polling."""
+        """Open the controller, ADOPT its state, start polling.
+
+        Lukas's rule (2026-09-27, every module): starting the software must
+        not change the instrument. So start() only READS: the controller's
+        stored velocity/acceleration are adopted into the brain AND into
+        ``cfg.motion`` (so the GUI's spin boxes, get_config and describe show
+        what the K-Cube will really do), and the first poll adopts position,
+        moving and homed. Nothing is written -- no profile push, no homing.
+        The config's velocity/acceleration are applied only when the user
+        sets them (set_velocity / set_acceleration / set_config).
+        """
         with self._hw:
             self.backend.open()
             self._connected = True
-            self._push_profile(self.cfg.motion.velocity, self.cfg.motion.acceleration)
+            v, a = self.backend.read_velocity_params()
+        v, a = float(v), float(a)
+        with self._st:
+            self._velocity, self._acceleration = v, a
+        self.cfg.motion.velocity, self.cfg.motion.acceleration = v, a
         self._poll_once()
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="ddr25-poll", daemon=True)
         self._thread.start()
         self._emit("info", f"rotation stage started ({self.idn()})")
-        if self.cfg.motion.home_on_start:
-            self.home()
+        st = self.status()
+        self._emit("info", f"adopted controller state: {st.raw_deg:.4f} deg, "
+                           f"{'homed' if st.homed else 'NOT homed'}, "
+                           f"{v:.4g} deg/s, {a:.4g} deg/s^2")
+        # Out-of-envelope values are REPORTED, not corrected: correcting them
+        # would be a write at start. The next set_velocity clamps as usual.
+        if self.cfg.limits.enforce and v > self.cfg.limits.max_velocity:
+            self._emit("warn", f"controller velocity {v:.4g} deg/s is above the "
+                               f"limit {self.cfg.limits.max_velocity:.4g} (left as is)")
+        if self.cfg.limits.enforce and a > self.cfg.limits.max_acceleration:
+            self._emit("warn", f"controller acceleration {a:.4g} deg/s^2 is above the "
+                               f"limit {self.cfg.limits.max_acceleration:.4g} (left as is)")
 
     def shutdown(self) -> None:
         """Stop motion (profiled), stop polling, close. Idempotent."""
@@ -416,13 +440,6 @@ class Rotator:
     # ------------------------------------------------------------------ #
     # profile verbs
     # ------------------------------------------------------------------ #
-    def _push_profile(self, velocity: float, acceleration: float) -> None:
-        self.backend.set_velocity(velocity)
-        self.backend.set_acceleration(acceleration)
-        v, a = self.backend.read_velocity_params()
-        with self._st:
-            self._velocity, self._acceleration = float(v), float(a)
-
     def set_velocity(self, value: float) -> float:
         v = self._clamp(float(value), MIN_VELOCITY, self.cfg.limits.max_velocity,
                         "velocity", "deg/s")
@@ -545,10 +562,21 @@ class Rotator:
         return self.cfg
 
     def apply_config(self) -> None:
-        """Re-push the motion profile after the config was edited in place."""
+        """Apply the config after it was edited in place (set_config, Settings).
+
+        Only what DIFFERS from the controller's read-back is written, so a
+        set_config of, say, the ``frame`` group does not re-send an unchanged
+        velocity. The tolerances are the describe echo tolerances (the
+        acceleration read-back is quantised, ~0.36 deg/s^2 per unit).
+        """
         if wrap_policy(self.cfg) != str(self.cfg.motion.wrap).strip().lower():
             self._emit("warn", f"unknown wrap {self.cfg.motion.wrap!r}; using literal")
             self.cfg.motion.wrap = "literal"
-        self.set_velocity(self.cfg.motion.velocity)
-        self.set_acceleration(self.cfg.motion.acceleration)
+        with self._st:
+            v_now, a_now = self._velocity, self._acceleration
+        v_cfg, a_cfg = float(self.cfg.motion.velocity), float(self.cfg.motion.acceleration)
+        if not (math.isfinite(v_now) and abs(v_cfg - v_now) <= 1e-3):
+            self.set_velocity(v_cfg)
+        if not (math.isfinite(a_now) and abs(a_cfg - a_now) <= 0.5):
+            self.set_acceleration(a_cfg)
         self._emit("info", "config applied")

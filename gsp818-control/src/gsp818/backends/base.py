@@ -21,7 +21,12 @@ shutdown).
 Averaging is the brain's: it asks for single sweeps and averages them in
 linear power itself, so "N averages" means the same thing on both backends.
 
-SAFETY: `open()` and `close()` must leave the tracking generator OFF.
+START-UP CHANGES NOTHING (Lukas's rule, 2026-09-27): `open()` and
+`read_state()` only query. The brain adopts what `read_state()` reports and
+calls `mark_in_sync()`, so its first `configure` sends nothing. Anything that
+must change for a FRESH trace (a frozen/max-hold trace, the instrument's own
+averaging) is changed by `ensure_live()`, called only when an acquisition
+begins. SAFETY on SHUTDOWN: `close()` switches the tracking generator OFF.
 """
 
 from __future__ import annotations
@@ -40,7 +45,22 @@ class SpectrumBackend(Protocol):
     simulated: bool
 
     def open(self) -> None:
-        """Connect, switch the tracking generator OFF, set dBm as the unit."""
+        """Connect and identify. Queries only: nothing on the instrument changes."""
+
+    def read_state(self) -> dict:
+        """The instrument's current settings, from queries: any of start_Hz,
+        stop_Hz, points, rbw_Hz, rbw_auto, vbw_Hz, vbw_auto, ref_level_dBm,
+        atten_dB, atten_auto, sweep_time_s, sweep_time_auto, detector, preamp,
+        tg_on, tg_level_dBm (a key it could not read is left out), plus
+        "notes": sentences for the event log."""
+
+    def mark_in_sync(self, s: SweepSettings) -> None:
+        """Treat every setting of `s` not reported by read_state as already
+        applied, so starting writes nothing."""
+
+    def ensure_live(self) -> list[str]:
+        """Before an acquisition: make the next read a fresh sweep, writing
+        only what is wrong. Returns one sentence per change (for warn events)."""
 
     def close(self) -> None:
         """Tracking generator OFF, then disconnect. Safe to call more than

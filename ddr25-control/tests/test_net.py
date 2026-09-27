@@ -20,8 +20,8 @@ CMD, PUB = 17280, 17281
 @pytest.fixture()
 def service_and_client():
     cfg = Config()
-    cfg.motion.velocity = 720.0
-    cfg.motion.acceleration = 3600.0
+    cfg.hardware.sim_start_velocity = 720.0      # the controller's own profile
+    cfg.hardware.sim_start_acceleration = 3600.0
     brain, _ = build_sim_system(cfg)
     svc = Ddr25Service(brain, host="127.0.0.1", cmd_port=CMD, pub_port=PUB, status_hz=20)
     svc.start()

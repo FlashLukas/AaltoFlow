@@ -69,9 +69,17 @@ sync with `--extra gui --extra real`.
   sweep times before reading `:TRAC? TRACE1` -- the sweep that was running when
   the trigger came is not trusted. `sweep_mode = single` uses the usual SCPI
   `:INIT:IMM` instead (one sweep per trace, faster) once it has been verified.
+- **Starting changes nothing on the analyser** (2026-09-27): the module READS
+  span, points, RBW/VBW, reference level, attenuation, sweep time, detector,
+  preamp, amplitude unit and the tracking generator (on/off and level) and
+  shows them as they are. The `.ini` sweep/tracking values are sent only when
+  you apply them. A front-panel unit other than dBm is converted in software.
+  A frozen / max-hold trace, the instrument's own averaging or single-sweep
+  mode is reported at start and corrected only when an **acquisition** begins
+  (with a warning in the log).
 - **Safety:** the tracking generator is switched **OFF** when the module
-  connects, when it disconnects (also on the launcher's Stop), and at every
-  start whatever the `.ini` says. It is flagged `danger` in `describe`.
+  disconnects (also on the launcher's Stop). It is flagged `danger` in
+  `describe`.
 
 ## The thru reference and norm
 

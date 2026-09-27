@@ -30,13 +30,20 @@ class SpectrometerBackend(Protocol):
     simulated: bool
 
     def open(self) -> None:
-        """Connect. Must not change any setting the brain has not asked for."""
+        """Connect and READ the instrument's state. Queries only: no setting
+        may be written here (Lukas's rule, 2026-09-27 -- a module adopts what
+        the instrument is doing, it does not reset it)."""
 
     def close(self) -> None:
         """Disconnect. Safe to call more than once and on a crash."""
 
     def idn(self) -> str:
         """'Vendor Model S/N fw', or '' if unknown."""
+
+    def integration_time(self) -> float:
+        """The integration time the instrument is set to NOW (s), as read at
+        open() and kept up to date by start_scan; NaN if it could not be read.
+        The brain adopts it at start instead of pushing its config value."""
 
     def wavelengths(self) -> np.ndarray:
         """nm of every pixel (the instrument's calibration). Read at open()."""

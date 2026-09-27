@@ -174,15 +174,12 @@ class SettingsDialog(QtWidgets.QDialog):
                   self._combo(["16", "10"], hw.stat_base))
         self._add(form, "hardware", "expected_sensor", "Sensor wired",
                   self._combo(SENSORS, hw.expected_sensor))
-        push = QtWidgets.QCheckBox("Push the Controller tab at start (else adopt)")
-        push.setChecked(bool(hw.push_on_start))
-        self._add(form, "hardware", "push_on_start", "At start", push)
         off = QtWidgets.QCheckBox("Switch the heater OFF when the service stops")
         off.setChecked(bool(hw.disable_on_shutdown))
         self._add(form, "hardware", "disable_on_shutdown", "At stop", off)
         form.addRow(_hint("Port settings are used by the real backend (--real) when the "
-                          "service STARTS. Starting never switches the heater or changes the "
-                          "setpoint."))
+                          "service STARTS. Starting only READS the box: the heater, the setpoint "
+                          "and the Controller tab are adopted, never written."))
         return page
 
     def _appearance_tab(self):

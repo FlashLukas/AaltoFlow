@@ -26,7 +26,7 @@ THREADS (the hf2/pm16 rules):
     snapshot; setters never edit a snapshot (docs/DEVELOPER_NOTES.md gotcha #1).
 
 STATES
-  OFF         output de-energized (AO 0 V, enable line False)
+  OFF         output de-energized (enable line False; AO normally 0 V)
   REGULATING  energized, PI running, not (yet) stable
   STABLE      energized, PI running, every axis inside tolerance for stable_time
   RAMP_DOWN   output switched off: AO slewing to 0 V, then enable False -> OFF
@@ -130,6 +130,11 @@ class Controller:
         self._hw_error = ""
         self._last_err_emit = -1e9
         self._last_tick: float | None = None
+        # The last drive the loop wrote (or adopted at start). tick() writes the
+        # AO only when the wanted value differs: an OFF magnet is never touched,
+        # and a drive adopted at start is not re-written by a rounding of itself.
+        self._ao_last: tuple[float, float] | None = None
+        self._ao_known = True        # False while the drive is unknown (no read-back)
 
         self._opened = False
         self._thread: threading.Thread | None = None
@@ -140,11 +145,25 @@ class Controller:
     # =================================================================== lifecycle
 
     def start(self, run_thread: bool = True) -> None:
-        """Open the hardware, check the water, energize if configured, run the loop.
+        """Open the hardware, READ what the magnet is doing, adopt it, run the loop.
 
-        Raises WaterInterlockError (after closing the hardware again) when the
-        water is off and not bypassed -- run_service.py turns that into a clear
-        message and exit code 3.
+        ADOPT ON START (Lukas, 2026-09-27: "all modules should read the
+        instrument state on startup, not to change anything"). start() issues
+        NO write to the card. It reads the enable line, the drive voltages (if
+        the card can read them back), the Hall probes, the thermometers and the
+        water switch, and takes over from there:
+          * output OFF  -> state OFF; the setpoint stays 0 mT until commanded.
+          * output ON   -> state REGULATING, setpoint = the field measured now,
+                           and the PI starts BUMPLESS from the drive that is on
+                           the wire -- the loop holds the field where it is.
+        Before 2026-09-27 start() forced AO 0 V + enable False and then
+        (energize_on_start) switched the output on at 0 mT: a magnet left at
+        100 mT would have dropped to zero in one step.
+
+        THE ONE EXCEPTION is the water interlock (a safety interlock, kept on
+        purpose): water off and not bypassed -> WaterInterlockError, and closing
+        the backend then puts 0 V / enable False on the card (backstop). A
+        magnet that is energized without cooling must not be adopted.
 
         `run_thread=False` leaves the loop to the caller (tests call tick()).
         """
@@ -152,10 +171,8 @@ class Controller:
         self.backend.open()
         self._opened = True
         try:
-            # Safe state first, whatever the card was left at.
-            self.backend.write_ao(0.0, 0.0)
-            self.backend.set_enable(False)
             water = bool(self.backend.read_water())
+            enable, ao = self.backend.read_output_state()
         except Exception:
             self._close_backend()
             raise
@@ -164,19 +181,100 @@ class Controller:
             raise WaterInterlockError(
                 "cooling water is OFF (flow switch reads False). Start the water, "
                 "or run with --bypass-water (interlock.water_bypass = True).")
+        # The field and temperatures: a failed read here is not fatal -- the
+        # loop's first tick handles it exactly as it would later (a FAULT if
+        # energized, never regulating blind).
+        try:
+            vx, vy = self.backend.read_hall()
+            v1, v2 = self.backend.read_temps()
+            read_error = ""
+        except Exception as exc:
+            vx = vy = v1 = v2 = _NAN
+            read_error = f"{type(exc).__name__}: {exc}"
+        events = []
         with self._lock:
             self._water = water
-            if self.cfg.control.energize_on_start:
-                self._energize_locked()
+            if read_error:
+                self._hw_error = read_error
+            else:
+                self._store_reads_locked(vx, vy, v1, v2)
+            self._adopt_locked(enable, ao, events)
         if not water:
             self._emit("warn", "water interlock BYPASSED and the water is off")
-        self._emit("info", "magnet started" + (", output energized at 0 mT"
-                                               if self.cfg.control.energize_on_start else
-                                               ", output off"))
+        for level, msg in events:
+            self._emit(level, msg)
         if run_thread:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="mag2d-loop", daemon=True)
             self._thread.start()
+
+    def _adopt_locked(self, enable, ao, events) -> None:
+        """Take over the output state read at start (see start()). No hardware."""
+        c = self.cfg.control
+        if enable is None:
+            # The card could not tell us. Assume OFF (the loop then writes
+            # nothing until commanded) and say so loudly.
+            events.append(("warn", "the enable line could not be read back -- assuming "
+                                   "the output is OFF; check the amplifier before energizing"))
+            enable = False
+        if ao is not None:
+            ao = (float(ao[0]), float(ao[1]))
+        self._ao_known = ao is not None
+
+        if not enable:
+            # OFF. Keep the drive that is on the wire as the loop's output, so
+            # the OFF loop re-writes nothing (a value it already holds is
+            # skipped); energizing later starts from 0 V (_energize_locked).
+            out = ao if ao is not None else (0.0, 0.0)
+            for p, o in zip(self._pi, out):
+                p.reset(o)
+            # Unknown drive -> _ao_last None: the OFF loop still writes nothing
+            # (see tick), but the FIRST time the loop wants to drive (energize,
+            # fault ramp) it writes for sure -- a 0 V it "already holds" must not
+            # be skipped when nobody knows what the card is really putting out.
+            self._ao_last = out if ao is not None else None
+            self._state = OFF
+            self._enable_hw = self._enable_want = False
+            msg = "magnet started, output OFF (adopted)"
+            if ao is not None and any(abs(v) > 1e-3 for v in ao):
+                msg += (f"; the AO still holds {ao[0]:.3f} / {ao[1]:.3f} V with the "
+                        f"enable line off (left as it is)")
+            elif ao is None:
+                msg += "; the AO drive cannot be read back on this card (shown as unknown)"
+            events.append(("info", msg))
+            return
+
+        # ENERGIZED: adopt. Setpoint = the field there is now, so the loop's
+        # first job is to hold it, not to move it.
+        ff = c.ff_mT_per_V
+        bx, by = self._bx, self._by
+        if not (math.isfinite(bx) and math.isfinite(by)):
+            # No field reading: estimate from the drive, or 0 if unknown. The
+            # first tick re-reads; if the read keeps failing it FAULTs.
+            bx, by = ((ao[0] * ff, ao[1] * ff) if ao is not None else (0.0, 0.0))
+        bx, by, warn = self._apply_vector_locked(bx, by)
+        if warn:
+            events.append(("warn", "adopted setpoint " + warn))
+        if ao is None:
+            # No AO read-back on this card: the best guess of the drive is the
+            # feed-forward's. The first PI write may differ from the real AO by
+            # the feed-forward error (a few percent of the drive).
+            ao = ((self._sp_bx / ff, self._sp_by / ff) if ff else (0.0, 0.0))
+            events.append(("warn", "the AO drive could not be read back -- estimated "
+                                   f"{ao[0]:.3f} / {ao[1]:.3f} V from the field"))
+        meas = (self._bx, self._by)
+        sp = (self._sp_bx, self._sp_by)
+        for i, p in enumerate(self._pi):
+            m = meas[i] if math.isfinite(meas[i]) else sp[i]
+            p.bumpless(sp[i], m, ao[i], c.kp_V_per_mT, c.ki_V_per_mT_s, ff)
+        self._ao_last = ao
+        self._state = REGULATING
+        self._stable = False
+        self._stable_since = None
+        self._enable_hw = self._enable_want = True
+        events.append(("info", f"magnet started ENERGIZED (adopted): holding "
+                               f"{self._sp_field:g} mT at {self._sp_angle:.2f} deg, "
+                               f"drive {ao[0]:.3f} / {ao[1]:.3f} V"))
 
     def shutdown(self) -> None:
         """Ramp the output to 0 V at the slew rate, disable, close. Idempotent.
@@ -352,7 +450,10 @@ class Controller:
                 measured_field_mT=along, measured_magnitude_mT=mag,
                 measured_angle_deg=ang, error_mT=err,
                 field_stable=self._stable and self._enable_hw and self._state == STABLE,
-                output_V=[self._pi[0].output, self._pi[1].output],
+                # NaN (null on the wire) while the drive is unknown: a card
+                # without AO read-back, output OFF, nothing written yet.
+                output_V=([self._pi[0].output, self._pi[1].output] if self._ao_known
+                          else [_NAN, _NAN]),
                 hall_V=list(self._hall), temp_C=list(self._temps),
                 water_ok=self._water, water_bypass=bool(ilk.water_bypass),
                 temp_monitor=bool(ilk.temp_monitor),
@@ -428,11 +529,7 @@ class Controller:
                 if self._hw_error:
                     events.append(("info", "hardware reads recovered"))
                 self._hw_error = ""
-                self._hall = [vx, vy]
-                self._bx, self._by = self.cfg.hall.volts_to_mT(vx, vy)
-                tc = self.cfg.temperature
-                self._temps = [tc.t1_C_per_V * v1 + tc.t1_offset_C,
-                               tc.t2_C_per_V * v2 + tc.t2_offset_C]
+                self._store_reads_locked(vx, vy, v1, v2)
                 self._water = water
                 reason = self._interlock_reason_locked()
                 if reason and self._state != FAULT:
@@ -463,11 +560,27 @@ class Controller:
             enable_hw = self._enable_hw
 
         # ---- 3. act (hardware, outside the lock) --------------------------
-        # Order matters: enable BEFORE driving, drive to 0 BEFORE disabling.
+        # Order matters. Switching ON: the drive is written FIRST (it is the
+        # loop's starting value, 0 V from OFF), then the enable line -- so the
+        # coils never see a stale AO left on the card. Switching OFF: drive to
+        # 0 BEFORE disabling. The AO is written only when the wanted value
+        # CHANGES: an adopted drive, or an OFF magnet, is left untouched.
         try:
+            out_t = (out[0], out[1])
+            if self._ao_last is None:
+                # drive unknown (no AO read-back at start): write only once the
+                # loop actually wants to drive -- never while simply sitting OFF
+                driving = enable_want or enable_hw or state in (RAMP_DOWN, FAULT)
+                must_write = driving
+            else:
+                must_write = out_t != self._ao_last
+            if must_write:
+                self.backend.write_ao(out[0], out[1])
+                self._ao_last = out_t
+                with self._lock:
+                    self._ao_known = True
             if enable_want and not enable_hw:
                 self.backend.set_enable(True)
-            self.backend.write_ao(out[0], out[1])
             if enable_hw and not enable_want:
                 self.backend.set_enable(False)
             with self._lock:
@@ -512,15 +625,26 @@ class Controller:
         for i, p in enumerate(self._pi):
             meas = (self._bx, self._by)[i]
             sp = (self._sp_bx, self._sp_by)[i]
-            if math.isfinite(meas) and (self._enable_hw or p.output != 0.0):
+            if math.isfinite(meas) and self._enable_hw:
                 # picking up a ramp in progress: continue from where it is
                 p.bumpless(sp, meas, p.output, c.kp_V_per_mT, c.ki_V_per_mT_s, c.ff_mT_per_V)
             else:
-                p.reset(p.output)
+                # The coils carry no current (enable off), so start from 0 V --
+                # even if a stale AO value was adopted at start: energizing onto
+                # a leftover drive would be a voltage step on the coils.
+                p.reset(0.0)
         self._state = REGULATING
         self._stable = False
         self._stable_since = None
         self._enable_want = True
+
+    def _store_reads_locked(self, vx, vy, v1, v2) -> None:
+        """Raw volts -> mT and C, into the brain attributes (used by start and tick)."""
+        self._hall = [vx, vy]
+        self._bx, self._by = self.cfg.hall.volts_to_mT(vx, vy)
+        tc = self.cfg.temperature
+        self._temps = [tc.t1_C_per_V * v1 + tc.t1_offset_C,
+                       tc.t2_C_per_V * v2 + tc.t2_offset_C]
 
     def _enter_fault_locked(self, reason: str, events) -> None:
         """Latch a fault: zero the setpoint (so clearing it later can never make

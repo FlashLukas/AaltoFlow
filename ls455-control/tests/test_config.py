@@ -8,7 +8,8 @@ def test_defaults():
     assert cfg.meter.mode == "dc"
     assert cfg.meter.auto_range is True
     assert cfg.meter.relative is False
-    assert cfg.hardware.push_on_start is False
+    assert not hasattr(cfg.hardware, "push_on_start")        # removed 2026-09-27: never push at start
+    assert cfg.hardware.probe_geometry == "axial"
     assert cfg.hardware.resource == "GPIB0::12::INSTR"      # the 455's factory address
     assert cfg.acquisition.readings >= 1
 
@@ -27,7 +28,7 @@ def test_ini_round_trip(tmp_path):
     cfg.acquisition.settle_time_constants = 5.0
     cfg.hardware.resource = "ASRL3::INSTR"
     cfg.hardware.baud_rate = 19200
-    cfg.hardware.push_on_start = True
+    cfg.hardware.probe_geometry = "transverse"
     cfg.ui.theme = "light"
     path = tmp_path / "ls455.ini"
     cfg.save(str(path))
@@ -45,18 +46,28 @@ def test_ini_round_trip(tmp_path):
     assert back.acquisition.settle_time_constants == 5.0
     assert back.hardware.resource == "ASRL3::INSTR"
     assert back.hardware.baud_rate == 19200
-    assert back.hardware.push_on_start is True
+    assert back.hardware.probe_geometry == "transverse"
     assert back.ui.theme == "light"
 
 
 def test_false_bools_survive(tmp_path):
     cfg = Config()
     cfg.meter.auto_range = False
-    cfg.hardware.push_on_start = False
     path = tmp_path / "f.ini"
     cfg.save(str(path))
     back = Config.load(str(path))
-    assert back.meter.auto_range is False and back.hardware.push_on_start is False
+    assert back.meter.auto_range is False
+
+
+def test_old_ini_with_push_on_start_still_loads(tmp_path):
+    """An .ini saved before 2026-09-27 still carries push_on_start; the key is
+    ignored (there is no pushing at start any more), everything else loads."""
+    path = tmp_path / "old.ini"
+    path.write_text("[hardware]\npush_on_start = True\nresource = ASRL3::INSTR\n",
+                    encoding="utf-8")
+    back = Config.load(str(path))
+    assert back.hardware.resource == "ASRL3::INSTR"
+    assert not hasattr(back.hardware, "push_on_start")
 
 
 def test_partial_ini_keeps_defaults(tmp_path):

@@ -51,8 +51,15 @@ def test_info_and_config(service_and_client):
     assert cli.cfg.sweep.span_Hz == 20e6 and cli.cfg.tracking.on is False
 
 
+def test_service_start_leaves_the_analyser_unconfigured(service_and_client):
+    _, cli = service_and_client
+    s = _wait(lambda s: s.connected, cli)
+    assert s.configured is False and s.continuous is False and s.sweeps == 0
+
+
 def test_continuous_sweeps_arrive(service_and_client):
     _, cli = service_and_client
+    cli.set_continuous(True)                # start-up leaves it off (start-up rule)
     s = _wait(lambda s: s.sweeps > 3, cli)
     assert s.connected and s.sweeps > 3 and s.points == 401
     last = cli.get_trace("last")

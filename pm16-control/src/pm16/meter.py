@@ -139,7 +139,18 @@ class PowerMeter:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the meter, adopt (or push) its settings, start polling.
+        """Open the meter, ADOPT its settings, start polling.
+
+        Lukas's rule for every module (2026-09-27): connecting READS the
+        instrument and never changes it. The PM16 stores its wavelength and
+        range itself (across power cycles, and someone may have set them in
+        Thorlabs OPM for a measurement that is running), so start-up only
+        QUERIES: wavelength, auto/manual range, the range in use, limits,
+        averaging time, dark offset. The config's sensor values are then
+        overwritten with what the meter reports, so the GUI, `describe` and a
+        later Save config all show what the meter is really doing. The config
+        values reach the meter only when someone sets them explicitly
+        (a setter, or set_config / Settings > Apply).
 
         `poll=False` skips the thread, so a test can drive `poll_once()` by hand.
         """
@@ -151,19 +162,16 @@ class PowerMeter:
             self._dev_wl = self._try(self.backend.wavelength_range, self._dev_wl)
             self._dev_range = self._try(self.backend.range_limits, self._dev_range)
             self._avg_time = self._try(self.backend.average_time_s, _NAN)
-            self._connected = True
-            if self.cfg.hardware.push_on_start:
-                self._sanitise_config()
-                self._push_sensor()
-            else:
-                # The meter stores its wavelength; adopting it means connecting
-                # never silently changes a measurement someone already set up.
-                s.wavelength_nm = self.backend.get_wavelength()
-                s.auto_range = self.backend.get_auto_range()
-                if not s.auto_range:
-                    s.range_W = self.backend.get_range()
-                self._read_back()
+            # Queries only -- no set_* call may appear in this block.
+            s.wavelength_nm = float(self.backend.get_wavelength())
+            s.auto_range = bool(self.backend.get_auto_range())
+            # The range in use: on manual it is the setpoint; on auto it is
+            # what auto picked, which is also what a later switch to manual
+            # keeps (set_auto_range hands over without a jump).
+            s.range_W = float(self.backend.get_range())
+            self._read_back()
             self._dark = self._try(self.backend.dark_offset, _NAN)
+            self._connected = True
         self._emit("info", f"connected: {self._idn or 'power meter'}"
                            + (f", sensor {self._sensor}" if self._sensor else ""))
         self._emit("info", f"wavelength {self._wl_actual:g} nm, "

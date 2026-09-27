@@ -27,14 +27,76 @@ def test_start_adopts_the_meters_stored_settings(system):
     assert meter.status().wavelength_nm == 633.0
 
 
-def test_push_on_start_pushes_config():
+class _NoWrites:
+    """Wraps a backend and FAILS on any call that would change the meter.
+    Lukas's rule (2026-09-27): start-up reads the instrument, never writes."""
+
+    WRITES = ("set_wavelength", "set_auto_range", "set_range",
+              "start_zero", "cancel_zero")
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            if name in self.WRITES:
+                raise AssertionError(f"start-up wrote to the meter: {name}{args}")
+            self.calls.append(name)
+            return attr(*args, **kwargs)
+        return call
+
+
+def test_start_issues_no_state_changing_writes():
+    # The config asks for something different in EVERY sensor field, which is
+    # exactly the case where the old push_on_start would have written.
     cfg = Config()
-    cfg.hardware.push_on_start = True
     cfg.sensor.wavelength_nm = 1064.0
-    meter, sim = build_sim_system(cfg, realtime=False)
+    cfg.sensor.auto_range = True
+    cfg.sensor.range_W = 1.0
+    meter, sim = build_sim_system(cfg, realtime=False, seed=1,
+                                  wavelength_nm=532.0, auto_range=False,
+                                  range_W=1.7e-2)
+    spy = _NoWrites(sim)
+    meter.backend = spy
     meter.start(poll=False)
-    assert sim.get_wavelength() == 1064.0
+    meter.poll_once()                     # a live reading is a query too
+    assert "get_wavelength" in spy.calls and "measure_power" in spy.calls
     meter.shutdown()
+
+
+def test_status_after_start_reflects_the_meters_preexisting_state():
+    # The meter was left on MANUAL range 17.4 mW at 532 nm by someone else.
+    cfg = Config()                        # defaults: 800 nm, auto range
+    meter, sim = build_sim_system(cfg, realtime=False, seed=2,
+                                  wavelength_nm=532.0, auto_range=False,
+                                  range_W=1.7e-2)
+    meter.start(poll=False)
+    st = meter.status()
+    assert st.wavelength_nm == 532.0 and st.wavelength_set_nm == 532.0
+    assert st.auto_range is False
+    assert st.range_W == pytest.approx(1.736957e-2)
+    assert st.range_set_W == pytest.approx(1.736957e-2)   # settle echoes this
+    # ...and the meter itself is untouched
+    assert sim.get_wavelength() == 532.0 and sim.get_auto_range() is False
+    assert sim.get_range() == pytest.approx(1.736957e-2)
+    # describe follows: range is a control only on manual range
+    from pm16.net.describe import build_manifest
+    rng = next(p for p in build_manifest(meter)["parameters"] if p["id"] == "range")
+    assert rng["kind"] == "control"
+    meter.shutdown()
+
+
+def test_config_reaches_the_meter_only_when_applied_explicitly(system):
+    meter, sim, cfg, _ = system
+    cfg.sensor.wavelength_nm = 1064.0     # edited, not applied: meter unchanged
+    assert sim.get_wavelength() == 633.0
+    meter.apply_config()                  # the explicit push (set_config / Apply)
+    assert sim.get_wavelength() == 1064.0
 
 
 def test_limits_come_from_the_device_too(system):

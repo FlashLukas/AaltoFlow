@@ -1,5 +1,5 @@
-"""The brain against the simulated SG12000L: clamping to BOTH envelopes,
-read-back through the poll thread, lifecycle and RF safety."""
+"""The brain against the simulated SG12000L: adopt-on-start, clamping to BOTH
+envelopes, read-back through the poll thread, lifecycle and RF safety."""
 
 import time
 
@@ -19,9 +19,48 @@ def wait_for(synth, pred, timeout=2.0):
     raise AssertionError(f"timed out; last status {synth.status()}")
 
 
+def _left_on(cfg: Config) -> Config:
+    """A box someone left RUNNING from the front panel, with every value
+    different from both the sim defaults and the config preset -- so a test
+    can tell "adopted" from "pushed"."""
+    cfg.sim.state_rf_on = True
+    cfg.sim.state_frequency_Hz = 3.2e9
+    cfg.sim.state_power_dBm = 2.5
+    cfg.sim.state_phase_deg = 45.0
+    cfg.sim.state_reference = "external"
+    return cfg
+
+
+class RecordingSim:
+    """Wraps the simulated unit and records every STATE-CHANGING call. During
+    start() there must be none (Lukas's rule, 2026-09-27)."""
+    SETTERS = ("set_output", "set_frequency", "set_power", "set_phase",
+               "set_reference", "set_buzzer", "set_display")
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = []
+        self.forbid = False
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name in self.SETTERS:
+            def rec(*a):
+                if self.forbid:
+                    raise AssertionError(f"{name}{a} during start")
+                self.calls.append((name,) + a)
+                return attr(*a)
+            return rec
+        return attr
+
+    def close(self, rf_off=True):
+        self.calls.append(("close", rf_off))
+        self._inner.close(rf_off)
+
+
 @pytest.fixture
 def synth():
-    cfg = Config()
+    cfg = _left_on(Config())
     cfg.hardware.poll_hz = 20.0
     s, backend = build_sim_system(cfg)
     events = []
@@ -32,21 +71,74 @@ def synth():
     s.shutdown()
 
 
-def test_start_leaves_rf_off_and_connected(synth):
+def test_status_after_start_reflects_the_units_own_state(synth):
+    """Adopt, don't push: the status, the brain's desired values and the unit
+    all show what the box was ALREADY doing, not the config preset."""
     s = synth.status()
     assert s.connected is True
-    assert s.rf_on is False
-    assert synth.sim.read_output() is False
     assert "SG12000L" in s.idn
+    assert s.rf_on is True and synth.sim.read_output() is True
+    assert s.frequency_Hz == 3.2e9 != synth.cfg.signal.frequency_Hz
+    assert s.power_dBm == 2.5 != synth.cfg.signal.power_dBm
+    assert s.phase_deg == 45.0
+    assert s.reference == "external"
+    assert (synth._freq, synth._power, synth._phase, synth._reference, synth._rf_on) \
+        == (3.2e9, 2.5, 45.0, "external", True)
+    assert any("adopted" in m for _, m in synth.events)
 
 
-def test_rf_forced_off_even_if_the_box_was_left_on():
-    cfg = Config()
-    s, backend = build_sim_system(cfg)
-    backend._output = True                  # someone left it on from the front panel
+def test_start_issues_no_state_changing_calls():
+    cfg = _left_on(Config())
+    s, inner = build_sim_system(cfg)
+    rec = RecordingSim(inner)
+    rec.forbid = True                       # any setter during start() raises
+    s.backend = rec
     s.start()
     try:
-        assert backend.read_output() is False
+        rec.forbid = False
+        assert rec.calls == []
+        assert inner.read_output() is True  # still on, as we found it
+        # pressing Apply in Settings with nothing changed sends nothing either
+        s.apply_config()
+        assert rec.calls == []
+    finally:
+        s.shutdown()
+    assert ("set_output", False) in rec.calls   # shutdown still turns RF off
+    assert inner.read_output() is False
+
+
+def test_only_a_changed_preset_is_sent():
+    cfg = _left_on(Config())
+    s, inner = build_sim_system(cfg)
+    rec = RecordingSim(inner)
+    s.backend = rec
+    s.start()
+    try:
+        cfg.ui.theme = "light"              # unrelated change: no instrument traffic
+        s.apply_config()
+        assert rec.calls == []
+        cfg.signal.power_dBm = -12.0        # the user CHANGED the preset power
+        cfg.hardware.mute_buzzer = True     # ...and ticked "mute the buzzer"
+        s.apply_config()
+        assert rec.calls == [("set_power", -12.0), ("set_buzzer", False)]
+        assert inner.read_frequency() == 3.2e9      # frequency untouched
+        assert inner._buzzer is False
+    finally:
+        s.shutdown()
+
+
+def test_adopted_value_outside_limits_is_left_and_warned():
+    cfg = _left_on(Config())
+    cfg.sim.state_power_dBm = 8.0           # above the +5 dBm ceiling
+    s, backend = build_sim_system(cfg)
+    events = []
+    s._on_event = lambda lvl, msg: events.append((lvl, msg))
+    s.start()
+    try:
+        assert s.status().power_dBm == 8.0 and backend.read_power() == 8.0
+        assert any(lvl == "warn" and "outside your limits" in m for lvl, m in events)
+        s.set_power(9.0)                    # the NEXT set is clamped
+        assert s._power == cfg.limits.power_max_dBm
     finally:
         s.shutdown()
 
@@ -65,7 +157,7 @@ def test_set_and_read_back(synth):
 
 def test_power_readback_is_quantised_to_the_attenuator_step(synth):
     synth.set_power(-7.3)
-    s = wait_for(synth, lambda s: s.power_dBm != synth.cfg.signal.power_dBm)
+    s = wait_for(synth, lambda s: s.power_dBm != 2.5)       # 2.5 = adopted
     assert s.power_dBm == -7.5              # 0.5 dB step attenuator
 
 
@@ -168,16 +260,17 @@ def test_apply_config_reclamps_to_new_limits(synth):
 
 
 def test_failed_start_closes_the_port_again():
-    """open() succeeded, then a query failed: the brain must close the backend
-    (RF off) instead of leaving the COM port held by a dying process."""
-    cfg = Config()
+    """open() succeeded, then a query failed: the brain must release the
+    backend instead of leaving the COM port held by a dying process -- and,
+    having never taken control, leave the unit's RF exactly as it was."""
+    cfg = _left_on(Config())
     s, backend = build_sim_system(cfg)
 
     def broken():
-        raise TimeoutError("no reply to FREQ:CW")
-    backend.set_frequency = lambda hz: broken()
+        raise TimeoutError("no reply to FREQ:CW?")
+    backend.read_frequency = broken
     with pytest.raises(TimeoutError):
         s.start()
     assert backend._open is False
-    assert backend.read_output() is False
+    assert backend.read_output() is True        # untouched
     assert s.status().connected is False

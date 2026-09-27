@@ -54,7 +54,7 @@ def test_start_adopts_without_moving():
     assert s.target_nm == pytest.approx(cfg.sim.start_nm, abs=0.01)
     assert s.wavelength_nm == pytest.approx(s.target_nm)
     assert s.moving is False
-    assert "nothing moved" in events[0][1]
+    assert "nothing changed" in events[0][1]
 
 
 def test_moving_is_set_together_with_the_target():
@@ -248,11 +248,66 @@ def test_shutdown_closes_the_shutter_and_is_idempotent():
         mono.set_wavelength(500.0)
 
 
-def test_close_on_start_is_optional():
-    cfg, mono, sim, clock, _ = make(shutter__close_on_start=True)
-    assert mono.status().shutter_open is False
+class NoWritesAtStart:
+    """Wraps the sim and FAILS on any call that would change the instrument
+    while `armed` -- i.e. during start()."""
+
+    def __init__(self, sim):
+        self._sim = sim
+        self.armed = True
+
+    def __getattr__(self, name):
+        attr = getattr(self._sim, name)
+        if name in ("goto", "set_grating", "set_filter", "set_port", "step",
+                    "set_shutter", "abort", "calibrate"):
+            def guarded(*a, **k):
+                assert not self.armed, f"start() called {name}{a}: it must only read"
+                return attr(*a, **k)
+            return guarded
+        return attr
+
+
+def test_start_writes_nothing_and_adopts_the_existing_state():
+    """Lukas's rule (2026-09-27): the service READS the instrument at start
+    and changes nothing. The sim is left in a NON-default state (grating 2,
+    750 nm, shutter closed, filter 3, lateral port) and the brain must show
+    exactly that -- with no command reaching the backend."""
+    from cs260.monochromator import Monochromator
+    from cs260.backends.sim import SimulatedCS260
+    cfg = Config()
+    cfg.accessories.filter_wheel = True
+    cfg.accessories.dual_port = True
+    cfg.sim.start_grating = 2
+    cfg.sim.start_nm = 750.0
+    cfg.sim.start_shutter_open = False
+    cfg.sim.start_filter = 3
+    cfg.sim.start_port = 2
+    clock = Clock()
+    guard = NoWritesAtStart(SimulatedCS260(cfg, clock=clock))
+    mono = Monochromator(guard, cfg, clock=clock)
+    mono.start(poll=False)
+    s = mono.status()
+    assert s.grating == 2 and s.grating_target == 2
+    assert s.wavelength_nm == pytest.approx(750.0, abs=0.05)
+    assert s.target_nm == pytest.approx(s.wavelength_nm)
+    assert s.shutter_open is False
+    assert s.filter == 3 and s.filter_target == 3
+    assert s.port == 2 and s.port_target == 2
+    assert s.moving is False
+    # the envelope (and so describe) follows the ADOPTED grating, not grating 1
+    assert (s.wl_min_nm, s.wl_max_nm) == mono.limits_for(2)
+    # a few idle polls later nothing has been commanded either
+    run(mono, clock, 1.0)
+    assert mono.status().grating == 2 and mono.status().shutter_open is False
+    guard.armed = False
+    mono.shutdown()
+
+
+def test_start_leaves_an_open_shutter_open():
     cfg, mono, sim, clock, _ = make()
     assert mono.status().shutter_open is True
+    cfg, mono, sim, clock, _ = make(sim__start_shutter_open=False)
+    assert mono.status().shutter_open is False
 
 
 def test_apply_config_never_moves_and_rejects_bad_bands():

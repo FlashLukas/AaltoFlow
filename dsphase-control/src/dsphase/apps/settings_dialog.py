@@ -4,7 +4,7 @@ Nothing here talks to hardware directly -- it edits the shared `cfg` object in
 place and then calls `brain.apply_config()` so the running phase shifter (local
 or remote) picks the changes up. Values are grouped:
 
-  Signal    -- the power-on defaults (phase / attenuation / carrier / output)
+  Signal    -- the carrier at start (phase/att/output are read from the unit)
   Limits    -- the safety envelope every setpoint is clamped to
   Device    -- what this unit can do (step sizes, optional frequency command)
   Hardware  -- COM port and timing (used by the real backend only)
@@ -99,17 +99,13 @@ class SettingsDialog(QtWidgets.QDialog):
     def _signal_tab(self):
         page, form = self._form_widget()
         s = self.cfg.signal
-        self._add(form, "signal", "phase_deg", "Default phase",
-                  _dspin(s.phase_deg, -720, 720, 3, 0.5, "deg"))
-        self._add(form, "signal", "attenuation_dB", "Default attenuation",
-                  _dspin(s.attenuation_dB, 0, 60, 2, 0.25, "dB"))
-        self._add(form, "signal", "frequency_MHz", "Default carrier",
+        self._add(form, "signal", "frequency_MHz", "Carrier at start",
                   _dspin(s.frequency_MHz, 0, 100000, 1, 10.0, "MHz"))
-        out = QtWidgets.QCheckBox("Switch the RF output on at start-up")
-        out.setChecked(bool(s.output_on))
-        self._add(form, "signal", "output_on", "Output at start-up", out)
-        form.addRow(_hint("Pushed to the phase shifter when the service starts. Leaving "
-                          "the output off at start-up is the safe default."))
+        form.addRow(_hint("Phase, attenuation and RF on/off are READ from the phase "
+                          "shifter when the service starts and adopted as they are -- "
+                          "nothing is sent to the unit at start. The carrier cannot be "
+                          "read back, so it starts from this value (it is not sent at "
+                          "start either)."))
         return page
 
     def _limits_tab(self):

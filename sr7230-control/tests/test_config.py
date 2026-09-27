@@ -6,7 +6,9 @@ from sr7230.config import Config
 def test_defaults_are_safe():
     cfg = Config()
     assert cfg.reference.amplitude_V == 0.0          # OSC OUT never starts driving
-    assert cfg.hardware.osc_zero_on_start and cfg.hardware.osc_off_on_shutdown
+    assert cfg.hardware.osc_off_on_shutdown
+    # removed 2026-09-27: a start reads OSC OUT, it never zeroes it
+    assert not hasattr(cfg.hardware, "osc_zero_on_start")
     assert cfg.hardware.port == 50000                # the socket with status bytes
     assert cfg.hardware.host == ""                   # no made-up address
     assert cfg.signal.sensitivity_index == 24        # 100 mV: nothing overloads
@@ -45,7 +47,6 @@ def test_save_load_roundtrip(tmp_path):
     assert back.filter.fast_mode is True
     assert back.hardware.option_250kHz is True
     assert back.hardware.osc_off_on_shutdown is False
-    assert back.hardware.osc_zero_on_start is True
     assert back.signal.sensitivity_index == 18
     assert back.filter.time_constant_s == 0.3
     assert back.filter.slope_db == 6
@@ -60,3 +61,12 @@ def test_partial_ini_keeps_defaults(tmp_path):
     back = Config.load(str(path))
     assert back.filter.slope_db == 24
     assert back.signal.sensitivity_index == 24 and back.reference.amplitude_V == 0.0
+
+
+def test_an_old_ini_with_the_removed_start_key_still_loads(tmp_path):
+    path = tmp_path / "old.ini"
+    path.write_text("[hardware]\nosc_zero_on_start = True\nhost = 10.0.0.9\n",
+                    encoding="utf-8")
+    cfg = Config.load(str(path))
+    assert cfg.hardware.host == "10.0.0.9"
+    assert not hasattr(cfg.hardware, "osc_zero_on_start")

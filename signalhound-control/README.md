@@ -53,6 +53,20 @@ dll_path = C:\Program Files\Signal Hound\Spike\sa_api.dll
 `model = auto` accepts whatever is plugged in; a named model makes the service
 **refuse** a different one, so a swapped USB cable is noticed.
 
+## Start-up changes nothing
+
+Starting the service (or a GUI with its own analyser) only READS the analyser:
+model (which sets the frequency and RBW envelope), serial, API version and
+whether a USB-TG44A is paired. An SA44B/SA124B keeps no settings of its own
+and has no call to read the host's settings back, so nothing else can be
+adopted -- and nothing is written: no configure, no initiate, no abort. The
+panel says "not configured yet" until a setting is changed, **Continuous** is
+ticked or an acquisition is started; each of those configures the analyser
+with the settings shown. `acquisition.sweep_on_start = true` in
+`signalhound.ini` brings back sweeping at start. (The in-process simulator
+GUI, `python -m signalhound.apps.gui`, sweeps at once: it has no instrument to
+disturb.)
+
 ## The analyser picks its own bins
 
 A Signal Hound decides how many frequency bins a sweep has -- from span and RBW

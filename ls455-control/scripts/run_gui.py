@@ -32,6 +32,9 @@ def main() -> int:
                     help="connect to a service at HOST instead of running the meter here")
     ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
     ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
+    ap.add_argument("--sim-probe", choices=["HSE", "HST", "UHS"], default="HSE",
+                    help="simulator only: which probe family the simulated meter has "
+                         "(the geometry is hardware.probe_geometry, axial by default)")
     ap.add_argument("--real", action="store_true",
                     help="without --connect: open the real meter in this process")
     ap.add_argument("--theme", choices=["dark", "light"], default=None,
@@ -60,7 +63,7 @@ def main() -> int:
                                         zero_time_s=hw.zero_time_s), cfg)
     else:
         from ls455.sim_system import build_sim_system
-        meter, _ = build_sim_system(cfg)
+        meter, _ = build_sim_system(cfg, probe=args.sim_probe)
     return run_app(meter, cfg)
 
 

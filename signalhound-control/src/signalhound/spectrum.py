@@ -54,6 +54,20 @@ Threads and locks (the pm16/hf2/vna rules):
   * Every backend call runs under `_hw`, but the WAIT during a sweep does not.
   * Safety: the tracking generator is off at start (whatever the config said)
     and the backend is aborted and closed on shutdown or a crash.
+
+START-UP (Lukas's rule, 2026-09-27: "read the instrument state on startup,
+not to change anything"). An SA44B/SA124B keeps NO settings of its own: the
+API holds centre, span, RBW ... in the host process and forgets them when the
+device is closed, and there is no call to read them back (saQuerySweepInfo
+answers only after WE have configured and initiated). So what can be read is
+read and adopted -- model (and with it the frequency / RBW envelope), serial,
+API version, whether a TG44A is paired -- and nothing is written: `start()`
+does not configure, initiate or abort, the sweep thread stays idle, and
+`continuous` is switched off unless `acquisition.sweep_on_start`. The first
+setter, `set_continuous(True)`, an acquire or `frequencies()` (a scan asking
+for its axis) configures the analyser; each of those is a deliberate request.
+Status shows `configured` False and `points` 0 until then: the settings in
+status are what WILL be applied, not something the analyser reported.
 """
 
 from __future__ import annotations
@@ -125,6 +139,9 @@ class Status:
     tg_level_dBm: float = _NAN
     tg_points: int = 0
     continuous: bool = True
+    # False until something deliberately configured the analyser in this
+    # session (start-up never does: see START-UP in the module docstring)
+    configured: bool = False
     # the grid the analyser uses for the configured settings
     points: int = 0
     bin_Hz: float = _NAN
@@ -188,6 +205,12 @@ class SpectrumAnalyzer:
         self._tg = False
         self._hw_error = ""
         self._last_err_emit = -1e9
+        # ARMED = someone asked for something that needs the analyser
+        # configured (a setter, continuous on, an acquire). Until then the
+        # idle sweep thread must not configure it (start-up rule). A plain
+        # bool, only ever set to True -- written by setters, read by the
+        # thread; it is not part of a snapshot, so gotcha #1 does not apply.
+        self._armed = False
 
         # everything below is written under _lock
         self._rev = 0                       # bumped by any change that alters a trace
@@ -227,18 +250,24 @@ class SpectrumAnalyzer:
             self._tg = bool(self.backend.tg_attached())
         # SAFETY: never come up emitting. Whatever the saved config said, the
         # tracking generator starts OFF; turning it on is a deliberate act.
+        # (Nothing is WRITTEN for this: the analyser is simply not put into
+        # TG sweep mode.)
         if self.cfg.tracking.on:
             self.cfg.tracking.on = False
             self._emit("info", "tracking generator off at start (turn it on deliberately)")
+        # START-UP RULE: do not configure the analyser with the saved
+        # settings. Sweeping continuously would do exactly that, so it waits
+        # for a deliberate "continuous on" unless sweep_on_start says otherwise.
+        acq = self.cfg.acquisition
+        if acq.continuous and not acq.sweep_on_start:
+            acq.continuous = False
         self._sanitise_config()
         self._connected = True
         self._emit("info", f"connected: {self._idn}"
                    + ("  + tracking generator" if self._tg else "  (no tracking generator)"))
-        try:
-            with self._hw:
-                self._ensure_configured()
-        except Exception as exc:
-            self._report_hw_error(exc)
+        if not acq.continuous:
+            self._emit("info", "analyser left as opened (nothing configured); "
+                               "Continuous or Acquire starts sweeping")
         if run:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="signalhound-sweep",
@@ -366,6 +395,8 @@ class SpectrumAnalyzer:
         self._changed(f"{int(v)} averages per acquisition", clamped)
 
     def set_continuous(self, on: bool) -> None:
+        if on:
+            self._armed = True
         self.cfg.acquisition.continuous = bool(on)
         self._emit("info", "continuous sweep on" if on else "sweep on trigger only")
 
@@ -527,6 +558,7 @@ class SpectrumAnalyzer:
         """The bins the NEXT sweep will use (a scan reads it once, before
         starting). Configures the analyser first if a setting changed: the grid
         is the analyser's answer to the settings, not something we can compute."""
+        self._armed = True
         with self._hw:
             self._ensure_configured()
         with self._lock:
@@ -563,6 +595,7 @@ class SpectrumAnalyzer:
                 reject=bool(sw.reject), detector=sw.detector, averages=int(sw.averages),
                 tg_on=bool(tg.on), tg_level_dBm=tg.level_dBm, tg_points=int(tg.points),
                 continuous=bool(c.acquisition.continuous),
+                configured=self._configured is not None,
                 points=int(points), bin_Hz=g.bin_Hz if g else _NAN,
                 grid_start_Hz=g.start_Hz if g else _NAN,
                 sweep_time_s=self.backend.sweep_time_s(settings, max(points, 2)),
@@ -613,9 +646,12 @@ class SpectrumAnalyzer:
             wanted = self._acq is not None or self.cfg.acquisition.continuous
         try:
             if not wanted:
-                # idle, but keep the reported grid honest after a setter
-                with self._hw:
-                    self._ensure_configured()
+                # idle, but keep the reported grid honest after a setter --
+                # only once something was actually set: an untouched analyser
+                # is left as it was opened (start-up rule).
+                if self._armed:
+                    with self._hw:
+                        self._ensure_configured()
                 self._stop.wait(0.1)
                 return False
             return self._sweep_once()
@@ -750,6 +786,7 @@ class SpectrumAnalyzer:
     def _trigger(self, reference: bool) -> int:
         if not self._connected:
             raise ValueError("not connected")
+        self._armed = True
         cleared = False
         with self._lock:
             old = self._acq
@@ -772,6 +809,7 @@ class SpectrumAnalyzer:
         """A trace-altering change: bump the revision and restart a running
         acquisition from scratch under the new settings."""
         restarted = None
+        self._armed = True
         with self._lock:
             self._rev += 1
             if self._acq is not None:

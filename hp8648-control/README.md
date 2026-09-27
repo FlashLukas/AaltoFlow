@@ -28,13 +28,21 @@ a setter:
   error event, a red lamp) and makes "off" the desired state too, so nothing
   switches it back on behind your back. Remove the source, then switch RF on:
   that is also how the instrument re-arms.
-- **Pure CW, always.** At connect the backend sends `*RST` and switches AM, FM,
-  PM and pulse modulation off; status reports `modulation_off`. There is no
-  phase control on the 8648.
+- **Adopt at connect, change nothing.** When the service starts it READS the
+  generator -- RF on/off, frequency, level, modulation, reverse-power state,
+  reference and attenuator modes -- and shows exactly that; it writes nothing
+  but `*CLS` (clears the error queue). A generator left running keeps running.
+  RF found ON, a modulation found ON, a level outside your envelope or a
+  reference mode found ON are each reported as a `warn` event and left as they
+  are (reference modes are converted in software). The `signal` values in the
+  config are defaults, sent only when you change them in Settings.
+- **Pure CW is assumed, not forced.** Status reports `modulation_off` and the
+  AM/FM/PM state; the module never switches a modulation. There is no phase
+  control on the 8648.
 
-The RF output is **off at start** (there is no config switch to change that)
-and **off at shutdown** (Ctrl-C, the `shutdown` verb, the launcher's Stop, or
-closing a local GUI).
+The RF output is switched **only by an explicit command** (there is no config
+switch for it) and is switched **off at shutdown** (Ctrl-C, the `shutdown`
+verb, the launcher's Stop, or closing a local GUI).
 
 ## Layout
 
@@ -44,7 +52,7 @@ src/hp8648/
   spec.py                the 8648D's ranges, resolution and freq-dependent max level
   backends/
     base.py              SigGenBackend Protocol -- the interface everything depends on
-    sim.py               SimulatedHP8648 -- resolution, RPP, unspecified-level flag, *RST
+    sim.py               SimulatedHP8648 -- resolution, RPP, unspecified-level flag, power-on state
     visa_8648.py         Visa8648 -- the real box over GPIB (SCPI, lazy pyvisa import)
   source.py              SignalSource -- clamps, worker thread, safe write order, RPP
   sim_system.py          build_sim_system(cfg)

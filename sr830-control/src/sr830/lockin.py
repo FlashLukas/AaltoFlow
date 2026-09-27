@@ -191,18 +191,39 @@ class DspLockIn:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the backend, push the whole configuration, start polling.
+        """Open the backend, ADOPT the instrument's settings, start polling.
+
+        ADOPT, not push (Lukas, 2026-09-27, for every module): whoever set up
+        the SR830 at the front panel -- sensitivity, time constant, a SINE OUT
+        that drives a modulation coil, an AUX OUT that biases something -- must
+        find it exactly as they left it after the service starts. So start()
+        only READS: every setting is queried and copied into `cfg` (which is
+        the brain's live control state), and the status / GUI / describe show
+        what the instrument is really doing. The .ini values of [reference],
+        [input], [demod] and [aux_out] are therefore NOT applied at start; they
+        reach the instrument only when someone sets them explicitly (a setter,
+        or set_config / Settings > Apply, which write only what differs).
 
         `poll=False` skips the thread, so a test can drive `poll_once()` by hand.
         """
-        self._sanitise_config()
+        self._sanitise_config()                 # repairs .ini typos; no hardware
         with self._hw:
             self.backend.open()
-            self._idn = self.backend.idn()
+            try:
+                self._idn = self.backend.idn()
+                self._adopt(self.backend.read_state())
+                self.backend.read_lia_status()  # forget overloads from before we came
+            except Exception:
+                # A reply we cannot interpret: refuse to run rather than guess
+                # (and guessing would later be WRITTEN back). Nothing was set.
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
             self._connected = True
-            self._push_all()
-            self.backend.read_lia_status()      # forget overloads from before we came
         self._emit("info", f"connected: {self._idn or 'SR830'}")
+        self._emit("info", "adopted the front panel: " + self._summary())
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._poll_loop,
@@ -658,13 +679,33 @@ class DspLockIn:
 
     def apply_config(self) -> None:
         """Re-validate everything in cfg (possibly edited in place over the
-        wire) and push it all again."""
+        wire) and write to the instrument ONLY the settings that differ from
+        what it is set to now (read fresh, so a knob turned at the front panel
+        since start is not an accidental difference).
+
+        Why not push everything: a set_config that only changes, say, the
+        acquisition group must not rewrite SINE OUT and AUX OUT -- and a
+        Settings > Apply must change what the user changed, nothing else.
+        This is an EXPLICIT user action, so writing is allowed here; note that
+        clamping to [limits] happens here too, so a limit narrowed in the .ini
+        is enforced from this moment on."""
         self._check_idle()
-        self._sanitise_config()
+        changed: list[str] = []
         if self._connected:
             with self._hw:
-                self._push_all()
-        self._emit("info", "settings applied")
+                # Read the instrument FIRST: a value outside [limits] that the
+                # SR830 already has (adopted at start, or set at the front
+                # panel) is not an edit, so it is not clamped -- otherwise an
+                # Apply that only changed, say, average_tc would silently move
+                # a SINE OUT or AUX OUT that nobody touched.
+                now = self.backend.read_state()
+                self._sanitise_config(found=now)
+                changed = self._push_changed(now)
+        else:
+            self._sanitise_config()
+        self._emit("info", "settings applied" + (
+            f"; written to the SR830: {', '.join(changed)}" if changed
+            else "; nothing on the SR830 needed changing"))
 
     # ---- polling ----------------------------------------------------------------------------
 
@@ -839,10 +880,14 @@ class DspLockIn:
             f = lim.freq_min_Hz
         return max(1, min(int(lim.harmonic_max), int(lim.freq_max_Hz // f)))
 
-    def _sanitise_config(self) -> None:
+    def _sanitise_config(self, found: dict | None = None) -> None:
         """Validate and clamp every setting in cfg, in place. A bad enum value
         (a typo in the .ini) falls back to the default instead of reaching the
-        instrument."""
+        instrument.
+
+        `found` = the instrument's read_state(): a value that is ALREADY what
+        the instrument is set to is left alone even outside [limits] (the
+        limits guard what we SEND; they do not move what someone else set)."""
         from .config import CHOICES, Config as _C
         defaults = _C()
         for (group, name), options in CHOICES.items():
@@ -883,16 +928,32 @@ class DspLockIn:
                                    f"on/off; using {fallback!r}")
                 setattr(grp, name, fallback)
         ref, lim = self.cfg.reference, self.cfg.limits
-        ref.harmonic = int(_clamp(int(ref.harmonic), 1, int(lim.harmonic_max))[0])
-        lo, hi = self._freq_range()
-        ref.frequency_Hz = _clamp(float(ref.frequency_Hz), lo, hi)[0]
+        f = found or {}
+
+        def as_found(key, value, tol=0.0) -> bool:
+            # True when `value` is what the instrument already has
+            return key in f and abs(float(value) - float(f[key])) <= tol
+
+        if not as_found("harmonic", ref.harmonic):
+            ref.harmonic = int(_clamp(int(ref.harmonic), 1, int(lim.harmonic_max))[0])
+        # the frequency is only ever written in internal mode, and FREQ? is the
+        # oscillator there; in external mode FREQ? is a measurement, not "found"
+        if not (f.get("internal") and ref.source == "internal"
+                and as_found("freq_Hz", ref.frequency_Hz,
+                             1e-9 * max(1.0, abs(float(ref.frequency_Hz))))):
+            lo, hi = self._freq_range()
+            ref.frequency_Hz = _clamp(float(ref.frequency_Hz), lo, hi)[0]
         ref.phase_deg = _clamp(float(ref.phase_deg), -180.0, 180.0)[0]
-        ref.sine_out_V = _clamp(float(ref.sine_out_V), lim.sine_min_V, lim.sine_max_V)[0]
+        if not as_found("sine_out_V", ref.sine_out_V, 0.001):
+            ref.sine_out_V = _clamp(float(ref.sine_out_V), lim.sine_min_V, lim.sine_max_V)[0]
         for k in range(4):
-            self.cfg.aux_out.set(k, _clamp(self.cfg.aux_out.get(k),
-                                           lim.aux_out_min_V, lim.aux_out_max_V)[0])
+            v = self.cfg.aux_out.get(k)
+            if "aux_out_V" in f and abs(float(v) - float(f["aux_out_V"][k])) <= 0.0005:
+                continue
+            self.cfg.aux_out.set(k, _clamp(v, lim.aux_out_min_V, lim.aux_out_max_V)[0])
         dem = self.cfg.demod
-        if tables.tc_index(dem.time_constant) > tables.tc_index(lim.tc_max):
+        if (tables.tc_index(dem.time_constant) > tables.tc_index(lim.tc_max)
+                and not as_found("tc", tables.tc_index(dem.time_constant))):
             dem.time_constant = lim.tc_max
 
     def _push_input(self) -> None:
@@ -902,31 +963,133 @@ class DspLockIn:
                                tables.COUPLINGS.index(inp.coupling),
                                tables.LINE_FILTERS.index(inp.line_filter))
 
-    def _push_all(self) -> None:
-        """Send the whole configuration (with _hw held), then read it back.
+    def _adopt(self, st: dict) -> None:
+        """Copy the instrument's settings into cfg and the read-back (with _hw
+        held). Nothing is clamped or written: a value outside [limits] is
+        ADOPTED as it is, with a warning -- the limits guard what WE send, they
+        are not a reason to change what someone else set."""
+        ref, inp, dem = self.cfg.reference, self.cfg.input, self.cfg.demod
+        ref.source = "internal" if st["internal"] else "external"
+        f = float(st["freq_Hz"])
+        # In external mode FREQ? is the MEASURED reference (possibly 0 while
+        # unlocked). Keep it as the setpoint anyway when it is sensible, so a
+        # later switch to internal continues at the frequency the experiment ran.
+        if math.isfinite(f) and f > 0:
+            ref.frequency_Hz = f
+        ref.harmonic = int(st["harmonic"])
+        ref.phase_deg = round(float(st["phase_deg"]), 2)
+        ref.trigger = _pick(tables.TRIGGERS, st["trigger"], "RSLP?")
+        # rounded like the setters round them, so the *_set echo keys match
+        ref.sine_out_V = round(float(st["sine_out_V"]), 3)
+        inp.source = _pick(tables.INPUT_SOURCES, st["source"], "ISRC?")
+        inp.ground = _pick(tables.GROUNDS, st["ground"], "IGND?")
+        inp.coupling = _pick(tables.COUPLINGS, st["coupling"], "ICPL?")
+        inp.line_filter = _pick(tables.LINE_FILTERS, st["line"], "ILIN?")
+        dem.sensitivity = _pick(tables.SENS_LABELS_V, st["sens"], "SENS?")
+        dem.reserve = _pick(tables.RESERVES, st["reserve"], "RMOD?")
+        dem.time_constant = _pick(tables.TC_LABELS, st["tc"], "OFLT?")
+        dem.slope = _pick(tables.SLOPES, st["slope"], "OFSL?")
+        dem.sync_filter = bool(st["sync"])
+        for k, v in enumerate(list(st["aux_out_V"])[:4]):
+            self.cfg.aux_out.set(k, round(float(v), 3))
+        self._rb = {"sens": int(st["sens"]), "reserve": int(st["reserve"]),
+                    "tc": int(st["tc"]), "slope": int(st["slope"]),
+                    "phase_deg": ref.phase_deg, "harmonic": ref.harmonic,
+                    "sine_out_V": float(st["sine_out_V"])}
+        # Say so when the front panel is outside OUR envelope -- but leave it.
+        lim = self.cfg.limits
+        notes = []
+        if not lim.sine_min_V <= ref.sine_out_V <= lim.sine_max_V:
+            notes.append(f"SINE OUT {ref.sine_out_V:.3f} V")
+        for k in range(4):
+            v = self.cfg.aux_out.get(k)
+            if not lim.aux_out_min_V <= v <= lim.aux_out_max_V:
+                notes.append(f"AUX OUT {k + 1} {v:+.3f} V")
+        if tables.tc_index(dem.time_constant) > tables.tc_index(lim.tc_max):
+            notes.append(f"time constant {dem.time_constant}")
+        if ref.harmonic > lim.harmonic_max:
+            notes.append(f"harmonic {ref.harmonic}")
+        if notes:
+            self._emit("warn", "adopted as found, outside [limits]: " + ", ".join(notes)
+                       + " (a setter clamps it only when you change it)")
+
+    def _summary(self) -> str:
+        """One line for the event log: what the SR830 was found doing."""
+        ref, inp, dem = self.cfg.reference, self.cfg.input, self.cfg.demod
+        f = f"{ref.frequency_Hz:g} Hz internal" if ref.source == "internal" else "external ref"
+        return (f"{f}, harmonic {ref.harmonic}, phase {ref.phase_deg:+.2f} deg, "
+                f"sine {ref.sine_out_V:.3f} V, input {inp.source}, "
+                f"{tables.sens_label(self._rb['sens'], inp.source)}, "
+                f"{dem.time_constant}, {dem.slope}, reserve {dem.reserve}, aux out "
+                + "/".join(f"{self.cfg.aux_out.get(k):g}" for k in range(4)) + " V")
+
+    def _push_changed(self, now: dict | None = None) -> list[str]:
+        """Write the cfg settings that DIFFER from the instrument (with _hw
+        held), then read back. Returns what was written (for the event log).
 
         Order matters on an SR830: the allowed time constant depends on slope
         and reserve, so those go first; and the frequency only exists in
         internal mode.
         """
-        ref, dem = self.cfg.reference, self.cfg.demod
+        ref, inp, dem = self.cfg.reference, self.cfg.input, self.cfg.demod
         b = self.backend
-        b.set_ref_source(ref.source == "internal")
-        if ref.source == "internal":
+        if now is None:
+            now = b.read_state()
+        done: list[str] = []
+
+        def differs(a: float, c: float, tol: float) -> bool:
+            return abs(float(a) - float(c)) > tol
+
+        internal = ref.source == "internal"
+        if internal != bool(now["internal"]):
+            b.set_ref_source(internal)
+            done.append("reference source")
+        # re-written if it differs at all: the SR830 rounds FREQ to 5 digits,
+        # so a 6-digit request is sent again each time -- harmless, same result
+        if internal and differs(ref.frequency_Hz, now["freq_Hz"],
+                                1e-9 * max(1.0, abs(ref.frequency_Hz))):
             b.set_frequency(ref.frequency_Hz)
-        b.set_harmonic(ref.harmonic)
-        b.set_phase(ref.phase_deg)
-        b.set_trigger(tables.TRIGGERS.index(ref.trigger))
-        b.set_sine_out(ref.sine_out_V)
-        self._push_input()
-        b.set_sensitivity(tables.sens_index(dem.sensitivity))
-        b.set_reserve(tables.RESERVES.index(dem.reserve))
-        b.set_slope(tables.SLOPES.index(dem.slope))
-        b.set_time_constant(tables.tc_index(dem.time_constant))
-        b.set_sync(dem.sync_filter)
+            done.append("frequency")
+        if int(ref.harmonic) != int(now["harmonic"]):
+            b.set_harmonic(ref.harmonic)
+            done.append("harmonic")
+        if differs(ref.phase_deg, now["phase_deg"], 0.005):         # 0.01 deg steps
+            b.set_phase(ref.phase_deg)
+            done.append("phase")
+        if tables.TRIGGERS.index(ref.trigger) != int(now["trigger"]):
+            b.set_trigger(tables.TRIGGERS.index(ref.trigger))
+            done.append("trigger")
+        if differs(ref.sine_out_V, now["sine_out_V"], 0.001):        # 2 mV steps
+            b.set_sine_out(ref.sine_out_V)
+            done.append("sine out")
+        want_in = (tables.INPUT_SOURCES.index(inp.source), tables.GROUNDS.index(inp.ground),
+                   tables.COUPLINGS.index(inp.coupling),
+                   tables.LINE_FILTERS.index(inp.line_filter))
+        if want_in != tuple(int(now[k]) for k in ("source", "ground", "coupling", "line")):
+            self._push_input()
+            done.append("input")
+            # Switching ISRC between voltage and current may move sensitivity
+            # on its own (VERIFY #6): compare the gain/filter against what the
+            # instrument has NOW, not before the input change.
+            now = b.read_state()
+        for key, value, name, setter in (
+                ("sens", tables.sens_index(dem.sensitivity), "sensitivity", b.set_sensitivity),
+                ("reserve", tables.RESERVES.index(dem.reserve), "reserve", b.set_reserve),
+                ("slope", tables.SLOPES.index(dem.slope), "slope", b.set_slope),
+                ("tc", tables.tc_index(dem.time_constant), "time constant",
+                 b.set_time_constant)):
+            if value != int(now[key]):
+                setter(value)
+                done.append(name)
+        if bool(dem.sync_filter) != bool(now["sync"]):
+            b.set_sync(dem.sync_filter)
+            done.append("sync filter")
         for k in range(4):
-            b.set_aux_out(k + 1, self.cfg.aux_out.get(k))
+            if differs(self.cfg.aux_out.get(k), now["aux_out_V"][k], 0.0005):   # 1 mV steps
+                b.set_aux_out(k + 1, self.cfg.aux_out.get(k))
+                done.append(f"aux out {k + 1}")
         self._read_back()
+        return done
 
     def _read_back(self) -> None:
         """What the instrument is actually set to (with _hw held)."""
@@ -948,6 +1111,15 @@ def _auto_result(name: str, before: dict, after: dict, source: str) -> str:
         a, b = tables.RESERVES[before["reserve"]], tables.RESERVES[after["reserve"]]
         return f"reserve {a} -> {b}" if a != b else f"reserve stays {b}"
     return f"phase {before['phase_deg']:+.2f} -> {after['phase_deg']:+.2f} deg"
+
+
+def _pick(options, index, query: str) -> str:
+    """options[index] for an index the instrument replied, refusing nonsense
+    (a garbled reply must not silently become some other setting)."""
+    i = int(index)
+    if not 0 <= i < len(options):
+        raise ValueError(f"{query} replied {index!r}: not one of 0..{len(options) - 1}")
+    return options[i]
 
 
 def _maybe_number(v):

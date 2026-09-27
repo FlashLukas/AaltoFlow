@@ -13,6 +13,13 @@ the same way.
 
 A background thread owns the SUB socket and keeps the latest status; commands go
 out on a REQ socket guarded by a lock (REQ is strict request/reply, one at a time).
+
+LOST-CLIENT GUARD. Every command carries this client's random id. Switching
+emission ON sends that id as the "owner", and from then on the same background
+thread sends a `ping` every `ping_s` seconds. If this process dies or the
+network goes, the pings stop and the service switches emission off after
+hardware.client_timeout_s. (A raw client -- scan-core, the console -- sends no
+owner: it gets no guard, so a long scan is never cut.)
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 
 import zmq
 
@@ -55,6 +63,8 @@ class RemoteStatus:
         self.wavelength_nm = d.get("wavelength_nm", list(z))
         self.amplitude_set_pct = d.get("amplitude_set_pct", list(z))
         self.amplitude_pct = d.get("amplitude_pct", list(z))
+        self.crystal = d.get("crystal", 0)
+        self.emission_guarded = d.get("emission_guarded", False)
         self.hw_error = d.get("hw_error", "")
         self.describe_rev = d.get("describe_rev")
 
@@ -63,8 +73,13 @@ class SuperkClient:
     def __init__(self, host: str = "localhost",
                  cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int = DEFAULT_PUB_PORT,
-                 timeout_ms: int = 3000):
+                 timeout_ms: int = 3000, ping_s: float = 1.0):
         self._timeout_ms = timeout_ms
+        # a random id per client object: tells the service WHICH client owns
+        # the emission, so another client's traffic cannot keep it alive
+        self.client_id = uuid.uuid4().hex[:12]
+        self._ping_s = float(ping_s)
+        self._pinging = False          # True after we switched emission on
         self._ctx = zmq.Context.instance()
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
@@ -124,7 +139,11 @@ class SuperkClient:
         return s.filter_min_nm, s.filter_max_nm
 
     def set_emission(self, on: bool):
-        self._must({"cmd": "set_emission", "on": bool(on)})
+        d = {"cmd": "set_emission", "on": bool(on)}
+        if on:
+            d["owner"] = self.client_id      # arm the service's lost-client guard
+        self._must(d)
+        self._pinging = bool(on)             # heartbeat while we own emission
 
     def reset_interlock(self):
         self._must({"cmd": "reset_interlock"})
@@ -149,8 +168,10 @@ class SuperkClient:
                     "amplitude_pct": float(pct)})
 
     def shutdown(self):
-        """Close the client. Does NOT stop the remote service (and so does not
-        switch the laser off -- see the open question in CLAUDE.local.md)."""
+        """Close the client. Does NOT stop the remote service. If THIS client
+        switched emission on (and still owns it), its pings stop here, so the
+        service's lost-client guard switches emission off after
+        hardware.client_timeout_s."""
         self._stop.set()
         time.sleep(0.25)
         self._req.close(0)
@@ -169,6 +190,7 @@ class SuperkClient:
         return r
 
     def _cmd(self, d: dict) -> dict:
+        d = {**d, "client": self.client_id}  # every command is a heartbeat
         with self._req_lock:
             self._req.send_json(d)
             try:
@@ -190,7 +212,15 @@ class SuperkClient:
     def _listen(self):
         poller = zmq.Poller()
         poller.register(self._sub, zmq.POLLIN)
+        last_ping = time.monotonic()
         while not self._stop.is_set():
+            now = time.monotonic()
+            if self._pinging and self._ping_s > 0 and now - last_ping >= self._ping_s:
+                last_ping = now
+                try:
+                    self._cmd({"cmd": "ping"})
+                except Exception:              # the service may be gone; keep trying
+                    pass
             try:
                 if poller.poll(200):
                     topic, payload = self._sub.recv_multipart()

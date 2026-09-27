@@ -212,17 +212,24 @@ def test_status_never_touches_the_hardware(fast_brain):
     assert calls == []
 
 
-def test_safe_start_stops_a_leftover_jog_and_pushes_amplitudes():
+def test_leftover_jog_is_stopped_at_start_as_a_safety_interlock():
+    """The ONE deliberate state change at start: a JA left running by a
+    crashed session (controller still in remote) has no dead-man any more.
+    It gets hardware.start_wait_s to end, then ST -- and it is reported."""
     cfg = Config()
-    cfg.motion.amp_fwd_y = 33
+    cfg.hardware.start_wait_s = 0.2
+    cfg.motion.amp_fwd_y = 33                 # an .ini value: must NOT be pushed
     brain, sim = build_sim_system(cfg)
-    sim._remote = True
-    sim.jog(1, 3)                            # a previous session left X jogging
-    sim._remote = False
+    sim.preset_used_state()
+    sim.jog(1, 1)                            # a previous session left X jogging
+    t0 = time.monotonic()
     brain.start()
     try:
+        assert time.monotonic() - t0 >= 0.2  # it was given the grace time
         assert sim.axis_state(1) == READY
-        assert sim.read_amplitude(2, +1) == 33
+        assert any("1ST" in w for w in brain.startup_writes)
+        assert sim.read_amplitude(2, +1) == 16           # adopted, not 33
+        assert brain.cfg.motion.amp_fwd_y == 16
     finally:
         brain.shutdown()
 
@@ -328,7 +335,7 @@ def test_failed_start_closes_the_controller():
 
     def boom(*_a):
         raise RuntimeError("controller error -6: not allowed in current state")
-    sim.set_amplitude = boom
+    sim.read_amplitude = boom
     with pytest.raises(RuntimeError, match="-6"):
         brain.start()
     assert closed and not brain.status().connected

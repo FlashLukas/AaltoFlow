@@ -31,7 +31,8 @@ What is NOT confirmed and must be checked on the instrument (grep "# VERIFY"):
    (the brain covers the gap with a short grace window either way).
 4. The hold-time semantics (0 = no hold assumed; what value means "forever").
 5. The allowed closed-loop max frequency range.
-6. Whether the sensor type must be set (hardware.sensor_type, 0 = leave it).
+6. The sensor type stored in the SCU (hardware.sensor_type, 0 = do not check;
+   non-zero = CHECK it at start, never set it).
 7. The direction MoveToReference searches in, and whether autoZero=0 keeps the
    absolute scale of the distance-coded marks (assumed yes).
 """
@@ -116,7 +117,7 @@ class ScuStage:
             "SA_GetDeviceID": [u, pu],
             "SA_GetDeviceFirmwareVersion": [u, pu],
             "SA_GetSensorPresent_S": [u, u, pu],
-            "SA_SetSensorType_S": [u, u, u],
+            "SA_GetSensorType_S": [u, u, pu],
             "SA_MovePositionAbsolute_S": [u, u, ctypes.c_int, u],
             "SA_MovePositionRelative_S": [u, u, ctypes.c_int, u],
             "SA_MoveToReference_S": [u, u, u, u],
@@ -139,13 +140,29 @@ class ScuStage:
         if self._dev >= n.value:
             self.close()
             raise ScuError(f"SCU device index {self._dev} not found ({n.value} connected)")
-        if self.cfg.hardware.sensor_type:
-            self._call("SA_SetSensorType_S", self._dev, self._ch,
-                       int(self.cfg.hardware.sensor_type))  # VERIFY
+        # Startup READS and never writes (Lukas's rule, 2026-09-27): the
+        # sensor type is a setting stored in the SCU, so it is only CHECKED
+        # here. A wrong type means every position reading is wrong, hence the
+        # refusal instead of a warning; set it once with SmarAct's own tool,
+        # or leave hardware.sensor_type = 0 to skip the check.
+        want = int(self.cfg.hardware.sensor_type)
+        if want:
+            have = ctypes.c_uint(0)
+            self._call("SA_GetSensorType_S", self._dev, self._ch,
+                       ctypes.byref(have))  # VERIFY (newly used query)
+            if have.value != want:
+                self.close()
+                raise ScuError(
+                    f"the SCU channel is configured for sensor type {have.value}, "
+                    f"hardware.sensor_type asks for {want}. The service does not "
+                    "change it at start; set it with the SmarAct software, or set "
+                    "hardware.sensor_type = 0 to accept the controller's setting.")
         if not self.sensor_present():
             self.close()
             raise ScuError("the SCU reports NO position sensor on this channel; "
                            "closed-loop control is impossible")
+        # Only QUERIES from here on: the brain adopts the frequency, position,
+        # state and "position known" the controller already has.
         self._freq = self.get_max_frequency()
 
     def close(self) -> None:

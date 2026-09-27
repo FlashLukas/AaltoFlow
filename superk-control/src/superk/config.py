@@ -32,15 +32,23 @@ N_LINES = 8
 
 @dataclass
 class Startup:
-    """What the service pushes to the hardware when it starts.
+    """PRESETS -- values the operator can send to the laser from the settings.
 
-    Emission is NOT here on purpose: the laser never starts emitting because a
-    service started. The RF output also starts OFF.
+    (The group keeps its old name "startup" so existing .ini files still load.)
+
+    Lukas's rule (2026-09-27): starting the service READS the laser and adopts
+    whatever it is doing -- nothing in here is pushed at start any more. A value
+    in this group reaches the laser only when someone CHANGES it (Settings >
+    Apply, or set_config over the wire); then just the changed values are sent,
+    through the normal setters, so they are clamped and announced like any
+    other request.
+
+    Emission is NOT here on purpose: no setting can switch the laser on.
     """
 
-    power_pct: float = 10.0                    # EXTREME power level written at start
-    filter: str = "VIS-nIR"                    # which AOTF crystal is driven at start
-    # line 1 is the "scan" line; lines 2..8 start at 0 % amplitude = not emitting
+    power_pct: float = 10.0                    # EXTREME power level preset
+    filter: str = "VIS-nIR"                    # AOTF crystal preset
+    # line 1 is the "scan" line; lines 2..8 at 0 % amplitude = not emitting
     wavelengths_nm: str = "650,700,750,800,850,600,550,520"
     amplitudes_pct: str = "80,0,0,0,0,0,0,0"
 
@@ -114,11 +122,20 @@ class Hardware:
     # The EXTREME's own watchdog switches emission OFF when it hears nothing
     # for this many seconds -- the only protection that still works when the
     # service process is KILLED (no code runs then). 0 disables it.
+    # Written at start ONLY if the laser's own value differs (a safety
+    # interlock, kept deliberately -- see CLAUDE.local.md).
     watchdog_s: int = 10
     poll_hz: float = 5.0               # how often the worker re-reads the hardware
-    # Switch emission off when the service starts (in case someone left it on
-    # from the front panel). Safe default; see the open questions in CLAUDE.local.md.
-    emission_off_on_start: bool = True
+    # Lost-client guard: a REMOTE GUI that switches emission on becomes its
+    # "owner" and pings the service every second. If the owner is silent for
+    # this long (GUI crashed, network gone), the service switches emission OFF.
+    # Emission switched on WITHOUT an owner (a scan routine, the console)
+    # has no guard, so a long scan is never cut. 0 disables the guard.
+    client_timeout_s: float = 5.0
+    # Opt-in: switch emission off when the service starts. Default False since
+    # 2026-09-27 (Lukas: a start must only READ the laser; an emitting laser
+    # is ADOPTED and shown as emitting).
+    emission_off_on_start: bool = False
     # Sim only: seconds from "emission on" until the laser reports emitting.
     sim_warmup_s: float = 1.5
 

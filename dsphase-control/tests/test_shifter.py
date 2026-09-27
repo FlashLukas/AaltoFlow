@@ -33,21 +33,99 @@ def rig():
     brain.shutdown()
 
 
-def test_start_leaves_output_off(rig):
+def test_start_writes_nothing(rig):
+    """Adopt-on-start (Lukas, 2026-09-27): start() only READS the unit."""
     brain, backend = rig
-    s = brain.status()
-    assert s.connected is True
-    assert s.output_on is False
-    assert backend.read_output() is False
+    assert brain.status().connected is True
+    assert backend.write_log == []
+    assert brain.status().adopted is True
 
 
-def test_start_output_off_even_if_backend_was_on():
+def test_start_adopts_preexisting_state():
+    """A unit left at -90 deg, 12.5 dB, RF ON by someone else: status shows
+    exactly that, the setpoints equal it, and nothing was written."""
     cfg = Config()
-    brain, backend = build_sim_system(cfg)
-    backend._output = True              # a unit left on by someone else
+    brain, backend = build_sim_system(cfg, phase_deg=-90.0, attenuation_dB=12.5,
+                                      output_on=True)
+    events = []
+    brain._on_event = lambda lvl, msg: events.append((lvl, msg))
     brain.start()
     try:
-        assert backend.read_output() is False
+        s = brain.status()
+        assert s.adopted is True
+        assert s.output_on is True                   # left ON, not switched off
+        assert s.phase_deg == -90.0 and s.phase_set_deg == -90.0
+        assert s.phase_device_deg == -90.0
+        assert s.attenuation_dB == 12.5 and s.attenuation_set_dB == 12.5
+        assert backend.write_log == []
+        assert backend.read_output() is True
+        # RF found ON is never silent
+        assert any(lvl == "warn" and "RF output is ON" in m for lvl, m in events)
+        assert any("adopted from the unit" in m for _, m in events)
+    finally:
+        brain.shutdown()
+    assert backend._output is False                  # shutdown rule unchanged
+
+
+def test_adopted_phase_is_expressed_in_the_envelope_branch():
+    """Envelope 0..360, unit at -90: adopt as 270 (same physical phase), so an
+    echo check and the GUI agree with the limits -- still no write."""
+    cfg = Config()
+    cfg.limits.phase_min_deg, cfg.limits.phase_max_deg = 0.0, 360.0
+    brain, backend = build_sim_system(cfg, phase_deg=-90.0)
+    brain.start()
+    try:
+        s = brain.status()
+        assert s.phase_set_deg == 270.0 and s.phase_deg == 270.0
+        assert s.phase_device_deg == -90.0
+        assert backend.write_log == []
+    finally:
+        brain.shutdown()
+
+
+def test_adopted_value_outside_limits_is_announced_not_changed():
+    cfg = Config()
+    cfg.limits.att_min_dB = 20.0                     # a power ceiling
+    brain, backend = build_sim_system(cfg, attenuation_dB=5.0)
+    events = []
+    brain._on_event = lambda lvl, msg: events.append((lvl, msg))
+    brain.start()
+    try:
+        assert brain.status().attenuation_dB == 5.0
+        assert backend.write_log == []
+        assert any(lvl == "warn" and "outside the limits" in m for lvl, m in events)
+    finally:
+        brain.shutdown()
+
+
+def test_failed_start_read_adopts_later_and_never_pushes_placeholders():
+    """If the first read fails the state is UNKNOWN: nothing is written (not
+    even by set_config), and the first good read adopts it."""
+    cfg = Config()
+    brain, backend = build_sim_system(cfg, phase_deg=45.0, attenuation_dB=7.5,
+                                      output_on=True)
+    backend.fail_next_read = True
+    brain.start()
+    try:
+        assert brain.status().adopted is False
+        brain.apply_config()                         # e.g. Settings > Apply
+        assert [w for w in backend.write_log if w[0] in ("phase", "att", "output")] == []
+        s = wait_for(brain, lambda s: s.adopted)
+        assert s.phase_set_deg == 45.0 and s.attenuation_set_dB == 7.5 and s.output_on
+    finally:
+        brain.shutdown()
+
+
+def test_a_user_setpoint_is_not_overwritten_by_a_late_adoption():
+    cfg = Config()
+    brain, backend = build_sim_system(cfg, phase_deg=45.0, attenuation_dB=7.5)
+    backend.fail_next_read = True
+    brain.start()
+    try:
+        brain.set_phase(10.0)                        # user acts before the good read
+        s = wait_for(brain, lambda s: s.adopted)
+        assert s.phase_set_deg == 10.0 and s.phase_deg == 10.0
+        assert s.attenuation_set_dB == 7.5           # the rest is still adopted
     finally:
         brain.shutdown()
 
@@ -208,18 +286,3 @@ def test_concurrent_setters_do_not_lose_updates(rig):
     brain.set_phase(123.5)
     s = wait_for(brain, lambda s: s.phase_deg == 123.5)
     assert s.phase_deg == 123.5 and s.phase_set_deg == 123.5
-
-
-def test_rf_at_start_is_allowed_but_announced():
-    cfg = Config()
-    cfg.signal.output_on = True
-    brain, backend = build_sim_system(cfg)
-    events = []
-    brain._on_event = lambda lvl, msg: events.append((lvl, msg))
-    brain.start()
-    try:
-        assert backend.read_output() is True
-        assert any(lvl == "warn" and "RF output" in msg for lvl, msg in events)
-    finally:
-        brain.shutdown()
-    assert backend._output is False

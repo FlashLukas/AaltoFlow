@@ -111,7 +111,8 @@ def build_manifest(synth) -> dict:
            read_path=["rf_on"],
            set={"verb": "set_rf", "arg": "on"},
            settle={"policy": "echoes", "key": "rf_on"},
-           help="RF output on/off. Always OFF when the service starts and stops."),
+           help="RF output on/off. Adopted from the unit when the service "
+                "starts (never changed then); switched OFF when it stops."),
 
         # Scanned in MHz, commanded and published in Hz. `scale` is on the
         # descriptor rather than inside `set`, so reading and setting cannot

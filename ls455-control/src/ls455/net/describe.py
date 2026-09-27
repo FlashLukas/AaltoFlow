@@ -11,7 +11,12 @@ What is dynamic (each changes `revision`, carried by every status frame as
   * `range` is a control on manual range and an indicator on auto range (same
     id both ways);
   * its min/max follow the probe family;
-  * `rms_band` is a control only in RMS mode, `dc_digits` only in DC mode.
+  * `rms_band` is a control only in RMS mode, `dc_digits` only in DC mode,
+    and in PEAK mode the peak sub-settings appear as indicators;
+  * the detectors' label and help name what they report (DC field, RMS
+    field, a peak) -- a meter adopted in peak mode must not look like a DC one;
+  * a different PROBE (re-read at reconnect or by `reread_probe`) changes the
+    range list and so the range bounds.
 
 Every field is in mT, commanded and published.
 
@@ -92,6 +97,9 @@ def build_manifest(meter) -> dict:
     m = cfg.meter
     lim = cfg.limits
     rlo, rhi = meter.range_limits()
+    # what the field detectors report, so their labels say it (see docstring)
+    kind = {"dc": "DC", "rms": "RMS", "peak": "peak"}.get(m.mode, m.mode)
+    quantity = meter.quantity()
 
     acquire = {
         "group": "sample",
@@ -110,7 +118,8 @@ def build_manifest(meter) -> dict:
            set={"verb": "set_mode", "arg": "mode"},
            settle={"policy": "echoes", "key": "mode"},
            help="dc: static field. rms: the AC part (wide band to 20 kHz, "
-                "narrow to 1 kHz); measured_field_mT is then empty."),
+                "narrow to 1 kHz). peak: the peak detector, its sub-settings as "
+                "set on the front panel. measured_field_mT is empty outside dc."),
     ]
     if m.mode == "dc":
         params.append(_p(
@@ -121,6 +130,19 @@ def build_manifest(meter) -> dict:
             settle={"policy": "echoes", "key": "dc_digits", "tol": 0.5},
             help="The 455's filter: 3 = 100 Hz / 30 rdg/s, 4 = 10 Hz, "
                  "5 = 1 Hz / 10 rdg/s. More digits = less noise, slower settling."))
+    elif m.mode == "peak":
+        params += [
+            _p("peak_mode", "Peak mode", "indicator", "string", group="Meter",
+               order=20, read_path=["peak_mode"],
+               help="periodic: a repeating signal. pulse: a single event, LATCHED "
+                    "until reset on the meter -- then a reading is the largest peak "
+                    "since that reset, not since the acquisition started. Set on "
+                    "the front panel."),
+            _p("peak_display", "Peak display", "indicator", "string", group="Meter",
+               order=21, read_path=["peak_display"],
+               help="Which peak is reported: positive, negative, or with 'both' "
+                    "the larger in magnitude (sign kept)."),
+        ]
     else:
         params.append(_p(
             "rms_band", "RMS band", "control", "enum", group="Meter", order=20,
@@ -139,7 +161,11 @@ def build_manifest(meter) -> dict:
         params.append(_p(
             "range", "Range", "indicator", "float", unit="mT", group="Meter",
             order=40, decimals=4, read_path=["range_mT"],
-            help="Full scale chosen by auto-range. Switch auto-range off to set it."))
+            # the probe's range list is named here so that describe_rev moves
+            # when a different probe is plugged in, also on auto range
+            help="Full scale chosen by auto-range. Switch auto-range off to set it. "
+                 "This probe's ranges: "
+                 + ", ".join(f"{r:g}" for r in meter.status().ranges_mT) + " mT."))
     else:
         params.append(_p(
             "range", "Range", "control", "float", unit="mT", group="Meter",
@@ -186,17 +212,21 @@ def build_manifest(meter) -> dict:
            help="An acquisition averages this many fresh, settled readings."),
 
         # -- measurement: latched (scan) and live (panel) -------------------------
-        _p("field", "Field", "indicator", "float", unit="mT", group="Measurement",
-           order=10, decimals=5, read_path=["sample", "field_mT"],
-           acquire=acquire,
-           help="Mean of fresh readings latched by `acquire`: safe to record in a scan."),
-        _p("field_std", "Field std. dev.", "indicator", "float", unit="mT",
+        _p("field", f"Field ({kind})", "indicator", "float", unit="mT",
+           group="Measurement", order=10, decimals=5,
+           read_path=["sample", "field_mT"], acquire=acquire,
+           help=f"Mean of fresh readings latched by `acquire`: safe to record in "
+                f"a scan. Reports the {quantity}."),
+        _p("field_std", f"Field std. dev. ({kind})", "indicator", "float", unit="mT",
            group="Measurement", order=11, decimals=5,
            read_path=["sample", "std_mT"], acquire=acquire,
-           help="Standard deviation of the readings in that acquisition."),
-        _p("live_field", "Field (live)", "indicator", "float", unit="mT",
+           help=f"Standard deviation of the readings in that acquisition ({quantity})."),
+        _p("live_field", f"Field ({kind}, live)", "indicator", "float", unit="mT",
            group="Live", order=20, decimals=5, plottable=True,
-           read_path=["field_mT"]),
+           read_path=["field_mT"], help=f"The {quantity}, as read now."),
+        _p("quantity", "Reading is", "indicator", "string", group="Live", order=19,
+           read_path=["quantity"],
+           help="What the field readings are, following the meter's mode."),
         _p("flag", "Reading flag", "indicator", "string", group="Live", order=21,
            read_path=["flag"],
            help="'overload' when the manual range is too small, 'no probe'."),
@@ -224,8 +254,24 @@ def build_manifest(meter) -> dict:
            order=1, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
            read_path=["idn"]),
-        _p("probe", "Probe type", "indicator", "string", group="Status", order=3,
-           read_path=["probe"]),
+        _p("probe", "Probe type", "indicator", "string", group="Probe", order=1,
+           read_path=["probe"],
+           help="HSE / HST / UHS, as the meter reports it (TYPE?). Decides the ranges."),
+        _p("probe_desc", "Probe", "indicator", "string", group="Probe", order=2,
+           read_path=["probe_desc"]),
+        _p("probe_serial", "Probe serial", "indicator", "string", group="Probe",
+           order=3, read_path=["probe_serial"]),
+        _p("probe_sensitivity", "Probe sensitivity", "indicator", "float",
+           unit="mV/kG", group="Probe", order=4, decimals=4,
+           read_path=["probe_sensitivity_mV_per_kG"]),
+        _p("probe_geometry", "Probe geometry", "indicator", "string", group="Probe",
+           order=5, read_path=["probe_geometry"],
+           help="axial or transverse. From the config (hardware.probe_geometry): "
+                "the 455 does not report it."),
+        _p("reread_probe", "Re-read probe", "action", "action", group="Probe",
+           order=6, wait={"ready": {"policy": "immediate"}},
+           help="Ask the meter again which probe is plugged in (after swapping "
+                "it). The ranges and their limits follow the probe."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
            order=4, read_path=["hw_error"]),
     ]

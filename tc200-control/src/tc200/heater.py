@@ -21,8 +21,10 @@ unattended heater safe. Its jobs:
     detect this itself).
 
 What it deliberately does NOT do at start: change anything. It ADOPTS the
-box's setpoint, output state, sensor, gains, PMAX and TMAX (unless
-`hardware.push_on_start` asks it to push the stored settings). At shutdown it
+box's setpoint, output state, sensor, gains, PMAX and TMAX, and only QUERIES
+the box (Lukas, 2026-09-27: "all modules should read the instrument state on
+startup, not to change anything"). A wrong sensor setting is a WARNING, never
+a write -- the enable interlock below keeps it safe. At shutdown it
 switches the output OFF when `hardware.disable_on_shutdown` (the default,
 because an unattended heater is the one thing in the lab that can start a fire).
 
@@ -167,10 +169,12 @@ class Heater:
     # ---- lifecycle -------------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Connect, ADOPT the box's state (or push the stored settings when
-        hardware.push_on_start), and start polling. Never touches the output
-        or the setpoint. `poll=False` is for tests that step `poll_once()`."""
-        hw = self.cfg.hardware
+        """Connect, ADOPT the box's state and start polling. Queries only: the
+        output, the setpoint, the sensor, the gains, PMAX and TMAX stay exactly
+        as the box has them, and the stored `device` group of the .ini becomes
+        what the box says (it is pushed only when someone CHANGES it later,
+        through a setter or set_config). `poll=False` is for tests that step
+        `poll_once()`."""
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
@@ -180,8 +184,6 @@ class Heater:
                 self._enabled = st.enabled
                 self._sp = float(sp)
                 self._connected = True
-            if hw.push_on_start:
-                self._push_on_start(st.enabled)
             self._read_settings(adopt_into_cfg=True)
         with self._lock:
             dev = self._dev
@@ -585,28 +587,6 @@ class Heater:
             if "sensor" in changed:
                 self._check_sensor(announce=True)
 
-    def _push_on_start(self, enabled: bool) -> None:
-        """Caller holds _hw. hardware.push_on_start: push cfg.device to the box.
-        The sensor only while the output is off (see set_sensor)."""
-        dev = self.cfg.device
-        be = self.backend
-        if dev.sensor in SENSORS and be.read_sensor() != dev.sensor:
-            if enabled:
-                self._emit("warn", f"push_on_start: sensor NOT changed to {dev.sensor} "
-                                   "while the heater is on")
-            else:
-                be.set_sensor(dev.sensor)
-        be.set_p_gain(int(_clamp(int(dev.p_gain), *P_GAIN_RANGE)[0]))
-        be.set_i_gain(int(_clamp(int(dev.i_gain), *I_GAIN_RANGE)[0]))
-        be.set_d_gain(int(_clamp(int(dev.d_gain), *D_GAIN_RANGE)[0]))
-        be.set_pmax(_clamp(float(dev.pmax_W), PMAX_MIN_W,
-                           max(PMAX_MIN_W, float(self.cfg.limits.pmax_max_W)))[0])
-        be.set_tmax(_clamp(float(dev.tmax_C), TMAX_MIN_C, TMAX_MAX_C)[0])
-        sp = be.read_setpoint()                 # TMAX may have dragged it down
-        with self._lock:
-            self._sp = float(sp)
-        self._emit("info", "pushed the stored settings to the TC200 (push_on_start)")
-
     def _check_sensor(self, announce: bool) -> None:
         with self._lock:
             sensor = self._dev.sensor
@@ -614,7 +594,7 @@ class Heater:
         if sensor != expected and announce:
             self._emit("warn", f"the TC200 is set to sensor {sensor!r}, but a {expected!r} "
                                "is wired: enabling is refused until this is fixed "
-                               "(front panel, set_sensor, or hardware.push_on_start)")
+                               "(front panel or set_sensor; start never changes it)")
 
     def _require_connected(self) -> None:
         if not self._connected:

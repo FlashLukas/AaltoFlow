@@ -11,6 +11,7 @@ non-zero if anything looks wrong.
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -87,9 +88,9 @@ def main() -> int:
     brain.store_position(0, "spot")
     p = brain.get_positions()[0]
     assert p["used"] and p["name"] == "spot", p
-    brain.save_positions("/tmp/_piezo_smoke_positions.json")
+    brain.save_positions(str(Path(tempfile.gettempdir()) / "_piezo_smoke_positions.json"))
     brain.clear_position(0)
-    brain.load_positions("/tmp/_piezo_smoke_positions.json")
+    brain.load_positions(str(Path(tempfile.gettempdir()) / "_piezo_smoke_positions.json"))
     assert brain.get_positions()[0]["used"], "reload failed"
     print("  position list OK")
 

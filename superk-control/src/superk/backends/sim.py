@@ -13,7 +13,12 @@ apart from the real laser. It behaves like the registers of the real one:
     it with `close_interlock()` (a person closing a door, in the lab);
   * temperatures drift a little, the inlet warms up while emitting.
 
-It starts with emission OFF and RF OFF, as a laser that was just powered up.
+A fresh SimulatedSuperK is a laser that was just powered up (everything off,
+zero). `preset(...)` puts it in the state someone LEFT it in -- the service
+adopts that state at start instead of overwriting it, so the tests start the
+sim from a non-default state (emission already on, RF on, 23.4 %, ...) to prove
+the adoption. The recording `writes` list lets a test check that a start wrote
+nothing that changes the laser.
 """
 
 from __future__ import annotations
@@ -62,6 +67,34 @@ class SimulatedSuperK:
         self._wl = [0.0] * N_LINES
         self._amp = [0.0] * N_LINES
         self._xtal_temp = 26.0
+        # every state-changing call, in order: (method, args). Tests read it.
+        self.writes: list[tuple] = []
+
+    def preset(self, *, emission: bool | None = None, rf: bool | None = None,
+               power_pct: float | None = None, crystal: int | None = None,
+               wavelengths_nm=None, amplitudes_pct=None,
+               watchdog_s: int | None = None) -> None:
+        """Put the fake laser in a state 'someone left it in' (front panel,
+        NKT CONTROL, a previous session). NOT recorded in `writes`: this is the
+        world before the service exists. An emission preset is already warm."""
+        with self._lock:
+            if emission is not None:
+                self._emission_cmd = bool(emission)
+                self._emission_since = time.monotonic() - self.warmup_s - 1.0
+            if rf is not None:
+                self._rf = bool(rf)
+            if power_pct is not None:
+                self._power = round(float(power_pct) * 10) / 10
+            if crystal is not None:
+                self._crystal = int(crystal)
+            if wavelengths_nm is not None:
+                self._wl = [round(float(v) * 1000) / 1000 for v in
+                            (list(wavelengths_nm) + [0.0] * N_LINES)[:N_LINES]]
+            if amplitudes_pct is not None:
+                self._amp = [round(float(v) * 10) / 10 for v in
+                             (list(amplitudes_pct) + [0.0] * N_LINES)[:N_LINES]]
+            if watchdog_s is not None:
+                self._watchdog = int(watchdog_s)
 
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
@@ -91,6 +124,7 @@ class SimulatedSuperK:
 
     # ---- EXTREME -----------------------------------------------------------
     def set_emission(self, on: bool) -> None:
+        self.writes.append(("set_emission", bool(on)))
         with self._lock:
             if on and self._interlock_code != 2:
                 return                     # the real laser ignores it too
@@ -108,6 +142,7 @@ class SimulatedSuperK:
             return self._interlock_code
 
     def reset_interlock(self) -> None:
+        self.writes.append(("reset_interlock",))
         with self._lock:
             if self._interlock_closed:
                 self._interlock_code = 2
@@ -124,6 +159,7 @@ class SimulatedSuperK:
         return bits
 
     def set_power(self, pct: float) -> None:
+        self.writes.append(("set_power", float(pct)))
         with self._lock:
             self._power = round(float(pct) * 10) / 10      # 0.1 % register steps
 
@@ -138,10 +174,15 @@ class SimulatedSuperK:
             return round(self._inlet, 1)
 
     def set_watchdog(self, seconds: int) -> None:
+        self.writes.append(("set_watchdog", int(seconds)))
         self._watchdog = int(seconds)
+
+    def read_watchdog(self) -> int:
+        return self._watchdog
 
     # ---- RF driver ---------------------------------------------------------
     def set_rf(self, on: bool) -> None:
+        self.writes.append(("set_rf", bool(on)))
         with self._lock:
             self._rf = bool(on)
 
@@ -150,6 +191,7 @@ class SimulatedSuperK:
             return self._rf
 
     def select_crystal(self, crystal: int) -> None:
+        self.writes.append(("select_crystal", int(crystal)))
         # Behave like the hardware's two rules: the RF switch must not move
         # under RF power, and a crystal that is not there cannot be reached.
         with self._lock:
@@ -180,6 +222,7 @@ class SimulatedSuperK:
             return round(self._xtal_temp, 1)
 
     def set_wavelength(self, ch: int, nm: float) -> None:
+        self.writes.append(("set_wavelength", ch, float(nm)))
         with self._lock:
             self._wl[ch] = round(float(nm) * 1000) / 1000   # whole picometres
 
@@ -188,6 +231,7 @@ class SimulatedSuperK:
             return self._wl[ch]
 
     def set_amplitude(self, ch: int, pct: float) -> None:
+        self.writes.append(("set_amplitude", ch, float(pct)))
         with self._lock:
             self._amp[ch] = round(float(pct) * 10) / 10      # 0.1 % steps
 

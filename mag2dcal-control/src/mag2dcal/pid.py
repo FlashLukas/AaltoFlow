@@ -107,6 +107,19 @@ class AxisSeek:
         self._settle_dt = 0.0
         self.phase = IDLE
 
+    def adopt(self, output_V: float, approach: int) -> None:
+        """Take over an output a previous run left on the coils, FROZEN.
+
+        Used at start when the magnet is found energized: the field it is
+        holding becomes the setpoint and this drive is held exactly still, so
+        adopting it changes nothing on the wire. The trim wakes (from this
+        output, one-way in `approach`) only if the field leaves the band.
+        """
+        self.reset(output_V)
+        self.jump_V = self.target_V = float(output_V)
+        self.approach = 1 if approach >= 0 else -1
+        self.phase = FROZEN
+
     @property
     def frozen(self) -> bool:
         return self.phase == FROZEN

@@ -10,7 +10,8 @@ Source: "Oriel Cornerstone 260 User Manual" Rev A (MKS/Newport), chapter 16
 the Cornerstone 130 manual (M-74000). Summary of what this file relies on:
 
     statement            reply (GPIB, standard mode)
-    UNITS NM             none
+    UNITS?               -> "NM" | "UM" | "WN"   (we never SEND UNITS: see below)
+    HANDSHAKE?           -> "0" | "1"            (HANDSHAKE 0 only if it is 1)
     GOWAVE <nm>          none            WAVE?          -> "500.000"
     GRAT <n>             none            GRAT?          -> "1,1200,BLUE"
     GRAT<n>LINES?        -> "1200"       GRAT<n>LABEL?  -> "BLUE"
@@ -49,6 +50,17 @@ grating swap WAVE? stable twice after a minimum time), and it gives reads made
 during a move the long `move_timeout_ms`, so a query that blocks until the move
 is over simply comes back late instead of timing out.
 
+STARTING CHANGES NOTHING (Lukas's rule, 2026-09-27, for every module).
+open() sends QUERIES only: it reads the units, the handshake mode, the error
+state (reading STB?/ERROR? clears the error queue, like *CLS -- allowed) and
+INFO?. In particular it no longer sends `UNITS NM`: the units are part of how
+the user left the instrument (the hand controller shows them), so we READ them
+and convert in software -- every wavelength goes over the wire in the box's
+own unit and is handed to the brain in nm. The one exception left is
+HANDSHAKE 0, sent ONLY if HANDSHAKE? says 1: in handshake mode every statement
+answers with a status byte, which this driver does not read, so replies would
+be out of step with queries. It selects the reply format, it moves nothing.
+
 Every call not confirmed on the lab instrument is marked # VERIFY.
 """
 
@@ -61,6 +73,36 @@ from .base import MonoState
 #: Error codes of ERROR? (manual 16.7) that mean "the move you asked for will
 #: not happen" -- the pending move is dropped instead of waited for forever.
 _FATAL_FOR_MOVE = {1, 2, 3, 6, 8}
+
+#: UNITS? replies we understand (manual: NM nanometres, UM micrometres,
+#: WN wavenumbers in 1/cm). # VERIFY the exact reply text.
+_UNITS = ("NM", "UM", "WN")
+
+
+def to_nm(value: float, units: str) -> float:
+    """A wavelength in the instrument's unit -> nm."""
+    if units == "UM":
+        return value * 1000.0
+    if units == "WN":
+        # 1e7 / (1/cm) = nm. Zero order (0 nm) has no finite wavenumber; the
+        # box can only report it as 0 (or something huge) -- treat both as 0 nm.
+        return 1e7 / value if 0.0 < value < 1e12 else 0.0
+    return value
+
+
+def from_nm(nm: float, units: str) -> str:
+    """nm -> the text of a wavelength argument in the instrument's unit, with
+    enough digits that the conversion loses nothing the drive can resolve
+    (~0.01 nm per step)."""
+    nm = float(nm)
+    if units == "UM":
+        return f"{nm / 1000.0:.6f}"
+    if units == "WN":
+        if nm <= 0.0:
+            raise ValueError("zero order (0 nm) cannot be expressed in wavenumbers; "
+                             "the instrument is set to UNITS WN")
+        return f"{1e7 / nm:.4f}"
+    return f"{nm:.3f}"
 
 
 class CornerstoneGPIB:
@@ -83,6 +125,9 @@ class CornerstoneGPIB:
         self._rm = None
         self._inst = None
         self._idn = ""
+        self.units = "NM"                  # what UNITS? said at open(); see to_nm()
+        #: messages for the brain to show once after start (warn events)
+        self.startup_notes: list[str] = []
         # the move we started and are waiting to see finished:
         # (kind, target, t_started) -- kind in wave/step/grating/filter/port
         self._pending = None
@@ -102,12 +147,75 @@ class CornerstoneGPIB:
         self._inst.timeout = self._timeout_ms
         self._inst.write_termination = "\n"             # manual: statements end in [lf]
         self._inst.read_termination = "\n"              # replies end [cr][lf]; strip() drops the [cr]
-        self._write("HANDSHAKE 0")                      # VERIFY: standard mode (no reply to commands)
-        self._write("UNITS NM")                         # VERIFY: all wavelengths in nm from now on
+        self._init_session()
+
+    def _init_session(self) -> None:
+        """Everything open() does once the bus is there. Split out so the
+        tests can run it against a fake instrument and check it only READS."""
+        self.startup_notes = []
+        # Queries only from here on -- see "STARTING CHANGES NOTHING" above.
+        # Reading STB? and ERROR? clears stale errors (manual 16.7), which is
+        # bookkeeping, not a change of the instrument's state.
         self._query("STB?")                             # VERIFY: reading it clears stale errors
-        self._query("ERROR?")                           # manual 16.7: reading STB? AND ERROR? resets both
+        self._query("ERROR?")
+        self._adopt_handshake()
+        self._adopt_units()
         self._idn = self._query("INFO?")                # VERIFY: reply format
         self._grating = self._read_grating()
+
+    def _adopt_handshake(self) -> None:
+        """Standard mode (HANDSHAKE 0, the power-up default -- VERIFY) is what
+        this driver speaks. Only if the box is in handshake mode do we switch
+        it: the ONE write left at start, and only when needed."""
+        try:
+            hs = self._query("HANDSHAKE?")              # VERIFY: query exists, "0"/"1"
+        except Exception:
+            hs = ""
+        if hs.strip().startswith("1"):
+            self._write("HANDSHAKE 0")                  # VERIFY; reply format only
+            self._drain()
+            self.startup_notes.append("the instrument was in HANDSHAKE 1 mode; switched "
+                                      "to standard mode (HANDSHAKE 0) to be able to read it")
+        elif hs.strip() != "0":
+            # Not understood (older firmware?): assume the power-up default and
+            # clear the "not understood" error this may have raised.
+            self._query("STB?")
+            self._query("ERROR?")
+
+    def _adopt_units(self) -> None:
+        """Read the instrument's wavelength unit and convert in software,
+        instead of forcing it to nm (which would also change the hand
+        controller's display)."""
+        try:
+            reply = self._query("UNITS?").upper()       # VERIFY: reply text
+        except Exception:
+            reply = ""
+        units = next((u for u in _UNITS if reply.startswith(u)), None)
+        if units is None:
+            units = "NM"
+            self._query("STB?")                         # clear a possible error 1
+            self._query("ERROR?")
+            self.startup_notes.append(f"UNITS? answered {reply!r}; assuming nm -- check "
+                                      "that the wavelength readout is right")
+        elif units != "NM":
+            # VERIFY: how many digits WAVE? gives in UM/WN. If it were only 3
+            # (0.633 um), the readout would be 1 nm coarse -- then ask Lukas
+            # whether to switch the box to NM by hand, not from here.
+            self.startup_notes.append(f"the instrument works in {units}; wavelengths "
+                                      "are converted to nm in software (not changed on it)")
+        self.units = units
+
+    def _drain(self) -> None:
+        """Throw away any reply lines still queued (status bytes of handshake
+        mode), with a short timeout."""
+        self._inst.timeout = 200
+        try:
+            for _ in range(5):
+                self._inst.read()
+        except Exception:
+            pass
+        finally:
+            self._inst.timeout = self._timeout_ms
 
     def close(self) -> None:
         try:
@@ -160,7 +268,8 @@ class CornerstoneGPIB:
     def read_state(self) -> MonoState:
         busy = self._pending is not None
         kind_now = self._pending[0] if busy else ""
-        wl = float(self._query("WAVE?", long=busy))                      # VERIFY: blocks during a move?
+        # WAVE? answers in the box's own unit (UNITS?, read at open) -> nm
+        wl = to_nm(float(self._query("WAVE?", long=busy)), self.units)   # VERIFY: blocks during a move?
         self._grating = self._read_grating()
         shutter = self._query("SHUTTER?").upper().startswith("O")        # VERIFY: "O"/"C"
         filter_in_transit = False
@@ -230,7 +339,7 @@ class CornerstoneGPIB:
         self._same = 0
 
     def goto(self, nm: float) -> None:
-        self._write(f"GOWAVE {float(nm):.3f}")          # VERIFY
+        self._write(f"GOWAVE {from_nm(nm, self.units)}")  # VERIFY
         self._begin("wave", float(nm))
 
     def set_grating(self, n: int) -> None:
@@ -261,4 +370,4 @@ class CornerstoneGPIB:
         self._pending = None
 
     def calibrate(self, nm: float) -> None:
-        self._write(f"CALIBRATE {float(nm):.3f}")       # VERIFY: rewrites the stored offset
+        self._write(f"CALIBRATE {from_nm(nm, self.units)}")  # VERIFY: rewrites the stored offset

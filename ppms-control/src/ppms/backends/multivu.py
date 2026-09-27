@@ -123,7 +123,11 @@ class MultiVuDynaCool:
         return float(h_Oe) / OE_PER_MT, str(status)
 
     def read_field_setpoint(self) -> tuple[float, float, str]:
-        # (Oe, Oe/s, approach name, driven-mode name)
+        # (Oe, Oe/s, approach name, driven-mode name). A QUERY only: start()
+        # adopts it. On a MultiVu error MultiPyVu returns 0.0 / 0.0 / <error
+        # text> instead of raising; the brain rejects an unknown approach name.
+        # VERIFY on the DynaCool: after a setpoint typed on MultiVu's front
+        # panel, this returns THAT setpoint, rate and approach.
         f, rate, approach, _driven = self._c().get_field_setpoints()
         return float(f) / OE_PER_MT, float(rate) / OE_PER_MT, str(approach)
 
@@ -143,6 +147,8 @@ class MultiVuDynaCool:
         return float(t), str(status)
 
     def read_temperature_setpoint(self) -> tuple[float, float, str]:
+        # (K, K/min, approach name) -- a query; same error convention as the field.
+        # VERIFY on the DynaCool, as for read_field_setpoint.
         t, rate, approach = self._c().get_temperature_setpoints()
         return float(t), float(rate), str(approach)
 

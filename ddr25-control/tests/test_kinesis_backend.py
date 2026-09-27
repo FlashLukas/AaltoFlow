@@ -28,7 +28,7 @@ class _FakeMotor:
         _FakeMotor.instances.append(self)
 
     def get_status(self):
-        return ["homed"]                      # not "enabled" -> the backend enables
+        return ["homed"]                      # not "enabled" -> a MOVE enables
 
     def _enable_channel(self, enabled=True):
         self.calls.append(("enable", enabled))
@@ -91,8 +91,9 @@ def test_backend_maps_onto_pylablib(fake_pylablib):
     be.open()
     m = _FakeMotor.instances[-1]
     assert m.conn == "28000042" and m.scale == "DDR25"
-    assert ("enable", True) in m.calls
+    assert m.calls == []                              # open() writes nothing
     be.move_to(370.0)
+    assert ("enable", True) in m.calls                # enabled by the user's move
     assert m.calls[-1] == ("move_to", 370.0) and be.read_position() == 370.0
     be.home()
     assert m.calls[-1] == ("home", False, True)       # fire-and-forget, forced
@@ -112,7 +113,8 @@ def test_brain_runs_on_the_real_backend(fake_pylablib):
     brain.start()
     try:
         st = brain.status()
-        assert st.connected and st.homed and st.velocity == Config().motion.velocity
+        # adopted from the controller (the fake stores 20 deg/s, 10 deg/s^2)
+        assert st.connected and st.homed and st.velocity == 20.0 and st.acceleration == 10.0
         brain.move_to(12.5)
         assert _FakeMotor.instances[-1].calls[-1] == ("move_to", 12.5)
     finally:
@@ -132,3 +134,63 @@ def test_homing_counts_as_moving(fake_pylablib):
     m.get_status = lambda: ["homed", "enabled"]
     assert not be.is_moving() and be.is_homed()
     be.close()
+
+
+class _WriteGuardMotor(_FakeMotor):
+    """A controller that FAILS the test on any state-changing call while
+    `armed`: the adopt-on-start rule says starting the service only reads."""
+
+    armed = True
+
+    def _guard(self, what):
+        if _WriteGuardMotor.armed:
+            raise AssertionError(f"state-changing call at start: {what}")
+
+    def _enable_channel(self, enabled=True):
+        self._guard("enable")
+        super()._enable_channel(enabled)
+
+    def home(self, sync=True, force=False):
+        self._guard("home")
+        super().home(sync, force)
+
+    def move_to(self, position):
+        self._guard("move_to")
+        super().move_to(position)
+
+    def stop(self, immediate=False, sync=True):
+        self._guard("stop")
+        super().stop(immediate, sync)
+
+    def setup_velocity(self, *a, **k):
+        self._guard("setup_velocity")
+        super().setup_velocity(*a, **k)
+
+
+def test_real_start_issues_no_writes_and_adopts(fake_pylablib, monkeypatch):
+    """Start the brain on the real backend against a controller that is
+    already homed, sits at 212.5 deg and stores 55 deg/s / 140 deg/s^2:
+    nothing may be written, and status must show exactly that state."""
+    import pylablib.devices as dev
+    from ddr25.sim_system import build_real_system
+
+    class _Preset(_WriteGuardMotor):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.pos = 212.5
+            self.vel = _Vel(0.0, 140.0, 55.0)
+
+    monkeypatch.setattr(dev.Thorlabs, "KinesisMotor", _Preset)
+    _WriteGuardMotor.armed = True
+    cfg = Config()
+    brain, _be = build_real_system(cfg)
+    brain.start()
+    try:
+        st = brain.status()
+        assert st.connected and st.homed and st.raw_deg == 212.5
+        assert (st.velocity, st.acceleration) == (55.0, 140.0)
+        assert (cfg.motion.velocity, cfg.motion.acceleration) == (55.0, 140.0)
+        assert _FakeMotor.instances[-1].calls == []
+    finally:
+        _WriteGuardMotor.armed = False          # shutdown's stop is allowed
+        brain.shutdown()

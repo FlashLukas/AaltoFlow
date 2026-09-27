@@ -32,6 +32,7 @@ L * dI / tau_bop -- real, but not what the averaged readback shows.
 
 from __future__ import annotations
 
+import math
 import random
 import time
 
@@ -53,24 +54,49 @@ class SimulatedBOP:
         self._v_rating = v_rating
         self._i_rating = i_rating
         self._open = False
-        self._mode = "voltage"          # *RST default on the real unit
-        self._prog_v = 0.0
-        self._prog_i = 0.0
-        self._output = False
-        # the physical state of the load
+        # The state the unit is FOUND in (cfg.sim.found_*): a real BOP keeps
+        # its mode, programmed values and output across our connections, and
+        # the brain must adopt whatever is there.
+        ld = self.load
+        mode = str(getattr(ld, "found_mode", "current")).strip().lower()
+        self._mode = mode if mode in ("voltage", "current") else "current"
+        self._prog_v = max(-v_rating, min(v_rating, float(getattr(ld, "found_voltage_V", 10.0))))
+        self._prog_i = max(-i_rating, min(i_rating, float(getattr(ld, "found_current_A", 0.0))))
+        self._output = bool(getattr(ld, "found_output", False))
+        # the physical state of the load: if the output was found live, the
+        # coil has long settled at its steady state
         self._I = 0.0
         self._V = 0.0
-        self._I_avg = 0.0                # what the averaged readback shows
-        self._V_avg = 0.0
+        if self._output:
+            R = max(1e-6, float(ld.load_R_ohm))
+            if self._mode == "current":
+                i = self._prog_i
+                v_lim = abs(self._prog_v)
+                if abs(i * R) > v_lim:               # compliance holds it lower
+                    i = math.copysign(v_lim / R, i)
+            else:
+                i = self._prog_v / R
+                i_lim = abs(self._prog_i)
+                if abs(i) > i_lim:                   # crossover to the limit
+                    i = math.copysign(i_lim, i)
+            self._I, self._V = i, i * R
+        self._I_avg = self._I                # what the averaged readback shows
+        self._V_avg = self._V
         self._t = self._clock()
+        # every write the brain makes, for tests ("start writes nothing")
+        self.writes: list[tuple] = []
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
+        # Connecting changes nothing, as on the real unit (start-up reads only).
         self._advance()
         self._open = True
-        self._output = False
-        self._prog_v = self._prog_i = 0.0
+
+    def read_state(self) -> dict:
+        self._advance()
+        return {"mode": self._mode, "output": self._output,
+                "voltage_V": self._prog_v, "current_A": self._prog_i}
 
     def close(self) -> None:
         self._advance()
@@ -83,18 +109,22 @@ class SimulatedBOP:
         self._advance()
         if mode not in ("voltage", "current"):
             raise ValueError(f"unknown mode {mode!r}")
+        self.writes.append(("set_mode", mode))
         self._mode = mode
 
     def program_voltage(self, volts: float) -> None:
         self._advance()
+        self.writes.append(("program_voltage", float(volts)))
         self._prog_v = max(-self._v_rating, min(self._v_rating, float(volts)))
 
     def program_current(self, amps: float) -> None:
         self._advance()
+        self.writes.append(("program_current", float(amps)))
         self._prog_i = max(-self._i_rating, min(self._i_rating, float(amps)))
 
     def set_output(self, on: bool) -> None:
         self._advance()
+        self.writes.append(("set_output", bool(on)))
         self._output = bool(on)
 
     # ---- measurement -----------------------------------------------------

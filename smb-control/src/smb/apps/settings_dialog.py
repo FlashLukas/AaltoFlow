@@ -4,7 +4,7 @@ Like clMag's Settings pane, nothing here talks to hardware directly -- it edits
 the shared `cfg` object in place and then calls `generator.apply_config()` so the
 running generator (local or remote) picks the changes up. Values are grouped:
 
-  Signal    -- the power-on defaults (frequency / power / phase / RF on)
+  Signal    -- defaults applied when you change them (never at start)
   Limits    -- the safety envelope every setpoint is clamped to
   Hardware  -- the GPIB/VISA address and timing (used by the real backend only)
 """
@@ -104,11 +104,11 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(s.power_dBm, -200, 40, 2, 0.5, "dBm"))
         self._add(form, "signal", "phase_deg", "Default phase",
                   _dspin(s.phase_deg, -360, 360, 2, 1.0, "deg"))
-        rf = QtWidgets.QCheckBox("Enable RF output at start-up")
-        rf.setChecked(bool(s.rf_on))
-        self._add(form, "signal", "rf_on", "RF at start-up", rf)
-        form.addRow(_hint("These are the values pushed to the generator when it starts. "
-                          "Leaving RF off at start-up is the safe default."))
+        # No "RF at start-up" box any more: at start the service ADOPTS what the
+        # generator is doing, and RF is switched only by the RF button.
+        form.addRow(_hint("Nothing is written to the generator at start: its own "
+                          "frequency, power, phase and RF state are adopted. A value "
+                          "changed here is sent when you press OK."))
         return page
 
     def _limits_tab(self):

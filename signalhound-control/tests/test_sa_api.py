@@ -164,3 +164,58 @@ def test_the_brain_drives_the_real_backend():
     finally:
         v.shutdown()
     assert dll.open is False
+
+
+# ---- start-up: read, never write (Lukas's rule, 2026-09-27) -----------------------
+
+def test_open_issues_no_state_changing_calls():
+    """A fake DLL that RAISES on any configure / initiate / abort / TG call:
+    opening must get through it."""
+    cfg = Config()
+    dll = FakeSaApi(device_type=4, readonly=True)          # an SA124B
+    b = SaApiAnalyzer(cfg, dll=dll)
+    b.open()
+    assert dll.writes() == [] and dll.mode == -1
+    assert b.device_model() == "SA124B" and b.tg_attached()
+
+
+def test_brain_start_adopts_the_analyser_and_writes_nothing():
+    """The whole start: service-style (sweep thread running), saved config
+    asking for continuous sweeps and the TG on. The analyser is an SA124B
+    (non-default model) left with the TG at -12 dBm by a previous program."""
+    cfg = Config()
+    cfg.acquisition.continuous = True                      # the saved default
+    cfg.tracking.on = True
+    dll = FakeSaApi(device_type=4, readonly=True)
+    dll.tg_level = -12.0                                   # pre-existing TG state
+    v = SpectrumAnalyzer(SaApiAnalyzer(cfg, dll=dll), cfg)
+    v.start(run=True)
+    try:
+        time.sleep(0.4)                                    # a few idle passes of the thread
+        st = v.status()
+        assert dll.writes() == [] and dll.mode == -1 and dll.tg_level == -12.0
+        assert st.connected and st.hw_error == ""
+        assert st.device_model == "SA124B" and st.tg_attached is True
+        assert st.freq_max_Hz == pytest.approx(12.4e9)      # the ADOPTED model's envelope
+        assert st.configured is False and st.points == 0 and st.sweeps == 0
+        assert st.continuous is False and st.tg_on is False
+    finally:
+        dll.readonly = False                               # shutdown's abort + close is allowed
+        v.shutdown()
+    assert dll.names()[-2:] == ["saAbort", "saCloseDevice"]
+
+
+def test_the_first_deliberate_request_configures():
+    cfg = Config()
+    cfg.acquisition.continuous = False
+    dll = FakeSaApi(bins=101)
+    v = SpectrumAnalyzer(SaApiAnalyzer(cfg, dll=dll), cfg)
+    v.start(run=False)
+    try:
+        v.step()
+        assert dll.writes() == []
+        v.set_span(10e6)                                   # a user setting: now configure
+        v.step()
+        assert "saInitiate" in dll.writes() and v.status().configured is True
+    finally:
+        v.shutdown()

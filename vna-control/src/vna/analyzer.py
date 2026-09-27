@@ -141,6 +141,10 @@ class Status:
     acq_is_reference: bool = False
     sample: dict = field(default_factory=dict)
     reference: dict = field(default_factory=_no_reference)
+    # what the analyser was doing when the module connected (read, adopted,
+    # never written): start_Hz ... sparam, sweep_mode / trigger_source,
+    # averaging_on, correction_on. Empty before start.
+    instrument: dict = field(default_factory=dict)
 
 
 def _clamp(value, lo, hi):
@@ -196,6 +200,7 @@ class Analyzer:
         self._sample: dict = {}
         self._sample_trace: dict | None = None
         self._reference: dict | None = None  # a latched sample trace + "taken_at"
+        self._instrument: dict = {}          # what the analyser held at start (read_state)
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -216,10 +221,14 @@ class Analyzer:
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
+            read = getattr(self.backend, "read_state", None)
+            state = read() if read is not None else None
         self._build_field()
         self._connected = True
-        self._refresh_live()
         self._emit("info", f"connected: {self._idn}")
+        if state is not None:
+            self._adopt(state)
+        self._refresh_live()
         self._emit("info", "field from " + self._field_description())
         if run:
             self._stop.clear()
@@ -517,6 +526,7 @@ class Analyzer:
                 acq_is_reference=bool(a is not None and a["reference"]),
                 sample=dict(self._sample),
                 reference=self._reference_status_locked(),
+                instrument=dict(self._instrument),
             )
 
     def _reference_status_locked(self) -> dict:
@@ -765,6 +775,69 @@ class Analyzer:
             self.backend.abort_sweep()
         except Exception:
             pass
+
+    def _adopt(self, state: dict) -> None:
+        """Take over what the analyser is ALREADY doing as this module's settings.
+
+        Lukas's rule (2026-09-27): a module reads the instrument at start and
+        changes nothing. So the sweep the analyser holds (band, points, IFBW,
+        power, S-parameter) becomes cfg.sweep, and the .ini values for those
+        are only defaults for a key the analyser could not report. Nothing is
+        written here -- the backend writes a setting at the next sweep this
+        module runs, and only if it differs (i.e. a user changed it).
+
+        A value outside this module's envelope is still adopted, then clamped
+        like any setpoint and ANNOUNCED: the analyser keeps it until this
+        module sweeps, and the first sweep uses the clamped one.
+
+        `continuous` comes from the backend too: a real analyser says False,
+        because showing live sweeps means taking over its trigger -- so the
+        module starts hands-off, and sweeps only when asked (acquire,
+        take_reference, or Continuous switched on). The simulator says what
+        its config says (nothing real to protect)."""
+        sw = self.cfg.sweep
+        keys = (("start_Hz", "start_Hz", float), ("stop_Hz", "stop_Hz", float),
+                ("points", "points", int), ("ifbw_Hz", "ifbw_Hz", float),
+                ("power_dBm", "power_dBm", float))
+        read = {}
+        for key, attr, cast in keys:
+            v = state.get(key)
+            if v is None:
+                continue
+            try:
+                v = cast(v)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(v, float) and not math.isfinite(v):
+                continue
+            setattr(sw, attr, v)
+            read[attr] = v
+        sp = state.get("sparam")
+        if isinstance(sp, str) and sp.upper() in SPARAMS:
+            sw.sparam = sp.upper()
+        elif "sparam" in state:
+            self._emit("warn", "the analyser's active measurement is not an S-parameter; "
+                               f"this module will measure {sw.sparam} when it sweeps")
+        if "continuous" in state:
+            self.cfg.acquisition.continuous = bool(state["continuous"])
+        self._sanitise_config()
+        for attr, v in read.items():
+            now = getattr(sw, attr)
+            if now != v:
+                self._emit("warn", f"the analyser holds {attr} = {v:g}, outside this module's "
+                                   f"envelope: it keeps it until this module sweeps, which "
+                                   f"will use {now:g}")
+        for w in getattr(self.backend, "warnings", [])[:]:
+            self._emit("warn", w)
+        with self._lock:
+            self._instrument = dict(state)
+        self._emit("info", f"adopted the analyser's sweep: {sw.start_Hz / 1e9:.6g}-"
+                           f"{sw.stop_Hz / 1e9:.6g} GHz, {sw.points} points, IFBW "
+                           f"{sw.ifbw_Hz:g} Hz, {sw.power_dBm:g} dBm, {sw.sparam}")
+        if not self.cfg.acquisition.continuous and not self.simulated:
+            self._emit("info", "hands off: the analyser keeps sweeping on its own until "
+                               "this module is asked to measure (acquire, take reference "
+                               "or Continuous on)")
 
     def _sanitise_config(self) -> None:
         sw, lim = self.cfg.sweep, self.cfg.limits

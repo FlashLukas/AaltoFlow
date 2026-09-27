@@ -56,8 +56,12 @@ gives its meters their own USB driver by default, and NI-VISA cannot see a
 device on it; TLPMX works with either driver.
 
 At start, and whenever a new head is plugged in, the module **adopts** the
-console's settings for that head instead of pushing its config. Set
-`hardware.push_on_start = true` to push the config at start instead.
+console's settings for that head: start-up only READS the console (wavelength,
+auto range / range, averaging time, dark offset) and writes nothing, so starting
+the service never changes a measurement someone set up by hand. The config's
+`[sensor]` values reach the console only when you set them explicitly (a Set
+button, Settings > Apply, or `set_config`). The old `hardware.push_on_start`
+option was removed on 2026-09-27; an .ini that still has it loads fine.
 
 ## Commands (wire verbs)
 

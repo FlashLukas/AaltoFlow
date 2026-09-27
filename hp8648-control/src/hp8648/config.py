@@ -27,11 +27,15 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class Signal:
-    """The CW signal pushed to the generator at start-up.
+    """DEFAULT frequency and level -- NOT sent at start-up.
 
-    There is deliberately NO "RF on at start-up" switch: the service always
-    starts with the RF output OFF, and switching it on is always a deliberate
-    command. A config file cannot then energise a sample by surprise.
+    Since 2026-09-27 (Lukas: modules read the instrument at start, they do not
+    change it) the service ADOPTS whatever the generator is doing when it
+    connects. These two values are sent only when you CHANGE them (Settings
+    dialog OK, or set_config with a different `signal` group).
+
+    There is deliberately NO "RF on" switch here: a config file must never
+    energise a sample. RF is switched only by an explicit set_rf.
     """
 
     frequency_Hz: float = 1_000_000_000.0   # 1 GHz
@@ -64,10 +68,10 @@ class Hardware:
     visa_resource    -- 19 is the 8648's FACTORY HP-IB address (Operation and
                         Service Guide, "HP-IB Address"). # VERIFY on the unit.
     option_1ea       -- the high-power option is fitted (raises the ceiling).
-    reset_on_open    -- send *RST at connect: RF off, all modulation off, level
-                        -136 dBm, every reference/offset mode off. The module
-                        then pushes its own start-up signal. Turn off only if
-                        you need to keep a state set up by hand on the front panel.
+                        (`reset_on_open` -- *RST at connect -- was REMOVED on
+                        2026-09-27: connecting must not change the instrument.
+                        An old .ini that still has the key loads fine; the
+                        key is ignored.)
     poll_s           -- how often the worker thread reads the instrument back.
     switch_settle_s  -- after a frequency or level write the worker waits this
                         long before reading back, so the echo a scan waits for
@@ -78,7 +82,6 @@ class Hardware:
     visa_resource: str = "GPIB0::19::INSTR"
     visa_timeout_ms: int = 5000
     option_1ea: bool = False
-    reset_on_open: bool = True
     poll_s: float = 0.2
     switch_settle_s: float = 0.1
 

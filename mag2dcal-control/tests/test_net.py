@@ -25,6 +25,9 @@ from mag2dcal.sim_system import build_sim_system
 def pair(request, tmp_path):
     port = request.param if hasattr(request, "param") else 15960
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.calibration.directory = str(tmp_path)
     cfg.calibration.load_newest_on_start = False
     ctrl, sim = build_sim_system(cfg, seed=4)

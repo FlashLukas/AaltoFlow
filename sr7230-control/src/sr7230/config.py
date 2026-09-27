@@ -49,8 +49,11 @@ class Reference:
 
     source: str = "internal"        # internal | ext_ttl | ext_analog
     frequency_Hz: float = 1000.0    # oscillator frequency (OF.)
-    # 0 V on purpose: OSC OUT may be wired to a sample or a coil driver, and a
-    # service that starts must not start driving it. Raise it deliberately.
+    # Since 2026-09-27 the service ADOPTS the instrument's own settings at
+    # start (it reads them; it never pushes these at start). The values in
+    # this group and in Signal / Filter are therefore what a Settings > Apply
+    # (set_config) would send, and what the simulator is switched on with.
+    # 0 V: an .ini that is applied on purpose does not start driving OSC OUT.
     amplitude_V: float = 0.0        # oscillator amplitude, V rms (OA.)
     phase_deg: float = 0.0          # reference phase shift (REFP.)
     harmonic: int = 1               # demodulate at n x the reference (REFN), 1..127
@@ -145,12 +148,12 @@ class Hardware:
     option_250kHz: bool = False     # fitted with the 7230/99 option (250 kHz instead of 120 kHz)
     read_adc: bool = True           # read the rear ADC1/ADC2 inputs with every poll
     poll_hz: float = 20.0           # how often the brain reads the outputs
-    # OSC OUT safety. At start: the amplitude goes to 0 V whatever the .ini
-    # says, so (re)starting the service never starts driving a coil or a
-    # sample by itself. At shutdown: back to 0 V, so a Stop in the launcher
-    # does not leave it driven either. Switch off only if the oscillator must
-    # keep running across restarts (e.g. it IS the experiment's modulation).
-    osc_zero_on_start: bool = True
+    # OSC OUT at shutdown: back to 0 V, so a Stop in the launcher does not
+    # leave a coil or a sample driven. Switch off if the oscillator must keep
+    # running after the service stops (e.g. it IS the experiment's modulation).
+    # (There is no start-time counterpart any more: `osc_zero_on_start` was
+    # REMOVED on 2026-09-27 -- a start reads OSC OUT and leaves it running.
+    # An old .ini that still has the key loads fine; the key is ignored.)
     osc_off_on_shutdown: bool = True
 
 

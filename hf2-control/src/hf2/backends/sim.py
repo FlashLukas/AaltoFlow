@@ -51,6 +51,7 @@ class _Demod:
         self.input = 0
         self.harmonic = 1
         self.phase_deg = 0.0
+        self.rate = 1000.0
         self.enabled = False
         self.stages: list[complex] = [0j] * 8      # filter state, one per stage
         self.noise = 0j                            # correlated noise state
@@ -73,6 +74,9 @@ class SimulatedHF2:
         self.osc_external = [False, False]
         self.osc_ref_input = [0, 1]
         self._lock_t = [0.0, 0.0]          # when the PLL was (re)started
+        # signal-input front end per input: range V, AC, 50 ohm, differential
+        self.sigin = [{"range": 1.0, "ac": False, "imp50": False, "diff": False}
+                      for _ in range(2)]
 
         # -- the "experiment" ------------------------------------------------
         # Two reference sources, e.g. a chopper and a modulated RF source.
@@ -111,6 +115,48 @@ class SimulatedHF2:
         """Pin an AUX input to a value (None = back to the built-in waveform)."""
         self.aux_override[index] = volts
 
+    def preset(self, ch: Channel, rate_Sa_s: float = 1000.0) -> None:
+        """Put one demodulator into a state "left behind by an earlier session"
+        -- directly, the way someone clicking in LabOne would, NOT through the
+        backend interface. Since the module ADOPTS the instrument's state at
+        start (it no longer pushes its config), a simulator that started blank
+        would show a blank lock-in; this is what gives it something to adopt.
+        Tests use it to create a deliberately non-default instrument."""
+        with self._lock:
+            self._advance()
+            d = self.demods[ch.demod]
+            d.input = int(ch.signal_input)
+            d.osc = int(ch.oscillator)
+            d.harmonic = max(1, int(ch.harmonic))
+            d.phase_deg = float(ch.phase_deg)
+            d.rate = float(rate_Sa_s)
+            d.tc = float(f"{float(ch.time_constant_s):.4g}")
+            d.order = int(ch.order)
+            d.enabled = True
+            self.sigin[d.input] = {"range": float(ch.input_range_V), "ac": bool(ch.input_ac),
+                                   "imp50": bool(ch.input_50ohm), "diff": bool(ch.input_diff)}
+            o = d.osc
+            self.osc_freq[o] = float(ch.frequency_Hz)
+            self.osc_external[o] = ch.reference == "external"
+            self.osc_ref_input[o] = int(ch.ref_input)
+            # a PLL someone left running has long since locked
+            self._lock_t[o] = self._clock() - 10.0 * self.lock_time_s
+
+    # ---- reading the state (what the brain adopts at start) -----------------
+
+    def read_channel(self, demod: int) -> dict:
+        with self._lock:
+            d = self.demods[int(demod)]
+            si = self.sigin[d.input]
+            return {"enabled": d.enabled, "signal_input": d.input, "oscillator": d.osc,
+                    "harmonic": d.harmonic, "phase_deg": d.phase_deg,
+                    "rate_Sa_s": d.rate, "time_constant_s": d.tc, "order": d.order,
+                    "input_range_V": si["range"], "input_ac": si["ac"],
+                    "input_50ohm": si["imp50"], "input_diff": si["diff"],
+                    "frequency_Hz": self.osc_freq[d.osc],
+                    "reference": "external" if self.osc_external[d.osc] else "internal",
+                    "ref_input": self.osc_ref_input[d.osc]}
+
     # ---- set-up ------------------------------------------------------------
 
     def setup_channel(self, ch: Channel, rate_Sa_s: float) -> None:
@@ -121,7 +167,10 @@ class SimulatedHF2:
             d.osc = int(ch.oscillator)
             d.harmonic = max(1, int(ch.harmonic))
             d.phase_deg = float(ch.phase_deg)
+            d.rate = float(rate_Sa_s)
             d.enabled = True
+            self.sigin[d.input] = {"range": float(ch.input_range_V), "ac": bool(ch.input_ac),
+                                   "imp50": bool(ch.input_50ohm), "diff": bool(ch.input_diff)}
 
     def set_reference(self, oscillator: int, external: bool, ref_input: int) -> None:
         with self._lock:

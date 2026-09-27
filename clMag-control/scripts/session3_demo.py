@@ -71,6 +71,9 @@ def main() -> int:
 
     print("Building calibration ...")
     cal = build_calibration(cfg, kepco, probe)
+    # The sweep left the simulated supply at -I_max. Start-up now ADOPTS the
+    # supply's state instead of zeroing it, so put the sim back at rest first.
+    kepco.set_current(0.0)
     lo, hi = cal.range_mT
     print(f"  {len(cal.currents_A)} points, {lo:.1f}..{hi:.1f} mT\n")
 

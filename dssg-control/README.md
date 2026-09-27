@@ -7,7 +7,8 @@ Ethernet option (a TCP socket), or fully simulated with no hardware.
 
 ![dssg front panel](../front-panels/dssg.png)
 
-*The simulator as the service starts it: RF off, 1 GHz at -20 dBm. The spectrum
+*The simulator as the service starts it: it adopts the simulated box's own state
+(RF off, 2.45 GHz at -10 dBm, internal reference -- `[sim] state_*`). The spectrum
 screen shades the band this unit can reach; with RF on the carrier stands up out
 of the noise floor at its frequency and power, with its 2nd and 3rd harmonics
 below it, and the dial in the corner shows the phase.*
@@ -86,9 +87,12 @@ been checked against the unit.
 | range         |                              | `FREQ:MIN?/MAX?`, `POWER:MIN?/MAX?` |
 | health        |                              | `*SYSVOLTS?`, `SYST:ERR?`     |
 
-On connect: `OUTP:STAT OFF` first, `*CLS`, `*IDN?`, `*BUZZER OFF` (configurable),
-and a `PHASE?` probe -- the 2022 SG12000L list has no phase command, the shop
-page advertises 0-360 deg phase control, so the module asks the firmware. A unit
+On connect the module ADOPTS the unit's state and changes nothing (rule of
+2026-09-27): `*CLS` (empties the error queue only), `*IDN?`, the range queries,
+`OUTP:STAT?`, `FREQ:CW?`, `POWER?`, `PHASE?`, `*REFMODE?`. The config's
+`[signal]` preset and `mute_buzzer` / `display_off` are sent only when you CHANGE
+them. RF is switched OFF when the service stops. There is also a `PHASE?`
+probe -- the 2022 SG12000L list has no phase command, the shop page advertises 0-360 deg phase control, so the module asks the firmware. A unit
 without it simply has no phase control in `describe`, and `set_phase` is refused.
 
 USB: 115200 baud, 8N1, linefeed terminator. Ethernet: TCP port 10001 (fixed for

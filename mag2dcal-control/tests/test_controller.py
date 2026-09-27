@@ -22,6 +22,9 @@ from mag2dcal.sim_system import build_sim_system
 @pytest.fixture
 def rig(tmp_path):
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     # Never touch the project's real Calibrations folder from a test, and start
     # UNCALIBRATED so these tests exercise the straight-line fallback.
     cfg.calibration.directory = str(tmp_path)
@@ -235,6 +238,9 @@ def test_clamps_emit_warn_events(rig):
 
 def _drift_trial(tmp_path, enabled, drift=-0.02, hold_s=40.0):
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.calibration.load_newest_on_start = False
     cfg.calibration.directory = str(tmp_path)
     cfg.stabilizer.enabled = enabled
@@ -268,7 +274,18 @@ def test_the_stabilizer_removes_a_slow_drift(tmp_path):
 def test_the_stabilizer_does_nothing_inside_its_deadband(tmp_path):
     """A correction that is not needed is just another direction flip."""
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.calibration.load_newest_on_start = False
+    # A deadband CLEARLY wider than where the freeze parks (up to tolerance/2 =
+    # 0.25 mT per axis) plus probe noise. At the default 0.25 this test only
+    # passed on a lucky noise seed: 2 of 6 seeds kept the output still, the
+    # rest nudged -- that is the known "stabilizer fires on the freeze's own
+    # parking error" problem (CLAUDE.local.md), not what this test is about.
+    # It broke when start() began READING the probes (adopt-on-start,
+    # 2026-09-27), which shifted the simulator's noise sequence by one read.
+    cfg.stabilizer.deadband_mT = 0.45
     clock = FakeClock()
     ctrl, sim = build_sim_system(cfg, clock=clock, sleep=clock.sleep, seed=2)
     ctrl.start(run_thread=False)

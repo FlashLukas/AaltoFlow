@@ -141,6 +141,9 @@ def test_build_calibration_sorts_each_leg_by_voltage():
 @pytest.fixture
 def rig(tmp_path):
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.calibration.directory = str(tmp_path)
     clock = FakeClock()
     ctrl, sim = build_sim_system(cfg, clock=clock, sleep=clock.sleep, seed=5)

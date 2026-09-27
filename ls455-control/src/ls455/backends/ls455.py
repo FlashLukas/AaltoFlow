@@ -21,6 +21,12 @@ Everything that has NOT been tried against a real 455 carries `# VERIFY`.
 The commands themselves are copied from the manual; what is unverified is
 mostly reply FORMATTING and timing (what an overload reading looks like, how
 long ZPROBE takes, whether RANGE also switches autorange off).
+
+START-UP RULE (Lukas, 2026-09-27): open() only ASKS. It sends no command that
+changes the meter -- no *RST, no mode, unit, range or relative write -- so the
+module adopts whatever someone set on the front panel. Every `write()` below is
+reached only from a setter the user called. tests/test_ls455_backend.py checks
+this with a fake instrument that fails on any write during start-up.
 """
 
 from __future__ import annotations
@@ -28,8 +34,8 @@ from __future__ import annotations
 import time
 
 from .base import (DC_DIGITS, FLAG_NO_PROBE, FLAG_OK, FLAG_OVERLOAD, MODES,
-                   PROBE_RANGES_mT, PROBE_TYPE_CODES, RMS_BANDS, UNIT_CODES,
-                   from_mT, to_mT)
+                   PEAK_DISPLAYS, PEAK_MODES, PROBE_RANGES_mT, PROBE_TYPE_CODES,
+                   RMS_BANDS, UNIT_CODES, from_mT, pick_peak, to_mT)
 
 #: OPST? bit weights (manual section 6.1.4.2.2)
 OPST_NO_PROBE = 1          # bit 0
@@ -38,7 +44,8 @@ OPST_OVERLOAD = 2          # bit 1
 _CODE_UNITS = {v: k for k, v in UNIT_CODES.items()}
 _DIGIT_CODES = {3: 1, 4: 2, 5: 3}                 # RDGMODE <dc resolution>
 _CODE_DIGITS = {v: k for k, v in _DIGIT_CODES.items()}
-_MODE_CODES = {"dc": 1, "rms": 2}                 # 3 = peak, not offered
+_MODE_CODES = {"dc": 1, "rms": 2, "peak": 3}
+_CODE_MODES = {v: k for k, v in _MODE_CODES.items()}
 _BAND_CODES = {"wide": 1, "narrow": 2}
 
 
@@ -72,6 +79,8 @@ class LakeShore455:
         self._inst = None
         self._unit = "G"
         self._family = ""
+        self._mode = "dc"                    # cached so read_field knows DC/RMS vs peak
+        self._peak_display = "positive"
         self._zero_t = None
         self._last_write = 0.0
 
@@ -125,8 +134,14 @@ class LakeShore455:
             inst.stop_bits = constants.StopBits.one
         self._inst = inst
         try:
-            self._unit = _CODE_UNITS.get(int(self.query("UNIT?")), "G")     # VERIFY reply '1'
-            self._family = self._probe_family()
+            # QUERIES ONLY (see the module docstring): the unit, so readings can
+            # be converted to mT in software whatever the display shows; the
+            # probe, so the range list is right; the mode, so read_field asks
+            # for the right reading (RDGFIELD? or RDGPEAK?).
+            self.get_display_unit()
+            self.probe_info()
+            self.get_mode()
+            self.get_peak()
         except Exception:
             self.close()
             raise
@@ -142,22 +157,33 @@ class LakeShore455:
     def idn(self) -> str:
         return self.query("*IDN?")                 # 'LSCI,MODEL455,<serial>,<date>'
 
-    def _probe_family(self) -> str:
-        try:
-            code = int(self.query("TYPE?"))        # VERIFY: 40/41/42 (50..52 user cable)
-        except ValueError:
-            return ""
-        return PROBE_TYPE_CODES.get(code, "")
-
     def probe_info(self) -> dict:
-        info = {"family": self._family, "type_code": -1, "serial": "",
+        """Ask the meter which probe is plugged in. Called at open() and again
+        by the brain's `reread_probe` (a probe swapped while the service runs):
+        the family decides what RANGE 1..5 MEAN, so it must never be stale.
+
+        Each query is tried on its own, so a meter that refuses one (an old
+        firmware, a probe without an EEPROM) still reports the others.
+        The 455 has no probe-geometry query in its command list (axial vs
+        transverse) -- VERIFY on the front panel's Probe menu; until then the
+        geometry is a config value (hardware.probe_geometry)."""
+        info = {"family": "", "type_code": -1, "serial": "",
                 "sensitivity_mV_per_kG": float("nan")}
         try:
+            # VERIFY: 40 HSE / 41 HST / 42 UHS, 50..52 the same on a user-programmed cable
             info["type_code"] = int(self.query("TYPE?"))
-            info["serial"] = self.query("PRBSNUM?")                       # VERIFY
-            info["sensitivity_mV_per_kG"] = parse_float(self.query("PRBSENS?"))  # VERIFY unit mV/kG
-        except (ValueError, LS455Error):
+            info["family"] = PROBE_TYPE_CODES.get(info["type_code"], "")
+        except ValueError:
             pass
+        try:
+            info["serial"] = self.query("PRBSNUM?")                       # VERIFY reply format
+        except ValueError:
+            pass
+        try:
+            info["sensitivity_mV_per_kG"] = parse_float(self.query("PRBSENS?"))  # VERIFY unit mV/kG
+        except ValueError:
+            pass
+        self._family = info["family"]
         return info
 
     def ranges_mT(self) -> list[float]:
@@ -167,6 +193,7 @@ class LakeShore455:
 
     # ---- mode ----------------------------------------------------------------
     def set_mode(self, mode: str, dc_digits: int, rms_band: str) -> None:
+        """Only from a user's setter. Never called at start-up."""
         if mode not in MODES or int(dc_digits) not in DC_DIGITS or rms_band not in RMS_BANDS:
             raise ValueError(f"bad mode {mode}/{dc_digits}/{rms_band}")
         # keep the peak settings the user may have on the front panel
@@ -175,11 +202,22 @@ class LakeShore455:
         peak_disp = cur[4].strip() if len(cur) == 5 else "1"
         self.write(f"RDGMODE {_MODE_CODES[mode]},{_DIGIT_CODES[int(dc_digits)]},"
                    f"{_BAND_CODES[rms_band]},{peak_mode},{peak_disp}")
+        self._mode = mode
 
     def get_mode(self) -> tuple[str, int, str]:
         m, d, b = [int(x) for x in self.query("RDGMODE?").split(",")[:3]]
-        mode = {1: "dc", 2: "rms", 3: "peak"}.get(m, "dc")               # peak shown as-is
-        return mode, _CODE_DIGITS.get(d, 4), "narrow" if b == 2 else "wide"
+        self._mode = _CODE_MODES.get(m, "dc")
+        return self._mode, _CODE_DIGITS.get(d, 4), "narrow" if b == 2 else "wide"
+
+    def get_peak(self) -> tuple[str, str]:
+        cur = [x.strip() for x in self.query("RDGMODE?").split(",")]    # VERIFY fields 4, 5
+        try:
+            pm = PEAK_MODES[int(cur[3]) - 1]
+            pd = PEAK_DISPLAYS[int(cur[4]) - 1]
+        except (IndexError, ValueError):
+            pm, pd = "periodic", "positive"
+        self._peak_display = pd
+        return pm, pd
 
     # ---- range ----------------------------------------------------------------
     def set_auto_range(self, on: bool) -> None:
@@ -207,6 +245,9 @@ class LakeShore455:
         self._unit = unit
 
     def get_display_unit(self) -> str:
+        """ASKS the meter (UNIT?), so a unit changed on the front panel is seen
+        the next time this is called; readings are converted in software."""
+        self._unit = _CODE_UNITS.get(int(self.query("UNIT?")), "G")        # VERIFY reply '1'
         return self._unit
 
     def set_relative(self, on: bool, setpoint_mT: float) -> None:
@@ -214,11 +255,27 @@ class LakeShore455:
         self.write(f"RELSP {from_mT(float(setpoint_mT), self._unit):.6E}")   # VERIFY format
         self.write(f"REL {1 if on else 0},1")      # 1 = user-defined setpoint
 
+    def get_relative(self) -> tuple[bool, float]:
+        # REL? -> '<on/off>,<setpoint source>' (VERIFY); RELSP? -> the setpoint
+        # in the PRESENT display unit (VERIFY), converted here to mT.
+        on = self.query("REL?").split(",")[0].strip() == "1"
+        try:
+            sp = to_mT(parse_float(self.query("RELSP?")), self._unit)
+        except ValueError:
+            sp = 0.0
+        return on, sp
+
     # ---- measurement ----------------------------------------------------------
     def read_field(self) -> tuple[float, str]:
-        reply = self.query("RDGFIELD?")            # 'nnn.nnnEnn' in present units, DC or RMS
         try:
-            value = to_mT(parse_float(reply), self._unit)
+            if self._mode == "peak":
+                # RDGFIELD? is only defined for DC and RMS (manual p. 6-33);
+                # in peak mode ask for the peaks. VERIFY reply '<+peak>,<-peak>'.
+                pos, neg = [parse_float(x) for x in self.query("RDGPEAK?").split(",")[:2]]
+                value = to_mT(pick_peak(pos, neg, self._peak_display), self._unit)
+            else:
+                reply = self.query("RDGFIELD?")    # 'nnn.nnnEnn' in present units, DC or RMS
+                value = to_mT(parse_float(reply), self._unit)
         except ValueError:
             value = float("nan")                   # VERIFY: what an overload reply looks like
         # The operational status register says what the number cannot: no probe,

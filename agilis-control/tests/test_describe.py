@@ -49,7 +49,12 @@ def test_manifest_shape_and_required_fields():
             if p["kind"] == "indicator":
                 assert p["read_path"], p["id"]
             if p["kind"] == "action":
-                assert p["wait"]["ready"]["policy"] == "immediate"
+                # immediate (datum, stop) or a numbered routine (limit switch)
+                w = p["wait"]
+                assert w["ready"]["policy"] in ("immediate", "adopt_then_flag"), p["id"]
+                if w["ready"]["policy"] == "adopt_then_flag":
+                    assert w["target_key"] == "routine_id"
+                    assert w["check"] == {"key": "routine_error", "equals": "OK"}
         assert {"position_x", "position_y"} <= set(ids)
         assert not any(i.endswith("_z") for i in ids)          # two axes only
     finally:
@@ -62,6 +67,10 @@ def test_every_read_path_resolves_against_a_real_status():
         st = asdict(brain.status())
         for p in build_manifest(brain)["parameters"]:
             if p.get("read_path"):
+                if p["id"].startswith("measured_um"):
+                    # None until MA/PA/step-size has run: the key must exist
+                    assert p["read_path"][0] in st, p["id"]
+                    continue
                 assert read_path(st, p["read_path"]) is not None, p["id"]
         assert read_path({}, ["position_um", 0]) is None      # must not raise
     finally:
@@ -80,6 +89,12 @@ def test_every_set_verb_and_action_exists_on_the_service():
                 reply = svc._dispatch({"cmd": s["verb"], s["arg"]: value, **s.get("extra", {})})
             elif p["kind"] == "action":
                 reply = svc._dispatch({"cmd": p["id"]})
+                if "routine_id" in reply:
+                    # a routine started: abort it (MA ends by itself), wait
+                    brain._abort.set()
+                    t0 = time.monotonic()
+                    while brain._routine_running and time.monotonic() - t0 < 5:
+                        time.sleep(0.02)
             else:
                 continue
             assert reply["ok"], (p["id"], reply)

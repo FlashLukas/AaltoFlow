@@ -106,7 +106,10 @@ class AuxPanel(QtWidgets.QWidget):
             return
         for ch, lbl in self._ao_readback.items():
             if ch in aux.get("ao", {}):
-                lbl.setText(f"cmd {aux['ao'][ch]:+.3f} V")
+                v = aux["ao"][ch]
+                # None = not commanded since the service started: the 6259
+                # cannot read an AO back, and start-up does not overwrite it.
+                lbl.setText("cmd --  (unchanged)" if v is None else f"cmd {v:+.3f} V")
         for ch, lbl in self._ai_labels.items():
             if ch in aux.get("ai", {}):
                 lbl.setText(f"{aux['ai'][ch]:+.3f}  V")

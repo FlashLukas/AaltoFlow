@@ -42,6 +42,11 @@ def test_window_builds_and_drives_both_channels(app):
         win._refresh()
         a, b = win.cards["a"], win.cards["b"]
         assert a.freq_value.text() not in ("", "-")
+        # read-only start: A was left radiating 2.45 GHz and still is, and
+        # the input box shows that value, not the config's 1 GHz
+        assert a.rf_btn.text() == "Turn RF Off" and backend.output_on(0)
+        assert a.current_freq_hz() == pytest.approx(2.45e9)
+        assert backend.writes == []
 
         a.unit_combo.setCurrentText("GHz")
         assert a.freq_spin.value() == pytest.approx(cfg.channel_a.frequency_Hz / 1e9)
@@ -49,18 +54,18 @@ def test_window_builds_and_drives_both_channels(app):
         a.unit_combo.setCurrentText("MHz")
         b.power_spin.setValue(-8.0); b._set_power()
         b.phase_spin.setValue(45.0); b._set_phase()
-        a._toggle_rf()
-        _settle(app, synth, lambda s: s["a_rf_on"] and s["a_frequency_Hz"] == 2.5e9
+        b._toggle_rf()
+        _settle(app, synth, lambda s: s["b_rf_on"] and s["a_frequency_Hz"] == 2.5e9
                 and s["b_power_dBm"] == -8.0 and s["b_phase_deg"] == 45.0)
         win._refresh()
-        assert a.rf_btn.text() == "Turn RF Off"
-        assert backend.output_on(0)
+        assert b.rf_btn.text() == "Turn RF Off"
+        assert backend.output_on(1)
 
         # reference combo: a user choice sends a command
-        i = win.ref_combo.findData("internal_10MHz")
+        i = win.ref_combo.findData("internal_27MHz")
         win.ref_combo.setCurrentIndex(i)
         win._set_reference(i)
-        _settle(app, synth, lambda s: s["reference"] == "internal_10MHz")
+        _settle(app, synth, lambda s: s["reference"] == "internal_27MHz")
 
         # the indicator animates and paints without throwing
         win.tone._tick()
@@ -69,7 +74,7 @@ def test_window_builds_and_drives_both_channels(app):
         assert "," not in a.freq_spin.text()
     finally:
         win.close()
-    assert not backend.output_on(0)          # closing the window switched RF off
+    assert not backend.output_on(0) and not backend.output_on(1)   # closing = RF off
 
 
 def test_settings_dialog_builds_and_applies(app):

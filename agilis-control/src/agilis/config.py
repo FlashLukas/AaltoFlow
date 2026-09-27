@@ -25,10 +25,23 @@ so (``cal_valid`` in status) instead of silently reporting wrong micrometres.
     forward steps  x  um_per_step (forward)
   - backward steps x  um_per_step (backward)   = position estimate in um
 
-Datasheet anchors (AG-LS25 linear stage, Newport manual A824E): 12 mm travel,
-minimum incremental motion 0.05 um ("may be larger than 50 nm" at default
-settings), > 0.5 mm/s maximum speed. Mirror mounts (AG-M100N) step ~1 urad
-instead -- see the open question in CLAUDE.local.md; this module speaks um.
+THE STAGE ON THE RIG (Lukas, 2026-09-27): an AG-LS25 linear stage ("NPT-AG-LS25V"
+-- Newport's "V6" suffix is the 1e-6 Torr VACUUM version, AG-LS25V6; the manual
+lists no separate vertical model). Datasheet (Newport manual A824E, section 2.1):
+  * travel 12 mm, mechanical hard stops AND a precision electrical limit switch
+    (so PH, MV, MA, PA all work -- see the brain);
+  * minimum incremental motion 0.05 um; "with default settings, the step size
+    for the forward direction varies from the step size for the backward
+    direction and may be larger than 50 nm";
+  * absolute positioning accuracy (MA/PA) 100 um -- coarse, it is a
+    limit-to-limit step count;
+  * max speed > 0.5 mm/s with no axial load, > 0.2 mm/s with 1.7 N axial load;
+    axial load capacity 2 N, normal load 3 N (40 mm cantilever), holding force 3 N.
+If it is mounted VERTICALLY, gravity is an axial load: the step going UP is
+smaller than the step going DOWN (the datasheet's speed halves at 1.7 N). That
+is exactly what the per-direction calibration below already handles -- measure
+both directions (``measure_step_size``) and the up/down difference is in the
+numbers.
 """
 
 # `from __future__ import annotations` turns every annotation into a *string* at
@@ -57,7 +70,12 @@ AMPLITUDE_DEFAULT = 16
 # --------------------------------------------------------------------------- #
 @dataclass
 class Motion:
-    """Drive settings pushed to the controller on start.
+    """Drive settings.
+
+    ADOPTED, NOT PUSHED (rule of 2026-09-27): at start the brain READS the
+    amplitudes the controller is using (SU+? / SU-?) and writes them into
+    amp_*; the values from the .ini are then only what you get when you press
+    "Apply" (set_amplitude / set_config) -- never written behind your back.
 
     The AG-UC2 has no velocity or acceleration setting for a relative move: a
     ``PR`` move always runs at the controller's own stepping rate. What you CAN
@@ -103,7 +121,11 @@ class Calibration:
     fills these in automatically when you store a new step size.
 
     Default 0.05 um = the AG-LS25 datasheet's minimum incremental motion, at the
-    power-up amplitude 16. MEASURE yours.
+    power-up amplitude 16 (the datasheet: "may be larger than 50 nm" there).
+    For scale at amplitude 50: > 0.5 mm/s at jog speed 3 (1700 steps/s, always
+    amplitude 50) means >= ~0.3 um per step. # VERIFY -- MEASURE yours with the
+    ``measure_step_size`` routine (limit to limit, both directions); on a
+    vertical mount up and down WILL differ.
     """
 
     um_per_step_x: float = 0.05
@@ -123,15 +145,17 @@ class Limits:
     """The SAFETY ENVELOPE.  The brain clamps every target to this.
 
     Travel is bounded in STEPS because that is what the open-loop controller
-    actually counts. +/-300 000 steps is +/-15 mm at 50 nm/step -- wider than an
-    AG-LS25 (12 mm), whose own hard stops and limit switches are the real ends.
+    actually counts. The AG-LS25 travels 12 mm = 240 000 steps at the
+    datasheet's 50 nm; the datum can sit anywhere along it, so the counter can
+    legitimately reach +/-240 000 from it. The stage's own limit switches and
+    hard stops are the real ends; this box only stops nonsense targets.
     The LEASH (below) is the tighter, datum-referenced guard.
     """
 
-    min_steps_x: int = -300_000
-    max_steps_x: int = 300_000
-    min_steps_y: int = -300_000
-    max_steps_y: int = 300_000
+    min_steps_x: int = -240_000
+    max_steps_x: int = 240_000
+    min_steps_y: int = -240_000
+    max_steps_y: int = 240_000
     # Master switch: set False to disable clamping (advanced/bench use).
     enforce: bool = True
     # --- LEASH: a symmetric travel box around the DATUM (counter 0) ---------
@@ -187,6 +211,20 @@ class Hardware:
     # Hand the push buttons back (ML, local mode) when the service stops, so
     # the controller is usable by hand again.
     local_on_close: bool = True
+    # --- the stage on the controller (AG-LS25, datasheet in the module doc) --
+    # Travel between the limits, um. The step-size measurement divides this by
+    # the counted steps, and MA/PA report in 1/1000 of it. # VERIFY: the
+    # switch-to-switch distance may be a little shorter than the nominal 12 mm.
+    travel_um: float = 12000.0
+    # The AG-LS25 has an electrical limit switch; MA, PA and MV need one (a
+    # stage without one would never stop an MV). Set False for a mirror mount.
+    has_limit_switch: bool = True
+    # At start, a jog found running (a crashed session's JA: no dead-man any
+    # more) is given this long to end by itself before it is stopped.
+    start_wait_s: float = 2.0
+    # MA / PA interrupt the USB link "up to 2 minutes" (manual); a finite move
+    # found running at start is also waited for this long.
+    limit_op_timeout_s: float = 150.0
 
 
 @dataclass

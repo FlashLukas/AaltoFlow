@@ -58,16 +58,23 @@ class SimulatedDynaCool:
     NEAR_S = 2.0
 
     def __init__(self, field_mT: float = 0.0, temperature_K: float = 300.0,
-                 clock=time.monotonic, noise: bool = True, seed: int | None = None):
+                 clock=time.monotonic, noise: bool = True, seed: int | None = None,
+                 field_rate_mT_per_s: float = 22.0, field_approach: str = "linear",
+                 temperature_rate_K_per_min: float = 20.0,
+                 temperature_approach: str = "fast_settle"):
+        # The rate/approach arguments are what "MultiVu" was last told before
+        # this service started (by its front panel or an earlier session).
+        # Tests start the sim from NON-default values to prove the brain adopts
+        # them instead of the config's (the adopt-on-start rule).
         self._clock = clock
         self._rng = random.Random(seed)
         self._noise = noise
         self._field = _Ramp(field_mT, clock)
-        self._field.rate = 10.0
+        self._field.rate = float(field_rate_mT_per_s)
         self._temp = _Ramp(temperature_K, clock)
-        self._temp.rate = 20.0 / 60.0
-        self._field_approach = "linear"
-        self._temp_approach = "fast_settle"
+        self._temp.rate = float(temperature_rate_K_per_min) / 60.0
+        self._field_approach = field_approach
+        self._temp_approach = temperature_approach
         self._open = False
         self.chamber = "Purged and Sealed"
 

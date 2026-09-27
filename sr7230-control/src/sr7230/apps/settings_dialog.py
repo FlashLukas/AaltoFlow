@@ -29,8 +29,8 @@ _TAB_TITLES = {
 _HINTS = {
     "reference": "Internal = detect at our own oscillator; ext_ttl / ext_analog = "
                  "follow REF IN. amplitude_V is OSC OUT in V rms -- it drives "
-                 "whatever is connected, and is forced to 0 V at start unless "
-                 "hardware.osc_zero_on_start is off.",
+                 "whatever is connected. At start the service READS all of these "
+                 "from the instrument; Apply sends them.",
     "signal": "sensitivity_index is the instrument's SEN number: 24 = 100 mV "
               "(or 100 nA in high-BW current mode), 3..27 (7..27 in low-noise "
               "current mode). line_filter: off / 1f / 2f / both, at line_freq_Hz "
@@ -46,7 +46,7 @@ _HINTS = {
               "give 5 V rms).",
     "hardware": "Ethernet (TCP) only for now: host = the 7230's IP address, port "
                 "50000. option_250kHz: the instrument has the 7230/99 option. "
-                "The OSC OUT safety switches are here too.",
+                "osc_off_on_shutdown: OSC OUT to 0 V when the service stops.",
     "ui": "Light or dark colour scheme. A start-up setting: it applies the next "
           "time the GUI is launched.",
 }

@@ -29,9 +29,14 @@ class Sensor:
     and the live value is written back here, so Save config stores what is
     actually in use.
 
-    At start-up the meter's OWN stored settings win (it keeps its wavelength
-    across power cycles, and someone may have set it in Thorlabs OPM), unless
-    hardware.push_on_start is True -- then these values are pushed instead.
+    At start-up the meter's OWN stored settings ALWAYS win (it keeps its
+    wavelength across power cycles, and someone may have set it in Thorlabs
+    OPM): connecting only reads the meter and copies what it reports into
+    these fields. The values here reach the meter only when they are set
+    explicitly (a setter, or set_config / Settings > Apply). The old
+    `hardware.push_on_start` option was REMOVED on 2026-09-27 (Lukas: "all
+    modules should read the instrument state on startup, not change
+    anything"); an old .ini that still has the key simply ignores it.
     """
 
     wavelength_nm: float = 800.0      # sets the responsivity used to turn A into W
@@ -82,7 +87,6 @@ class Hardware:
     dll_path: str = ""
     timeout_ms: int = 5000
     poll_hz: float = 20.0             # upper bound; the PM16 itself gives ~17 readings/s
-    push_on_start: bool = False       # False = adopt the meter's stored settings at start
 
 
 @dataclass

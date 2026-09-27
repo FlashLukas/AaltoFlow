@@ -27,7 +27,12 @@ class Fake7230:
         self.log: list[str] = []
         self.replies = {"ID": "7230", "VER": "2.20", "XY.": "+1.5E-03,-2.0E-04",
                         "FRQ.": "+1.0000E+03", "ADC. 1": "+1.250", "ADC. 2": "-0.500",
-                        "TC.": "+1.0E-01", "SEN": "24", "REFP.": "+30.00"}
+                        "TC.": "+1.0E-01", "SEN": "24", "REFP.": "+30.00",
+                        # the front panel as someone left it (read at start)
+                        "REFMODE": "0", "IE": "0", "OF.": "+1.0000E+03",
+                        "OA.": "+2.500E-01", "REFN": "1", "IMODE": "0", "VMODE": "3",
+                        "DCCOUPLE": "1", "FET": "0", "FLOAT": "0", "AUTOMATIC": "1",
+                        "FASTMODE": "0", "SLOPE": "3", "LF": "1,1"}
         self.status = 1                  # command complete
         self.overload = 0
         self.split = False               # send each reply in two packets
@@ -95,13 +100,43 @@ def dev(fake):
     d.close()
 
 
-def test_open_identifies_and_selects_single_reference(fake, dev):
+#: every command the backend may send while STARTING: queries only (a command
+#: without its argument reports the value on the 7230)
+START_QUERIES = {"ID", "VER", "REFMODE", "IE", "OF.", "OA.", "REFP.", "REFN", "IMODE",
+                 "VMODE", "DCCOUPLE", "FET", "FLOAT", "AUTOMATIC", "SEN", "FASTMODE",
+                 "TC.", "SLOPE", "LF"}
+
+
+def test_open_identifies_and_only_reads_the_reference_mode(fake, dev):
     assert "7230" in dev.idn() and "2.20" in dev.idn()
-    assert fake.log[:3] == ["ID", "VER", "REFMODE 0"]
-    assert not any(c.startswith("OA") for c in fake.log), "open() must not touch OSC OUT"
+    assert fake.log[:3] == ["ID", "VER", "REFMODE"]      # read, never "REFMODE 0"
+
+
+def test_open_refuses_a_dual_mode_instrument_instead_of_switching_it(fake):
+    fake.replies["REFMODE"] = "1"
+    d = Tcp7230("127.0.0.1", port=PORT, timeout_s=2.0)
+    with pytest.raises(InstrumentError, match="single reference"):
+        d.open()
+    assert set(fake.log) <= START_QUERIES
+
+
+def test_read_settings_sends_queries_only_and_parses(fake, dev):
+    st = dev.read_settings()
+    assert set(fake.log) <= START_QUERIES, set(fake.log) - START_QUERIES
+    assert st["osc_amplitude_V"] == pytest.approx(0.25) and st["vmode"] == 3
+    assert st["dc_coupled"] is True and st["slope_index"] == 3
+    assert st["line_filter_mode"] == 1 and st["line_50Hz"] is True
+    assert st["time_constant_s"] == pytest.approx(0.1) and st["unread"] == []
+
+
+def test_a_query_the_instrument_refuses_is_listed_not_fatal(fake, dev):
+    del fake.replies["AUTOMATIC"]            # answers with no number
+    st = dev.read_settings()
+    assert "auto_ac_gain" not in st and st["unread"] == ["auto_ac_gain"]
 
 
 def test_setters_send_the_manual_commands(fake, dev):
+    n0 = len(fake.log)
     dev.set_ref_source(2)
     dev.set_osc_frequency(1234.5)
     dev.set_osc_amplitude(0.25)
@@ -114,7 +149,7 @@ def test_setters_send_the_manual_commands(fake, dev):
     dev.set_tc_index(12)
     dev.set_slope_index(3)
     dev.set_line_filter(3, True)
-    log = fake.log[3:]
+    log = fake.log[n0:]
     assert log == ["IE 2", "OF. 1.234500E+03", "OA. 2.500000E-01", "REFP. -12.5000",
                    "REFN 2", "IMODE 0", "VMODE 3", "DCCOUPLE 1", "SEN 18",
                    "FASTMODE 1", "TC 12", "SLOPE 3", "LF 3 1"]
@@ -166,16 +201,24 @@ def test_no_address_is_refused_before_connecting():
 
 
 def test_the_brain_drives_the_fake_end_to_end(fake):
-    """The brain + real backend: start pushes everything, OSC OUT goes to 0 V
-    LAST, and shutdown sends OA. 0 again."""
+    """The brain + real backend: start sends QUERIES ONLY and adopts what the
+    instrument reports (OSC OUT keeps its 0.25 V); a deliberate Apply pushes;
+    shutdown still sends OA. 0 (osc_off_on_shutdown, not part of the rule)."""
     cfg = Config()
     li = LockIn(Tcp7230("127.0.0.1", port=PORT), cfg)
     li.start(poll=False)
     li.poll_once()
+    assert set(fake.log) <= START_QUERIES | {"XY.", "FRQ.", "ADC. 1", "ADC. 2"}, \
+        set(fake.log) - START_QUERIES
     s = li.status()
     assert s.connected and s.live["x"] == pytest.approx(1.5e-3) and s.tc_s == pytest.approx(0.1)
-    pushed = [c.split()[0] for c in fake.log]
+    assert s.amplitude_V == pytest.approx(0.25) and s.input == "A-B"
+    assert s.coupling == "DC" and s.slope_db == 24 and s.phase_deg == pytest.approx(30.0)
+    assert li.cfg.signal.line_filter == "1f"
+    # an explicit Apply is a request: THEN everything is pushed, OSC OUT last
+    n0 = len(fake.log)
+    li.apply_config()
+    pushed = [c.split()[0] for c in fake.log[n0:]]
     assert pushed.index("OA.") > pushed.index("TC") and pushed.index("OA.") > pushed.index("SEN")
-    assert "OA. 0.000000E+00" in fake.log
     li.shutdown()
     assert fake.log[-1] == "OA. 0.000000E+00"

@@ -23,10 +23,14 @@ class MicrowaveSource(Protocol):
     """A programmable CW microwave source (the DS Instruments SG12000L)."""
 
     def open(self) -> None:
-        """Connect and initialise. Must leave the RF OUTPUT OFF."""
+        """Connect and READ -- never change the instrument's state (adopt-on-
+        start rule, 2026-09-27). Queries only; the one write allowed is *CLS,
+        which only empties the error queue."""
 
-    def close(self) -> None:
-        """Turn RF off and disconnect. Safe to call on shutdown/crash/twice."""
+    def close(self, rf_off: bool = True) -> None:
+        """Disconnect. With rf_off (the normal shutdown) turn RF off first.
+        rf_off=False releases the port untouched: used when start() failed,
+        i.e. the service never took control of the unit. Safe to call twice."""
 
     def idn(self) -> str:
         """Identification string (*IDN?). '' if unknown."""
@@ -73,3 +77,7 @@ class MicrowaveSource(Protocol):
 
     def errors(self) -> list[str]:
         """Drain the instrument's error queue. Empty list == clean."""
+
+    # ---- front-panel preferences (sent only on an explicit user change) ----
+    def set_buzzer(self, on: bool) -> None: ...
+    def set_display(self, on: bool) -> None: ...

@@ -18,11 +18,19 @@ def _deref(ptr, ctype):
 
 
 class FakeTlccs:
-    def __init__(self, polls_until_ready=2, fail_init=False):
+    # Calls that CHANGE the instrument's state. open() must issue none of them
+    # (adopt-on-start rule): with forbid_writes=True the fake raises on each.
+    WRITES = ("setIntegrationTime",)
+
+    def __init__(self, polls_until_ready=2, fail_init=False, t_int=0.05,
+                 forbid_writes=False):
         self.calls = []
         self.polls_until_ready = polls_until_ready
         self.fail_init = fail_init
-        self.t_int = 0.01
+        self.forbid_writes = forbid_writes
+        # the time the unit was LEFT at by its last user: deliberately not the
+        # driver default 10 ms, so adoption is visible in the tests
+        self.t_int = t_int
         self._polls = 0
         self._scanning = False
         self.level = 0.25
@@ -50,7 +58,14 @@ class FakeTlccs:
 
     def tlccs_setIntegrationTime(self, vi, t):
         self.calls.append("setIntegrationTime")
+        if self.forbid_writes:
+            raise AssertionError("setIntegrationTime: a state-changing write")
         self.t_int = float(t)
+        return 0
+
+    def tlccs_getIntegrationTime(self, vi, pt):
+        self.calls.append("getIntegrationTime")
+        pt._obj.value = self.t_int
         return 0
 
     def tlccs_startScan(self, vi):

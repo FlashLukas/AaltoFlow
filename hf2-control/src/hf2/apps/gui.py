@@ -793,6 +793,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ctrl._on_event = lambda lvl, msg: self.bridge.event.emit(lvl, msg)
 
         self.ctrl.start()
+        # start() ADOPTS the instrument's settings into cfg, but the Settings
+        # form was filled from cfg before that; refill it now, or an Apply
+        # pressed straight away would push the old .ini values back.
+        try:
+            self.inst_tab.settings.reload()
+        except Exception:
+            pass
         self._t0 = time.monotonic()
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(60)

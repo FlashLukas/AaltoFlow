@@ -13,6 +13,7 @@ from agilis.config import Config
 def _sim():
     s = SimAgilis(Config())
     s.open()
+    s.enable_remote()        # power-up is LOCAL mode, like the real controller
     s.pr_rate = 50000.0
     return s
 
@@ -66,8 +67,12 @@ def test_end_stop_and_limit_switch():
 def test_controller_refusals():
     s = SimAgilis(Config())
     with pytest.raises(RuntimeError, match="-5"):
-        s.move_by(1, 10)                                 # local mode before open
+        s.move_by(1, 10)                                 # local mode before MR
     s.open()
+    with pytest.raises(RuntimeError, match="-5"):
+        s.read_position(1)                               # TP needs remote mode too
+    assert s.axis_state(1) == READY                      # TS works in local mode
+    s.enable_remote()
     s.pr_rate = 10.0
     s.move_by(1, 100)
     assert s.axis_state(1) == STEPPING
@@ -90,3 +95,39 @@ def test_jog_speeds_and_max_amplitude():
     s.jog(1, 0)
     assert 200 < n < 500
     assert s.axis_state(1) == READY
+
+
+def test_mv_stops_at_the_switch_and_tp_is_refused_meanwhile():
+    s = _sim()
+    s.speed_scale = 50.0
+    s.move_to_limit(1, -3)                               # MV-3: fast, amplitude 50
+    with pytest.raises(RuntimeError, match="-6"):
+        s.read_position(1)                               # manual: TP refused in state 3
+    t0 = time.monotonic()
+    while s.axis_state(1) != READY and time.monotonic() - t0 < 5:
+        time.sleep(0.01)
+    assert s.limit_status() & 1
+    assert s.true_um(1) == pytest.approx(-TRAVEL_UM / 2 + 2.0, abs=1.0)
+    n = s.read_position(1)
+    s.move_to_limit(1, -4)                               # at the switch: no motion
+    assert s.axis_state(1) == READY and s.read_position(1) == n
+
+
+def test_enable_remote_is_refused_while_an_axis_moves():
+    s = SimAgilis(Config())
+    s.preset_used_state()                                # left in remote
+    s.pr_rate = 20.0
+    s.move_by(2, 100)
+    with pytest.raises(RuntimeError, match="-6"):
+        s.enable_remote()
+
+
+def test_ma_and_pa_report_in_thousandths_of_the_travel():
+    s = _sim()
+    s.limit_op_s = 0.0
+    x = s.true_um(1)
+    assert s.measure_position(1) == round((x + TRAVEL_UM / 2) / TRAVEL_UM * 1000)
+    c0 = s.read_position(2)
+    assert s.move_absolute(2, 250) == 250
+    assert s.true_um(2) == pytest.approx(0.25 * TRAVEL_UM - TRAVEL_UM / 2)
+    assert s.read_position(2) != c0                      # PA's steps are counted

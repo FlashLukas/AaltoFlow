@@ -22,8 +22,8 @@ _TABS = [("sensor", "Sensor"), ("acquisition", "Acquisition"), ("limits", "Limit
          ("hardware", "Hardware"), ("ui", "Appearance")]
 
 _HINTS = {
-    "sensor": "Pushed to the meter on Apply. At start-up the meter's own stored "
-              "settings are adopted unless Hardware > push_on_start is on.",
+    "sensor": "Pushed to the meter on Apply. At start-up nothing is pushed: the "
+              "meter's own stored settings are read and shown here.",
     "acquisition": "An acquisition averages this many readings that all started after "
                    "the trigger (60 ms each on a PM16).",
     "limits": "The envelope every setpoint is clamped to, narrowed further by what "

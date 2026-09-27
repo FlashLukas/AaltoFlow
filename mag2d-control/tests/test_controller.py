@@ -45,20 +45,125 @@ def run_until_stable(ctrl, clock, limit_s=20.0):
 
 
 def started(rig):
+    """Start, then switch the output ON explicitly -- since 2026-09-27 start()
+    adopts the magnet's state (here: off) instead of energizing by itself."""
     cfg, clock, ctrl, sim, events = rig
     ctrl.start(run_thread=False)
+    ctrl.set_output(True)
     run(ctrl, clock, 1.0)
     return rig
 
 
 # ---------------------------------------------------------------- settling
 
-def test_start_energizes_at_zero_and_is_stable(rig):
+def test_energizing_after_start_regulates_at_zero_and_is_stable(rig):
+    # (was test_start_energizes_at_zero_and_is_stable: start() used to switch the
+    # output on by itself; now the user does, via set_output(True))
     cfg, clock, ctrl, sim, events = started(rig)
     s = ctrl.status()
     assert s.energized and sim.enable
     assert s.state == "STABLE" and s.field_stable
     assert s.setpoint_field_mT == 0.0 and abs(s.measured_magnitude_mT) < 1.0
+
+
+# ---------------------------------------------------------------- adopt on start
+# Lukas, 2026-09-27: "all modules should read the instrument state on startup,
+# not to change anything".
+
+class _NoWrites:
+    """Arms the simulator so that ANY state-changing call raises."""
+
+    def __init__(self, sim):
+        self.sim = sim
+        self.real = (sim.write_ao, sim.set_enable)
+
+    def __enter__(self):
+        def refuse(*a):
+            raise AssertionError(f"state-changing write during start: {a}")
+        self.sim.write_ao = refuse
+        self.sim.set_enable = refuse
+        return self
+
+    def __exit__(self, *exc):
+        self.sim.write_ao, self.sim.set_enable = self.real
+
+
+def test_start_issues_no_writes_and_adopts_an_off_magnet(rig):
+    cfg, clock, ctrl, sim, events = rig
+    # left behind by an earlier run: enable OFF, but 3 V / -1 V still on the AO
+    sim.preset(False, 3.0, -1.0)
+    with _NoWrites(sim):
+        ctrl.start(run_thread=False)
+        run(ctrl, clock, 2.0)            # the OFF loop must not touch anything either
+    s = ctrl.status()
+    assert s.state == "OFF" and not s.energized and not s.field_stable
+    assert s.output_V == [3.0, -1.0]     # what the card really holds
+    assert sim.ao == [3.0, -1.0] and not sim.enable and sim.ao_log == []
+    assert any("OFF (adopted)" in m for _, m in events)
+
+    # energizing starts from 0 V, written BEFORE the enable line goes on --
+    # never onto the stale 3 V
+    order = []
+    real_w, real_e = sim.write_ao, sim.set_enable
+    sim.write_ao = lambda x, y: (order.append(("ao", x, y)), real_w(x, y))
+    sim.set_enable = lambda on: (order.append(("en", on)), real_e(on))
+    ctrl.set_output(True)
+    run(ctrl, clock, 0.02)
+    assert order[:2] == [("ao", 0.0, 0.0), ("en", True)]
+
+
+def test_start_adopts_an_energized_magnet_and_holds_its_field(rig):
+    cfg, clock, ctrl, sim, events = rig
+    sim.preset(True, 2.5, -1.5)          # ~ +50 mT / -29 mT, energized
+    bx0, by0 = sim.true_field()
+    with _NoWrites(sim):
+        ctrl.start(run_thread=False)
+    s = ctrl.status()
+    assert s.energized and s.state in ("REGULATING", "STABLE")
+    assert s.output_V == [2.5, -1.5]
+    # the setpoint IS the field that was there (within the probe noise)
+    assert abs(s.setpoint_bx_mT - bx0) < 0.5 and abs(s.setpoint_by_mT - by0) < 0.5
+    assert any("ENERGIZED (adopted)" in m for _, m in events)
+
+    # the loop HOLDS it: bumpless, no voltage step, the field stays put
+    run(ctrl, clock, 3.0)
+    bx, by = sim.true_field()
+    assert abs(bx - bx0) < cfg.control.tolerance_mT and abs(by - by0) < cfg.control.tolerance_mT
+    first = sim.ao_log[0]
+    assert abs(first[1] - 2.5) < 0.05 and abs(first[2] + 1.5) < 0.05
+    assert ctrl.status().field_stable and sim.enable
+
+
+def test_start_without_ao_readback_estimates_and_warns(rig):
+    cfg, clock, ctrl, sim, events = rig
+    sim.preset(False, 0.0, 0.0)
+    sim.read_output_state = lambda: (False, None)
+    ctrl.start(run_thread=False)
+    s = ctrl.status()
+    assert s.state == "OFF" and all(math.isnan(v) for v in s.output_V)   # honest: unknown
+    run(ctrl, clock, 1.0)
+    assert sim.ao_log == []                                            # still untouched
+
+    # Energizing with an UNKNOWN drive must still write 0 V before the enable
+    # line -- the card might hold anything (reviewer fix 2026-09-27: the 0 V
+    # used to be skipped as "already there").
+    sim.ao = [4.0, -2.0]                  # what the card really held, unseen
+    order = []
+    real_w, real_e = sim.write_ao, sim.set_enable
+    sim.write_ao = lambda x, y: (order.append(("ao", x, y)), real_w(x, y))
+    sim.set_enable = lambda on: (order.append(("en", on)), real_e(on))
+    ctrl.set_output(True)
+    run(ctrl, clock, 0.02)
+    assert order[:2] == [("ao", 0.0, 0.0), ("en", True)]
+    assert all(math.isfinite(v) for v in ctrl.status().output_V)
+
+
+def test_start_with_unreadable_enable_assumes_off_and_warns(rig):
+    cfg, clock, ctrl, sim, events = rig
+    sim.read_output_state = lambda: (None, (0.0, 0.0))
+    ctrl.start(run_thread=False)
+    assert ctrl.status().state == "OFF"
+    assert any(lvl == "warn" and "enable line could not be read" in m for lvl, m in events)
 
 
 def test_settles_to_a_polar_target_within_a_few_seconds(rig):
@@ -207,7 +312,6 @@ def _max_step(sim, cfg):
 
 def test_not_stable_while_off(rig):
     cfg, clock, ctrl, sim, events = rig
-    cfg.control.energize_on_start = False
     ctrl.start(run_thread=False)
     run(ctrl, clock, 2.0)
     s = ctrl.status()
@@ -225,6 +329,7 @@ def test_water_off_at_start_refuses_unless_bypassed(rig):
 
     cfg.interlock.water_bypass = True
     ctrl.start(run_thread=False)
+    ctrl.set_output(True)
     run(ctrl, clock, 1.0)
     s = ctrl.status()
     assert s.state == "STABLE" and not s.water_ok and s.water_bypass
@@ -338,4 +443,5 @@ def test_status_never_touches_the_hardware(rig):
     def boom(*a):
         raise AssertionError("status() called the backend")
     sim.read_hall = sim.read_temps = sim.read_water = sim.write_ao = boom
+    sim.read_output_state = sim.set_enable = boom
     ctrl.status()

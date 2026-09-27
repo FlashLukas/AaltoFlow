@@ -3,6 +3,12 @@
 A phase shifter needs no control loop -- the unit settles in < 0.5 ms. The
 brain's whole job is:
 
+  * ADOPT the unit's state at start: open() and start() only QUERY the unit
+    (Lukas's rule, 2026-09-27: "read the instrument state on startup, not
+    change anything"). Whatever phase / attenuation / RF on-off the box holds
+    becomes the brain's setpoint, so the GUI, status and describe show what the
+    instrument is really doing, and a service (re)start never changes the RF
+    going into the experiment,
   * hold the DESIRED state (phase, attenuation, carrier frequency, output on),
   * CLAMP every request to the safety envelope and announce a clamp as a warn
     event,
@@ -52,6 +58,7 @@ class Status:
     connected: bool = False
     idn: str = ""
     hw_error: str = ""                # last failed read, "" when healthy
+    adopted: bool = False             # True once the unit's own state has been read
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -68,16 +75,23 @@ class PhaseShifter:
         self.backend = backend
         self.cfg = cfg or Config()
         s = self.cfg.signal
-        # desired state = the config's power-on defaults, clamped and rounded
-        self._phase_set = self._round_phase(self._clamped_phase(s.phase_deg)[0])
-        self._att_set = self._round_att(self._clamped_att(s.attenuation_dB)[0])
+        # The desired state is NOT taken from the config any more: it is READ
+        # from the unit at start (_adopt). Until then these are placeholders,
+        # and the names in _to_adopt say which of them are still unknown -- a
+        # placeholder is never written to the unit (see apply_config).
+        self._phase_set = 0.0
+        self._att_set = 0.0
+        self._output_on = False
+        self._to_adopt = {"phase", "att", "output"}
+        # The carrier has no query on the PS6000L (it is bookkeeping unless
+        # device.freq_command is set), so it starts from the config value and
+        # is NOT sent at start: nothing to read, and nothing written either.
         self._freq = self._clamped_freq(s.frequency_MHz)[0]
-        self._output_on = bool(s.output_on)   # False unless the .ini asks for RF at start
         self._connected = False
         self._idn = ""
         # last GOOD readbacks (a failed read keeps these, flagged by hw_error)
-        self._rb_phase = wrap(self._phase_set)
-        self._rb_att = self._att_set
+        self._rb_phase = 0.0
+        self._rb_att = 0.0
         self._rb_output = False
         self._hw_error = ""
 
@@ -93,27 +107,69 @@ class PhaseShifter:
     # ---- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        """Open the backend, push the start-up state, start the read-back worker."""
+        """Open the backend, READ (never write) the unit's state and adopt it as
+        the setpoint, start the read-back worker.
+
+        Why no write: a service restart must not disturb an experiment that is
+        running on the RF path (Lukas, 2026-09-27). The RF output in particular
+        stays exactly as found -- ON if someone left it on. Only the user (a
+        setter or set_config) changes the unit. Shutdown still switches the
+        output off; that is a separate, deliberate rule."""
         if self._connected:
             return
         with self._lock:
-            self.backend.open()
+            self.backend.open()               # queries only (*PING?, *IDN?)
             self._connected = True
+            self._to_adopt = {"phase", "att", "output"}
             self._idn = self.backend.idn()
-            # a safe order: the carrier and the attenuation first, the output last
-            self._send_frequency(self._freq)
-            self.backend.set_attenuation(self._att_set)
-            self.backend.set_phase(wrap(self._phase_set))
-            self.backend.set_output(self._output_on)
-        self._poll_once()                     # first snapshot = real readbacks
+        self._poll_once()                     # first snapshot = real readbacks, adopted
         self._stop.clear()
         self._worker = threading.Thread(target=self._run, name="dsphase-poll", daemon=True)
         self._worker.start()
         self._emit("info", f"connected: {self._idn or self.cfg.device.model}")
-        if self._output_on:
-            # Allowed (signal.output_on in the .ini), but never silent: RF appearing
-            # on a service (re)start can surprise whoever is at the setup.
-            self._emit("warn", "RF output switched ON at start (signal.output_on = True)")
+        if self._to_adopt:
+            # The reads failed: we do NOT know what the unit holds. The worker
+            # adopts it at the first good read; nothing is written meanwhile.
+            self._emit("warn", "could not read the unit's state at start; it will be "
+                               "adopted at the first good read (nothing was written)")
+
+    def _adopt(self, ph: float, att: float, out: bool) -> None:
+        """Make the unit's own state the desired state -- for every quantity the
+        user has not set in the meantime. Caller holds self._lock.
+
+        No rounding and no clamping: the adopted value is what the box HOLDS, so
+        a scan's echo check agrees with it at once. A value outside the safety
+        envelope is only announced; it is changed only when the user asks."""
+        lim = self.cfg.limits
+        found = []
+        if "phase" in self._to_adopt:
+            # The unit reports -180..+180. If the envelope is e.g. 0..360,
+            # express the SAME physical phase in that branch (no write needed).
+            p = ph
+            if p < lim.phase_min_deg and p + 360.0 <= lim.phase_max_deg:
+                p += 360.0
+            elif p > lim.phase_max_deg and p - 360.0 >= lim.phase_min_deg:
+                p -= 360.0
+            self._phase_set = p
+            found.append(f"phase {p:g} deg")
+            if not (lim.phase_min_deg <= p <= lim.phase_max_deg):
+                self._emit("warn", f"the unit holds phase {ph:g} deg, outside the limits "
+                                   f"{lim.phase_min_deg:g}..{lim.phase_max_deg:g} (left as is)")
+        if "att" in self._to_adopt:
+            self._att_set = att
+            found.append(f"attenuation {att:g} dB")
+            if not (lim.att_min_dB <= att <= lim.att_max_dB):
+                self._emit("warn", f"the unit holds attenuation {att:g} dB, outside the limits "
+                                   f"{lim.att_min_dB:g}..{lim.att_max_dB:g} (left as is)")
+        if "output" in self._to_adopt:
+            self._output_on = bool(out)
+            found.append(f"RF output {'ON' if out else 'off'}")
+            if out:
+                # never silent: RF is live on the downstream path
+                self._emit("warn", "RF output is ON on the unit (adopted, not changed)")
+        self._to_adopt.clear()
+        if found:
+            self._emit("info", "adopted from the unit: " + ", ".join(found))
 
     def shutdown(self) -> None:
         """RF output off, stop the worker, disconnect. Safe to call twice / on a crash."""
@@ -146,6 +202,7 @@ class PhaseShifter:
     def set_output(self, on: bool) -> None:
         with self._lock:
             self._output_on = bool(on)
+            self._to_adopt.discard("output")  # the user decided; never overwrite it
             if self._connected:
                 self.backend.set_output(self._output_on)
         self._kick.set()
@@ -156,6 +213,7 @@ class PhaseShifter:
         q = self._round_phase(value)
         with self._lock:
             self._phase_set = q
+            self._to_adopt.discard("phase")
             if self._connected:
                 self.backend.set_phase(wrap(q))
         self._kick.set()
@@ -171,6 +229,7 @@ class PhaseShifter:
         q = self._round_att(value)
         with self._lock:
             self._att_set = q
+            self._to_adopt.discard("att")
             if self._connected:
                 self.backend.set_attenuation(q)
         self._kick.set()
@@ -217,10 +276,19 @@ class PhaseShifter:
 
     def apply_config(self) -> None:
         """Re-clamp and re-round the desired state to the (possibly new) limits
-        and step, and push it. Called after set_config edits self.cfg IN PLACE."""
+        and step, and push it. Called after set_config edits self.cfg IN PLACE --
+        i.e. only on an explicit request from the user or a coordinator.
+
+        A quantity whose value is still UNKNOWN (the start-up read failed) is
+        not pushed: its placeholder (0 deg, 0 dB = full power) was never
+        anyone's choice and must not reach the unit."""
+        with self._lock:
+            unknown = set(self._to_adopt)
         self.set_frequency(self._freq)
-        self.set_attenuation(self._att_set)
-        self.set_phase(self._phase_set)
+        if "att" not in unknown:
+            self.set_attenuation(self._att_set)
+        if "phase" not in unknown:
+            self.set_phase(self._phase_set)
 
     # ---- the worker ------------------------------------------------------
 
@@ -242,6 +310,8 @@ class PhaseShifter:
                     att = float(self.backend.read_attenuation())
                     out = bool(self.backend.read_output())
                     self._rb_phase, self._rb_att, self._rb_output = ph, att, out
+                    if self._to_adopt:        # first good read since start
+                        self._adopt(ph, att, out)
                     if self._hw_error:
                         self._emit("info", "hardware reads recovered")
                     self._hw_error = ""
@@ -269,6 +339,7 @@ class PhaseShifter:
             connected=self._connected,
             idn=self._idn if self._connected else "",
             hw_error=self._hw_error,
+            adopted=self._connected and not self._to_adopt,
         )
 
     # ---- clamps and rounding -------------------------------------------

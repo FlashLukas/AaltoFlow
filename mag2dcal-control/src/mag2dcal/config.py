@@ -192,7 +192,16 @@ class Control:
     stable_time_s: float = 0.3
     settle_timeout_s: float = 30.0
     loop_hz: float = 50.0
-    energize_on_start: bool = True
+    # ADOPT, DON'T PUSH (Lukas, 2026-09-27: "all modules should read the
+    # instrument state on startup, not to change anything"). At start the
+    # service READS what the magnet is doing -- enable line, drive voltages,
+    # field -- and carries on from there: an energized magnet keeps its field
+    # (held, frozen), a de-energized one stays off. This switch used to be True,
+    # which enabled the amplifier and drove the field to 0 mT on every start.
+    # Now it is False; set it True only if you WANT the service to switch a
+    # de-energized magnet on at 0 mT when it starts (run_service.py --energize).
+    # It never touches a magnet that is already energized.
+    energize_on_start: bool = False
 
 
 @dataclass
@@ -328,6 +337,14 @@ class Sim:
     ambient_C: float = 25.0
     heating_C_per_V2: float = 0.15    # steady-state rise per volt squared of drive
     thermal_tau_s: float = 60.0
+    # The state a PREVIOUS run left the simulated magnet in, as a real DAQ card
+    # keeps its last AO / DO values when a program exits. Defaults = a magnet
+    # that was switched off cleanly. The tests set these to a driven,
+    # energized magnet to prove the service ADOPTS that state instead of
+    # resetting it (see Control.energize_on_start).
+    start_output_x_V: float = 0.0
+    start_output_y_V: float = 0.0
+    start_enabled: bool = False
 
 
 @dataclass

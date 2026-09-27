@@ -15,6 +15,16 @@ Sources used (2026-09-27), every call below is written from them:
 None of it has been run against the instrument yet: every call whose
 behaviour could not be confirmed on hardware is marked # VERIFY.
 
+START-UP (Lukas's rule, 2026-09-27: read, do not change). `open()` only
+opens the device and asks what it is: saGetDeviceType, saGetSerialNumber,
+saGetAPIVersion, and -- the one exception -- saAttachTg + saIsTgAttached.
+The analyser keeps no settings of its own (the API holds them in the host
+process and has no getter for them), so there is nothing else to adopt, and
+nothing is configured, initiated or aborted until the brain is asked to sweep.
+saAttachTg PAIRS the TG44A with this handle; it is the only way to learn
+whether a TG is there, and it is not documented to switch the TG output
+(# VERIFY 3). `hardware.attach_tg = False` skips it.
+
 How a sweep goes: `configure` aborts whatever runs, sends every setting,
 `saInitiate`s the mode and asks `saQuerySweepInfo` which bins it will return.
 `finish_sweep` then calls `saGetSweep_32f`, which TAKES the sweep and BLOCKS
@@ -198,8 +208,10 @@ class SaApiAnalyzer:
         ok = c_bool(False)
         self._call("saIsTgAttached", self._h, byref(ok))
         self._tg = bool(ok.value)
-        # VERIFY: attaching must leave the TG output OFF until a TG sweep is
-        # initiated. The API has no explicit "TG output off" call.
+        # VERIFY: attaching must leave the TG output as it was (off, unless a
+        # previous program left it emitting) until a TG sweep is initiated.
+        # The API has no explicit "TG output off" call, and start-up does not
+        # try to force one (start-up rule).
 
     def close(self) -> None:
         """Abort (which also stops a TG sweep, i.e. the TG output) and close.

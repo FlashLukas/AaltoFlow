@@ -9,7 +9,7 @@ import pytest
 from windfreak.config import Config
 from windfreak.sim_system import build_sim_system
 from windfreak.synthesizer import parse_channel
-from windfreak.backends.sim import max_leveled_power
+from windfreak.backends.sim import max_leveled_power, SIM_BOOT_STATE
 
 
 def wait_for(pred, synth, timeout=2.0):
@@ -35,14 +35,128 @@ def rig():
     synth.shutdown()
 
 
-# ---- safety ---------------------------------------------------------------
+def _boot(a_rf=False, b_rf=False, a_pll=True, b_pll=True, ref="internal_27MHz",
+          a_power=-10.0, a_freq=1e9):
+    return {"channels": [
+        {"frequency_Hz": a_freq, "power_dBm": a_power, "phase_deg": 0.0,
+         "rf_on": a_rf, "pll_on": a_pll},
+        {"frequency_Hz": 1e9, "power_dBm": -10.0, "phase_deg": 0.0,
+         "rf_on": b_rf, "pll_on": b_pll}],
+        "reference": ref, "ext_MHz": 10.0}
 
-def test_outputs_start_off_even_if_the_box_booted_radiating(rig):
-    synth, backend, _ = rig
+
+# ---- read-only start (Lukas's rule, 2026-09-27) ------------------------------
+
+def test_start_adopts_the_instruments_state(rig):
+    """The sim boots in a state that differs from EVERY config default (A
+    radiating 2.45 GHz at -5 dBm, B 3.2 GHz / -12 dBm / 90 deg, internal
+    10 MHz reference). After start the status must show exactly that -- not
+    the config's 1 GHz / -10 dBm / RF off / 27 MHz."""
+    synth, backend, events = rig
+    boot = SIM_BOOT_STATE
     s = wait_for(lambda s: s["a_settled"] and s["b_settled"], synth)
+    a, b = boot["channels"]
     assert s["connected"] is True
-    assert s["a_rf_on"] is False and s["b_rf_on"] is False
-    assert not backend.output_on(0) and not backend.output_on(1)
+    assert s["a_rf_on"] is True and s["b_rf_on"] is False
+    assert s["a_frequency_Hz"] == a["frequency_Hz"] != Config().channel_a.frequency_Hz
+    assert s["a_power_dBm"] == a["power_dBm"] != Config().channel_a.power_dBm
+    assert s["b_frequency_Hz"] == b["frequency_Hz"]
+    assert s["b_power_dBm"] == b["power_dBm"] and s["b_phase_deg"] == b["phase_deg"]
+    assert s["reference"] == boot["reference"] != Config().reference.source
+    assert s["a_locked"] and s["a_pll_on"]
+    # the output that was radiating is STILL radiating
+    assert backend.output_on(0) and not backend.output_on(1)
+    # the config now tells the truth too (get_config, a saved .ini, a GUI)
+    assert synth.cfg.channel_a.frequency_Hz == a["frequency_Hz"]
+    assert synth.cfg.reference.source == boot["reference"]
+    assert any("state read, nothing changed" in m for _, m in events)
+
+
+def test_start_sends_nothing_to_the_instrument(rig):
+    """open(), the adoption and several worker polls: not ONE state-changing
+    command may reach the backend (the sim logs every one)."""
+    synth, backend, _ = rig
+    wait_for(lambda s: s["a_settled"] and s["b_settled"], synth)
+    time.sleep(0.5)                              # a few polls at 5 Hz
+    assert backend.writes == []
+    synth.set_power("b", -3.0)                   # and a real request does go out
+    wait_for(lambda s: s["b_power_dBm"] == -3.0 and s["b_settled"], synth)
+    assert backend.writes == [("set_power", 1, -3.0)]
+
+
+def test_out_of_limit_state_is_reported_not_clamped():
+    """An instrument holding more power than our limits allow is NOT turned
+    down at start (that would be a write): it is shown as it is, with a warn."""
+    cfg = Config()
+    cfg.limits.power_max_dBm = 0.0
+    synth, backend = build_sim_system(cfg, boot=_boot(a_rf=True, a_power=10.0))
+    events = []
+    synth._on_event = lambda lvl, msg: events.append((lvl, msg))
+    synth.start()
+    try:
+        s = wait_for(lambda s: s["a_settled"], synth)
+        assert s["a_power_dBm"] == 10.0 and backend.ch[0].power_dBm == 10.0
+        assert any(lvl == "warn" and "outside the limits" in m for lvl, m in events)
+        assert backend.writes == []
+    finally:
+        synth.shutdown()
+
+
+def test_half_on_output_is_switched_fully_off_when_asked():
+    """Muted but amplifier on: shown as OFF, and an explicit 'RF off' really
+    sends the off command although the status already says off."""
+    synth, backend = build_sim_system(Config(), boot=_boot())
+    backend.ch[0].pa_on = True                  # amplifier on, output muted
+    synth.start()
+    try:
+        s = wait_for(lambda s: s["a_settled"], synth)
+        assert s["a_rf_on"] is False and backend.writes == []
+        synth.set_rf("a", False)
+        wait_for(lambda s: s["a_settled"], synth)
+        time.sleep(0.1)
+        assert ("set_output", 0, False) in backend.writes
+        assert backend.ch[0].pa_on is False
+    finally:
+        synth.shutdown()
+
+
+def test_adopted_pll_state_is_shown_not_assumed():
+    """A channel left with its PLL powered down is shown as such, whatever
+    the config's RF-off mode says."""
+    synth, _ = build_sim_system(Config(), boot=_boot(b_pll=False))
+    synth.start()
+    try:
+        s = wait_for(lambda s: s["b_settled"], synth)
+        assert s["b_pll_on"] is False and s["a_pll_on"] is True
+    finally:
+        synth.shutdown()
+
+
+def test_set_config_sends_only_what_was_changed(rig):
+    """The Settings dialog sends EVERY group back. Unchanged channel values
+    must not be written; a changed one is."""
+    synth, backend, _ = rig
+    wait_for(lambda s: s["a_settled"], synth)
+    synth.apply_config()                         # everything sent back unchanged
+    wait_for(lambda s: s["a_settled"] and s["b_settled"], synth)
+    time.sleep(0.2)
+    assert backend.writes == []
+    synth.cfg.channel_b.power_dBm = -20.0         # the user edits ONE value
+    synth.apply_config()
+    wait_for(lambda s: s["b_power_dBm"] == -20.0 and s["b_settled"], synth)
+    assert backend.writes == [("set_power", 1, -20.0)]
+
+
+def test_channel_spacing_is_written_only_when_changed(rig):
+    synth, backend, _ = rig
+    synth.cfg.hardware.channel_spacing_Hz = 50.0
+    synth.apply_config()
+    wait_for(lambda s: s["a_settled"], synth)
+    time.sleep(0.2)
+    assert ("set_channel_spacing", 50.0) in backend.writes and backend.spacing == 50.0
+
+
+# ---- safety ---------------------------------------------------------------
 
 
 def test_shutdown_turns_both_outputs_off():
@@ -75,7 +189,7 @@ def test_channels_are_independent(rig):
     synth.set_power("b", -3.0)
     s = wait_for(lambda s: s["b_frequency_Hz"] == 5.5e9 and s["b_settled"]
                  and s["a_frequency_Hz"] == 2.0e9 and s["a_settled"], synth)
-    assert s["a_power_dBm"] == Config().channel_a.power_dBm
+    assert s["a_power_dBm"] == SIM_BOOT_STATE["channels"][0]["power_dBm"]  # untouched
     assert s["b_power_dBm"] == -3.0
     assert backend.read_frequency(0) == 2.0e9 and backend.read_frequency(1) == 5.5e9
 
@@ -213,7 +327,9 @@ def test_all_rf_off_waits_for_the_instrument(rig):
     worker has actually switched BOTH outputs off -- not when the command is
     merely accepted."""
     synth, backend, _ = rig
-    wait_for(lambda s: s["rf_all_off"], synth)          # starts off
+    wait_for(lambda s: not s["rf_all_off"], synth)      # A was left radiating
+    synth.all_rf_off()
+    wait_for(lambda s: s["rf_all_off"], synth)
     synth.set_rf("a", True)
     synth.set_rf("b", True)
     wait_for(lambda s: s["a_rf_on"] and s["b_rf_on"] and not s["rf_all_off"], synth)
@@ -251,7 +367,8 @@ def test_pll_off_mode_still_settles_with_rf_off():
     must not block a scan that sets frequency before switching RF on."""
     cfg = Config()
     cfg.hardware.pll_off_when_rf_off = True
-    synth, backend = build_sim_system(cfg)
+    # a box left fully quiet (RF off, PLL off) -- adopted as it is
+    synth, backend = build_sim_system(cfg, boot=_boot(a_pll=False, b_pll=False))
     synth.start()
     try:
         synth.set_frequency("a", 3e9)

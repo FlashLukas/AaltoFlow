@@ -9,7 +9,9 @@ datasheet (V3.6, Dec 2022) where it matters to a caller:
 * Output power is set by a step attenuator in 0.5 dB steps, so the read-back
   power is the request ROUNDED to the step. A caller that asks for -7.3 dBm
   reads back -7.5 -- exactly why the scan's echo tolerance is half a step.
-* RF powers up OFF, and `open()` forces it off again.
+* The box starts in whatever state `Sim.state_*` describes (as if left like
+  that from the front panel); `open()` only connects, it changes nothing, so
+  the brain's adopt-on-start logic is exercised against a non-default state.
 * The USB supply sags a little when the RF chain is on (the 12 GHz model draws
   ~0.8 A from USB), which makes the "USB volts" indicator come alive.
 * An external 10 MHz reference is only "detected" if the Sim config says a
@@ -21,34 +23,37 @@ from __future__ import annotations
 
 import random
 
-from ..config import Sim, Signal
+from ..config import REFERENCES, Sim
 
 
 class SimulatedSG12000L:
     """Pretends to be a DS Instruments SG12000L microwave signal generator."""
 
-    def __init__(self, sim: Sim | None = None, startup: Signal | None = None,
-                 power_step_dB: float = 0.5):
-        self._sim = sim or Sim()
-        s = startup or Signal()
+    def __init__(self, sim: Sim | None = None, power_step_dB: float = 0.5):
+        self._sim = sim = sim or Sim()
         self._step = float(power_step_dB) if power_step_dB > 0 else 0.0
-        # remembered instrument state (a real box keeps its last settings)
-        self._freq = float(s.frequency_Hz)
-        self._power = self._quantise(float(s.power_dBm))
-        self._phase = 0.0
-        self._ref = "auto"
-        self._output = False
+        # The state the box is already in (a real one keeps its last settings
+        # across power cycles and front-panel use). Clamped/quantised like the
+        # firmware would hold it.
+        lo, hi = self.freq_range()
+        self._freq = min(max(float(sim.state_frequency_Hz), lo), hi)
+        self._power = self._quantise(float(sim.state_power_dBm))
+        self._phase = float(sim.state_phase_deg) if sim.has_phase else 0.0
+        self._ref = sim.state_reference if sim.state_reference in REFERENCES else "auto"
+        self._output = bool(sim.state_rf_on)
+        self._buzzer = True               # what a unit does out of the box
+        self._display = True
         self._open = False
         self._rng = random.Random(12000)
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
-        self._open = True
-        self._output = False          # mirror OUTP:STAT OFF on connect
+        self._open = True             # connect only: the state stays as it was
 
-    def close(self) -> None:
-        self._output = False          # RF off on the way out
+    def close(self, rf_off: bool = True) -> None:
+        if rf_off:
+            self._output = False      # RF off on the way out (normal shutdown)
         self._open = False
 
     def idn(self) -> str:
@@ -129,3 +134,11 @@ class SimulatedSG12000L:
 
     def errors(self) -> list[str]:
         return []
+
+    # ---- front-panel preferences -------------------------------------------
+
+    def set_buzzer(self, on: bool) -> None:
+        self._buzzer = bool(on)
+
+    def set_display(self, on: bool) -> None:
+        self._display = bool(on)

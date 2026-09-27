@@ -26,7 +26,6 @@ def test_save_load_roundtrip(tmp_path):
     cfg.hardware.visa_resource = "GPIB0::7::INSTR"
     cfg.hardware.visa_timeout_ms = 8000
     cfg.hardware.option_1ea = True
-    cfg.hardware.reset_on_open = False
     cfg.hardware.switch_settle_s = 0.25
 
     path = tmp_path / "hp8648.ini"
@@ -43,7 +42,6 @@ def test_save_load_roundtrip(tmp_path):
     # the important edge case: bools survive the string round-trip (gotcha #3)
     assert back.limits.enforce_spec_ceiling is False
     assert back.hardware.option_1ea is True
-    assert back.hardware.reset_on_open is False
 
 
 def test_bool_defaults_roundtrip(tmp_path):
@@ -53,7 +51,6 @@ def test_bool_defaults_roundtrip(tmp_path):
     back = Config.load(str(path))
     assert back.limits.enforce_spec_ceiling is True
     assert back.hardware.option_1ea is False
-    assert back.hardware.reset_on_open is True
 
 
 def test_cast_parses_bool_text():
@@ -79,3 +76,15 @@ def test_ini_is_utf8(tmp_path):
     path = tmp_path / "hp8648.ini"
     cfg.save(str(path))
     assert Config.load(str(path)).hardware.visa_resource.endswith("°")
+
+
+def test_reset_on_open_is_gone_and_an_old_ini_still_loads(tmp_path):
+    """*RST at connect was removed on 2026-09-27 (adopt, do not reset). An
+    .ini written before that still carries the key; it must load, ignored."""
+    assert not hasattr(Config().hardware, "reset_on_open")
+    path = tmp_path / "old.ini"
+    path.write_text("[hardware]\nreset_on_open = True\noption_1ea = True\n",
+                    encoding="utf-8")
+    back = Config.load(str(path))
+    assert back.hardware.option_1ea is True
+    assert not hasattr(back.hardware, "reset_on_open")

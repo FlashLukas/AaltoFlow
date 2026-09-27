@@ -54,6 +54,9 @@ def hold_trial(freeze: bool, seed: int, tolerance_mT: float = 0.5,
       unstable_frames how many polled frames had field_stable False
     """
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.control.freeze_enabled = freeze
     cfg.control.tolerance_mT = tolerance_mT
     cfg.stabilizer.enabled = False          # compare the fast loop only

@@ -15,7 +15,7 @@ def build_sim_system(cfg: Config | None = None) -> tuple[Synthesizer, SimulatedS
     """Return (synthesizer, sim_backend) wired together but NOT yet started.
     The caller (service / test / GUI) calls synthesizer.start()."""
     cfg = cfg or Config()
-    backend = SimulatedSG12000L(sim=cfg.sim, startup=cfg.signal,
+    backend = SimulatedSG12000L(sim=cfg.sim,
                                 power_step_dB=cfg.hardware.power_step_dB)
     return Synthesizer(backend, cfg), backend
 
@@ -26,5 +26,4 @@ def build_real_backend(cfg: Config):
     hw = cfg.hardware
     return DsiSG12000L(transport=hw.transport, com_port=hw.com_port, baud=hw.baud,
                        host=hw.host, tcp_port=hw.tcp_port, timeout_s=hw.timeout_s,
-                       phase_mode=hw.phase_mode, mute_buzzer=hw.mute_buzzer,
-                       display_off=hw.display_off)
+                       phase_mode=hw.phase_mode)

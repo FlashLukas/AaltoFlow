@@ -22,13 +22,17 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class Signal:
-    """The signal the generator should produce at start-up. These are just the
-    power-on defaults; everything is changeable live over the wire."""
+    """Signal DEFAULTS. Since 2026-09-27 these are NOT pushed at start: the
+    service adopts whatever the generator is already doing. A default is
+    applied only when the user changes it (Settings dialog / set_config).
+    `rf_on` is kept so old .ini files load, but it never switches RF (use the
+    RF button / set_rf). The simulator uses this group as the state its fake
+    box is already in when we connect."""
 
     frequency_Hz: float = 1_000_000_000.0   # 1 GHz
     power_dBm: float = -30.0                 # a quiet, safe default level
     phase_deg: float = 0.0
-    rf_on: bool = False                      # start with the RF OUTPUT OFF (safe)
+    rf_on: bool = False                      # simulator only: RF state of the fake box
 
 
 @dataclass

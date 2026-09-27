@@ -123,16 +123,57 @@ class Stage:
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Open the backend and push the start-up motion parameters."""
+        """Open the backend and ADOPT what the controller is already doing.
+
+        Lukas's rule (2026-09-27, every module): starting the software must not
+        change the instrument.  So start() only READS the BSC203 -- positions,
+        homed flags, velocity and acceleration -- and never writes a motion
+        parameter.  The velocity/acceleration it finds are copied INTO the
+        config (``cfg.motion``), so the Settings dialog and ``get_config`` show
+        what the motors will really do; the .ini values in ``motion`` are now
+        only defaults that reach the controller when YOU set them (set_velocity,
+        set_acceleration, Settings > OK, set_config).
+
+        Before 2026-09-27 this pushed cfg.motion to every axis at start, which
+        silently overwrote whatever Kinesis or a previous session had set.
+
+        ``motion.home_on_start`` (default False) is the one deliberate
+        exception: homing is a state change, so it only happens when someone
+        has explicitly switched it on in the .ini.
+        """
         self.backend.open()
         self._connected = True
         self._ensure_matrix_ok()  # a config file could carry a singular matrix
-        for axis in range(3):
-            self.backend.set_velocity(axis, axis_velocity(self.cfg, axis))
-            self.backend.set_acceleration(axis, axis_acceleration(self.cfg, axis))
+        self._adopt_motion_params()
         if self.cfg.motion.home_on_start:
             self.home_all()
         self._emit("info", f"stage started ({self.backend.idn()})")
+
+    def _adopt_motion_params(self) -> None:
+        """Copy the controller's velocity/acceleration into cfg.motion (reads only).
+
+        If the controller holds a value above our safety ceiling we REPORT it
+        (a warn event) rather than correct it: correcting would be a write at
+        start.  The ceiling still applies to every value someone sets later.
+        A failed read keeps the config default for that axis and says so.
+        """
+        lim = self.cfg.limits
+        for axis in range(3):
+            try:
+                v = float(self.backend.read_velocity(axis))
+                a = float(self.backend.read_acceleration(axis))
+            except Exception as exc:  # noqa: BLE001 -- a read must not stop start()
+                self._emit("warn", f"{AXES[axis]}: could not read motion parameters "
+                                   f"({exc}); showing config defaults")
+                continue
+            set_axis_velocity(self.cfg, axis, v)
+            set_axis_acceleration(self.cfg, axis, a)
+            if lim.enforce and v > lim.max_velocity:
+                self._emit("warn", f"{AXES[axis]} velocity on the controller ({v:.4g} mm/s) "
+                                   f"is above limits.max_velocity ({lim.max_velocity:.4g}); left as is")
+            if lim.enforce and a > lim.max_acceleration:
+                self._emit("warn", f"{AXES[axis]} acceleration on the controller ({a:.4g} mm/s^2) "
+                                   f"is above limits.max_acceleration ({lim.max_acceleration:.4g}); left as is")
 
     def shutdown(self) -> None:
         """Stop all motion and close the backend.  Idempotent."""

@@ -10,7 +10,10 @@ def test_defaults_are_safe():
     assert isinstance(cfg.limits, Limits)
     assert isinstance(cfg.device, Device)
     assert isinstance(cfg.hardware, Hardware)
-    assert cfg.signal.output_on is False            # output OFF at start
+    # phase / attenuation / RF on-off are READ from the unit at start
+    # (adopt-on-start rule), so they are no config values any more
+    assert not hasattr(cfg.signal, "output_on")
+    assert not hasattr(cfg.signal, "phase_deg")
     assert cfg.device.phase_step_deg == 0.5         # PS6000L datasheet
     assert cfg.device.att_step_dB == 0.25
     assert cfg.device.freq_command == ""            # not in the V3 command list
@@ -19,10 +22,7 @@ def test_defaults_are_safe():
 
 def test_save_load_roundtrip(tmp_path):
     cfg = Config()
-    cfg.signal.phase_deg = 12.5
-    cfg.signal.attenuation_dB = 3.75
     cfg.signal.frequency_MHz = 5800.0
-    cfg.signal.output_on = True
     cfg.limits.att_min_dB = 6.0
     cfg.device.phase_step_deg = 5.625
     cfg.device.freq_command = "FREQ {mhz:.3f}MHZ"
@@ -34,10 +34,7 @@ def test_save_load_roundtrip(tmp_path):
     cfg.save(str(path))
     back = Config.load(str(path))
 
-    assert back.signal.phase_deg == 12.5
-    assert back.signal.attenuation_dB == 3.75
     assert back.signal.frequency_MHz == 5800.0
-    assert back.signal.output_on is True            # the bool edge case
     assert back.limits.att_min_dB == 6.0
     assert back.device.phase_step_deg == 5.625
     assert back.device.freq_command == "FREQ {mhz:.3f}MHZ"
@@ -46,12 +43,16 @@ def test_save_load_roundtrip(tmp_path):
     assert back.ui.theme == "light"
 
 
-def test_bool_false_roundtrip(tmp_path):
-    cfg = Config()
-    cfg.signal.output_on = False
-    path = tmp_path / "dsphase.ini"
-    cfg.save(str(path))
-    assert Config.load(str(path)).signal.output_on is False
+def test_old_ini_with_start_up_push_keys_still_loads(tmp_path):
+    """An .ini written before 2026-09-27 has signal.output_on / phase_deg /
+    attenuation_dB (values that used to be PUSHED at start). They must be
+    ignored, not crash the load -- and above all not switch RF on."""
+    path = tmp_path / "old.ini"
+    path.write_text("[signal]\nphase_deg = 45\nattenuation_dB = 3\noutput_on = True\n"
+                    "frequency_MHz = 3000\n", encoding="utf-8")
+    back = Config.load(str(path))
+    assert back.signal.frequency_MHz == 3000.0
+    assert not hasattr(back.signal, "output_on")
 
 
 def test_cast_parses_bool_text():
@@ -64,9 +65,9 @@ def test_cast_parses_bool_text():
 
 def test_missing_group_keeps_defaults(tmp_path):
     path = tmp_path / "partial.ini"
-    path.write_text("[signal]\nphase_deg = 45\n", encoding="utf-8")
+    path.write_text("[signal]\nfrequency_MHz = 1500\n", encoding="utf-8")
     back = Config.load(str(path))
-    assert back.signal.phase_deg == 45.0
+    assert back.signal.frequency_MHz == 1500.0
     assert back.device.phase_step_deg == 0.5
 
 
@@ -76,13 +77,14 @@ def test_wire_values_get_the_field_type():
     from dsphase.net.protocol import apply_config_dict
     cfg = Config()
     apply_config_dict(cfg, {"device": {"phase_step_deg": "5.625"},
-                            "signal": {"output_on": "off"},
+                            "ui": {"theme": 5},
                             "hardware": {"baud": "9600", "poll_hz": 2},
                             "limits": {"att_max_dB": 20}})
     assert cfg.device.phase_step_deg == 5.625
-    assert cfg.signal.output_on is False
+    assert cfg.ui.theme == "5"
     assert cfg.hardware.baud == 9600
     assert isinstance(cfg.hardware.poll_hz, float)
     assert isinstance(cfg.limits.att_max_dB, float)
+    # a key removed from the config (an old client) is ignored, not invented
     apply_config_dict(cfg, {"signal": {"output_on": True}})
-    assert cfg.signal.output_on is True
+    assert not hasattr(cfg.signal, "output_on")

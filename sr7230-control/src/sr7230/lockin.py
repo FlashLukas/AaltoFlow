@@ -38,8 +38,17 @@ The 7230 has a few things the suite's other lock-in did not:
   * AUTO OPERATIONS. Auto-phase / auto-sensitivity / auto-measure take real
     time on the instrument. They are queued, numbered like acquisitions
     (`auto_id`, `auto_busy`) and carried out by the polling thread.
-  * AN OUTPUT. OSC OUT can drive a real load, so it starts at 0 V and goes
-    back to 0 V on shutdown (Hardware.osc_zero_on_start / osc_off_on_shutdown).
+  * START = READ, NOT WRITE (Lukas, 2026-09-27: "all modules should read the
+    instrument state on startup, not to change anything"). `start()` asks the
+    7230 for every setting -- reference, oscillator, phase, harmonic, input,
+    coupling, sensitivity, fast mode, time constant, slope -- and ADOPTS them
+    into the config, so the GUI and `describe` show what the instrument is
+    really doing. The .ini values are only applied when someone asks
+    (a setter, or set_config / Settings > Apply). OSC OUT in particular keeps
+    whatever it was driving: it may BE the experiment's modulation.
+  * AN OUTPUT. OSC OUT can drive a real load, so setpoints are clamped to
+    Limits.amplitude_max_V, and it goes back to 0 V on shutdown
+    (Hardware.osc_off_on_shutdown).
 
 Threads and locks (both rules learned the hard way elsewhere in the suite):
 
@@ -204,21 +213,31 @@ class LockIn:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the backend, push every setting, start polling.
+        """Open the backend, READ every setting and adopt it, start polling.
 
+        Nothing is written to the instrument here (see the module docstring):
+        whatever the 7230 is doing when the service starts, it keeps doing.
         `poll=False` skips the thread, so a test can drive `poll_once()` by hand.
         """
-        if self.cfg.hardware.osc_zero_on_start and self.cfg.reference.amplitude_V != 0.0:
-            self._emit("info", f"OSC OUT starts at 0 V (was {self.cfg.reference.amplitude_V:g} V "
-                               f"in the config; raise it deliberately)")
-            self.cfg.reference.amplitude_V = 0.0
+        # Tidy the config first: it still supplies anything the instrument
+        # could not report, and the Limits envelope the setters will use.
         self._sanitise_config()
         with self._hw:
             self.backend.open()
-            self._idn = self.backend.idn()
+            try:
+                self._idn = self.backend.idn()
+                settings = self.backend.read_settings()
+            except Exception:
+                # e.g. the link dropped half-way through the reads: nothing was
+                # written, so just let go of the socket and report the failure
+                try:
+                    self.backend.close()
+                except Exception:
+                    pass
+                raise
             self._connected = True
-            self._push_all()
         self._emit("info", f"connected: {self._idn or '7230'}")
+        self._adopt(settings)
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._poll_loop,
@@ -793,8 +812,114 @@ class LockIn:
         if sig.line_filter not in _LINE_FILTER:
             sig.line_filter = "off"
 
+    def _adopt(self, st: dict) -> None:
+        """Take the instrument's own settings (backend.read_settings) as the
+        brain's state. Values are NOT clamped to the Limits envelope: clamping
+        would make status disagree with the instrument -- and fixing that
+        would mean writing to it. An out-of-envelope value is reported with a
+        warning instead, and the next deliberate set is clamped as usual."""
+        ref, sig, flt = self.cfg.reference, self.cfg.signal, self.cfg.filter
+        # Values the instrument DID report but that this module has no name
+        # for (a new firmware code, a garbled reply). Keeping the config value
+        # silently would make status lie, so they are named in a warning, like
+        # the ones that could not be read at all.
+        odd_codes: list[str] = []
+        if "ref_source" in st:
+            if 0 <= int(st["ref_source"]) < len(REF_SOURCES):
+                ref.source = REF_SOURCES[int(st["ref_source"])]
+            else:
+                odd_codes.append(f"reference source IE {int(st['ref_source'])}")
+        if "osc_frequency_Hz" in st:
+            ref.frequency_Hz = float(st["osc_frequency_Hz"])
+        if "osc_amplitude_V" in st:
+            ref.amplitude_V = float(st["osc_amplitude_V"])
+        if "phase_deg" in st:
+            # REFP. may report anywhere in +-360 deg; status uses -180..180
+            ref.phase_deg = (float(st["phase_deg"]) + 180.0) % 360.0 - 180.0
+        if "harmonic" in st:
+            ref.harmonic = int(st["harmonic"])
+        if "imode" in st and "vmode" in st:
+            code = (int(st["imode"]), int(st["vmode"]))
+            if code[0] in (1, 2):           # current mode: VMODE does not matter
+                code = (code[0], 1)
+            for mode, c in _INPUT_CODES.items():
+                if c == code:
+                    sig.input = mode
+                    break
+            else:
+                odd_codes.append(f"input IMODE {code[0]} / VMODE {int(st['vmode'])}")
+        if "dc_coupled" in st:
+            sig.ac_coupled = not bool(st["dc_coupled"])
+        if "fet" in st:
+            sig.fet = bool(st["fet"])
+        if "float_shield" in st:
+            sig.float_shield = bool(st["float_shield"])
+        if "auto_ac_gain" in st:
+            sig.auto_ac_gain = bool(st["auto_ac_gain"])
+        if "line_filter_mode" in st:
+            names = {v: k for k, v in _LINE_FILTER.items()}
+            if int(st["line_filter_mode"]) in names:
+                sig.line_filter = names[int(st["line_filter_mode"])]
+            else:
+                odd_codes.append(f"line filter LF {int(st['line_filter_mode'])}")
+            sig.line_freq_Hz = 50 if st.get("line_50Hz", True) else 60
+        if "sensitivity_index" in st:
+            sig.sensitivity_index = int(st["sensitivity_index"])
+        if "fast_mode" in st:
+            flt.fast_mode = bool(st["fast_mode"])
+        if "time_constant_s" in st and float(st["time_constant_s"]) > 0:
+            # what the instrument applies IS what we "asked for" at start, so
+            # the settle echo (tc_set_s) and tc_s agree
+            self._tc_actual = float(st["time_constant_s"])
+            flt.time_constant_s = self._tc_actual
+        if "slope_index" in st:
+            if 0 <= int(st["slope_index"]) < len(SLOPES_DB):
+                flt.slope_db = SLOPES_DB[int(st["slope_index"])]
+            else:
+                odd_codes.append(f"slope SLOPE {int(st['slope_index'])}")
+        if "sensitivity_index" in st and sig.sensitivity_index not in self.sensitivity_table():
+            # e.g. a voltage-mode SEN index read while in a current mode
+            odd_codes.append(f"sensitivity SEN {sig.sensitivity_index} for input {sig.input}")
+        if odd_codes:
+            self._emit("warn", "the instrument reported values this module does not "
+                               "recognise (status may not match the instrument there; "
+                               "set them once to be sure): "
+                               + ", ".join(odd_codes))
+
+        unread = list(st.get("unread", []))
+        if unread:
+            self._emit("warn", "could not read from the instrument: " + ", ".join(unread)
+                               + " -- status shows the CONFIG value there, which the "
+                               "instrument may not have; set it once to be sure")
+        # Outside the envelope? Report, do not correct (see the docstring).
+        lim = self.cfg.limits
+        odd = []
+        if ref.amplitude_V > lim.amplitude_max_V:
+            odd.append(f"OSC OUT {ref.amplitude_V:g} V > amplitude_max_V {lim.amplitude_max_V:g} V")
+        if not lim.freq_min_Hz <= ref.frequency_Hz <= self.freq_max_Hz():
+            odd.append(f"oscillator {ref.frequency_Hz:g} Hz outside "
+                       f"{lim.freq_min_Hz:g}..{self.freq_max_Hz():g} Hz")
+        if not lim.tc_min_s * (1 - 1e-9) <= self._tc_actual <= lim.tc_max_s * (1 + 1e-9):
+            odd.append(f"time constant {tables.tc_label(self._tc_actual)} outside the Limits")
+        if ref.harmonic > lim.harmonic_max:
+            odd.append(f"harmonic {ref.harmonic} > harmonic_max {lim.harmonic_max}")
+        if odd:
+            self._emit("warn", "the instrument is outside this module's envelope (left as is): "
+                               + "; ".join(odd))
+        self._emit("info", "adopted the instrument's settings: "
+                           f"ref {ref.source}, osc {ref.frequency_Hz:g} Hz / "
+                           f"{ref.amplitude_V:g} V, phase {ref.phase_deg:+.2f} deg, "
+                           f"input {sig.input}, "
+                           f"{tables.sensitivity_label(sig.sensitivity_index, sig.input)}, "
+                           f"tau {tables.tc_label(self._tc_actual)}, "
+                           f"{tables.slope_label(flt.slope_db)}"
+                           + (", fast mode" if flt.fast_mode else ""))
+
     def _push_all(self) -> None:
         """Send the whole configuration to the instrument (with _hw held).
+
+        ONLY on an explicit request (set_config / Settings > Apply) -- never at
+        start, where the instrument's own settings are adopted instead.
 
         Order matters: the input first (it decides what a sensitivity index
         means), fast mode before the time constant and slope (it decides which

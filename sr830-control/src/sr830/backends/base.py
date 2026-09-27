@@ -29,7 +29,13 @@ class SR830Backend(Protocol):
     """A Stanford Research SR830 DSP lock-in amplifier."""
 
     def open(self) -> None:
-        """Connect and route replies to this interface (OUTX 1 on GPIB)."""
+        """Connect and route replies to this interface (OUTX 1 on GPIB).
+
+        open() must NOT change what the instrument is doing (Lukas's rule,
+        2026-09-27: every module ADOPTS the instrument's state at start). Only
+        writes that change no measurement setting are allowed here: OUTX 1
+        (replies to GPIB -- without it nothing can be read), OVRM (front panel
+        lock-out while remote) and *CLS (clears the error/status registers)."""
 
     def close(self) -> None:
         """Disconnect. Safe to call on shutdown or after a crash."""
@@ -81,6 +87,17 @@ class SR830Backend(Protocol):
         """AUXV k (1..4), volts (-10.5 .. 10.5)."""
 
     # ---- read-back ---------------------------------------------------------------
+    def read_state(self) -> dict:
+        """EVERY setting the brain can change, read from the instrument (queries
+        only), so the service can ADOPT the front panel at start instead of
+        overwriting it:
+        {"internal": bool (FMOD?), "freq_Hz": x (FREQ?: the oscillator in
+         internal mode, the MEASURED reference in external mode),
+         "harmonic": n, "phase_deg": x, "trigger": i (RSLP?), "sine_out_V": x,
+         "source": i, "ground": i, "coupling": i, "line": i (ISRC?/IGND?/
+         ICPL?/ILIN?), "sens": i, "reserve": i, "tc": i, "slope": i,
+         "sync": bool (SYNC?), "aux_out_V": [4 x volts] (AUXV? 1..4)}."""
+
     def read_settings(self) -> dict:
         """What the instrument is ACTUALLY set to (it changes some on its own):
         {"sens": i, "reserve": i, "tc": i, "slope": i, "phase_deg": x,

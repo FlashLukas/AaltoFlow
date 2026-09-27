@@ -604,8 +604,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.conn_dot.setText("●  offline")
             self.conn_dot.setStyleSheet(f"color:{COLORS['danger']}; font-weight:700;")
 
-        self.sweep_time_label.setText(
-            f"{s.points} bins of {_hz(s.bin_Hz)}, sweep {_fmt(s.sweep_time_s, '.3g')} s")
+        if getattr(s, "configured", True):
+            self.sweep_time_label.setText(
+                f"{s.points} bins of {_hz(s.bin_Hz)}, sweep {_fmt(s.sweep_time_s, '.3g')} s")
+        else:
+            # start-up rule: nothing has been sent to the analyser yet
+            self.sweep_time_label.setText("not configured yet: Continuous or Acquire sweeps")
         self.tg_state.setText(("attached" if s.tg_attached else "not attached"))
         self.tg_chk.setEnabled(bool(s.tg_attached))
         self._sync_inputs()
@@ -758,6 +762,9 @@ def main(theme: str | None = None) -> int:
     cfg = Config()
     if theme:
         cfg.ui.theme = theme
+    # In-process SIMULATOR: no instrument to disturb, so sweep at once (a real
+    # analyser is left untouched at start -- acquisition.sweep_on_start).
+    cfg.acquisition.sweep_on_start = True
     signalhound, _ = build_sim_system(cfg)
     return run_app(signalhound, cfg)
 

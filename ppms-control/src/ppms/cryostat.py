@@ -165,23 +165,41 @@ class Cryostat:
     def start(self, poll: bool = True) -> None:
         """Connect, ADOPT MultiVu's current setpoints (command nothing), and
         start polling. `poll=False` is for tests that step `poll_once()`."""
+        # Everything below is a QUERY. Lukas's rule (2026-09-27, every module):
+        # "read the instrument state on startup, not change anything". So the
+        # setpoint, the rate AND the approach MultiVu currently holds are all
+        # adopted; the rate/approach in ppms.ini are only the starting values
+        # used when MultiVu cannot tell us, and otherwise apply only once the
+        # user sets a rate/approach explicitly (setter or set_config).
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
-            try:
-                f_sp, _, _ = self.backend.read_field_setpoint()
-                t_sp, _, _ = self.backend.read_temperature_setpoint()
-            except Exception as exc:            # adopt the readings instead
-                self._emit("warn", f"could not read MultiVu's setpoints ({exc}); "
-                                   "adopting the measured values")
-                f_sp = self.backend.read_field()[0]
-                t_sp = self.backend.read_temperature()[0]
+            f_sp, f_rate, f_appr = self._adopt_setpoint(
+                "field", self.backend.read_field_setpoint, FIELD_APPROACHES,
+                self.backend.read_field)
+            t_sp, t_rate, t_appr = self._adopt_setpoint(
+                "temperature", self.backend.read_temperature_setpoint,
+                TEMPERATURE_APPROACHES, self.backend.read_temperature)
+        lim = self.cfg.limits
+        if f_rate is not None:
+            self.cfg.field.rate_mT_per_s, self.cfg.field.approach = f_rate, f_appr
+            if not lim.field_rate_min_mT_per_s <= f_rate <= lim.field_rate_max_mT_per_s:
+                self._emit("warn", f"MultiVu's field rate {f_rate:g} mT/s is outside the "
+                                   "limits; the next field setpoint will clamp it")
+        if t_rate is not None:
+            self.cfg.temperature.rate_K_per_min, self.cfg.temperature.approach = t_rate, t_appr
+            if not (lim.temperature_rate_min_K_per_min <= t_rate
+                    <= lim.temperature_rate_max_K_per_min):
+                self._emit("warn", f"MultiVu's temperature rate {t_rate:g} K/min is outside "
+                                   "the limits; the next temperature setpoint will clamp it")
         with self._lock:
             self._field_sp = float(f_sp)
             self._temp_sp = float(t_sp)
             self._connected = True
-        self._emit("info", f"connected: {self._idn}; adopted {f_sp:.2f} mT, {t_sp:.3f} K "
-                           "(nothing commanded)")
+        self._emit("info", f"connected: {self._idn}; adopted {f_sp:.2f} mT "
+                           f"({self.cfg.field.rate_mT_per_s:g} mT/s, {self.cfg.field.approach}), "
+                           f"{t_sp:.3f} K ({self.cfg.temperature.rate_K_per_min:g} K/min, "
+                           f"{self.cfg.temperature.approach}) -- nothing commanded")
         self.poll_once()
         if poll:
             self._stop.clear()
@@ -398,6 +416,29 @@ class Cryostat:
             self._emit("info", "MultiVu readings recovered")
 
     # ---- internals -------------------------------------------------------------------
+
+    def _adopt_setpoint(self, what, read_setpoint, approaches, read_measured):
+        """Ask MultiVu for (setpoint, rate, approach) of one loop, for start().
+
+        Returns (setpoint, rate, approach), or (measured value, None, None) when
+        the answer cannot be trusted -- then the measured value stands in for the
+        setpoint and the config's rate/approach stay as they are.
+
+        Why the approach name is checked: when MultiVu reports an error,
+        MultiPyVu 3.6.1 does not raise -- it returns setpoint 0.0, rate 0.0 and
+        the ERROR TEXT in place of the approach name. Adopting that would show
+        "setpoint 0 K" on a cryostat sitting at 300 K. An approach name we do
+        not know is therefore treated as a failed read."""
+        try:
+            sp, rate, approach = read_setpoint()
+            sp, rate, approach = float(sp), float(rate), str(approach)
+            if approach not in approaches or not (math.isfinite(sp) and math.isfinite(rate)):
+                raise ValueError(f"MultiVu answered {sp!r}, {rate!r}, {approach!r}")
+            return sp, rate, approach
+        except Exception as exc:
+            self._emit("warn", f"could not read MultiVu's {what} setpoint ({exc}); "
+                               "adopting the measured value, rate/approach from the config")
+            return float(read_measured()[0]), None, None
 
     def _require_connected(self) -> None:
         if not self._connected:

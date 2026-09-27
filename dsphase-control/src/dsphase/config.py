@@ -22,13 +22,22 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class Signal:
-    """The state pushed to the shifter at start-up. Everything is changeable
-    live over the wire; these are only the power-on defaults."""
+    """Start-up values that are NOT read from the unit.
 
-    phase_deg: float = 0.0
-    attenuation_dB: float = 10.0        # 10 dB down from the ~+10 dBm full output: gentle
+    Since 2026-09-27 (Lukas: "read the instrument state on startup, not change
+    anything") the phase, the attenuation and the RF on/off are READ from the
+    phase shifter at start and adopted -- they are no longer config values, and
+    nothing is pushed to the unit when the service starts. The old keys
+    `phase_deg`, `attenuation_dB` and `output_on` were removed; an old .ini that
+    still has them loads fine and they are simply ignored.
+
+    What is left is the carrier frequency: the PS6000L has no query for it, so
+    the service starts from this number (bookkeeping + the datasheet accuracy
+    band). It is not sent at start either, even with device.freq_command set --
+    only set_frequency / set_config send it.
+    """
+
     frequency_MHz: float = 2400.0       # the carrier you feed in (see Device.freq_command)
-    output_on: bool = False             # start with the RF OUTPUT OFF (safe)
 
 
 @dataclass

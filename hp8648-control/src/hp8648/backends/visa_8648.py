@@ -18,12 +18,26 @@ Reference: HP 8648A/B/C/D Signal Generator Operation and Service Guide
 
 Commands used:
     RF output   OUTP:STAT ON|OFF              query OUTP:STAT?
-    level       POW:AMPL <v> DBM              query POW:AMPL?
-    frequency   FREQ:CW <v> HZ                query FREQ:CW?
-    modulation  AM:STAT OFF  FM:STAT OFF  PM:STAT OFF  PULM:STAT OFF
-    references  POW:REF:STAT OFF  FREQ:REF:STAT OFF  POW:ATT:AUTO ON
+    level       POW:AMPL <v> DBM (or DB)      query POW:AMPL?
+    frequency   FREQ:CW <v> MHZ               query FREQ:CW?
+    modulation  (read only)                   AM:STAT?  FM:STAT?  PM:STAT?
+    references  (read only)                   POW:REF:STAT?  POW:REF?
+                                              FREQ:REF:STAT? FREQ:REF?
+                                              POW:ATT:AUTO?
     RPP/level   STAT:QUES:POW:COND?           bit0 RPP, bit1 unspecified level
-    errors      SYST:ERR?
+    errors      *CLS, SYST:ERR?
+
+ADOPT, DO NOT RESET (Lukas, 2026-09-27). open() used to send *RST, RF off,
+every modulation off and the reference / attenuator modes to known values.
+Now it only READS: whatever the generator is doing when the service connects
+is what the module reports and keeps doing. The one write left at open() is
+*CLS, which empties the status and error registers and changes nothing at the
+RF output. RF OFF on close() stays -- shutdown is not part of the rule.
+
+Because we no longer force the reference modes off, the backend reads them and
+CONVERTS in software: with POWer:REFerence:STATe ON the box talks in dB
+relative to the reference, with FREQuency:REFerence:STATe ON in Hz relative to
+it. The brain always sees absolute dBm and Hz.
 
 Every line that could not be confirmed against the instrument itself carries a
 `# VERIFY` marker.
@@ -34,20 +48,24 @@ compatible) mode none of this parses. # VERIFY on the unit.
 
 from __future__ import annotations
 
-import time
-
 
 class Visa8648:
     """Drives a physical HP 8648D. Implements the SigGenBackend interface."""
 
     def __init__(self, resource: str = "GPIB0::19::INSTR",
-                 timeout_ms: int = 5000, reset_on_open: bool = True):
+                 timeout_ms: int = 5000):
         self._resource = resource
         self._timeout_ms = int(timeout_ms)
-        self._reset_on_open = bool(reset_on_open)
         self._rm = None
         self._inst = None
         self._idn = ""
+        # Reference modes found at open() (read, never changed). With a mode
+        # OFF the offset is 0 and the conversions below are no-ops.
+        self._pow_ref_on = False
+        self._pow_ref_dBm = 0.0
+        self._freq_ref_on = False
+        self._freq_ref_Hz = 0.0
+        self._notes: list[str] = []
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -60,25 +78,56 @@ class Visa8648:
         # the same code work through a GPIB-to-USB/LAN adapter.
         self._inst.write_termination = "\n"             # VERIFY
         self._inst.read_termination = "\n"              # VERIFY
-        self._inst.write("*CLS")                        # clear status + error queue
-        # Belt and braces: RF off FIRST, before anything else is touched, so
-        # nothing below can put a surprise level on the sample.
-        self._inst.write("OUTP:STAT OFF")
-        if self._reset_on_open:
-            # *RST: RF off, every modulation off, -136 dBm, 100 MHz.
-            self._inst.write("*RST")
-            time.sleep(0.5)                             # VERIFY how long a preset takes
-        self.modulation_off()
-        # Absolute units both ways: with a reference mode on, POW:AMPL? would
-        # answer in dB RELATIVE to the reference and our echo would be wrong.
-        self._inst.write("POW:REF:STAT OFF")            # VERIFY
-        self._inst.write("FREQ:REF:STAT OFF")           # VERIFY
-        self._inst.write("POW:ATT:AUTO ON")             # VERIFY (attenuator hold off)
+        # *CLS empties the status registers and the error queue -- nothing the
+        # sample can feel -- so SYST:ERR? below reports only what WE cause.
+        self._inst.write("*CLS")
         self._idn = self._query("*IDN?")
-        # Options that are not fitted (pulse modulation needs 1E6) answer
-        # PULM:STAT with "undefined header"; that is expected, so the queue is
-        # drained here and not reported as a fault.
-        self.drain_errors()
+        self._notes = []
+        self._read_modes()
+        # A mode query the unit does not know leaves an "undefined header" in
+        # the queue; drain it so it is not reported later as our fault.
+        for err in self.drain_errors():
+            self._notes.append(f"instrument error while reading its state: {err}")
+
+    def _read_modes(self) -> None:
+        """Read (never set) the modes that change what POW:AMPL? / FREQ:CW?
+        mean, and the attenuator hold. Each query is guarded: a unit that does
+        not answer one (timeout) is assumed to be in the plain mode, and a
+        note says so."""
+        def q_bool(cmd):
+            return self._query(cmd) in ("1", "ON", "+1")
+        try:
+            self._pow_ref_on = q_bool("POW:REF:STAT?")              # VERIFY
+            if self._pow_ref_on:
+                self._pow_ref_dBm = float(self._query("POW:REF?"))  # VERIFY: dBm
+                self._notes.append(
+                    f"POWer reference mode is ON (reference {self._pow_ref_dBm:g} dBm): "
+                    "left on, levels converted to absolute dBm in software")
+        except Exception as exc:
+            self._pow_ref_on = False
+            self._notes.append(f"could not read POW:REF:STAT? ({exc}); assuming OFF")
+        try:
+            self._freq_ref_on = q_bool("FREQ:REF:STAT?")            # VERIFY
+            if self._freq_ref_on:
+                self._freq_ref_Hz = float(self._query("FREQ:REF?"))  # VERIFY: Hz
+                self._notes.append(
+                    f"FREQuency reference mode is ON (reference {self._freq_ref_Hz:g} Hz): "
+                    "left on, frequencies converted to absolute Hz in software")
+        except Exception as exc:
+            self._freq_ref_on = False
+            self._notes.append(f"could not read FREQ:REF:STAT? ({exc}); assuming OFF")
+        try:
+            # Attenuator HOLD (AUTO OFF) limits the level range around the held
+            # setting; out-of-range levels then raise the "unspecified" bit.
+            # We used to force AUTO ON; now we only report it.
+            if not q_bool("POW:ATT:AUTO?"):                         # VERIFY
+                self._notes.append("attenuator HOLD is on (POW:ATT:AUTO OFF): left as "
+                                   "found; the usable level range is limited")
+        except Exception as exc:
+            self._notes.append(f"could not read POW:ATT:AUTO? ({exc})")
+
+    def startup_notes(self) -> list[str]:
+        return list(self._notes)
 
     def close(self) -> None:
         try:
@@ -117,18 +166,27 @@ class Visa8648:
 
     def set_power(self, dBm: float) -> None:
         # 0.1 dB is the instrument's resolution; more digits buy nothing.
-        self._inst.write(f"POW:AMPL {dBm:.1f} DBM")
+        if self._pow_ref_on:
+            # reference mode left on by the operator: talk RELATIVE to it
+            self._inst.write(f"POW:AMPL {dBm - self._pow_ref_dBm:.1f} DB")  # VERIFY
+        else:
+            self._inst.write(f"POW:AMPL {dBm:.1f} DBM")
 
     def read_power(self) -> float:
-        return float(self._query("POW:AMPL?"))                   # VERIFY: DBM while REF off
+        raw = float(self._query("POW:AMPL?"))                    # VERIFY: DBM while REF off
+        # with the reference mode on the reply is dB relative to POW:REF
+        return raw + self._pow_ref_dBm if self._pow_ref_on else raw
 
     def set_frequency(self, hz: float) -> None:
         # "up to 9 digits with a maximum of 10 Hz resolution" -> send MHz with
         # five decimals (10 Hz), which is 9 digits at 4000 MHz.
+        if self._freq_ref_on:
+            hz = hz - self._freq_ref_Hz                          # VERIFY relative entry
         self._inst.write(f"FREQ:CW {hz / 1e6:.5f} MHZ")          # VERIFY digits accepted
 
     def read_frequency(self) -> float:
-        return float(self._query("FREQ:CW?"))                    # VERIFY: reply in Hz
+        raw = float(self._query("FREQ:CW?"))                     # VERIFY: reply in Hz
+        return raw + self._freq_ref_Hz if self._freq_ref_on else raw  # VERIFY relative reply
 
     # ---- status registers -----------------------------------------------
 
@@ -140,13 +198,6 @@ class Visa8648:
         for k, cmd in (("am", "AM:STAT?"), ("fm", "FM:STAT?"), ("pm", "PM:STAT?")):
             out[k] = self._query(cmd) in ("1", "ON", "+1")       # VERIFY reply form
         return out
-
-    def modulation_off(self) -> None:
-        # Each modulation must be switched off explicitly; turning one on does
-        # not turn the others off (manual, AM/FM/PM subsystems).
-        for cmd in ("AM:STAT OFF", "FM:STAT OFF", "PM:STAT OFF",
-                    "PULM:STAT OFF"):                            # PULM only with option 1E6
-            self._inst.write(cmd)
 
     def drain_errors(self) -> list[str]:
         errors = []

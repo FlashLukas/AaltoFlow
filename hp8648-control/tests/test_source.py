@@ -38,15 +38,149 @@ def test_sim_implements_the_interface():
     assert isinstance(sim, SigGenBackend)
 
 
-def test_start_leaves_rf_off_and_pushes_startup_signal(rig):
+#: A box someone left running: RF ON, not the default frequency / level, AM on.
+BUSY_BOX = {"rf_on": True, "frequency_Hz": 2.2e9, "power_dBm": 3.0,
+            "modulation": {"am": True}}
+
+#: Backend methods that CHANGE the instrument. None may run during start().
+_WRITES = ("set_output", "set_power", "set_frequency")
+
+
+def _forbid_writes(sim):
+    """Make every state-changing backend call fail loudly, and log it."""
+    log = []
+    for name in _WRITES:
+        def boom(*a, _n=name):
+            log.append(_n)
+            raise AssertionError(f"start() wrote to the instrument: {_n}{a}")
+        setattr(sim, name, boom)
+    return log
+
+
+def test_start_adopts_the_instruments_state_and_writes_nothing():
+    """Lukas, 2026-09-27: read the instrument on startup, change nothing."""
+    cfg = Config()
+    cfg.hardware.poll_s = 0.02
+    src, sim = build_sim_system(cfg, initial=BUSY_BOX)
+    writes = _forbid_writes(sim)
+    events = []
+    src._on_event = lambda lvl, msg: events.append((lvl, msg))
+    src.start()
+    try:
+        time.sleep(0.15)                 # several worker cycles
+        assert writes == []
+        s = src.status()
+        assert s.connected is True
+        # read back AND desired both equal what the box was doing
+        assert (s.rf_on, s.frequency_Hz, s.power_dBm) == (True, 2.2e9, 3.0)
+        assert (s.rf_set, s.frequency_set_Hz, s.power_set_dBm) == (True, 2.2e9, 3.0)
+        assert s.modulation_off is False and s.modulation["am"] is True
+        # the box is untouched
+        assert sim.read_output() is True and sim.read_modulation()["am"] is True
+        warns = [m for lvl, m in events if lvl == "warn"]
+        assert any("already ON" in m for m in warns)
+        assert sum("modulation" in m for m in warns) == 1     # reported once
+        assert any("adopted" in m for _, m in events)
+    finally:
+        # shutdown behaviour is NOT part of the rule: RF off on the way out
+        for name in _WRITES:
+            delattr(sim, name)
+        src.shutdown()
+    assert sim.read_output() is False
+
+
+def test_config_signal_is_not_pushed_at_start():
+    cfg = Config()
+    cfg.signal.frequency_Hz = 1.5e9
+    cfg.signal.power_dBm = -20.0
+    src, sim = build_sim_system(cfg, initial=BUSY_BOX)
+    src.start()
+    try:
+        assert src.wait_idle()
+        s = src.status()
+        assert (s.frequency_Hz, s.power_dBm) == (2.2e9, 3.0)
+    finally:
+        src.shutdown()
+
+
+def test_adopted_state_outside_the_envelope_is_left_and_reported():
+    """Limits guard what WE command; a box found outside them is reported,
+    not moved. The next explicit setpoint is clamped as usual."""
+    cfg = Config()
+    cfg.limits.power_max_dBm = 0.0
+    src, sim = build_sim_system(cfg, initial=BUSY_BOX)       # +3 dBm
+    events = []
+    src._on_event = lambda lvl, msg: events.append((lvl, msg))
+    src.start()
+    try:
+        assert src.wait_idle()
+        assert src.status().power_dBm == 3.0 and sim.read_power() == 3.0
+        assert any("outside your envelope" in m for lvl, m in events if lvl == "warn")
+        src.set_power(5.0)
+        assert src.wait_idle()
+        assert src.status().power_dBm == 0.0
+    finally:
+        src.shutdown()
+
+
+def test_rpp_already_tripped_at_connect_is_adopted():
+    src, sim = build_sim_system(Config(), initial={"rpp": True, "rf_on": False})
+    writes = _forbid_writes(sim)
+    events = []
+    src._on_event = lambda lvl, msg: events.append((lvl, msg))
+    src.start()
+    try:
+        s = src.status()
+        assert s.rpp_tripped is True and s.rf_set is False and writes == []
+        assert sum("REVERSE POWER" in m for lvl, m in events if lvl == "error") == 1
+    finally:
+        for name in _WRITES:
+            delattr(sim, name)
+        src.shutdown()
+
+
+def test_unreadable_at_connect_writes_nothing_and_adopts_later():
+    cfg = Config()
+    cfg.hardware.poll_s = 0.02
+    src, sim = build_sim_system(cfg, initial=BUSY_BOX)
+    writes = _forbid_writes(sim)
+    orig = sim.read_frequency
+    sim.read_frequency = lambda: (_ for _ in ()).throw(IOError("bus asleep"))
+    src.start()
+    try:
+        assert src.status().hw_error
+        sim.read_frequency = orig
+        assert _wait(lambda: src.status().frequency_set_Hz == 2.2e9
+                     and src.status().rf_set is True and not src.status().hw_error)
+        assert writes == []
+    finally:
+        for name in _WRITES:
+            delattr(sim, name)
+        src.shutdown()
+
+
+def test_settings_ok_without_changes_writes_nothing(rig):
     src, sim, _ = rig
+    src.set_frequency(1.7e9)
+    assert src.wait_idle()
+    writes = _forbid_writes(sim)
+    try:
+        src.apply_config()                 # same config: nothing to do
+        time.sleep(0.1)
+        assert writes == []
+    finally:
+        for name in _WRITES:
+            delattr(sim, name)
+
+
+def test_changed_signal_default_is_applied_on_request(rig):
+    src, _, _ = rig
+    src.cfg.signal.frequency_Hz = 3.3e9
+    src.cfg.signal.power_dBm = -11.0
+    src.apply_config()
+    assert src.wait_idle()
     s = src.status()
-    assert s.connected is True
-    assert s.rf_on is False and sim.read_output() is False
-    # the *RST state (100 MHz, -136 dBm) was replaced by the config's values
-    assert s.frequency_Hz == Config().signal.frequency_Hz
-    assert s.power_dBm == Config().signal.power_dBm
-    assert s.modulation_off is True
+    assert (s.frequency_Hz, s.power_dBm) == (3.3e9, -11.0)
 
 
 def test_set_and_read_back(rig):
@@ -215,25 +349,6 @@ def test_reverse_power_trip_is_followed_not_fought(rig):
     src.set_rf(True)
     assert _wait(lambda: src.status().rf_on and not src.status().rpp_tripped)
     assert any("re-arms" in m for _, m in events)
-
-
-def test_modulation_forced_off_at_start():
-    cfg = Config()
-    src, sim = build_sim_system(cfg)
-    orig_open = sim.open
-    def open_with_am():
-        orig_open()
-        sim.force_modulation("am")      # an instrument that ignored the OFF
-    sim.open = open_with_am
-    events = []
-    src._on_event = lambda lvl, msg: events.append((lvl, msg))
-    src.start()
-    try:
-        assert sim.read_modulation() == {"am": False, "fm": False, "pm": False}
-        assert src.status().modulation_off is True
-        assert any("modulation" in m for lvl, m in events if lvl == "warn")
-    finally:
-        src.shutdown()
 
 
 def test_shutdown_turns_rf_off_and_is_idempotent():

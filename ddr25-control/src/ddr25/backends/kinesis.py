@@ -74,12 +74,23 @@ class KinesisRotator:
         hw = self.cfg.hardware
         # One K-Cube = one channel, so the default channel 1 is the stage.
         self._m = Thorlabs.KinesisMotor(str(hw.serial), scale=hw.scale)  # VERIFY scale="DDR25" on a KBD101
-        # A brushless servo may power up with its channel DISABLED (the motor
-        # then does not hold position and ignores moves). pylablib keeps the
-        # enable call private on KinesisMotor. VERIFY whether it is needed.
+        # open() only CONNECTS and reads (adopt-on-start rule, 2026-09-27):
+        # no enable, no profile, no homing. A brushless servo may power up
+        # with its channel DISABLED (it then does not hold position and
+        # ignores moves); enabling it changes the instrument's state, so it
+        # is done in _ensure_enabled() just before the first move or home the
+        # user commands -- never at start.
+
+    def _ensure_enabled(self) -> None:
+        """Enable the channel if the status word says it is disabled.
+
+        Called only from user-commanded motion (move_to, home). pylablib
+        keeps the enable call private on KinesisMotor. VERIFY whether it is
+        needed at all on a KBD101 and that "enabled" is the right bit name.
+        """
         try:
-            if "enabled" not in self._m.get_status():  # VERIFY status string
-                self._m._enable_channel(True)           # VERIFY private API
+            if "enabled" not in self._dev().get_status():  # VERIFY status string
+                self._dev()._enable_channel(True)           # VERIFY private API
         except Exception:
             pass
 
@@ -108,6 +119,7 @@ class KinesisRotator:
         # sync=False: fire-and-forget; the brain polls is_homed().
         # force=True: re-home even if the controller says it already is (the
         # user asked for it, e.g. after the stage was turned by hand).
+        self._ensure_enabled()
         self._status = []           # the cached word predates the home
         self._dev().home(sync=False, force=True)  # VERIFY direction/velocity (setup_homing untouched)
 
@@ -126,6 +138,7 @@ class KinesisRotator:
         # firmware (Kinesis' "rotation mode" is a PC-software setting, which
         # the APT protocol pylablib speaks bypasses) -- VERIFY with a move
         # past 360 that the position reads 370, not 10.
+        self._ensure_enabled()
         self._dev().move_to(float(position))  # VERIFY
 
     # pylablib's KinesisMotor._moving_status, plus "homing" (see docstring).

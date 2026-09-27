@@ -28,14 +28,26 @@ class LockInBackend(Protocol):
     """A single-reference DSP lock-in amplifier (the Signal Recovery 7230)."""
 
     def open(self) -> None:
-        """Connect and put the instrument in single-reference mode. Must not
-        raise the oscillator amplitude."""
+        """Connect and identify. QUERIES ONLY: opening a connection must not
+        change anything the instrument is doing (Lukas's rule, 2026-09-27: a
+        service that starts reads the front panel, it does not set it)."""
 
     def close(self) -> None:
         """Disconnect. Safe to call on shutdown or after a crash."""
 
     def idn(self) -> str:
         """Identification ('' if unknown)."""
+
+    def read_settings(self) -> dict:
+        """Everything the brain would otherwise have pushed, READ from the
+        instrument. Keys (each optional -- a query that failed is left out and
+        its name listed in "unread"):
+            ref_source (IE index), osc_frequency_Hz (OF.), osc_amplitude_V (OA.),
+            phase_deg (REFP.), harmonic (REFN), imode, vmode, dc_coupled,
+            fet, float_shield, line_filter_mode (LF n1), line_50Hz (LF n2),
+            auto_ac_gain, sensitivity_index (SEN), fast_mode,
+            time_constant_s (TC.), slope_index (SLOPE), unread: [names].
+        Queries only; nothing is written."""
 
     # ---- reference channel + oscillator ----------------------------------
     def set_ref_source(self, index: int) -> None:

@@ -44,6 +44,9 @@ class Motion:
     # Travel speed, mm/s. The SCU has no velocity setting as such: it limits
     # the STEP FREQUENCY of the closed loop ("closed-loop max frequency"). We
     # turn mm/s into Hz with hardware.um_per_step, so this is a NOMINAL speed.
+    # NOT pushed at start (2026-09-27): the service ADOPTS the frequency the
+    # controller already runs at and overwrites this value with it; the value
+    # here is written to the SCU only by an explicit set_velocity / set_config.
     velocity_mm_s: float = 2.0
     # How long the controller keeps actively holding the target after it got
     # there, ms. 0 = let go at once (the piezo stops dithering, no vibration,
@@ -128,8 +131,9 @@ class Hardware:
     # own range (the MCS family takes 50..18500 Hz).
     min_frequency_hz: int = 50
     max_frequency_hz: int = 18500
-    # Sensor type code to program at open (SA_SetSensorType_S). 0 = leave the
-    # controller as it was commissioned (recommended: SmarAct sets it).
+    # Sensor type code EXPECTED in the controller (SA_GetSensorType_S). It is
+    # only CHECKED at open, never written (startup changes nothing, 2026-09-27):
+    # a mismatch refuses to start. 0 = no check (recommended: SmarAct set it).
     sensor_type: int = 0
     # Flip the sign of the axis (positive = the other end of the rail).
     invert: bool = False

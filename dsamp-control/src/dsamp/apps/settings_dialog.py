@@ -101,14 +101,13 @@ class SettingsDialog(QtWidgets.QDialog):
     def _amp_tab(self):
         page, form = self._form_widget()
         a = self.cfg.amp
-        self._add(form, "amp", "startup_gain_dB", "Gain at start-up",
-                  _dspin(a.startup_gain_dB, 0, 40, 2, 0.5, "dB"))
         self._add(form, "amp", "frequency_Hz", "Signal frequency",
                   _dspin(a.frequency_Hz, 0, 2e10, 0, 1e6, "Hz"))
         self._add(form, "amp", "input_dBm", "Input level",
                   _dspin(a.input_dBm, -120, 30, 2, 0.5, "dBm"))
-        form.addRow(_hint("The amplifier always starts OFF; the start-up gain is clamped "
-                          "to the limits. Frequency and input level only feed the "
+        form.addRow(_hint("At start the module reads the amplifier's gain and on/off "
+                          "state and keeps them (nothing is written). Frequency and "
+                          "input level only feed the "
                           "gain / output estimate (the device has no such settings)."))
         return page
 

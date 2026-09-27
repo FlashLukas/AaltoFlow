@@ -50,7 +50,8 @@ def main() -> int:
         from chopper.backends.mc2000b import SerialMC2000B
         port = args.port or cfg.hardware.port
         backend = SerialMC2000B(port, baud=cfg.hardware.baud,
-                                timeout_s=cfg.hardware.timeout_s)
+                                timeout_s=cfg.hardware.timeout_s,
+                                quiet_on_open=cfg.hardware.quiet_on_open)
         ch = Chopper(backend, cfg, simulated=False)
         print(f"REAL backend -> {port}")
     else:

@@ -233,12 +233,39 @@ class Spectrometer:
             self.backend.open()
             self._idn = self.backend.idn()
             self._wl = np.asarray(self.backend.wavelengths(), dtype=float)
+            t_dev = float(getattr(self.backend, "integration_time", lambda: _NAN)())
         self._connected = True
         self._emit("info", f"connected: {self._idn}")
+        self._adopt_integration_time(t_dev)
         if run:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="ccs200-scan", daemon=True)
             self._thread.start()
+
+    def _adopt_integration_time(self, t_dev: float) -> None:
+        """Take over the integration time the instrument is ALREADY set to
+        (Lukas's rule 2026-09-27: read the state at start, change nothing).
+        The value in the .ini is then only a default for when the user sets
+        one explicitly -- it is no longer pushed at start. The first scan runs
+        at the adopted time, so the backend has nothing to write.
+
+        Only if the instrument's time lies OUTSIDE the Limits envelope is it
+        clamped (and the first scan writes the clamped value): the envelope is
+        the one thing config is allowed to impose. A warn event says so."""
+        if not (math.isfinite(t_dev) and t_dev > 0):
+            return                          # unknown: keep the config value
+        lim = self.cfg.limits
+        v, clamped = _clamp(t_dev, lim.integration_min_s, lim.integration_max_s)
+        with self._lock:
+            old = float(self.cfg.scan.integration_time_s)
+            self.cfg.scan.integration_time_s = v
+            if not _same_time(old, v):
+                self._rev += 1
+        if clamped:
+            self._emit("warn", f"the instrument is at {t_dev * 1e3:.6g} ms, outside the limits: "
+                               f"using {v * 1e3:.6g} ms")
+        else:
+            self._emit("info", f"adopted the instrument's integration time {v * 1e3:.6g} ms")
 
     def shutdown(self) -> None:
         """Stop scanning and disconnect. Safe to call more than once. A

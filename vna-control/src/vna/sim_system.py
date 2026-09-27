@@ -8,12 +8,14 @@ from .config import Config
 
 
 def build_sim_system(cfg: Config | None = None, realtime: bool = True,
-                     seed: int | None = None) -> tuple[Analyzer, SimulatedVna]:
+                     seed: int | None = None,
+                     state: dict | None = None) -> tuple[Analyzer, SimulatedVna]:
     """Return (analyzer, sim_backend) wired together but NOT yet started.
 
     realtime=True makes sweeps take as long as on a real analyser (right for the
     GUI and the service); tests pass False to run instantly.
     """
     cfg = cfg or Config()
-    backend = SimulatedVna(cfg, seed=seed, time_scale=1.0 if realtime else 0.0)
+    backend = SimulatedVna(cfg, seed=seed, time_scale=1.0 if realtime else 0.0,
+                           state=state)
     return Analyzer(backend, cfg), backend

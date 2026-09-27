@@ -30,6 +30,10 @@ def _make_controller():
     probe = SimulatedHallProbe(kepco, hall=cfg.hall)
     kepco.open()
     cal = _build(cfg, kepco, probe)
+    # The sweep leaves the sim supply at -I_max; Controller.start() now ADOPTS
+    # that instead of zeroing it (adopt-on-start rule), so park it at 0 A here
+    # to keep these tests starting from rest as before.
+    kepco.set_current(0.0)
     # keep timing off so the test runs fast; behaviour is identical
     probe.emulate_timing = False
     acq = AcquisitionThread(probe, cfg.hall, cfg.acquisition)

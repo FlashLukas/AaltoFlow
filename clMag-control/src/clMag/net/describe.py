@@ -123,6 +123,11 @@ def build_manifest(ctrl) -> dict:
            read_path=["measured_field_mT"]),
         _p("field_stable", "Field stable", "indicator", "bool",
            group="Status", order=4, read_path=["field_stable"]),
+        _p("output_on", "Supply output", "indicator", "bool",
+           group="Status", order=5, read_path=["output_on"],
+           help="The Kepco's output switch as read back. The service adopts "
+                "it at start and switches it on only when a command first "
+                "needs to move the current."),
 
         # ---- actions -------------------------------------------------------
         _p("demag", "Demagnetise", "action", "action", group="Routines",
@@ -176,7 +181,9 @@ def _aux_params(cfg) -> list:
                            "extra": {"channel": ch}},
                       settle={"policy": "immediate"},
                       help="The 6259 cannot read its own analog outputs back, "
-                           "so this reports the COMMANDED value."))
+                           "so this reports the value COMMANDED since the "
+                           "service started, and null before that (the "
+                           "output keeps whatever it was driving)."))
     for i, ch in enumerate(aux.ai_list()):
         short = ch.split("/")[-1]
         out.append(_p(f"aux_{short}", f"AUX {short}", "indicator", "float",

@@ -33,8 +33,11 @@ class Sensor:
     actually in use.
 
     At start-up (and whenever a head is plugged in) the console's OWN settings
-    are adopted, unless hardware.push_on_start is True -- then these values are
-    pushed at start instead.
+    are READ and adopted into these fields; nothing is ever written to the
+    console at start (Lukas's rule, 2026-09-27: starting the software must not
+    change a measurement someone already set up). The values here are sent to
+    the console only when the user explicitly sets them (a setter, Settings >
+    Apply or set_config). There is deliberately no "push at start" option.
     """
 
     wavelength_nm: float = 800.0      # the correction wavelength (responsivity / absorption)
@@ -100,7 +103,8 @@ class Hardware:
     channel: int = 1
     poll_hz: float = 20.0             # upper bound; the averaging time sets the real rate
     head_check_s: float = 2.0
-    push_on_start: bool = False       # False = adopt the console's settings at start
+    # push_on_start was REMOVED 2026-09-27 (adopt-on-start rule). An old .ini
+    # that still has the key loads fine: Config.load reads only known fields.
 
 
 @dataclass

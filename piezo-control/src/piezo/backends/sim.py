@@ -37,9 +37,15 @@ class SimPiezo:
         self._pos = [0.0, 0.0]          # current true actuator position, um
         self._start_pos = [0.0, 0.0]    # position when the latest move began
         self._t0 = [0.0, 0.0]           # monotonic time the latest move began
+        # The simulated controller's PRE-EXISTING state (what it was doing
+        # before the service started).  By default it is what a previous
+        # session with this config would have left: the configured loop mode,
+        # and a slew rate that matches the ramp mode (the velocity in
+        # "hardware" mode, 0 = no limit otherwise).  Tests use :meth:`preset`
+        # to start it somewhere else, so that ADOPTION at start is tested.
         self._closed = [axis_closed_loop_default(cfg, a) for a in range(2)]
-        # Native slew rate per axis, um/s (0 = instant).  Seeded from config vel.
-        self._slew = [axis_velocity(cfg, a) for a in range(2)]
+        hw = cfg.motion.ramp_mode == "hardware"
+        self._slew = [axis_velocity(cfg, a) if hw else 0.0 for a in range(2)]
 
         # A tiny, deterministic open-loop error model so OL != CL visibly.
         # (Signed fraction of setpoint + a small constant, no randomness so
@@ -51,7 +57,24 @@ class SimPiezo:
 
     # -- connection -------------------------------------------------------- #
     def open(self) -> None:
+        # Like the real driver: opening changes nothing on the "controller".
         self._opened = True
+
+    def preset(self, axis: int, position: float | None = None,
+               closed: bool | None = None, slew: float | None = None) -> None:
+        """Put the simulated controller into a state BEFORE the brain starts.
+
+        Stands in for "someone left the stage like this": the stage is at rest
+        at ``position`` (setpoint == position), in the given loop mode, with the
+        given native slew rate.  Not part of the backend Protocol.
+        """
+        if position is not None:
+            self._setpoint[axis] = self._pos[axis] = self._start_pos[axis] = float(position)
+            self._t0[axis] = self._now()
+        if closed is not None:
+            self._closed[axis] = bool(closed)
+        if slew is not None:
+            self._slew[axis] = max(0.0, float(slew))
 
     def close(self) -> None:
         self._opened = False
@@ -108,6 +131,9 @@ class SimPiezo:
 
     def read_position(self, axis: int) -> float:
         return self._measured(axis)
+
+    def read_setpoint(self, axis: int) -> float:
+        return self._setpoint[axis]
 
     # -- loop mode --------------------------------------------------------- #
     def set_closed_loop(self, axis: int, enabled: bool) -> None:

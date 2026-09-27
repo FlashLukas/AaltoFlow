@@ -56,7 +56,10 @@ Through **TLCCS**, Thorlabs' C driver library (`TLCCS_64.dll`, installed with th
 Thorlabs CCS / ThorSpectra software into
 `C:\Program Files\IVI Foundation\VISA\Win64\Bin`), called with Python's built-in
 `ctypes` -- the same pattern as the PM16's TLPMX backend, so there is **no pip
-dependency** for `--real`. One scan is: `tlccs_setIntegrationTime` (only when it
+dependency** for `--real`. At start the module only READS the instrument --
+identity, wavelength calibration and `tlccs_getIntegrationTime` -- and adopts
+the integration time it finds (the `.ini` value is used only when you set a
+time yourself); init is done with reset OFF. One scan is: `tlccs_setIntegrationTime` (only when it
 changed), `tlccs_startScan`, poll `tlccs_getDeviceStatus` for the
 "transfer ready" bit, `tlccs_getScanData` (3648 doubles). The wavelength of each
 pixel comes from the instrument's own calibration (`tlccs_getWavelengthData`).

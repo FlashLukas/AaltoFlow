@@ -25,10 +25,21 @@ What the manual says, and what it leaves open:
   format (axis prefix present? sign on SU replies?) is not printed in the manual,
   so replies are parsed by taking the LAST signed integer in the line.
   # VERIFY each reply format on the controller.
-* ``PA``/``MA`` (absolute positioning) exist only for stages WITH limit switches
-  and interrupt the USB link for up to 2 minutes -- this driver never sends them.
+* ``PA``/``MA`` (absolute positioning) exist only for stages WITH a limit
+  switch (AG-LS25) and interrupt the USB link for up to 2 minutes; both reply
+  only when they are done, so :meth:`measure_position` / :meth:`move_absolute`
+  wait for that reply with ``hardware.limit_op_timeout_s``. ``MV`` (move to
+  limit) is an ordinary fire-and-forget command.
 * The AG-UC2 has no step-delay (``DL``) and no ``CC``; ``CC`` is sent only when
   ``hardware.channel`` > 0 (for an AG-UC8).
+
+START-UP WRITES (AaltoFlow rule 2026-09-27: read the state, change nothing).
+:meth:`open` sends only ``VE`` (a query). The manual lets TP, SU?, PH and JA?
+run ONLY in remote mode (-5 otherwise; TS and VE are the exceptions), so the
+brain must call :meth:`enable_remote` (``MR``) to read the counters and
+amplitudes at all. MR disables the push buttons and moves nothing; it is the
+one write the start-up needs. ``SU`` is NOT written: the amplitudes are read
+back and adopted.
 """
 
 from __future__ import annotations
@@ -70,6 +81,9 @@ class AgUC2:
         # backstop that makes the driver safe on its own.
         self._lock = threading.RLock()
         self._version = ""
+        # True once WE switched the controller to remote mode: close() hands
+        # the buttons back (ML) and stops the axes only if we took them.
+        self._remote_by_us = False
 
     # -- low level --------------------------------------------------------- #
     def _write(self, cmd: str) -> None:
@@ -116,11 +130,8 @@ class AgUC2:
             stopbits=serial.STOPBITS_ONE, xonxoff=False, rtscts=False,
             timeout=float(hw.timeout_s), write_timeout=float(hw.timeout_s))
         try:
+            # a QUERY: works in local mode and changes nothing
             self._version = self.query("VE")                     # VERIFY reply text
-            # MR is refused (-6) unless BOTH axes are ready (manual, MR)
-            self.command("MR")                                   # remote mode
-            if int(hw.channel) > 0:
-                self.command(f"CC{int(hw.channel)}")             # AG-UC8 only  # VERIFY
         except Exception:
             # a half-opened controller must not keep the COM port: the next
             # start (or the vendor applet) could not open it until this
@@ -131,10 +142,25 @@ class AgUC2:
                 self._ser = None
             raise
 
+    def enable_remote(self) -> None:
+        """MR (+ CC on an AG-UC8): the writes needed to READ the controller.
+
+        TP, SU?, PH are refused in local mode (manual 4.6.4), so without MR the
+        module could not even see where the stage is. MR moves nothing; it
+        disables the push buttons. The manual refuses it (-6) unless both axes
+        are READY -- the brain waits for that first.
+        """
+        self.command("MR")                                       # remote mode
+        self._remote_by_us = True
+        if int(self.cfg.hardware.channel) > 0:
+            self.command(f"CC{int(self.cfg.hardware.channel)}")  # AG-UC8 only  # VERIFY
+
     def close(self) -> None:
         if self._ser is None:
             return
         try:
+            if not self._remote_by_us:
+                return      # we never took the controller: leave it as we found it
             for ax in (1, 2):
                 try:
                     self.command(f"{ax}ST")
@@ -150,6 +176,7 @@ class AgUC2:
                 self._ser.close()
             finally:
                 self._ser = None
+                self._remote_by_us = False
 
     def idn(self) -> str:
         return f"Newport {self._version or 'AG-UC2'} on {self.cfg.hardware.port}"
@@ -185,3 +212,41 @@ class AgUC2:
 
     def limit_status(self) -> int:
         return _last_int(self.query("PH"), "PH")                 # VERIFY "PH0".."PH3"
+
+    # -- limit-switch stages (AG-LS25): MV, MA, PA ------------------------ #
+    def move_to_limit(self, hw_axis: int, mode: int) -> None:
+        """MV: jog at speed |mode| towards the limit (sign = way), stop there."""
+        self.command(f"{int(hw_axis)}MV{int(mode)}")             # VERIFY
+
+    def _blocking(self, cmd: str, what: str) -> int:
+        """Send MA/PA and wait for THE reply (the USB link is down meanwhile).
+
+        A refused command replies nothing at all, which from here looks exactly
+        like a long measurement -- so the brain only sends these on a READY
+        axis in remote mode, and a silent timeout is followed by TE to learn
+        why. # VERIFY the reply text ("1MA523"? "1PA500"?) and that the
+        controller really answers once the link is back.
+        """
+        with self._lock:
+            self._ser.reset_input_buffer()
+            old = self._ser.timeout
+            self._ser.timeout = float(self.cfg.hardware.limit_op_timeout_s)
+            try:
+                self._write(cmd)
+                raw = self._ser.readline()
+            finally:
+                self._ser.timeout = old
+            if not raw:
+                self._write("TE")
+                code = _last_int(self._readline(), "TE")
+                raise RuntimeError(f"AG-UC2 gave no answer to {cmd!r} (error {code}: "
+                                   f"{TE_CODES.get(code, 'no error reported - timed out')})")
+            return _last_int(raw.decode("ascii", errors="replace").strip(), what)
+
+    def measure_position(self, hw_axis: int) -> int:
+        """MA: distance to the limit in 1/1000 of the travel (0..1000)."""
+        return self._blocking(f"{int(hw_axis)}MA", "MA")
+
+    def move_absolute(self, hw_axis: int, permille: int) -> int:
+        """PA: go to permille/1000 of the travel; returns the reached target."""
+        return self._blocking(f"{int(hw_axis)}PA{int(permille)}", "PA")

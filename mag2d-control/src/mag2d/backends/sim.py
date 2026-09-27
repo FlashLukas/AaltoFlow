@@ -61,10 +61,28 @@ class SimVectorMagnet:
     # ---- Protocol -------------------------------------------------------------
 
     def open(self) -> None:
+        # Like the real card: opening changes NOTHING. Whatever enable/AO the
+        # "hardware" was left at stays (adopt-on-start rule, 2026-09-27).
         self._advance()
         self.is_open = True
-        self.enable = False
-        self.ao = [0.0, 0.0]
+
+    def read_output_state(self) -> tuple[bool | None, tuple[float, float] | None]:
+        self._advance()
+        return self.enable, (self.ao[0], self.ao[1])
+
+    def preset(self, enable: bool, x_V: float, y_V: float) -> None:
+        """Put the simulated magnet in a state "left behind by an earlier run":
+        enable line and drive as given, the coils fully settled there (as if it
+        had been sitting like that for minutes). Tests use it to check that the
+        brain ADOPTS a running magnet instead of resetting it."""
+        self._advance()
+        self.enable = bool(enable)
+        self.ao = [float(x_V), float(y_V)]
+        drive = self.ao if self.enable else (0.0, 0.0)
+        gains = (self.p.gain_x_mT_per_V, self.p.gain_y_mT_per_V)
+        for a in (0, 1):
+            self._lag[a] = drive[a]
+            self._mag[a] = gains[a] * drive[a]
 
     def close(self) -> None:
         self._advance()

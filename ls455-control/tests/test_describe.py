@@ -57,9 +57,8 @@ def test_range_is_indicator_on_auto_and_control_on_manual(meter):
 def test_range_bounds_follow_the_probe():
     for probe in ("HST", "UHS"):
         cfg = Config()
-        cfg.meter.auto_range = False
-        cfg.hardware.push_on_start = True
-        m, _ = build_sim_system(cfg, realtime=False, probe=probe)
+        # the METER is on manual range; the module adopts that at start
+        m, _ = build_sim_system(cfg, realtime=False, probe=probe, auto_range=False)
         m.start(poll=False)
         r = _by_id(build_manifest(m))["range"]
         assert r["max"] == max(PROBE_RANGES_mT[probe])
@@ -73,7 +72,36 @@ def test_mode_swaps_digits_for_band(meter):
     rms = build_manifest(meter)
     assert "rms_band" in _by_id(rms) and "dc_digits" not in _by_id(rms)
     assert rms["revision"] != dc["revision"]
-    assert _by_id(rms)["mode"]["options"] == ["dc", "rms"]
+    assert _by_id(rms)["mode"]["options"] == ["dc", "rms", "peak"]
+
+
+def test_detectors_say_what_they_report(meter):
+    dc = _by_id(build_manifest(meter))
+    assert dc["field"]["label"] == "Field (DC)"
+    meter.set_mode("peak")
+    pk = build_manifest(meter)
+    d = _by_id(pk)
+    assert d["field"]["label"] == "Field (peak)" and "peak" in d["field"]["help"]
+    assert "peak_mode" in d and "peak_display" in d
+    assert "dc_digits" not in d and "rms_band" not in d
+
+
+def test_probe_swap_moves_the_revision():
+    cfg = Config()
+    m, sim = build_sim_system(cfg, realtime=False, auto_range=False)
+    m.start(poll=False)
+    try:
+        before = build_manifest(m)
+        d = _by_id(before)
+        assert d["reread_probe"]["wait"] == {"ready": {"policy": "immediate"}}
+        assert d["range"]["max"] == max(PROBE_RANGES_mT["HSE"])
+        sim.swap_probe("HST")
+        m.reread_probe()
+        after = build_manifest(m)
+        assert _by_id(after)["range"]["max"] == max(PROBE_RANGES_mT["HST"])
+        assert after["revision"] != before["revision"]
+    finally:
+        m.shutdown()
 
 
 def test_detectors_share_one_acquire_keyed_on_the_trigger_reply(meter):

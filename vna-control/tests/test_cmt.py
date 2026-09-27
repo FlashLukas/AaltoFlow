@@ -29,19 +29,61 @@ def _pos(log, cmd):
     return log.index(cmd)
 
 
-def test_open_sets_up_one_trace_bus_trigger_and_ascii():
+def _writes(log):
+    """The commands in a log that are not queries (every query ends in '?')."""
+    return [c for c in log if "?" not in c]
+
+
+def test_open_only_looks_and_changes_nothing():
+    """Lukas's rule (2026-09-27): connecting reads S2VNA, it does not set it up.
+    The only write allowed is *CLS (it empties the error queue)."""
     b, fake, _ = _backend()
     b.open()
-    log = fake.log
+    st = b.read_state()
     assert b.idn().startswith("CMT,C1209")
     assert b.warnings == []
     # a raw socket has no end-of-message: both terminations must be newline
     assert fake.read_termination == "\n" and fake.write_termination == "\n"
+    assert _writes(fake.log) == ["*CLS"]
+    assert fake.traces == 2 and fake.trig_source == "INT" and fake.sparam == "S11"
+    assert st["start_Hz"] == 100e3 and st["stop_Hz"] == 9e9 and st["points"] == 201
+    assert st["ifbw_Hz"] == 10e3 and st["power_dBm"] == 0.0 and st["sparam"] == "S11"
+    assert st["trigger_source"] == "INT" and st["continuous"] is False
+    b.close()
+    assert _writes(fake.log) == ["*CLS"], "close of an analyser only looked at writes nothing"
+
+
+def test_the_first_sweep_sets_up_one_trace_bus_trigger_and_ascii():
+    b, fake, _ = _backend()
+    b.open()
+    b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -10.0, "S21", F)
+    log = fake.log
     assert _pos(log, "*IDN?") < _pos(log, "*CLS") < _pos(log, ":TRIG:SOUR BUS")
     assert fake.traces == 1 and fake.trig_source == "BUS" and fake.cont
     assert fake.fmt == "ASC", "binary is HiSLIP-only on Copper Mountain"
     assert ":SENS1:AVER OFF" in log
-    assert fake.sparam == "S21"                      # the config's default
+    assert fake.sparam == "S21"
+    assert log[-1] == ":TRIG:SING" and fake.sweeps == 1
+
+
+def test_the_brain_adopts_what_s2vna_holds_and_writes_nothing_at_start():
+    cfg = Config()
+    cfg.hardware.driver = "cmt"
+    cfg.field.source = "manual"
+    fake = FakeCmt()
+    fake.state.update(start=2e9, stop=4e9, points=301, ifbw=1e3, power=-7.0)
+    vna = Analyzer(CmtVna(cfg, resource=fake), cfg)
+    vna.start(run=False)
+    try:
+        st = vna.status()
+        assert (st.start_Hz, st.stop_Hz, st.points, st.ifbw_Hz, st.power_dBm, st.sparam) == (
+            2e9, 4e9, 301, 1e3, -7.0, "S11")
+        assert st.continuous is False and st.instrument["trigger_source"] == "INT"
+        assert vna.step() is False
+        assert _writes(fake.log) == ["*CLS"] and fake.trig_source == "INT"
+    finally:
+        vna.shutdown()
+    assert _writes(fake.log) == ["*CLS"]
 
 
 def test_a_sweep_writes_settings_reads_back_triggers_once_and_parses_sdat():
@@ -152,14 +194,14 @@ def test_the_brain_acquires_averages_and_files_the_field_on_the_c1209():
     cfg.hardware.driver = "cmt"
     cfg.field.source = "manual"
     cfg.field.manual_mT = 123.0
-    cfg.sweep.start_Hz, cfg.sweep.stop_Hz, cfg.sweep.points = 1e9, 2e9, 21
-    cfg.sweep.ifbw_Hz = 1e6                 # rule-of-thumb sweep: 25 us
-    cfg.sweep.averages = 2
-    cfg.acquisition.continuous = False
+    cfg.sweep.averages = 2                  # the brain's own: not an instrument setting
     fake = FakeCmt()
     vna = Analyzer(CmtVna(cfg, resource=fake), cfg)
     vna.start()
     try:
+        # the analyser's sweep was adopted at start; a user now sets ours
+        vna.set_start(1e9); vna.set_stop(2e9); vna.set_points(21)
+        vna.set_ifbw(1e6)                   # rule-of-thumb sweep: 25 us
         acq = vna.acquire()
         import time
         t0 = time.monotonic()

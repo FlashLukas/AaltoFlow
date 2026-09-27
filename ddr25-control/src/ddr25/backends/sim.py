@@ -13,7 +13,11 @@ software above it:
   distance/velocity, and a scan's settle wait has something real to wait for.
 * **Power-up frame.** A K-Cube counts from 0 wherever the stage happened to be
   when it was switched on. The simulated shaft starts ``sim_start_deg`` away
-  from the encoder INDEX mark, the counter reads 0, and it is NOT homed.
+  from the encoder INDEX mark, the counter reads 0, and it is NOT homed --
+  unless ``sim_start_homed`` says the controller was homed in an earlier
+  session. The stored velocity/acceleration are the controller's own
+  (``sim_start_velocity`` / ``_acceleration``), not the config's, so the
+  brain's adopt-on-start is really tested.
 * **Homing** turns in the + direction (VERIFY the real home direction) at the
   profile velocity until the index mark passes, then re-zeroes the counter
   there. From 137 deg that is a 223 deg trip -- homing is not instantaneous.
@@ -96,13 +100,24 @@ class SimRotator:
         self._rng = random.Random(seed)
         # Physical shaft angle measured from the encoder index mark (deg,
         # continuous). The counter reads shaft - _counter_zero.
-        self._shaft = float(cfg.hardware.sim_start_deg)
-        self._counter_zero = self._shaft     # power-up: counter reads 0 here
+        hw = cfg.hardware
+        self._shaft = float(hw.sim_start_deg)
         self._profile: _Profile | None = None
         self._homing = False
-        self._homed = False
-        self._vel = float(cfg.motion.velocity)
-        self._acc = float(cfg.motion.acceleration)
+        if bool(hw.sim_start_homed):
+            # Homed in an earlier session: the counter was zeroed at the index
+            # mark (shaft 0), so it reads the shaft angle itself.
+            self._homed = True
+            self._counter_zero = 0.0
+        else:
+            self._homed = False
+            self._counter_zero = self._shaft  # fresh power-up: counter reads 0 here
+        # The controller's OWN stored profile -- not cfg.motion: the brain must
+        # read it at start rather than find its own config echoed back.
+        self._vel = float(hw.sim_start_velocity)
+        self._acc = float(hw.sim_start_acceleration)
+        #: Every state-changing call, in order (tests assert start() adds none).
+        self.writes: list[tuple] = []
         self._opened = False
 
     # -- connection -------------------------------------------------------- #
@@ -147,10 +162,12 @@ class SimRotator:
 
     # -- motion ------------------------------------------------------------ #
     def move_to(self, position: float) -> None:
+        self.writes.append(('move_to', float(position)))
         self._homing = False                    # a move aborts a home
         self._start(float(position) + self._counter_zero)
 
     def home(self) -> None:
+        self.writes.append(('home',))
         # Turn + to the NEXT index mark (shaft = a multiple of 360). A stage
         # already sitting exactly on the mark finds it at once.
         here = self._advance()
@@ -172,6 +189,7 @@ class SimRotator:
         return self._homed
 
     def stop(self, immediate: bool = False) -> None:
+        self.writes.append(('stop', bool(immediate)))
         here = self._advance()
         v = abs(self._speed())
         was_homing = self._homing
@@ -193,9 +211,11 @@ class SimRotator:
 
     # -- parameters -------------------------------------------------------- #
     def set_velocity(self, velocity: float) -> None:
+        self.writes.append(('set_velocity', float(velocity)))
         self._vel = float(velocity)
 
     def set_acceleration(self, acceleration: float) -> None:
+        self.writes.append(('set_acceleration', float(acceleration)))
         self._acc = float(acceleration)
 
     def read_velocity_params(self) -> tuple[float, float]:

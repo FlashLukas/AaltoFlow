@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 
-from .base import Reading, other
+from .base import InstrumentState, Reading, other
 
 # SCPI mnemonics per function
 _SRC = {"voltage": "VOLT", "current": "CURR"}
@@ -46,6 +46,8 @@ class VisaK2450:
         self.resource = resource
         self.visa_library = visa_library
         self.timeout_ms = int(timeout_ms)
+        # Only used if the user later ASKS for front/rear (set_config); open()
+        # no longer writes it -- the instrument's own choice is read and adopted.
         self.terminals = terminals
         self._rm = None
         self._inst = None
@@ -75,15 +77,14 @@ class VisaK2450:
                 f"the 2450 is in the {lang!r} command set; this module needs SCPI. "
                 "Front panel: MENU > System > Settings > Command Set > SCPI, "
                 "then power-cycle the instrument.")
-        # Output OFF first, before anything else is touched.
-        self._w(":OUTP OFF")                                  # VERIFY
-        self._w("*CLS")                                      # VERIFY: clears the error queue
-        self._w(f":ROUT:TERM {'REAR' if self.terminals.lower() == 'rear' else 'FRON'}")  # VERIFY
-        # Measure the source value back (so `source` in a reading is what was
-        # APPLIED, not just the setpoint). ON is the 2450's default.
-        for fn in ("VOLT", "CURR"):
-            self._w(f":SOUR:{fn}:READ:BACK ON")               # VERIFY
-        self._check_errors("open")
+        # QUERIES ONLY from here on (Lukas, 2026-09-27: "read the instrument
+        # state on startup, not to change anything"). No :OUTP OFF, no
+        # :ROUT:TERM, no :READ:BACK ON -- whatever the instrument is doing, it
+        # keeps doing; read_state() tells the brain what that is.
+        # *CLS only empties the error queue (and the event registers), so that
+        # an old error left by someone at the front panel is not blamed on
+        # our first command. It changes no source or measure setting.
+        self._w("*CLS")                                      # VERIFY: clears the error queue only
 
     def close(self) -> None:
         if self._inst is None:
@@ -103,6 +104,52 @@ class VisaK2450:
 
     def idn(self) -> str:
         return self._idn
+
+    def read_state(self) -> InstrumentState:
+        """Every setting the brain needs, read back with queries only.
+
+        Both source functions are read (level, limit, range): the brain keeps
+        the inactive function's pair for when you switch, and it should be the
+        instrument's pair, not a config default. Measure settings (range, NPLC,
+        remote sense) are read for the quantity each source function MEASURES.
+        """
+        fn = _func_from(self._q(":SOUR:FUNC?"))              # VERIFY: reply "VOLT" / "CURR"
+        if fn not in ("voltage", "current"):
+            raise RuntimeError(f"2450 reports source function {fn!r}")
+        sense = _func_from(self._q(":SENS:FUNC?"))           # VERIFY: reply '"CURR:DC"' (quoted)
+        level, limit, src_auto, src_range = {}, {}, {}, {}
+        meas_auto, meas_range, nplc, rsen = {}, {}, {}, {}
+        for f in ("voltage", "current"):
+            m, mm = _SRC[f], _SRC[other(f)]
+            # VERIFY: the level/limit/range of the INACTIVE function can be queried
+            level[f] = float(self._q(f":SOUR:{m}?"))                     # VERIFY
+            limit[f] = float(self._q(f":SOUR:{m}:{_LIM[f]}?"))           # VERIFY
+            src_auto[f] = _on(self._q(f":SOUR:{m}:RANG:AUTO?"))          # VERIFY
+            src_range[f] = float(self._q(f":SOUR:{m}:RANG?"))            # VERIFY
+            mf = other(f)
+            meas_auto[mf] = _on(self._q(f":SENS:{mm}:RANG:AUTO?"))       # VERIFY
+            meas_range[mf] = float(self._q(f":SENS:{mm}:RANG?"))         # VERIFY
+            nplc[mf] = float(self._q(f":SENS:{mm}:NPLC?"))               # VERIFY
+            rsen[mf] = _on(self._q(f":SENS:{mm}:RSEN?"))                 # VERIFY
+        output = _on(self._q(":OUTP?"))                                  # VERIFY
+        term = self._q(":ROUT:TERM?").upper()                            # VERIFY: "FRON" / "REAR"
+        terminals = "rear" if term.startswith("REAR") else "front"
+        readback = _on(self._q(f":SOUR:{_SRC[fn]}:READ:BACK?"))          # VERIFY
+        # measure() needs these without asking the instrument every time
+        self._fn = fn
+        self._src_auto = dict(src_auto)
+        self._meas_auto = dict(meas_auto)
+        return InstrumentState(function=fn, sense_function=sense, level=level,
+                               limit=limit, src_auto=src_auto, src_range=src_range,
+                               meas_auto=meas_auto, meas_range=meas_range,
+                               nplc=nplc, four_wire=rsen, output=output,
+                               terminals=terminals, readback=readback)
+
+    def set_terminals(self, where: str) -> None:
+        # VERIFY: the 2450 switches the OUTPUT OFF when the terminals change;
+        # the brain switches it off itself first, so the two agree either way.
+        self._w(f":ROUT:TERM {'REAR' if str(where).lower() == 'rear' else 'FRON'}")  # VERIFY
+        self._check_errors("terminals")
 
     # ---- source --------------------------------------------------------------
     def set_source_function(self, fn: str) -> None:
@@ -211,3 +258,20 @@ class VisaK2450:
             errors.append(reply)
         if errors:
             raise RuntimeError(f"2450 refused {what}: " + "; ".join(errors))
+
+
+def _on(reply: str) -> bool:
+    """SCPI booleans come back as 1/0 (sometimes ON/OFF)."""
+    return reply.strip().strip('"').upper() in ("1", "ON")
+
+
+def _func_from(reply: str) -> str:
+    """'VOLT', '"CURR:DC"', 'RES' -> 'voltage' / 'current' / 'resistance'."""
+    r = reply.strip().strip('"').upper()
+    if r.startswith("VOLT"):
+        return "voltage"
+    if r.startswith("CURR"):
+        return "current"
+    if r.startswith("RES"):
+        return "resistance"
+    return r.lower() or "unknown"

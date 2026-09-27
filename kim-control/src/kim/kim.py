@@ -222,14 +222,62 @@ class Kim:
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Open the backend and push the start-up drive parameters."""
+        """Open the backend and ADOPT the controller's drive parameters.
+
+        Rule (Lukas, 2026-09-27, every module): starting the software must not
+        change the instrument. The KIM101 remembers its step rate, acceleration
+        and drive voltage per channel; whoever set them (Kinesis, a previous
+        session, a colleague) had a reason. So we READ them and copy them into
+        ``cfg.motion`` -- the brain's live drive state -- instead of pushing the
+        .ini values over them. The .ini numbers are now only defaults that the
+        user applies explicitly (Settings, set_config, a preset, a setter).
+
+        Why the copy into cfg matters: the voltage picks the row of the camera
+        px/step table (``um_per_step``), and the presets / Settings read cfg.
+        Adopting only into the status would leave the um conversion computed at
+        the .ini voltage while the stage steps at the real one.
+        """
         self.backend.open()
         self._connected = True
-        for axis in range(3):
-            self.backend.set_step_rate(axis, axis_rate(self.cfg, axis))
-            self.backend.set_acceleration(axis, axis_acceleration(self.cfg, axis))
-            self.backend.set_voltage(axis, axis_voltage(self.cfg, axis))
+        self._adopt_drive_state()
         self._emit("info", f"kim started ({self.backend.idn()})")
+
+    def _adopt_drive_state(self) -> None:
+        """Read rate / acceleration / voltage per axis into cfg.motion. Queries only."""
+        lim = self.cfg.limits
+        found = []
+        for axis in range(3):
+            try:
+                rate = float(self.backend.read_step_rate(axis))
+                acc = float(self.backend.read_acceleration(axis))
+                volt = float(self.backend.read_voltage(axis))
+            except Exception as exc:
+                # Keep the config's numbers for DISPLAY, but say so: they were
+                # not written, so they may not be what the controller does.
+                self._emit("warn", f"{AXES[axis]}: could not read the drive parameters "
+                                   f"({exc}); showing the config values, nothing was written")
+                continue
+            set_axis_rate(self.cfg, axis, rate)
+            set_axis_acceleration(self.cfg, axis, acc)
+            set_axis_voltage(self.cfg, axis, volt)
+            found.append(f"{AXES[axis]} {volt:g} V / {rate:g} steps/s / {acc:g} steps/s^2")
+            # Outside our safety window? Report it, do not "fix" it: correcting
+            # it would be exactly the start-up write this rule forbids. The next
+            # explicit set_* call clamps as usual.
+            if not lim.min_voltage <= volt <= lim.max_voltage:
+                self._emit("warn", f"{AXES[axis]} drive voltage {volt:g} V is outside "
+                                   f"{lim.min_voltage:g}..{lim.max_voltage:g} V (left as found)")
+            if not 1.0 <= rate <= lim.max_step_rate or not 1.0 <= acc <= lim.max_acceleration:
+                self._emit("warn", f"{AXES[axis]} rate/acceleration outside the configured "
+                                   f"limits (left as found)")
+        # The front-panel toggles show whichever preset the ADOPTED values are
+        # closer to (they only mirror; pressing one is what writes).
+        m = self.cfg.motion
+        self._speed_fast = abs(m.rate_x - m.fast_rate) <= abs(m.rate_x - m.slow_rate)
+        self._step_large = (abs(m.voltage_x - lim.max_voltage)
+                            <= abs(m.voltage_x - lim.min_voltage))
+        if found:
+            self._emit("info", "adopted from the controller: " + "; ".join(found))
 
     def shutdown(self) -> None:
         """Stop all motion and close the backend.  Idempotent."""

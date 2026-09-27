@@ -14,6 +14,8 @@ Static checks, per module:
   * module.toml parses; key, name, ports, scripts are valid
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
+  * excludes (modules that drive the SAME instrument and must never run
+    together) names modules that exist; every excluded pair is listed
   * icon.svg exists and is well-formed XML
   * run_service.py accepts --cmd-port, --pub-port and --real
   * run_gui.py (if any) accepts --connect, --cmd-port and --pub-port
@@ -48,8 +50,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
-from suite_common.modules import (MANIFEST, discover_local, port_conflicts,  # noqa: E402
-                                  start_order)
+from suite_common.modules import (MANIFEST, discover_local, exclusion_pairs,  # noqa: E402
+                                  mirror_excludes, port_conflicts, start_order)
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -255,6 +257,11 @@ def main(argv=None) -> int:
     keys = {m.key for m in mods}
     for c in port_conflicts(mods):
         rep.add("suite", "ports unique", "FAIL", c)
+    # Checked on what each toml DECLARES (a typo must be caught in the file
+    # that has it), then mirrored the way discover() does it to list the pairs.
+    bad_excludes = {m.key: [k for k in m.excludes if k not in keys] for m in mods}
+    mirror_excludes(mods)
+    pairs = exclusion_pairs(mods)
 
     if args.modules:
         unknown = set(args.modules) - keys
@@ -268,6 +275,12 @@ def main(argv=None) -> int:
         missing = [k for k in m.start_after if k not in keys]
         rep.add(m.key, "start_after names existing modules", "FAIL" if missing else "PASS",
                 ", ".join(missing))
+        if bad_excludes.get(m.key):
+            rep.add(m.key, "excludes names existing modules", "FAIL",
+                    ", ".join(bad_excludes[m.key]))
+        elif m.excludes:
+            rep.add(m.key, "excludes names existing modules", "PASS",
+                    "never runs with " + ", ".join(m.excludes))
         before = {x.key for x in ordered[:ordered.index(m)]}
         cyc = [k for k in m.start_after if k in keys and k not in before
                and m.key in next((x.start_after for x in mods if x.key == k), [])]
@@ -298,6 +311,11 @@ def main(argv=None) -> int:
                     "FAIL" if miss else "PASS", "missing " + ", ".join(miss) if miss else "")
         if args.live:
             live_check(rep, m, py)
+
+    shown = {m.key for m in mods}
+    for a, b in pairs:
+        if a in shown or b in shown:
+            rep.add("suite", "shared-instrument pair", "PASS", f"{a} <-> {b} never run together")
 
     rep.print()
     n_fail = len(rep.failed)

@@ -33,7 +33,7 @@ class RemoteStatus:
 
     _FLOATS = ("field_mT", "measured_field_mT", "field_rel_mT", "read_ms",
                "range_set_mT", "range_mT", "range_min_mT", "range_max_mT",
-               "rel_setpoint_mT", "settle_s")
+               "rel_setpoint_mT", "settle_s", "probe_sensitivity_mV_per_kG")
 
     def __init__(self, d: dict):
         for k in self._FLOATS:
@@ -42,6 +42,12 @@ class RemoteStatus:
         self.idn = d.get("idn", "")
         self.probe = d.get("probe", "")
         self.probe_serial = d.get("probe_serial", "")
+        self.probe_type_code = d.get("probe_type_code", -1)
+        self.probe_geometry = d.get("probe_geometry", "axial")
+        self.probe_desc = d.get("probe_desc", "")
+        self.quantity = d.get("quantity", "")
+        self.peak_mode = d.get("peak_mode", "periodic")
+        self.peak_display = d.get("peak_display", "positive")
         self.hw_error = d.get("hw_error", "")
         self.flag = d.get("flag", "")
         self.readings = d.get("readings", 0)
@@ -150,6 +156,12 @@ class Ls455Client:
 
     def clear_zero(self):
         return self._cmd({"cmd": "clear_zero"})
+
+    def reread_probe(self):
+        r = self._cmd({"cmd": "reread_probe"})
+        if not r.get("ok"):
+            raise ValueError(r.get("error", "reread_probe refused"))
+        return r
 
     def acquire(self) -> int:
         """Start an acquisition; returns its id (or raises if refused)."""

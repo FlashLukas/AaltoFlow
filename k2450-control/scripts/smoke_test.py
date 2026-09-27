@@ -32,13 +32,16 @@ def wait_sample(smu, n, timeout=10.0):
 
 def main() -> int:
     cfg = Config()
-    cfg.measure.nplc = 0.1
     smu, backend = build_sim_system(cfg, seed=1)
     events = []
     smu._on_event = lambda lvl, msg: events.append((lvl, msg))
     smu.start()
     print("IDN:", backend.idn())
-    assert smu.status().output is False, "output must be OFF at start"
+    # the simulated 2450 powers up with the output off, and start-up only
+    # adopts: so it is still off, and nothing was written to it
+    assert smu.status().output is False, "the sim powers up with the output OFF"
+    assert backend.writes == [], f"start-up wrote to the instrument: {backend.writes}"
+    smu.set_nplc(0.1)                   # fast readings (an explicit write)
 
     smu.set_current_limit(0.01)
     smu.set_voltage(1.0)

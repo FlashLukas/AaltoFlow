@@ -45,8 +45,14 @@ class MC2000BError(RuntimeError):
 class SerialMC2000B:
     """Drives a physical MC2000B. Implements the ChopperBackend interface."""
 
-    def __init__(self, port: str = "COM5", baud: int = 115200, timeout_s: float = 0.5):
+    def __init__(self, port: str = "COM5", baud: int = 115200, timeout_s: float = 0.5,
+                 quiet_on_open: bool = False):
         self._port = port
+        # Lukas's rule (2026-09-27): at start we only READ the controller. The
+        # one write the old open() made, `verbose=0`, changes a setting of the
+        # unit, so it is now opt-in (hardware.quiet_on_open, default False).
+        # The reply parser below copes with verbose mode instead.
+        self._quiet_on_open = bool(quiet_on_open)
         self._baud = int(baud)
         self._timeout = float(timeout_s)
         self._ser = None
@@ -62,14 +68,21 @@ class SerialMC2000B:
         # Flush whatever the unit printed at power-up (a banner and a prompt).
         time.sleep(0.05)
         self._ser.reset_input_buffer()
-        # Verbose mode would interleave status messages with our replies; we
-        # want plain answers. (# VERIFY: verbose=0 is accepted and silences them.)
-        try:
-            self._command("verbose=0")                    # VERIFY
-        except MC2000BError:
-            pass
+        # QUERIES ONLY from here on (Lukas, 2026-09-27: "read the instrument
+        # state on startup, not change anything"). The brain then reads blade,
+        # modes, frequency, phase and run state and ADOPTS them.
+        #
+        # Verbose mode may add status lines to a reply. We do NOT switch it off
+        # by default (that would change the unit's setting); `_query` takes the
+        # LAST line before the prompt, which is the answer either way. Only if
+        # that turns out not to be enough on the real unit, set
+        # hardware.quiet_on_open = True to send `verbose=0` here.
+        if self._quiet_on_open:
+            try:
+                self._command("verbose=0")                # VERIFY accepted, silences status lines
+            except MC2000BError:
+                pass
         self._idn = self._query("id?")                    # VERIFY reply "THORLABS MC2000B ..."
-        # Deliberately nothing else: the state of the chopper is ADOPTED.
 
     def close(self) -> None:
         if self._ser is not None:
@@ -107,7 +120,11 @@ class SerialMC2000B:
         self._transact(line)
 
     def _query(self, line: str) -> str:
-        return self._transact(line)
+        # The answer is the last non-empty line before the prompt; anything
+        # earlier would be a status message printed in verbose mode.
+        # (# VERIFY: where verbose lines appear relative to the value.)
+        lines = [ln.strip() for ln in self._transact(line).split("\r") if ln.strip()]
+        return lines[-1] if lines else ""
 
     def _query_num(self, line: str) -> float:
         text = self._query(line)

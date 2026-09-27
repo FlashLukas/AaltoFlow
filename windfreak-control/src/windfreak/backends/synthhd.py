@@ -47,6 +47,10 @@ MHz), W (%.3f dBm), V, ~ (%.3f, called "phase_step" there), h (called
 v1 all agree with what is used below. [PY] gives the PRO v2 power range as
 -70..+20 dBm (the range the command ACCEPTS; leveling is narrower).
 
+START-UP IS READ-ONLY (2026-09-27): open() only queries; read_state()
+reads f? W? h? r? E? per channel and x? *? for the reference. Every one of
+those "?" forms except f? is new and marked # VERIFY.
+
 The brain clamps every value to the configured limits BEFORE it reaches this
 backend. Every line that could not be confirmed against a manual for the v2
 hardware carries `# VERIFY`.
@@ -62,13 +66,11 @@ class SerialSynthHD:
 
     def __init__(self, port: str = "COM4", timeout_s: float = 1.0,
                  pll_off_when_rf_off: bool = False,
-                 phase_command: str = "relative",
-                 channel_spacing_Hz: float = 0.0):
+                 phase_command: str = "relative"):
         self._port = port
         self._timeout_s = float(timeout_s)
         self._pll_off = bool(pll_off_when_rf_off)
         self._phase_relative = (str(phase_command).lower() != "absolute")
-        self._spacing = float(channel_spacing_Hz)
         self._ser = None
         self._idn = ""
         # The phase command is a STEP ([API]: "These adjustments are relative
@@ -80,21 +82,74 @@ class SerialSynthHD:
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
+        """Connect and identify -- QUERIES ONLY.
+
+        Rule of 2026-09-27 (Lukas): a module reads the instrument at start and
+        changes nothing. So, unlike before, open() does NOT switch the outputs
+        off and does NOT write the channel spacing: if the SynthHD is radiating
+        when the service starts, it keeps radiating and the status says so.
+        The only bytes that are not a query are the "C0"/"C1" channel selects
+        in front of per-channel queries (read_state): they choose which
+        channel the NEXT query addresses and change no output.
+        """
         import serial                                    # lazy: pyserial, extra "real"
         self._ser = serial.Serial(port=self._port, timeout=self._timeout_s)
-        self._ser.reset_input_buffer()                   # drop any stale reply bytes
-        # The SynthHD boots into whatever was saved in its EEPROM, which may be
-        # RF ON. Make both outputs quiet FIRST, before anything else.
-        for ch in (0, 1):
-            self.set_output(ch, False)
-        if self._spacing > 0:
-            self._write(f"i{self._spacing:.1f}")         # VERIFY: v2 channel spacing, units Hz ([PY])
+        self._ser.reset_input_buffer()                   # drop any stale reply bytes (PC side only)
         model = self._query("+")                         # VERIFY: reply format on v2
         fw = self._query("v0")                           # VERIFY
         hw = self._query("v1")                           # VERIFY
         # The serial number ("-") is deliberately NOT part of the id string:
         # the id travels in every status frame and into data files.
         self._idn = f"Windfreak {model} (fw {fw}, hw {hw})".strip()
+
+    def read_state(self) -> dict:
+        """Read both channels and the reference with queries only (see
+        base.DualSynth.read_state). A query that fails is reported in
+        `unread` instead of stopping the service: every one of these is still
+        unconfirmed on the v2 firmware."""
+        unread = []
+
+        def q(label, cmd, conv):
+            try:
+                return conv(self._query(cmd))
+            except Exception:
+                unread.append(label)
+                return None
+
+        def flag(text):
+            t = text.strip()
+            if t not in ("0", "1"):
+                raise ValueError(f"not a 0/1 flag: {t!r}")
+            return t == "1"
+
+        channels = []
+        for ch, name in ((0, "a"), (1, "b")):
+            freq = q(f"{name}.frequency_Hz", f"C{ch}f?",
+                     lambda t: float(t) * 1e6)           # VERIFY: plain MHz text
+            power = q(f"{name}.power_dBm", f"C{ch}W?", float)   # VERIFY: W? on v2, plain dBm
+            unmuted = q(f"{name}.rf_on", f"C{ch}h?", flag)      # VERIFY: h? on v2, 1 = NOT muted
+            pa = q(f"{name}.rf_on", f"C{ch}r?", flag)           # VERIFY: r? on v2
+            pll = q(f"{name}.pll_on", f"C{ch}E?", flag)         # VERIFY: E? on v2
+            if unmuted is None or pa is None:
+                # Unknown output state: report it as possibly radiating. A
+                # status that says "RF on" when it is off is an annoyance; one
+                # that says "off" while the output radiates is a hazard.
+                rf_on, partial = True, True
+            else:
+                rf_on = bool(unmuted and pa)
+                partial = bool(unmuted) != bool(pa)
+            channels.append({"rf_on": rf_on, "rf_partial": partial,
+                             "pll_on": pll, "frequency_Hz": freq,
+                             "power_dBm": power,
+                             # no phase readback: the zero is "phase at open()"
+                             "phase_deg": self._phase_sent[ch]})
+
+        def ref_code(t):
+            return REFERENCE_SOURCES[int(float(t))]
+        ref = q("reference", "x?", ref_code)             # VERIFY: x? numbering 0 ext/1 27/2 10
+        ext = q("ext_MHz", "*?", float)                  # VERIFY: *? reply = plain MHz
+        return {"channels": channels, "reference": ref, "ext_MHz": ext,
+                "unread": sorted(set(unread))}
 
     def close(self) -> None:
         try:
@@ -167,6 +222,11 @@ class SerialSynthHD:
         if source == "external":
             self._write(f"*{ext_MHz:.3f}")               # VERIFY: [API] "*xxx.xxx" MHz on v2
         self._write(f"x{code}")                          # VERIFY: numbering unchanged on v2
+
+    def set_channel_spacing(self, hz: float) -> None:
+        # Sent only when the user changes hardware.channel_spacing_Hz, never
+        # at start (it moves the frequency grid of both channels).
+        self._write(f"i{float(hz):.1f}")                 # VERIFY: v2 channel spacing, units Hz ([PY])
 
     def read_temperature(self) -> float:
         return float(self._query("z"))                   # VERIFY: reply is plain degC text

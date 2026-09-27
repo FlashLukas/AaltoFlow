@@ -14,8 +14,9 @@ from ddr25.sim_system import build_sim_system
 
 def _fast(cfg=None):
     cfg = cfg or Config()
-    cfg.motion.velocity = 720.0
-    cfg.motion.acceleration = 3600.0
+    # The CONTROLLER's stored profile: start() adopts it, pushes nothing.
+    cfg.hardware.sim_start_velocity = 720.0
+    cfg.hardware.sim_start_acceleration = 3600.0
     brain, sim = build_sim_system(cfg)
     events = []
     brain._on_event = lambda level, msg: events.append((level, msg))
@@ -334,6 +335,8 @@ class _LaggyHomeBackend:
     def close(self): pass
     def idn(self): return "laggy stub"
 
+    v, a = 10.0, 10.0
+
     def home(self): self.t_home = time.monotonic()
     def is_homed(self): return True
 
@@ -365,5 +368,63 @@ def test_rehome_with_stale_homed_bit_waits_for_the_motion():
             assert time.monotonic() - t0 < 3.0
             time.sleep(0.01)
         assert brain.status().homed
+    finally:
+        brain.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# adopt-on-start (Lukas, 2026-09-27): starting the software changes nothing
+# --------------------------------------------------------------------------- #
+def _preexisting_cfg():
+    """A controller found in a NON-default state: homed in an earlier session,
+    parked at 212.5 deg, with its own stored profile (not the config's)."""
+    cfg = Config()
+    cfg.hardware.sim_start_deg = 212.5
+    cfg.hardware.sim_start_homed = True
+    cfg.hardware.sim_start_velocity = 55.0
+    cfg.hardware.sim_start_acceleration = 140.0
+    return cfg
+
+
+def test_start_issues_no_state_changing_writes():
+    brain, sim = build_sim_system(_preexisting_cfg())
+    brain.start()
+    try:
+        time.sleep(0.1)                      # a few polls
+        assert sim.writes == []              # no profile push, no home, no move
+    finally:
+        brain.shutdown()
+    assert sim.writes == [("stop", False)]   # shutdown behaviour unchanged
+
+
+def test_status_after_start_reflects_the_preexisting_state():
+    cfg = _preexisting_cfg()
+    assert cfg.motion.velocity != 55.0       # the config default differs...
+    brain, _sim = build_sim_system(cfg)
+    brain.start()
+    try:
+        st = brain.status()
+        assert st.homed and not st.moving and not st.homing
+        assert st.raw_deg == pytest.approx(212.5, abs=0.01)
+        assert st.angle_deg == pytest.approx(212.5, abs=0.01)
+        assert (st.velocity, st.acceleration) == (55.0, 140.0)   # ...the controller wins
+        assert (cfg.motion.velocity, cfg.motion.acceleration) == (55.0, 140.0)
+        brain.move_to(213.0)                 # homed state adopted: no re-home needed
+        _wait_idle(brain)
+    finally:
+        brain.shutdown()
+
+
+def test_set_config_writes_only_what_changed():
+    brain, sim = build_sim_system(_preexisting_cfg())
+    brain.start()
+    try:
+        brain.cfg.frame.zero_deg = 10.0      # an unrelated group
+        brain.apply_config()
+        assert sim.writes == []              # the adopted profile is not re-sent
+        brain.cfg.motion.velocity = 80.0     # the user changes one value
+        brain.apply_config()
+        assert sim.writes == [("set_velocity", 80.0)]
+        assert brain.status().velocity == 80.0
     finally:
         brain.shutdown()

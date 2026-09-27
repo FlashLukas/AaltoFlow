@@ -121,3 +121,38 @@ def test_shutdown_verb_switches_the_laser_off():
         assert backend.read_emission() is False and backend.read_rf() is False
     finally:
         cli.shutdown()
+
+
+def test_lost_client_guard_over_the_wire():
+    """A remote GUI's client owns the emission it switched on and pings; when
+    it goes away, the service switches emission off. A raw client (like
+    scan-core) sends no owner, so its emission is never cut."""
+    cfg = Config()
+    cfg.hardware.sim_warmup_s = 0.0
+    cfg.hardware.poll_hz = 20.0
+    cfg.hardware.client_timeout_s = 0.8
+    laser, backend = build_sim_system(cfg)
+    svc = SuperkService(laser, host="127.0.0.1", cmd_port=17346, pub_port=17347,
+                        status_hz=20.0)
+    svc.start()
+    gui = SuperkClient(host="127.0.0.1", cmd_port=17346, pub_port=17347,
+                       timeout_ms=2000, ping_s=0.2)
+    raw = SuperkClient(host="127.0.0.1", cmd_port=17346, pub_port=17347,
+                       timeout_ms=2000, ping_s=0.2)
+    try:
+        gui.set_emission(True)
+        assert wait_for(lambda: gui.status().emission_guarded)
+        time.sleep(2.0)                        # 2.5x the timeout, pings flowing
+        assert gui.status().emission_set is True
+        gui.shutdown()                         # the GUI crashes / closes
+        assert wait_for(lambda: backend.read_emission() is False, 5.0)
+        # scan-core style: a plain command with no owner -> no guard
+        assert raw._cmd({"cmd": "emission_on"})["ok"]
+        assert wait_for(backend.read_emission)
+        time.sleep(2.0)
+        assert backend.read_emission() is True
+        assert raw.status().emission_guarded is False
+    finally:
+        raw.shutdown()
+        svc.stop()
+        time.sleep(0.2)

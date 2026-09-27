@@ -23,9 +23,15 @@ from ..instruments import Grid, SweepSettings, estimate_sweep_time_s, sim_grid, 
 class SimulatedAnalyzer:
     simulated = True
 
-    def __init__(self, cfg: Config, seed: int | None = None, time_scale: float = 1.0):
+    def __init__(self, cfg: Config, seed: int | None = None, time_scale: float = 1.0,
+                 tg_output_on: bool = False):
         """`time_scale` multiplies every sweep time: 1.0 behaves like the real
-        analyser (the GUI, the service), 0.0 makes tests instant."""
+        analyser (the GUI, the service), 0.0 makes tests instant.
+
+        `tg_output_on` is the state the TG was LEFT in by whatever used the
+        analyser before us (the real TG44A may keep emitting CW, VERIFY 5b in
+        the module notes). open() does not change it -- the start-up rule --
+        so a test can start from a non-default state and see it untouched."""
         self.cfg = cfg
         self.time_scale = float(time_scale)
         self._rng = np.random.default_rng(seed)
@@ -33,7 +39,10 @@ class SimulatedAnalyzer:
         self._settings: SweepSettings | None = None
         self._grid: Grid | None = None
         self._pending = None
-        self.tg_output_on = False          # for the safety tests: is the TG emitting?
+        self.tg_output_on = bool(tg_output_on)   # for the safety tests: is the TG emitting?
+        # Every configure() is a WRITE to the analyser (settings + initiate);
+        # tests count them to prove that start-up writes nothing.
+        self.configure_calls = 0
 
     # ---- lifecycle ---------------------------------------------------------
     def _model(self) -> str:
@@ -41,8 +50,9 @@ class SimulatedAnalyzer:
         return m if m in MODELS else "SA44B"          # "auto" -> the SA44B
 
     def open(self) -> None:
+        # Like the real one: opening reads (model, TG present) and writes
+        # nothing, so whatever the TG was doing it keeps doing.
         self._open = True
-        self.tg_output_on = False
 
     def close(self) -> None:
         self._open = False
@@ -64,6 +74,7 @@ class SimulatedAnalyzer:
             raise RuntimeError("simulated analyser is not open")
         if settings.tg_on and not self.tg_attached():
             raise RuntimeError("no tracking generator attached")
+        self.configure_calls += 1
         self._settings = settings
         self._grid = sim_grid(settings, self.cfg.limits.max_bins)
         self._pending = None

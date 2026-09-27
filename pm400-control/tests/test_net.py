@@ -18,10 +18,11 @@ PUB_PORT = 17401
 @pytest.fixture
 def service_and_client():
     cfg = Config()
-    cfg.sensor.avg_time_s = 0.005
-    cfg.hardware.push_on_start = True             # short averaging -> fast test
     cfg.hardware.head_check_s = 0.1
     meter, sim = build_sim_system(cfg, realtime=True, zero_time_s=0.2)
+    # Short averaging -> fast test. Set on the simulated console's "front
+    # panel" (start-up adopts it); the config is never pushed at start.
+    sim.front_panel(avg_time_s=0.005)
     svc = Pm400Service(meter, host="127.0.0.1", cmd_port=CMD_PORT, pub_port=PUB_PORT,
                        status_hz=20.0)
     svc.start()

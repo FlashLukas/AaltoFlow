@@ -39,7 +39,10 @@ def main() -> int:
 
     synth.start()
     print("IDN:", backend.idn())
-    assert synth.status().rf_on is False, "RF must be off after start"
+    # adopt-on-start: the status shows the simulated box's own state
+    s0 = synth.status()
+    assert s0.rf_on == cfg.sim.state_rf_on, "RF state must be adopted, not changed"
+    assert s0.frequency_Hz == cfg.sim.state_frequency_Hz, "frequency must be adopted"
     lim = synth.limits()
     print(f"effective range: {lim['freq_min_Hz']/1e6:g} .. {lim['freq_max_Hz']/1e9:g} GHz, "
           f"{lim['power_min_dBm']:g} .. {lim['power_max_dBm']:g} dBm")

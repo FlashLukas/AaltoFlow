@@ -376,6 +376,16 @@ class ChannelCard(QtWidgets.QFrame):
             self.power_spin.setRange(lim.power_min_dBm, lim.power_max_dBm)
             self.phase_spin.setRange(lim.phase_min_deg, lim.phase_max_deg)
 
+    def seed_inputs(self):
+        """Put the instrument's values into the input boxes. Called once after
+        the service/brain has started: the boxes were built from the config
+        BEFORE the start read the instrument (read-only start), and a "Set"
+        pressed on a stale box would send a value nobody chose."""
+        c = self.cfg.channel(self.ch)
+        self.apply_limits(initial_hz=c.frequency_Hz)
+        self.power_spin.setValue(c.power_dBm)
+        self.phase_spin.setValue(c.phase_deg)
+
     def current_freq_hz(self) -> float:
         return self.freq_spin.value() * _FREQ_UNITS[self._unit]
 
@@ -477,8 +487,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.event.connect(self._on_event)
         self.ctrl._on_event = lambda lvl, msg: self.bridge.event.emit(lvl, msg)
 
-        # start the synthesizer (opens the backend, outputs OFF) and the timer
+        # start the synthesizer (opens the backend and READS its state --
+        # nothing is changed, a running output keeps running) and the timer
         self.ctrl.start()
+        # the start copied the instrument's state into cfg: show it in the
+        # input boxes too (locally; a remote client pulled the service's cfg)
+        for card in self.cards.values():
+            card.seed_inputs()
+        self.ext_spin.setValue(self.cfg.reference.ext_MHz)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)

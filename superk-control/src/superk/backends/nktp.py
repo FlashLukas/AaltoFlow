@@ -87,6 +87,8 @@ REG_CONNECTED_XTAL = 0x75     # U8, READ-ONLY: which crystal the RF reaches  # V
 
 # ---- SELECT housing registers (type 0x67) ----------------------------------
 REG_RF_SWITCH = 0x34          # U8: 0 = normal, 1 = swap the two RF inputs  # VERIFY
+
+# ---- SELECT RF driver line registers (addressed at rf_addr, like above) ----
 REG_WL0 = 0x90                # U32, pm, channel 1 .. 8 = 0x90 .. 0x97  # VERIFY
 REG_AMP0 = 0xB0               # U16, 0.1 %, channel 1 .. 8 = 0xB0 .. 0xB7  # VERIFY
 
@@ -175,6 +177,9 @@ class NktpSuperK:
 
     def set_watchdog(self, seconds: int) -> None:
         self._w8(self.extreme_addr, REG_WATCHDOG, max(0, min(255, int(seconds))))  # VERIFY
+
+    def read_watchdog(self) -> int:
+        return self._r8(self.extreme_addr, REG_WATCHDOG)                     # VERIFY readable
 
     # ---- RF driver ---------------------------------------------------------
 

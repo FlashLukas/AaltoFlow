@@ -3,6 +3,7 @@ the command strings it sends and the tolerance of its reply parsers."""
 
 import pytest
 
+from dssg.backends import dsi_scpi
 from dssg.backends.dsi_scpi import (DsiSG12000L, parse_bool, parse_number,
                                     parse_reference)
 
@@ -113,6 +114,62 @@ def test_close_turns_rf_off_first():
     b.close()
     assert link.sent[0] == "OUTP:STAT OFF" and link.sent[-1] == "<close>"
     b.close()                                         # idempotent
+
+
+class StrictLink(FakeLink):
+    """A fake instrument that FAILS on any write except *CLS: the adopt-on-
+    start rule (2026-09-27) allows open() to ask, never to change."""
+    ALLOWED_WRITES = ("*CLS",)
+
+    def write(self, line):
+        if line not in self.ALLOWED_WRITES:
+            raise AssertionError(f"state-changing write at open(): {line!r}")
+        super().write(line)
+
+
+_UNIT = {"*IDN?": "DS INSTRUMENTS,SG12000L,1234,2.1", "PHASE?": "45.00",
+         "SYST:ERR?": '0,"No error"', "OUTP:STAT?": "ON",
+         "FREQ:CW?": "3200000000", "POWER?": "2.5", "*REFMODE?": "0",
+         "FREQ:MIN?": "25000000", "FREQ:MAX?": "12000000000",
+         "POWER:MIN?": "-21.5", "POWER:MAX?": "10"}
+
+
+@pytest.mark.parametrize("phase_mode", ["auto", "on", "off"])
+def test_open_issues_no_state_changing_writes(monkeypatch, phase_mode):
+    links = []
+
+    def fake_serial(port, baud, timeout_s):
+        links.append(StrictLink(_UNIT))
+        return links[-1]
+    monkeypatch.setattr(dsi_scpi, "_SerialLink", fake_serial)
+    b = DsiSG12000L(phase_mode=phase_mode)
+    b.open()                                          # StrictLink raises on a write
+    writes = [s for s in links[0].sent if not s.endswith("?")]
+    assert writes == ["*CLS"]
+    # ...and everything the brain reads to adopt is a query, too
+    assert b.read_output() is True and b.read_frequency() == 3.2e9
+    assert b.read_power() == 2.5 and b.read_reference() == "external"
+    # a failed start releases the port WITHOUT touching RF
+    b.close(rf_off=False)
+    assert links[0].sent[-1] == "<close>"
+    assert "OUTP:STAT OFF" not in links[0].sent
+
+
+def test_buzzer_and_display_only_on_request():
+    b = _backend({})
+    b.set_buzzer(False)
+    b.set_display(False)
+    link = b._link
+    assert link.sent == ["*BUZZER OFF", "*DISPLAY OFF"]
+    b.close()                                         # we turned it off -> back on
+    assert link.sent[-3:] == ["OUTP:STAT OFF", "*DISPLAY ON", "<close>"]
+
+
+def test_close_leaves_display_alone_if_we_never_touched_it():
+    b = _backend({})
+    link = b._link
+    b.close()
+    assert link.sent == ["OUTP:STAT OFF", "<close>"]
 
 
 def test_bad_transport_refused():

@@ -121,14 +121,29 @@ class Positioner:
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Open the controller, push the speed, start the poll thread.
+        """Open the controller, ADOPT its state, start the poll thread.
 
-        Nothing MOVES here unless motion.reference_on_start is set.
+        Lukas's rule (2026-09-27): starting the service READS the instrument
+        and changes nothing. So the speed is read back from the controller
+        (its closed-loop max frequency) and becomes motion.velocity_mm_s --
+        the .ini value is only a default for an explicit set_velocity /
+        set_config. The position, the channel state (a move another program
+        started keeps running and shows as "moving") and "referenced" are
+        read too. The target is "where it is": the SCU library has no call
+        that returns a target, so a move already under way shows as moving
+        towards an unknown target until it ends.
+
+        Nothing MOVES here unless motion.reference_on_start is set (default
+        off, and it stays an explicit opt-in: it is the one startup action
+        that changes the instrument).
         """
         with self._lock:
             self.backend.open()
             self._connected = True
-            self._push_velocity(self.cfg.motion.velocity_mm_s, quiet=True)
+            self._adopt_velocity()
+            # hold time is NOT an instrument setting on the SCU: it travels
+            # with every move command, so clamping the config value writes
+            # nothing to the controller.
             self.cfg.motion.hold_time_ms = self._clamp_hold(self.cfg.motion.hold_time_ms)
             self._pos = self.backend.read_position_mm()
             self._known = self.backend.physical_position_known()
@@ -430,6 +445,28 @@ class Positioner:
     # ------------------------------------------------------------------ #
     # parameters
     # ------------------------------------------------------------------ #
+    def _adopt_velocity(self) -> float:
+        """Read the controller's closed-loop max frequency and turn it into
+        the speed the brain reports (mm/s = Hz x step length). A read, never
+        a write: whatever speed the last user left in the SCU stays. A value
+        outside our configured range is reported, not corrected -- the next
+        explicit set_velocity will clamp it. Caller holds the lock."""
+        hw = self.cfg.hardware
+        hz = int(self.backend.get_max_frequency())
+        self._freq_hz = hz
+        v = hz * max(hw.um_per_step, 1e-9) * 1e-3
+        self.cfg.motion.velocity_mm_s = v
+        lo, hi = self.velocity_range()
+        if hz <= 0:
+            # What 0 means on the SCU is not confirmed (unlimited? disabled?).
+            # VERIFY on the controller.
+            self._emit("warn", "controller reports a closed-loop max frequency of "
+                               f"{hz} Hz -- speed unknown; set one with set_velocity")
+        elif v < lo - 1e-12 or v > hi + 1e-12:
+            self._emit("warn", f"adopted speed {v:.4g} mm/s ({hz} Hz) is outside the "
+                               f"configured range {lo:.4g}..{hi:.4g} mm/s; left as it is")
+        return v
+
     def _push_velocity(self, value: float, quiet: bool = False) -> float:
         lo, hi = self.velocity_range()
         v = float(value)
@@ -535,10 +572,19 @@ class Positioner:
         return self.cfg
 
     def apply_config(self) -> None:
-        """Re-push speed and hold time after the config was edited in place."""
+        """Apply the config after it was edited in place (set_config).
+
+        The speed is written to the controller only when the config value
+        actually DIFFERS from what the controller runs at now: a set_config
+        that touches another group (theme, limits, ...) must not rewrite -- or
+        silently clamp -- a speed that was adopted from the instrument.
+        """
         with self._lock:
-            if self._connected:
-                self._push_velocity(self.cfg.motion.velocity_mm_s)
+            hw = self.cfg.hardware
+            current = self._freq_hz * max(hw.um_per_step, 1e-9) * 1e-3
+            wanted = float(self.cfg.motion.velocity_mm_s)
+            if self._connected and abs(wanted - current) > 1e-9 * max(1.0, abs(current)):
+                self._push_velocity(wanted)
             self.cfg.motion.hold_time_ms = self._clamp_hold(self.cfg.motion.hold_time_ms)
             if self._connected:
                 self._status = self._build_status(self._status.channel_state,

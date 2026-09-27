@@ -9,7 +9,10 @@ The panel is built around what makes an Agilis stage different:
   * a continuous JOG you hold down (one of the controller's four speeds),
   * the STEP AMPLITUDE per direction -- the one knob the AG-UC2 gives you --
     next to the measured STEP SIZE, which is only valid at the amplitude it was
-    measured at (the panel says when it is not).
+    measured at (the panel says when it is not),
+  * the LIMIT SWITCH of an AG-LS25: move to a limit (MV), let the controller
+    measure / go to an absolute position (MA / PA), and measure the step size
+    limit to limit in both directions.
 
 Threading rule: instrument events arrive on a background thread, so they MUST
 cross into Qt through a signal -- see :class:`Bridge`.
@@ -346,6 +349,12 @@ class MainWindow(QWidget):
         where = "remote service" if remote else "local brain"
         self._on_event("info", f"front panel ready ({where}); hold a JOG button to move "
                                f"continuously, it stops when you let go")
+        # What start-up had to WRITE to the controller (the rule: read, change
+        # nothing -- normally just MR, without which nothing can be read).
+        writes = list(getattr(self._live, "startup_writes", None) or [])
+        if writes:
+            self._on_event("info", "start-up adopted the controller's counters and "
+                                   "amplitudes; it wrote only: " + "; ".join(writes))
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -381,6 +390,7 @@ class MainWindow(QWidget):
         left.addWidget(self._build_log_card(), 1)
         right.addWidget(self._build_amplitude_card())
         right.addWidget(self._build_step_size_card())
+        right.addWidget(self._build_limit_card())
         right.addWidget(self._build_leash_card())
         right.addWidget(self._build_positions_card(), 1)
         cols.addLayout(left, 11)
@@ -589,6 +599,50 @@ class MainWindow(QWidget):
         lay.addWidget(hint)
         return frame
 
+    def _build_limit_card(self) -> QFrame:
+        """AG-LS25 limit switch: MV to a limit, MA / PA, step-size routine."""
+        frame, lay = _card("LIMIT SWITCH  (AG-LS25 · MV · MA · PA · step size)")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        self._pa_target = []
+        self._limit_buttons = []
+        for a in range(2):
+            grid.addWidget(QLabel(AXES[a]), a, 0)
+            lo, hi = QPushButton("◀ limit"), QPushButton("limit ▶")
+            lo.setToolTip("MV-3: fast to the negative limit switch, stops there")
+            hi.setToolTip("MV3: fast to the positive limit switch, stops there")
+            lo.clicked.connect(lambda _c, ax=a: self._do(lambda: self.ctrl.move_to_limit(ax, -1, 3)))
+            hi.clicked.connect(lambda _c, ax=a: self._do(lambda: self.ctrl.move_to_limit(ax, +1, 3)))
+            meas = QPushButton("Measure step size")
+            meas.setToolTip("limit to limit and back at the amplitudes in force: stores "
+                            "forward AND backward step size; ends at the − limit with "
+                            "the datum there (minutes)")
+            meas.clicked.connect(lambda _c, ax=a: self._do(lambda: self.ctrl.measure_step_size(ax)))
+            ma = QPushButton("MA")
+            ma.setToolTip("the controller measures the absolute position (limit to "
+                          "limit; the USB link is cut for up to 2 min)")
+            ma.clicked.connect(lambda _c, ax=a: self._do(lambda: self.ctrl.measure_position(ax)))
+            pa = _spin(0.0, 0.0, float(self.cfg.hardware.travel_um), 100.0, 0)
+            pa.setToolTip("absolute target, µm from the − limit (resolution travel/1000)")
+            go = QPushButton("PA")
+            go.setToolTip("absolute move to the target on the left (accuracy ~100 µm)")
+            go.clicked.connect(lambda _c, ax=a, sp=pa: self._do(
+                lambda: self.ctrl.move_absolute(ax, sp.value())))
+            for col, w in enumerate((lo, hi, meas, ma, pa, go), start=1):
+                grid.addWidget(w, a, col)
+            self._pa_target.append(pa)
+            self._limit_buttons += [lo, hi, meas, ma, go]
+        grid.setColumnStretch(7, 1)
+        lay.addLayout(grid)
+        self._limit_hint = QLabel("")
+        self._limit_hint.setObjectName("hint")
+        self._limit_hint.setWordWrap(True)
+        lay.addWidget(self._limit_hint)
+        if not self.cfg.hardware.has_limit_switch:
+            for b in self._limit_buttons:
+                b.setEnabled(False)
+        return frame
+
     def _build_leash_card(self) -> QFrame:
         frame, lay = _card("LEASH  (limit travel to a box around the Datum)")
         row = QHBoxLayout()
@@ -662,6 +716,11 @@ class MainWindow(QWidget):
     # settings
     # ------------------------------------------------------------------ #
     def _open_settings(self) -> None:
+        if self.remote:
+            # start from what the service uses NOW (it adopted the controller's
+            # amplitudes), or OK would push this window's stale copy back
+            from ..net.protocol import apply_config_dict
+            self._do(lambda: apply_config_dict(self.cfg, self.ctrl.get_config()))
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             if self.remote:
@@ -896,6 +955,22 @@ class MainWindow(QWidget):
             self._steps_btn.setChecked(bool(st.step_large))
             self._suppress_presets = False
             self._paint_steps_button(bool(st.step_large))
+        # limit switch: the running routine, else the last result + positions
+        meas = " · ".join(
+            f"{AXES[a]} {st.measured_um[a]:.0f} µm" for a in range(2)
+            if st.measured_um and st.measured_um[a] is not None)
+        if st.routine_running:
+            text = f"RUNNING #{st.routine_id} {st.routine}: {st.routine_msg}"
+            if st.usb_busy:
+                text += "  (controller has cut the USB link, STOP unavailable until it answers)"
+        else:
+            text = (f"last: {st.routine} → {st.routine_error}" if st.routine else
+                    "no routine run yet")
+        sw = [AXES[a] for a in range(2) if st.limit_switch[a]]
+        self._limit_hint.setText(
+            text + (f" — measured from the − limit: {meas}" if meas else "")
+            + (f" — switch closed: {', '.join(sw)}" if sw else "")
+            + f" — travel {st.travel_um:g} µm")
         k = st.um_per_step[0]
         self._leash_hint.setText(
             f"ARMED — ±{st.leash_steps} steps (≈ ±{st.leash_steps * k:.1f} µm in X) from the datum."

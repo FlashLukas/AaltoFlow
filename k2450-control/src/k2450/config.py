@@ -38,8 +38,13 @@ class Source:
     Only the ACTIVE function's level and compliance reach the instrument; the
     other pair is remembered for when you switch.
 
-    The OUTPUT is always OFF at start-up. There is deliberately no "output on at
-    start" setting: a service restarting at 3 a.m. must not energise a sample.
+    START-UP ADOPTS THE INSTRUMENT (2026-09-27): the service reads the 2450's
+    own function, levels, limits, ranges and output state and copies them in
+    here; nothing below is PUSHED at start. These values are defaults that
+    reach the instrument only when you ask (a setter, set_config, Settings).
+    The module never switches the output ON by itself -- there is deliberately
+    no "output on at start" setting -- and it does not switch OFF an output it
+    finds on either: it leaves the instrument as it was.
     """
 
     function: str = "voltage"         # "voltage" or "current"

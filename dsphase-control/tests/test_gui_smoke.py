@@ -82,3 +82,20 @@ def test_settings_dialog_applies(app):
         _settle(app, brain, lambda s: s.attenuation_dB == 10.0)
     finally:
         brain.shutdown()
+
+
+def test_input_boxes_start_from_the_units_state(app):
+    """The service adopts the unit's state, so the GUI's boxes must show it:
+    pressing Set next to an untouched box must not change the RF."""
+    from dsphase.apps.gui import MainWindow
+    cfg = Config()
+    brain, backend = build_sim_system(cfg, phase_deg=-45.0, attenuation_dB=17.25)
+    win = MainWindow(brain, cfg)
+    try:
+        _settle(app, brain, lambda s: s.adopted)
+        win._refresh()
+        assert win.phase_spin.value() == -45.0
+        assert win.att_spin.value() == 17.25
+        assert backend.write_log == []
+    finally:
+        win.close()

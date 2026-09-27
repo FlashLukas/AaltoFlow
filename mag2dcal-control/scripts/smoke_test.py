@@ -82,6 +82,9 @@ def main() -> int:
 
     banner("2. Measure the magnet (both axes, both hysteresis legs)")
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.calibration.directory = tmp.name
     clock = FakeClock()
     ctrl, sim = build_sim_system(cfg, clock=clock, sleep=clock.sleep, seed=1)
@@ -121,6 +124,9 @@ def main() -> int:
     print("   both, so this compares only the fast loop.")
     for freeze in (True, False):
         c2 = Config()
+        # Opt in: these runs regulate from a magnet that starts OFF. The default
+        # (False) leaves a de-energized magnet off -- adopt, don't push.
+        c2.control.energize_on_start = True
         c2.control.freeze_enabled = freeze
         c2.stabilizer.enabled = False
         c2.calibration.load_newest_on_start = False

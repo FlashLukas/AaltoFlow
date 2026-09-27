@@ -1,14 +1,15 @@
 # dsamp-control
 
-Control for a **DS Instruments smart variable-gain RF amplifier** (assumed
-model: **GB6000L**, 10 MHz - 6 GHz, gain 0 - 31 dB in 0.5 dB steps): switch the
+Control for a **DS Instruments GB6000L** smart variable-gain RF amplifier
+(10 MHz - 6 GHz, gain 0 - 31 dB in 0.5 dB steps): switch the
 amplifier stage on/off and set its **gain** -- over its USB virtual COM port
 (SCPI-like text commands), or fully simulated with no hardware.
 
 ![dsamp front panel](../front-panels/dsamp.png)
 
-*Straight after start: the stage is OFF and the gain is at its minimum, which is
-how the module always starts. The gain-stage indicator shows a small sine going
+*Straight after start, simulated: the module has READ the amplifier (the
+simulator's leftover 6 dB, stage off) and shows exactly that -- it never changes
+the amplifier when it starts. The gain-stage indicator shows a small sine going
 in and (when on) a bigger one coming out, next to the estimated gain-vs-frequency
 curve of the current setting and, dashed, of the safety ceiling. Light theme:
 [dsamp-light.png](../front-panels/dsamp-light.png).*
@@ -21,10 +22,13 @@ sample is how they get destroyed. So the module is built around three rules:
    intersected with the device range; every request is clamped to it (a warn
    event says so) and snapped to the device step. `describe` publishes that
    live envelope, and its revision moves when you change it.
-2. **Off at start, off on the way out.** The stage is switched off when the
-   service starts (there is deliberately no "on at start-up" option) and on
-   shutdown, Ctrl-C, the launcher's Stop or the `shutdown` verb -- and the gain
-   goes back to the minimum.
+2. **Read at start, off on the way out.** At start the module only QUERIES the
+   amplifier (`*IDN?`, `OUTP:STAT?`, `GAIN?`) and adopts what it finds -- a
+   stage left on stays on, a gain above the ceiling stays there (a warn event
+   says so; the next gain you set is clamped). Nothing is written, so
+   restarting the software never disturbs a running experiment. On shutdown,
+   Ctrl-C, the launcher's Stop or the `shutdown` verb the stage is switched off
+   and the gain goes back to the minimum.
 3. **Turning it on is a dangerous action.** `amp_on` is flagged `danger` in
    `describe`, and switching on logs a reminder: the vendor manual warns that a
    power amplifier driving an unterminated port can die within seconds.
@@ -115,5 +119,5 @@ From DS Instruments' "PA/GB Amplifier SCPI Command List" (v3.1, Sept 2022):
 
 The reply formats are not documented; every query is marked `# VERIFY` in
 `backends/dsi_serial.py`, and the parsers accept a number with or without a unit.
-The **older GB6000** used a different command set (`AMP ON|OFF`, `VATT 0-1000`)
-and would need a second backend.
+The unit in the lab is a GB6000L (confirmed); the **older GB6000** used a
+different command set (`AMP ON|OFF`, `VATT 0-1000`) and is not supported.

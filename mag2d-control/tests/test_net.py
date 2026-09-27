@@ -62,6 +62,7 @@ def test_status_has_every_contract_key_on_both_paths(pair):
 def test_set_field_blocking_over_the_wire(pair):
     cfg, ctrl, sim, svc, client = pair
     client.start()
+    client.set_output(True)          # start() adopts: the sim magnet starts OFF
     st = client.set_field_blocking(20.0, 30.0, timeout_s=15.0)
     assert st.field_stable and st.setpoint_field_mT == 20.0 and st.setpoint_angle_deg == 30.0
     assert abs(st.measured_magnitude_mT - 20.0) < 1.0

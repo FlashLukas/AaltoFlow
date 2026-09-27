@@ -24,12 +24,18 @@ class Meter:
     wire, and the live value is written back here, so Save config stores what
     is actually in use.
 
-    At start-up the meter's OWN settings win (it keeps them across power
-    cycles, and someone may have set them on the front panel), unless
-    hardware.push_on_start is True -- then these values are pushed instead.
+    At start-up the meter's OWN settings ALWAYS win: they are read and written
+    into this group, never the other way round (Lukas's rule, 2026-09-27 --
+    starting a service must not change an instrument). The values here are
+    applied to the meter only when a user asks: a setter, or set_config /
+    Settings > Apply. (The old `hardware.push_on_start` option is gone; an
+    .ini that still has it loads fine, the key is ignored.)
 
-    mode         -- "dc" (static field; the normal case) or "rms" (AC field,
-                    wide band up to 20 kHz or narrow band up to 1 kHz).
+    mode         -- "dc" (static field; the normal case), "rms" (AC field,
+                    wide band up to 20 kHz or narrow band up to 1 kHz) or
+                    "peak" (the peak detector; its periodic/pulse and
+                    positive/negative/both sub-settings stay as the front
+                    panel has them).
     dc_digits    -- DC resolution 3, 4 or 5 digits. It IS the 455's filter:
                     3 digits = 100 Hz bandwidth, 30 rdg/s; 4 = 10 Hz, 30 rdg/s;
                     5 = 1 Hz, 10 rdg/s (manual section 4.6.2). More digits =
@@ -111,6 +117,11 @@ class Hardware:
                    range), so 8 Hz stays well under the 20 messages/s limit.
     zero_time_s -- how long ZPROBE takes. The manual gives no completion query,
                    so readings pause for this long. VERIFY on the real meter.
+    probe_geometry -- "axial" (the Hall element measures the field ALONG the
+                   stem; the lab's probe) or "transverse" (across a flat blade).
+                   The 455 reports the probe's type (HSE/HST/UHS), serial and
+                   sensitivity but not its geometry, so it is stated here. It
+                   changes only labels, never a reading.
     """
 
     resource: str = "GPIB0::12::INSTR"
@@ -118,8 +129,8 @@ class Hardware:
     timeout_ms: int = 2000
     command_gap_s: float = 0.05
     poll_hz: float = 8.0
-    push_on_start: bool = False       # False = adopt the meter's own settings at start
     zero_time_s: float = 8.0
+    probe_geometry: str = "axial"
 
 
 @dataclass

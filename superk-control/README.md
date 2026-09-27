@@ -8,12 +8,20 @@ or fully simulated with no hardware.
 
 ![superk front panel](../front-panels/superk.png)
 
-*Start-up state: emission off, RF off. The spectrum indicator shows the
+*The simulated laser as it is left: emission off, RF off. The spectrum indicator shows the
 white-light envelope (dashed = not emitting), the tuning windows of the three
 crystals (the active one lit) and each line at its wavelength, in its own
 colour, as tall as the model says it is bright.*
 
 > **CLASS 4 LASER.** Starting the service or a GUI never switches emission on.
+> Starting it changes nothing at all: the service READS the laser (emission,
+> interlock, RF, power level, crystal, all 8 lines) and adopts that state --
+> a laser left emitting is shown as emitting, not switched off. The one
+> possible start-up write is arming the laser's watchdog, and only if its
+> value differs from `hardware.watchdog_s`.
+> **Lost client:** a remote GUI that switches emission on owns it and pings
+> every second; if it falls silent for `hardware.client_timeout_s` (5 s), the
+> service switches emission off. A scan routine (no owner) is never cut.
 > `Emission ON` asks for confirmation (GUI, console) or is flagged `danger`
 > (describe), and is **refused while the interlock is not OK**. Stopping the
 > service switches RF and emission off; the laser's own watchdog switches
@@ -63,8 +71,9 @@ Universal: `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 
 | verb | arguments | notes |
 |---|---|---|
-| `set_emission` | `on` | on is refused unless the interlock reads OK |
-| `emission_on` / `emission_off` | -- | the describe actions (on = danger) |
+| `set_emission` | `on`, `owner` (optional) | on is refused unless the interlock reads OK; `owner` = a client id arms the lost-client guard |
+| `emission_on` / `emission_off` | -- | the describe actions (on = danger); no owner = no guard |
+| `ping` | -- | heartbeat; every message may carry `client` (id) |
 | `reset_interlock` | -- | acknowledge a closed interlock; never switches emission on |
 | `set_power` | `power_pct` | clamped to `limits.power_max_pct` (default 50 %) |
 | `set_rf` | `on` | AOTF RF drive |

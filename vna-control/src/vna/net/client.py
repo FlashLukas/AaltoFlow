@@ -40,11 +40,13 @@ class RemoteStatus:
         for k, default in self._DEFAULTS.items():
             setattr(self, k, d.get(k, default))
         for k, v in d.items():
-            if k not in self._DEFAULTS and k not in ("sample", "reference"):
+            if k not in self._DEFAULTS and k not in ("sample", "reference", "instrument"):
                 setattr(self, k, _NAN if v is None else v)
         self.sample = {k: (_NAN if v is None else v) for k, v in (d.get("sample") or {}).items()}
         self.reference = {k: (_NAN if v is None else v)
                           for k, v in (d.get("reference") or {"present": False}).items()}
+        self.instrument = {k: (_NAN if v is None else v)
+                           for k, v in (d.get("instrument") or {}).items()}
         self.describe_rev = d.get("describe_rev")
 
     def __getattr__(self, name):

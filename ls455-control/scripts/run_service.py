@@ -37,6 +37,9 @@ def main() -> int:
     ap.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")
     ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
     ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
+    ap.add_argument("--sim-probe", choices=["HSE", "HST", "UHS"], default="HSE",
+                    help="simulator only: which probe family the simulated meter has "
+                         "(the geometry is hardware.probe_geometry, axial by default)")
     ap.add_argument("--real", action="store_true",
                     help="drive the real meter through pyvisa; default is simulated")
     ap.add_argument("--resource", default=None,
@@ -56,7 +59,7 @@ def main() -> int:
         meter = Gaussmeter(backend, cfg)
         print(f"REAL backend -> {hw.resource}")
     else:
-        meter, _ = build_sim_system(cfg)
+        meter, _ = build_sim_system(cfg, probe=args.sim_probe)
         print("SIMULATED backend (no hardware needed)")
 
     Ls455Service(meter, host=args.host, cmd_port=args.cmd_port,

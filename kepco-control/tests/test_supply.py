@@ -19,15 +19,15 @@ def _mains(spy):
 
 # ---- lifecycle / safety -------------------------------------------------------
 
-def test_start_leaves_output_off_in_the_configured_mode(rig):
+def test_start_adopts_the_found_idle_state_and_writes_nothing(rig):
+    """The default sim BOP is found idle (current mode, output off, 10 V
+    compliance). Start + a worker step must adopt that and write NOTHING."""
     supply, spy, clock, _ = rig
     s = supply.status()
     assert s.connected and s.output is False and s.output_request is False
+    assert s.mode == "current" and s.voltage_limit_V == 10.0
     assert spy.inner.output_on is False
-    assert spy.inner.mode == "current"
-    # the output was explicitly switched off BEFORE anything else was programmed
-    names = [c[0] for c in spy.calls]
-    assert names.index("set_output") < names.index("set_mode")
+    assert spy.inner.writes == []
 
 
 def test_output_on_programs_zero_before_switching_on(rig):

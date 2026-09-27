@@ -68,11 +68,23 @@ after the trigger the status can still describe the previous sample.
 ## OSC OUT safety
 
 The oscillator output can drive a coil or a sample, so it is treated as an
-output: it goes to **0 V when the service starts** (whatever the .ini says) and
-**back to 0 V when it stops**, and a setpoint above `limits.amplitude_max_V`
-(1 V rms by default; the instrument can do 5) is clamped with a warning. If the
-oscillator IS your experiment's modulation and must survive a restart, switch
-off `hardware.osc_zero_on_start` / `osc_off_on_shutdown`.
+output: a setpoint above `limits.amplitude_max_V` (1 V rms by default; the
+instrument can do 5) is clamped with a warning, and it goes **back to 0 V when
+the service stops** (switch off `hardware.osc_off_on_shutdown` if it must keep
+running).
+
+## Start-up reads, it does not write
+
+When the service starts it **reads** the 7230's settings -- reference source,
+oscillator frequency and amplitude, phase, harmonic, input, coupling, FET,
+float, line filter, sensitivity, fast mode, time constant, slope -- and shows
+them. Nothing is sent that changes the instrument, so OSC OUT keeps driving the
+experiment through a service restart. The .ini values are applied only when you
+ask (Settings > Apply, `set_config`, or a setter). A value the instrument would
+not report is named in a warning; a value outside this module's `limits` is
+left as it is and reported. The instrument must be in single-reference mode
+(REFMODE 0): in a dual mode the service refuses to start rather than switching
+it.
 
 ## Commands (wire verbs)
 

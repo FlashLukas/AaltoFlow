@@ -14,9 +14,8 @@ Two kinds of settings live here, and the difference matters:
     TMAX). The controller remembers them across power cycles and they can be
     changed on its front panel, so the software ADOPTS them at start (the
     `device` group is overwritten with what the box reports) and only PUSHES
-    them when asked: `hardware.push_on_start`, or an explicit change (GUI,
-    set_config, a verb). That way starting the service never changes how the
-    heater behaves.
+    them on an explicit change (GUI, set_config, a verb) -- never at start.
+    That way starting the service never changes how the heater behaves.
 """
 
 from __future__ import annotations
@@ -132,9 +131,9 @@ class Hardware:
     expected_sensor -- what is really wired to the box. The service warns at
                  start if the box is set to anything else, and REFUSES to
                  enable the heater while it is.
-    push_on_start -- False: adopt what the box is set to (sensor, gains, PMAX,
-                 TMAX). True: push the `device` group from this file at start
-                 (the sensor only while the heater is off).
+    (There is no push-at-start option any more, removed 2026-09-27: start
+    only READS the box. An old .ini that still has `push_on_start` loads fine;
+    the key is ignored.)
     disable_on_shutdown -- switch the heater OFF when the service stops (or the
                  launcher stops it). True is the SAFER default: an unattended
                  heater stays hot with nobody watching it. False leaves it as
@@ -149,7 +148,6 @@ class Hardware:
     settings_poll_s: float = 5.0
     stat_base: int = 16
     expected_sensor: str = "ptc100"
-    push_on_start: bool = False
     disable_on_shutdown: bool = True
 
 

@@ -558,6 +558,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 sp.setRange(*rng)
             self.range_label.setText(f"{s.filter}: {rng[0]:g} - {rng[1]:g} nm")
 
+        # The input boxes start from the presets; the first time the laser is
+        # seen they are filled with what it is REALLY set to (the service
+        # adopted it at start), so a "Set" never sends a stale preset by
+        # accident. Only once: afterwards they belong to the operator.
+        if s.connected and not getattr(self, "_seeded", False):
+            self._seeded = True
+            self.power_spin.setValue(s.power_set_pct)
+            self.wl1_spin.setValue(s.wavelength_set_nm[0])
+            self.amp1_spin.setValue(s.amplitude_set_pct[0])
+            for n in self.line_wl:
+                self.line_wl[n].setValue(s.wavelength_set_nm[n - 1])
+                self.line_amp[n].setValue(s.amplitude_set_pct[n - 1])
+
         for n, lab in self.line_now.items():
             a = s.amplitude_pct[n - 1]
             lab.setText(f"{s.wavelength_nm[n - 1]:.1f} nm  {a:.0f} %" if a > 0 else "off")
@@ -570,7 +583,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev: QtGui.QCloseEvent):
         self.timer.stop()
         # local brain: RF + emission off and disconnect. Remote client: only
-        # disconnects -- the service keeps the laser as it is.
+        # disconnects; if this GUI switched emission on, its pings stop and
+        # the service's lost-client guard switches emission off.
         self.ctrl.shutdown()
         super().closeEvent(ev)
 

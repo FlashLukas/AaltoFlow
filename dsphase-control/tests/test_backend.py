@@ -74,14 +74,55 @@ def fake_serial(monkeypatch):
     return mod
 
 
-def test_open_pings_identifies_and_switches_output_off(fake_serial):
+class QueryOnlySerial(FakeSerial):
+    """A unit that FAILS the test on any line that is not a query (does not end
+    in '?'). Used to prove open() and the brain's start() change nothing."""
+
+    def write(self, data: bytes):
+        line = data.decode("ascii").rstrip("\n")
+        assert line.endswith("?"), f"state-changing write at start: {line!r}"
+        return super().write(data)
+
+
+def test_open_only_queries(fake_serial):
+    """Adopt-on-start: open() pings and identifies, and writes NOTHING (the
+    old OUTP:STAT OFF on connect is gone). The fake powers up with RF ON."""
+    fake_serial.Serial = QueryOnlySerial
     dev = PS6000L("COM5")
     dev.open()
     ser = FakeSerial.last
     assert ser.baud == 115200
-    assert ser.lines[:3] == ["*PING?", "*IDN?", "OUTP:STAT OFF"]
+    assert ser.lines == ["*PING?", "*IDN?"]
     assert "PS6000L" in dev.idn()
-    assert dev.read_output() is False
+    assert dev.read_output() is True                   # still as found
+
+
+def test_brain_start_on_the_real_backend_only_queries(fake_serial):
+    """The whole start path (backend.open + the brain's first read-back and
+    adoption) against a unit left at -90 deg / 12.5 dB / RF ON."""
+    from dsphase.config import Config
+    from dsphase.shifter import PhaseShifter
+
+    class LeftOn(QueryOnlySerial):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.phase, self.att, self.on = -90.0, 12.5, True
+
+    fake_serial.Serial = LeftOn
+    brain = PhaseShifter(PS6000L("COM5"), Config())
+    brain.start()
+    ser = FakeSerial.last
+    try:
+        s = brain.status()
+        assert s.adopted and s.output_on is True
+        assert s.phase_deg == -90.0 and s.attenuation_dB == 12.5
+        assert all(line.endswith("?") for line in ser.lines)
+    finally:
+        brain._stop.set(); brain._kick.set()
+        # shutdown switches the output off: allow writes from here on
+        ser.write = FakeSerial.write.__get__(ser)
+        brain.shutdown()
+    assert ser.lines[-1] == "OUTP:STAT OFF"
 
 
 def test_command_strings(fake_serial):

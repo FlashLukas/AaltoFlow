@@ -9,7 +9,11 @@ service will sit on top of in Session 5, so nothing here has to change then.
 
 States
 ------
-IDLE      : holding whatever current we have, not regulating a field.
+IDLE      : holding whatever current we have, not regulating a field. At start
+            this is whatever the supply was ALREADY doing: the controller
+            reads the output state and current and adopts them, and writes
+            nothing to the supply until the first command that moves the
+            current (adopt-on-start rule, Lukas 2026-09-27).
 RAMPING   : moving current toward a target (direct set, or a calibration jump);
             when the ramp finishes we go to whatever `_after_ramp` says.
 SEEK      : PI is actively closing the last couple of mT to a field setpoint,
@@ -62,6 +66,7 @@ class Status:
     field_stable: bool
     locked: bool
     aux: Optional[dict] = None    # {"ao": {...}, "ai": {...}, "do": {...}}
+    output_on: bool = False       # the supply's output switch, as read back
 
 
 class Controller:
@@ -109,6 +114,15 @@ class Controller:
         self.stabilizer_enabled = True
         self.locked = False
 
+        # ADOPT-ON-START. `_driving` stays False until a command that moves the
+        # current begins; until then the loop sends NOTHING to the supply, so
+        # starting (or restarting) the service cannot change what the magnet
+        # is doing. `_output_on` mirrors the supply's output switch (read at
+        # start, then updated when we switch it on). Both are plain attributes
+        # that status() copies (gotcha #1), never written into a snapshot.
+        self._driving = False
+        self._output_on = False
+
         # sub-state for DEMAG / CALIBRATE
         self._seq: List[float] = []
         self._seq_i = 0
@@ -127,19 +141,28 @@ class Controller:
     # These just enqueue; the loop does the real work on its own thread.
 
     def start(self) -> None:
+        # open() only connects and queries (see backends/base.py): the supply
+        # keeps whatever output and current it had, and so do the AUX outputs.
         self.kepco.open()
         if self.aux is not None:
             self.aux.open()
         if not self.acq.is_alive():
             self.acq.start()
-        self.ramper.sync_to(self.kepco.read_current())
+        # Adopt: the ramp starts from the current actually flowing, so the
+        # first command ramps FROM there instead of jumping.
+        self._output_on = bool(self.kepco.read_output())
+        adopted = self.kepco.read_current()
+        self.ramper.sync_to(adopted)
+        self._hold_current = adopted
+        self._driving = False
         self._stop.clear()
         if self._csv_path:
             self._csv = open(self._csv_path, "w", encoding="utf-8")
             self._csv.write("time_s,current_A,field_mT,state\n")
         self._thread = threading.Thread(target=self._run, name="control", daemon=True)
         self._thread.start()
-        self._event("info", "controller started")
+        self._event("info", f"controller started; adopted supply state: output "
+                            f"{'ON' if self._output_on else 'OFF'}, {adopted:.3f} A")
 
     def shutdown(self) -> None:
         """Safe stop: ramp to zero, output off, threads down. Safe to call on a
@@ -210,6 +233,7 @@ class Controller:
             field_stable=self._field_stable,
             locked=self.locked,
             aux=self.aux_snapshot(),
+            output_on=self._output_on,
         )
 
     # ---- AUX I/O (general-purpose DAQ, independent of the field loop) -----
@@ -266,6 +290,27 @@ class Controller:
             return -lim
         return amps
 
+    def _take_control(self) -> None:
+        """Called (on the control thread) when a command starts to move the
+        current. From here on the loop commands the supply every tick.
+
+        If the output was off, first program the present ramp value (the
+        current actually flowing = 0 A) and only THEN switch the output on:
+        the supply may still hold an old programmed current, and OUTP ON would
+        otherwise step the magnet straight to it.
+
+        Open point for the real driver (# VERIFY): if the supply is found with
+        its output ON but in VOLTAGE mode (FUNC:MODE? = VOLT), the CURR values
+        sent below would only move the current LIMIT. The driver's open()
+        should query FUNC:MODE? so this case can be refused or reported rather
+        than silently mis-driven; switching mode with the output on is a step."""
+        if not self._output_on:
+            self.kepco.set_current(self.ramper.setpoint)
+            self.kepco.enable_output()
+            self._output_on = True
+            self._event("info", "supply output switched ON")
+        self._driving = True
+
     def _require_calibration(self) -> bool:
         if self.calibration is None or not self.calibration.currents_A:
             self._event("error", "no calibration loaded; cannot set a field")
@@ -297,6 +342,7 @@ class Controller:
 
     def _begin_set_current(self, amps: float) -> None:
         amps = self._clamp_current(amps)
+        self._take_control()
         self._setpoint_field = None
         self._field_stable = False
         self._settling = False
@@ -309,6 +355,7 @@ class Controller:
     def _begin_set_field(self, field_mT: float, use_pid: bool, now: float) -> None:
         if not self._require_calibration():
             return
+        self._take_control()
         self._setpoint_field = field_mT
         self._field_stable = False
         self._settling = False
@@ -350,6 +397,7 @@ class Controller:
             seq.append(mag if k % 2 == 0 else -mag)
             k += 1
         seq.append(0.0)
+        self._take_control()
         self._seq = seq
         self._seq_i = 0
         self._setpoint_field = None
@@ -362,6 +410,7 @@ class Controller:
 
     def _begin_calibrate(self, n_per_leg: int, dwell_s: float,
                          on_done, now: float) -> None:
+        self._take_control()
         I_max = self.cfg.limits.current_max_A
         up = [(-I_max) + (2 * I_max) * i / (n_per_leg - 1) for i in range(n_per_leg)]
         self._seq = up + list(reversed(up))
@@ -395,7 +444,11 @@ class Controller:
             # command the supply. While the output is frozen (settling on a
             # field target) we hold EXACTLY the same value so the ramp direction
             # cannot flip; otherwise we advance the ramp one step toward target.
-            if self._output_frozen:
+            # Before the first command (_driving False) nothing is sent at all:
+            # the supply keeps the state it was found in.
+            if not self._driving:
+                pass
+            elif self._output_frozen:
                 self.kepco.set_current(self._freeze_current)
             else:
                 self.ramper.step()

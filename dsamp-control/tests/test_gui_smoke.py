@@ -31,6 +31,8 @@ def test_window_builds_and_refreshes(app):
     try:
         win._refresh()
         assert win.gain_value.text() not in ("", "—")
+        # the gain box starts from the ADOPTED gain (sim leftover: 6 dB), not 0
+        assert win.gain_spin.value() == backend._gain == 6.0
         # the spin box range IS the live envelope
         assert win.gain_spin.maximum() == cfg.limits.gain_max_dB
 

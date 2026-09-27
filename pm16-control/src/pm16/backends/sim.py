@@ -49,7 +49,9 @@ def responsivity(nm: float) -> float:
 class SimulatedPM16:
     def __init__(self, laser_nm: float = 800.0, incident_W: float = 1.2e-3,
                  sample_period_s: float = 0.0, zero_time_s: float = 1.0,
-                 seed: int | None = None, clock=time.monotonic):
+                 seed: int | None = None, clock=time.monotonic,
+                 wavelength_nm: float = 633.0, auto_range: bool = True,
+                 range_W: float | None = None):
         self.laser_nm = float(laser_nm)
         self.incident_W = float(incident_W)
         self.sample_period_s = float(sample_period_s)
@@ -59,9 +61,15 @@ class SimulatedPM16:
         self._lock = threading.Lock()
 
         self._open = False
-        self._wl = 633.0              # a fresh meter remembers SOME wavelength
-        self._auto = True
+        # The state the meter is in BEFORE we connect. A real PM16 remembers
+        # its wavelength and range, so the sim starts somewhere that is NOT
+        # the config default (800 nm): tests can then tell "adopted" from
+        # "pushed". Pass auto_range=False + range_W to start on manual range.
+        self._wl = float(wavelength_nm)
+        self._auto = bool(auto_range)
         self._range = _RANGES_W[0]
+        if range_W is not None:
+            self._range = next((r for r in _RANGES_W if r >= range_W * 0.999), _RANGES_W[-1])
         self._dark_A = 2e-9           # un-zeroed dark current
         self._zero_until = None
         self._t0 = clock()

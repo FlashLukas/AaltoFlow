@@ -16,7 +16,13 @@ never be commanded outside what it can do, and a conservative config ceiling can
 never be exceeded just because the box could go higher. `describe` publishes that
 intersection, so a scan sees the real, live range.
 
-RF is ALWAYS off at start-up: there is deliberately no "RF on at start" setting.
+Start-up ADOPTS, it never pushes (Lukas's rule, 2026-09-27: "all modules
+should read the instrument state on startup, not to change anything"). When the
+service connects it READS what the SG12000L is doing -- RF on/off, frequency,
+power, phase, reference -- and shows that. Nothing in this file is sent to the
+unit at start. The `signal` group is a PRESET: it is sent only when you change
+it (Settings dialog, set_config, loading an .ini). There is deliberately no
+"RF on" setting at all.
 """
 
 from __future__ import annotations
@@ -30,8 +36,10 @@ REFERENCES = ("internal", "external", "auto")
 
 @dataclass
 class Signal:
-    """The signal pushed to the generator when the service starts (RF stays
-    OFF). Everything here is changeable live over the wire."""
+    """A PRESET signal. It is NOT sent at start (the module adopts whatever the
+    unit is doing); a field is sent to the generator only when it CHANGES here
+    -- in the Settings dialog, over set_config, or by loading an .ini. The RF
+    output is never switched by a preset."""
 
     frequency_Hz: float = 1_000_000_000.0    # 1 GHz
     power_dBm: float = -20.0                  # a quiet, safe default level
@@ -95,8 +103,13 @@ class Hardware:
     # list has no PHASE command, the shop page and the DSI app note do), "on"
     # forces it, "off" hides it.
     phase_mode: str = "auto"
-    mute_buzzer: bool = True                  # *BUZZER OFF: it beeps on every change otherwise
-    display_off: bool = False                 # *DISPLAY OFF: faster commands (DSI app note)
+    # Front-panel preferences. NOT sent at start any more (adopt-on-start
+    # rule): *BUZZER / *DISPLAY are written only when you CHANGE the value
+    # (Settings / set_config). Default False = leave the unit as it is. Until
+    # 2026-09-27 mute_buzzer defaulted to True and was pushed on every connect.
+    mute_buzzer: bool = False                 # True -> *BUZZER OFF (it beeps on every change)
+    display_off: bool = False                 # True -> *DISPLAY OFF (faster commands, DSI app note);
+                                              # switched back ON at disconnect if WE turned it off
 
 
 @dataclass
@@ -110,6 +123,15 @@ class Sim:
     power_max_dBm: float = 10.0
     has_phase: bool = True
     external_ref_present: bool = False        # is a 10 MHz cable plugged into the MCX jack?
+    # The state the simulated box is IN when the service connects, as if
+    # someone had left it like that from the front panel. The module adopts
+    # it (never overwrites it), so this is what the GUI shows at start.
+    # Deliberately not the `signal` preset's values, so adoption is visible.
+    state_rf_on: bool = False
+    state_frequency_Hz: float = 2_450_000_000.0
+    state_power_dBm: float = -10.0
+    state_phase_deg: float = 0.0
+    state_reference: str = "internal"
 
 
 @dataclass

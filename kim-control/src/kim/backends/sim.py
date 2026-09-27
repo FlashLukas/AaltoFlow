@@ -28,21 +28,38 @@ from ..config import (
 class SimKim:
     """Simulated KIM101 + 3 PIA25 actuators (open-loop step counters)."""
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, state: dict | None = None):
+        """`state` = what the "controller" holds BEFORE the software starts:
+        optional keys ``position`` (steps), ``rate`` (steps/s), ``accel``
+        (steps/s^2), ``voltage`` (V), each a 3-list. Tests use it to start the
+        sim somewhere the config would never put it, so they can prove the
+        brain ADOPTS the controller's state instead of overwriting it (the
+        adopt-on-start rule, 2026-09-27). Without it the sim starts at the
+        config values, as a freshly configured KIM101 would.
+        """
         self.cfg = cfg
         self.n = 3
+        state = state or {}
 
         # Live state, per axis (steps).
-        self._pos = [0.0, 0.0, 0.0]        # current step position
-        self._target = [0.0, 0.0, 0.0]     # commanded target, steps
-        self._start_pos = [0.0, 0.0, 0.0]  # position when the move began
+        pos0 = [float(v) for v in state.get("position", (0, 0, 0))]
+        self._pos = list(pos0)             # current step position
+        self._target = list(pos0)          # commanded target, steps
+        self._start_pos = list(pos0)       # position when the move began
         self._t0 = [0.0, 0.0, 0.0]         # monotonic time the move began
         self._moving = [False, False, False]
 
-        # Drive parameters (seeded from config; the brain re-pushes on start).
-        self._rate = [axis_rate(cfg, a) for a in range(3)]       # steps/s
-        self._acc = [axis_acceleration(cfg, a) for a in range(3)]  # steps/s^2
-        self._volt = [axis_voltage(cfg, a) for a in range(3)]     # V
+        # Drive parameters, as the controller would remember them. The brain
+        # READS these at start (it no longer pushes the config over them).
+        self._rate = [float(v) for v in state.get("rate", [axis_rate(cfg, a) for a in range(3)])]
+        self._acc = [float(v) for v in state.get(
+            "accel", [axis_acceleration(cfg, a) for a in range(3)])]
+        self._volt = [float(v) for v in state.get(
+            "voltage", [axis_voltage(cfg, a) for a in range(3)])]
+
+        # Every call that CHANGES the controller, in order -- so a test can
+        # assert that start-up wrote nothing.
+        self.writes: list[str] = []
 
         self._opened = False
 
@@ -87,6 +104,7 @@ class SimKim:
 
     # -- motion ------------------------------------------------------------ #
     def move_to(self, axis: int, position_steps: int) -> None:
+        self.writes.append("move_to")
         self._start_pos[axis] = self._advance(axis)  # start from where we are
         self._target[axis] = float(int(position_steps))
         self._t0[axis] = self._now()
@@ -103,6 +121,7 @@ class SimKim:
         return self._moving[axis]
 
     def stop(self, axis: int) -> None:
+        self.writes.append("stop")
         self._advance(axis)  # freeze wherever we are right now
         self._moving[axis] = False
 
@@ -111,6 +130,7 @@ class SimKim:
 
     def zero_counter(self, axis: int) -> None:
         """Define the current physical position as step 0 (reset the counter)."""
+        self.writes.append("zero_counter")
         self._advance(axis)
         self._pos[axis] = 0.0
         self._target[axis] = 0.0
@@ -123,6 +143,7 @@ class SimKim:
         # NOW rather than being multiplied by the whole elapsed time (which would
         # make the simulated position jump).  On real hardware a velocity change
         # mid-move just changes the speed going forward -- this mirrors that.
+        self.writes.append("set_step_rate")
         if self._moving[axis]:
             self._start_pos[axis] = self._advance(axis)
             self._t0[axis] = self._now()
@@ -132,12 +153,14 @@ class SimKim:
         return self._rate[axis]
 
     def set_acceleration(self, axis: int, steps_per_sec2: float) -> None:
+        self.writes.append("set_acceleration")
         self._acc[axis] = float(steps_per_sec2)
 
     def read_acceleration(self, axis: int) -> float:
         return self._acc[axis]
 
     def set_voltage(self, axis: int, volts: float) -> None:
+        self.writes.append("set_voltage")
         self._volt[axis] = float(volts)
 
     def read_voltage(self, axis: int) -> float:

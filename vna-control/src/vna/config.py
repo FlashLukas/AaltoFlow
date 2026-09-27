@@ -29,7 +29,11 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class Sweep:
-    """What the analyser sweeps. Every one is changeable live over the wire."""
+    """What the analyser sweeps. Every one is changeable live over the wire.
+
+    At start these are REPLACED by what the analyser already holds (the brain
+    reads and adopts it; Lukas, 2026-09-27). The values here are only defaults
+    for anything the analyser could not report (and for the simulator)."""
 
     start_Hz: float = 1.0e9
     stop_Hz: float = 6.0e9
@@ -46,7 +50,10 @@ class Acquisition:
     the trigger, averaged and latched as the sample."""
 
     timeout_s: float = 120.0          # a client gives up waiting after this
-    continuous: bool = True           # sweep on its own between acquisitions (front-panel mode)
+    # sweep on its own between acquisitions (front-panel mode). At START the
+    # backend decides (read_state): a real analyser starts hands-off (False),
+    # because sweeping it means taking over its trigger; the simulator uses this.
+    continuous: bool = True
 
 
 @dataclass
@@ -155,7 +162,8 @@ class Hardware:
                      otherwise put the full "TCPIP0::<ip>::hislip0::INSTR" here.
     cal_set       -- "" = leave the instrument's correction exactly as it is;
                      otherwise the name (or {GUID}) of a calibration set to
-                     activate on connect.
+                     activate when this module FIRST sweeps (never on
+                     connect: connecting only reads the analyser).
     timeout_s     -- VISA I/O timeout for one query. The sweep itself is waited
                      for separately, so this does not have to cover a slow sweep.
     data_format   -- "REAL,64" (binary, the default: exact and ~3x smaller) or

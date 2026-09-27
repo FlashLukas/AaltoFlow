@@ -52,8 +52,10 @@ ceiling (`[limits] temperature_max_C = 150`).
 - **degC throughout.** The serial interface speaks degC only, whatever the
   front panel displays, so the module never sends `unit=`.
 - **Start changes nothing.** The service ADOPTS the box's setpoint, output
-  state, sensor type, PID gains, PMAX and TMAX. Only `hardware.push_on_start`
-  pushes the stored settings (and even then never switches the heater).
+  state, sensor type, PID gains, PMAX and TMAX, and sends queries only. A
+  sensor setting that is not the wired PT100 is a warning (and enabling is
+  refused), never a write. The stored settings are sent only when you change
+  them (GUI, set_config, a setter).
 - **Stop switches the heater OFF** (`hardware.disable_on_shutdown`, default
   True -- the safer choice for an unattended heater; set False to leave it
   heating). The TC200 regulates on its own, so a *crashed* service leaves it

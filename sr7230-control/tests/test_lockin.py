@@ -57,9 +57,143 @@ def _run_acquisition(li, clock, step=0.002, max_s=5.0):
     return n, li.get_sample()
 
 
-# ---- start-up, shutdown, OSC OUT safety -------------------------------------------
+# ---- start-up: READ the instrument, never write (Lukas, 2026-09-27) -----------------
 
-def test_start_pushes_config_and_reports(rig):
+class NoWrites:
+    """Wraps a backend and FAILS on any call that would change the instrument.
+
+    Everything that is not a known read-only call is treated as a write, so a
+    new setter added later is caught too, not silently allowed."""
+
+    READS = {"open", "close", "idn", "read_settings", "read_outputs", "get_phase",
+             "get_sensitivity_index", "get_time_constant"}
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+        if name not in self.READS:
+            raise AssertionError(f"state-changing call during start-up: {name}")
+        self.calls.append(name)
+        return attr
+
+
+def _bench_sim():
+    """A simulated 7230 that someone has ALREADY set up by hand -- every value
+    away from both the simulator's power-up state and Config()'s defaults, so
+    the test can tell adopting from pushing."""
+    li, sim = build_sim_system(Config(), seed=0, preset=False)
+    sim.ref_source = 2                    # ext_analog
+    sim.osc_f = 1234.5
+    sim.osc_amp = 0.3                     # OSC OUT is driving the experiment
+    sim.phase_deg = 45.0
+    sim.harmonic = 2
+    sim.imode, sim.vmode = 0, 3           # A-B
+    sim.dc = True
+    sim.fet = True
+    sim.floating = True
+    sim.line_filter = (3, False)          # both notches, 60 Hz
+    sim.auto_ac_gain = False
+    sim.sen_index = 18                    # 1 mV
+    sim.fast = True
+    sim.tc_index = 7                      # 2 ms: only legal in fast mode
+    sim.slope_index = 0                   # 6 dB/oct
+    return li, sim
+
+
+def test_start_issues_no_state_changing_writes():
+    li, sim = _bench_sim()
+    guard = NoWrites(sim)
+    li.backend = guard
+    li.start(poll=False)
+    try:
+        li.poll_once()
+        assert "read_settings" in guard.calls
+    finally:
+        li.backend = sim          # shutdown may zero OSC OUT: not part of this rule
+        li.shutdown()
+
+
+def test_status_after_start_is_the_instruments_preexisting_state():
+    li, sim = _bench_sim()
+    events = []
+    li._on_event = lambda lvl, msg: events.append((lvl, msg))
+    li.start(poll=False)
+    try:
+        s = li.status()
+        assert s.ref_source == "ext_analog"
+        assert s.freq_set_Hz == 1234.5
+        assert s.amplitude_V == 0.3 and sim.osc_amp == 0.3      # still driving
+        assert s.phase_deg == 45.0 and s.harmonic == 2
+        assert s.input == "A-B" and s.coupling == "DC"
+        assert s.sensitivity_index == 18 and s.sensitivity == "1 mV"
+        assert s.fast_mode and s.slope_db == 6
+        assert s.tc_s == pytest.approx(2e-3) and s.tc_set_s == pytest.approx(2e-3)
+        sig = li.cfg.signal
+        assert sig.fet and sig.float_shield and not sig.auto_ac_gain
+        assert sig.line_filter == "both" and sig.line_freq_Hz == 60
+        # the settle time follows the ADOPTED tau and slope, not the config's
+        assert s.settle_s == pytest.approx(filters.settle_time_s(2e-3, 1, 99.0))
+        assert any("adopted" in m for _, m in events)
+        # and the simulator was not touched
+        assert (sim.ref_source, sim.tc_index, sim.sen_index, sim.slope_index) == (2, 7, 18, 0)
+    finally:
+        li.shutdown()
+
+
+def test_describe_follows_the_adopted_state():
+    from sr7230.net.describe import build_manifest
+    li, sim = _bench_sim()
+    li.start(poll=False)
+    try:
+        by_id = {p["id"]: p for p in build_manifest(li)["parameters"]}
+        # fast mode adopted -> the time-constant control reaches below 5 ms
+        assert by_id["tc"]["min"] < 5.0              # ms
+    finally:
+        li.shutdown()
+
+
+def test_an_out_of_envelope_instrument_is_reported_not_corrected():
+    li, sim = _bench_sim()
+    sim.osc_amp = 2.0                     # above amplitude_max_V (1 V)
+    events = []
+    li._on_event = lambda lvl, msg: events.append((lvl, msg))
+    li.start(poll=False)
+    try:
+        assert li.status().amplitude_V == 2.0 and sim.osc_amp == 2.0
+        assert any(lvl == "warn" and "envelope" in m for lvl, m in events)
+        li.set_amplitude(1.5)             # a deliberate set IS clamped
+        assert sim.osc_amp == li.cfg.limits.amplitude_max_V
+    finally:
+        li.shutdown()
+
+
+def test_a_setting_the_instrument_would_not_report_is_named():
+    li, sim = _bench_sim()
+    real = sim.read_settings
+
+    def partial():
+        st = real()
+        del st["fet"]
+        st["unread"] = ["fet"]
+        return st
+
+    sim.read_settings = partial
+    events = []
+    li._on_event = lambda lvl, msg: events.append((lvl, msg))
+    li.start(poll=False)
+    try:
+        assert any(lvl == "warn" and "fet" in m for lvl, m in events)
+        assert li.status().sensitivity_index == 18          # the rest adopted
+    finally:
+        li.shutdown()
+
+
+def test_start_reports_and_the_sim_preset_follows_the_config(rig):
     li, sim, clock, _ = rig
     s = li.status()
     assert s.connected and s.ref_source == "internal"
@@ -67,30 +201,6 @@ def test_start_pushes_config_and_reports(rig):
     assert sim.sen_index == 20 and s.sensitivity == "5 mV"
     assert s.slope == "12 dB/oct" and sim.slope_index == 1
     assert s.ref_locked is None                           # internal: nothing to lock
-
-
-def test_osc_out_is_zeroed_at_start_even_if_the_config_says_otherwise():
-    cfg = Config()
-    cfg.reference.amplitude_V = 0.5
-    li, sim = build_sim_system(cfg, seed=0)
-    sim.osc_amp = 0.3                                     # someone left it on
-    li.start(poll=False)
-    try:
-        assert sim.osc_amp == 0.0 and li.status().amplitude_V == 0.0
-    finally:
-        li.shutdown()
-
-
-def test_osc_out_can_be_kept_across_a_start_if_asked():
-    cfg = Config()
-    cfg.reference.amplitude_V = 0.5
-    cfg.hardware.osc_zero_on_start = False
-    li, sim = build_sim_system(cfg, seed=0)
-    li.start(poll=False)
-    try:
-        assert sim.osc_amp == 0.5
-    finally:
-        li.shutdown()
 
 
 def test_shutdown_returns_osc_out_to_zero(rig):
@@ -456,3 +566,30 @@ def test_polling_thread_runs_in_real_time():
         assert li.status().auto_id == a and not li.status().auto_busy
     finally:
         li.shutdown()
+
+
+def test_codes_the_module_does_not_know_are_named_not_hidden():
+    """A value the 7230 reports but this module has no name for (here an
+    impossible VMODE and slope) must not silently keep the config value."""
+    li, sim = build_sim_system(Config(), seed=0, preset=False)
+    sim.vmode = 7
+    sim.slope_index = 9
+    events = []
+    li._on_event = lambda lvl, msg: events.append((lvl, msg))
+    li.start(poll=False)
+    try:
+        warn = " ".join(m for lvl, m in events if lvl == "warn")
+        assert "VMODE 7" in warn and "SLOPE 9" in warn
+    finally:
+        li.shutdown()
+
+
+def test_a_failed_read_at_start_releases_the_connection():
+    li, sim = build_sim_system(Config(), seed=0, preset=False)
+
+    def boom():
+        raise ConnectionError("link lost")
+    sim.read_settings = boom
+    with pytest.raises(ConnectionError):
+        li.start(poll=False)
+    assert not sim._open and not li.status().connected

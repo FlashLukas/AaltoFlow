@@ -353,3 +353,43 @@ def test_take_reference_survives_a_restart_but_not_a_new_trigger(vna):
     assert vna.status().reference["present"] is False
     _finish(vna)
     assert vna.status().reference["present"] is False
+
+
+def test_start_adopts_what_the_simulated_analyser_is_already_doing():
+    """Lukas's rule (2026-09-27): the module reads the instrument at start and
+    adopts it. The pretend analyser starts somewhere the config is NOT, and the
+    status after start must show the analyser's state, not the .ini's."""
+    cfg = Config()
+    cfg.field.source = "manual"
+    assert (cfg.sweep.start_Hz, cfg.sweep.points, cfg.sweep.sparam) == (1e9, 1601, "S21")
+    found = {"start_Hz": 2.5e9, "stop_Hz": 4.0e9, "points": 301, "ifbw_Hz": 1e3,
+             "power_dBm": -20.0, "sparam": "S12", "continuous": False}
+    v, sim = build_sim_system(cfg, realtime=False, seed=1, state=found)
+    v.start(run=False)
+    try:
+        st = v.status()
+        assert (st.start_Hz, st.stop_Hz, st.points, st.ifbw_Hz, st.power_dBm, st.sparam) == \
+            (2.5e9, 4.0e9, 301, 1e3, -20.0, "S12")
+        assert st.continuous is False and st.instrument["points"] == 301
+        assert v.step() is False                    # not free-running: nothing swept
+        # a sweep the user asks for measures on the adopted grid
+        v.acquire()
+        _finish(v)
+        t = v.get_trace("sample")
+        assert (t["start_Hz"], t["points"], t["sparam"]) == (2.5e9, 301, "S12")
+    finally:
+        v.shutdown()
+
+
+def test_a_non_s_parameter_measurement_keeps_the_config_and_says_so():
+    cfg = Config()
+    cfg.field.source = "manual"
+    events = []
+    v, _ = build_sim_system(cfg, realtime=False, state={"sparam": None, "points": 51})
+    v._on_event = lambda lvl, msg: events.append((lvl, msg))
+    v.start(run=False)
+    try:
+        assert v.status().sparam == "S21" and v.status().points == 51
+        assert any(l == "warn" and "not an S-parameter" in m for l, m in events)
+    finally:
+        v.shutdown()

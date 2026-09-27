@@ -11,7 +11,9 @@ The service owns the generator and exposes it over ZeroMQ:
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 5 Hz)
 
 If a `dssg.ini` sits in the project folder it is loaded automatically (or
-pass --config). The RF output is OFF when the service starts and when it stops.
+pass --config). At start the service READS the unit's state (RF on/off,
+frequency, power, phase, reference) and adopts it -- it changes nothing. The RF
+output is switched OFF when the service stops.
 Drive it with:
     uv run scripts/dssg_console.py --connect <host>
 """

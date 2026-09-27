@@ -75,11 +75,14 @@ def test_parsers_accept_plausible_reply_formats():
         parse_state("maybe")
 
 
-def test_open_switches_off_and_reads_idn(fake_serial):
+def test_open_sends_only_queries_and_reads_idn(fake_serial):
+    """Lukas's rule: open() changes nothing on the amplifier -- every line it
+    sends is a query (ends in '?')."""
     b = DsiSerialAmp("COM99")
     b.open()
     ser = fake_serial[0]
-    assert "OUTP:STAT OFF" in ser.written
+    assert ser.written and all(w.endswith("?") for w in ser.written), ser.written
+    assert "OUTP:STAT OFF" not in ser.written
     assert b.idn().startswith("DS Instruments")
 
 
@@ -124,8 +127,13 @@ def test_brain_on_the_real_backend(fake_serial):
     amp = Amplifier(DsiSerialAmp("COM99"), Config())
     amp.start()
     try:
+        # the whole start-up, brain included, sent nothing but queries
+        assert all(w.endswith("?") for w in fake_serial[0].written), fake_serial[0].written
         s = amp.status()
-        assert s.connected and s.gain_dB == 12.5 and s.temperature_C == 31.0
+        # adopted: the fake reports ON at 12.5 dB (above the 10 dB ceiling)
+        assert s.connected and s.amp_on is True
+        assert s.gain_dB == 12.5 and s.gain_set_dB == 12.5
+        assert s.temperature_C == 31.0
     finally:
         amp.shutdown()
     assert fake_serial[0].written[-2:] == ["OUTP:STAT OFF", "*BUTTONS ON"]

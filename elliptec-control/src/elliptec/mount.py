@@ -91,7 +91,8 @@ class RotationMount:
         n = self.n
         # -- control state (written by setters, read by the worker) ------- #
         self._target = [None] * n            # user deg, as commanded
-        self._velocity = [int(cfg.motion.velocity_pct)] * n
+        self._velocity = [None] * n          # percent, READ from the mount at start
+        self._cfg_velocity = int(cfg.motion.velocity_pct)
         self._offsets = get_offsets(cfg, n)
         self._seq = [0] * n                  # last motion command number
         self._exec_seq = [0] * n             # last one the worker has executed
@@ -124,7 +125,16 @@ class RotationMount:
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Open the bus, read every mount once, push the speed, start the worker."""
+        """Open the bus, READ every mount once, adopt what it is doing, start
+        the worker.
+
+        Adopt, never impose (Lukas, 2026-09-27: "all modules should read the
+        instrument state on startup, not to change anything"): the angle and
+        the SPEED each mount already has become the brain's state.  Nothing is
+        written to a mount here -- no speed push, no homing, no move.  The
+        config's ``motion.velocity_pct`` is only a default the user can apply
+        on purpose (Settings / set_config, or the per-axis velocity control).
+        """
         self.backend.open(list(self.addresses))
         self._connected = True
         for i, a in enumerate(self.addresses):
@@ -132,9 +142,22 @@ class RotationMount:
                 self._infos[i] = self.backend.device_info(a)
             except Exception:
                 self._infos[i] = {"address": a}
-            v = self._clamp_velocity(self._velocity[i], quiet=True)
-            self._velocity[i] = v
-            self.backend.set_velocity(a, v)
+            try:
+                v = self.backend.read_velocity(a)      # a READ: what the mount runs at
+            except Exception:
+                v = None
+            self._velocity[i] = None if v is None else int(v)
+            if v is None:
+                self._emit("warn", f"{self._label(i)}: speed could not be read; "
+                                   "set it to see it here")
+            elif self._clamp_velocity(v, quiet=True) != int(v):
+                # Shown as it is, not "corrected": correcting it would be a write.
+                self._emit("warn", f"{self._label(i)} runs at {int(v)} %, outside the "
+                                   "configured velocity window (left unchanged)")
+        # Remember the config speed as it was at start, so a later set_config
+        # that does not CHANGE it (e.g. only an offset edited) does not push it
+        # over the speed the mounts were found at (see apply_config).
+        self._cfg_velocity = int(self.cfg.motion.velocity_pct)
         self._poll_all()
         with self._lock:
             # The mount does not move at start: its target is where it is.
@@ -146,6 +169,9 @@ class RotationMount:
         self._worker = threading.Thread(target=self._run, name="elliptec-worker", daemon=True)
         self._worker.start()
         if self.cfg.motion.home_on_start:
+            # Explicit opt-in only (default False): homing TURNS the optic, so
+            # under the adopt-on-start rule it never happens unless asked for.
+            self._emit("warn", "motion.home_on_start is set: homing every mount")
             self.home_all()
         self._emit("info", f"elliptec started: {self.backend.idn()}")
 
@@ -575,6 +601,13 @@ class RotationMount:
                 if self._target[i] is not None:
                     self._target[i] = wrap360(self._target[i] + self._offsets[i] - new_off[i])
             self._offsets = new_off
-        for i in range(self.n):
-            self.set_velocity(i, self.cfg.motion.velocity_pct)
+        # Push the config speed only when it was CHANGED since the last apply
+        # (or since start).  A set_config that edits, say, an offset carries the
+        # unchanged default speed too, and must not overwrite the speed the
+        # mounts were adopted at (adopt-on-start rule, 2026-09-27).
+        v_cfg = int(self.cfg.motion.velocity_pct)
+        if v_cfg != self._cfg_velocity:
+            self._cfg_velocity = v_cfg
+            for i in range(self.n):
+                self.set_velocity(i, v_cfg)
         self._emit("info", "config applied")

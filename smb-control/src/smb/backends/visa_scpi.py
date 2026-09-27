@@ -10,7 +10,12 @@ SCPI reference (R&S SMB100A), the four things we control:
     level       POW <value>               (dBm)  query POW?
     frequency   FREQ <value>              (Hz)   query FREQ?
     phase       PHAS <value>              (deg)  query PHAS?
-We send UNIT:ANGL DEG once on open so phase is always in degrees both ways.
+open() changes NOTHING on the instrument (the adopt-on-start rule, 2026-09-27):
+it used to send UNIT:ANGL DEG and OUTP:STAT OFF, which switched off an RF
+output that a running experiment was using. Now it only clears the error queue
+(*CLS -- no effect on the signal) and QUERIES the angle unit; if the box is set
+to radians, read_phase() converts in software instead of changing the unit.
+set_phase() always sends an explicit "DEG" suffix, so it is unit-proof anyway.
 
 The Generator clamps every value to the configured safety limits BEFORE it
 reaches this backend, so here we simply forward commands and read back.
@@ -29,6 +34,7 @@ class VisaSMB100A:
         self._settle_s = settle_s
         self._rm = None
         self._inst = None
+        self._phase_in_rad = False                      # learned in open(), never set
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -40,10 +46,17 @@ class VisaSMB100A:
         # SCPI instruments are line-terminated; \n is the SMB100A default.
         self._inst.write_termination = "\n"
         self._inst.read_termination = "\n"
-        self._inst.write("*CLS")                        # clear status/error queue
-        self._inst.write("UNIT:ANGL DEG")               # phase in degrees from now on
-        # Leave RF as-is on connect except make the OFF state explicit and safe.
-        self._inst.write("OUTP:STAT OFF")
+        # *CLS only empties the status/error queue; it does not touch RF,
+        # level, frequency or phase, so it is allowed under the adopt rule.
+        self._inst.write("*CLS")
+        # Which unit will PHAS? answer in? READ it, do not set it.
+        # VERIFY on the SMB100A: the reply spelling of UNIT:ANGL? (expected
+        # "DEG" / "RAD") and that PHAS? follows this unit.
+        try:
+            unit = self._query("UNIT:ANGL?").upper()
+        except Exception:
+            unit = "DEG"                                # the factory default
+        self._phase_in_rad = unit.startswith("RAD")
 
     def close(self) -> None:
         try:
@@ -106,7 +119,11 @@ class VisaSMB100A:
         self._write(f"PHAS {deg:.3f} DEG")
 
     def read_phase(self) -> float:
-        return float(self._query("PHAS?"))
+        value = float(self._query("PHAS?"))
+        if self._phase_in_rad:                          # convert, never change the unit
+            import math
+            value = math.degrees(value)
+        return value
 
     # ---- identity --------------------------------------------------------
     def idn(self) -> str:

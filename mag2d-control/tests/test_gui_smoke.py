@@ -24,6 +24,7 @@ def _rig():
     clock = FakeClock()
     ctrl, sim = build_sim_system(cfg, clock=clock, sleep=clock.sleep, seed=2)
     ctrl.start(run_thread=False)
+    ctrl.set_output(True)            # start() adopts (sim: off); energize explicitly
     return cfg, clock, ctrl, sim
 
 

@@ -5,7 +5,14 @@ command emission, a power level, which crystal, and up to 8 lines (wavelength +
 RF amplitude each), and the hardware holds them. So there is no control loop
 here. What there IS, because this is a CLASS 4 LASER, is safety logic:
 
-  * emission is never switched on by starting the service;
+  * starting the service only READS the laser and adopts what it is doing
+    (Lukas, 2026-09-27: "read the instrument state on startup, not change
+    anything") -- emission is never switched on by a start, and an emission
+    someone left on is shown as ON, not silently switched off;
+  * a remote GUI that switches emission on "owns" it and pings; if it goes
+    silent for hardware.client_timeout_s the service switches emission OFF
+    (lost-client guard). A scan routine switches it on without an owner, so a
+    scan that does not talk to the laser for an hour is never cut;
   * `set_emission(True)` is REFUSED (SafetyError) while the interlock is not OK
     or the laser is not connected -- the caller gets {"ok": false, "error": ...};
   * the power level is clamped to `limits.power_max_pct`, amplitudes to
@@ -76,6 +83,8 @@ class Status:
     wavelength_nm: list = field(default_factory=lambda: [0.0] * N_LINES)
     amplitude_set_pct: list = field(default_factory=lambda: [0.0] * N_LINES)
     amplitude_pct: list = field(default_factory=lambda: [0.0] * N_LINES)
+    crystal: int = 0                   # NKT crystal number the RF driver reports (0 = none)
+    emission_guarded: bool = False     # lost-client guard armed (a remote GUI owns emission)
     hw_error: str = ""
 
 
@@ -105,10 +114,18 @@ class SuperK:
         self._power = float(s.power_pct)
         self._filter = self._filter_index(s.filter)
         self._range = self._config_range(self._filter)
-        self._applied_code = None               # crystal number last switched to
+        # NKT crystal number of the ACTIVE table entry when it was last
+        # switched to / adopted: apply_config re-switches only if someone edits
+        # the table so that this number changes
+        self._applied_code = None
         self._sanitise_limits()
         self._wl = C.floats(s.wavelengths_nm, N_LINES, 0.0)
         self._amp = C.floats(s.amplitudes_pct, N_LINES, 0.0)
+        # presets as last seen: apply_config sends only the ones that CHANGED
+        self._presets_seen = dict(vars(s))
+        # ---- lost-client guard (see set_emission / touch) ------------------
+        self._owner: str | None = None          # client id that owns emission
+        self._owner_seen = 0.0                  # monotonic time of its last word
         # ---- snapshot, rebuilt only by the worker -------------------------
         self._status = Status()
         self._stop = threading.Event()
@@ -151,7 +168,15 @@ class SuperK:
     # ============================================================== lifecycle
 
     def start(self) -> None:
-        """Connect and push the safe start-up state. Emission is NOT switched on."""
+        """Connect and ADOPT the laser's state. Emission is NOT switched on --
+        and, since 2026-09-27, nothing else is changed either: RF, power level,
+        crystal and the 8 lines are READ and become the brain's setpoints, so
+        the GUI and describe show what the laser is really doing.
+
+        The one write that can remain is the laser's watchdog (a safety
+        interlock against a killed service), and only if the laser's own value
+        differs from hardware.watchdog_s. hardware.emission_off_on_start
+        (default False) is an opt-in to switch emission off here."""
         hw = self.cfg.hardware
         with self._lock:
             self.backend.open()
@@ -159,34 +184,75 @@ class SuperK:
             self._idn = self.backend.identify()
             if hw.emission_off_on_start:
                 self.backend.set_emission(False)
-            self.backend.set_rf(False)
-            self.backend.set_watchdog(int(hw.watchdog_s))
-            self._power = self._clamped_power(self._power, announce=True)
-            self.backend.set_power(self._power)
-            try:
-                self._apply_filter_locked(self._filter, announce=False, switch=True)
-            except Exception as exc:
-                # The start-up crystal cannot be reached (e.g. it sits in the
-                # other SELECT housing and the RF cable is not there). Do not
-                # refuse to start: adopt the crystal the driver DOES reach, if
-                # it is in the table, and say so. RF is off either way.
-                self._emit("warn", f"start-up crystal {self.active_filter()}: {exc}")
-                self._adopt_connected_crystal_locked()
-            amax = self.cfg.limits.amplitude_max_pct
-            for i in range(N_LINES):
-                self._amp[i] = _clamp(self._amp[i], 0.0, amax)[0]
-                self.backend.set_wavelength(i, self._wl[i])
-                self.backend.set_amplitude(i, self._amp[i])
-            # if emission was left on (front panel) and we did not switch it
-            # off, adopt it so the GUI and a scan see the truth
-            self._emission = bool(self.backend.read_emission())
-        self._emit("info", f"connected: {self._idn or 'SuperK'} (emission "
-                           f"{'ON' if self._emission else 'off'}, RF off)")
+            self._arm_watchdog_locked()
+            self._adopt_locked()
+        self._emit("info", f"connected: {self._idn or 'SuperK'} -- adopted: emission "
+                           f"{'ON' if self._emission else 'off'}, RF "
+                           f"{'ON' if self._rf else 'off'}, power {self._power:g} %, "
+                           f"crystal {self.active_filter()}")
+        if self._emission:
+            self._emit("warn", "the laser was already EMITTING at start; left on "
+                               "(no lost-client guard until a GUI switches it on)")
         self._poll_once()
         self._stop.clear()
         self._thread = threading.Thread(target=self._worker, name="superk-poll",
                                         daemon=True)
         self._thread.start()
+
+    def _adopt_locked(self) -> None:
+        """Read every setpoint the laser holds and make it the brain's own.
+        QUERIES ONLY. A value outside this module's limits is NOT corrected on
+        the laser (that would be a write at start): it is announced, and the
+        next explicit request is clamped as usual. Caller holds self._lock."""
+        b = self.backend
+        self._emission = bool(b.read_emission())
+        self._owner = None                      # nobody here switched it on
+        self._rf = bool(b.read_rf())
+        self._power = float(b.read_power())
+        lim = self.cfg.limits
+        if not lim.power_min_pct <= self._power <= lim.power_max_pct:
+            self._emit("warn", f"the laser's power level {self._power:g} % is outside "
+                               f"this module's limits {lim.power_min_pct:g}.."
+                               f"{lim.power_max_pct:g} %; left as it is")
+        # crystal: which one the RF driver reaches, mapped onto the table
+        try:
+            code = int(b.read_crystal())
+        except Exception:
+            code = 0
+        n = len(self.filter_names())
+        codes = C.ints(self.cfg.filters.crystal, n, 1) if n else []
+        if code in codes:
+            self._filter = codes.index(code)
+        else:
+            self._emit("warn", f"the RF driver reports crystal {code}, which is not in "
+                               f"the filter table ({self.cfg.filters.crystal}); showing "
+                               f"{self.active_filter()} -- check filters.crystal")
+        self._applied_code = self._crystal_code(self._filter)
+        rng = b.read_crystal_range() or self._config_range(self._filter)
+        self._range = rng
+        self._wl = [float(b.read_wavelength(i)) for i in range(N_LINES)]
+        self._amp = [float(b.read_amplitude(i)) for i in range(N_LINES)]
+        lo, hi = rng
+        for i in range(N_LINES):
+            if self._amp[i] > 0 and not lo <= self._wl[i] <= hi:
+                self._emit("warn", f"line {i + 1}: {self._wl[i]:g} nm is outside "
+                                   f"{self.active_filter()} ({lo:g}..{hi:g} nm); "
+                                   f"left as it is")
+
+    def _arm_watchdog_locked(self) -> None:
+        """Make the laser's own watchdog match hardware.watchdog_s. It is the
+        only protection left when the service is KILLED (no code runs then),
+        so it is a safety interlock and the one write a start may do -- and
+        only when the laser's value differs. Caller holds self._lock."""
+        want = max(0, int(self.cfg.hardware.watchdog_s))
+        try:
+            have = int(self.backend.read_watchdog())
+        except Exception:
+            have = None                         # unreadable: write to be sure
+        if have != want:
+            self.backend.set_watchdog(want)
+            self._emit("info", f"laser watchdog {have if have is not None else '?'} s "
+                               f"-> {want} s (safety against a killed service)")
 
     def shutdown(self) -> None:
         """RF off, emission off, disconnect. Safe to call more than once / on a crash."""
@@ -219,9 +285,16 @@ class SuperK:
 
     # ============================================================== commands
 
-    def set_emission(self, on: bool) -> None:
+    def set_emission(self, on: bool, owner: str | None = None) -> None:
         """Switch the laser emission. ON is refused unless connected and the
-        interlock reads OK. OFF is always accepted."""
+        interlock reads OK. OFF is always accepted.
+
+        `owner` (a client id) arms the LOST-CLIENT GUARD: the remote GUI's
+        client sends it and then pings; if that client stays silent for
+        hardware.client_timeout_s, the worker switches emission off. ON without
+        an owner (scan routine, console, the in-process GUI) has no guard --
+        and TAKES OVER ownership, so a scan that switches the laser on in its
+        routine is not cut when a GUI that switched it on earlier closes."""
         on = bool(on)
         if on:
             if not self._connected:
@@ -236,12 +309,26 @@ class SuperK:
         # laser has taken the command, so a failed write leaves "off".
         if not on:
             self._emission = False
+            self._owner = None
         if self._connected:
             with self._lock:
                 self.backend.set_emission(on)
+        if on:
+            # owner and its clock BEFORE the emission flag: the worker's guard
+            # reads them without a lock, and must never pair a fresh "on" with
+            # the previous owner's stale heartbeat time
+            self._owner_seen = time.monotonic()
+            self._owner = owner or None
         self._emission = on
         self._emit("warn" if on else "info",
                    "EMISSION ON requested (class 4 laser)" if on else "emission OFF")
+
+    def touch(self, client: str | None) -> None:
+        """A client said something (the service calls this on EVERY command,
+        `ping` included). Only the owner's words feed the lost-client guard:
+        another client being alive does not prove the owner still is."""
+        if client and client == self._owner:
+            self._owner_seen = time.monotonic()
 
     def reset_interlock(self) -> None:
         """Acknowledge a closed interlock. Does NOT switch emission on."""
@@ -320,18 +407,25 @@ class SuperK:
         return self.cfg
 
     def apply_config(self) -> None:
-        """Re-clamp everything to the (possibly new) limits / filter table.
-        Called after set_config edits self.cfg in place. Never turns emission on."""
+        """Called after set_config edits self.cfg in place (or the Settings
+        dialog does). Never turns emission on, and writes ONLY what the edit
+        actually changes on the laser:
+          * a value the new limits no longer allow is clamped (and announced);
+          * a changed watchdog is written;
+          * a crystal-table edit that changes the active crystal's number
+            re-switches (otherwise no RF blip);
+          * a changed PRESET (group "startup") is sent through its setter.
+        An unchanged Settings > Apply therefore writes nothing at all."""
         self._sanitise_limits()
-        self._power = self._clamped_power(self._power, announce=True)
         self._filter = min(self._filter, max(len(self.filter_names()) - 1, 0))
         with self._lock:
+            p = self._clamped_power(self._power, announce=True)
+            if p != self._power:
+                self._power = p
+                if self._connected:
+                    self.backend.set_power(p)
             if self._connected:
-                self.backend.set_power(self._power)
-                self.backend.set_watchdog(int(self.cfg.hardware.watchdog_s))
-            # switch the RF switch only if the crystal MEANT by the active
-            # entry changed (someone edited the crystal table); otherwise just
-            # re-read the range and re-clamp, without blipping the RF
+                self._arm_watchdog_locked()
             code = self._crystal_code(self._filter)
             self._apply_filter_locked(self._filter, announce=True,
                                       switch=code != self._applied_code)
@@ -339,9 +433,30 @@ class SuperK:
                 a, clamped = _clamp(self._amp[i], 0.0, self.cfg.limits.amplitude_max_pct)
                 if clamped:
                     self._emit("warn", f"line {i + 1}: amplitude clamped to {a:g} %")
-                self._amp[i] = a
-                if self._connected:
-                    self.backend.set_amplitude(i, a)
+                    self._amp[i] = a
+                    if self._connected:
+                        self.backend.set_amplitude(i, a)
+        self._apply_changed_presets()
+
+    def _apply_changed_presets(self) -> None:
+        """Send the presets someone CHANGED since they were last seen (at
+        construction or at the previous apply). Line lists go line by line, so
+        editing line 3 does not re-send lines 1..8."""
+        new = dict(vars(self.cfg.startup))
+        old, self._presets_seen = self._presets_seen, new
+        if new["filter"] != old.get("filter"):
+            self.set_filter(new["filter"])
+        if new["power_pct"] != old.get("power_pct"):
+            self.set_power(float(new["power_pct"]))
+        wl_n = C.floats(new["wavelengths_nm"], N_LINES, 650.0)
+        wl_o = C.floats(old.get("wavelengths_nm", ""), N_LINES, float("nan"))
+        am_n = C.floats(new["amplitudes_pct"], N_LINES, 0.0)
+        am_o = C.floats(old.get("amplitudes_pct", ""), N_LINES, float("nan"))
+        for i in range(N_LINES):
+            if wl_n[i] != wl_o[i]:
+                self.set_wavelength(i + 1, wl_n[i])
+            if am_n[i] != am_o[i]:
+                self.set_amplitude(i + 1, am_n[i])
 
     # ============================================================= internals
 
@@ -350,20 +465,6 @@ class SuperK:
         if not 0 <= i < N_LINES:
             raise ValueError(f"line must be 1..{N_LINES}, got {line}")
         return i
-
-    def _adopt_connected_crystal_locked(self) -> None:
-        """Point the brain at whichever table entry the RF driver is really
-        connected to (used when the wanted crystal could not be reached)."""
-        try:
-            code = int(self.backend.read_crystal())
-        except Exception:
-            return
-        n = len(self.filter_names())
-        codes = C.ints(self.cfg.filters.crystal, n, 1) if n else []
-        if code in codes:
-            self._applied_code = code
-            self._apply_filter_locked(codes.index(code), announce=True, switch=False)
-            self._emit("info", f"using the connected crystal {self.active_filter()}")
 
     def _sanitise_limits(self) -> None:
         """The limits themselves arrive over the wire (set_config) or from a
@@ -397,7 +498,8 @@ class SuperK:
         Caller holds self._lock.
 
         switch=False only re-reads the range and re-clamps (a config change
-        that did not change which crystal is meant), so the RF is not blipped.
+        that did not change which crystal is meant), so the RF is not blipped,
+        and only the lines that the clamp actually MOVED are written.
 
         ORDER MATTERS on the real hardware: the SELECT's RF switch must not
         move under RF power (SDK manual 6.10), so RF goes off first and comes
@@ -431,8 +533,11 @@ class SuperK:
                 self._emit("warn", f"line {i + 1}: {self._wl[i]:g} nm is outside "
                                    f"{self.active_filter()} ({lo:g}..{hi:g} nm), "
                                    f"moved to {v:g} nm")
+            moved = v != self._wl[i]
             self._wl[i] = v
-            if self._connected:
+            # after a crystal switch every line is re-sent (an explicit user
+            # action on a new crystal); otherwise only what the clamp moved
+            if self._connected and (switch or moved):
                 self.backend.set_wavelength(i, v)
         if self._connected and switch and self._rf:
             self.backend.set_rf(True)
@@ -442,6 +547,7 @@ class SuperK:
     def _worker(self) -> None:
         while not self._stop.is_set():
             t0 = time.monotonic()
+            self._check_owner()
             self._poll_once()
             period = 1.0 / max(0.5, float(self.cfg.hardware.poll_hz))
             # time.sleep, not Event.wait: a timed wait rounds up to the 15.6 ms
@@ -450,6 +556,27 @@ class SuperK:
             end = time.monotonic() + max(0.0, remaining)
             while not self._stop.is_set() and time.monotonic() < end:
                 time.sleep(0.02)
+
+    def _check_owner(self) -> None:
+        """Lost-client guard: the client that switched emission on (with an
+        owner id) has been silent for longer than hardware.client_timeout_s
+        -> emission OFF. RF and everything else are left alone (not dangerous
+        without emission, and a reconnecting GUI finds them as they were)."""
+        timeout = float(self.cfg.hardware.client_timeout_s)
+        if not self._owner or timeout <= 0 or not self._emission:
+            return
+        silent = time.monotonic() - self._owner_seen
+        if silent <= timeout:
+            return
+        self._owner = None
+        self._emission = False
+        try:
+            with self._lock:
+                self.backend.set_emission(False)
+        except Exception as exc:                       # the poll will show hw_error
+            self._emit("error", f"lost-client guard: emission OFF failed: {exc}")
+        self._emit("warn", f"the client that switched emission on has been silent "
+                           f"for {silent:.1f} s (> {timeout:g} s): emission OFF")
 
     def _poll_once(self) -> None:
         """Read the hardware and build a NEW Status. The only writer of _status."""
@@ -465,6 +592,7 @@ class SuperK:
                 st.inlet_temp_C = float(self.backend.read_inlet_temp())
                 st.rf_on = bool(self.backend.read_rf())
                 st.crystal_temp_C = float(self.backend.read_crystal_temp())
+                st.crystal = int(self.backend.read_crystal())
                 st.wavelength_nm = [float(self.backend.read_wavelength(i))
                                     for i in range(N_LINES)]
                 st.amplitude_pct = [float(self.backend.read_amplitude(i))
@@ -485,6 +613,7 @@ class SuperK:
         # so closing the door again does not bring the beam back by itself
         if self._emission and code != 2:
             self._emission = False
+            self._owner = None
             self._emit("warn", f"interlock {INTERLOCK_TEXT.get(code, code)}: "
                                f"emission request cleared")
         st.interlock_code = code
@@ -507,6 +636,7 @@ class SuperK:
         st.filter_min_nm, st.filter_max_nm = range_w
         st.wavelength_set_nm = wl_w
         st.amplitude_set_pct = amp_w
+        st.emission_guarded = bool(self._owner) and st.emission_set
         self._status = st
 
     def _emit(self, level: str, msg: str) -> None:

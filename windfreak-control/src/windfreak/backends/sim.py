@@ -51,14 +51,30 @@ def max_leveled_power(hz: float) -> float:
 
 
 class _SimChannel:
-    def __init__(self):
-        self.freq_Hz = 1e9
-        self.power_dBm = -10.0
-        self.phase_deg = 0.0
-        self.pa_on = False          # output amplifier ("r")
-        self.unmuted = False        # RF mute ("h", 1 = not muted)
-        self.pll_on = True          # PLL + VCO ("E")
-        self.lock_after = 0.0       # monotonic time from which the PLL is locked
+    def __init__(self, frequency_Hz=1e9, power_dBm=-10.0, phase_deg=0.0, rf_on=False,
+                 pll_on=True):
+        self.freq_Hz = float(frequency_Hz)
+        self.power_dBm = float(power_dBm)
+        self.phase_deg = float(phase_deg)
+        self.pa_on = bool(rf_on)          # output amplifier ("r")
+        self.unmuted = bool(rf_on)        # RF mute ("h", 1 = not muted)
+        self.pll_on = bool(pll_on)        # PLL + VCO ("E")
+        self.lock_after = 0.0             # monotonic time from which the PLL is locked
+
+
+#: What the pretend SynthHD is doing BEFORE the service starts -- as if someone
+#: had left it running from the Windfreak GUI, or its EEPROM powers it up like
+#: this. Deliberately NOT the config defaults (1 GHz, -10 dBm, RF off,
+#: internal 27 MHz): the service must READ this state and adopt it, and a test
+#: can only tell adoption from "pushed the defaults" if the two differ.
+SIM_BOOT_STATE = {
+    "channels": [
+        {"frequency_Hz": 2.45e9, "power_dBm": -5.0, "phase_deg": 0.0, "rf_on": True},
+        {"frequency_Hz": 3.2e9, "power_dBm": -12.0, "phase_deg": 90.0, "rf_on": False},
+    ],
+    "reference": "internal_10MHz",
+    "ext_MHz": 10.0,
+}
 
 
 class SimulatedSynthHD:
@@ -70,13 +86,18 @@ class SimulatedSynthHD:
 
     def __init__(self, channel_spacing_Hz: float = 100.0,
                  pll_off_when_rf_off: bool = False,
-                 external_ref_MHz: float | None = None):
+                 external_ref_MHz: float | None = None,
+                 boot: dict | None = None):
         self.spacing = float(channel_spacing_Hz) if channel_spacing_Hz > 0 else 100.0
         self.pll_off_when_rf_off = bool(pll_off_when_rf_off)
         self.external_ref_MHz = external_ref_MHz
-        self.ch = [_SimChannel(), _SimChannel()]
-        self.ref_source = "internal_27MHz"
-        self.ref_ext_MHz = 10.0
+        boot = SIM_BOOT_STATE if boot is None else boot
+        self.ch = [_SimChannel(**c) for c in boot["channels"]]
+        self.ref_source = boot.get("reference", "internal_27MHz")
+        self.ref_ext_MHz = float(boot.get("ext_MHz", 10.0))
+        # every command that CHANGES the instrument, in order -- so a test can
+        # prove that start-up sends none (the read-only start rule)
+        self.writes: list[tuple] = []
         self._open = False
         self._temp_C = 28.0
         self._temp_t = time.monotonic()
@@ -84,15 +105,26 @@ class SimulatedSynthHD:
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
+        # Connect and change nothing (read-only start rule, 2026-09-27): the
+        # pretend box keeps whatever it was doing, RF included.
         self._open = True
-        # a real SynthHD may boot radiating (EEPROM defaults); the backend's
-        # job on open is to make it quiet. Pretend it booted ON to prove that.
+
+    def read_state(self) -> dict:
+        chans = []
         for c in self.ch:
-            c.pa_on = c.unmuted = True
-        for i in (0, 1):
-            self.set_output(i, False)
+            chans.append({"rf_on": c.pa_on and c.unmuted,
+                          "rf_partial": c.pa_on != c.unmuted,
+                          "pll_on": c.pll_on,
+                          "frequency_Hz": c.freq_Hz,
+                          "power_dBm": c.power_dBm,
+                          # the sim CAN read its phase (its coordinate is
+                          # absolute); the real backend reports its own zero
+                          "phase_deg": c.phase_deg})
+        return {"channels": chans, "reference": self.ref_source,
+                "ext_MHz": self.ref_ext_MHz, "unread": []}
 
     def close(self) -> None:
+        # shutdown is not part of the read-only rule: RF off on the way out
         for i in (0, 1):
             self.set_output(i, False)
         self._open = False
@@ -100,6 +132,7 @@ class SimulatedSynthHD:
     # ---- per channel -----------------------------------------------------
 
     def set_output(self, ch: int, on: bool) -> None:
+        self.writes.append(("set_output", ch, bool(on)))
         c = self.ch[ch]
         now = time.monotonic()
         if on:
@@ -117,6 +150,7 @@ class SimulatedSynthHD:
         return c.pa_on and c.unmuted
 
     def set_frequency(self, ch: int, hz: float) -> None:
+        self.writes.append(("set_frequency", ch, float(hz)))
         c = self.ch[ch]
         # the PLL can only make multiples of its channel spacing
         c.freq_Hz = round(float(hz) / self.spacing) * self.spacing
@@ -126,9 +160,11 @@ class SimulatedSynthHD:
         return self.ch[ch].freq_Hz
 
     def set_power(self, ch: int, dBm: float) -> None:
+        self.writes.append(("set_power", ch, float(dBm)))
         self.ch[ch].power_dBm = float(dBm)
 
     def set_phase(self, ch: int, deg: float) -> None:
+        self.writes.append(("set_phase", ch, float(deg)))
         self.ch[ch].phase_deg = float(deg) % 360.0
 
     def read_locked(self, ch: int) -> bool:
@@ -153,6 +189,7 @@ class SimulatedSynthHD:
     def set_reference(self, source: str, ext_MHz: float) -> None:
         if source not in REFERENCE_SOURCES:
             raise ValueError(f"unknown reference {source!r}")
+        self.writes.append(("set_reference", source, float(ext_MHz)))
         now = time.monotonic()
         self.ref_source = source
         self.ref_ext_MHz = float(ext_MHz)
@@ -167,6 +204,10 @@ class SimulatedSynthHD:
             return False                    # nothing on REF IN
         # a mismatch pulls the PFD out of range: no lock (0.1 % window)
         return abs(self.external_ref_MHz - self.ref_ext_MHz) <= 1e-3 * self.ref_ext_MHz
+
+    def set_channel_spacing(self, hz: float) -> None:
+        self.writes.append(("set_channel_spacing", float(hz)))
+        self.spacing = float(hz) if hz > 0 else self.spacing
 
     def read_temperature(self) -> float:
         # first-order approach towards the steady state for the load now on

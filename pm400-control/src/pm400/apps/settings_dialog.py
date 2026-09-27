@@ -22,9 +22,9 @@ _TABS = [("sensor", "Sensor"), ("acquisition", "Acquisition"), ("limits", "Limit
          ("hardware", "Hardware"), ("sim", "Simulation"), ("ui", "Appearance")]
 
 _HINTS = {
-    "sensor": "Pushed to the console on Apply. At start-up and whenever a head is "
-              "plugged in, the console's own settings are adopted unless Hardware > "
-              "push_on_start is on. range_W is for power heads, range_J for pyro heads.",
+    "sensor": "Sent to the console only on Apply. At start-up and whenever a head is "
+              "plugged in, the console's own settings are READ and adopted -- starting "
+              "never changes the console. range_W is for power heads, range_J for pyro heads.",
     "acquisition": "An acquisition averages this many readings that all started at "
                    "least settle_s after the trigger. Use settle_s ~5 s with a thermal head.",
     "limits": "The envelope every setpoint is clamped to, narrowed further by what "

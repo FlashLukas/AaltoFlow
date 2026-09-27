@@ -12,9 +12,19 @@ def test_defaults_match_the_contract():
     assert cfg.limits.field_max_mT == 180.0
     assert (cfg.limits.angle_min_deg, cfg.limits.angle_max_deg) == (-360.0, 360.0)
     assert cfg.control.settle_timeout_s == 30.0
-    assert cfg.control.energize_on_start is True
+    # energize_on_start was removed 2026-09-27 (adopt-on-start rule)
+    assert not hasattr(cfg.control, "energize_on_start")
     assert cfg.interlock.water_bypass is False and cfg.interlock.temp_monitor is False
     assert cfg.interlock.max_temp_C == 40.0
+
+
+def test_an_old_ini_with_energize_on_start_still_loads(tmp_path):
+    path = tmp_path / "old.ini"
+    path.write_text("[control]\nkp_V_per_mT = 0.05\nenergize_on_start = True\n",
+                    encoding="utf-8")
+    back = Config.load(str(path))
+    assert back.control.kp_V_per_mT == 0.05
+    assert not hasattr(back.control, "energize_on_start")
 
 
 def test_hall_conversion_round_trips():
@@ -29,7 +39,6 @@ def test_hall_conversion_round_trips():
 def test_ini_round_trip_including_bools(tmp_path):
     cfg = Config()
     cfg.control.kp_V_per_mT = 0.033
-    cfg.control.energize_on_start = False
     cfg.interlock.water_bypass = True
     cfg.interlock.temp_monitor = True
     cfg.hardware.hall_samples = 250
@@ -41,8 +50,7 @@ def test_ini_round_trip_including_bools(tmp_path):
 
     back = Config.load(str(path))
     assert back.control.kp_V_per_mT == 0.033
-    assert back.control.energize_on_start is False      # the classic bool trap
-    assert back.interlock.water_bypass is True
+    assert back.interlock.water_bypass is True           # the classic bool trap
     assert back.interlock.temp_monitor is True
     assert back.sim.water_ok is False
     assert back.hardware.hall_samples == 250 and isinstance(back.hardware.hall_samples, int)

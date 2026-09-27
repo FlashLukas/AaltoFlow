@@ -9,6 +9,9 @@ The service owns the magnet and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 10 Hz)
 
+ADOPT AT START: the service reads the magnet (enable line, drive, field) and
+takes it over as it is -- it does not switch the output on or off by itself.
+
 WATER CHECK AT START: if the cooling water is off and the interlock is not
 bypassed, the service prints why and exits with code 3 -- before it opens a
 socket, so nothing can command a magnet that must not run.

@@ -33,6 +33,14 @@ What the manual says that shapes this file:
   * sec. B.20     OUTP OFF saves the programmed values and programs 0 V / 0 A
     at once; OUTP ON restores them. The brain therefore programs the main
     channel to 0 BEFORE switching on and ramps to 0 BEFORE switching off.
+    VERIFY on the unit: an earlier note read B.20 as "remote mode starts with
+    OUTP OFF". If addressing the BOP over GPIB really switches a live output
+    off, adoption can only ever find it OFF -- watch the front panel when the
+    service starts with the output on.
+  * START-UP READS, IT DOES NOT WRITE (Lukas, 2026-09-27). open() sends *IDN?
+    and *CLS only; read_state() then queries FUNC:MODE?, OUTP?, VOLT?, CURR?
+    and the brain adopts the answers. The range (CURR:RANG / VOLT:RANG) is left
+    as found and is pinned only after the next EXPLICIT mode change.
   * sec. 1.2.1    Readback is the average of the last 16 conversions, valid
     ~320 ms after a change. (The brain's `acquisition.settle_s` covers it.)
   * sec. B.87     SYST:REM is for RS-232 only; on GPIB the bus puts the unit in
@@ -71,12 +79,37 @@ class VisaBOP:
         self._inst.write_termination = "\n"
         self._inst.read_termination = "\n"
         self._idn = self._query("*IDN?")                    # VERIFY A.6: "KEPCO,BIT 4886,..."
+        # *CLS only empties the status registers and the error queue; it does
+        # not touch the output, the mode or any programmed value. It is the
+        # ONLY write at start: so that a later SYST:ERR? reports our errors,
+        # not something left over from the last session.
         self._write("*CLS")                                 # VERIFY A.2: clear status + error queue
-        # Output off FIRST, then both channels to 0, so opening the connection
-        # never energises anything (B.20: remote mode starts with OUTP OFF anyway).
-        self._write("OUTP OFF")                             # VERIFY B.20
-        self._write("VOLT 0")                               # VERIFY B.57
-        self._write("CURR 0")                               # VERIFY B.48
+        # Nothing else is written here (Lukas, 2026-09-27: "read the instrument
+        # state on startup, not change anything"). The BOP may be driving a
+        # coil right now -- possibly left live by clMag-control, which drives
+        # the SAME physical unit. No OUTP OFF, no VOLT 0 / CURR 0, no FUNC:MODE,
+        # no range pinning: the brain reads the state with read_state() and
+        # adopts it.
+
+    def read_state(self) -> dict:
+        """What the BOP is doing right now, from QUERIES only.
+
+        mode      FUNC:MODE?  (B.23: 0 = voltage, 1 = current)
+        output    OUTP?       (B.21: 0/1)
+        voltage_V VOLT?       the PROGRAMMED voltage: the output in voltage
+                              mode, the voltage LIMIT in current mode (4.1.1.1)
+        current_A CURR?       the programmed current, likewise
+        """
+        mode = self.read_mode()
+        output = self.read_output()
+        # VERIFY B.58 / B.49: VOLT? / CURR? return the PROGRAMMED value (not a
+        # measurement) in <exp_value> form. Also check what they return while
+        # the output is OFF: B.20 says OUTP OFF saves the programmed values and
+        # programs 0, so they may read 0 until OUTP ON restores them.
+        volts = float(self._query("VOLT?"))
+        amps = float(self._query("CURR?"))
+        return {"mode": mode, "output": output, "voltage_V": volts,
+                "current_A": amps}
 
     def close(self) -> None:
         try:
@@ -132,7 +165,7 @@ class VisaBOP:
     def idn(self) -> str:
         return self._idn
 
-    # ---- diagnostics (used by hand from a Python prompt) ----------------
+    # ---- queries (read_state uses the first two; the rest by hand) ------
 
     def read_mode(self) -> str:
         return "current" if self._query("FUNC:MODE?").strip() == "1" else "voltage"   # VERIFY B.23

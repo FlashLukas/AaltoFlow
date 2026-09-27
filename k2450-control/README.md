@@ -24,9 +24,13 @@ An SMU is two instruments in one box, and the module treats it that way:
 
 ## Safety, in one list
 
-* The output is **OFF** at start, on shutdown (also on the launcher's
-  `shutdown` verb), and before a source-function change. There is no
-  "output on at start" setting, on purpose.
+* **Start-up changes nothing.** The service only *reads* the 2450 and adopts
+  what it finds (function, levels, limits, ranges, NPLC, 2/4-wire, terminals,
+  output on/off); an output that was ON stays ON and is reported as such. The
+  `.ini` source/measure values are defaults applied only when you set them.
+* The output is switched **OFF** on shutdown (also on the launcher's
+  `shutdown` verb) and before a source-function change. The module never
+  switches it ON by itself.
 * The **compliance limit is always written before the level** and re-sent
   before `OUTP ON`.
 * The 2450's output is two boxes, **21 V x 1.05 A** and **210 V x 105 mA**.

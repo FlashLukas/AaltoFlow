@@ -28,18 +28,19 @@ def main() -> int:
     amp.start()
     print("IDN:", backend.idn())
     s = amp.status()
-    assert s.amp_on is False, "amplifier must be OFF after start"
-    print(f"after start: amp_on={s.amp_on}  gain={s.gain_dB} dB")
+    # the simulator starts as a leftover (6 dB, off) and the module ADOPTS it
+    assert (s.amp_on, s.gain_dB) == (backend._output, backend._gain),         "start must adopt the amplifier's state, not change it"
+    print(f"after start (adopted): amp_on={s.amp_on}  gain={s.gain_dB} dB")
 
     amp.set_frequency(3e9)
     amp.set_input_power(-20.0)
-    amp.set_gain(6.2)                          # snaps to the 0.5 dB step -> 6.0
+    amp.set_gain(4.2)                          # snaps to the 0.5 dB step -> 4.0
     amp.set_amp(True)
     amp.poll_once()
     s = amp.status()
     print(f"after set: amp_on={s.amp_on}  gain={s.gain_dB} dB  est. gain at 3 GHz "
           f"{s.est_gain_dB:.2f} dB  est. output {s.est_output_dBm:.2f} dBm")
-    assert s.amp_on is True and s.gain_dB == 6.0
+    assert s.amp_on is True and s.gain_dB == 4.0
 
     amp.set_gain(99.0)                         # above the safety ceiling -> clamped
     amp.poll_once()

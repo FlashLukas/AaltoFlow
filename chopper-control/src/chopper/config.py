@@ -84,6 +84,10 @@ class Hardware:
     timeout_s: float = 0.5                # per reply; the controller answers in ms
     poll_hz: float = 5.0                  # measured-frequency reads per second
     stop_on_exit: bool = False            # True: disable the motor when the service stops
+    # Start-up only READS the controller (Lukas, 2026-09-27). The one write the
+    # real backend used to make at connect, `verbose=0`, is now opt-in: set True
+    # only if verbose status lines turn out to confuse the replies on the unit.
+    quiet_on_open: bool = False
 
 
 @dataclass

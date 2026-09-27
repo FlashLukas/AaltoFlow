@@ -30,6 +30,11 @@ stage is turning. Light theme: `../front-panels/ddr25-light.png`.*
   wherever it was switched on.
 - **Velocity** and **acceleration**, clamped to a safety envelope and read back
   from the controller.
+- **Adopt on start**: starting the service only READS the controller --
+  position, homed, and its stored velocity/acceleration (which become the
+  config's values). Nothing is written at start: no profile push, no homing,
+  no channel enable (a disabled channel is enabled by the first move or home
+  you command). Config values reach the controller only when you apply them.
 - **STOP** (profiled, or immediate), a **display zero** ("Zero here"), and
   **10 stored orientations** with save/load to JSON.
 - **Fly-scan stream** of the encoder angle (`stream_start/read/stop`).

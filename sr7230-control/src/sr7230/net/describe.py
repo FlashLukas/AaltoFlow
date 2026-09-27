@@ -161,8 +161,9 @@ def build_manifest(lockin) -> dict:
            set={"verb": "set_amplitude", "arg": "amplitude_V"},
            settle={"policy": "echoes", "key": "amplitude_V", "tol": 1e-9},
            danger=True,
-           help="OSC OUT in V rms. Drives whatever is connected to it; starts "
-                "at 0 V and returns to 0 V when the service stops."),
+           help="OSC OUT in V rms. Drives whatever is connected to it. Read "
+                "from the instrument at start (never changed then); returns to "
+                "0 V when the service stops unless osc_off_on_shutdown is off."),
         _p("phase", "Reference phase", "control", "float", unit="deg",
            group="Reference", order=30, decimals=3, min=-180.0, max=180.0,
            read_path=["phase_deg"],

@@ -16,6 +16,14 @@ CLASS 4 LASER: `stop()` (reached from Ctrl-C, the `shutdown` verb, or any
 exception in serve_forever) always runs the brain's shutdown, which switches RF
 and emission OFF before disconnecting. A HARD kill runs no code at all; for that
 case the brain arms the laser's own watchdog (hardware.watchdog_s).
+
+LOST CLIENT: a message may carry "client": <id>. Every message is passed to
+`laser.touch(client)` BEFORE it is dispatched, so any command -- or the plain
+`ping` verb the remote GUI's client sends every second -- counts as a
+heartbeat. `set_emission{on: true, owner: <id>}` makes that client the owner;
+if the owner goes silent for hardware.client_timeout_s, the brain switches
+emission off. scan-core and the console send no owner, so a scan is never cut
+(see CLAUDE.local.md for the trade-off).
 """
 
 from __future__ import annotations
@@ -145,11 +153,14 @@ class SuperkService:
     def _dispatch(self, msg: dict) -> dict:
         cmd = msg.get("cmd")
         L = self.laser
+        L.touch(msg.get("client"))               # heartbeat for the lost-client guard
         try:
-            if cmd == "set_emission":
-                L.set_emission(_bool(msg["on"]))
+            if cmd == "ping":
+                return {"ok": True}
+            elif cmd == "set_emission":
+                L.set_emission(_bool(msg["on"]), owner=msg.get("owner"))
             elif cmd == "emission_on":           # describe action (danger)
-                L.set_emission(True)
+                L.set_emission(True, owner=msg.get("owner"))
             elif cmd == "emission_off":          # describe action
                 L.set_emission(False)
             elif cmd == "reset_interlock":

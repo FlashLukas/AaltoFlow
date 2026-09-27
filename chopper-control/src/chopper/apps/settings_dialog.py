@@ -155,6 +155,9 @@ class SettingsDialog(QtWidgets.QDialog):
         stop = QtWidgets.QCheckBox("Put the chopper in standby when the service stops")
         stop.setChecked(bool(hw.stop_on_exit))
         self._add(form, "hardware", "stop_on_exit", "On exit", stop)
+        quiet = QtWidgets.QCheckBox("Send verbose=0 when connecting (a write; off = read only)")
+        quiet.setChecked(bool(hw.quiet_on_open))
+        self._add(form, "hardware", "quiet_on_open", "On connect", quiet)
         form.addRow(_hint("Used by the real backend (USB virtual COM port, 115200 8N1). "
                           "The port applies at the next start of the service."))
         return page

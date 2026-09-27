@@ -7,6 +7,14 @@
     uv run scripts/run_service.py --calibration Calibrations\\mag2dcal_....json
     uv run scripts/run_service.py --no-calibration   # ignore saved curves, run on the
                                                      # straight line (and say so)
+    uv run scripts/run_service.py --energize         # switch a magnet found OFF on at 0 mT
+
+ADOPT, DON'T RESET. At start the service READS what the magnet is doing (enable
+line, drive voltages, field) and carries on from there: a magnet left energized
+by a previous run keeps its field (held, output frozen); one found off stays off
+until you switch the output on. Nothing is written at start -- except the water
+interlock below. --energize (control.energize_on_start) is the opt-in to switch
+a de-energized magnet on at 0 mT; it never touches one that is already on.
 
 CALIBRATION. By default the newest *.json in the project's Calibrations folder
 is loaded at start, and its measured range becomes the field limit. With none
@@ -61,6 +69,9 @@ def main() -> int:
                     help="load this calibration .json instead of the newest saved one")
     ap.add_argument("--no-calibration", action="store_true",
                     help="start uncalibrated (the jump uses ff_mT_per_V)")
+    ap.add_argument("--energize", action="store_true",
+                    help="if the magnet is found OFF, switch the output on at 0 mT "
+                         "(default: leave it as found)")
     args = ap.parse_args()
 
     cfg = Config.load(args.config) if args.config else Config()
@@ -69,6 +80,8 @@ def main() -> int:
         print("WARNING: water interlock BYPASSED for this run")
     if args.no_calibration:
         cfg.calibration.load_newest_on_start = False
+    if args.energize:
+        cfg.control.energize_on_start = True
 
     if args.real:
         try:

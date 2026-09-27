@@ -379,7 +379,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tcard, tlay = _card("Tracking generator")
         row = QtWidgets.QHBoxLayout()
         self.tg_btn = QtWidgets.QPushButton("TG OFF"); self.tg_btn.setCheckable(True)
-        self.tg_btn.setToolTip("RF out of GEN OUTPUT, following the sweep. Off at every start.")
+        self.tg_btn.setToolTip("RF out of GEN OUTPUT, following the sweep. Left as the instrument has it at start; "
+                                  "off when the service stops.")
         self.tg_btn.clicked.connect(lambda on: self._call(self.ctrl.set_tg, on))
         self.tg_level_spin = self._dspin(lim.tg_level_min_dBm, lim.tg_level_max_dBm, 1, "  dBm", 1.0)
         b = QtWidgets.QPushButton("Set level")

@@ -21,7 +21,8 @@ class RFSource(Protocol):
     """A programmable RF signal generator (the R&S SMB100A)."""
 
     def open(self) -> None:
-        """Connect and initialise. Should leave the RF OUTPUT OFF."""
+        """Connect. Must NOT change the instrument's state (no RF off, no
+        unit/level/frequency writes): the Generator adopts what it finds."""
 
     def close(self) -> None:
         """Turn RF off and disconnect. Safe to call on shutdown/crash."""

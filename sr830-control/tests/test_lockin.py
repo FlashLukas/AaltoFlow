@@ -64,7 +64,9 @@ def _run_auto(li, clock, fn, step=0.01, max_s=10.0):
 
 # ---- lifecycle and settings --------------------------------------------------
 
-def test_start_pushes_the_whole_config_and_reads_it_back(rig):
+def test_start_adopts_the_simulated_front_panel(rig):
+    """In simulation the power-on state comes from cfg (sim_system), and start()
+    READS it -- it writes nothing (see test_adopt.py for a non-default state)."""
     li, sim, clock, _ = rig
     cfg = li.cfg
     assert sim.internal and sim.osc_hz == cfg.reference.frequency_Hz

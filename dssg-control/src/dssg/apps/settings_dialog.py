@@ -4,8 +4,9 @@ Nothing here talks to hardware directly -- it edits the shared `cfg` object in
 place and then calls `synth.apply_config()` so the running brain (local or
 remote) picks the changes up. Values are grouped:
 
-  Signal     -- the start-up signal (frequency / power / phase / reference; RF
-                is always off at start-up, deliberately not a setting)
+  Signal     -- a PRESET (frequency / power / phase / reference), sent only
+                when you change it here; the service ADOPTS the unit's state
+                at start and changes nothing then. RF is never a setting.
   Limits     -- the safety envelope every setpoint is clamped to
   Hardware   -- USB COM port or Ethernet address, timing, echo tolerances
   Simulator  -- what the simulated unit reports about itself
@@ -118,16 +119,17 @@ class SettingsDialog(QtWidgets.QDialog):
     def _signal_tab(self):
         page, form = self._form_widget()
         s = self.cfg.signal
-        self._add(form, "signal", "frequency_Hz", "Start frequency",
+        self._add(form, "signal", "frequency_Hz", "Preset frequency",
                   _dspin(s.frequency_Hz, 0, 4e10, 0, 1e6, "Hz"))
-        self._add(form, "signal", "power_dBm", "Start power",
+        self._add(form, "signal", "power_dBm", "Preset power",
                   _dspin(s.power_dBm, -100, 30, 2, 0.5, "dBm"))
-        self._add(form, "signal", "phase_deg", "Start phase",
+        self._add(form, "signal", "phase_deg", "Preset phase",
                   _dspin(s.phase_deg, 0, 360, 2, 1.0, "deg"))
         self._add(form, "signal", "reference", "10 MHz reference",
                   _combo(REFERENCES, s.reference))
-        form.addRow(_hint("Pushed to the generator when the service starts. The RF output "
-                          "always starts OFF; that is not a setting, on purpose."))
+        form.addRow(_hint("Sent to the generator only when you CHANGE a value here and "
+                          "press Apply. Nothing is sent at start: the service reads what "
+                          "the unit is doing and adopts it. RF on/off is never a preset."))
         return page
 
     def _limits_tab(self):
@@ -176,9 +178,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self._add(form, "hardware", "phase_mode", "Phase control",
                   _combo(("auto", "on", "off"), hw.phase_mode))
         self._add(form, "hardware", "mute_buzzer", "Buzzer",
-                  _check("mute the buzzer on connect", hw.mute_buzzer))
+                  _check("mute the buzzer (sent when you change it)", hw.mute_buzzer))
         self._add(form, "hardware", "display_off", "Display",
-                  _check("switch the OLED off while connected", hw.display_off))
+                  _check("switch the OLED off (sent when you change it; back on "
+                         "at disconnect)", hw.display_off))
         form.addRow(_hint("USB: the unit is a virtual COM port (115200 8N1). Ethernet: raw "
                           "TCP, port 10001. Transport settings take effect when the service "
                           "restarts. The simulator ignores them."))
@@ -199,7 +202,21 @@ class SettingsDialog(QtWidgets.QDialog):
                   _check("the simulated firmware has PHASE", sm.has_phase))
         self._add(form, "sim", "external_ref_present", "External reference",
                   _check("a 10 MHz cable is plugged in", sm.external_ref_present))
-        form.addRow(_hint("Only used without --real. Takes effect when the simulator restarts."))
+        # The state the simulated box is in when the service connects -- the
+        # module adopts it, exactly as it adopts a real unit's state.
+        self._add(form, "sim", "state_rf_on", "Box state: RF",
+                  _check("RF already on", sm.state_rf_on))
+        self._add(form, "sim", "state_frequency_Hz", "Box state: frequency",
+                  _dspin(sm.state_frequency_Hz, 0, 4e10, 0, 1e6, "Hz"))
+        self._add(form, "sim", "state_power_dBm", "Box state: power",
+                  _dspin(sm.state_power_dBm, -100, 30, 1, 0.5, "dBm"))
+        self._add(form, "sim", "state_phase_deg", "Box state: phase",
+                  _dspin(sm.state_phase_deg, 0, 360, 2, 1.0, "deg"))
+        self._add(form, "sim", "state_reference", "Box state: reference",
+                  _combo(REFERENCES, sm.state_reference))
+        form.addRow(_hint("Only used without --real. Takes effect when the simulator restarts. "
+                          "'Box state' is what the simulated unit is doing when the service "
+                          "connects; the service adopts it."))
         return page
 
     def _appearance_tab(self):

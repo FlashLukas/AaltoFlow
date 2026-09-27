@@ -30,6 +30,12 @@ class Sweep:
     span, VBW follows RBW, attenuation follows the reference level, sweep time
     follows span/RBW/VBW). Typing a value switches that coupling off, exactly
     like the front panel.
+
+    At start these are READ from the instrument and adopted (Lukas's rule,
+    2026-09-27): the .ini values are only a fallback for a setting the
+    instrument does not report, and are sent to it only when the user applies
+    them (a setter or set_config) -- never at start. (`averages` is the
+    software's own and is not read.)
     """
 
     start_Hz: float = 9e3              # full span, like the instrument's preset
@@ -53,8 +59,10 @@ class Sweep:
 class Tracking:
     """The tracking generator (option TG): a CW source that follows the sweep,
     so the analyser measures a device's transmission |S21| in dB (a SCALAR
-    network analyser). OFF at every start, whatever the .ini says: it drives
-    whatever is connected to GEN OUTPUT."""
+    network analyser). Like the `sweep` group, READ from the instrument at start
+    and adopted (2026-09-27: starting the software changes nothing on the
+    instrument); these values are sent only when the user sets them. Switched
+    OFF when the service stops: it drives whatever is connected to GEN OUTPUT."""
 
     tg_on: bool = False
     level_dBm: float = -10.0           # -30 ... 0 dBm on the GSP-818

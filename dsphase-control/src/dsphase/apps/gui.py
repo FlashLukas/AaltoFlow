@@ -300,7 +300,7 @@ class MainWindow(QtWidgets.QMainWindow):
         prow = QtWidgets.QHBoxLayout()
         self.phase_spin = _dspin(lim.phase_min_deg, lim.phase_max_deg,
                                  decimals_for(dev.phase_step_deg), dev.phase_step_deg,
-                                 self.cfg.signal.phase_deg, "deg")
+                                 0.0, "deg")      # seeded from the unit (_seed_inputs)
         set_ph = QtWidgets.QPushButton("Set"); set_ph.setObjectName("primary")
         set_ph.clicked.connect(self._set_phase)
         prow.addWidget(self.phase_spin, 1); prow.addWidget(set_ph)
@@ -327,7 +327,7 @@ class MainWindow(QtWidgets.QMainWindow):
         arow = QtWidgets.QHBoxLayout()
         self.att_spin = _dspin(lim.att_min_dB, lim.att_max_dB,
                                decimals_for(dev.att_step_dB), dev.att_step_dB,
-                               self.cfg.signal.attenuation_dB, "dB")
+                               lim.att_min_dB, "dB")  # seeded from the unit (_seed_inputs)
         set_att = QtWidgets.QPushButton("Set"); set_att.setObjectName("primary")
         set_att.clicked.connect(self._set_attenuation)
         arow.addWidget(self.att_spin, 1); arow.addWidget(set_att)
@@ -459,8 +459,27 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{COLORS["accent_dim"]}">{stamp}</span> '
             f'<span style="color:{color}">{msg}</span>')
 
+    def _seed_inputs(self, s):
+        """Put the unit's ADOPTED state into the input boxes, once.
+
+        The service reads the phase and attenuation from the unit at start
+        instead of pushing config values, so the boxes must start from what the
+        unit holds -- otherwise pressing "Set" next to an untouched box would
+        silently change the RF. Done on the first status frame that says the
+        state has been read (for a remote GUI that frame arrives a moment after
+        the window opens); later frames never overwrite what the user types."""
+        self._seeded = True
+        for spin, value in ((self.phase_spin, s.phase_set_deg),
+                            (self.att_spin, s.attenuation_set_dB),
+                            (self.freq_spin, s.frequency_MHz)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+
     def _refresh(self):
         s = self.ctrl.status()
+        if not getattr(self, "_seeded", False) and getattr(s, "adopted", False):
+            self._seed_inputs(s)
         self._out_on = bool(s.output_on)
         dec = decimals_for(s.phase_step_deg or 0.5)
         self.phase_value.setText(f"{s.phase_deg:+.{dec}f}")

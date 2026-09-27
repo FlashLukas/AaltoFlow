@@ -28,7 +28,9 @@ class SupercontinuumBackend(Protocol):
     """A SuperK EXTREME laser with a SuperK SELECT AOTF RF driver."""
 
     def open(self) -> None:
-        """Connect. Must NOT switch emission or RF on."""
+        """Connect. QUERIES ONLY: must not change anything on the laser (no
+        emission / RF / power / crystal / line writes). The brain reads the
+        state afterwards and adopts it."""
 
     def close(self) -> None:
         """Emission off, RF off, disconnect. Safe to call on shutdown/crash."""
@@ -50,6 +52,8 @@ class SupercontinuumBackend(Protocol):
     def read_inlet_temp(self) -> float: ...
     def set_watchdog(self, seconds: int) -> None:
         """Emission switches off by itself if the laser hears nothing for this long."""
+    def read_watchdog(self) -> int:
+        """The watchdog time the laser currently has (s, 0 = disabled)."""
 
     # ---- SELECT RF driver ------------------------------------------------
     def set_rf(self, on: bool) -> None: ...

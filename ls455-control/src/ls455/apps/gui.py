@@ -249,6 +249,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.idn_label = QtWidgets.QLabel("—"); self.idn_label.setObjectName("hint")
         self.idn_label.setWordWrap(True)
         clay.addWidget(self.idn_label)
+        # the probe is READ from the meter (type, serial, sensitivity); after
+        # swapping it, this asks again so the ranges follow the new probe
+        self.probe_btn = QtWidgets.QPushButton("Re-read probe")
+        self.probe_btn.clicked.connect(self._reread_probe)
+        clay.addWidget(self.probe_btn)
         col.addWidget(ccard)
 
         # mode: DC (with resolution) or RMS (with band)
@@ -412,6 +417,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if 0 <= i < len(self._ranges):
             self.ctrl.set_range(self._ranges[i])
 
+    def _reread_probe(self):
+        try:
+            self.ctrl.reread_probe()
+        except Exception as exc:
+            self._on_event("warn", f"probe re-read failed: {exc}")
+        self._sync_inputs(force=True)
+
     def _relative_here(self):
         try:
             self.ctrl.relative_here()
@@ -491,7 +503,8 @@ class MainWindow(QtWidgets.QMainWindow):
         v, u = split_mT(s.field_mT)
         self.field_value.setText(v); self.field_unit.setText(u)
         gauss = s.field_mT * 10.0
-        kind = "RMS" if s.mode == "rms" else "DC"
+        # say what the number IS: a meter adopted in peak mode is not a DC reading
+        kind = s.quantity or ("RMS" if s.mode == "rms" else "DC")
         self.field_sub.setText(
             f"{kind}   "
             + (f"= {gauss:.5g} G   " if math.isfinite(gauss) else "")
@@ -514,9 +527,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.conn_dot.setText("●  offline")
             self.conn_dot.setStyleSheet(f"color:{COLORS['danger']}; font-weight:700;")
-        self.idn_label.setText((s.idn + (f"\nprobe {s.probe}" if s.probe else "")) if s.idn else "—")
+        self.idn_label.setText((s.idn + f"\nprobe: {s.probe_desc}") if s.idn else "—")
+        self.probe_btn.setEnabled(bool(s.connected) and not s.zeroing)
 
-        self.mode_label.setText(f"front panel in {s.display_unit}; an acquisition "
+        peak = (f"peak: {s.peak_mode}, {s.peak_display} (front panel); "
+                if s.mode == "peak" else "")
+        self.mode_label.setText(f"{peak}front panel in {s.display_unit}; an acquisition "
                                 f"waits {s.settle_s:.3g} s for the filter")
         self.range_combo.setEnabled(not s.auto_range)
         self.range_set.setEnabled(not s.auto_range)
@@ -580,17 +596,16 @@ def run_app(ctrl, cfg, remote: bool = False) -> int:
 
 
 def main(theme: str | None = None) -> int:
-    """Run against the built-in simulator, in-process. Relative mode is switched
-    on around the sim's 42 mT so a fresh window shows every readout working."""
+    """Run against the built-in simulator, in-process. The simulated METER
+    starts with relative mode on around its 42 mT, and the module adopts that
+    at start (it never pushes its config), so a fresh window shows every
+    readout working."""
     from ..config import Config
     from ..sim_system import build_sim_system
     cfg = Config()
     if theme:
         cfg.ui.theme = theme
-    cfg.meter.relative = True
-    cfg.meter.rel_setpoint_mT = 42.0
-    cfg.hardware.push_on_start = True
-    meter, _ = build_sim_system(cfg)
+    meter, _ = build_sim_system(cfg, relative=True, rel_setpoint_mT=42.0)
     # one acquisition shortly after start, so the sample line is not empty
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 

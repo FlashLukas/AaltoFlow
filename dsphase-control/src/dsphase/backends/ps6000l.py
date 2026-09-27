@@ -86,7 +86,10 @@ class PS6000L:
         if "PONG" not in pong.upper():
             raise RuntimeError(f"{self.port}: no PONG from the phase shifter (got {pong!r})")
         self._idn = self._query("*IDN?")        # VERIFY: reply format
-        self.set_output(False)                  # safe state on connect
+        # NOTHING is written here (Lukas's rule, 2026-09-27): no *RST, no
+        # OUTP:STAT OFF, no PHASE/ATT. The brain reads the unit back right after
+        # open() and adopts what it holds, so a service restart leaves the RF
+        # path exactly as it was. (close() still switches the output off.)
 
     def close(self) -> None:
         if self._ser is None:

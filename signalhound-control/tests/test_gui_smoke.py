@@ -48,6 +48,7 @@ def test_window_builds_sweeps_and_uses_the_brains_thru(app):
     from signalhound.apps.gui import MainWindow
     cfg = Config()
     cfg.sweep.span_Hz = 20e6
+    cfg.acquisition.sweep_on_start = True          # as gui.main() does for its own simulator
     sa, sim = build_sim_system(cfg, realtime=False, seed=3)
     win = MainWindow(_NoThread(sa), cfg)
     try:
@@ -131,3 +132,18 @@ def test_settings_dialog_parses_and_applies(app):
     dlg._apply_and_close()
     assert cfg.sweep.rbw_Hz == 3e3                  # nothing half-applied
     sa.shutdown()
+
+
+def test_untouched_analyser_says_so(app):
+    """Start-up rule: nothing configured yet, and the panel says why it is empty."""
+    from signalhound.apps.gui import MainWindow
+    cfg = Config()
+    sa, sim = build_sim_system(cfg, realtime=False, seed=3)
+    win = MainWindow(_NoThread(sa), cfg)
+    try:
+        sa.step()
+        win._refresh()
+        assert sim.configure_calls == 0 and not win.cont_chk.isChecked()
+        assert "not configured" in win.sweep_time_label.text()
+    finally:
+        win.close()

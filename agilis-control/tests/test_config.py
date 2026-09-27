@@ -61,7 +61,7 @@ def test_directional_step_size_and_leash_accessors():
     cfg.calibration.um_per_step_x_bwd = 0.03
     assert axis_um_per_step(cfg, 0, -1) == 0.03
     assert axis_um_per_step(cfg, 0, 0) == (0.05 + 0.03) / 2
-    assert axis_effective_limits(cfg, 1) == (-300_000, 300_000)
+    assert axis_effective_limits(cfg, 1) == (-240_000, 240_000)   # 12 mm at 50 nm
     cfg.limits.leash_enabled = True
     cfg.limits.leash_steps = 500
     assert axis_effective_limits(cfg, 1) == (-500, 500)

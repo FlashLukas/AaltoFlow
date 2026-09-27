@@ -7,7 +7,12 @@ plugged in.
 
 What it models, because each one changes what the rest of the code must do:
 
-* *RST state at open: RF off, 100 MHz, -136 dBm, all modulation off.
+* a POWER-ON STATE that open() does NOT touch: the real box keeps whatever
+  it was doing when the service connects, and the module ADOPTS it (Lukas's
+  rule, 2026-09-27). `initial=` sets that state -- tests start the sim with
+  RF already on, a non-default frequency/level and AM on, so adoption is
+  really exercised. The default is a quiet box someone left at 1 GHz,
+  -30 dBm, RF off.
 * the instrument's RESOLUTION: frequency kept to 10 Hz, level to 0.1 dB, so a
   read-back differs slightly from what was asked (the settle tolerance in
   `describe` has to cope with that, exactly as on the real box).
@@ -31,30 +36,31 @@ from .base import RPP_BIT, UNSPECIFIED_BIT
 class SimulatedHP8648:
     """Pretends to be an HP 8648D RF signal generator."""
 
-    def __init__(self, hardware=None):
+    #: The state the simulated box is in before anyone connects.
+    POWER_ON = {"rf_on": False, "frequency_Hz": 1e9, "power_dBm": -30.0,
+                "modulation": {}, "rpp": False}
+
+    def __init__(self, hardware=None, initial: dict | None = None):
         # A reference to the config's Hardware group, read LIVE: set_config
         # edits the config in place, so switching option_1ea in Settings is
         # seen here at once, exactly like fitting the option would be.
         from ..config import Hardware
         self._hw = hardware if hardware is not None else Hardware()
         self._open = False
-        self._reset()
-        self._errors: list[str] = []
-
-    def _reset(self):
-        """The *RST state (Operation and Service Guide, 'Receiving the Clear
-        Message' table)."""
-        self._freq = 100e6
-        self._power = -136.0
-        self._output = False
+        st = {**self.POWER_ON, **(initial or {})}
+        self._freq = spec.quantize_frequency(float(st["frequency_Hz"]))
+        self._power = spec.quantize_power(float(st["power_dBm"]))
+        self._output = bool(st["rf_on"])
         self._mod = {"am": False, "fm": False, "pm": False}
-        self._rpp = False
+        self._mod.update({k: bool(v) for k, v in dict(st["modulation"]).items()})
+        self._rpp = bool(st["rpp"])
+        self._errors: list[str] = []
 
     # ---- lifecycle -------------------------------------------------------
 
     def open(self) -> None:
+        # Connecting changes NOTHING -- exactly like the real backend now.
         self._open = True
-        self._reset()
 
     def close(self) -> None:
         self._output = False
@@ -108,9 +114,8 @@ class SimulatedHP8648:
     def read_modulation(self) -> dict:
         return dict(self._mod)
 
-    def modulation_off(self) -> None:
-        for k in self._mod:
-            self._mod[k] = False
+    def startup_notes(self) -> list[str]:
+        return []
 
     def drain_errors(self) -> list[str]:
         out, self._errors = self._errors, []

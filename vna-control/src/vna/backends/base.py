@@ -36,8 +36,23 @@ class VnaBackend(Protocol):
     simulated: bool
 
     def open(self) -> None:
-        """Connect. Must not change any setting the brain has not asked for
-        (beyond what single-sweep operation needs)."""
+        """Connect and LOOK, nothing else (Lukas's rule, 2026-09-27: every module
+        reads the instrument's state at start and changes nothing). Queries,
+        plus *CLS (it only empties the error queue). Everything this module
+        needs to drive single sweeps -- trigger mode, its own measurement,
+        data format, averaging off -- is set up by the FIRST `start_sweep`,
+        i.e. only once somebody asks this module to measure."""
+
+    def read_state(self) -> dict:
+        """What the analyser is doing right now, read with queries only, for
+        the brain to ADOPT at start. Keys (any may be missing when a query
+        failed -- the brain then keeps its config value):
+            start_Hz, stop_Hz, points, ifbw_Hz, power_dBm, sparam (S11..S22 or
+            None if the active measurement is not one), continuous (True only
+            if the brain may show live sweeps WITHOUT changing the instrument:
+            the simulator yes, a real analyser no -- driving it means taking
+            over its trigger), plus anything informative (sweep_mode,
+            averaging_on, correction_on, ...) that goes to status as it is."""
 
     def close(self) -> None:
         """Disconnect. Safe to call more than once and on a crash."""

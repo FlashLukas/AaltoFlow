@@ -81,7 +81,7 @@ class _Axis:
         self.moving = False
         self.deadline = 0.0
         self.error = 0
-        self.velocity = 100
+        self.velocity = None      # percent, read with "gv" at open
         self.pending_velocity = None
         self.last_gp = 0.0
         self.info = {}
@@ -128,10 +128,12 @@ class EllSerialBus:
                 raise RuntimeError(f"mount {a} reported 0 pulses per revolution")
             ax.travel = float(ax.info["travel_deg"] or 360)
             ax.info["pulses_per_rev"] = ax.pulses_per_rev
+            # Only QUERIES in open(): in / gv / gp.  Nothing that changes the
+            # mount (no sv, no ho, no move) -- the service adopts what it finds.
             try:
-                ax.velocity = int(self._transact(a, "gv", "", ("GV",)), 16)   # VERIFY
+                ax.velocity = int(self._transact(a, "gv", "", ("GV",))[:2], 16)   # VERIFY
             except Exception:
-                ax.velocity = 100
+                ax.velocity = None     # unknown: shown as "--", not as a guessed 100
             self._read_position(a)
 
     def close(self) -> None:

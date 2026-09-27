@@ -112,13 +112,13 @@ class SettingsDialog(QtWidgets.QDialog):
     def _signal_tab(self):
         page, form = self._form_widget()
         s = self.cfg.signal
-        self._add(form, "signal", "frequency_Hz", "Start-up frequency",
+        self._add(form, "signal", "frequency_Hz", "Default frequency",
                   _dspin(s.frequency_Hz, 0, 4.1e9, 0, 1e6, "Hz"))
-        self._add(form, "signal", "power_dBm", "Start-up level",
+        self._add(form, "signal", "power_dBm", "Default level",
                   _dspin(s.power_dBm, -140, 25, 1, 1.0, "dBm"))
-        form.addRow(_hint("Pushed to the generator when the service starts. The RF "
-                          "output always starts OFF; switching it on is always a "
-                          "deliberate command."))
+        form.addRow(_hint("NOT sent at start: the module adopts whatever the generator "
+                          "is doing when it connects. A value CHANGED here is sent when "
+                          "you press OK. RF on/off is never set from here."))
         return page
 
     def _limits_tab(self):
@@ -150,8 +150,6 @@ class SettingsDialog(QtWidgets.QDialog):
                   _ispin(hw.visa_timeout_ms, 100, 60000, "ms"))
         self._add(form, "hardware", "option_1ea", "Option 1EA",
                   _check("High-power option fitted", hw.option_1ea))
-        self._add(form, "hardware", "reset_on_open", "Reset at connect",
-                  _check("Send *RST at connect (RF off, modulation off)", hw.reset_on_open))
         self._add(form, "hardware", "poll_s", "Read-back period",
                   _dspin(hw.poll_s, 0.02, 5.0, 2, 0.05, "s"))
         self._add(form, "hardware", "switch_settle_s", "Switching wait",

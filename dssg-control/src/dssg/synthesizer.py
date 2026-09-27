@@ -11,6 +11,14 @@ A CW signal generator needs no control loop, so this is a set-and-forget brain:
     READ-BACK, so a scan waiting for "echo" waits for the box, not for our
     memory of what we asked.
 
+Start-up ADOPTS (Lukas's rule, 2026-09-27: "all modules should read the
+instrument state on startup, not to change anything"). start() reads RF on/off,
+frequency, power, phase and reference from the unit and takes them as the
+desired values; it writes nothing that changes the unit. If the unit sits
+outside your limits it is LEFT there with a warning -- the next setter clamps.
+The config's `signal` preset and the buzzer/display preferences are sent only
+when they CHANGE (apply_config), never at start. Shutdown still turns RF off.
+
 Threads (gotcha #1 in docs/DEVELOPER_NOTES.md)
 ----------------------------------------------
 Two threads touch this object: the service's command thread (setters) and our
@@ -29,7 +37,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from .backends.base import MicrowaveSource
 from .config import Config, REFERENCES
@@ -73,12 +81,19 @@ class Synthesizer:
         self.backend = backend
         self.cfg = cfg or Config()
         s = self.cfg.signal
-        # the DESIRED signal (what we were asked for, after clamping)
+        # the DESIRED signal. Before start() these are only placeholders from
+        # the preset (shown while offline); start() replaces them with what
+        # the unit is actually doing (adopt, never push).
         self._freq = float(s.frequency_Hz)
         self._power = float(s.power_dBm)
         self._phase = float(s.phase_deg)
         self._reference = s.reference if s.reference in REFERENCES else "auto"
-        self._rf_on = False                 # never on at start-up
+        self._rf_on = False                 # adopted at start; never switched ON by us
+        # The config values the brain has already acted on. apply_config()
+        # compares against this, so only a value the user CHANGED is sent --
+        # pressing Apply in Settings (which sends the whole config) must not
+        # overwrite the adopted instrument state with the stale preset.
+        self._seen = self._cfg_snapshot()
         # what the unit itself can do; unknown (None) until start()
         self._unit_freq: tuple[float, float] | None = None
         self._unit_power: tuple[float, float] | None = None
@@ -120,49 +135,74 @@ class Synthesizer:
     # ---- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        """Open the backend, learn what the unit can do, push the start-up
-        signal with RF OFF, and start the read-back thread."""
+        """Open the backend, learn what the unit can do, ADOPT what it is
+        doing (read only -- nothing is changed), start the read-back thread."""
         try:
-            self._connect_and_push()
+            self._connect_and_adopt()
         except Exception:
             # Half-way failures (port opened, then a query timed out) must not
             # leave the COM port / socket held open by a process that is about
-            # to exit with a traceback: close it -- close() also sends RF off.
+            # to exit with a traceback: release it. rf_off=False: we never took
+            # control, so the unit is left exactly as we found it.
             self._connected = False
             try:
                 with self._io:
-                    self.backend.close()
+                    self.backend.close(rf_off=False)
             except Exception:
                 pass
             raise
-        self._emit("info", f"connected: {self._idn or 'SG12000L'} (RF off)")
+        self._emit("info", f"connected: {self._idn or 'SG12000L'}; adopted "
+                           f"RF {'ON' if self._rf_on else 'off'}, "
+                           f"{self._freq / 1e6:.6f} MHz, {self._power:g} dBm, "
+                           f"ref {self._reference} (nothing changed)")
+        self._warn_if_outside_limits()
+        self._seen = self._cfg_snapshot()       # the config as it stood at connect
         self._poll_once()                       # a valid snapshot before anyone asks
         self._stop.clear()
         self._poll_t = threading.Thread(target=self._poller, name="dssg-poll",
                                         daemon=True)
         self._poll_t.start()
 
-    def _connect_and_push(self) -> None:
+    def _connect_and_adopt(self) -> None:
+        """Queries only. The desired values become what the unit reports, so
+        the GUI, describe and a scan's first 'echo' all agree with the box."""
         with self._io:
-            self.backend.open()                 # the backend leaves RF off
+            b = self.backend
+            b.open()                            # connects; changes nothing
             self._connected = True
-            self.backend.set_output(False)      # ...and we make sure of it
-            self._idn = self.backend.idn()
+            self._idn = b.idn()
             try:
-                self._unit_freq = tuple(self.backend.freq_range())
-                self._unit_power = tuple(self.backend.power_range())
+                self._unit_freq = tuple(b.freq_range())
+                self._unit_power = tuple(b.power_range())
             except Exception as exc:            # keep going on the cfg envelope
                 self._emit("warn", f"could not read the unit's range: {exc}")
-            self._has_phase = bool(self.backend.has_phase())
-            lim = self.limits()
-            self._freq = _clamp(self._freq, lim["freq_min_Hz"], lim["freq_max_Hz"])[0]
-            self._power = _clamp(self._power, lim["power_min_dBm"], lim["power_max_dBm"])[0]
-            self._phase = _clamp(self._phase, lim["phase_min_deg"], lim["phase_max_deg"])[0]
-            self.backend.set_frequency(self._freq)
-            self.backend.set_power(self._power)
+            self._has_phase = bool(b.has_phase())
+            self._rf_on = bool(b.read_output())
+            self._freq = float(b.read_frequency())
+            self._power = float(b.read_power())
             if self._has_phase:
-                self.backend.set_phase(self._phase)
-            self.backend.set_reference(self._reference)
+                self._phase = float(b.read_phase())
+            ref = b.read_reference()
+            if ref in REFERENCES:
+                self._reference = ref
+
+    def _warn_if_outside_limits(self) -> None:
+        """The unit may have been left beyond YOUR envelope (e.g. +8 dBm from
+        the front panel with a +5 dBm ceiling). Adopting means we do not fix
+        that behind your back -- but we say so; the next set_* is clamped."""
+        lim = self.limits()
+        checks = [("frequency", self._freq / 1e6, lim["freq_min_Hz"] / 1e6,
+                   lim["freq_max_Hz"] / 1e6, "MHz"),
+                  ("power", self._power, lim["power_min_dBm"],
+                   lim["power_max_dBm"], "dBm")]
+        if self._has_phase:
+            checks.append(("phase", self._phase, lim["phase_min_deg"],
+                           lim["phase_max_deg"], "deg"))
+        for name, v, lo, hi, unit in checks:
+            if not lo <= v <= hi:
+                self._emit("warn", f"the unit is at {name} {v:g} {unit}, outside "
+                                   f"your limits {lo:g}..{hi:g} {unit}: left as "
+                                   f"it is (the next set_{name} is clamped)")
 
     def shutdown(self) -> None:
         """RF off, disconnect. Safe to call more than once / on a crash."""
@@ -181,7 +221,7 @@ class Synthesizer:
             self._rf_on = False
             try:
                 with self._io:
-                    self.backend.close()        # the backend also sends RF off
+                    self.backend.close()        # rf_off=True: the backend also sends RF off
             finally:
                 self._connected = False
                 self._status = self._offline_snapshot()
@@ -323,13 +363,58 @@ class Synthesizer:
     def get_config(self) -> Config:
         return self.cfg
 
+    def _cfg_snapshot(self) -> dict:
+        """The config values whose CHANGE means "send this to the unit"."""
+        hw = self.cfg.hardware
+        return {"signal": asdict(self.cfg.signal),
+                "limits": asdict(self.cfg.limits),
+                "mute_buzzer": bool(hw.mute_buzzer),
+                "display_off": bool(hw.display_off)}
+
     def apply_config(self) -> None:
-        """Re-clamp the desired signal to the (possibly new) limits and push it.
-        Called after set_config edits self.cfg in place."""
-        self.set_frequency(self._freq)
-        self.set_power(self._power)
+        """Act on what CHANGED in the config. Called after set_config (or the
+        Settings dialog) edited self.cfg in place.
+
+        Only a change is an instruction. The Settings dialog and set_config
+        send the WHOLE config, so treating every field as "push this" would
+        overwrite the adopted instrument state with a stale preset every time
+        someone changed the theme.
+          * a changed `signal` preset field -> set that value (clamped),
+          * changed `limits` -> re-clamp the desired signal and push any value
+            that moved (a narrower ceiling must bite at once),
+          * changed mute_buzzer / display_off -> *BUZZER / *DISPLAY.
+        """
+        now, prev = self._cfg_snapshot(), self._seen
+        self._seen = now
+        sig, old = now["signal"], prev["signal"]
+        lim = self.limits()
+        if sig["frequency_Hz"] != old["frequency_Hz"]:
+            self.set_frequency(sig["frequency_Hz"])
+        elif now["limits"] != prev["limits"]:
+            v = _clamp(self._freq, lim["freq_min_Hz"], lim["freq_max_Hz"])[0]
+            if v != self._freq:
+                self.set_frequency(v)
+        if sig["power_dBm"] != old["power_dBm"]:
+            self.set_power(sig["power_dBm"])
+        elif now["limits"] != prev["limits"]:
+            v = _clamp(self._power, lim["power_min_dBm"], lim["power_max_dBm"])[0]
+            if v != self._power:
+                self.set_power(v)
         if self._has_phase or not self._connected:
-            self.set_phase(self._phase)
+            if sig["phase_deg"] != old["phase_deg"]:
+                self.set_phase(sig["phase_deg"])
+            elif now["limits"] != prev["limits"]:
+                v = _clamp(self._phase, lim["phase_min_deg"], lim["phase_max_deg"])[0]
+                if v != self._phase:
+                    self.set_phase(v)
+        if sig["reference"] != old["reference"] and sig["reference"] in REFERENCES:
+            self.set_reference(sig["reference"])
+        if now["mute_buzzer"] != prev["mute_buzzer"]:
+            self._push(self.backend.set_buzzer, not now["mute_buzzer"])
+            self._emit("info", f"buzzer {'muted' if now['mute_buzzer'] else 'on'}")
+        if now["display_off"] != prev["display_off"]:
+            self._push(self.backend.set_display, not now["display_off"])
+            self._emit("info", f"display {'off' if now['display_off'] else 'on'}")
         if not self._connected:
             self._status = self._offline_snapshot()
 

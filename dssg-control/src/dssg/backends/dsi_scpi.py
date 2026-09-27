@@ -163,8 +163,7 @@ class DsiSG12000L:
 
     def __init__(self, transport: str = "serial", com_port: str = "COM5",
                  baud: int = 115200, host: str = "", tcp_port: int = 10001,
-                 timeout_s: float = 1.0, phase_mode: str = "auto",
-                 mute_buzzer: bool = True, display_off: bool = False):
+                 timeout_s: float = 1.0, phase_mode: str = "auto"):
         self._transport = transport
         self._com_port = com_port
         self._baud = int(baud)
@@ -172,8 +171,9 @@ class DsiSG12000L:
         self._tcp_port = int(tcp_port)
         self._timeout_s = float(timeout_s)
         self._phase_mode = phase_mode
-        self._mute_buzzer = bool(mute_buzzer)
-        self._display_off = bool(display_off)
+        # True only if THIS session switched the display off (set_display), so
+        # close() switches it back on -- and leaves it alone otherwise.
+        self._display_turned_off = False
         self._link = None
         self._has_phase = False
         self._idn = ""
@@ -188,15 +188,15 @@ class DsiSG12000L:
         else:
             raise ValueError(f"hardware.transport must be 'serial' or 'tcp', "
                              f"not {self._transport!r}")
-        # RF OFF first, before anything else can go wrong.
-        self._link.write("OUTP:STAT OFF")
-        self._link.write("*CLS")                               # clear old errors
+        # ADOPT, don't initialise (Lukas's rule, 2026-09-27): the unit keeps
+        # whatever RF state, frequency, power, reference, buzzer and display
+        # it had -- the brain READS them afterwards. The only write is *CLS,
+        # which empties the error queue and nothing else; it is needed so the
+        # PHASE? probe below is judged on ITS error, not on an old one.
+        # (Until 2026-09-27 open() sent OUTP:STAT OFF and *BUZZER OFF here.)
+        self._link.write("*CLS")                               # clear old errors only
         self._idn = self._link.query("*IDN?")
-        if self._mute_buzzer:
-            self._link.write("*BUZZER OFF")
-        if self._display_off:
-            self._link.write("*DISPLAY OFF")
-        self._has_phase = self._probe_phase()
+        self._has_phase = self._probe_phase()                  # queries only
 
     def _probe_phase(self) -> bool:
         """Does this firmware understand PHASE? The 2022 SG12000L list [CL] has
@@ -214,14 +214,16 @@ class DsiSG12000L:
             return False
         return not self.errors()                               # VERIFY: error on unknown cmd
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         link, self._link = self._link, None
         if link is None:
             return
         try:
-            link.write("OUTP:STAT OFF")                        # RF off on the way out
-            if self._display_off:
+            if rf_off:
+                link.write("OUTP:STAT OFF")                    # RF off on the way out
+            if self._display_turned_off:
                 link.write("*DISPLAY ON")                      # leave the front panel usable
+                self._display_turned_off = False
         finally:
             link.close()
 
@@ -299,6 +301,15 @@ class DsiSG12000L:
 
     def usb_volts(self) -> float:
         return parse_number(self._link.query("*SYSVOLTS?"))    # VERIFY: "5.07" or "5.07V"
+
+    # ---- front-panel preferences (only on an explicit user change) ---------
+
+    def set_buzzer(self, on: bool) -> None:
+        self._link.write(f"*BUZZER {'ON' if on else 'OFF'}")   # [CL]
+
+    def set_display(self, on: bool) -> None:
+        self._link.write(f"*DISPLAY {'ON' if on else 'OFF'}")  # [CL]
+        self._display_turned_off = not on
 
     def errors(self) -> list[str]:
         """Drain SYST:ERR?. Treat "0", "+0,..." or "No error" as the end."""

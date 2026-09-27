@@ -111,6 +111,22 @@ class Simulated7230:
     def idn(self) -> str:
         return "7230 (SIMULATED) firmware 2.20" if self._open else ""
 
+    def read_settings(self) -> dict:
+        """The simulated front panel, as the real backend's queries report it."""
+        with self._lock:
+            return {
+                "ref_source": self.ref_source, "osc_frequency_Hz": self.osc_f,
+                "osc_amplitude_V": self.osc_amp, "phase_deg": self.phase_deg,
+                "harmonic": self.harmonic, "imode": self.imode, "vmode": self.vmode,
+                "dc_coupled": self.dc, "fet": self.fet, "float_shield": self.floating,
+                "auto_ac_gain": self.auto_ac_gain, "sensitivity_index": self.sen_index,
+                "fast_mode": self.fast,
+                "time_constant_s": tables.TIME_CONSTANTS_S[self.tc_index],
+                "slope_index": self.slope_index,
+                "line_filter_mode": self.line_filter[0], "line_50Hz": self.line_filter[1],
+                "unread": [],
+            }
+
     # ---- test hooks (not part of the backend interface) ----------------------------
 
     def set_signal(self, amplitude_V: float, phase_deg: float) -> None:

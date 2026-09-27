@@ -10,6 +10,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from sr830 import tables
 from sr830.config import Config
 from sr830.sim_system import build_sim_system
 
@@ -146,3 +147,25 @@ def test_settings_dialog_applies_and_rejects_bad_numbers(app):
     dlg._apply_and_close()
     assert "frequency_Hz" in dlg.error.text()
     assert applied == [True]                   # not applied a second time
+
+
+def test_settings_apply_writes_only_what_was_edited(app):
+    """The form is filled when the tab opens. A setting changed since then
+    (a front-panel control, the console, a scan) must NOT be set back by an
+    Apply that edited something else (review 2026-09-27)."""
+    from sr830.apps.settings_dialog import SettingsPanel
+    cfg = Config()
+    li, sim = build_sim_system(cfg)
+    li.start(poll=False)
+    try:
+        panel = SettingsPanel(li, cfg, lambda: None)
+        li.set_sensitivity("100 mV")              # changed after the form was filled
+        panel.w[("acquisition", "average_tc")][0].setText("4")
+        assert panel.apply()
+        assert cfg.acquisition.average_tc == 4.0
+        assert cfg.demod.sensitivity == "100 mV"
+        assert tables.SENS_LABELS_V[sim.sens] == "100 mV"
+        # and the form now shows what is in use
+        assert panel.w[("demod", "sensitivity")][0].currentText() == "100 mV"
+    finally:
+        li.shutdown()

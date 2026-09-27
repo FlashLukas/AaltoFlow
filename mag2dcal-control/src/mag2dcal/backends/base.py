@@ -24,7 +24,19 @@ class VectorMagnetBackend(Protocol):
     output-enable line."""
 
     def open(self) -> None:
-        """Connect. Must leave the output SAFE: AO at 0 V, enable False."""
+        """Connect, and change NOTHING on the magnet.
+
+        Lukas's rule (2026-09-27): a module reads the instrument's state at start
+        and adopts it; it does not reset it. So open() must not write the AO,
+        must not touch the enable line -- a magnet a previous run left
+        energized at 40 mT is still at 40 mT after open(). The brain reads what
+        is there with read_output() and decides from that.
+        """
+
+    def read_output(self) -> tuple[float | None, float | None, bool | None]:
+        """What the card is driving RIGHT NOW: (x_V, y_V, enabled), as found at
+        open(). None for anything the hardware cannot report (the brain then
+        estimates it, or assumes off, and says so). Queries only."""
 
     def close(self) -> None:
         """Disconnect. A last-resort backstop sets AO 0 V and enable False first;

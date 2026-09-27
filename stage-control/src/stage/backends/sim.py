@@ -33,11 +33,35 @@ class SimStage:
         self._homing = [False, False, False]
         self._homed = [False, False, False]
 
-        # Motion parameters (seeded from config; the brain re-pushes on start).
+        # Motion parameters.  Seeded from config so a plain simulator behaves
+        # like a controller someone configured with the .ini defaults; the
+        # brain no longer pushes anything at start (it adopts these), so tests
+        # use preset() to start from a different, pre-existing state.
         self._vel = [axis_velocity(cfg, a) for a in range(3)]
         self._acc = [axis_acceleration(cfg, a) for a in range(3)]
 
         self._opened = False
+
+    def preset(self, position=None, velocity=None, acceleration=None,
+               homed=None) -> None:
+        """Put the simulated controller in a PRE-EXISTING state (tests).
+
+        Models a BSC203 that was left somewhere by Kinesis or an earlier
+        session -- e.g. X at 7.5 mm, homed, velocity 1.3 mm/s -- so a test can
+        prove that start() adopts that state instead of overwriting it.
+        Each argument is a length-3 list (X, Y, Z) or None to leave it alone.
+        """
+        if position is not None:
+            self._pos = [float(p) for p in position]
+            self._target = list(self._pos)
+            self._start_pos = list(self._pos)
+            self._moving = [False, False, False]
+        if velocity is not None:
+            self._vel = [float(v) for v in velocity]
+        if acceleration is not None:
+            self._acc = [float(a) for a in acceleration]
+        if homed is not None:
+            self._homed = [bool(h) for h in homed]
 
     # -- connection -------------------------------------------------------- #
     def open(self) -> None:

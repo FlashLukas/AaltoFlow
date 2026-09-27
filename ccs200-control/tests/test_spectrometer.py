@@ -67,6 +67,9 @@ def test_window_ends_bound_each_other(spec):
 
 
 def test_acquire_finds_the_mercury_line(spec):
+    # The sim instrument starts at 5 ms (adopted); the intensity window below
+    # is for 10 ms, set explicitly as a user would.
+    spec.set_integration_time(0.01)
     n = spec.acquire()
     assert spec.status().acquiring and spec.status().acq_id == n
     _done(spec)
@@ -221,3 +224,50 @@ def test_analyse_subpixel_peak_on_a_nonuniform_grid():
     assert r["peak_nm"] == pytest.approx(547.33, abs=0.02)
     assert r["integrated"] == pytest.approx(0.6 * np.sqrt(2 * np.pi), rel=1e-3)
     assert np.isnan(analyse(wl, y, 700, 800)["peak_nm"])
+
+
+# ---- adopt-on-start (Lukas's rule 2026-09-27) ----------------------------------
+
+def test_start_adopts_the_instruments_integration_time():
+    """The sim unit was left at 0.3 s; the config says 10 ms. After start the
+    brain, the status and the describe revision follow the INSTRUMENT."""
+    from ccs200.net.describe import build_manifest
+    cfg = Config()
+    cfg.scan.continuous = False
+    s, backend = build_sim_system(cfg, realtime=False, seed=5, integration_s=0.3)
+    rev_before = build_manifest(s)["revision"]
+    events = []
+    s._on_event = lambda lvl, msg: events.append((lvl, msg))
+    s.start(run=False)
+    assert s.status().integration_time_s == pytest.approx(0.3)
+    assert cfg.scan.integration_time_s == pytest.approx(0.3)
+    assert backend.integration_time() == pytest.approx(0.3)      # untouched
+    assert any("adopted" in m for _, m in events)
+    # the acquire timeout grows with integration: describe must say so
+    assert build_manifest(s)["revision"] != rev_before
+    n = s.acquire()
+    _done(s)
+    assert s.get_trace("sample")["integration_time_s"] == pytest.approx(0.3)
+    assert backend.integration_time() == pytest.approx(0.3)
+    s.shutdown()
+
+
+def test_default_sim_starts_away_from_the_config_default():
+    """The sim is deliberately NOT at the config's 10 ms, or adoption would be
+    invisible in every other test."""
+    s, _ = build_sim_system(Config(), realtime=False)
+    s.start(run=False)
+    assert s.status().integration_time_s == pytest.approx(0.005)
+    s.shutdown()
+
+
+def test_out_of_limits_instrument_time_is_clamped_with_a_warning():
+    cfg = Config()
+    cfg.limits.integration_max_s = 1.0
+    s, _ = build_sim_system(cfg, realtime=False, integration_s=5.0)
+    events = []
+    s._on_event = lambda lvl, msg: events.append((lvl, msg))
+    s.start(run=False)
+    assert s.status().integration_time_s == pytest.approx(1.0)
+    assert any(lvl == "warn" and "outside the limits" in m for lvl, m in events)
+    s.shutdown()

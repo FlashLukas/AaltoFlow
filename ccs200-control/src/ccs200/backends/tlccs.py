@@ -177,7 +177,11 @@ class TlccsSpectrometer:
                              "another program?) -- " + "; ".join(errors))
         self._idn = self._read_idn()
         self._wl = self._read_wavelengths()
-        self._t_set = None
+        # ADOPT the integration time the CCS is already set to (queries only;
+        # Lukas's rule 2026-09-27). Caching it in _t_set also means the first
+        # start_scan at that time sends NO setIntegrationTime: the instrument
+        # is only written when someone asks for a different time.
+        self._t_set = self._read_integration_time()
         self._pending = self._stale = False
 
     def close(self) -> None:
@@ -193,6 +197,9 @@ class TlccsSpectrometer:
 
     def wavelengths(self) -> np.ndarray:
         return self._wl.copy()
+
+    def integration_time(self) -> float:
+        return float("nan") if self._t_set is None else float(self._t_set)
 
     # ---- scanning ----------------------------------------------------------
     def start_scan(self, integration_s: float) -> None:
@@ -289,6 +296,19 @@ class TlccsSpectrometer:
             return ""
         manuf, name, serial, fw, drv = (b.value.decode(errors="replace") for b in bufs)
         return f"{manuf} {name} S/N {serial} fw {fw} driver {drv}".strip()
+
+    def _read_integration_time(self) -> float | None:
+        """tlccs_getIntegrationTime, or None if it cannot be read (then the
+        first scan sends the brain's time, as before). # VERIFY on the unit:
+        that it reports the time the CCD really uses after an init with reset
+        off (and not the driver's 10 ms default)."""
+        v = ViReal64(0.0)
+        try:
+            self._call("tlccs_getIntegrationTime", self._vi, C.byref(v))
+        except TLCCSError:
+            return None
+        t = float(v.value)
+        return t if t > 0 and t == t else None
 
     def _read_wavelengths(self) -> np.ndarray:
         buf = (ViReal64 * NUM_PIXELS)()

@@ -107,25 +107,106 @@ class Piezo:
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
-        """Open the backend, push start-up loop mode + velocity, run the ramp."""
+        """Open the backend, ADOPT the controller's state, run the ramp thread.
+
+        Adopt rule (Lukas, 2026-09-27: "read the instrument state on startup,
+        not change anything").  Starting the service must never move the stage
+        or switch its loop mode, so nothing is WRITTEN here -- we only READ:
+
+          * loop mode per axis  -> ``_closed`` (and cfg.motion.closed_loop_*,
+            so a later ``set_config`` of an unrelated group does not flip it),
+          * the setpoint the controller is holding -> ``_target``,
+          * the native slew rate -> velocity + ramp mode (see _adopt_slew).
+
+        A read that fails leaves the config default in place for THAT item and
+        says so in a warn event -- still without writing it.  The config values
+        are now defaults applied only when the user explicitly sets them
+        (setters, the settings dialog, ``set_config``).  There was no
+        push-on-start option to remove: the push was unconditional.
+        """
         self.backend.open()
         self._connected = True
+        slews = [None, None]
         for axis in range(2):
-            self.set_closed_loop(axis, axis_closed_loop_default(self.cfg, axis), _quiet=True)
-            self.set_velocity(axis, axis_velocity(self.cfg, axis), _quiet=True)
-            # Seed target with the current measured position so we don't yank
-            # the stage on the first status read.
+            name = AXES[axis]
+            # -- loop mode ------------------------------------------------- #
             try:
-                self._target[axis] = self.backend.read_position(axis)
+                self._closed[axis] = bool(self.backend.get_closed_loop(axis))
+            except Exception as exc:
+                self._emit("warn", f"{name}: loop mode not readable ({exc}); "
+                                   f"assuming {'CL' if self._closed[axis] else 'OL'} from config")
+            setattr(self.cfg.motion, ("closed_loop_x", "closed_loop_y")[axis], self._closed[axis])
+            # -- target: the SETPOINT, not the read-out --------------------- #
+            # In open loop the read-out differs from the command (hysteresis),
+            # so the setpoint is the honest "what am I holding".  Fall back to
+            # the measured position if the controller cannot report it.
+            target = None
+            try:
+                target = float(self.backend.read_setpoint(axis))
             except Exception:
-                self._target[axis] = 0.0
+                try:
+                    target = float(self.backend.read_position(axis))
+                except Exception:
+                    target = None
+            if target is None or target != target:
+                self._emit("warn", f"{name}: position not readable at start; target shown as 0")
+                target = 0.0
+            self._target[axis] = target
+            # An adopted target outside this mode's travel is REPORTED, not
+            # corrected: correcting it would be a move at start.
+            lo = self.cfg.limits.travel_min
+            hi = travel_max(self.cfg, self._closed[axis])
+            if self.cfg.limits.enforce and not (lo - 1e-9 <= target <= hi + 1e-9):
+                self._emit("warn", f"{name}: adopted setpoint {target:.4g} um is outside the "
+                                   f"{'CL' if self._closed[axis] else 'OL'} travel [{lo:.4g}, {hi:.4g}]; "
+                                   f"left as is")
+            # -- native slew rate ------------------------------------------ #
+            try:
+                slews[axis] = max(0.0, float(self.backend.read_slew_rate(axis)))
+            except Exception as exc:
+                self._emit("warn", f"{name}: slew rate not readable ({exc})")
+        self._adopt_slew(slews)
 
         self._stop.clear()
         self._ramp_thread = threading.Thread(
             target=self._ramp_worker, name="piezo-ramp", daemon=True
         )
         self._ramp_thread.start()
-        self._emit("info", f"piezo started ({self.backend.idn()})")
+        st = ", ".join(f"{AXES[a]} {'CL' if self._closed[a] else 'OL'} @ {self._target[a]:.4g} um"
+                       for a in range(2))
+        self._emit("info", f"piezo started ({self.backend.idn()}); adopted {st}, "
+                           f"ramp {self.cfg.motion.ramp_mode}")
+
+    def _adopt_slew(self, slews: list) -> None:
+        """Turn the controller's slew rates into a consistent ramp mode + velocity.
+
+        The ramp modes need a particular hardware slew rate (see set_velocity):
+        "hardware" = slew is the velocity, "software"/"off" = slew 0.  We may
+        not WRITE the slew to make the config's mode true, so the mode follows
+        what the controller already does:
+
+          * any axis limits its slew (> 0)  -> "hardware", velocity = that slew
+            (an axis at 0 then simply has no limit, velocity 0 = jump);
+          * no axis limits                  -> the config's "software"/"off" is
+            consistent and kept; a configured "hardware" is NOT (the controller
+            would jump), so we adopt "software" -- the brain then limits the
+            speed at the configured velocity without touching the controller.
+          * slews unreadable                -> config kept as it is.
+        """
+        if any(v is None for v in slews):
+            return
+        with self._ramp_lock:
+            if any(v > 0.0 for v in slews):
+                if self.cfg.motion.ramp_mode != "hardware":
+                    self._emit("info", "controller slew rate is set -> ramp mode 'hardware' adopted")
+                self.cfg.motion.ramp_mode = "hardware"
+                for axis in range(2):
+                    set_axis_velocity(self.cfg, axis, slews[axis])
+                    self._ramp_vel[axis] = slews[axis]
+            elif self.cfg.motion.ramp_mode == "hardware":
+                self._emit("warn", "controller has no slew-rate limit -> ramp mode 'software' "
+                                   "adopted (the brain ramps; the controller is not written)")
+                self.cfg.motion.ramp_mode = "software"
 
     def shutdown(self) -> None:
         """Stop ramping and close the backend.  Idempotent.
@@ -334,6 +415,10 @@ class Piezo:
         enabled = bool(enabled)
         self.backend.set_closed_loop(axis, enabled)
         self._closed[axis] = enabled
+        # Keep the config in step with the live mode, so a set_config of some
+        # other group (which ends in apply_config) re-applies THIS mode instead
+        # of flipping the axis back to a stale default.
+        setattr(self.cfg.motion, ("closed_loop_x", "closed_loop_y")[axis], enabled)
         if not _quiet:
             self._emit("info", f"{AXES[axis]} -> {'CLOSED' if enabled else 'OPEN'} loop")
         # Re-clamp the standing target to the (possibly smaller) travel.

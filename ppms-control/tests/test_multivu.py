@@ -193,3 +193,46 @@ def test_the_brain_on_the_real_backend_adopts_in_millitesla():
         assert [c for c in FakeClient.instances[0].calls if isinstance(c, tuple)] == []
     finally:
         cryo.shutdown()
+
+
+class StrictClient(FakeClient):
+    """Fails the test on ANY state-changing call: only queries are allowed
+    while the service starts (adopt-on-start rule, 2026-09-27)."""
+
+    def get_field_setpoints(self):
+        return 25000.0, 30.0, "oscillate", "driven"      # 2.5 T at 3 mT/s
+
+    def get_temperature_setpoints(self):
+        return 10.0, 2.5, "no_overshoot"
+
+    def set_field(self, *a, **k):
+        raise AssertionError("set_field during start-up")
+
+    def set_temperature(self, *a, **k):
+        raise AssertionError("set_temperature during start-up")
+
+    def __getattr__(self, name):                        # purge/seal/vent/... too
+        if name.startswith(("set_", "purge", "seal", "vent", "wait")):
+            raise AssertionError(f"{name} during start-up")
+        raise AttributeError(name)
+
+
+class StrictMpv(FakeMpv):
+    Client = StrictClient
+
+
+def test_start_issues_only_queries_and_adopts_multivus_state():
+    cfg = Config()
+    cryo = Cryostat(MultiVuDynaCool(cfg, mpv=StrictMpv), cfg)
+    cryo.start(poll=False)
+    try:
+        s = cryo.status()
+        assert s.setpoint_field_mT == 2500.0                     # 25000 Oe
+        assert s.field_rate_mT_per_s == 3.0 and s.field_approach == "oscillate"
+        assert s.setpoint_temperature_K == 10.0
+        assert s.temperature_rate_K_per_min == 2.5
+        assert s.temperature_approach == "no_overshoot"
+        assert FakeClient.instances[0].calls == ["open"]
+    finally:
+        cryo.shutdown()
+    assert FakeClient.instances[0].calls == ["open", "close_client"]

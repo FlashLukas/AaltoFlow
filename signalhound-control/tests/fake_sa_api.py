@@ -30,14 +30,24 @@ def _set(ptr, value):
 
 
 class FakeSaApi:
+    #: Calls that only READ the analyser (or open / pair it). Everything else
+    #: configures, initiates, aborts or drives the TG -- a WRITE.
+    #: saAttachTg is here because pairing is the only way to learn whether a
+    #: TG44A exists (it is listed as a start-up write in the module notes).
+    READ_ONLY = {"saGetSerialNumberList", "saOpenDevice", "saOpenDeviceBySerialNumber",
+                 "saGetSerialNumber", "saGetDeviceType", "saAttachTg", "saIsTgAttached",
+                 "saGetErrorString", "saGetAPIVersion", "saQuerySweepInfo"}
+
     def __init__(self, device_type=2, serial=17040001, tg=True, bins=None,
-                 compression=False, fail=None):
+                 compression=False, fail=None, readonly=False):
         self.device_type = device_type        # 2 = SA44B, 4 = SA124B
         self.serial = serial
         self.tg = tg
         self.bins = bins                      # force a bin count (else from span / RBW)
         self.compression = compression
         self.fail = fail or {}                # name -> status code to return
+        # readonly=True: any WRITE call raises -- proves start-up changes nothing
+        self.readonly = readonly
         self.calls: list[tuple] = []
         self.open = False
         self.mode = -1                        # SA_IDLE
@@ -57,6 +67,8 @@ class FakeSaApi:
         def call(*args):
             self.calls.append((name,) + tuple(a if isinstance(a, (int, float, bool, str))
                                               else "<ptr>" for a in args))
+            if self.readonly and name not in self.READ_ONLY:
+                raise AssertionError(f"{name} would change the analyser's state")
             if name in self.fail:
                 return self.fail[name]
             return fn(*args)
@@ -64,6 +76,9 @@ class FakeSaApi:
 
     def names(self):
         return [c[0] for c in self.calls]
+
+    def writes(self):
+        return [n for n in self.names() if n not in self.READ_ONLY]
 
     # ---- the API ----------------------------------------------------------
     def _saOpenDevice(self, h):

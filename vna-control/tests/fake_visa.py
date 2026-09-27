@@ -25,6 +25,8 @@ class FakePna:
         self.state = {"start": 10e6, "stop": 26.5e9, "points": 201, "ifbw": 100e3,
                       "power": -5.0}
         self.mode = "CONT"
+        self.averaging = True                # front-panel averaging on, as someone left it
+        self.selected = catalog.strip('"').split(",")[0]   # the active measurement
         self.catalog = catalog
         self.sparam = None
         self.errors: list[str] = []          # queued "code,message" strings
@@ -38,6 +40,10 @@ class FakePna:
     # ---- the pyvisa Resource surface the backend uses ----------------------
     def write(self, cmd: str) -> None:
         self.log.append(cmd)
+        if cmd == "*CLS":
+            self.errors.clear()
+        if cmd.startswith("SENS1:AVER "):
+            self.averaging = cmd.endswith(("ON", "1"))
         m = re.fullmatch(r"SENS1:FREQ:STAR (\S+)", cmd)
         if m:
             self.state["start"] = float(m.group(1))
@@ -86,6 +92,10 @@ class FakePna:
             return "0"
         if cmd == "CALC1:PAR:CAT:EXT?":
             return self.catalog
+        if cmd == "CALC1:PAR:SEL?":
+            return f'"{self.selected}"'
+        if cmd == "SENS1:AVER?":
+            return "1" if self.averaging else "0"
         if cmd == "DISP:WIND1:TRAC:NEXT?":
             return "+2"
         if cmd == "SENS1:SWE:MODE?":

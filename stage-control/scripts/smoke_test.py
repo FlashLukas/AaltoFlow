@@ -10,6 +10,7 @@ and exits non-zero if anything looks wrong.
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -17,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stage.config import Config  # noqa: E402
 from stage.sim_system import build_sim_system  # noqa: E402
+
+# A temp folder that exists on Windows too ("/tmp" does not there).
+_POS_FILE = str(Path(tempfile.gettempdir()) / "_stage_smoke_positions.json")
 
 
 def main() -> int:
@@ -62,9 +66,9 @@ def main() -> int:
     brain.store_position(0, "home-ish")
     p = brain.get_positions()[0]
     assert p["used"] and p["name"] == "home-ish", p
-    brain.save_positions("/tmp/_stage_smoke_positions.json")
+    brain.save_positions(_POS_FILE)
     brain.clear_position(0)
-    brain.load_positions("/tmp/_stage_smoke_positions.json")
+    brain.load_positions(_POS_FILE)
     assert brain.get_positions()[0]["used"], "reload failed"
     print("  position list OK")
 

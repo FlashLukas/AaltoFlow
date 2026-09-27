@@ -5,9 +5,13 @@ the original notes said U3-38J0XCP). IDS peak is its GenICam-based SDK.
 
 VERIFIED on it 2026-09-13 (IDS peak 2.17.1, ids-peak 1.16, ids-peak-ipl 1.17.2):
 open, idn, get/set_feature, 237 features, grab -> (1096, 1936) uint8 at 20 fps.
-KNOWN: open() loads the Default UserSet = 15 ms exposure, which saturates this
-microscope completely (every pixel 255); ~1 ms gives mean ~76. Lower
-ExposureTime in the GUI after starting, until this is made configurable.
+KNOWN: the camera's own power-on UserSet (Default) = 15 ms exposure, which
+saturates this microscope completely (every pixel 255); ~1 ms gives mean ~76.
+Since 2026-09-27 open() ADOPTS the camera's current settings and writes none of
+them (it used to load the Default UserSet and force Mono8): a restarted service
+keeps the exposure the camera was left at. After a camera POWER CYCLE the camera
+boots its own default set again -- lower ExposureTime in the GUI, or store a good
+set in the camera (UserSetDefault) once with IDS peak Cockpit.
 This is the ONLY camera file that imports the IDS libraries, and it imports them
 LAZILY inside :meth:`open` so the package still imports and the simulator still
 runs on a PC with no IDS peak installed.  In ``pyproject.toml`` the IDS deps stay
@@ -27,7 +31,7 @@ To finish at the microscope (a short hardware pass):
   2. Plug in the U3-38J0XCP; confirm it appears in IDS peak Cockpit first.
   3. If you have several cameras, set ``device`` to the serial/display name to
      pick the right one (default = first device found).
-  4. Verify the default UserSet gives a usable image, then tune from the GUI.
+  4. Tune exposure/gain from the GUI; open() never overwrites them.
 
 References: ids_peak Library / DeviceManager / RemoteDevice().NodeMaps() /
 DataStreams(); acquisition = AllocAndAnnounceBuffer -> QueueBuffer ->
@@ -53,6 +57,7 @@ _PREFERRED = [
 class IDSCamera:
     def __init__(self, device: str = "", pixel_format: str = "Mono8"):
         self.device = device            # serial / display name; "" = first found
+        # What the camera REPORTS after open() (read, never written -- see open).
         self.pixel_format = pixel_format
         self._lib_open = False
         self._dev = None
@@ -86,18 +91,27 @@ class IDSCamera:
         self._dev = descr.OpenDevice(ids_peak.DeviceAccessType_Control)
         self._nodemap = self._dev.RemoteDevice().NodeMaps()[0]
 
-        # Load the factory default UserSet for a known starting state.
-        try:
-            self._nodemap.FindNode("UserSetSelector").SetCurrentEntry("Default")
-            self._nodemap.FindNode("UserSetLoad").Execute()
-        except Exception:
-            pass
-        try:
-            self._nodemap.FindNode("PixelFormat").SetCurrentEntry(self.pixel_format)
-        except Exception:
-            pass
+        # ADOPT, DO NOT RESET (Lukas, 2026-09-27: "all modules should read the
+        # instrument state on startup, not to change anything"). This used to
+        # load the factory Default UserSet and force PixelFormat = Mono8, which
+        # threw away whatever exposure / gain / ROI the camera was running with
+        # (the Default set is 15 ms = a saturated image on the microscope). Now
+        # the camera keeps its settings; we only READ them. The pixel format is
+        # read, not set: grab() converts any format to Mono8 in SOFTWARE (IDS
+        # peak IPL), so the vision engine still gets 8-bit grayscale.
+        self.pixel_format = self._read_pixel_format()
 
+        # Opening the data stream + AcquisitionStart is the ONE write left at
+        # start: without it the camera delivers no frames at all. It changes no
+        # camera parameter (exposure, gain, ROI, format all stay as found).
         self._start_stream()
+
+    def _read_pixel_format(self) -> str:
+        """The camera's current PixelFormat, read only ("" if unreadable)."""
+        try:
+            return str(self._nodemap.FindNode("PixelFormat").CurrentEntry().SymbolicValue())
+        except Exception:
+            return ""
 
     def _pick_device(self, devices):
         if self.device:
@@ -146,6 +160,9 @@ class IDSCamera:
         buffer = self._stream.WaitForFinishedBuffer(2000)
         img = self._ext.BufferToImage(buffer)
         # Convert to Mono8 so the vision engine gets a 2-D grayscale array.
+        # Since open() no longer forces Mono8, this conversion also has to cope
+        # with whatever format the camera was left in (Mono10/12, packed).
+        # VERIFY: ConvertTo(Mono8) from Mono10p/Mono12p on the U3-386xCP-M.
         mono = img.ConvertTo(self._ipl.PixelFormatName_Mono8)
         arr = mono.get_numpy_2D().copy()
         self._stream.QueueBuffer(buffer)

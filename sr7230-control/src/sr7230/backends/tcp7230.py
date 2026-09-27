@@ -164,16 +164,73 @@ class Tcp7230:
             raise InstrumentError(f"not a 7230: ID answered {ident!r}")
         self._idn = f"Signal Recovery {ident} firmware {ver}".strip()
         # This module speaks single-reference mode only; the dual modes change
-        # the command set (manual 6.6.14).
-        self._q("REFMODE 0")                    # 0 = single reference (6.6.02)
-        # Deliberately NOT touched: OA (oscillator amplitude). The brain decides
-        # what OSC OUT does; opening a connection must never raise it.
+        # the command set (manual 6.6.14). We used to SEND "REFMODE 0" here.
+        # Since 2026-09-27 a start never changes the instrument (Lukas: "read
+        # the instrument state on startup, not to change anything"), so the
+        # mode is only READ, and a box left in a dual mode is refused with a
+        # message instead of being switched over under someone's experiment.
+        mode = int(self._float("REFMODE"))     # VERIFY: query form answers n
+        if mode != 0:
+            self._t.close()
+            raise InstrumentError(
+                f"the 7230 is in dual-reference / dual-harmonic mode (REFMODE {mode}); "
+                f"this module drives single-reference mode only. Switch the "
+                f"instrument to single reference on its front panel, then start again.")
+        # Deliberately NOT touched: OA (oscillator amplitude) or anything else.
+        # The brain reads the settings (read_settings) and adopts them.
 
     def close(self) -> None:
         self._t.close()
 
     def idn(self) -> str:
         return self._idn
+
+    def read_settings(self) -> dict:
+        """Read the front-panel state -- queries only (see LockInBackend).
+
+        On the 7230 a command sent WITHOUT its argument reports the current
+        value ("IE" -> "0", "OF." -> "+1.0000E+03"); that is the manual's
+        general rule (6.6), but not every one of these query forms has been
+        seen answering on a real unit, hence the # VERIFY. A query the
+        instrument refuses (status bit 1/2) or answers without a number is
+        LEFT OUT and named in "unread", so the brain can say which values it
+        could not confirm instead of the whole start failing. A dead link
+        (ConnectionError) still propagates: then nothing can be trusted.
+        """
+        out: dict = {}
+        unread: list[str] = []
+
+        def num(key, cmd, conv):
+            try:
+                out[key] = conv(self._float(cmd))
+            except InstrumentError:
+                unread.append(key)
+
+        as_bool = lambda v: bool(int(v))
+        # VERIFY (all below): the argument-less query form of each command.
+        num("ref_source", "IE", int)
+        num("osc_frequency_Hz", "OF.", float)
+        num("osc_amplitude_V", "OA.", float)
+        num("phase_deg", "REFP.", float)
+        num("harmonic", "REFN", int)
+        num("imode", "IMODE", int)
+        num("vmode", "VMODE", int)
+        num("dc_coupled", "DCCOUPLE", as_bool)
+        num("fet", "FET", as_bool)
+        num("float_shield", "FLOAT", as_bool)
+        num("auto_ac_gain", "AUTOMATIC", as_bool)
+        num("sensitivity_index", "SEN", int)
+        num("fast_mode", "FASTMODE", as_bool)
+        num("time_constant_s", "TC.", float)
+        num("slope_index", "SLOPE", int)
+        # LF answers TWO numbers, "n1,n2": notch mode, then 1 = 50 Hz / 0 = 60 Hz
+        try:
+            n1, n2 = self._floats("LF", 2)      # VERIFY: reply "n1,n2"
+            out["line_filter_mode"], out["line_50Hz"] = int(n1), bool(int(n2))
+        except InstrumentError:
+            unread.append("line_filter")
+        out["unread"] = unread
+        return out
 
     # ---- reference + oscillator --------------------------------------------------------
 

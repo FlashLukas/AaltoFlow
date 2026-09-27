@@ -29,7 +29,7 @@ class RemoteStatus:
     value) comes back as NaN, so arithmetic and formatting just work."""
 
     _DEFAULTS = {"connected": False, "idn": "", "hw_error": "", "points": 0,
-                 "averages": 1, "continuous": True, "sweeping": False,
+                 "averages": 1, "continuous": False, "configured": False, "sweeping": False,
                  "sweep_progress": 0.0, "sweeps": 0, "trace_id": 0,
                  "acq_id": 0, "acquiring": False, "acq_progress": 0.0,
                  "simulated": True, "acq_is_reference": False, "device_model": "",

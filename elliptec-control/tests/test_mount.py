@@ -325,3 +325,71 @@ def test_window_across_the_home_mark_is_never_left():
             [a for a in seen if not 9.99 <= a <= 200.01][:5]
     finally:
         brain.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# adopt-on-start rule (Lukas, 2026-09-27): read the mounts, change nothing
+# --------------------------------------------------------------------------- #
+class _RecordingBus:
+    """Wraps the simulator and records every call that would CHANGE a mount."""
+
+    WRITES = ("start_home", "start_move_abs", "start_move_rel", "stop", "set_velocity")
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.writes = []
+
+    def __getattr__(self, name):
+        attr = getattr(self.inner, name)
+        if name in self.WRITES:
+            def rec(*a, **kw):
+                self.writes.append((name, a))
+                return attr(*a, **kw)
+            return rec
+        return attr
+
+
+def test_start_issues_no_state_changing_writes():
+    from elliptec.mount import RotationMount
+    from elliptec.backends.sim import SimEllBus
+    cfg = Config()
+    cfg.axes.addresses = "0,1"
+    cfg.motion.velocity_pct = 100          # a config default that must not be pushed
+    bus = _RecordingBus(SimEllBus(cfg))
+    brain = RotationMount(bus, cfg)
+    brain.start()
+    try:
+        time.sleep(0.2)                    # let the worker run a few cycles too
+        assert bus.writes == []
+    finally:
+        brain.shutdown()                   # (shutdown's stop is allowed: not start)
+
+
+def test_status_after_start_reflects_the_preexisting_state():
+    cfg = Config()
+    cfg.axes.addresses = "0,1"
+    cfg.sim.start_deg = 123.0
+    cfg.sim.start_velocity_pct = 45        # below the 100 % config default
+    brain, bus = build_sim_system(cfg)
+    brain.start()
+    try:
+        st = brain.status()
+        assert st.velocity_pct == [45, 45]
+        assert abs(st.angle_deg[0] - 123.0) < 0.01
+        assert abs(st.angle_deg[1] - 173.0) < 0.01
+        assert st.moving == [False, False] and st.homed == [False, False]
+        assert bus.read_velocity("0") == 45        # the mount still runs at 45 %
+    finally:
+        brain.shutdown()
+
+
+def test_set_config_without_a_speed_change_keeps_the_adopted_speed(rig):
+    """Editing, e.g., an offset through set_config carries the unchanged
+    default speed along; it must not overwrite the speed the mount was found at."""
+    cfg, brain, bus, _ev = rig
+    assert bus.read_velocity("0") == cfg.sim.start_velocity_pct != cfg.motion.velocity_pct
+    cfg.offsets.offsets_deg = "10"
+    brain.apply_config()
+    time.sleep(0.15)
+    assert bus.read_velocity("0") == cfg.sim.start_velocity_pct
+    assert brain.status().velocity_pct == [cfg.sim.start_velocity_pct]

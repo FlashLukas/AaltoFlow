@@ -12,7 +12,9 @@ def test_defaults_match_the_contract():
     assert cfg.limits.field_max_mT == 180.0
     assert (cfg.limits.angle_min_deg, cfg.limits.angle_max_deg) == (-360.0, 360.0)
     assert cfg.control.settle_timeout_s == 30.0
-    assert cfg.control.energize_on_start is True
+    # adopt, don't push (2026-09-27): a magnet found off at start stays off
+    assert cfg.control.energize_on_start is False
+    assert (cfg.sim.start_output_x_V, cfg.sim.start_output_y_V, cfg.sim.start_enabled) == (0.0, 0.0, False)
     assert cfg.interlock.water_bypass is False and cfg.interlock.temp_monitor is False
     assert cfg.interlock.max_temp_C == 40.0
     # this module's own groups
@@ -43,6 +45,8 @@ def test_ini_round_trip_including_bools(tmp_path):
     cfg.hardware.hall_samples = 250
     cfg.hardware.ai_terminal = "RSE"
     cfg.sim.water_ok = False
+    cfg.sim.start_enabled = True
+    cfg.sim.start_output_x_V = 1.25
     cfg.ui.theme = "light"
     cfg.control.freeze_enabled = False
     cfg.stabilizer.enabled = False
@@ -57,6 +61,7 @@ def test_ini_round_trip_including_bools(tmp_path):
     back = Config.load(str(path))
     assert back.control.kp_V_per_mT == 0.033
     assert back.control.energize_on_start is False      # the classic bool trap
+    assert back.sim.start_enabled is True and back.sim.start_output_x_V == 1.25
     assert back.interlock.water_bypass is True
     assert back.interlock.temp_monitor is True
     assert back.sim.water_ok is False

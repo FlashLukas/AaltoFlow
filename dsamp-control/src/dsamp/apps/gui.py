@@ -292,6 +292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # start the brain (opens the backend) and the refresh timer
         self.ctrl.start()
         self._range = None
+        self._gain_seeded = False       # the gain box starts from the ADOPTED gain
         self._apply_gain_range()
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(60)
@@ -555,6 +556,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if s.connected:
             self._apply_gain_range(s.gain_min_dB, s.gain_max_dB)
+            if not self._gain_seeded:
+                # Once, from the first connected frame: the module adopts the
+                # amplifier's gain at start, so the box should show that value,
+                # not 0 -- pressing Set must not silently change the amplifier.
+                # (If the device holds more than the ceiling, the box can only
+                # show the ceiling; the readout on the right shows the truth.)
+                self.gain_spin.blockSignals(True)
+                self.gain_spin.setValue(s.gain_set_dB)
+                self.gain_spin.blockSignals(False)
+                self._gain_seeded = True
         self.indicator.set_state(s.amp_on, s.gain_dB, s.gain_max_dB,
                                  self.cfg.hardware.gain_max_dB, s.frequency_Hz,
                                  s.est_gain_dB, s.output_warning)

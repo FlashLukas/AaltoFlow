@@ -213,23 +213,104 @@ class SpectrumAnalyzer:
     # ---- lifecycle ---------------------------------------------------------------
 
     def start(self, run: bool = True) -> None:
-        """Open the analyser and start the sweep thread.
+        """Open the analyser, ADOPT its current settings, start the sweep thread.
 
-        The tracking generator is forced OFF here whatever the .ini said: after
-        a restart nobody should find a DUT being driven that they did not
-        switch on. `run=False` skips the thread, so a test can drive `step()`."""
+        Lukas's rule (2026-09-27): starting the software must not change the
+        instrument. So nothing is pushed here -- not the .ini, not a safe
+        tracking-generator state. The backend is only QUERIED; what the
+        instrument is doing (span, RBW, reference level, TG on and its level,
+        ...) is copied into cfg, so status, describe and the GUI show the
+        instrument as it is, and the sweep thread's first `configure` finds
+        nothing to change. The .ini values of the sweep/tracking groups are
+        therefore only a fallback for a setting the instrument does not report;
+        they are written only when the user sets something (a setter or
+        set_config). `run=False` skips the thread, so a test can drive `step()`."""
         self._sanitise_config()
-        self.cfg.tracking.tg_on = False
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
+            state = self.backend.read_state()
         self._connected = True
         self._emit("info", f"connected: {self._idn}")
-        self._emit("info", "tracking generator off")
+        self._adopt(state)
+        with self._hw:
+            # Knobs the instrument did not report keep the .ini value; tell the
+            # backend to treat them as already applied, so they are written only
+            # when the user changes them -- never as a side effect of starting.
+            self.backend.mark_in_sync(model.resolve(self.cfg))
         if run:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="gsp818-sweep", daemon=True)
             self._thread.start()
+
+    #: instrument state key -> (config group, config field)
+    _ADOPT = {
+        "start_Hz": ("sweep", "start_Hz"), "stop_Hz": ("sweep", "stop_Hz"),
+        "points": ("sweep", "points"),
+        "rbw_Hz": ("sweep", "rbw_Hz"), "rbw_auto": ("sweep", "rbw_auto"),
+        "vbw_Hz": ("sweep", "vbw_Hz"), "vbw_auto": ("sweep", "vbw_auto"),
+        "ref_level_dBm": ("sweep", "ref_level_dBm"),
+        "atten_dB": ("sweep", "atten_dB"), "atten_auto": ("sweep", "atten_auto"),
+        "sweep_time_s": ("sweep", "sweep_time_s"),
+        "sweep_time_auto": ("sweep", "sweep_time_auto"),
+        "detector": ("sweep", "detector"), "preamp": ("sweep", "preamp"),
+        "tg_on": ("tracking", "tg_on"), "tg_level_dBm": ("tracking", "level_dBm"),
+    }
+
+    def _adopt(self, state: dict) -> None:
+        """Copy the instrument's reported settings into cfg.
+
+        NOT clamped to Limits: the instrument is doing it, and clamping would
+        make the first configure WRITE the clamped value -- a change on the
+        instrument caused only by starting the software. A value outside the
+        configured envelope is kept and announced (several limits are
+        themselves # VERIFY guesses, e.g. the point range)."""
+        state = dict(state or {})
+        missing = []
+        for key, (group, name) in self._ADOPT.items():
+            if key not in state or state[key] is None:
+                missing.append(key)
+                continue
+            old = getattr(getattr(self.cfg, group), name)
+            v = state[key]
+            if isinstance(old, bool):
+                v = bool(v)
+            elif isinstance(old, int):
+                v = int(v)
+            elif isinstance(old, float):
+                v = float(v)
+                if not math.isfinite(v):
+                    missing.append(key)
+                    continue
+            else:
+                v = str(v)
+            setattr(getattr(self.cfg, group), name, v)
+        sw, tg, lim = self.cfg.sweep, self.cfg.tracking, self.cfg.limits
+        outside = []
+        for label, v, lo, hi in (
+                ("start", sw.start_Hz, lim.freq_min_Hz, lim.freq_max_Hz),
+                ("stop", sw.stop_Hz, lim.freq_min_Hz, lim.freq_max_Hz),
+                ("points", sw.points, lim.points_min, lim.points_max),
+                ("reference level", sw.ref_level_dBm, lim.ref_level_min_dBm, lim.ref_level_max_dBm),
+                ("TG level", tg.level_dBm, lim.tg_level_min_dBm, lim.tg_level_max_dBm)):
+            if not lo <= v <= hi:
+                outside.append(f"{label} {v:g} (limits {lo:g}..{hi:g})")
+        if sw.detector not in DETECTORS:
+            outside.append(f"detector {sw.detector!r}")
+        self._emit("info", "adopted from the instrument: "
+                   f"{_fmt_Hz(sw.start_Hz)} - {_fmt_Hz(sw.stop_Hz)}, {int(sw.points)} points, "
+                   f"RBW {'auto' if sw.rbw_auto else _fmt_Hz(sw.rbw_Hz)}, "
+                   f"ref {sw.ref_level_dBm:g} dBm, detector {sw.detector}, "
+                   f"preamp {'on' if sw.preamp else 'off'}, tracking generator "
+                   f"{'ON' if tg.tg_on else 'off'} ({tg.level_dBm:g} dBm)")
+        if outside:
+            self._emit("warn", "the instrument is set outside the configured limits, kept "
+                               "as it is (nothing written): " + "; ".join(outside))
+        if missing:
+            self._emit("warn", "the instrument did not report " + ", ".join(missing)
+                       + ": showing the configured value (not written to it)")
+        for note in (state.get("notes") or []):
+            self._emit("warn", str(note))
 
     def shutdown(self) -> None:
         """Stop sweeping, switch the tracking generator off and disconnect.
@@ -657,6 +738,18 @@ class SpectrumAnalyzer:
             stale = self._rev != rev0
         if s is None or stale:
             return False
+        with self._lock:
+            acquiring = self._acq is not None
+        if acquiring:
+            # An acquisition is an explicit request for a FRESH trace. If the
+            # front panel left the trace frozen (View), holding (Max Hold) or
+            # averaged by the instrument, reading it would not be one; the
+            # backend fixes that now -- never at start-up -- and says what it
+            # changed.
+            with self._hw:
+                notes = self.backend.ensure_live()
+            for note in notes or []:
+                self._emit("warn", note)
         t0 = self._clock()
         with self._hw:
             dt = float(self.backend.start_sweep(s))

@@ -22,6 +22,9 @@ def app():
 
 def _rig(tmp_path=None):
     cfg = Config()
+    # Opt in: these runs regulate from a magnet that starts OFF. The default
+    # (False) leaves a de-energized magnet off -- adopt, don't push.
+    cfg.control.energize_on_start = True
     cfg.calibration.load_newest_on_start = False
     if tmp_path is not None:
         cfg.calibration.directory = str(tmp_path)

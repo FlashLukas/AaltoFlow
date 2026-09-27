@@ -107,6 +107,20 @@ still assumes piezo/zpiezo.
 - **camera-control owns no motion hardware.** It drives XY through
   piezo-control and Z through zpiezo-control over ZeroMQ.
 - **scan-core is THE coordinator** (homegrown, chosen over QCoDeS; see 7.8/7.10).
+- **Two modules, one instrument: `[run] excludes` (2026-09-27).** Some
+  modules are two programs for the SAME hardware -- kepco and clMag both open
+  the one Kepco BOP on the same GPIB address, mag2d and mag2dcal the same coils
+  and DAQ card. Two services commanding one supply would fight, and neither
+  knows the other exists, so a module declares its partners in `module.toml`
+  (`excludes = ["clMag"]`). Discovery makes it SYMMETRIC (naming it in one toml
+  is enough; `suite_common.mirror_excludes`) and only LOCAL modules take part (a
+  remote copy drives another PC's instrument). Mission Control then refuses to
+  start a service while a partner is up -- started from the launcher OR
+  answering on its port -- greys the Service button with the reason, refuses a
+  profile that holds both, and leaves the second of each pair out of "Full
+  suite" / "Start all". The profile "Exclusive" checkbox is a different thing
+  (stop everything not in the profile) and is unchanged. `check_modules.py`
+  fails an `excludes` key that names no module and lists every pair.
 
 ---
 

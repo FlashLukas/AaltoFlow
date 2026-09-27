@@ -201,7 +201,8 @@ def build_manifest(sa) -> dict:
         # -- tracking generator ---------------------------------------------------------------
         switch("tg_on", "Tracking generator", "tg_on", "set_tg", "Tracking generator", 10,
                "RF out of GEN OUTPUT, following the sweep (100 kHz - 1.8 GHz). "
-               "Off at every start.", danger=True),
+               "Read from the instrument at start (left as it is); off when the "
+               "service stops.", danger=True),
         ctrl("tg_level", "TG level", "dBm", "tg_level_dBm", "set_tg_level", "level_dBm",
              "Tracking generator", 20, lim.tg_level_min_dBm, lim.tg_level_max_dBm,
              decimals=1, step=1.0, tol=1e-6,

@@ -35,13 +35,19 @@ def wait_for(brain, pred, timeout=2.0):
 
 def main() -> int:
     cfg = Config()
-    brain, backend = build_sim_system(cfg)
+    # the fake unit was left at -90 deg / 12.5 dB with RF ON by someone else:
+    # start() must ADOPT that, not reset it
+    brain, backend = build_sim_system(cfg, phase_deg=-90.0, attenuation_dB=12.5, output_on=True)
     events = []
     brain._on_event = lambda lvl, msg: events.append((lvl, msg))
 
     brain.start()
     print("IDN:", backend.idn())
-    assert brain.status().output_on is False, "output must start OFF"
+    s0 = brain.status()
+    print(f"adopted: phase {s0.phase_deg} deg, att {s0.attenuation_dB} dB, out={s0.output_on}")
+    assert s0.output_on is True and s0.phase_deg == -90.0 and s0.attenuation_dB == 12.5, \
+        "start must adopt the unit's state"
+    assert backend.write_log == [], "start must not write to the unit"
 
     brain.set_phase(33.3)                      # -> 33.5 (0.5 deg step)
     brain.set_attenuation(6.1)                 # -> 6.0 (0.25 dB step)

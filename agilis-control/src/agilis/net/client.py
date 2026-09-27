@@ -49,8 +49,8 @@ class RemoteStatus:
     cal_valid: list = field(default_factory=lambda: [True, True])
     uncal_steps: list = field(default_factory=lambda: [0, 0])
     estimate_ok: list = field(default_factory=lambda: [True, True])
-    limit_lo: list = field(default_factory=lambda: [-300_000, -300_000])
-    limit_hi: list = field(default_factory=lambda: [300_000, 300_000])
+    limit_lo: list = field(default_factory=lambda: [-240_000, -240_000])
+    limit_hi: list = field(default_factory=lambda: [240_000, 240_000])
     limit_switch: list = field(default_factory=lambda: [False, False])
     leash: bool = False
     leash_steps: int = 20000
@@ -58,6 +58,16 @@ class RemoteStatus:
     connected: bool = False
     hw_error: str = ""
     poll_hz: float = 0.0
+    travel_um: float = 12000.0
+    measured_um: list = field(default_factory=lambda: [None, None])
+    measured_steps: list = field(default_factory=lambda: [None, None])
+    routine: str = ""
+    routine_id: int = 0
+    routine_running: bool = False
+    routine_error: str = ""
+    routine_msg: str = ""
+    usb_busy: bool = False
+    startup_writes: list = field(default_factory=list)
     #: Manifest revision from the service; None if it predates `describe`.
     describe_rev: int | None = None
 
@@ -279,3 +289,17 @@ class AgilisClient:
 
     def load_positions(self, path) -> list:
         return self._rpc(cmd="load_positions", path=path)["positions"]
+
+    # -- limit-switch stage (AG-LS25) ------------------------------------ #
+    def move_to_limit(self, axis, direction, speed=3) -> int:
+        return self._rpc(cmd="move_to_limit", axis=axis, direction=direction,
+                         speed=speed)["mode"]
+
+    def measure_position(self, axis) -> int:
+        return self._rpc(cmd="measure_position", axis=axis)["routine_id"]
+
+    def move_absolute(self, axis, position_um) -> int:
+        return self._rpc(cmd="move_absolute", axis=axis, position=position_um)["routine_id"]
+
+    def measure_step_size(self, axis) -> int:
+        return self._rpc(cmd="measure_step_size", axis=axis)["routine_id"]

@@ -324,3 +324,43 @@ def test_a_sample_is_never_announced_before_it_exists():
         t.join()
         v.shutdown()
     assert bad == []
+
+
+# ---- start-up: read, never write (Lukas's rule, 2026-09-27) -----------------------
+
+def test_start_leaves_a_busy_analyser_as_it_found_it():
+    """The simulated TG was left EMITTING by whatever used the analyser last,
+    and the saved config wants continuous sweeps. Start must neither silence
+    the TG nor configure anything; status tells the truth about both."""
+    from signalhound.backends.sim import SimulatedAnalyzer
+    from signalhound.spectrum import SpectrumAnalyzer
+    cfg = Config()
+    cfg.hardware.model = "SA124B"
+    cfg.acquisition.continuous = True
+    sim = SimulatedAnalyzer(cfg, seed=1, time_scale=0.0, tg_output_on=True)
+    v = SpectrumAnalyzer(sim, cfg)
+    v.start(run=False)
+    for _ in range(3):
+        v.step()
+    st = v.status()
+    assert sim.configure_calls == 0 and sim.tg_output_on is True
+    assert st.configured is False and st.continuous is False and st.sweeps == 0
+    assert st.device_model == "SA124B" and st.freq_max_Hz == pytest.approx(12.4e9)
+    v.shutdown()
+    assert sim.tg_output_on is False                      # shutdown behaviour unchanged
+
+
+def test_sweep_on_start_restores_the_old_behaviour():
+    cfg = Config()
+    cfg.acquisition.sweep_on_start = True
+    v, sim = build_sim_system(cfg, realtime=False, seed=1)
+    v.start(run=False)
+    assert v.status().continuous is True
+    assert v.step() is True and sim.configure_calls == 1
+    v.shutdown()
+
+
+def test_continuous_on_is_a_deliberate_request_that_configures(sa):
+    assert sa.status().configured is False
+    sa.set_continuous(True)
+    assert sa.step() is True and sa.status().configured is True

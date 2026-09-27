@@ -21,8 +21,8 @@ from ..config import Config, MODES
 #: tab title, hint -- per config group, in tab order
 _TABS = {
     "output": ("Output", "The live operating point (the service keeps these in "
-                         "step with what you set). The output itself always "
-                         "starts OFF."),
+                         "step with what you set). At start they are READ "
+                         "from the BOP, never pushed to it."),
     "ramp": ("Ramp", "Setpoints are walked at this rate. Keep the ramp ON with "
                      "any inductive load: V = L dI/dt."),
     "limits": ("Limits", "Every setpoint is clamped to this envelope. The BOP "

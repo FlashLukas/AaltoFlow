@@ -26,18 +26,37 @@ from ..field import FieldReading
 class SimulatedVna:
     simulated = True
 
-    def __init__(self, cfg: Config, seed: int | None = None, time_scale: float = 1.0):
+    def __init__(self, cfg: Config, seed: int | None = None, time_scale: float = 1.0,
+                 state: dict | None = None):
         """`time_scale` multiplies every sweep time: 1.0 behaves like a real
-        analyser (the GUI, the service), 0.0 makes tests instant."""
+        analyser (the GUI, the service), 0.0 makes tests instant.
+
+        `state` = what the pretend analyser is ALREADY doing when the module
+        connects (keys as in `read_state`), so a test can start it somewhere
+        the config is not and check that the brain adopts it. None = it holds
+        the config's sweep (taken at `open`), which keeps the service and the
+        GUI starting exactly where the .ini says."""
         self.cfg = cfg
         self.time_scale = float(time_scale)
         self._rng = np.random.default_rng(seed)
         self._open = False
         self._pending = None
+        self._state = dict(state) if state is not None else None
 
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
+        if self._state is None:
+            sw = self.cfg.sweep
+            self._state = {"start_Hz": sw.start_Hz, "stop_Hz": sw.stop_Hz,
+                           "points": sw.points, "ifbw_Hz": sw.ifbw_Hz,
+                           "power_dBm": sw.power_dBm, "sparam": sw.sparam,
+                           "continuous": self.cfg.acquisition.continuous}
         self._open = True
+
+    def read_state(self) -> dict:
+        """The pretend analyser's settings. `continuous` is the simulator's own
+        free-running flag: showing live sweeps changes nothing real here."""
+        return dict(self._state or {})
 
     def close(self) -> None:
         self._open = False
@@ -57,6 +76,12 @@ class SimulatedVna:
         if sparam not in model.SPARAMS:
             raise ValueError(f"sparam must be one of {model.SPARAMS}, got {sparam!r}")
         field = field or FieldReading(0.0, False, "none", float("nan"))
+        # the pretend instrument now HOLDS these settings (what read_state reports)
+        f = np.asarray(freqs_Hz, dtype=float)
+        self._state = {**(self._state or {}), "start_Hz": float(f[0]),
+                       "stop_Hz": float(f[-1]), "points": int(f.size),
+                       "ifbw_Hz": float(ifbw_Hz), "power_dBm": float(power_dBm),
+                       "sparam": sparam}
         self._pending = {
             "freqs": np.asarray(freqs_Hz, dtype=float),
             "ifbw": float(ifbw_Hz), "power": float(power_dBm), "sparam": sparam,

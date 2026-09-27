@@ -23,10 +23,18 @@ from ..config import Config
 class SimulatedSpectrometer:
     simulated = True
 
+    # The integration time the simulated CCD "was left at" by whoever used it
+    # last (ThorSpectra, a previous session). Deliberately NOT the config
+    # default (10 ms): the brain must ADOPT this at start, and a sim that
+    # starts where the config already is would never show that it does.
+    INITIAL_INTEGRATION_S = 0.005
+
     def __init__(self, cfg: Config, seed: int | None = None, time_scale: float = 1.0,
-                 clock=time.monotonic):
+                 clock=time.monotonic, integration_s: float | None = None):
         """`time_scale` multiplies every scan time: 1.0 behaves like the real
-        instrument (the GUI, the service), 0.0 makes tests instant."""
+        instrument (the GUI, the service), 0.0 makes tests instant.
+        `integration_s` is the instrument's pre-existing integration time
+        (default INITIAL_INTEGRATION_S)."""
         self.cfg = cfg
         self.time_scale = float(time_scale)
         self._clock = clock
@@ -35,6 +43,9 @@ class SimulatedSpectrometer:
         self._pattern = model.dark_pattern(self._wl.size)
         self._open = False
         self._pending = None
+        # instrument-side state: survives close()/open() like a real CCS200's
+        self._t_device = float(self.INITIAL_INTEGRATION_S if integration_s is None
+                               else integration_s)
 
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
@@ -47,6 +58,9 @@ class SimulatedSpectrometer:
     def idn(self) -> str:
         return "AaltoFlow simulated CCS200 (lamp + Hg/Ar lines; not a real instrument)"
 
+    def integration_time(self) -> float:
+        return self._t_device
+
     def wavelengths(self) -> np.ndarray:
         return self._wl.copy()
 
@@ -55,6 +69,7 @@ class SimulatedSpectrometer:
         if not self._open:
             raise RuntimeError("simulated spectrometer is not open")
         t = float(integration_s)
+        self._t_device = t                  # the real CCS keeps the last time set
         self._pending = {"t": t, "sim": copy.copy(self.cfg.sim),
                          "t0": self._clock(),
                          "dt": model.scan_duration_s(t) * self.time_scale}

@@ -72,7 +72,11 @@ class Motion:
     # Default jog step used by the GUI +/- buttons, um.
     jog_step: float = 1.0
 
-    # Loop mode each axis starts in (True = closed loop, needs the SG sensor).
+    # Loop mode per axis (True = closed loop, needs the SG sensor).  NOT pushed
+    # at start any more (adopt rule, 2026-09-27): the service reads the
+    # controller's own mode and copies it here; this value is applied only when
+    # the user sets it explicitly (settings dialog / set_config).  Likewise
+    # vel_x/y and ramp_mode follow the controller's slew rate at start.
     closed_loop_x: bool = True
     closed_loop_y: bool = True
 

@@ -224,3 +224,37 @@ def test_refused_velocity_is_not_reported_as_taken(bus):
     with pytest.raises(RuntimeError, match="GS04"):
         b.set_velocity("0", 150)
     assert b.read_velocity("0") == 60
+
+
+# --------------------------------------------------------------------------- #
+# adopt-on-start rule (Lukas, 2026-09-27): open() only QUERIES the mounts
+# --------------------------------------------------------------------------- #
+def test_open_sends_only_queries_and_adopts_speed_and_angle(monkeypatch):
+    """open() may send in / gv / gp and nothing else: no sv (speed), no ho
+    (home), no ma/mr (move), no st.  A mount left at 45 % and at a non-zero
+    angle is reported as such."""
+    fake = types.ModuleType("serial")
+
+    class PreSet(FakeSerial):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.mounts["0"].vel = 45
+            self.mounts["1"].vel = 70
+
+    fake.Serial = PreSet
+    fake.EIGHTBITS, fake.PARITY_NONE, fake.STOPBITS_ONE = 8, "N", 1
+    monkeypatch.setitem(sys.modules, "serial", fake)
+    FakeSerial.instances.clear()
+    cfg = Config()
+    cfg.hardware.port = "COM99"
+    cfg.motion.velocity_pct = 100           # the config default must NOT be pushed
+    b = EllSerialBus(cfg)
+    b.open(["0", "1"])
+    try:
+        ser = FakeSerial.instances[-1]
+        cmds = {s[1:3] for s in ser.sent}
+        assert cmds <= {"in", "gv", "gp"}, ser.sent
+        assert b.read_velocity("0") == 45 and b.read_velocity("1") == 70
+        assert abs(b.poll("0").device_deg - 1000 / PPR * 360) < 1e-9
+    finally:
+        b.close()

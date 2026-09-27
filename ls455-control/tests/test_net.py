@@ -100,7 +100,18 @@ def test_shutdown_verb_replies_then_stops(service_and_client):
 def test_bad_request_is_an_error_not_a_crash(service_and_client):
     _, cli, _ = service_and_client
     assert cli._cmd({"cmd": "set_range"})["ok"] is False           # missing argument
-    assert cli._cmd({"cmd": "set_mode", "mode": "peak"})["ok"] is False
+    assert cli._cmd({"cmd": "set_mode", "mode": "ac"})["ok"] is False
     assert cli._cmd({"cmd": "set_relative"})["ok"] is False
     assert cli._cmd({"cmd": "nonsense"})["ok"] is False
     assert cli._cmd({"cmd": "status"})["ok"] is True                # the loop survived
+
+
+def test_reread_probe_over_the_wire(service_and_client):
+    _, cli, sim = service_and_client
+    assert cli.status().probe == "HSE"
+    sim.swap_probe("HST")
+    cli.reread_probe()
+    s = _wait(lambda s: s.probe == "HST", cli)
+    assert s.probe == "HST" and max(s.ranges_mT) == 35000.0
+    assert s.probe_desc.startswith("HST axial")
+    assert cli.info()["probe_geometry"] == "axial"

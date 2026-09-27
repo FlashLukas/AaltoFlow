@@ -41,6 +41,8 @@ class FakeCmt:
     # ---- the pyvisa Resource surface the backend uses ----------------------
     def write(self, cmd: str) -> None:
         self.log.append(cmd)
+        if cmd == "*CLS":
+            self.errors.clear()
         for key, pat, cast in (("start", r":SENS1:FREQ:STAR (\S+)", float),
                                ("stop", r":SENS1:FREQ:STOP (\S+)", float),
                                ("ifbw", r":SENS1:BWID (\S+)", float),
@@ -97,6 +99,12 @@ class FakeCmt:
         if cmd == ":SENS1:SWE:POIN?":
             return f"{self.state['points']}"
         if cmd == ":SENS1:CORR:STAT?":
+            return "0"
+        if cmd == ":CALC1:PAR1:DEF?":
+            return self.sparam
+        if cmd == ":TRIG:SOUR?":
+            return self.trig_source
+        if cmd == ":SENS1:AVER?":
             return "0"
         raise AssertionError(f"FakeCmt: unexpected query {cmd!r}")
 

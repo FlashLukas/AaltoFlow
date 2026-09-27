@@ -20,7 +20,9 @@ class PhaseShifterBackend(Protocol):
     """A programmable RF phase shifter with an output attenuator."""
 
     def open(self) -> None:
-        """Connect and initialise. Must leave the RF OUTPUT OFF."""
+        """Connect. QUERIES ONLY: must not change the unit's state (no reset,
+        no output off, no phase/attenuation write) -- the brain reads the
+        state back and adopts it (the suite's adopt-on-start rule)."""
 
     def close(self) -> None:
         """Turn the RF output off and disconnect. Safe to call twice / on a crash."""

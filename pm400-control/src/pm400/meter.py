@@ -202,21 +202,24 @@ class Pm400Meter:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the console, find the head, adopt (or push) its settings, start
-        polling. `poll=False` skips the thread, so a test can drive
-        `poll_once()` by hand."""
+        """Open the console, find the head, ADOPT its settings, start polling.
+
+        Start-up only READS the console (Lukas's rule, 2026-09-27): wavelength,
+        auto range / range, averaging time and dark offset are queried and
+        copied into cfg.sensor and the status, so the GUI and describe show what
+        the console is actually doing. Nothing is written -- the config values
+        reach the console only when the user sets them explicitly.
+        `poll=False` skips the thread, so a test can drive `poll_once()` by hand."""
         with self._hw:
             self.backend.open()
             self._idn = self.backend.idn()
             self._connected = True
             info = self._try(self.backend.sensor_info, empty_sensor_info())
-            self._take_head(info, adopt=not self.cfg.hardware.push_on_start)
-            if self.cfg.hardware.push_on_start and self.quantity != "none":
-                self._sanitise_config()
-                self._push_sensor()
+            self._take_head(info, adopt=True)
             self._last_head_check = self._clock()
         self._emit("info", f"connected: {self._idn or 'power meter console'}")
         self._announce_head()
+        self._warn_adopted_outside_limits()
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._poll_loop,
@@ -676,6 +679,27 @@ class Pm400Meter:
                 s.avg_time_s = self._try(b.get_avg_time, s.avg_time_s)
         self._read_back()
         self._dark = self._try(b.dark_offset, _NAN) if info.get("zero_supported") else _NAN
+
+    def _warn_adopted_outside_limits(self) -> None:
+        """An adopted setting may lie outside this module's envelope (e.g. the
+        console was left averaging 3 s, our limit is 1 s). It is NOT corrected
+        -- that would be a write at start -- only reported, so the user knows
+        why readings are slow or why the next setter will clamp."""
+        if self.quantity == "none":
+            return
+        checks = [("wavelength", self._wl_actual, self.wavelength_limits(), "nm")]
+        if self._is_energy():
+            checks.append(("energy range", self._range_actual, self.range_limits(), "J"))
+        else:
+            checks.append(("averaging time", self._avg_actual, self.avg_time_limits(), "s"))
+            if not self.cfg.sensor.auto_range:
+                checks.append(("power range", self._range_actual, self.range_limits(), "W"))
+        for name, v, (lo, hi), unit in checks:
+            if math.isfinite(v) and math.isfinite(lo) and math.isfinite(hi) and not (
+                    lo * (1 - 1e-9) <= v <= hi * (1 + 1e-9)):
+                self._emit("warn", f"console {name} {v:g} {unit} is outside this "
+                                   f"module's limits {lo:g}..{hi:g} {unit}; kept as "
+                                   f"found (not changed at start)")
 
     def _announce_head(self) -> None:
         h = self._head

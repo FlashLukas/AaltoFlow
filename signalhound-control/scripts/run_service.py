@@ -19,8 +19,12 @@ The service exposes the analyser over ZeroMQ:
   * commands on tcp://0.0.0.0:5587   (REP)
   * status   on tcp://0.0.0.0:5588   (PUB, 10 Hz)
 
-Safety: the tracking generator always starts OFF, and the analyser is aborted
-and closed (TG output off) on shutdown, Ctrl+C or a crash.
+Start-up writes nothing: the analyser is opened and asked what it is (model,
+serial, TG present) and left idle -- no saved setting is sent until a setter,
+"continuous on" or an acquire asks for a sweep (acquisition.sweep_on_start =
+true restores sweeping at start). The tracking generator is never switched on
+at start, and the analyser is aborted and closed (TG output off) on shutdown,
+Ctrl+C or a crash.
 
 Output is ASCII only: the launcher reads it through a pipe (suite gotcha #14).
 """

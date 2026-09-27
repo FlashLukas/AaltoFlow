@@ -4,7 +4,7 @@ Nothing here talks to hardware directly -- it edits the shared `cfg` object in
 place and then calls `laser.apply_config()` so the running brain (local or
 remote) picks the changes up and re-clamps everything. Tabs:
 
-  Start-up  -- what is pushed at service start (never emission)
+  Presets   -- values sent to the laser when CHANGED here (never at start)
   Limits    -- the safety envelope every request is clamped to
   Filters   -- the AOTF crystal table (names, ranges, NKT crystal numbers)
   Hardware  -- COM port, module addresses, watchdog (real backend only)
@@ -74,7 +74,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.w = {}   # (group, field) -> widget
 
         tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._startup_tab(), "Start-up")
+        tabs.addTab(self._startup_tab(), "Presets")
         tabs.addTab(self._limits_tab(), "Limits")
         tabs.addTab(self._filters_tab(), "Filters")
         tabs.addTab(self._hardware_tab(), "Hardware")
@@ -115,10 +115,11 @@ class SettingsDialog(QtWidgets.QDialog):
                   QtWidgets.QLineEdit(s.wavelengths_nm))
         self._add(form, "startup", "amplitudes_pct", "Line amplitudes (%)",
                   QtWidgets.QLineEdit(s.amplitudes_pct))
-        form.addRow(_hint("Pushed to the laser when the service starts. Eight "
-                          "comma-separated values, line 1 first. Emission and RF "
-                          "always start OFF -- there is deliberately no setting "
-                          "to change that."))
+        form.addRow(_hint("NOT applied at start: the service reads the laser and "
+                          "adopts what it is doing. A value you CHANGE here is sent "
+                          "when you press Apply (clamped like any request). Eight "
+                          "comma-separated values, line 1 first. No setting can "
+                          "switch emission on."))
         return page
 
     def _limits_tab(self):
@@ -166,13 +167,19 @@ class SettingsDialog(QtWidgets.QDialog):
                   _ispin(hw.watchdog_s, 0, 255, "s"))
         self._add(form, "hardware", "poll_hz", "Poll rate",
                   _dspin(hw.poll_hz, 0.5, 20, 1, 0.5, "Hz"))
+        self._add(form, "hardware", "client_timeout_s", "Lost-client guard",
+                  _dspin(hw.client_timeout_s, 0, 600, 1, 1.0, "s"))
         self._add(form, "hardware", "emission_off_on_start", "At service start",
-                  _check(hw.emission_off_on_start, "switch emission off"))
+                  _check(hw.emission_off_on_start,
+                         "switch emission off (default: adopt it)"))
         self._add(form, "hardware", "sim_warmup_s", "Sim warm-up",
                   _dspin(hw.sim_warmup_s, 0, 30, 1, 0.5, "s"))
         form.addRow(_hint("Used by the real backend (NKT SDK). The watchdog switches "
                           "emission off if the laser hears nothing for that long -- "
-                          "it protects against a killed service. 0 disables it."))
+                          "it protects against a killed service. 0 disables it. "
+                          "Lost-client guard: a remote GUI that switched emission "
+                          "on and then falls silent this long -> emission off "
+                          "(0 = never; scans are never guarded)."))
         return page
 
     def _appearance_tab(self):

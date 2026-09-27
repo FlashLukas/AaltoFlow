@@ -10,8 +10,8 @@ def test_defaults_are_safe():
     assert isinstance(cfg.hardware, Hardware)
     # the safety ceiling starts well below the device maximum
     assert cfg.limits.gain_max_dB < cfg.hardware.gain_max_dB
-    assert cfg.amp.startup_gain_dB == 0.0
-    # there is deliberately no "amplifier on at start-up" setting
+    # the state is ADOPTED at start: no start-up gain, no "on at start-up"
+    assert not hasattr(cfg.amp, "startup_gain_dB")
     assert not hasattr(cfg.amp, "amp_on")
     assert cfg.hardware.baud == 115200
     assert cfg.limits.input_max_dBm <= 10.0
@@ -19,7 +19,6 @@ def test_defaults_are_safe():
 
 def test_save_load_roundtrip(tmp_path):
     cfg = Config()
-    cfg.amp.startup_gain_dB = 3.5
     cfg.amp.frequency_Hz = 2.4e9
     cfg.amp.input_dBm = -12.5
     cfg.limits.gain_max_dB = 20.0
@@ -32,7 +31,6 @@ def test_save_load_roundtrip(tmp_path):
     cfg.save(str(path))
     back = Config.load(str(path))
 
-    assert back.amp.startup_gain_dB == 3.5
     assert back.amp.frequency_Hz == 2.4e9
     assert back.amp.input_dBm == -12.5
     assert back.limits.gain_max_dB == 20.0
@@ -89,3 +87,14 @@ def test_bad_config_value_is_refused_and_nothing_is_written():
     assert cfg.limits.gain_max_dB == 10.0
     with pytest.raises(ValueError):
         apply_config_dict(cfg, {"limits": {"gain_max_dB": float("nan")}})
+
+
+def test_old_ini_with_startup_gain_still_loads(tmp_path):
+    """startup_gain_dB was removed (the gain is adopted at start); an .ini that
+    still carries it must load, the key simply ignored."""
+    path = tmp_path / "old.ini"
+    path.write_text("[amp]" + chr(10) + "startup_gain_dB = 7.5" + chr(10)
+                    + "input_dBm = -30" + chr(10), encoding="utf-8")
+    back = Config.load(str(path))
+    assert back.amp.input_dBm == -30.0
+    assert not hasattr(back.amp, "startup_gain_dB")

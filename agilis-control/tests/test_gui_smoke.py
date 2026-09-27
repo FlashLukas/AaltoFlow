@@ -159,3 +159,18 @@ def test_settings_dialog_builds(qapp):
     from agilis.apps.settings_dialog import SettingsDialog
 
     assert SettingsDialog(Config()) is not None
+
+
+def test_limit_switch_card_runs_ma_and_shows_it(window, qapp):
+    win, brain, sim = window
+    sim.limit_op_s = 0.05
+    idx = [b.text() for b in win._limit_buttons].index("MA")
+    win._limit_buttons[idx].click()                    # X: MA
+    t0 = time.monotonic()
+    while (brain.status().routine_running or not brain.status().routine) \
+            and time.monotonic() - t0 < 3:
+        time.sleep(0.02)
+    win._refresh()
+    assert "measure position X" in win._limit_hint.text()
+    assert "OK" in win._limit_hint.text()
+    assert "µm" in win._limit_hint.text()

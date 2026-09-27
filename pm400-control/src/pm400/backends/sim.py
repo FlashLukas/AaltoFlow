@@ -121,6 +121,23 @@ class SimulatedPM400:
         self._th_val = 0.0                  # the thermal absorber starts cold
         self._th_t = self._clock()
 
+    def front_panel(self, wavelength_nm: float | None = None, auto_range: bool | None = None,
+                    range_: float | None = None, avg_time_s: float | None = None) -> None:
+        """What someone set on the console BY HAND before the software connected.
+        Tests use it to start the simulator from a non-default state, so the
+        adopt-on-start rule is really tested (the brain must show THESE values,
+        not its config)."""
+        self._sync_head()
+        with self._lock:
+            if wavelength_nm is not None:
+                self._wl = float(wavelength_nm)
+            if auto_range is not None:
+                self._auto = bool(auto_range)
+            if range_ is not None:
+                self._range = float(range_)
+            if avg_time_s is not None:
+                self._avg = float(avg_time_s)
+
     def _sync_head(self) -> None:
         with self._lock:
             if str(self.sim.head) != self._head:

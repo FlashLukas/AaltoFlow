@@ -198,6 +198,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # start the generator (opens the backend) and the refresh timer
         self.ctrl.start()
+        # The input boxes were built with config placeholders; now show what
+        # the generator is ACTUALLY set to (adopted at start), so pressing
+        # "Set" without typing does not silently change anything.
+        self._sync_inputs_from_status()
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
@@ -355,6 +359,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_spin.setSuffix(f"  {self._freq_unit}")
         self.freq_spin.blockSignals(False)
         self._prev_scale = scale
+
+    def _sync_inputs_from_status(self):
+        try:
+            s = self.ctrl.status()
+            self._apply_freq_unit_range(initial_hz=float(s.frequency_Hz))
+            self.power_spin.setValue(float(s.power_dBm))
+            self.phase_spin.setValue(float(s.phase_deg))
+        except Exception:                # no status yet: keep the placeholders
+            pass
 
     def _change_freq_unit(self, unit: str):
         self._prev_scale = _FREQ_UNITS[self._freq_unit]

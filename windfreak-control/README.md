@@ -8,7 +8,9 @@ or fully simulated with no hardware.
 
 ![windfreak front panel](../front-panels/windfreak.png)
 
-*The start state: both outputs OFF, as always at start-up. With RF on, the
+*The start state of the simulator: the pretend SynthHD was left with A radiating
+2.45 GHz and B off, and the service ADOPTED that (it reads the instrument at
+start and changes nothing). With RF on, the
 Outputs pane draws each channel as a wave (more cycles = higher frequency,
 taller = more power) and the dial on the right shows the two phases; with both
 channels at the same frequency it reads B - A directly (a quadrature pair is a
@@ -55,13 +57,15 @@ terminator** on what we send, `\n` on every reply:
 
 | what | command | notes |
 |---|---|---|
-| select channel | `C0` / `C1` | A / B; re-sent before every per-channel command |
+| select channel | `C0` / `C1` | A / B; re-sent before every per-channel command and query |
+| channel spacing | `i<Hz>` | sent only when you change `hardware.channel_spacing_Hz`, never at start |
 | frequency | `f<MHz>`, `f?` | 0.1 Hz steps, snapped to the channel spacing |
 | power | `W<dBm>` | the unit levels it; `V` = 1 if it managed |
 | phase | `~<deg>` | a phase **step** (relative); the backend turns absolute into steps |
 | output on | `E1r1h1` | PLL on, amplifier on, unmuted |
 | output off | `h0r0` (or `h0r0E0`) | muted + amplifier off (+ PLL off in the "quiet" mode) |
 | lock | `p` | 1 = locked |
+| read at start | `f?` `W?` `h?` `r?` `E?` per channel, `x?` `*?` | queries only -- nothing is written at start |
 | reference | `x0/x1/x2`, `*<MHz>` | external / internal 27 MHz / internal 10 MHz |
 | temperature | `z` | degC |
 
@@ -98,8 +102,13 @@ leave out.
     wf> alloff
 ```
 
-The service always starts with **both outputs off**, and switches them off
-again on `shutdown`, on Ctrl-C and when the GUI of a local simulation closes.
+**Start is read-only** (rule of 2026-09-27): the service READS what the
+SynthHD is doing -- RF on/off, frequency, power, PLL, reference -- and shows
+exactly that; a running output keeps running. The config's channel values are
+not pushed; they are overwritten with what was read, and a value goes to the
+instrument only when someone sets it. (The phase has no readback: "0 deg" is
+the phase at service start.) On `shutdown`, Ctrl-C and when the GUI of a local
+simulation closes, both outputs are switched **off**.
 
 ## What a scan sees (`describe`)
 
@@ -123,7 +132,7 @@ i.e. until both outputs really are off in the instrument.
 ## Tests
 
 ```powershell
-.\dev.ps1 run pytest -q            # 52 tests, offline, ports 17020-17039
+.\dev.ps1 run pytest -q            # 69 tests, offline, ports 17020-17039
 .\dev.ps1 run python scripts/smoke_test.py
 python ..\tools\check_modules.py windfreak --live
 ```

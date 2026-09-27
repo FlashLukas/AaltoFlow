@@ -32,7 +32,21 @@ Defaults chosen here (typical for the d-Drive digital line, CR-terminated):
   * ``sr,<ch>,<val>``   set the slew rate (native velocity limit).  UNITS: on
                         many units this is % of full stroke per ms -- if so,
                         convert um/s <-> %/ms in ``_slew_to_wire`` below.
+  * The same verbs WITHOUT a value (``cl,<ch>``, ``set,<ch>``, ``sr,<ch>``) are
+    assumed to be QUERIES that echo ``<verb>,<ch>,<val>``.  psj's ASCII protocol
+    generally works this way, but it is unconfirmed for the d-Drive.  Before
+    trusting it, check on the bench that e.g. ``set,0`` alone does NOT move the
+    stage (it must only report the setpoint).
 Adjust these to match your controller and delete this banner once verified.
+
+------------------------------------------------------------------------------
+Start-up rule (Lukas, 2026-09-27): READ, never write
+------------------------------------------------------------------------------
+``open()`` only opens the port.  It does not push the loop mode, the slew rate
+or a setpoint: whatever the controller is doing when the service starts (maybe
+another program, or the front panel, left it in open loop at 87 um) is what the
+brain ADOPTS via the query methods below.  Starting the software must never
+move the stage or change its mode.
 """
 
 from __future__ import annotations
@@ -49,6 +63,10 @@ _CMD = {
     "set_setpoint":    "set,{ch},{value:.4f}",
     "query_position":  "mess,{ch}",
     "set_slew_rate":   "sr,{ch},{value:.4f}",
+    # Queries used to ADOPT the controller's state at start (no value = query).
+    "query_closed_loop": "cl,{ch}",          # VERIFY: reply "cl,<ch>,<0|1>"
+    "query_setpoint":    "set,{ch}",         # VERIFY: reply "set,<ch>,<val>"; must NOT move
+    "query_slew_rate":   "sr,{ch}",          # VERIFY: reply "sr,<ch>,<val>" (wire unit)
 }
 _TERM = b"\r"                                # line terminator the d-Drive expects
 _ENCODING = "ascii"
@@ -64,7 +82,9 @@ class DDrivePiezo:
         # A lock so the publisher (status reads) and the commander (writes) never
         # interleave bytes on the one shared serial line.
         self._io_lock = threading.Lock()
-        # We can't always read the loop state back, so remember what we set.
+        # Last known loop state / slew rate per axis: filled by the queries at
+        # start (adoption) and by our own writes afterwards.  Used only as a
+        # fallback if a later query fails.
         self._closed = [True, True]
         self._slew = [0.0, 0.0]
         self._channels = [axis_channel(cfg, 0), axis_channel(cfg, 1)]
@@ -80,11 +100,11 @@ class DDrivePiezo:
             timeout=0.5,        # read timeout (s)
             write_timeout=0.5,
         )
-        # Push the start-up loop mode + slew rate for each axis.
-        from ..config import axis_closed_loop_default, axis_velocity
-        for axis in range(2):
-            self.set_closed_loop(axis, axis_closed_loop_default(self.cfg, axis))
-            self.set_slew_rate(axis, axis_velocity(self.cfg, axis))
+        # Nothing is WRITTEN here (adopt rule, see the module docstring): the
+        # brain reads the loop mode, setpoint and slew rate through the query
+        # methods and adopts them.  The old version pushed the config's loop
+        # mode and velocity at this point, which could flip a running stage
+        # from open to closed loop (and jump it) just by starting the service.
 
     def close(self) -> None:
         if self._ser is not None:
@@ -126,6 +146,19 @@ class DDrivePiezo:
         """
         return float(rate_um_s)
 
+    @staticmethod
+    def _slew_from_wire(value: float) -> float:
+        """Inverse of :meth:`_slew_to_wire` (controller unit -> um/s).  VERIFY."""
+        return float(value)
+
+    def _query_value(self, key: str, axis: int) -> float:
+        """Send a query from ``_CMD`` and return the last comma field as float."""
+        reply = self._query(_CMD[key].format(ch=self._channels[axis]))
+        try:
+            return float(reply.split(",")[-1])
+        except (ValueError, IndexError):
+            raise RuntimeError(f"unparsable reply to {key}: {reply!r}")
+
     # -- position ---------------------------------------------------------- #
     def set_setpoint(self, axis: int, position: float) -> None:
         self._write(_CMD["set_setpoint"].format(ch=self._channels[axis], value=float(position)))
@@ -145,8 +178,23 @@ class DDrivePiezo:
         self._closed[axis] = bool(enabled)
 
     def get_closed_loop(self, axis: int) -> bool:
-        # d-Drive does not reliably echo the loop state, so return what we set.
+        """Ask the controller whether the servo is on.  # VERIFY query + reply.
+
+        Raises if the reply cannot be parsed; the brain then falls back to its
+        config default WITHOUT writing it (and says so in an event).
+        """
+        state = self._query_value("query_closed_loop", axis)
+        self._closed[axis] = state >= 0.5
         return self._closed[axis]
+
+    def read_setpoint(self, axis: int) -> float:
+        """The controller's CURRENT target (not the measured position).  # VERIFY
+
+        In open loop the measured position differs from the command by the
+        piezo's hysteresis, so adopting the setpoint (not the read-out) is what
+        keeps the brain's target equal to what the controller is holding.
+        """
+        return self._query_value("query_setpoint", axis)
 
     # -- native slew rate -------------------------------------------------- #
     def set_slew_rate(self, axis: int, rate: float) -> None:
@@ -155,4 +203,7 @@ class DDrivePiezo:
         self._slew[axis] = float(rate)
 
     def read_slew_rate(self, axis: int) -> float:
+        """Ask the controller for its slew-rate limit, in um/s.  # VERIFY"""
+        wire = self._query_value("query_slew_rate", axis)
+        self._slew[axis] = self._slew_from_wire(wire)
         return self._slew[axis]

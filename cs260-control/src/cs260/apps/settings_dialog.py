@@ -25,7 +25,7 @@ _TABS = {
     "accessories": ("Accessories", "Only tick what is fitted: an absent accessory is "
                                    "left out of describe and refused. Filter bands: "
                                    "'position:from-to' in nm, comma separated."),
-    "shutter": ("Shutter", "Closing on start is optional. The shutter is closed during a "
+    "shutter": ("Shutter", "Start never touches the shutter (it is read, not set). It is closed during a "
                            "grating change because the drive sweeps past zero order."),
     "motion": ("Motion", "How moves are sequenced and judged."),
     "optics": ("Optics", "Only used to report the bandpass: dispersion x slit width."),

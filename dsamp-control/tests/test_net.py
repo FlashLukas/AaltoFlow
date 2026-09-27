@@ -110,7 +110,8 @@ def test_bad_set_config_is_refused_and_telemetry_keeps_flowing(service_and_clien
     r = cli._cmd({"cmd": "set_config", "config": {"limits": {"gain_max_dB": "6"}}})
     assert r["ok"] is True
     cli.set_gain(20.0)
-    assert _wait(cli, lambda s: s.gain_dB == 6.0).gain_max_dB == 6.0
+    # wait on BOTH: the simulator starts at 6 dB (adopted), so gain alone is no proof
+    assert _wait(cli, lambda s: s.gain_dB == 6.0 and s.gain_max_dB == 6.0).gain_max_dB == 6.0
 
 
 def test_bad_and_unknown_requests_reply_with_an_error(service_and_client):

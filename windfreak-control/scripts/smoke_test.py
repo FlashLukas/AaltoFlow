@@ -42,7 +42,11 @@ def main() -> int:
     synth.start()
     print("IDN:", backend.idn())
     s = synth.status()
-    assert not s["a_rf_on"] and not s["b_rf_on"], "outputs must start OFF"
+    # read-only start: the sim was left with A radiating; it must be ADOPTED
+    # (still on, shown as on), and nothing may have been sent
+    assert s["a_rf_on"] and not s["b_rf_on"], "start must adopt the instrument's state"
+    assert backend.writes == [], "start must not write to the instrument"
+    print(f"adopted: A {s['a_frequency_Hz']/1e6:.3f} MHz RF on, reference {s['reference']}")
 
     synth.set_frequency("a", 2.5e9)
     synth.set_power("a", -5.0)

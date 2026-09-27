@@ -337,7 +337,8 @@ class AxisCard(QFrame):
             # remote panel opened on a running service must not offer 100 %
             # when the mount runs at 30 %.  After that they are the user's.
             self._synced = True
-            self.vel.setValue(int(st.velocity_pct[i]))
+            if st.velocity_pct[i] is not None:     # None = the mount's speed is unknown
+                self.vel.setValue(int(st.velocity_pct[i]))
             if st.target_deg[i] is not None:
                 self.target.setValue(float(st.target_deg[i]))
 
@@ -350,7 +351,7 @@ class AxisCard(QFrame):
         self.big.setText(_fmt(ang))
         self.sub.setText(f"device {_fmt(dev)} · offset {_fmt(off)} · target {_fmt(tgt)}")
         parts = ["MOVING" if moving else "idle", "homed" if homed else "not homed",
-                 f"{at(st.velocity_pct, '--')} %"]
+                 f"{'--' if at(st.velocity_pct) is None else at(st.velocity_pct)} %"]
         if err:
             parts.append(f"ERROR: {err}")
         self.state.setText("  ·  ".join(parts))

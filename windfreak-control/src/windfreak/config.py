@@ -26,12 +26,17 @@ from dataclasses import dataclass, asdict, fields
 
 @dataclass
 class Channel:
-    """Start-up values for ONE output channel. They are pushed to the
-    instrument when the service starts; everything is changeable live.
+    """Frequency / power / phase of ONE output channel.
 
-    There is deliberately NO "RF on at start-up" field: the service always
-    starts with both outputs OFF, whatever was saved. A synthesizer that
-    radiates the moment a PC reboots is how an amplifier or a sample gets hurt.
+    NOT pushed at start (rule of 2026-09-27: every module reads the
+    instrument at start and changes nothing). The service READS what the
+    channel is doing and overwrites these fields with it, so get_config and a
+    saved .ini show the truth. A value here reaches the instrument only when
+    someone changes it: a setter, or set_config / the Settings dialog with a
+    different value. The values below are what is shown before a connection.
+
+    There is no "RF on" field: the RF state is simply read at start (and
+    left alone), and switched only by an explicit set_rf.
     """
 
     frequency_Hz: float = 1_000_000_000.0   # 1 GHz
@@ -110,9 +115,12 @@ class Hardware:
                           the v1.4 API guide says). "absolute": "~" sets the
                           phase directly. VERIFY on the v2 unit which is true.
     channel_spacing_Hz -- the PLL's frequency grid (= frequency resolution).
-                          0 leaves the instrument's own setting alone (the v2
-                          factory default is 100 Hz). Smaller spacing means
-                          finer frequency AND slower phase tuning.
+                          NEVER written at start (read-only start rule); sent
+                          only when you CHANGE it (set_config / Settings), and
+                          only if > 0. 0 = leave the instrument's own setting
+                          (v2 factory default 100 Hz). The simulator uses it
+                          as its grid. Smaller spacing means finer frequency
+                          AND slower phase tuning.
     temp_warn_C        -- warn when the internal sensor goes above this (the
                           datasheet says keep it below 75 C).
     """

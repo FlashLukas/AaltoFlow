@@ -35,7 +35,11 @@ from dataclasses import dataclass, asdict, fields
 class Scan:
     """What the spectrometer does. Every one is changeable live over the wire."""
 
-    integration_time_s: float = 0.01   # 10 ms, the driver's own default (TLCCS_DEF_INT_TIME)
+    # 10 ms, the driver's own default (TLCCS_DEF_INT_TIME). Since 2026-09-27
+    # this is NOT pushed at start: the brain adopts whatever the instrument is
+    # already set to and overwrites this field with it; it is sent only when
+    # the user sets a time (setter, GUI, set_config).
+    integration_time_s: float = 0.01
     averages: int = 1                  # scans averaged per acquisition
     dark_subtract: bool = False        # subtract the latched dark spectrum
     continuous: bool = True            # scan on its own between acquisitions (front panel)

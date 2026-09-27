@@ -119,7 +119,10 @@ class Control:
     stable_time_s: float = 0.3
     settle_timeout_s: float = 30.0
     loop_hz: float = 50.0
-    energize_on_start: bool = True
+    # (energize_on_start was REMOVED 2026-09-27, Lukas's adopt-on-start rule:
+    # the service never switches the output on or off by itself at start; it
+    # adopts whatever the magnet is doing. An old .ini that still has the key
+    # loads fine -- Config.load only reads the fields that exist.)
 
 
 @dataclass

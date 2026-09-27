@@ -236,18 +236,24 @@ class Camera:
 
         # Event hook (the service replaces this).
         self._on_event = lambda level, msg: None
+        # The camera's ExposureTime as last read from it (None = not started).
+        # Brain attribute, not status (gotcha #1); see _adopt_exposure.
+        self._exposure_known: float | None = None
 
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
     def start(self) -> None:
         self.backend.open()
-        exp = float(getattr(self.cfg.camera, "exposure_us", 0.0) or 0.0)
-        if exp > 0:
-            try:
-                self.backend.set_feature("ExposureTime", exp)
-            except Exception as exc:     # a sim/other camera may not have it
-                self._emit("warn", f"could not apply exposure {exp:g} us: {exc}")
+        # ADOPT the camera's exposure, never push ours (Lukas, 2026-09-27: every
+        # module reads the instrument's state at start and changes nothing).
+        # Until then the .ini's exposure_us was WRITTEN to the camera here. Now
+        # it is only a stored value: the camera's actual ExposureTime replaces
+        # it, so the GUI, get_config and a later "Save" all show what the camera
+        # is really doing. It reaches the camera again only when the user sets
+        # it explicitly (the live parameter panel, or set_config with a new
+        # value -- see apply_config).
+        self._adopt_exposure()
         self.xy.open()
         if self.cfg.hardware.use_z:
             self.z.open()
@@ -261,6 +267,23 @@ class Camera:
         self._engine.start()
         self._emit("info", "camera engine started")
 
+    def _adopt_exposure(self) -> None:
+        """Read ExposureTime from the camera into cfg.camera.exposure_us (read only)."""
+        self._exposure_known = None
+        try:
+            v = self.backend.get_feature("ExposureTime")
+        except Exception as exc:          # a camera without that feature
+            self._emit("info", f"camera exposure not readable ({exc}); left as it is")
+            return
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return
+        if v > 0:
+            self.cfg.camera.exposure_us = v
+            self._exposure_known = v
+            self._emit("info", f"camera exposure adopted: {v:g} us")
+
     def shutdown(self) -> None:
         self._stop.set()
         if self._engine is not None:
@@ -270,6 +293,7 @@ class Camera:
                 dev.close()
             except Exception:
                 pass
+        self._exposure_known = None     # closed: nothing to compare against
         with self._lock:
             self._status.connected = False
 
@@ -1769,7 +1793,10 @@ class Camera:
             v = value
         if name == "ExposureTime":
             try:
-                self.cfg.camera.exposure_us = float(v)   # re-applied on the next open
+                # keep cfg in step with the camera, so a set_config round trip of
+                # the whole config (the Settings dialog) does not look like a change
+                self.cfg.camera.exposure_us = float(v)
+                self._exposure_known = float(v)
             except (TypeError, ValueError):
                 pass
         self._emit("info", f"camera {name} = {v}")
@@ -1963,6 +1990,30 @@ class Camera:
         self._apply_objective(self.cfg.image.objective_name, quiet=True)
         self._avg_buf = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
+        self._apply_exposure_if_changed()
+
+    def _apply_exposure_if_changed(self) -> None:
+        """Write camera.exposure_us to the camera ONLY when the user changed it.
+
+        A set_config carries the whole group, usually with the exposure we
+        adopted at start; that must not count as a request. Only a value that
+        differs from what the camera last reported is written -- that is the
+        user asking for a new exposure. Before start() nothing is written.
+        """
+        known = getattr(self, "_exposure_known", None)
+        if known is None:            # not started, or the camera has no exposure
+            return
+        try:
+            want = float(self.cfg.camera.exposure_us or 0.0)
+        except (TypeError, ValueError):
+            return
+        if want <= 0 or abs(want - known) <= 1e-6 * max(1.0, abs(known)):
+            return
+        try:
+            self.set_camera_feature("ExposureTime", want)
+        except Exception as exc:
+            self._emit("warn", f"could not apply exposure {want:g} us: {exc}")
+            self.cfg.camera.exposure_us = known     # cfg keeps telling the truth
 
     def _emit(self, level: str, msg: str) -> None:
         try:

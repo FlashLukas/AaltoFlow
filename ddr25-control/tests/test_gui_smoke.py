@@ -29,7 +29,7 @@ def test_window_builds_refreshes_and_drives(qapp):
     from ddr25.apps.gui import MainWindow
 
     cfg = Config()
-    cfg.motion.velocity = 720.0
+    cfg.hardware.sim_start_velocity = 720.0
     brain, _ = build_sim_system(cfg)
     brain.start()
     qapp.setStyleSheet(theme.build_stylesheet())

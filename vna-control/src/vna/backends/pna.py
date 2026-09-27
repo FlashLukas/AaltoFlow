@@ -20,7 +20,13 @@ How it is driven, and why:
     measurements someone set up on the front panel; the backend only ever
     touches its own.
 
-  * SINGLE sweeps: the channel is put in HOLD on connect, and every sweep is
+  * CONNECTING CHANGES NOTHING (Lukas, 2026-09-27: every module reads the
+    instrument's state at start and adopts it). `open()` only queries;
+    `read_state()` reports the sweep the PNA holds, and the brain takes it
+    over as its own settings. The set-up below happens at the FIRST sweep
+    somebody asks this module for (acquire, take_reference, continuous on).
+
+  * SINGLE sweeps: the channel is put in HOLD at that first sweep, and every sweep is
     `SENS1:SWE:MODE SING`. A free-running analyser hands back whatever sweep
     happened to be on screen -- possibly one that started BEFORE the magnet
     arrived. A single sweep triggered by the brain is the only trace that is
@@ -95,6 +101,7 @@ class PnaVna:
         self._sweep_time = (None, math.nan)   # ((points, ifbw), seconds)
         self._correction = None
         self._pending = False
+        self._prepared = False            # set up for single sweeps yet? (see _take_over)
         self._points = 0
         self.warnings: list[str] = []     # non-fatal instrument complaints (display)
 
@@ -116,10 +123,73 @@ class PnaVna:
         r.read_termination = "\n"
         r.write_termination = "\n"
         self._applied, self._readback, self._sparam = {}, {}, None
+        self._prepared = False
 
+        # CONNECT = LOOK. Lukas's rule (2026-09-27): a module reads the
+        # instrument at start and changes nothing. So only queries here (and
+        # *CLS, which just empties the error queue). The front panel keeps
+        # sweeping exactly as it was until somebody asks THIS module for a
+        # trace -- then `_take_over` sets up single sweeps (first start_sweep).
         self._idn = r.query("*IDN?").strip()
         self._write("*CLS")                                # start with an empty error queue
-        # Single sweeps on demand (see the module docstring).
+
+    def read_state(self) -> dict:
+        """What the PNA is doing now, by queries only (see base.read_state).
+
+        Each query stands on its own: one the firmware does not know is noted
+        in `warnings` and its key is left out (the brain then keeps its config
+        value), instead of failing the connection. The values read are also
+        what the instrument is known to HOLD, so the first sweep writes only
+        what the brain really changed."""
+        r = self._res
+        st: dict = {}
+        for key, setter, cast in (("start_Hz", "start", float), ("stop_Hz", "stop", float),
+                                  ("points", "points", int), ("ifbw_Hz", "ifbw", float),
+                                  ("power_dBm", "power", float)):
+            try:
+                v = cast(float(r.query(_SETTERS[setter][1].format(ch=CH)).strip()))
+            except Exception as exc:
+                self.warnings.append(f"reading {key}: {exc}")
+                continue
+            st[key] = v
+            self._applied[setter] = v
+            self._readback[setter] = v
+        st["sparam"] = self._read_sparam()
+        try:
+            st["sweep_mode"] = r.query(f"SENS{CH}:SWE:MODE?").strip().upper()
+        except Exception as exc:
+            self.warnings.append(f"reading the sweep mode: {exc}")
+        st["averaging_on"] = self._query_bool(f"SENS{CH}:AVER?")      # VERIFY: 0/1 reply
+        st["correction_on"] = self._query_bool(f"SENS{CH}:CORR:STAT?")
+        # A real analyser is never swept "for free": driving it means taking
+        # over its trigger, a change. So the brain starts hands-off.
+        st["continuous"] = False
+        # Reading the error queue changes nothing; a query this firmware did
+        # not know shows up here, as a warning, not as a failed connection.
+        self.warnings.extend(self._errors())
+        return st
+
+    def _read_sparam(self):
+        """The S-parameter shown by our own measurement if it exists from an
+        earlier run, else by the SELECTED measurement of channel 1; None if
+        neither is an S-parameter (a receiver ratio, say)."""
+        r = self._res
+        try:
+            cat = r.query(f"CALC{CH}:PAR:CAT:EXT?").strip().strip('"')
+            items = cat.split(",") if cat and cat.upper() != "NO CATALOG" else []
+            pairs = dict(zip(items[0::2], items[1::2]))
+            # VERIFY: CALC1:PAR:SEL? returns the (quoted) name of the selected measurement
+            name = MEAS if MEAS in pairs else r.query(f"CALC{CH}:PAR:SEL?").strip().strip('"')
+            p = pairs.get(name, "").strip().upper()
+            return p if p in model.SPARAMS else None
+        except Exception as exc:
+            self.warnings.append(f"reading the measured S-parameter: {exc}")
+            return None
+
+    def _take_over(self) -> None:
+        """Set the PNA up for single sweeps on demand. Runs at the FIRST
+        start_sweep, i.e. only when somebody asks this module to measure --
+        never on connect (see open)."""
         self._write(f"SENS{CH}:SWE:MODE HOLD")             # VERIFY: channel 1 stops sweeping
         self._write("TRIG:SOUR IMM")                       # VERIFY: needed so SING starts at once
         self._write(f"SENS{CH}:AVER OFF")                  # the brain averages
@@ -136,8 +206,8 @@ class PnaVna:
             # cal's, the PNA interpolates or switches correction off -- check
             # `SENS1:CORR:STAT?` (reported as correction_on in every sample).
             self._write(f"SENS{CH}:CORR:CSET:ACT '{cal}',0")
-        self._check_errors("connecting")
-        self._ensure_measurement(self.cfg.sweep.sparam)
+        self._check_errors("taking over the sweep")
+        self._prepared = True
 
     def close(self) -> None:
         r, self._res = self._res, None
@@ -146,11 +216,15 @@ class PnaVna:
         try:
             if self._pending:
                 r.write("ABOR")
-            r.write(f"SENS{CH}:SWE:MODE CONT")             # hand the front panel back, sweeping
+            if self._prepared:
+                # hand the front panel back, sweeping -- only if we ever took it
+                # over; an analyser we only looked at is left exactly as it was
+                r.write(f"SENS{CH}:SWE:MODE CONT")
         except Exception:
             pass                                           # closing must not raise on a dead link
         finally:
             self._pending = False
+            self._prepared = False
             try:
                 r.close()
             except Exception:
@@ -185,10 +259,19 @@ class PnaVna:
                     sparam: str = "S21", field: FieldReading | None = None) -> None:
         if self._res is None:
             raise RuntimeError("PNA is not connected")
+        first = not self._prepared
+        if first:
+            # first sweep asked of this module: take over, and make our own
+            # measurement BEFORE any SENS1 write (a PNA channel with no
+            # measurement on it does not exist, and would refuse the settings)
+            self._take_over()
+            self._ensure_measurement(sparam)
         f = np.asarray(freqs_Hz, dtype=float)
         want = {"start": float(f[0]), "stop": float(f[-1]), "points": int(f.size),
                 "ifbw": float(ifbw_Hz), "power": float(power_dBm)}
-        changed = self._apply(want)
+        # `first`: even with nothing to write, check the grid and learn the
+        # correction state and sweep time once
+        changed = self._apply(want) or first
         if sparam != self._sparam:
             self._ensure_measurement(sparam)
             changed = True

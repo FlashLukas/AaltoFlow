@@ -603,22 +603,24 @@ def run_app(ctrl, cfg, remote: bool = False, after_show=None) -> int:
 def main(theme: str | None = None, demo: bool = False) -> int:
     """Default: run against the built-in simulator, in-process. `theme` (if
     given) overrides cfg.ui.theme for this launch. `demo` (or the environment
-    variable KEPCO_DEMO=1, used when rendering the README screenshot) switches
-    the output on at 2.5 A so the panel shows the supply working."""
+    variable KEPCO_DEMO=1, used when rendering the README screenshot) makes the
+    simulated BOP be FOUND with its output on at 2.5 A (8 V compliance) -- the
+    brain adopts that at start, exactly as it would a live real unit."""
     cfg = Config()
     if theme:
         cfg.ui.theme = theme
     demo = demo or os.environ.get("KEPCO_DEMO", "") not in ("", "0")
     if demo:
-        cfg.output.current_A = 2.5
-        cfg.output.voltage_limit_V = 8.0
+        cfg.sim.found_mode = "current"
+        cfg.sim.found_output = True
+        cfg.sim.found_current_A = 2.5
+        cfg.sim.found_voltage_V = 8.0
         cfg.ramp.rate_A_per_s = 2.0
     supply, _ = build_sim_system(cfg)
     after = None
     if demo:
         def after():
-            supply.set_output(True)
-            QtCore.QTimer.singleShot(1400, supply.acquire)   # the 1.25 s ramp is done
+            QtCore.QTimer.singleShot(600, supply.acquire)    # after the 0.35 s settle
     return run_app(supply, cfg, after_show=after)
 
 

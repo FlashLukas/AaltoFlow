@@ -19,7 +19,7 @@ by default; the NI backend is written but has **not run on the magnet yet**.
 ```powershell
 cd mag2d-control
 uv sync --extra gui
-uv run pytest -q                                  # 46 tests, ~6 s
+uv run pytest -q                                  # 51 tests, ~15 s
 uv run scripts/smoke_test.py                      # the sim magnet end to end, in simulated time
 
 uv run scripts/run_service.py                     # the service (simulated magnet)
@@ -29,6 +29,17 @@ uv run scripts/mag2d_console.py field 150 45      # or poke it by hand
 
 `run_gui.py` WITHOUT `--connect` runs its own private simulated magnet, not the
 service's.
+
+### At start: the magnet is ADOPTED, not reset
+
+The service READS the magnet and changes nothing (Lukas's rule, 2026-09-27):
+enable line, drive voltages (read back through the card's internal
+`_aoN_vs_aognd` channels where it has them), Hall probes, temperatures, water.
+A magnet found **off** stays off (switch it on with `set_output` / Energize); a
+magnet found **energized** -- e.g. after a crashed run -- is held where it is:
+the setpoint becomes the field measured at that moment and the PI starts
+bumpless from the drive on the wire. The output is never switched on or off by
+the service itself at start.
 
 ### The water interlock at start
 

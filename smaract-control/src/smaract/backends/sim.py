@@ -47,21 +47,29 @@ class SimScu:
     """Simulated SCU channel + CLL42 carriage."""
 
     def __init__(self, cfg: Config, *, power_on_mm: float = 23.4567,
-                 rail_stop_mm: float = 118.0, seed: int = 7):
+                 rail_stop_mm: float = 118.0, seed: int = 7,
+                 freq_hz: int = 1000, referenced: bool = False):
+        """``freq_hz`` and ``referenced`` describe the state the controller is
+        ALREADY in when the service connects (left there by an earlier session
+        or another program). The brain must adopt them, never reset them --
+        tests start the sim in a non-default state to prove that."""
         self.cfg = cfg
         self.rail_stop_mm = float(rail_stop_mm)
         self._rng = random.Random(seed)
 
         self._x = float(power_on_mm)       # true carriage position, absolute mm
-        self._origin = float(power_on_mm)  # where the COUNTER reads zero
-        self._known = False                # physical position known?
+        # Where the COUNTER reads zero: the power-on spot, or the scale's own
+        # zero if an earlier session already referenced the axis (the SCU
+        # keeps "position known" for as long as it stays powered).
+        self._origin = 0.0 if referenced else float(power_on_mm)
+        self._known = bool(referenced)     # physical position known?
 
         self._state = "stopped"
         self._target = self._x             # absolute mm the loop is chasing
         self._hold_ms = 0
         self._hold_until = 0.0
         self._ref_pending = False          # the current move is a reference search
-        self._freq_hz = 1000
+        self._freq_hz = int(freq_hz)
         self._t_last = time.monotonic()
         self._opened = False
 

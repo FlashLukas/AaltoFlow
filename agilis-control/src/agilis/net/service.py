@@ -196,6 +196,9 @@ class AgilisService:
                     "limits": P.config_to_dict(b.cfg)["limits"],
                     "calibration": P.config_to_dict(b.cfg)["calibration"],
                     "n_slots": len(b.positions.slots),
+                    # what start() had to WRITE to read the controller (MR,
+                    # plus a safety ST if a leftover jog was found)
+                    "startup_writes": list(b.startup_writes),
                 },
             }
         if cmd == "get_config":
@@ -263,6 +266,23 @@ class AgilisService:
             v = b.set_calibration(P.parse_axis(req["axis"]), req["value"],
                                   P.parse_direction(req.get("direction", 0)))
             return {"ok": True, "value": v}
+        # -- limit-switch stage (AG-LS25): MV, MA, PA, step-size routine ---- #
+        if cmd == "move_to_limit":
+            return {"ok": True, "mode": b.move_to_limit(
+                P.parse_axis(req["axis"]), P.parse_direction(req["direction"]) or 1,
+                int(req.get("speed", 3)))}
+        if cmd == "measure_position":
+            return {"ok": True, "routine_id": b.measure_position(P.parse_axis(req["axis"]))}
+        if cmd in ("measure_position_x", "measure_position_y"):
+            return {"ok": True, "routine_id": b.measure_position(0 if cmd.endswith("x") else 1)}
+        if cmd == "move_absolute":
+            return {"ok": True, "routine_id": b.move_absolute(
+                P.parse_axis(req["axis"]), float(req["position"]))}
+        if cmd == "measure_step_size":
+            return {"ok": True, "routine_id": b.measure_step_size(P.parse_axis(req["axis"]))}
+        if cmd in ("measure_step_size_x", "measure_step_size_y"):
+            return {"ok": True, "routine_id": b.measure_step_size(0 if cmd.endswith("x") else 1)}
+
         if cmd == "set_leash":
             state = b.set_leash(enabled=req.get("enabled"), leash_steps=req.get("leash_steps"))
             return {"ok": True, "leash": state}

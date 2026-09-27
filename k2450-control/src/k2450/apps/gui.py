@@ -326,7 +326,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.event.connect(self._on_event)
         self.ctrl._on_event = lambda lvl, msg: self.bridge.event.emit(lvl, msg)
 
-        # start the brain (opens the backend, output OFF) and the refresh timer
+        # start the brain (opens the backend and ADOPTS its state -- nothing is
+        # written, an output that is on stays on) and the refresh timer
         self.ctrl.start()
         lim = self.cfg.limits
         self.iv.set_box(lim.box_voltage_V, lim.current_max_A,

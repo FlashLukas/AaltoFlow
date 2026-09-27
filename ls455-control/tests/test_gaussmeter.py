@@ -64,15 +64,74 @@ def test_start_adopts_the_meters_own_settings(system):
     assert meter.status().probe == "HSE"
 
 
-def test_push_on_start_pushes_config():
+class NoWriteBackend:
+    """Wraps a backend and FAILS on any call that would change the meter. Used
+    to prove that start() only reads (Lukas's rule, 2026-09-27)."""
+
+    WRITES = ("set_mode", "set_auto_range", "set_range", "set_display_unit",
+              "set_relative", "start_zero", "clear_zero")
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.armed = True
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name in self.WRITES and self.armed:
+            def refuse(*a, **k):
+                raise AssertionError(f"start-up changed the meter: {name}{a}")
+            return refuse
+        return attr
+
+
+# a deliberately NON-default meter: every setting differs from Config() and
+# from the sim's own defaults, so adoption is actually tested
+ODD_STATE = dict(mode="dc", dc_digits=5, auto_range=False, range_mT=3500.0,
+                 unit="T", relative=True, rel_setpoint_mT=40.0)
+
+
+def test_start_writes_nothing_to_the_meter():
+    cfg = Config()                                   # its values must NOT reach the meter
+    sim = SimulatedLS455(realtime=False, seed=2, **ODD_STATE)
+    from ls455.gaussmeter import Gaussmeter
+    meter = Gaussmeter(NoWriteBackend(sim), cfg)
+    meter.start(poll=False)                          # raises if anything is written
+    try:
+        assert sim.get_mode() == ("dc", 5, "wide")
+        assert sim.get_auto_range() is False and sim.get_display_unit() == "T"
+        assert sim.get_relative() == (True, 40.0)
+    finally:
+        meter.shutdown()
+
+
+def test_status_after_start_is_the_meters_preexisting_state():
     cfg = Config()
-    cfg.hardware.push_on_start = True
-    cfg.meter.dc_digits = 5
-    cfg.meter.display_unit = "T"
-    meter, sim = build_sim_system(cfg, realtime=False)
+    meter, sim = build_sim_system(cfg, realtime=False, seed=2, **ODD_STATE)
     meter.start(poll=False)
-    assert sim.get_mode()[1] == 5 and sim.get_display_unit() == "T"
-    meter.shutdown()
+    meter.poll_once()
+    try:
+        s = meter.status()
+        assert (s.mode, s.dc_digits) == ("dc", 5)
+        assert s.auto_range is False and s.range_mT == 3500.0 and s.range_set_mT == 3500.0
+        assert s.display_unit == "T"
+        assert s.relative is True and s.rel_setpoint_mT == 40.0
+        assert s.field_rel_mT == pytest.approx(s.field_mT - 40.0)
+        assert s.settle_s == pytest.approx(7.0)      # 5 digits: 7 x 1 s
+        # and cfg now holds the ADOPTED values, so Save config stores the truth
+        assert cfg.meter.dc_digits == 5 and cfg.meter.display_unit == "T"
+    finally:
+        meter.shutdown()
+
+
+def test_rms_state_is_adopted():
+    meter, sim = build_sim_system(Config(), realtime=False, mode="rms", rms_band="narrow")
+    meter.start(poll=False)
+    try:
+        s = meter.status()
+        assert (s.mode, s.rms_band) == ("rms", "narrow")
+        assert "RMS" in s.quantity
+    finally:
+        meter.shutdown()
 
 
 def test_range_limits_come_from_the_probe():
@@ -106,7 +165,7 @@ def test_rms_mode_reads_the_ac_part_and_blanks_the_field_source(system):
 def test_bad_mode_is_refused(system):
     meter = system[0]
     with pytest.raises(ValueError):
-        meter.set_mode("peak")
+        meter.set_mode("ac")
     with pytest.raises(ValueError):
         meter.set_rms_band("medium")
 
@@ -405,18 +464,143 @@ def test_rms_mode_never_publishes_a_field_source_value(system):
     assert math.isfinite(s.field_mT) and math.isnan(s.measured_field_mT)
 
 
-def test_peak_mode_left_on_the_meter_is_switched_off_at_start():
+def test_peak_mode_left_on_the_meter_is_adopted_not_switched():
+    """Before 2026-09-27 a meter in PEAK mode was switched to DC at start. Now
+    it is adopted: nothing is written, and every reading says it is a peak."""
     cfg = Config()
-    meter, sim = build_sim_system(cfg, realtime=False, seed=1)
+    cfg.acquisition.settle_time_constants = 0.0      # real clock here: no settling wait
+    sim = SimulatedLS455(realtime=False, seed=1, mode="peak", peak_mode="pulse",
+                         peak_display="negative")
+    from ls455.gaussmeter import Gaussmeter
+    meter = Gaussmeter(NoWriteBackend(sim), cfg)
     events = []
     meter._on_event = lambda lvl, msg: events.append((lvl, msg))
-    sim.get_mode = lambda: ("peak", 4, "wide")        # as a real 455 would report it
-    calls = []
-    real_set = sim.set_mode
-    sim.set_mode = lambda *a: (calls.append(a), real_set(*a))
     meter.start(poll=False)
     try:
-        assert calls and calls[0][0] == "dc"
-        assert any(lvl == "warn" and "peak" in msg for lvl, msg in events)
+        assert sim.get_mode()[0] == "peak"             # untouched
+        for _ in range(3):
+            meter.poll_once()
+        s = meter.status()
+        assert s.mode == "peak" and (s.peak_mode, s.peak_display) == ("pulse", "negative")
+        assert "negative peak" in s.quantity
+        # the negative peak: DC field minus the ripple amplitude
+        assert s.field_mT == pytest.approx(sim.field_mT + sim.offset_mT
+                                           - sim.ac_rms_mT * math.sqrt(2), abs=0.3)
+        assert math.isnan(s.measured_field_mT)       # never filed as a DC field
+        assert any(lvl == "warn" and "PEAK" in msg for lvl, msg in events)
+        n = meter.acquire()
+        for _ in range(cfg.acquisition.readings + 40):
+            meter.poll_once()
+        assert meter.status().sample["acq_id"] == n
+        assert "peak" in meter.status().sample["quantity"]
     finally:
         meter.shutdown()
+
+
+# ---- the probe ----------------------------------------------------------------
+
+def test_probe_is_read_at_start_and_logged(system):
+    meter, sim, _, events, _ = system
+    s = meter.status()
+    assert s.probe == "HSE" and s.probe_serial == "SIM-HSE"
+    assert s.probe_type_code == 40 and s.probe_sensitivity_mV_per_kG == 8.0
+    assert s.probe_geometry == "axial"
+    assert s.probe_desc.startswith("HSE axial")
+    assert any("probe: HSE axial" in msg for _, msg in events)
+
+
+def test_reread_probe_follows_a_swapped_probe(system):
+    meter, sim, _, events, _ = system
+    assert meter.range_limits() == (0.35, 3500.0)
+    sim.swap_probe("HST")
+    meter.reread_probe()
+    s = meter.status()
+    assert s.probe == "HST" and s.ranges_mT == PROBE_RANGES_mT["HST"]
+    assert meter.range_limits() == (3.5, 35000.0)
+    assert any(lvl == "warn" and "PROBE CHANGED" in msg for lvl, msg in events)
+
+
+def test_a_probe_plugged_back_in_is_reread_automatically(system):
+    meter, sim, _, events, clock = system
+    sim.probe_present = False
+    _polls(meter, clock, 1)
+    assert meter.status().flag == "no probe"
+    sim.swap_probe("UHS")
+    sim.probe_present = True
+    _polls(meter, clock, 1)
+    assert meter.status().probe == "UHS"
+    assert meter.status().ranges_mT == PROBE_RANGES_mT["UHS"]
+
+
+# ---- the front panel stays in charge while the service runs --------------------
+
+def test_front_panel_change_is_adopted_by_the_periodic_reread(system):
+    """Someone switches the meter to RMS/narrow and tesla by hand: after the
+    next re-read the module reports exactly that, and wrote nothing."""
+    from ls455.gaussmeter import FRONT_PANEL_SYNC_S
+    meter, sim, cfg, events, clock = system
+    sim._mode, sim._band, sim._unit = "rms", "narrow", "T"      # hand on the front panel
+    guard = NoWriteBackend(sim)
+    meter.backend = guard                                       # any write now fails
+    _polls(meter, clock, 1, dt=FRONT_PANEL_SYNC_S + 0.1)
+    s = meter.status()
+    assert (s.mode, s.rms_band, s.display_unit) == ("rms", "narrow", "T")
+    assert "RMS" in s.quantity and math.isnan(s.measured_field_mT)
+    assert cfg.meter.mode == "rms"
+    assert any(lvl == "warn" and "front panel changed" in msg for lvl, msg in events)
+    # nothing changes -> no second warning
+    n = len(events)
+    _polls(meter, clock, 1, dt=FRONT_PANEL_SYNC_S + 0.1)
+    assert len(events) == n
+
+
+def test_no_reread_before_the_period(system):
+    meter, sim, cfg, events, clock = system
+    sim._unit = "T"
+    _polls(meter, clock, 3, dt=0.05)
+    assert meter.status().display_unit == "G"
+
+
+def test_acquire_rereads_first_and_reports_the_new_quantity(system):
+    meter, sim, cfg, events, clock = system
+    sim._mode = "peak"                                           # changed by hand just now
+    acq = meter.acquire()                                        # well inside the sync period
+    _polls(meter, clock, 60, dt=0.05)
+    s = meter.status()
+    assert s.acq_id == acq and not s.acquiring
+    assert s.sample["mode"] == "peak" and "peak" in s.sample["quantity"]
+    # adopted BEFORE the first counted reading, so not flagged as mixed
+    assert "settings changed" not in s.sample["flag"]
+
+
+def test_change_during_an_acquisition_is_flagged(system):
+    meter, sim, cfg, events, clock = system
+    cfg.acquisition.readings = 5
+    meter.acquire()
+    _polls(meter, clock, 16, dt=0.05)                           # settle + 2-3 readings
+    assert meter.status().acquiring
+    sim._unit = "T"
+    meter._sync_now = True                                       # as the periodic timer would
+    _polls(meter, clock, 20, dt=0.05)
+    assert "settings changed" in meter.status().sample["flag"]
+
+
+def test_reread_does_not_undo_a_setter_in_flight(system):
+    """A setter writes cfg first and the meter a moment later. A re-read that
+    lands in between must not put the meter's OLD value back into cfg."""
+    meter, sim, cfg, events, clock = system
+    cfg.meter.mode = "rms"                  # set_mode has stored it, not yet pushed
+    meter._sync_front_panel()
+    assert cfg.meter.mode == "rms"
+    meter.set_mode("rms")
+    assert sim.get_mode()[0] == "rms"
+
+
+def test_describe_revision_follows_a_probe_swap_on_auto_range(system):
+    from ls455.net.describe import build_manifest
+    meter, sim, cfg, events, clock = system
+    assert cfg.meter.auto_range
+    rev = build_manifest(meter)["revision"]
+    sim.swap_probe("HST")
+    meter.reread_probe()
+    assert build_manifest(meter)["revision"] != rev

@@ -50,6 +50,16 @@ def test_info_and_config(service_and_client):
     assert cli.get_config().hardware.tcp_port == 10001
 
 
+def test_status_over_the_wire_is_the_adopted_state(service_and_client):
+    _, cli, _ = service_and_client
+    sim = Config().sim
+    s = _wait(cli, lambda s: s.frequency_Hz == sim.state_frequency_Hz)
+    assert s.frequency_Hz == sim.state_frequency_Hz
+    assert s.power_dBm == sim.state_power_dBm
+    assert s.reference == sim.state_reference
+    assert s.rf_on is sim.state_rf_on
+
+
 def test_commands_take_effect(service_and_client):
     _, cli, _ = service_and_client
     cli.set_frequency(2.5e9)

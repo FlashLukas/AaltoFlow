@@ -9,14 +9,22 @@ over GPIB (SCPI), or fully simulated with a coil on the output.
 ![kepco front panel](../front-panels/kepco.png)
 
 *Current mode, 2.5 A into the simulated coil (2 ohm, 0.1 H) with an 8 V
-compliance. The V-I plane shows the four quadrants of a bipolar supply; the
-dot is the measured operating point and its trail the ramp that brought it
-there, which runs up the coil's load line V = I R. Dashed: the voltage limit.
-Dotted: the target.*
+compliance -- a BOP FOUND live at start and adopted without a single write
+(the log line says so). The V-I plane shows the four quadrants of a bipolar
+supply; the dot is the measured operating point (after a ramp, its trail runs
+up the coil's load line V = I R). Dashed: the voltage limit. Dotted: the
+target.*
 
 This is the supply **on its own**: a safe, scannable source of amps or volts.
-`clMag-control` also drives a Kepco, but as the actuator inside a
-magnetic-field loop; nothing here knows about fields or calibrations.
+`clMag-control` drives a Kepco too, as the actuator inside a magnetic-field
+loop; nothing here knows about fields or calibrations.
+
+> **Same unit as clMag-control.** On the rig this BOP is the SAME physical
+> supply clMag-control drives (GPIB0::6::INSTR, the default here too).
+> **Never run kepco-control and clMag-control at the same time**: two services
+> would program one output against each other. Stop one before starting the
+> other; kepco adopts whatever clMag left on the output (and vice versa, clMag
+> has its own start-up rules).
 
 ## What it does for you
 
@@ -30,7 +38,12 @@ magnetic-field loop; nothing here knows about fields or calibrations.
   The same happens when the service stops (Ctrl-C, the launcher's Stop, the
   `shutdown` verb) -- sped up to finish within `safety.shutdown_ramp_s` --
   and, if you enable it, when no client has spoken for `safety.watchdog_s`.
-- **The output is OFF at start**, always.
+- **Changes nothing at start.** The service READS the BOP -- mode, setpoint,
+  limit, output on/off (`FUNC:MODE?`, `VOLT?`, `CURR?`, `OUTP?`) -- and adopts
+  it; the only write is `*CLS` (clears the error queue). A live output stays
+  live at the value it has, and the ramp continues from there when you set a
+  new value. The `[output]` values of a loaded .ini are NOT pushed at start;
+  they reach the supply only when you set them.
 - **Clamps** every setpoint to the envelope in `[limits]` and says so.
 - **Honest scan values.** `measured_voltage` / `measured_current` come from
   `acquire`: wait for the readback to settle (the BIT 4886 averages its last

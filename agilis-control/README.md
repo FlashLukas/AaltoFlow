@@ -41,8 +41,16 @@ differ**. So this module:
   status says `estimate_ok: false` (and `uncal_steps`) until the next Datum.
 
 Default step size: 0.05 µm (the AG-LS25 datasheet's minimum incremental
-motion) at amplitude 16. **Measure your own**: move N steps, measure the
-distance, divide by N — each direction separately.
+motion) at amplitude 16. **Measure your own**: on the AG-LS25 the
+**Measure step size** routine does it limit to limit, in both directions (on a
+vertical mount up and down differ -- that is why there are two numbers); on a
+stage without a limit switch move N steps, measure the distance, divide by N.
+
+**The stage on the rig: Newport AG-LS25** (datasheet, manual A824E): 12 mm
+travel, hard stops + an electrical limit switch, minimum incremental motion
+0.05 µm, absolute accuracy (MA/PA) 100 µm, > 0.5 mm/s unloaded / > 0.2 mm/s at
+1.7 N axial load, axial load capacity 2 N. "AG-LS25V6" is the 1e-6 Torr vacuum
+version.
 
 ## What it does
 
@@ -59,12 +67,23 @@ distance, divide by N — each direction separately.
   sets a display origin for the relative read-out only.
 - A **travel leash** (± steps around the datum) that replaces the travel limits
   when armed; the brain also **stops a jog** that reaches it.
-- **Limit-switch** indicator (stages that have one, e.g. AG-LS25).
+- **Limit switch** (AG-LS25): indicator (PH), **move to a limit** (MV),
+  **measure position** (MA) and **absolute move** (PA) -- the controller counts
+  steps between the limits and cuts the USB link while it does (up to 2 min),
+  so these run as numbered routines -- and **Measure step size** (the manual's
+  MV-3 / ZP / PR100 / MV4 / TP procedure, both directions; ends at the
+  negative limit with the datum there).
 - A 20-slot **position list** in step coordinates, save/load JSON.
 - **Fly-scan stream** of both positions for scan-core (`stream_*` verbs).
-- Safe by construction: on start the controller is put in remote mode and
-  **both axes are stopped** (a jog left by a crashed session ends); on
-  shutdown both axes stop and the push buttons are handed back (`ML`).
+- **Reads, never changes, at start** (suite rule of 2026-09-27): the step
+  counters and amplitudes are READ from the controller and adopted; the .ini
+  amplitudes are applied only when you apply them (and only if they differ).
+  The one write is `MR` (remote mode) -- the manual refuses TP/SU?/PH in local
+  mode -- sent once the axes are at rest (a running move is waited for). The
+  one exception is a safety interlock: a **jog** found running (left by a
+  crashed session, so without its dead-man) is stopped after 2 s. `info` and
+  status list what start-up wrote (`startup_writes`). On shutdown both axes
+  stop and the push buttons are handed back (`ML`).
 
 ## Architecture (same as every module in the suite)
 
@@ -114,13 +133,19 @@ JSON over REQ/REP on 5595; every reply is `{"ok": true, ...}` or
 | store a measured step size | `{"cmd":"set_calibration","axis":"X","value":0.048,"direction":1}` |
 | leash | `{"cmd":"set_leash","enabled":true,"leash_steps":20000}` |
 | datum / display zero | `{"cmd":"zero_counter","axis":"X"}` · `set_zero` · `clear_zero` |
+| to a limit switch (MV) | `{"cmd":"move_to_limit","axis":"X","direction":-1,"speed":3}` |
+| measure position (MA, routine) | `{"cmd":"measure_position","axis":"X"}` → `routine_id`; result in `measured_um` |
+| absolute move (PA, routine) | `{"cmd":"move_absolute","axis":"X","position":6000}` (µm from the − limit) |
+| measure step size (routine) | `{"cmd":"measure_step_size","axis":"Y"}` → `routine_id`; wait for `routine_running` false, `routine_error` "OK" |
 | stop | `{"cmd":"stop"}` (all) or `{"axis":"Y"}` |
 | position list | `store_position` / `goto_position` / `save_positions` / `load_positions` |
 | fly-scan stream | `stream_start` / `stream_read` / `stream_stop` → `{t, values: {x, y}}` |
 
 `describe` offers `position_x/y` (µm, settle `adopt_then_flag` on `target_um`),
 the four amplitudes, the Large/Small preset, step-size and limit indicators, and
-the actions `datum_x`, `datum_y`, `stop` (usable in scan routines).
+the actions `datum_x`, `datum_y`, `stop`, and (limit-switch stages)
+`measure_step_size_x/y` and `measure_position_x/y` with a numbered-routine wait
+block -- all usable in scan routines.
 
 ## Hardware notes (before the first real run)
 
@@ -135,4 +160,8 @@ A824E. Every command is marked `# VERIFY`. On the lab PC:
 3. Time a 2000-step `PR` to learn the stepping rate (the simulator assumes 666
    steps/s) and check `TS` reports 1 right after `PR`.
 4. Measure the step size of each axis and direction at the amplitude you will
-   use, and store it (STEP SIZE card or `set_calibration`).
+   use: the LIMIT SWITCH card's **Measure step size** (AG-LS25), or by hand and
+   store it (STEP SIZE card or `set_calibration`).
+5. AG-LS25: check the reply of `1MA` / `1PA500` (format, which limit MA counts
+   from), that the controller answers once the USB link is back, and the
+   switch-to-switch distance (`hardware.travel_um`, nominal 12000).

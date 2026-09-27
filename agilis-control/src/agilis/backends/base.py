@@ -22,12 +22,26 @@ brain's job.
     set_amplitude(...)  axSU+n / axSU-n   step amplitude 1..50 per direction
     read_amplitude(...) axSU+? / axSU-?
     limit_status()      PH         bit 0 = axis 1 limit, bit 1 = axis 2 limit
+    enable_remote()     MR (+CC)   remote mode: the ONLY way to read TP/SU/PH
+    move_to_limit(ax,m) axMVm      jog to the limit switch and stop there
+    measure_position(ax) axMA      BLOCKING: position in 1/1000 of the travel
+    move_absolute(ax,p) axPAp      BLOCKING: go to p/1000 of the travel
 
-Contract note (fire-and-forget): ``move_by`` and ``jog`` START motion and
-return immediately. Progress is observed by polling ``axis_state`` and
-``read_position``. There is no absolute move: the AG-UC2's PA works only on
-stages with limit switches and blocks the USB link for up to 2 minutes, so the
-brain makes absolute moves out of TP + PR instead.
+Contract notes:
+
+* ``open()`` only opens the link and reads the firmware version. It must not
+  change anything on the controller (AaltoFlow rule 2026-09-27: read the
+  instrument state at start, never change it). The brain decides, after
+  looking at the axis states (TS works in local mode), when to call
+  ``enable_remote()`` -- which the manual refuses while an axis moves.
+* ``move_by``, ``jog`` and ``move_to_limit`` START motion and return
+  immediately (fire-and-forget); progress is observed by polling
+  ``axis_state`` and ``read_position``.
+* ``measure_position`` / ``move_absolute`` (MA / PA) work only on stages
+  WITH a limit switch (AG-LS25). The controller interrupts the USB link while
+  they run (up to 2 minutes), so these two calls BLOCK until the controller
+  answers. The brain runs them in a routine thread and never lets the poll or
+  a command wait behind them.
 """
 
 from __future__ import annotations
@@ -57,3 +71,9 @@ class AgilisBackend(Protocol):
     def set_amplitude(self, hw_axis: int, direction: int, amplitude: int) -> None: ...
     def read_amplitude(self, hw_axis: int, direction: int) -> int: ...
     def limit_status(self) -> int: ...
+
+    # -- start-up and limit-switch stages (AG-LS25) ------------------------ #
+    def enable_remote(self) -> None: ...
+    def move_to_limit(self, hw_axis: int, mode: int) -> None: ...
+    def measure_position(self, hw_axis: int) -> int: ...
+    def move_absolute(self, hw_axis: int, permille: int) -> int: ...

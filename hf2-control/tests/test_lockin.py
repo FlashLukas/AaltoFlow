@@ -55,7 +55,10 @@ def _run_acquisition(li, clock, step=0.002, max_s=5.0):
 
 # ---- settings ----------------------------------------------------------------
 
-def test_start_pushes_config_and_reports(rig):
+def test_start_adopts_the_instruments_state_and_reports(rig):
+    # Was "start pushes config" until 2026-09-27; start now READS the
+    # instrument (see test_adopt.py). The sim is preset to the config defaults
+    # by build_sim_system, so a fresh rig still looks like this.
     li, sim, clock, _ = rig
     s = li.status()
     assert s.connected
@@ -251,9 +254,10 @@ def test_apply_config_reclamps_and_repushes(rig):
 
 def test_polling_thread_runs_in_real_time():
     li, sim = build_sim_system(Config(), seed=2)
-    li.cfg.ch1.time_constant_s = 1e-3
-    li.cfg.ch2.time_constant_s = 1e-3
     li.start()
+    # set AFTER start: start adopts the instrument's tau, it no longer pushes cfg
+    li.set_time_constant(1, 1e-3)
+    li.set_time_constant(2, 1e-3)
     try:
         import time
         deadline = time.monotonic() + 3.0

@@ -26,6 +26,14 @@ waited `hardware.switch_settle_s` (the synthesiser's switching time). So when
 status shows the frequency a scan asked for, the instrument has not just
 accepted it but has had time to get there -- that is what describe's `echoes`
 settle policy waits on.
+
+ADOPT AT START (Lukas, 2026-09-27: "all modules should read the instrument
+state on startup, not to change anything"). start() READS the generator --
+RF on/off, frequency, level, modulation, protection -- and makes that the
+desired state. Nothing is written, so connecting the service never moves a
+level, switches the RF or kills a modulation someone set up by hand. The
+config's `signal` values are defaults for the Settings dialog, sent only when
+you change them there (apply_config). RF OFF at shutdown is unchanged.
 """
 
 from __future__ import annotations
@@ -83,12 +91,13 @@ class SignalSource:
         self._hw_lock = threading.RLock()      # one owner of the instrument at a time
         self._freq = float(s.frequency_Hz)
         self._power = float(s.power_dBm)
-        self._rf = False                       # ALWAYS off at start (safety)
+        self._rf = False                       # placeholder until start() adopts
         self._dirty: set[str] = set()
         self._connected = False
         self._rpp_latched = False
         self._last_hw_error = ""
         self._cycle_n = 0
+        self._need_adopt = False               # start() could not read: adopt later
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -98,6 +107,10 @@ class SignalSource:
         self._freq = _clamp(self._freq, *self.freq_limits())[0]
         self._power = _clamp(self._power, self.power_floor(),
                              self.power_ceiling(self._freq))[0]
+        # What cfg.signal held when we last looked: apply_config() sends the
+        # signal defaults only when they CHANGE, so an OK in Settings that
+        # did not touch them does not move the instrument.
+        self._signal_seen = (float(s.frequency_Hz), float(s.power_dBm))
         self._status = self._snapshot(rf=False, f=self._freq, p=self._power,
                                       cond=0, mod={}, idn="")
 
@@ -129,23 +142,60 @@ class SignalSource:
     # ---- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        """Open the backend, push the start-up signal (RF off), start the worker."""
+        """Open the backend, READ the instrument and adopt its state, start the
+        worker. Writes nothing (see the module docstring)."""
         with self._hw_lock:
             self.backend.open()
             self._connected = True
-            mod = self.backend.read_modulation()
-            if any(mod.values()):
-                # open() already switched modulation off; if it is still on,
-                # the instrument did not listen -- say so loudly.
-                self.backend.modulation_off()
-                self._emit("warn", "modulation was on after connect: switched off "
-                                   f"({', '.join(k for k, v in mod.items() if v)})")
-        with self._lock:
-            self._rf = False
-            self._dirty |= {"freq", "power", "rf"}
-        self._emit("info", f"connected: {self.backend.idn() or 'HP 8648'}  (RF off)")
-        # one synchronous cycle, so the first status already shows the
-        # instrument's real state rather than the placeholder
+            try:
+                rf = bool(self.backend.read_output())
+                f = float(self.backend.read_frequency())
+                p = float(self.backend.read_power())
+                cond = int(self.backend.read_power_condition())
+                mod = dict(self.backend.read_modulation())
+                notes = list(self.backend.startup_notes())
+                idn = self.backend.idn()
+            except Exception as exc:
+                # Could not read the state: keep the placeholders, mark nothing
+                # dirty (so nothing is written), and let the worker keep trying
+                # -- its read-back reports hw_error until the bus answers.
+                self._emit("error", f"could not read the instrument at connect: {exc}")
+                rf = f = p = None
+                self._need_adopt = True
+                cond, mod, notes, idn = 0, {}, [], ""
+        if f is not None:
+            with self._lock:
+                self._rf, self._freq, self._power = rf, f, p
+                self._dirty.clear()            # adopting is not a change to write
+            self._rpp_latched = bool(cond & RPP_BIT)
+            self._status = self._snapshot(rf=rf, f=f, p=p, cond=cond, mod=mod, idn=idn)
+            self._emit("info", f"connected: {idn or 'HP 8648'} -- adopted RF "
+                               f"{'ON' if rf else 'off'}, {f / 1e6:.5f} MHz, "
+                               f"{p:+.1f} dBm (nothing written)")
+            if rf:
+                self._emit("warn", "the RF output was already ON at connect; "
+                                   "it was left on")
+            on = [k for k, v in mod.items() if v]
+            if on:
+                # Pure CW is this module's job, but switching a modulation off
+                # is a change -- report it, leave it.
+                self._emit("warn", f"modulation is ON at the instrument ({', '.join(on)}); "
+                                   "left as found -- this module assumes a pure CW signal")
+            if cond & RPP_BIT:
+                self._emit("error", "REVERSE POWER PROTECTION was already tripped at "
+                                    "connect. Remove the signal reaching the RF OUTPUT, "
+                                    "then switch RF on to re-arm.")
+            f_lo, f_hi = self.freq_limits()
+            top = self.power_ceiling(f)
+            if not f_lo <= f <= f_hi or not self.power_floor() <= p <= top:
+                # Adopted as found: the limits guard what WE command. The next
+                # setpoint (or an OK in Settings) is clamped as usual.
+                self._emit("warn", f"the instrument is outside your envelope "
+                                   f"({f / 1e6:g} MHz, {p:+.1f} dBm; ceiling here "
+                                   f"{top:+.1f} dBm) -- left as found")
+            for note in notes:
+                self._emit("warn", note)
+        # one synchronous read cycle (nothing is dirty, so nothing is written)
         self._cycle()
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="hp8648-worker",
@@ -259,10 +309,32 @@ class SignalSource:
         return self.cfg
 
     def apply_config(self) -> None:
-        """Re-clamp the desired signal to the (possibly new) limits and push it.
-        Called after set_config edited self.cfg in place."""
-        self.set_frequency(self._freq)
-        self.set_power(self._power)
+        """Called after set_config (or the Settings dialog) edited self.cfg in
+        place.
+
+        * If the `signal` defaults were CHANGED, that is an explicit request:
+          send them (clamped, like any setpoint).
+        * Otherwise only re-clamp: a setpoint that no longer fits the new
+          limits is moved, one that still fits is left alone -- so pressing
+          OK in Settings does not rewrite (or move) the instrument.
+        """
+        sig = (float(self.cfg.signal.frequency_Hz), float(self.cfg.signal.power_dBm))
+        if sig != self._signal_seen:
+            self._signal_seen = sig
+            self.set_frequency(sig[0])
+            self.set_power(sig[1])
+            return
+        f_lo, f_hi = self.freq_limits()
+        with self._lock:
+            f, p = self._freq, self._power
+        f_new = _clamp(f, f_lo, f_hi)[0]
+        if f_new != f:
+            self.set_frequency(f_new)          # also lowers a level that no longer fits
+        with self._lock:
+            p = self._power
+        p_new = _clamp(p, self.power_floor(), self.power_ceiling(f_new))[0]
+        if p_new != p:
+            self.set_power(p_new)
 
     # ---- the worker ------------------------------------------------------
 
@@ -304,6 +376,18 @@ class SignalSource:
                 idn = b.idn()
             hw_error = ""
             self._last_hw_error = ""
+            if self._need_adopt:
+                # start() could not read the box; this is the first good read.
+                # Adopt it now -- unless the user has already asked for
+                # something, in which case that request wins.
+                with self._lock:
+                    if not dirty and not self._dirty:
+                        self._rf, self._freq, self._power = rf_rb, f_rb, p_rb
+                        rf, f, p = rf_rb, f_rb, p_rb
+                self._need_adopt = False
+                self._emit("info", f"instrument answered: adopted RF "
+                                   f"{'ON' if rf_rb else 'off'}, {f_rb / 1e6:.5f} MHz, "
+                                   f"{p_rb:+.1f} dBm")
         except Exception as exc:                       # never let the worker die
             hw_error = str(exc) or type(exc).__name__
             # A write that failed half-way must not be forgotten: put what was

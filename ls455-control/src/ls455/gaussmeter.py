@@ -25,6 +25,23 @@ Two ways to read it:
             check stops a stale "not acquiring" frame from the previous point
             fooling them (suite gotcha #17).
 
+Start-up READS, it never writes (Lukas's rule, 2026-09-27, for every module):
+connecting asks the meter for its probe, mode (DC / RMS / PEAK), resolution,
+range, unit and relative setting and ADOPTS them into cfg and the status, so
+the GUI and describe show what the meter is actually doing and a measurement
+set up on the front panel is never changed by starting the service. The config
+values are then only defaults that a user applies explicitly (a setter, or
+set_config / Settings > Apply). There is no push-on-start option any more.
+
+The front panel stays in charge WHILE the service runs, too. Readings arrive
+in the display unit and are converted to mT in software, and RDGFIELD? means
+nothing in peak mode, so a unit or mode changed by hand on the meter would
+otherwise silently scale every later number (G -> T is a factor 10^4). The
+polling thread therefore re-reads unit, mode, peak settings and range mode
+every FRONT_PANEL_SYNC_S seconds, and once before the first reading of every
+acquisition (queries only, ~0.25 s), adopts any change, logs it, and flags an
+acquisition that a change ran into ("settings changed").
+
 Threads and locks (the suite's rules for a polled detector):
 
   * ONE polling thread owns the readings. `status()` only copies what that
@@ -47,11 +64,16 @@ import time
 from dataclasses import dataclass, field
 
 from .backends.base import (DC_BANDWIDTH_HZ, DC_DIGITS, DC_TIME_CONSTANT_S,
-                            FLAG_OK, MODES, RMS_BANDS, RMS_TIME_CONSTANT_S,
+                            FLAG_NO_PROBE, FLAG_OK, MODES, PEAK_TIME_CONSTANT_S,
+                            PROBE_GEOMETRIES, RMS_BANDS, RMS_TIME_CONSTANT_S,
                             UNIT_CODES, GaussmeterBackend)
 from .config import Config
 
 _NAN = float("nan")
+
+#: How often the polling thread re-reads the front-panel settings (seconds).
+#: Four or five queries at the 455's 50 ms spacing, so ~5 % of the bus time.
+FRONT_PANEL_SYNC_S = 5.0
 
 
 
@@ -61,12 +83,17 @@ class Status:
 
     connected: bool
     idn: str = ""
-    probe: str = ""                    # probe family: HST / HSE / UHS
+    probe: str = ""                    # probe family: HST / HSE / UHS ("" = none detected)
     probe_serial: str = ""
+    probe_type_code: int = -1          # the 455's TYPE? answer
+    probe_sensitivity_mV_per_kG: float = _NAN
+    probe_geometry: str = "axial"      # from config: the 455 does not report it
+    probe_desc: str = ""               # one line for panels and logs
     hw_error: str = ""
     # the live reading
-    field_mT: float = _NAN             # what the meter reads now (DC or RMS field)
-    measured_field_mT: float = _NAN    # DC field only (NaN in rms mode) -- for field-source subscribers
+    field_mT: float = _NAN             # what the meter reads now (DC, RMS or peak field)
+    measured_field_mT: float = _NAN    # DC field only (NaN in rms/peak) -- for field-source subscribers
+    quantity: str = "DC field"         # what field_mT and the acquired sample ARE
     field_rel_mT: float = _NAN         # field - rel_setpoint, when relative mode is on
     flag: str = ""                     # "", "overload", "no probe"
     read_ms: float = _NAN              # how long the last reading took
@@ -75,6 +102,8 @@ class Status:
     mode: str = "dc"
     dc_digits: int = 4
     rms_band: str = "wide"
+    peak_mode: str = "periodic"        # adopted from the meter, never changed here
+    peak_display: str = "positive"
     auto_range: bool = True
     range_set_mT: float = _NAN
     range_mT: float = _NAN
@@ -124,6 +153,8 @@ class Gaussmeter:
         self._connected = False
         self._idn = ""
         self._probe: dict = {}
+        # the meter's peak sub-settings, READ from it (this module never sets them)
+        self._peak = ("periodic", "positive")
         self._hw_error = ""
         self._last_err_emit = -1e9
 
@@ -137,6 +168,14 @@ class Gaussmeter:
         self._read_ms = _NAN
         self._n_read = 0
         self._zeroing = False
+        self._reread_pending = False        # set by the poll thread when a probe reappears
+        # The front-panel state as last READ from (or written to) the meter.
+        # The periodic re-read compares against THIS, not against cfg: a
+        # setter writes cfg first and the meter a moment later, and comparing
+        # with cfg in between would "adopt" the old value over the user's.
+        self._panel: dict = {}
+        self._next_sync = 0.0
+        self._sync_now = False              # set by acquire(): re-read first
 
         # acquisition state (under _lock)
         self._acq_id = 0
@@ -151,53 +190,106 @@ class Gaussmeter:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the meter, adopt (or push) its settings, start polling.
+        """Open the meter, READ and adopt its state, start polling.
 
+        Nothing is written to the meter here (see the module docstring): the
+        455 keeps its settings over a power cycle and someone may have set it
+        up on the front panel, so connecting must not change a measurement.
         `poll=False` skips the thread, so a test can drive `poll_once()` by hand.
         """
         m = self.cfg.meter
         with self._hw:
             self.backend.open()
             self._idn = self._try(self.backend.idn, "")
-            self._probe = self._try(self.backend.probe_info, {})
-            self._ranges = list(self.backend.ranges_mT())
             self._connected = True
-            if self.cfg.hardware.push_on_start:
-                self._sanitise_config()
-                self._push_meter()
-            else:
-                # The 455 keeps its settings over a power cycle; adopting them
-                # means connecting never silently changes a measurement someone
-                # set up on the front panel.
-                mode, digits, band = self.backend.get_mode()
-                m.dc_digits, m.rms_band = int(digits), band
-                if mode in MODES:
-                    m.mode = mode
-                else:
-                    # PEAK mode (left on from the front panel): RDGFIELD? is
-                    # only defined for DC and RMS (manual p. 6-33), so we
-                    # cannot adopt it -- switch to our mode and say so.
-                    self.backend.set_mode(m.mode, int(m.dc_digits), m.rms_band)
-                    self._emit("warn", f"meter was in {mode} mode, which this module "
-                                       f"does not support; switched to {m.mode.upper()}")
-                m.auto_range = bool(self.backend.get_auto_range())
-                if not m.auto_range:
-                    m.range_mT = float(self.backend.get_range())
-                m.display_unit = self.backend.get_display_unit()
-                # relative mode is re-pushed: the meter has no query here that
-                # we trust to be in mT, and off is the safe default
-                self.backend.set_relative(m.relative, m.rel_setpoint_mT)
-                self._read_back()
-        fam = self._probe.get("family") or "unknown"
-        self._emit("info", f"connected: {self._idn or 'gaussmeter'}, probe {fam}")
-        self._emit("info", f"{m.mode.upper()} mode, "
+            self._read_probe()
+            # every one of these is a QUERY
+            mode, digits, band = self.backend.get_mode()
+            m.mode = mode if mode in MODES else "dc"
+            m.dc_digits, m.rms_band = int(digits), band
+            self._peak = tuple(self.backend.get_peak())
+            m.auto_range = bool(self.backend.get_auto_range())
+            if not m.auto_range:
+                m.range_mT = float(self.backend.get_range())
+            m.display_unit = self.backend.get_display_unit()
+            m.relative, m.rel_setpoint_mT = self.backend.get_relative()
+            m.relative = bool(m.relative)
+            m.rel_setpoint_mT = float(m.rel_setpoint_mT)
+            self._read_back()
+        self._next_sync = self._clock() + FRONT_PANEL_SYNC_S
+        self._emit("info", f"connected: {self._idn or 'gaussmeter'}")
+        self._emit_probe(first=True)
+        self._emit("info", "adopted the meter's settings: "
+                           f"{self.quantity()}, "
+                           + (f"{m.dc_digits} digits, " if m.mode == "dc" else
+                              f"{m.rms_band} band, " if m.mode == "rms" else
+                              f"{self._peak[0]} peak, ")
                            + ("auto range" if m.auto_range else
-                              f"manual range {_fmt_mT(self._range_actual)}"))
+                              f"manual range {_fmt_mT(self._range_actual)}")
+                           + f", front panel in {m.display_unit}"
+                           + (f", relative to {_fmt_mT(m.rel_setpoint_mT)}" if m.relative else ""))
+        if m.mode == "peak":
+            # not an error, but the one adopted state that changes what a scan
+            # records: say it where people look
+            self._emit("warn", "the meter is in PEAK mode: field readings and "
+                               "acquisitions are the " + self.quantity()
+                               + ", and measured_field_mT (the field-source key) is empty")
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._poll_loop,
                                             name="ls455-poll", daemon=True)
             self._thread.start()
+
+    # ---- the probe ------------------------------------------------------------
+
+    def _read_probe(self) -> bool:
+        """Ask the meter which probe is plugged in (with _hw held). Returns True
+        if the family -- and therefore the range list -- changed."""
+        old_family, old_ranges = self._probe.get("family"), list(self._ranges)
+        self._probe = self._try(self.backend.probe_info, {})
+        self._ranges = list(self.backend.ranges_mT())
+        return bool(old_ranges) and (self._probe.get("family") != old_family
+                                     or self._ranges != old_ranges)
+
+    def reread_probe(self) -> None:
+        """Re-read the probe (after swapping it). The ranges, the range limits
+        and therefore describe follow the new probe; describe_rev moves when
+        the range list changes, so scan-core re-fetches the limits."""
+        if not self._connected:
+            raise ValueError("not connected")
+        with self._hw:
+            changed = self._read_probe()
+            if not self.cfg.meter.auto_range:
+                self.cfg.meter.range_mT = float(self.backend.get_range())
+            self._read_back()
+        self._emit_probe(changed=changed)
+
+    def probe_desc(self) -> str:
+        """'HSE axial, S/N H12345, 8 mV/kG' -- one line for the panel and the log."""
+        p = self._probe
+        fam = p.get("family") or ""
+        if not fam:
+            return "no probe identified"
+        geo = self.cfg.hardware.probe_geometry
+        parts = [f"{fam} {geo}"]
+        if p.get("serial"):
+            parts.append(f"S/N {p['serial']}")
+        sens = p.get("sensitivity_mV_per_kG", _NAN)
+        if isinstance(sens, (int, float)) and math.isfinite(sens):
+            parts.append(f"{sens:g} mV/kG")
+        return ", ".join(parts)
+
+    def _emit_probe(self, first: bool = False, changed: bool = False) -> None:
+        if not self._probe.get("family"):
+            self._emit("warn", "no probe identified (TYPE? gave no known type): "
+                               f"ranges assume {', '.join(_fmt_mT(r) for r in self._ranges)}")
+            return
+        rng = f"ranges {_fmt_mT(min(self._ranges))} .. {_fmt_mT(max(self._ranges))}"
+        if changed:
+            self._emit("warn", f"PROBE CHANGED: now {self.probe_desc()}; {rng}")
+        else:
+            self._emit("info", f"probe: {self.probe_desc()} (geometry from config); {rng}"
+                       if first else f"probe re-read: {self.probe_desc()}; {rng}")
 
     def shutdown(self) -> None:
         """Stop polling and disconnect. Safe to call more than once. A
@@ -235,6 +327,8 @@ class Gaussmeter:
         m = self.cfg.meter
         if m.mode == "rms":
             tau = RMS_TIME_CONSTANT_S
+        elif m.mode == "peak":
+            tau = PEAK_TIME_CONSTANT_S
         else:
             tau = DC_TIME_CONSTANT_S.get(int(m.dc_digits), 0.1)
         return float(self.cfg.acquisition.settle_time_constants) * tau
@@ -258,8 +352,8 @@ class Gaussmeter:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.cfg.meter.mode = mode
         self._push_mode()
-        self._emit("info", f"{mode.upper()} mode"
-                   + (" (measured_field_mT is empty in RMS mode)" if mode == "rms" else ""))
+        self._emit("info", f"{mode.upper()} mode: readings are the {self.quantity()}"
+                   + (" (measured_field_mT is empty outside DC)" if mode != "dc" else ""))
 
     def set_dc_digits(self, digits: int) -> None:
         n = int(round(_finite(digits, "dc_digits")))
@@ -321,6 +415,7 @@ class Gaussmeter:
                 # RELSP is stored in display units on the meter: re-send it
                 m = self.cfg.meter
                 self.backend.set_relative(m.relative, m.rel_setpoint_mT)
+                self._record_panel()
         self._emit("info", f"front panel shows {unit}")
 
     def set_relative(self, on: bool, setpoint_mT: float | None = None) -> None:
@@ -397,6 +492,9 @@ class Gaussmeter:
             self._acq_id += 1
             self._acq = {"id": self._acq_id, "t0": self._clock() + settle, "want": n,
                          "vals": [], "taken": 0, "flags": set()}
+            # re-read the front panel before the first reading that counts, so
+            # the unit conversion and the reported quantity are the meter's NOW
+            self._sync_now = True
             return self._acq_id
 
     def get_sample(self) -> dict:
@@ -424,12 +522,19 @@ class Gaussmeter:
                 connected=self._connected, idn=self._idn,
                 probe=self._probe.get("family", ""),
                 probe_serial=str(self._probe.get("serial", "")),
+                probe_type_code=int(self._probe.get("type_code", -1)),
+                probe_sensitivity_mV_per_kG=float(
+                    self._probe.get("sensitivity_mV_per_kG", _NAN)),
+                probe_geometry=self.cfg.hardware.probe_geometry,
+                probe_desc=self.probe_desc(),
                 hw_error=self._hw_error,
                 field_mT=b,
                 measured_field_mT=b if (m.mode == "dc" and valid) else _NAN,
+                quantity=self.quantity(),
                 field_rel_mT=(b - m.rel_setpoint_mT) if m.relative else _NAN,
                 flag=self._flag, read_ms=self._read_ms, readings=self._n_read,
                 mode=m.mode, dc_digits=int(m.dc_digits), rms_band=m.rms_band,
+                peak_mode=self._peak[0], peak_display=self._peak[1],
                 auto_range=m.auto_range, range_set_mT=m.range_mT,
                 range_mT=self._range_actual, range_min_mT=rlo, range_max_mT=rhi,
                 ranges_mT=list(self._ranges), display_unit=m.display_unit,
@@ -480,6 +585,10 @@ class Gaussmeter:
                         self._zeroing = False
                     self._emit("info", "zero probe finished")
                 return
+            if self._sync_now or self._clock() >= self._next_sync:
+                self._sync_now = False
+                self._next_sync = self._clock() + FRONT_PANEL_SYNC_S
+                self._sync_front_panel()
             with self._hw:
                 t_start = self._clock()
                 value, flag = self.backend.read_field()
@@ -491,6 +600,9 @@ class Gaussmeter:
 
         with self._lock:
             recovered = bool(self._hw_error)
+            # A probe that was missing (or a link that was down) and is back
+            # may be a DIFFERENT probe: re-read it so the range list is right.
+            reread = recovered or (self._flag == FLAG_NO_PROBE and flag != FLAG_NO_PROBE)
             self._hw_error = ""
             self._field = float(value)
             self._flag = flag
@@ -501,6 +613,11 @@ class Gaussmeter:
             self._advance_acquisition(t_start, float(value), flag)
         if recovered:
             self._emit("info", "hardware reads recovered")
+        if reread:
+            try:
+                self.reread_probe()
+            except Exception as exc:          # never let the polling thread die
+                self._report_hw_error(exc)
 
     def _advance_acquisition(self, t_start: float, value: float, flag: str) -> None:
         """Called with _lock held. Only readings that STARTED after the trigger
@@ -528,7 +645,8 @@ class Gaussmeter:
                else (0.0 if n == 1 else _NAN))
         self._sample = {"acq_id": a["id"], "field_mT": mean, "std_mT": std, "n": n,
                         "flag": ",".join(sorted(a["flags"])),
-                        "mode": self.cfg.meter.mode, "range_mT": self._range_actual,
+                        "mode": self.cfg.meter.mode, "quantity": self.quantity(),
+                        "range_mT": self._range_actual,
                         "time": time.time()}
         self._acq = None
 
@@ -554,6 +672,10 @@ class Gaussmeter:
         m.dc_digits = int(_clamp(int(m.dc_digits), min(DC_DIGITS), max(DC_DIGITS))[0])
         if m.display_unit not in UNIT_CODES:
             m.display_unit = "G"
+        hw = self.cfg.hardware
+        if str(hw.probe_geometry).lower() not in PROBE_GEOMETRIES:
+            hw.probe_geometry = "axial"
+        hw.probe_geometry = str(hw.probe_geometry).lower()
         m.range_mT = _clamp(float(m.range_mT), *self.range_limits())[0]
         r = lim.rel_setpoint_max_mT
         m.rel_setpoint_mT = _clamp(float(m.rel_setpoint_mT), -r, r)[0]
@@ -579,8 +701,70 @@ class Gaussmeter:
         self._read_back()
 
     def _read_back(self) -> None:
-        """What the meter actually applied (with _hw held)."""
+        """What the meter actually applied (with _hw held). Queries only."""
         self._range_actual = float(self.backend.get_range())
+        self._peak = tuple(self.backend.get_peak())
+        self._record_panel()
+
+    def _record_panel(self) -> None:
+        """Remember the meter's state as it is now known (after a read or a
+        push), for the periodic front-panel re-read to compare against."""
+        m = self.cfg.meter
+        self._panel = {"unit": m.display_unit, "mode": m.mode,
+                       "dc_digits": int(m.dc_digits), "rms_band": m.rms_band,
+                       "peak": tuple(self._peak), "auto_range": bool(m.auto_range),
+                       "range": None if m.auto_range else float(self._range_actual)}
+
+    def _sync_front_panel(self) -> None:
+        """Re-read the settings someone may have changed by hand on the meter,
+        and adopt the ones that differ from what was last known. QUERIES ONLY.
+        Called from the polling thread; raises on a failed read (the caller
+        reports it as a hardware error)."""
+        m = self.cfg.meter
+        with self._hw:
+            unit = self.backend.get_display_unit()
+            mode, digits, band = self.backend.get_mode()
+            peak = tuple(self.backend.get_peak())
+            auto = bool(self.backend.get_auto_range())
+            rng = None if auto else float(self.backend.get_range())
+            now = {"unit": unit, "mode": mode if mode in MODES else "dc",
+                   "dc_digits": int(digits), "rms_band": band, "peak": peak,
+                   "auto_range": auto, "range": rng}
+            changed = [k for k, v in now.items() if v != self._panel.get(k)]
+            if not changed:
+                return
+            m.display_unit = unit
+            m.mode, m.dc_digits, m.rms_band = now["mode"], int(digits), band
+            self._peak = peak
+            m.auto_range = auto
+            if rng is not None:
+                m.range_mT = rng
+                self._range_actual = rng
+            self._panel = now
+        with self._lock:
+            if self._acq is not None and self._acq["taken"] > 0:
+                # this acquisition already counted readings taken BEFORE the
+                # change: its mean mixes two settings. (A change adopted before
+                # its first counted reading -- the re-read acquire() asks for --
+                # is harmless and not flagged.)
+                self._acq["flags"].add("settings changed")
+        what = ", ".join(f"{k}={'/'.join(v) if isinstance(v, tuple) else v}"
+                         for k, v in now.items() if k in changed)
+        self._emit("warn", f"front panel changed on the meter, adopted: {what}; "
+                           f"readings are now the {self.quantity()}")
+
+    def quantity(self) -> str:
+        """What field_mT and an acquired sample ARE, in words -- a detector must
+        say what it reports, most of all in a mode adopted from the front panel."""
+        mode = self.cfg.meter.mode
+        if mode == "rms":
+            return f"RMS field ({self.cfg.meter.rms_band} band)"
+        if mode == "peak":
+            pm, pd = self._peak
+            which = {"positive": "positive peak", "negative": "negative peak",
+                     "both": "larger peak"}.get(pd, "peak")
+            return f"{which} field ({pm})"
+        return "DC field"
 
     @staticmethod
     def _try(fn, default):

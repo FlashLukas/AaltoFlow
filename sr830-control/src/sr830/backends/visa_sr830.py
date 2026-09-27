@@ -73,15 +73,22 @@ class VisaSR830:
         # sending <lf> as well is harmless.
         self._inst.read_termination = "\n"
         self._inst.write_termination = "\n"
+        # open() CHANGES NOTHING the instrument measures or drives (Lukas,
+        # 2026-09-27: adopt the front panel, never overwrite it). The only
+        # writes are these three, none of which touches a measurement setting:
+        #
         # OUTX 1 FIRST: replies go only to the selected interface, so without it
         # every query below would time out if the unit was last used over RS232.
+        # It is the one write the adopt rule cannot do without.
         self._w("OUTX 1")
-        # OVRM 1: keep the front panel usable while remote (5-10). # VERIFY that
-        # the knobs really stay live on this unit's firmware.
+        # OVRM 1: keep the front panel usable while remote (5-10). This makes the
+        # service LESS intrusive (the knobs stay live), it changes no setting.
+        # # VERIFY that the knobs really stay live on this unit's firmware.
         self._w(f"OVRM {1 if self._override else 0}")
         self._idn = self._q("*IDN?")
-        # Clear stale latched status bits (old overloads) so the first poll
-        # reports only what happens from now on.
+        # *CLS clears the status registers only (no setting). Then LIAS? (a
+        # query; reading clears its latched bits) so the first poll reports
+        # overloads from now on, not ones left over from before we came.
         self._w("*CLS")
         self._q("LIAS?")
 
@@ -161,6 +168,33 @@ class VisaSR830:
         self._w(f"AUXV {int(k)},{float(volts):.3f}")
 
     # ---- read-back ---------------------------------------------------------------------------
+
+    def read_state(self) -> dict:
+        # Every setting the service can change, by QUERY only (19 queries,
+        # about 0.1-0.2 s on GPIB; called at start and on set_config, never at
+        # the polling rate). The spellings are the query forms of the manual's
+        # commands (5-4 .. 5-9).
+        # VERIFY on the unit: FMOD?/RSLP?/ISRC?/IGND?/ICPL?/ILIN?/SYNC? reply a
+        # bare integer, FREQ? in EXTERNAL mode returns the measured reference
+        # (0 when unlocked?), and AUXV? k returns the set AUX OUT voltage.
+        return {
+            "internal": self._qi("FMOD?") == 1,         # 1 = internal, 0 = external
+            "freq_Hz": self._qf("FREQ?"),
+            "harmonic": self._qi("HARM?"),
+            "phase_deg": self._qf("PHAS?"),
+            "trigger": self._qi("RSLP?"),
+            "sine_out_V": self._qf("SLVL?"),
+            "source": self._qi("ISRC?"),
+            "ground": self._qi("IGND?"),
+            "coupling": self._qi("ICPL?"),
+            "line": self._qi("ILIN?"),
+            "sens": self._qi("SENS?"),
+            "reserve": self._qi("RMOD?"),
+            "tc": self._qi("OFLT?"),
+            "slope": self._qi("OFSL?"),
+            "sync": self._qi("SYNC?") == 1,
+            "aux_out_V": [self._qf(f"AUXV? {k}") for k in (1, 2, 3, 4)],
+        }
 
     def read_settings(self) -> dict:
         # VERIFY: each reply is a bare number ("7", "-12.34", "0.004"); the manual

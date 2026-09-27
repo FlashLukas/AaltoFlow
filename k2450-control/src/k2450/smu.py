@@ -12,8 +12,19 @@ An SMU is two instruments in one box, and the brain treats them that way:
             that were all taken AFTER the trigger and AFTER the source settled,
             so a scan never files a reading from the previous step.
 
+Start-up ADOPTS, it does not push (Lukas, 2026-09-27: "all modules should
+read the instrument state on startup, not to change anything"):
+  * start() only QUERIES the 2450 (backend.read_state) and copies what it finds
+    -- function, levels, limits, ranges, NPLC, 2/4-wire, terminals and the
+    OUTPUT state -- into cfg and the status. An output that was ON stays ON.
+  * The .ini's source/measure values are therefore defaults that reach the
+    instrument only when you ask: a setter, set_config or the Settings dialog.
+  * A found value outside your [limits] envelope is left as it is and
+    announced (warn); the next change you make is clamped as usual.
+
 Safety rules, all enforced here (not in the backends):
-  * the output is OFF at start, on shutdown, and before a source-function change;
+  * the output is OFF on shutdown and before a source-function change
+    (never switched on by the module on its own, and not touched at start);
   * the COMPLIANCE limit is always written before the level and before OUTP ON,
     so the instrument never sources for an instant with a stale limit;
   * a level/limit combination outside the 2450's output boxes (21 V x 1.05 A,
@@ -38,8 +49,8 @@ import time
 from dataclasses import dataclass, field
 
 from .backends.base import (BOX_I, BOX_V, FUNCS, I_MAX, NPLC_MAX, NPLC_MIN,
-                            OVERRANGE, V_MAX, SourceMeterBackend, other,
-                            range_table, snap_range)
+                            OVERRANGE, V_MAX, InstrumentState,
+                            SourceMeterBackend, other, range_table, snap_range)
 from .config import Config
 
 _NAN = float("nan")
@@ -158,6 +169,14 @@ class SourceMeter:
         # the source function the INSTRUMENT is in (set by _push_all); cfg can
         # run ahead of it when set_config edits cfg in place
         self._pushed_fn = self.cfg.source.function
+        # the terminals the INSTRUMENT uses (read at start); a set_config that
+        # names the other ones switches them, otherwise they are never written
+        self._terminals_hw = self.cfg.hardware.terminals
+        # Non-empty when the 2450 measures something other than what this
+        # module expects (e.g. left in ohms mode at the front panel). Readings
+        # would be mislabelled, so polling and acquire stop until the user
+        # re-selects the source function (which also sets the measure one).
+        self._sense_bad = ""
 
         # the ranges the instrument reports (written under _hw / _lock)
         self._src_range = _NAN
@@ -185,27 +204,118 @@ class SourceMeter:
     # ---- lifecycle -----------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
-        """Open the instrument (output OFF), push every setting, start polling.
+        """Open the instrument, READ its state and adopt it, start polling.
 
+        Nothing is written to the instrument here (see the module docstring):
+        the GUI and describe then show what the 2450 is actually doing.
         `poll=False` skips the thread, so a test can drive `poll_once()` by hand.
         """
+        state, err, out = None, None, False
         with self._hw:
-            self.backend.open()                 # leaves the output OFF
+            self.backend.open()                 # queries only
             self._idn = self.backend.idn()
             self._connected = True
-            self._sanitise_config()
-            self._push_all()
-        with self._lock:
-            self._output = False
-        src = self.cfg.source
+            self._sanitise_envelope()
+            try:
+                state = self.backend.read_state()
+            except Exception as exc:            # a VERIFY query may be wrong on the real unit
+                err = exc
+                try:
+                    out = bool(self.backend.get_output())
+                except Exception:
+                    out = False
         self._emit("info", f"connected: {self._idn or 'Keithley 2450'}")
-        self._emit("info", f"output OFF, sourcing {src.function}, "
-                           f"limit {self._limit_text()}")
+        if state is not None:
+            self._adopt(state)
+        else:
+            # We do NOT fall back to pushing the config: that would change the
+            # instrument, which is exactly what the rule forbids. The settings
+            # shown are then the config's, and the first explicit command
+            # (set_output ON re-sends limit and level first) makes them true.
+            msg = (f"could not read the instrument state ({type(err).__name__}: {err}); "
+                   "settings shown are the CONFIG defaults, not the instrument's. "
+                   "Nothing was written.")
+            with self._lock:
+                self._hw_error = msg
+                self._output = out
+                if out:
+                    self._settle_at = self._clock() + self.cfg.source.settle_s
+            self._emit("error", msg)
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._poll_loop,
                                             name="k2450-poll", daemon=True)
             self._thread.start()
+
+    def _adopt(self, st: InstrumentState) -> None:
+        """Copy the instrument's state into cfg and the snapshot. Software only:
+        not a single write goes to the instrument from here."""
+        src, m = self.cfg.source, self.cfg.measure
+        fn = st.function if st.function in FUNCS else "voltage"
+        mfn = other(fn)
+        src.function = fn
+        src.voltage_V = float(st.level.get("voltage", src.voltage_V))
+        src.current_A = float(st.level.get("current", src.current_A))
+        src.current_limit_A = abs(float(st.limit.get("voltage", src.current_limit_A)))
+        src.voltage_limit_V = abs(float(st.limit.get("current", src.voltage_limit_V)))
+        src.auto_range = bool(st.src_auto.get(fn, src.auto_range))
+        # snap_range only rounds to one of the 2450's own ranges -- a software
+        # tidy-up of what was read, nothing is sent
+        if math.isfinite(st.src_range.get("voltage", _NAN)):
+            src.range_V = snap_range("voltage", st.src_range["voltage"])
+        if math.isfinite(st.src_range.get("current", _NAN)):
+            src.range_A = snap_range("current", st.src_range["current"])
+        m.auto_range = bool(st.meas_auto.get(mfn, m.auto_range))
+        if math.isfinite(st.meas_range.get("voltage", _NAN)):
+            m.range_V = snap_range("voltage", st.meas_range["voltage"])
+        if math.isfinite(st.meas_range.get("current", _NAN)):
+            m.range_A = snap_range("current", st.meas_range["current"])
+        m.nplc = float(st.nplc.get(mfn, m.nplc))
+        m.four_wire = bool(st.four_wire.get(mfn, m.four_wire))
+        self.cfg.hardware.terminals = st.terminals
+        self._terminals_hw = st.terminals
+        self._pushed_fn = fn
+        with self._lock:
+            self._src_range = float(st.src_range.get(fn, _NAN))
+            self._meas_range = float(st.meas_range.get(mfn, _NAN))
+            self._output = bool(st.output)
+            if self._output:
+                # we did not see the level arrive: do not call it settled at once
+                self._settle_at = self._clock() + src.settle_s
+            self._sense_bad = "" if st.sense_function == mfn else str(st.sense_function)
+            if self._sense_bad:
+                self._hw_error = (f"the 2450 measures {self._sense_bad}, this module "
+                                  f"expects {mfn} when sourcing {fn}: readings paused. "
+                                  f"Select the source function again to fix it.")
+        level = src.voltage_V if fn == "voltage" else src.current_A
+        self._emit("warn" if st.output else "info",
+                   f"adopted from the instrument: output {'ON' if st.output else 'OFF'}, "
+                   f"sourcing {fn} {fmt_si(level, self._unit(fn))}, "
+                   f"limit {self._limit_text()}, NPLC {m.nplc:g}, "
+                   f"{'4' if m.four_wire else '2'}-wire, {st.terminals} terminals "
+                   f"(nothing changed)")
+        if self._sense_bad:
+            self._emit("warn", self._hw_error)
+        if not st.readback:
+            self._emit("warn", "source readback is OFF on the instrument: the "
+                               "'source' values are the setpoint, not a measurement "
+                               "(left as found)")
+        # Outside YOUR envelope? Say so, but do not touch it: changing a live
+        # operating point on connect is what the rule forbids.
+        lo, hi = self.level_limits(fn)
+        if not lo - 1e-12 <= level <= hi + 1e-12:
+            self._emit("warn", f"the instrument's {fn} level {fmt_si(level, self._unit(fn))} "
+                               f"is outside your envelope (+-{fmt_si(hi, self._unit(fn))}); "
+                               "left as found, the next change is clamped")
+        llo, lhi = self.limit_limits(fn)
+        lim = src.current_limit_A if fn == "voltage" else src.voltage_limit_V
+        if not llo * (1 - 1e-9) <= lim <= lhi * (1 + 1e-9):
+            self._emit("warn", f"the instrument's limit {self._limit_text()} is outside "
+                               "your envelope; left as found")
+        L = self.cfg.limits
+        if not L.nplc_min <= m.nplc <= L.nplc_max:
+            self._emit("warn", f"the instrument's NPLC {m.nplc:g} is outside "
+                               f"{L.nplc_min:g}..{L.nplc_max:g}; left as found")
 
     def shutdown(self) -> None:
         """Output OFF, stop polling, disconnect. Safe to call more than once and
@@ -290,7 +400,7 @@ class SourceMeter:
             fn = "current"
         if fn not in FUNCS:
             raise ValueError(f"source function must be 'voltage' or 'current', got {fn!r}")
-        if fn == self.cfg.source.function:
+        if fn == self.cfg.source.function and not self._sense_bad:
             self._emit("info", f"already sourcing {fn}")
             return
         if self._output:
@@ -535,6 +645,10 @@ class SourceMeter:
         with self._lock:
             if not self._output:
                 raise ValueError("output is OFF: switch it on before acquiring")
+            if self._sense_bad:
+                raise ValueError(f"the 2450 measures {self._sense_bad}, not "
+                                 f"{other(self.cfg.source.function)}: select the "
+                                 "source function again first")
             # id and "acquiring" change TOGETHER, under the lock (gotcha #17)
             self._acq_id += 1
             self._acq = {"id": self._acq_id, "t0": self._clock(), "want": n,
@@ -591,6 +705,12 @@ class SourceMeter:
             self.set_output(False)
             self._emit("warn", "output switched OFF: the new settings change "
                                "the source function")
+        if self._output and self.cfg.hardware.terminals != self._terminals_hw:
+            # the 2450 drops the output on a terminal change anyway; doing it
+            # ourselves first keeps status and instrument in agreement
+            self.set_output(False)
+            self._emit("warn", "output switched OFF: the new settings change "
+                               "the terminals")
         self._sanitise_config()
         if self._connected:
             with self._hw:
@@ -614,7 +734,7 @@ class SourceMeter:
         """One reading while the output is on, then advance any acquisition.
         Public so tests and single-threaded scripts can drive it."""
         with self._lock:
-            if not self._output:
+            if not self._output or self._sense_bad:
                 return
         try:
             with self._hw:
@@ -752,15 +872,7 @@ class SourceMeter:
         src, m, lim = self.cfg.source, self.cfg.measure, self.cfg.limits
         if src.function not in FUNCS:
             src.function = "voltage"
-        # The user envelope may be narrower than the instrument, never wider
-        # (a hand-edited .ini or a set_config could ask for 500 V; the 2450
-        # would refuse it and status would report a level that is not applied).
-        lim.voltage_max_V = min(abs(float(lim.voltage_max_V)), V_MAX)
-        lim.current_max_A = min(abs(float(lim.current_max_A)), I_MAX)
-        lim.box_voltage_V = min(abs(float(lim.box_voltage_V)), BOX_V)
-        lim.box_current_A = min(abs(float(lim.box_current_A)), BOX_I)
-        lim.nplc_min = max(float(lim.nplc_min), NPLC_MIN)
-        lim.nplc_max = max(lim.nplc_min, min(float(lim.nplc_max), NPLC_MAX))
+        self._sanitise_envelope()
         src.range_V = snap_range("voltage", src.range_V)
         src.range_A = snap_range("current", src.range_A)
         m.range_V = snap_range("voltage", m.range_V)
@@ -772,6 +884,21 @@ class SourceMeter:
         src.voltage_V = _clamp(float(src.voltage_V), *self.level_limits("voltage"))[0]
         src.current_A = _clamp(float(src.current_A), *self.level_limits("current"))[0]
         m.nplc = _clamp(float(m.nplc), lim.nplc_min, lim.nplc_max)[0]
+
+    def _sanitise_envelope(self) -> None:
+        """The [limits] and [acquisition] groups only -- pure software, no
+        instrument setting. Used at start, where the source/measure values
+        come from the instrument and must NOT be clamped (see _adopt)."""
+        lim = self.cfg.limits
+        # The user envelope may be narrower than the instrument, never wider
+        # (a hand-edited .ini or a set_config could ask for 500 V; the 2450
+        # would refuse it and status would report a level that is not applied).
+        lim.voltage_max_V = min(abs(float(lim.voltage_max_V)), V_MAX)
+        lim.current_max_A = min(abs(float(lim.current_max_A)), I_MAX)
+        lim.box_voltage_V = min(abs(float(lim.box_voltage_V)), BOX_V)
+        lim.box_current_A = min(abs(float(lim.box_current_A)), BOX_I)
+        lim.nplc_min = max(float(lim.nplc_min), NPLC_MIN)
+        lim.nplc_max = max(lim.nplc_min, min(float(lim.nplc_max), NPLC_MAX))
         a = self.cfg.acquisition
         a.readings = int(_clamp(int(a.readings), lim.readings_min, lim.readings_max)[0])
 
@@ -781,7 +908,14 @@ class SourceMeter:
         src, m = self.cfg.source, self.cfg.measure
         fn, mfn = src.function, other(src.function)
         b = self.backend
-        b.set_source_function(fn)
+        hw = self.cfg.hardware
+        if hw.terminals != self._terminals_hw:
+            # only when the user asked for the other terminals (set_config)
+            b.set_terminals(hw.terminals)
+            self._terminals_hw = hw.terminals
+            with self._lock:
+                self._output = False          # the 2450 drops the output here
+        b.set_source_function(fn)             # also selects the measured quantity
         self._pushed_fn = fn
         b.set_limit(fn, src.current_limit_A if fn == "voltage" else src.voltage_limit_V)
         b.set_source_range(fn, src.auto_range, self._fixed_source_range())
@@ -793,6 +927,9 @@ class SourceMeter:
         meas_r = b.get_measure_range(mfn)
         with self._lock:
             self._src_range, self._meas_range = src_r, meas_r
+            if self._sense_bad:               # the measure function is right again
+                self._sense_bad = ""
+                self._hw_error = ""
 
     def _emit(self, level: str, msg: str) -> None:
         self._on_event(level, msg)

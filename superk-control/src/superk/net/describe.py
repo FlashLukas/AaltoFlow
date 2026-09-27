@@ -158,6 +158,11 @@ def build_manifest(laser) -> dict:
            read_path=["emission_on"]),
         _p("emission_state", "Emission state", "indicator", "string",
            group="Laser", order=21, read_path=["emission_state"]),
+        _p("emission_guarded", "Lost-client guard", "indicator", "bool",
+           group="Laser", order=22, read_path=["emission_guarded"],
+           help="True while a remote GUI owns the emission: if it falls silent "
+                "for hardware.client_timeout_s the service switches emission "
+                "off. Emission switched on by a scan routine is not guarded."),
         _p("interlock_ok", "Interlock OK", "indicator", "bool", group="Laser",
            order=22, read_path=["interlock_ok"]),
         _p("interlock", "Interlock", "indicator", "string", group="Laser",
@@ -185,6 +190,11 @@ def build_manifest(laser) -> dict:
            group="Filter", order=3, decimals=1, read_path=["filter_min_nm"]),
         _p("filter_max", "Crystal max", "indicator", "float", unit="nm",
            group="Filter", order=4, decimals=1, read_path=["filter_max_nm"]),
+        _p("crystal_no", "Connected crystal", "indicator", "int",
+           group="Filter", order=5, read_path=["crystal"],
+           help="NKT's number of the crystal the RF driver reaches, READ from "
+                "the driver (1, 2 = the SELECT with the lower bus address, "
+                "3, 4 = the other; 0 = none)."),
         _p("crystal_temp", "Crystal temperature", "indicator", "float",
            unit="C", group="Filter", order=5, decimals=1, plottable=True,
            read_path=["crystal_temp_C"]),

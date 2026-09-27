@@ -15,7 +15,13 @@ def fast_cfg() -> Config:
 
 
 def make_brain(cfg=None, start=True, **sim):
-    brain, backend = build_sim_system(cfg or fast_cfg(), **sim)
+    cfg = cfg or fast_cfg()
+    # The brain ADOPTS the controller's speed at start and never pushes the
+    # config value (2026-09-27), so the fast test speed has to be the state
+    # the simulated controller is already in.
+    hw = cfg.hardware
+    sim.setdefault("freq_hz", int(round(cfg.motion.velocity_mm_s / (hw.um_per_step * 1e-3))))
+    brain, backend = build_sim_system(cfg, **sim)
     if start:
         brain.start()
     return brain, backend

@@ -5,9 +5,11 @@ it apart from the real instrument. The point is to develop and test everything
 -- limits, the service, the client, the console -- with nothing plugged in.
 
 The "physics" is deliberately trivial: a signal generator just remembers what
-you told it. The only lifelike touches are (1) it reports RF OFF until opened,
-and (2) `read_*` returns the last commanded value, exactly like querying the
-real box right after a set.
+you told it. `startup` is the state the simulated box is ALREADY in when we
+connect (as a real generator keeps its settings, RF included, across our
+restarts); open() changes none of it, so the Generator's adopt-on-start is
+exercised for real. `read_*` returns the last commanded value, exactly like
+querying the real box right after a set.
 """
 
 from __future__ import annotations
@@ -24,12 +26,13 @@ class SimulatedSMB100A:
         self._freq = float(s.frequency_Hz)
         self._power = float(s.power_dBm)
         self._phase = float(s.phase_deg)
-        self._output = False          # a real box powers up with RF off
+        self._output = bool(s.rf_on)  # whatever the box is doing already
         self._open = False
 
     def open(self) -> None:
+        # Connecting is not a command: the RF output and the signal stay as
+        # they are (adopt-on-start rule).
         self._open = True
-        self._output = False          # mirror OUTP OFF on connect/init
 
     def close(self) -> None:
         self._output = False          # RF off on the way out

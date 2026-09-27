@@ -63,16 +63,59 @@ def test_start_never_switches_a_cold_heater_on():
     heater.shutdown()
 
 
-def test_push_on_start_pushes_the_stored_settings():
+class _NoWritesAtStart:
+    """Wraps the simulated box and FAILS the test on any state-changing call
+    (set_*, toggle_enable) while `armed` -- the start must only query."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.armed = True
+        self.calls = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def wrapper(*a, **k):
+            self.calls.append(name)
+            if self.armed and (name.startswith("set_") or name == "toggle_enable"):
+                raise AssertionError(f"start wrote to the box: {name}{a}")
+            return attr(*a, **k)
+        return wrapper
+
+
+def test_start_issues_no_state_changing_calls():
+    """Lukas, 2026-09-27: start READS the instrument, never changes it. The box
+    is deliberately in a non-default state, and the stored config disagrees
+    with it on every device field: nothing may be pushed."""
+    from tc200.heater import Heater
+    from tc200.backends.sim import SimulatedTC200
+    clock = Clock()
+    box = SimulatedTC200(temperature_C=61.0, setpoint_C=62.5, enabled=True, sensor="ptc1000",
+                         p_gain=40, i_gain=9, d_gain=2, pmax_W=3.5, tmax_C=85.0,
+                         clock=clock, seed=3)
     cfg = Config()
-    cfg.hardware.push_on_start = True
-    cfg.device.p_gain, cfg.device.pmax_W, cfg.device.tmax_C = 60, 4.0, 80.0
-    heater, box, clock, events = _make(cfg, p_gain=125, pmax_W=10.0, tmax_C=120.0)
+    cfg.device.p_gain, cfg.device.pmax_W, cfg.device.tmax_C = 125, 18.0, 150.0
+    rec = _NoWritesAtStart(box)
+    heater = Heater(rec, cfg, clock=clock)
+    events = []
+    heater._on_event = lambda lvl, msg: events.append((lvl, msg))
     heater.start(poll=False)
-    assert box.p == 60 and box.pmax == 4.0 and box.tmax == 80.0
-    assert heater.status().tmax_C == 80.0
-    assert box.enabled is False                  # pushing settings is not heating
-    heater.shutdown()
+    _run(heater, clock, 5)
+    s = heater.status()
+    # status reflects the pre-existing state
+    assert s.setpoint_C == 62.5 and s.enabled is True
+    assert s.sensor == "ptc1000" and s.sensor_ok is False
+    assert (s.p_gain, s.i_gain, s.d_gain, s.pmax_W, s.tmax_C) == (40, 9, 2, 3.5, 85.0)
+    assert heater.cfg.device.p_gain == 40 and heater.cfg.device.tmax_C == 85.0
+    # the wrong sensor is a WARNING, never a write, and the box keeps heating
+    assert any(lvl == "warn" and "ptc1000" in m for lvl, m in events)
+    assert box.sensor == "ptc1000" and box.enabled is True and box.tset == 62.5
+    assert not any(c.startswith("set_") or c == "toggle_enable" for c in rec.calls)
+    rec.armed = False
+    heater.shutdown()                    # shutdown (heater off) is NOT part of the rule
+    assert box.enabled is False
 
 
 def test_wrong_sensor_is_announced_at_start():

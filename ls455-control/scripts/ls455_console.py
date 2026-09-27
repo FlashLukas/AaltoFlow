@@ -10,7 +10,7 @@ so this one file can be copied to any machine with pyzmq.
 Commands (every field in mT)
     field                  one live reading
     acquire                average fresh, settled readings; print the latched sample
-    mode dc|rms            measurement mode
+    mode dc|rms|peak       measurement mode (peak keeps the front panel's peak settings)
     digits 3|4|5           DC resolution (= the meter's filter)
     band wide|narrow       RMS band
     auto on|off            auto range on/off
@@ -21,6 +21,7 @@ Commands (every field in mT)
     readings <n>           readings per acquisition
     zero                   zero the probe -- ZERO-GAUSS CHAMBER FIRST
     clearzero              forget the stored probe zero
+    probe                  re-read the probe from the meter (after swapping it)
     status                 print one status snapshot
     info                   static info (probe, ranges)
     watch [seconds]        stream the live status broadcast (default 5 s)
@@ -78,7 +79,9 @@ class Console:
     @staticmethod
     def show_status(s: dict):
         mode = s.get("mode", "dc")
-        detail = f"{s.get('dc_digits')} digits" if mode == "dc" else f"{s.get('rms_band')} band"
+        detail = (f"{s.get('dc_digits')} digits" if mode == "dc" else
+                  f"{s.get('rms_band')} band" if mode == "rms" else
+                  f"{s.get('peak_mode')} {s.get('peak_display')}")
         print(f"  B={fmt_mt(s.get('field_mT')):>14} {s.get('flag') or ''}"
               f"  {mode.upper()} {detail}"
               f"  range={'auto ' if s.get('auto_range') else 'manual '}{fmt_mt(s.get('range_mT'))}"
@@ -168,6 +171,13 @@ class Console:
                     print(self.send({"cmd": "zero"}))
             elif cmd == "clearzero":
                 print(self.send({"cmd": "clear_zero"}))
+            elif cmd == "probe":
+                r = self.send({"cmd": "reread_probe"})
+                if not r.get("ok"):
+                    print(" ", r)
+                else:
+                    s = self.send({"cmd": "status"}).get("status", {})
+                    print(f"  probe: {s.get('probe_desc')}  ranges (mT): {s.get('ranges_mT')}")
             elif cmd == "status":
                 r = self.send({"cmd": "status"})
                 self.show_status(r.get("status", {})) if r.get("ok") else print(r)

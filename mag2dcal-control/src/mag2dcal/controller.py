@@ -34,7 +34,8 @@ THREADS (the hf2/pm16 rules):
     snapshot; setters never edit a snapshot (docs/DEVELOPER_NOTES.md gotcha #1).
 
 STATES
-  OFF         output de-energized (AO 0 V, enable line False)
+  OFF         output de-energized (enable line False). Normally AO 0 V; a
+              magnet FOUND off at start keeps whatever AO it had.
   SEEK        energized and moving: the calibrated jump, then the one-way PI
               trim. The output is free to change.
   HOLD        energized, the output is FROZEN inside tolerance/2, and the
@@ -154,6 +155,11 @@ class Controller:
         self._state = OFF
         self._enable_want = False     # what the loop should put on the enable line
         self._enable_hw = False       # what the enable line actually is
+        # What is actually on the AO wires (last written, or ADOPTED at start).
+        # The loop writes only when its output differs from this, so a magnet
+        # found off with some leftover AO voltage is left exactly as it is, and
+        # a frozen output is not re-written 50 times a second.
+        self._ao_hw: list | None = None
         self._seek = (AxisSeek(), AxisSeek())
         self._bx = self._by = _NAN
         self._hall = [_NAN, _NAN]
@@ -182,12 +188,27 @@ class Controller:
     # =================================================================== lifecycle
 
     def start(self, run_thread: bool = True) -> None:
-        """Open the hardware, check the water, load a calibration, energize if
-        configured, run the loop.
+        """Open the hardware, READ what the magnet is doing and adopt it, check
+        the water, load a calibration, run the loop.
 
-        Raises WaterInterlockError (after closing the hardware again) when the
-        water is off and not bypassed -- run_service.py turns that into a clear
-        message and exit code 3.
+        ADOPT, DON'T RESET (Lukas, 2026-09-27: "all modules should read the
+        instrument state on startup, not to change anything"). This used to
+        write AO 0 V + enable False and then energize at 0 mT, so every start
+        de-energized a magnet that was holding a field. Now start() only
+        QUERIES (enable line, drive voltages, Hall probes, temperatures, water)
+        and takes over from there:
+          * found energized -> state HOLD, setpoint = the measured field, each
+            axis FROZEN at the drive it found. Nothing on the wire changes; the
+            field becomes STABLE after the usual dwell.
+          * found off       -> state OFF, setpoint 0 mT. Nothing is written
+            until someone switches the output on (or energize_on_start=True,
+            which is off by default and is the user's explicit choice).
+
+        The exception is the SAFETY INTERLOCK: with the water off and not
+        bypassed, start() refuses (WaterInterlockError -> run_service.py exits
+        with code 3) and closes the hardware, and the backend's close()
+        backstop puts AO 0 V / enable False on the wires -- a magnet without
+        cooling must not stay driven. That write is deliberate and kept.
 
         `run_thread=False` leaves the loop to the caller (tests call tick()).
         """
@@ -196,27 +217,32 @@ class Controller:
         self.backend.open()
         self._opened = True
         try:
-            # Safe state first, whatever the card was left at.
-            self.backend.write_ao(0.0, 0.0)
-            self.backend.set_enable(False)
             water = bool(self.backend.read_water())
+            found = self._read_found_state()
         except Exception:
             self._close_backend()
             raise
         if not water and not self.cfg.interlock.water_bypass:
+            # SAFETY INTERLOCK (kept on purpose): closing runs the backend's
+            # backstop, which de-energizes whatever a previous run left driven.
             self._close_backend()
             raise WaterInterlockError(
                 "cooling water is OFF (flow switch reads False). Start the water, "
                 "or run with --bypass-water (interlock.water_bypass = True).")
+        events = []
         with self._lock:
             self._water = water
-            if self.cfg.control.energize_on_start:
+            self._adopt_locked(found, events)
+            if not self._enable_want and self.cfg.control.energize_on_start:
+                # Opt-in only (default False): the user asked for a service that
+                # switches a de-energized magnet on at 0 mT when it starts.
                 self._energize_locked()
+                events.append(("info", "energize_on_start: switching the output on "
+                                       "at 0 mT"))
+        for level, msg in events:
+            self._emit(level, msg)
         if not water:
             self._emit("warn", "water interlock BYPASSED and the water is off")
-        self._emit("info", "magnet started" + (", output energized at 0 mT"
-                                               if self.cfg.control.energize_on_start else
-                                               ", output off"))
         if not self.is_calibrated:
             self._emit("warn", "no calibration loaded: the jump uses the straight line "
                                f"B / {self.cfg.control.ff_mT_per_V:g} mT per volt. Run "
@@ -226,6 +252,124 @@ class Controller:
             self._thread = threading.Thread(target=self._run, name="mag2dcal-loop",
                                             daemon=True)
             self._thread.start()
+
+    def _read_found_state(self) -> dict:
+        """Query everything start() needs to adopt. READS ONLY.
+
+        A backend without read_output() (an old test double) is treated as
+        "cannot say", which the adoption handles. A Hall read that fails here
+        is recorded, not raised: the first tick reports it again, and faults if
+        the magnet is energized (the existing blind-while-energized rule).
+        """
+        reader = getattr(self.backend, "read_output", None)
+        x_V, y_V, enabled = reader() if reader is not None else (None, None, None)
+        found = {"x_V": x_V, "y_V": y_V, "enabled": enabled,
+                 "hall": None, "temps": None, "error": "",
+                 "notes": list(getattr(self.backend, "found_notes", None) or [])}
+        try:
+            found["hall"] = tuple(self.backend.read_hall())
+            found["temps"] = tuple(self.backend.read_temps())
+        except Exception as exc:
+            found["error"] = f"{type(exc).__name__}: {exc}"
+        return found
+
+    def _adopt_locked(self, found: dict, events) -> None:
+        """Make the brain describe the magnet as it was FOUND. No hardware I/O."""
+        c = self.cfg.control
+        for note in found["notes"]:
+            events.append(("warn", f"start: {note}"))
+        if found["hall"] is not None:
+            vx, vy = found["hall"]
+            self._hall = [vx, vy]
+            self._bx, self._by = self.cfg.hall.volts_to_mT(vx, vy)
+        if found["temps"] is not None:
+            tc = self.cfg.temperature
+            v1, v2 = found["temps"]
+            self._temps = [tc.t1_C_per_V * v1 + tc.t1_offset_C,
+                           tc.t2_C_per_V * v2 + tc.t2_offset_C]
+        if found["error"]:
+            self._hw_error = found["error"]
+            events.append(("error", "start: could not read the Hall probes "
+                                    f"({found['error']})"))
+
+        enabled = found["enabled"]
+        if enabled is None:
+            enabled = False
+            events.append(("warn", "start: the enable line could not be read; "
+                                   "assuming the output is OFF. Nothing was written."))
+        meas = (self._bx, self._by)
+        outs = [found["x_V"], found["y_V"]]
+        estimated = False
+        for i in range(2):
+            if outs[i] is None:
+                # The card could not report its AO. De-energized, the coils carry
+                # no current whatever the AO says, so 0 V is the honest model.
+                # Energized, the best estimate is the drive that the calibration
+                # (or the straight line) says produces the field we MEASURE.
+                if enabled and math.isfinite(meas[i]):
+                    outs[i] = self._volts_for_field_either_leg(i, meas[i])
+                    estimated = True
+                else:
+                    outs[i] = 0.0
+        if estimated:
+            events.append(("warn", "start: the drive voltages could not be read back; "
+                                   f"estimated X {outs[0]:+.3f} V, Y {outs[1]:+.3f} V "
+                                   "from the measured field. The first correction may "
+                                   "step by that estimate's error."))
+        # What is on the wires now. The loop compares against this and writes
+        # only on a change, so adopting costs no write at all.
+        self._ao_hw = [float(outs[0]), float(outs[1])]
+        self._enable_hw = self._enable_want = bool(enabled)
+
+        if not enabled:
+            for i, s in enumerate(self._seek):
+                s.reset(outs[i])
+            self._state = OFF
+            self._sp_field = self._sp_angle = 0.0
+            self._sp_bx = self._sp_by = 0.0
+            self._seek_pending = False
+            events.append(("info", "magnet started: found the output OFF and left it off "
+                                   f"(AO X {outs[0]:+.3f} V, Y {outs[1]:+.3f} V)"))
+            return
+
+        # Energized: the setpoint becomes what the magnet IS doing, stored as the
+        # measured vector (not snapped or rounded, like any setpoint).
+        bx, by = meas
+        if not (math.isfinite(bx) and math.isfinite(by)):
+            bx = by = 0.0                        # blind: the first tick will fault
+        if math.hypot(bx, by) <= abs(c.tolerance_mT):
+            # Inside the band around zero the angle of the probe noise means
+            # nothing: call it 0 mT at 0 deg.
+            self._sp_field = self._sp_angle = 0.0
+            self._sp_bx = self._sp_by = 0.0
+        else:
+            self._sp_field = math.hypot(bx, by)
+            self._sp_angle = math.degrees(math.atan2(by, bx))
+            self._sp_bx, self._sp_by = bx, by
+        sp = (self._sp_bx, self._sp_by)
+        for i, s in enumerate(self._seek):
+            # FROZEN at the drive we found: the trim wakes only if the field
+            # leaves the full tolerance band. The hysteresis branch is not
+            # known; the direction the field was most likely ramped from (up to
+            # a positive field, down to a negative one) is the best guess.
+            s.adopt(outs[i], approach=1 if sp[i] >= 0 else -1)
+        self._state = HOLD
+        self._stable = False
+        self._stable_since = None
+        self._seek_pending = False
+        if self._sp_field > self.field_envelope_mT():
+            events.append(("warn", f"start: the magnet is holding {self._sp_field:.2f} mT, "
+                                   "above this module's field envelope "
+                                   f"({self.field_envelope_mT():g} mT). Left as found."))
+        events.append(("info", "magnet started: found the output ENERGIZED, holding "
+                               f"{self._sp_field:.2f} mT at {self._sp_angle:.1f} deg "
+                               f"(AO X {outs[0]:+.3f} V, Y {outs[1]:+.3f} V, frozen)"))
+
+    def _volts_for_field_either_leg(self, axis: int, field_mT: float) -> float:
+        """Drive for a field when the hysteresis branch is unknown: the mean of
+        the two legs (at worst half the loop width off)."""
+        return 0.5 * (self._volts_for_field(axis, field_mT, +1)
+                      + self._volts_for_field(axis, field_mT, -1))
 
     def shutdown(self) -> None:
         """Ramp the output to 0 V at the slew rate, disable, close. Idempotent.
@@ -271,6 +415,7 @@ class Controller:
                 pass
             with self._lock:
                 self._enable_hw = self._enable_want = False
+                self._ao_hw = [0.0, 0.0]
                 for s in self._seek:
                     s.reset(0.0)
                 if self._state != FAULT:
@@ -650,11 +795,20 @@ class Controller:
             enable_hw = self._enable_hw
 
         # ---- 3. act (hardware, outside the lock) --------------------------
-        # Order matters: enable BEFORE driving, drive to 0 BEFORE disabling.
+        # Order matters: the drive is written BEFORE the enable line goes on (so
+        # the amplifier wakes up to the voltage we chose, not to whatever was
+        # left on the AO), and brought to 0 BEFORE it goes off. The AO is
+        # written only when it CHANGES: an adopted or frozen output is left
+        # alone, so starting on a magnet costs no write at all.
+        with self._lock:
+            ao_hw = self._ao_hw
         try:
+            if ao_hw is None or out[0] != ao_hw[0] or out[1] != ao_hw[1]:
+                self.backend.write_ao(out[0], out[1])
+                with self._lock:
+                    self._ao_hw = [float(out[0]), float(out[1])]
             if enable_want and not enable_hw:
                 self.backend.set_enable(True)
-            self.backend.write_ao(out[0], out[1])
             if enable_hw and not enable_want:
                 self.backend.set_enable(False)
             with self._lock:
@@ -888,8 +1042,12 @@ class Controller:
     # ================================================================== internals
 
     def _energize_locked(self) -> None:
+        # From OFF the amplifier carries no current whatever the AO says, so the
+        # honest starting drive is 0 V (a voltage adopted at start while the
+        # output was off must not be switched straight onto the coils). From
+        # RAMP_DOWN the coils are still driven: continue from where they are.
         for s in self._seek:
-            s.reset(s.output)
+            s.reset(s.output if self._enable_hw else 0.0)
         self._state = SEEK
         self._stable = False
         self._stable_since = None

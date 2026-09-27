@@ -44,6 +44,7 @@ class RemoteStatus:
         self.order = d.get("order", [1, 1])
         self.pll_locked = d.get("pll_locked", [None, None])
         self.settle_s = _nan_list(d.get("settle_s"))
+        self.demod_enabled = d.get("demod_enabled", [True, True])
         live = d.get("live") or {}
         self.live = {k: _nan_list(live.get(k)) for k in
                      ("x", "y", "r", "theta_deg", "freq_Hz", "aux_in")}

@@ -13,6 +13,8 @@ def test_defaults_are_safe():
     assert cfg.limits.power_max_dBm <= 10.0          # at or below the calibrated max
     assert cfg.hardware.tcp_port == 10001             # DSI's fixed data port
     assert cfg.hardware.baud == 115200
+    # adopt-on-start: nothing that changes the unit is on by default
+    assert cfg.hardware.mute_buzzer is False and cfg.hardware.display_off is False
 
 
 def test_save_load_roundtrip(tmp_path):

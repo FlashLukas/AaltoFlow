@@ -38,7 +38,8 @@ def main() -> int:
 
     supply.start()
     print("IDN:", backend.idn())
-    assert supply.status().output is False, "output must start OFF"
+    # the default simulated BOP is found with its output off (cfg.sim.found_*)
+    assert supply.status().output is False, "sim BOP is found with the output OFF"
 
     supply.set_current(2.0)
     supply.set_output(True)

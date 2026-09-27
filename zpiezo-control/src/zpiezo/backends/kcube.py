@@ -31,6 +31,11 @@ class KCubeZ:
                 "pylablib not installed. `pip install pylablib` and install "
                 "Thorlabs Kinesis (see kcube.py header)."
             ) from exc
+        # Opening must NOT change the output (adopt-on-start rule): only the
+        # constructor here, no set_*/zero/enable call.  The brain then READS
+        # the voltage the KCube is already holding and adopts it as the focus.
+        # VERIFY: that pylablib's KinesisPiezoController() constructor sends no
+        # state-changing message (it should only open the USB handle).
         self._dev = Thorlabs.KinesisPiezoController(self.serial)  # pragma: no cover
 
     def close(self) -> None:  # pragma: no cover - only on a real PC
@@ -46,11 +51,14 @@ class KCubeZ:
         self._dev.set_output_voltage(self._v)
 
     def read_voltage(self) -> float:  # pragma: no cover - real PC
-        if self._dev is not None:
-            try:
-                self._v = float(self._dev.get_output_voltage())
-            except Exception:
-                pass
+        # A failed read RAISES (it used to return the last cached value, 0 V
+        # before the first move).  Returning 0 silently would make the brain
+        # adopt a focus of 0 V that the KCube is not holding; the brain's
+        # status() already catches the exception and falls back to the target.
+        # VERIFY: get_output_voltage() returns volts (not a fraction of max).
+        if self._dev is None:
+            raise RuntimeError("KCube not open")
+        self._v = float(self._dev.get_output_voltage())
         return self._v
 
     def range(self) -> tuple:

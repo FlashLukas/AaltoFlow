@@ -4,7 +4,9 @@ It pins down what we took from the manual -- the statements sent, the reply
 parsing, and the rule for deciding that a move has finished -- so that when the
 lab instrument disagrees, the difference is found in one place."""
 
-from cs260.backends.cornerstone import CornerstoneGPIB
+import pytest
+
+from cs260.backends.cornerstone import CornerstoneGPIB, from_nm, to_nm
 
 
 class FakeInst:
@@ -20,16 +22,26 @@ class FakeInst:
         self.stb = "00"
         self.err = "0"
         self.path = []            # scripted WAVE? replies during a move
+        self.units = "NM"
+        self.handshake = "0"
+        self.writes = []          # statements only (no queries)
+        self.allowed_writes = None  # set -> write() fails on anything else
 
     def write(self, cmd):
+        if self.allowed_writes is not None and cmd not in self.allowed_writes:
+            raise AssertionError(f"state-changing write at start: {cmd!r}")
         self.written.append(cmd)
+        self.writes.append(cmd)
+
+    def read(self):
+        raise TimeoutError("nothing queued")
 
     def query(self, cmd):
         self.written.append(cmd)
         if cmd == "WAVE?":
             if self.path:
                 self.wave = self.path.pop(0)
-            return f"{self.wave:.3f}\r"
+            return f"{self.wave:.6f}\r"
         if cmd == "GRAT?":
             return self.grat + "\r"
         if cmd == "SHUTTER?":
@@ -45,6 +57,10 @@ class FakeInst:
             return s
         if cmd == "ERROR?":
             return self.err
+        if cmd == "UNITS?":
+            return self.units + "\r"
+        if cmd == "HANDSHAKE?":
+            return self.handshake + "\r"
         if cmd == "INFO?":
             return "Oriel,Model 74100 Cornerstone 260,SN0,V1"
         if cmd == "GRAT1LINES?":
@@ -151,3 +167,71 @@ def test_filter_move_is_polled_even_if_not_configured():
     b.configure_accessories(True, False)
     b.read_state()
     assert "FILTER?" in inst.written
+
+
+# ---- start changes nothing (Lukas's rule, 2026-09-27) ---------------------------
+
+def _opened(inst_setup):
+    """Run open()'s session start against a fake instrument that raises on
+    ANY write, after `inst_setup(inst)` put it in some pre-existing state."""
+    clock = Clock()
+    b = CornerstoneGPIB(clock=clock)
+    inst = FakeInst()
+    inst_setup(inst)
+    b._inst = inst
+    b._init_session()
+    return b, inst
+
+
+def test_open_only_reads():
+    def setup(inst):
+        inst.allowed_writes = set()          # nothing at all may be written
+        inst.wave, inst.grat, inst.shutter = 812.5, "2,600,NIR", "O"
+    b, inst = _opened(setup)
+    assert inst.writes == []
+    assert all(c.endswith("?") for c in inst.written)   # queries only
+    assert b.units == "NM" and b.startup_notes == []
+    st = b.read_state()                      # and the pre-existing state is seen
+    assert st.wavelength_nm == 812.5 and st.grating == 2 and st.shutter_open
+
+
+def test_handshake_mode_is_the_only_write_and_only_when_needed():
+    def setup(inst):
+        inst.allowed_writes = {"HANDSHAKE 0"}
+        inst.handshake = "1"
+    b, inst = _opened(setup)
+    assert inst.writes == ["HANDSHAKE 0"]
+    assert any("HANDSHAKE" in n for n in b.startup_notes)
+
+
+def test_units_are_read_and_converted_not_changed():
+    """The box set to micrometres: WAVE? '0.6328' is 632.8 nm, GOWAVE is sent
+    in um -- and UNITS is never written."""
+    def setup(inst):
+        inst.allowed_writes = set()
+        inst.units = "UM"
+        inst.wave = 0.6328
+    b, inst = _opened(setup)
+    assert b.units == "UM" and b.startup_notes
+    assert b.read_state().wavelength_nm == pytest.approx(632.8)
+    inst.allowed_writes = None
+    b.goto(700.0)
+    b.calibrate(546.074)
+    assert inst.writes == ["GOWAVE 0.700000", "CALIBRATE 0.546074"]
+
+
+def test_unknown_units_reply_assumes_nm_and_says_so():
+    def setup(inst):
+        inst.allowed_writes = set()
+        inst.units = "???"
+    b, inst = _opened(setup)
+    assert b.units == "NM" and "assuming nm" in b.startup_notes[0]
+
+
+def test_wavenumber_conversion():
+    assert to_nm(20000.0, "WN") == pytest.approx(500.0)
+    assert from_nm(500.0, "WN") == "20000.0000"
+    assert to_nm(0.0, "WN") == 0.0           # zero order
+    with pytest.raises(ValueError):
+        from_nm(0.0, "WN")
+    assert from_nm(632.8, "NM") == "632.800"

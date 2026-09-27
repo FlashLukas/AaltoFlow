@@ -158,6 +158,10 @@ class Ls455Service:
                 m.zero()
             elif cmd == "clear_zero":
                 m.clear_zero()
+            elif cmd == "reread_probe":
+                # synchronous: the reply comes after the probe was re-read, so
+                # describe's `wait: immediate` is the truth
+                m.reread_probe()
             elif cmd == "acquire":
                 return {"ok": True, "acq_id": m.acquire()}
             elif cmd == "get_sample":
@@ -192,6 +196,9 @@ class Ls455Service:
         st = self.meter.status()
         return {
             "idn": st.idn, "probe": st.probe, "probe_serial": st.probe_serial,
+            "probe_type_code": st.probe_type_code,
+            "probe_sensitivity_mV_per_kG": st.probe_sensitivity_mV_per_kG,
+            "probe_geometry": st.probe_geometry, "probe_desc": st.probe_desc,
             "ranges_mT": st.ranges_mT,
             "range_min_mT": st.range_min_mT, "range_max_mT": st.range_max_mT,
             "unit": "mT",

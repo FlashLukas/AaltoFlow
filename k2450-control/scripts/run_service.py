@@ -8,7 +8,8 @@
 The service owns the instrument and exposes it over ZeroMQ:
   * commands on tcp://0.0.0.0:<cmd-port>   (REP)
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 10 Hz)
-The OUTPUT is off at start and is switched off again on shutdown.
+Start-up only READS the 2450 and adopts its state (the output is left as it
+was found); the output is switched off on shutdown.
 Drive it with:
     uv run scripts/k2450_console.py --connect <host>
 """

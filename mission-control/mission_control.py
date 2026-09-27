@@ -43,7 +43,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from suite_common import get_setting, set_setting
 from suite_common import (ENDPOINTS_ENV, PRODUCT, add_remote, default_root,
-                          discover, endpoints_json, gui_args, probe,
+                          discover, endpoints_json, exclusion_conflicts, gui_args, probe,
                           remove_remote, service_args, set_ports, set_real,
                           setup_name, start_order, title as suite_title)
 from suite_common.catalog import (DEFAULT_CATALOG_URL, CatalogError, InstallPlan,
@@ -106,7 +106,9 @@ DEFAULT_PROFILES = [
     dict(name="RF / pump-probe", members=["clMag", "smb", "camera", "hf2"]),
     # Two VNA-FMR chips because the two magnet modules drive the SAME coils and
     # must not both run: mag2d is the always-on PI, mag2dcal the calibrated seek
-    # that freezes and stabilises. Tick "Exclusive" to swap one for the other.
+    # that freezes and stabilises. Their module.toml files say so (`excludes`),
+    # so the launcher refuses to start one while the other is up. Tick
+    # "Exclusive" to swap one for the other in a single click.
     dict(name="VNA-FMR",         members=["mag2d", "vna"]),
     dict(name="VNA-FMR (cal)",   members=["mag2dcal", "vna"]),
     # The same measurement in the DynaCool: the cryostat's magnet (ppms) and
@@ -148,6 +150,38 @@ def load_profiles() -> list[dict]:
 
 def save_profiles(profiles: list[dict]) -> None:
     PROFILES_FILE.write_text(json.dumps(_clean_profiles(profiles), indent=2) + "\n", "utf-8")
+
+
+def profile_problems(members: list[ModuleSpec]) -> list[str]:
+    """Why this set of modules must not be started together ([] = it may).
+
+    Today the only reason is shared hardware: two modules that drive the same
+    instrument (module.toml `[run] excludes`, e.g. kepco and clMag on one Kepco
+    BOP). A profile holding both would start the second service on top of the
+    first, so the whole profile is refused instead of half-started.
+    """
+    return exclusion_conflicts(members)
+
+
+def full_suite_members(modules: list[ModuleSpec]) -> tuple[list[ModuleSpec], list[str]]:
+    """The "Full suite" / "Start all" set: every local module that can run
+    alongside the others.
+
+    "Everything" cannot include both halves of an excluded pair, so of each
+    pair the module listed FIRST (lower `order`: clMag before kepco, mag2d
+    before mag2dcal) is kept and the other one is left out -- and named, so
+    nobody wonders why it did not start. Returns (members, notes).
+    """
+    keep: list[ModuleSpec] = []
+    notes: list[str] = []
+    for m in (m for m in modules if not m.remote):
+        clash = next((k for k in keep if k.key in m.excludes or m.key in k.excludes), None)
+        if clash is not None:
+            notes.append(f"{m.name} ({m.key}) left out: it drives the same instrument "
+                         f"as {clash.name} ({clash.key})")
+            continue
+        keep.append(m)
+    return keep, notes
 
 
 def migrate_launcher_json(log) -> None:
@@ -588,6 +622,14 @@ class ProfileEditor(QtWidgets.QDialog):
         right.addStretch(1)
         body.addLayout(right, 1)
 
+        # Says why a profile cannot be saved (two modules sharing one
+        # instrument); a label, not a pop-up, so it updates as you tick boxes.
+        self.warning = QtWidgets.QLabel(); self.warning.setObjectName("meta")
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet(f"color: {C['danger']};")
+        self.warning.hide()
+        outer.addWidget(self.warning)
+
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         outer.addWidget(bb)
@@ -597,6 +639,27 @@ class ProfileEditor(QtWidgets.QDialog):
             self.list.setCurrentRow(0)
         else:
             self._set_checks_enabled(False)
+
+    def problems(self) -> list[str]:
+        """Every profile that holds two modules sharing one instrument."""
+        by_id = {m.id: m for m in self.modules}
+        out = []
+        for p in self.profiles:
+            for msg in profile_problems([by_id[k] for k in p["members"] if k in by_id]):
+                out.append(f"'{p['name']}': {msg}")
+        return out
+
+    def _show_problems(self) -> list[str]:
+        probs = self.problems()
+        self.warning.setText("Cannot save -- " + "\n".join(probs) if probs else "")
+        self.warning.setVisible(bool(probs))
+        return probs
+
+    def accept(self):
+        # Refuse to save a profile that could never be started safely.
+        if self._show_problems():
+            return
+        super().accept()
 
     def _current(self) -> dict | None:
         row = self.list.currentRow()
@@ -633,6 +696,7 @@ class ProfileEditor(QtWidgets.QDialog):
         row = self.list.currentRow()
         if 0 <= row < self.list.count():
             self.list.item(row).setText(f"{prof['name']}  ({len(prof['members'])})")
+        self._show_problems()
 
     def _add(self):
         name, ok = QtWidgets.QInputDialog.getText(self, "New profile", "Name:")
@@ -1290,12 +1354,51 @@ class ModuleCard(QtWidgets.QFrame):
             if line.strip():
                 self.win.log(f"[{self.spec.id}·{label}] {line.rstrip()}")
 
+    def blocking_partners(self, fresh: bool = False) -> list["ModuleCard"]:
+        """The modules that drive the SAME instrument as this one and are up.
+
+        From module.toml `[run] excludes` (made symmetric by discovery). "Up"
+        means started from here OR answering on its port -- a service started
+        from a console window drives the Kepco just the same. With `fresh`
+        the port is probed now (used right before a start); without, the
+        background prober's last answer is used (for the button, redrawn often).
+        """
+        if self.spec.remote:
+            return []                   # another PC's hardware, not ours
+        out = []
+        for key in self.spec.excludes:
+            other = self.win.cards.get(key)           # a local card's id is its key
+            if other is None or other is self or other.spec.remote:
+                continue
+            if other.owns_service:
+                out.append(other)
+            elif fresh:
+                if probe(other.spec.host, other.spec.cmd, 0.3):
+                    out.append(other)
+            elif other.up:
+                out.append(other)
+        return out
+
+    def exclusion_reason(self, blockers: list["ModuleCard"]) -> str:
+        names = ", ".join(f"{b.spec.name} ({b.spec.key})" for b in blockers)
+        return (f"{names} is running and drives the same instrument as "
+                f"{self.spec.name}. Stop it first (or tick 'Exclusive' and use a profile).")
+
     def start_service(self):
         if not self.spec.can_start:
             return
         if probe(self.spec.host, self.spec.cmd):
             self.win.log(f"[{self.spec.id}] something already listens on {self.spec.cmd} "
                          f"-- not starting a second one.", "warn")
+            return
+        # Shared hardware: two services must never command one instrument.
+        # Checked HERE, at the last moment, so every path (card button, profile,
+        # Start all) goes through it.
+        blockers = self.blocking_partners(fresh=True)
+        if blockers:
+            self.win.log(f"[{self.spec.id}] NOT started: {self.exclusion_reason(blockers)}",
+                         "error")
+            self.sync_service_button()
             return
         self._stopping = False
         self.win.log(f"[{self.spec.id}] starting in {'REAL' if self.spec.real else 'SIM'} mode "
@@ -1304,6 +1407,7 @@ class ModuleCard(QtWidgets.QFrame):
                                         gui=False, label="service")
         self.service_proc.finished.connect(self._service_finished)
         self.set_up(self.up)
+        self.win.refresh_exclusions()   # a partner's Service button greys out at once
         self.win.prober.probe_now()
 
     def _service_finished(self, code, _status):
@@ -1316,6 +1420,7 @@ class ModuleCard(QtWidgets.QFrame):
         self._stopping = False
         self.service_proc = None
         self.set_up(self.up)
+        self.win.refresh_exclusions()
         self.win.prober.probe_now()
 
     def stop_service(self, graceful_wait_ms: int = 8000):
@@ -1438,11 +1543,26 @@ class ModuleCard(QtWidgets.QFrame):
             self.status_dot.setPixmap(dot(C["accent_dim"])); self.status_txt.setText("starting…")
         else:
             self.status_dot.setPixmap(dot(C["muted"])); self.status_txt.setText("down")
-        self.btn_service.setEnabled(self.spec.can_start and not up and not self.owns_service)
+        self.sync_service_button()
         self.btn_stop.setEnabled(self.owns_service)
         if up and not was:
             # just came up: ask what it can do (a restarted service may have changed)
             self.win.prober.describe(self.spec.id, self.spec.host, self.spec.cmd)
+
+    def sync_service_button(self):
+        """Enable "Service" only when starting is possible AND allowed; when a
+        module sharing this instrument is up, grey it out and say why."""
+        can = self.spec.can_start and not self.up and not self.owns_service
+        blockers = self.blocking_partners() if can else []
+        self.btn_service.setEnabled(can and not blockers)
+        if blockers:
+            self.btn_service.setToolTip(self.exclusion_reason(blockers))
+        elif self.spec.excludes:
+            self.btn_service.setToolTip(
+                "Start the service. Never runs together with "
+                + ", ".join(self.spec.excludes) + " (same instrument).")
+        else:
+            self.btn_service.setToolTip("Start the service")
 
     def set_variables(self, manifest: dict | None, cached_at: float | None = None):
         if not manifest:
@@ -1724,6 +1844,13 @@ class MainWindow(QtWidgets.QMainWindow):
             card = self.cards.get(mid)
             if card is not None:
                 card.set_up(up)
+        # a card's Service button depends on its PARTNERS' state, which may
+        # have been updated after the card itself in the loop above
+        self.refresh_exclusions()
+
+    def refresh_exclusions(self):
+        for card in self.cards.values():
+            card.sync_service_button()
 
     def _on_described(self, mid: str, manifest):
         card = self.cards.get(mid)
@@ -1868,7 +1995,8 @@ class MainWindow(QtWidgets.QMainWindow):
             w = self.profile_bar.takeAt(0).widget()
             if w is not None:
                 w.deleteLater()
-        full = dict(name=FULL_SUITE, members=[m.id for m in self.found.modules if not m.remote])
+        full_members, left_out = full_suite_members(self.found.modules)
+        full = dict(name=FULL_SUITE, members=[m.id for m in full_members])
         for prof in self.profiles + [full]:
             present = [self.cards[k].spec.name for k in prof["members"] if k in self.cards]
             missing = [k for k in prof["members"] if k not in self.cards]
@@ -1877,15 +2005,31 @@ class MainWindow(QtWidgets.QMainWindow):
             tip = f"Bring up: {', '.join(present) or '(nothing available)'}"
             if missing:
                 tip += f"\nNot found on this PC: {', '.join(missing)}"
+            if prof is full and left_out:
+                tip += "\n" + "\n".join(left_out)
+            probs = profile_problems([self.cards[k].spec for k in prof["members"]
+                                      if k in self.cards])
+            if probs:
+                tip += "\nCANNOT START: " + "; ".join(probs)
             btn.setToolTip(tip)
             btn.clicked.connect(lambda _=False, p=prof: self.activate_profile(p))
             self.profile_bar.addWidget(btn)
 
-    def activate_profile(self, profile: dict, open_guis: bool = True):
+    def activate_profile(self, profile: dict, open_guis: bool = True) -> bool:
+        """Bring a profile up. Returns False if it was refused (nothing started)."""
         members = [self.cards[k] for k in profile["members"] if k in self.cards]
         if not members:
             self.log(f"profile '{profile['name']}' has no modules available here.", "warn")
-            return
+            return False
+        # Validate BEFORE stopping or starting anything: a profile holding two
+        # modules for one instrument is a mistake in the profile, and starting
+        # half of it would leave the rig in a state nobody asked for.
+        probs = profile_problems([c.spec for c in members])
+        if probs:
+            for msg in probs:
+                self.log(f"profile '{profile['name']}' refused: {msg}. "
+                         f"Edit the profile and keep only one of them.", "error")
+            return False
         self.log(f"profile '{profile['name']}' → {', '.join(c.spec.name for c in members)}")
         if self.exclusive_check.isChecked():
             ids = {c.spec.id for c in members}
@@ -1902,6 +2046,7 @@ class MainWindow(QtWidgets.QMainWindow):
             base = n_local * 500 + 800           # let services bind before GUIs connect
             for j, c in enumerate([c for c in members if c.spec.has_gui]):
                 QtCore.QTimer.singleShot(base + j * 400, c.open_gui)
+        return True
 
     def _start_cards(self, cards: list[ModuleCard]):
         """Start services in dependency order (start_after), staggered."""
@@ -1925,7 +2070,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def start_all(self):
         self.log("starting all local services…")
-        self._start_cards([c for c in self.local_cards() if c.spec.can_start])
+        # "all" minus the second half of every shared-instrument pair
+        keep, left_out = full_suite_members(self.found.modules)
+        for note in left_out:
+            self.log(note, "warn")
+        ids = {m.id for m in keep}
+        self._start_cards([c for c in self.local_cards()
+                           if c.spec.can_start and c.spec.id in ids])
 
     def open_all_guis(self):
         self.log("opening all GUIs…")

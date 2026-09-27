@@ -21,6 +21,13 @@ Discrete settings (time constant, sensitivity) are stored as their LABELS,
 "30 ms" or "10 mV", exactly as printed on the front panel, so the .ini reads
 like the instrument. tables.py converts them to GPIB indices.
 
+AT START THE INSTRUMENT WINS (Lukas, 2026-09-27): [reference], [input],
+[demod] and [aux_out] are NOT written to the SR830 when the service starts.
+The service reads the front panel and overwrites these groups with what it
+finds. The .ini values reach the instrument only when applied explicitly
+(Settings > Apply / set_config, which writes only what differs). There was no
+push-on-start switch to keep: the push was unconditional and is gone.
+
 Units are explicit in every numeric field name: seconds (s), hertz (Hz),
 volts (V), degrees (deg). X / Y / R / sine amplitudes are RMS volts, as on the
 SR830.
@@ -74,7 +81,8 @@ class Demod:
 
 @dataclass
 class AuxOut:
-    """The four rear-panel AUX OUT voltages, pushed at start (manual 5-9)."""
+    """The four rear-panel AUX OUT voltages (manual 5-9). ADOPTED at start
+    (AUXV? k), written only when set explicitly."""
 
     out1_V: float = 0.0
     out2_V: float = 0.0

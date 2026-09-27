@@ -232,6 +232,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._out_mode = None
         self._fmax = abs(cfg.limits.field_max_mT)
         self._cal_marker = None        # (calibrated, describe_rev) last seen
+        # The entry boxes start at 0; the first status fills them with the
+        # setpoint the service ADOPTED at start (a magnet found holding 40 mT
+        # shows 40 mT), so pressing Go without typing does not quietly send
+        # the field to 0. Done once only: after that they belong to the user.
+        self._entries_seeded = False
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
         outer = QtWidgets.QHBoxLayout(root)
@@ -642,6 +647,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_btn.style().unpolish(self.output_btn)
         self.output_btn.style().polish(self.output_btn)
 
+    def _seed_entries(self, s):
+        """Copy the adopted setpoint into the entry boxes (see __init__)."""
+        vals = (s.setpoint_field_mT, s.setpoint_angle_deg,
+                s.setpoint_bx_mT, s.setpoint_by_mT)
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals):
+            return                      # no status yet (remote, not connected)
+        for w, v in zip((self.field_spin, self.angle_spin, self.bx_spin, self.by_spin),
+                        vals):
+            w.setValue(float(v))        # setValue does not send anything: only Go does
+        self._entries_seeded = True
+
     def _refresh(self):
         s = self.ctrl.status()
         cfg = self.cfg
@@ -659,6 +675,8 @@ class MainWindow(QtWidgets.QMainWindow):
         spl.setText(f"tol {cfg.control.tolerance_mT:g}")
         self.setpoint_label.setText(
             f"setpoint {_fmt(s.setpoint_field_mT)} mT @ {_fmt(s.setpoint_angle_deg, '.1f')}°")
+        if not self._entries_seeded:
+            self._seed_entries(s)
 
         color = COLORS[STATE_COLOR_KEY.get(s.state, "text")]
         self.state_badge.setText(s.state)

@@ -83,14 +83,45 @@ class SimVectorMagnet:
         self._t = clock()
         # a log of every AO write, for tests that check the output never jumps
         self.ao_log: list[tuple[float, float, float]] = []
+        # every enable-line write, for tests that check start() touched nothing
+        self.enable_log: list[tuple[float, bool]] = []
+        self._preset(self.p.start_output_x_V, self.p.start_output_y_V,
+                     self.p.start_enabled)
+
+    def _preset(self, x_V: float, y_V: float, enabled: bool) -> None:
+        """Put the plant where a PREVIOUS run left it, fully settled.
+
+        A real DAQ card keeps its last AO and DO values when the program that
+        wrote them exits, so a service can start on a magnet that is already
+        energized and holding a field. Here: the coil current has long since
+        arrived (lag = drive), the hysteresis branch is the one you get by
+        ramping UP to a positive drive (DOWN to a negative one), and the coils
+        have warmed to their steady temperature.
+        """
+        self.ao = [float(x_V), float(y_V)]
+        self.enable = bool(enabled)
+        drive = self.ao if self.enable else [0.0, 0.0]
+        gains = (self.p.gain_x_mT_per_V, self.p.gain_y_mT_per_V)
+        h = abs(self.p.hysteresis_mT)
+        for a in (0, 1):
+            self._lag[a] = drive[a]
+            self._hyst[a] = h if drive[a] > 0 else (-h if drive[a] < 0 else 0.0)
+            self._mag[a] = gains[a] * self._lag[a] + self._hyst[a]
+            self._temp[a] = self.p.ambient_C + self.p.heating_C_per_V2 * drive[a] ** 2
 
     # ---- Protocol -------------------------------------------------------------
 
     def open(self) -> None:
+        # Connect and change NOTHING: the AO and the enable line keep whatever a
+        # previous run left on them, exactly as a real card does (see base.py).
         self._advance()
         self.is_open = True
-        self.enable = False
-        self.ao = [0.0, 0.0]
+
+    def read_output(self) -> tuple[float, float, bool]:
+        # The simulator can always say what it is driving. The real card can
+        # too, via its internal AO loopback channels -- see nidaq.py.
+        self._advance()
+        return (self.ao[0], self.ao[1], self.enable)
 
     def close(self) -> None:
         self._advance()
@@ -129,6 +160,7 @@ class SimVectorMagnet:
     def set_enable(self, on: bool) -> None:
         self._advance()
         self.enable = bool(on)
+        self.enable_log.append((self._t, self.enable))
 
     # ---- the physics ------------------------------------------------------------
 

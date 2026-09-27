@@ -18,8 +18,10 @@ PUB_PORT = 17041
 @pytest.fixture
 def service_and_client():
     cfg = Config()
-    cfg.measure.nplc = 0.1                # fast readings
     smu, sim = build_sim_system(cfg, seed=0)
+    # fast readings: start-up ADOPTS the instrument's NPLC (a cfg value would
+    # not be pushed), so set it on the pretend instrument itself
+    sim.preset(nplc=0.1)
     svc = K2450Service(smu, host="127.0.0.1", cmd_port=CMD_PORT, pub_port=PUB_PORT,
                        status_hz=20.0)
     svc.start()

@@ -25,8 +25,12 @@ class SigGenBackend(Protocol):
     """A programmable CW RF signal generator (the HP / Agilent 8648D)."""
 
     def open(self) -> None:
-        """Connect and initialise. Must leave the RF output OFF and every
-        modulation (AM / FM / PM / pulse) OFF."""
+        """Connect and get ready to READ. Must not change the instrument's
+        state (Lukas's rule, 2026-09-27: "all modules should read the instrument
+        state on startup, not to change anything"): no *RST, no RF off, no
+        modulation off, no unit/reference/attenuator changes. Clearing the
+        status/error queue (*CLS) is allowed -- it changes nothing the sample
+        can feel. The brain then reads the state back and adopts it."""
 
     def close(self) -> None:
         """Turn RF off and disconnect. Safe to call on shutdown/crash."""
@@ -56,8 +60,10 @@ class SigGenBackend(Protocol):
     def read_modulation(self) -> dict:
         """{"am": bool, "fm": bool, "pm": bool} -- which modulations are on."""
 
-    def modulation_off(self) -> None:
-        """Switch every modulation off (AM, FM, PM, pulse)."""
+    def startup_notes(self) -> list[str]:
+        """Things found at open() that the operator should know about, e.g.
+        "POWer reference mode is ON -- levels are converted in software".
+        The brain turns each into a `warn` event. [] when nothing unusual."""
 
     def drain_errors(self) -> list[str]:
         """Empty the instrument's error queue (SYST:ERR?). [] when clean."""

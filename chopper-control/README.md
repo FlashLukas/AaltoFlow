@@ -59,7 +59,8 @@ then becomes an indicator in `describe`.
 ## Start-up and shutdown
 
 The module **adopts** the controller's state: blade, modes, frequency, phase and
-whether the wheel runs. Nothing is commanded at start -- a spinning chopper is
+whether the wheel runs. Nothing is commanded or written at start (queries only;
+even a value outside the config safety envelope is adopted, not clamped) -- a spinning chopper is
 harmless and somebody's lock-in may be using it. At shutdown the wheel is left
 as it is, unless `hardware.stop_on_exit = True`.
 
@@ -107,11 +108,13 @@ plus the universal `status`, `info`, `get_config`, `set_config`, `describe`,
 
 ## Controller commands used (real backend)
 
-`id?`, `verbose=0`, `freq=` / `freq?`, `phase=` / `phase?`, `enable=` /
+`id?`, `freq=` / `freq?`, `phase=` / `phase?`, `enable=` /
 `enable?`, `blade=` / `blade?`, `ref=` / `ref?`, `output=` / `output?`,
 `nharmonic=` / `nharmonic?`, `dharmonic=` / `dharmonic?`, `refoutfreq?`,
 `input?` -- CR-terminated, 115200 8N1, the unit echoes the command and ends
-with the prompt `> ` (MC2000B user guide, chapters 7 and 8). Every call is
+with the prompt `> ` (MC2000B user guide, chapters 7 and 8). At connect the
+backend sends QUERIES ONLY; `verbose=0` is sent only if
+`hardware.quiet_on_open = True` (default False). Every call is
 marked `# VERIFY` in `backends/mc2000b.py` until checked on the unit.
 
 ## Run it

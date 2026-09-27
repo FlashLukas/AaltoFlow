@@ -4,7 +4,8 @@ Nothing here talks to hardware directly -- it edits the shared `cfg` object in
 place and then calls `synth.apply_config()` so the running synthesizer (local or
 remote) picks the changes up. Tabs:
 
-  Channel A / B -- the start-up frequency / power / phase of each output
+  Channel A / B -- frequency / power / phase of each output (read at start;
+                   a value changed here is sent on OK)
   Reference     -- which clock the PLLs use
   Limits        -- the safety envelope every setpoint is clamped to
   Hardware      -- COM port and behaviour of the real backend
@@ -106,14 +107,15 @@ class SettingsDialog(QtWidgets.QDialog):
     def _channel_tab(self, group):
         page, form = self._form_widget()
         c = getattr(self.cfg, group)
-        self._add(form, group, "frequency_Hz", "Start frequency",
+        self._add(form, group, "frequency_Hz", "Frequency",
                   _dspin(c.frequency_Hz, 0, 3e10, 1, 1e6, "Hz"))
-        self._add(form, group, "power_dBm", "Start power",
+        self._add(form, group, "power_dBm", "Power",
                   _dspin(c.power_dBm, -100, 30, 2, 0.5, "dBm"))
-        self._add(form, group, "phase_deg", "Start phase",
+        self._add(form, group, "phase_deg", "Phase",
                   _dspin(c.phase_deg, 0, 360, 2, 1.0, "deg"))
-        form.addRow(_hint("Programmed when the service starts. The RF output always "
-                          "starts OFF -- there is deliberately no setting for that."))
+        form.addRow(_hint("Read from the instrument when the service starts (never "
+                          "written then). A value you CHANGE here is sent when you "
+                          "press OK; unchanged values are left alone."))
         return page
 
     def _reference_tab(self):
@@ -164,10 +166,10 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(hw.channel_spacing_Hz, 0.0, 1000.0, 1, 1.0, "Hz"))
         self._add(form, "hardware", "temp_warn_C", "Temperature warning",
                   _dspin(hw.temp_warn_C, 20.0, 90.0, 1, 1.0, "C"))
-        form.addRow(_hint("Port, timeout, poll rate, RF off mode, phase command and "
-                          "channel spacing take effect when the service starts (restart "
-                          "it after a change). Channel spacing 0 keeps the instrument's "
-                          "own setting."))
+        form.addRow(_hint("Port, timeout, poll rate, RF off mode and phase command take "
+                          "effect when the service starts (restart it after a change). "
+                          "Channel spacing is never written at start: a new value (> 0) "
+                          "is sent when you press OK; 0 keeps the instrument's own."))
         return page
 
     def _appearance_tab(self):

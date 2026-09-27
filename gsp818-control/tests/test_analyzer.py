@@ -93,13 +93,57 @@ def test_auto_and_readback_in_status(sa):
 
 # ---- lifecycle and safety -------------------------------------------------------------
 
-def test_tracking_generator_is_off_at_start_even_if_the_ini_says_on():
+#: a pretend instrument left by somebody else in a NON-default state: a narrow
+#: span, manual RBW, preamp on, peak detector -- and the TG already ON
+PANEL = {"start_Hz": 850e6, "stop_Hz": 950e6, "points": 801, "rbw_Hz": 30e3,
+         "rbw_auto": False, "ref_level_dBm": -20.0, "atten_dB": 5.0, "atten_auto": False,
+         "detector": "pos_peak", "preamp": True, "tg_on": True, "tg_level_dBm": -7.0}
+
+
+def test_start_adopts_the_instruments_state_and_writes_nothing():
+    """Lukas's rule (2026-09-27): starting reads the instrument, changes nothing.
+    The .ini says full span / TG off; the instrument says otherwise and wins."""
     cfg = Config()
-    cfg.tracking.tg_on = True
-    a, sim = build_sim_system(cfg, realtime=False)
+    cfg.acquisition.continuous = False
+    a, sim = build_sim_system(cfg, realtime=False, seed=1, state=PANEL)
+    events = []
+    a._on_event = lambda lvl, msg: events.append((lvl, msg))
+    a.start(run=False)
+    for _ in range(3):
+        a.step()                                   # the thread's idle configure passes
+    s = a.status()
+    assert (s.start_Hz, s.stop_Hz, s.points) == (850e6, 950e6, 801)
+    assert s.rbw_auto is False and s.rbw_set_Hz == 30e3 and s.rbw_Hz == 30e3
+    assert s.ref_level_dBm == -20.0 and s.atten_auto is False and s.atten_dB == 5.0
+    assert s.detector == "pos_peak" and s.preamp is True
+    assert s.tg_on is True and s.tg_level_dBm == -7.0 and sim.tg_output is True
+    assert sim.writes == []                        # NOTHING changed on the instrument
+    assert any("adopted from the instrument" in m for _, m in events)
+    # an acquisition is taken with the adopted settings, still without writes
+    n = a.acquire()
+    _finish(a)
+    t = a.get_trace("sample")
+    assert t["acq_id"] == n and t["points"] == 801 and t["tg_on"] and t["preamp"]
+    assert sim.writes == []
+    # a user change IS written -- and only that one
+    a.set_rbw(10e3)
+    a.step()
+    assert sim.writes == [("rbw_Hz", 10e3)]
+    a.shutdown()
+    assert sim.tg_output is False and sim.writes[-1] == ("tg_on", False)   # shutdown kept
+
+
+def test_adopted_values_outside_the_limits_are_kept_not_clamped():
+    """Clamping would make the first configure WRITE the clamped value."""
+    cfg = Config()
+    cfg.acquisition.continuous = False
+    a, sim = build_sim_system(cfg, realtime=False, state={"points": 20001})
+    events = []
+    a._on_event = lambda lvl, msg: events.append((lvl, msg))
     a.start(run=False)
     a.step()
-    assert a.status().tg_on is False and sim.tg_output is False
+    assert a.status().points == 20001 and sim.writes == []
+    assert any(lvl == "warn" and "outside the configured limits" in m for lvl, m in events)
     a.shutdown()
 
 

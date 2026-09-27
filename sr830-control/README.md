@@ -83,10 +83,20 @@ serial-polls the instrument. Auto Phase counts as finished once the outputs
 have settled on the new phase. All three can run as **scan routines**
 ("auto phase before the scan").
 
+## Start-up: the front panel wins
+
+The service changes nothing when it starts. It reads every setting (reference,
+frequency, harmonic, phase, trigger, SINE OUT, input, sensitivity, reserve,
+time constant, slope, sync filter, AUX OUT) and ADOPTS it: the GUI, `status`
+and `describe` show what the SR830 is doing. The only commands it sends are
+`OUTX 1` (replies to GPIB -- without it nothing can be read), `OVRM 1` (keep
+the front panel usable) and `*CLS`. The `[reference]`, `[input]`, `[demod]`
+and `[aux_out]` values of the .ini are applied only on Settings > Apply /
+`set_config`, and then only the settings that differ from the instrument.
+
 ## Safety
 
-SINE OUT cannot be switched off on an SR830; its minimum is 4 mV, which is the
-default. When the service stops cleanly (Stop in the launcher, `shutdown`),
+SINE OUT cannot be switched off on an SR830; its minimum is 4 mV. When the service stops cleanly (Stop in the launcher, `shutdown`),
 SINE OUT goes back to 4 mV and every AUX OUT to 0 V (`[safety]` in the config;
 switch off if a setup must keep driving). A hard kill cannot do this.
 `[limits]` narrows the sine and aux ranges to protect what is connected.

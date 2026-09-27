@@ -36,8 +36,9 @@ class SpectrumBackend(Protocol):
     simulated: bool
 
     def open(self) -> None:
-        """Connect (and attach the tracking generator if there is one). Must
-        leave the TG output off."""
+        """Connect (and attach the tracking generator if there is one) and
+        READ what the analyser is: model, serial, TG present. Queries only --
+        no configure, no initiate, no abort (start-up rule, 2026-09-27)."""
 
     def close(self) -> None:
         """Stop sweeping, TG off, disconnect. Safe to call twice and on a crash."""

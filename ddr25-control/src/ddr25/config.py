@@ -41,7 +41,16 @@ WRAP_POLICIES = ("literal", "shortest", "positive", "negative")
 # --------------------------------------------------------------------------- #
 @dataclass
 class Motion:
-    """Motion defaults pushed to the controller on start."""
+    """Motion settings.
+
+    velocity / acceleration are NOT pushed at start (Lukas's rule 2026-09-27:
+    starting the software must not change the instrument). At start the
+    brain READS the K-Cube's stored profile and writes it into these two
+    fields; a value typed here reaches the controller only when the user
+    applies it (Settings, set_config, set_velocity / set_acceleration).
+    The numbers below are therefore just what a fresh Config holds before
+    a controller has been read.
+    """
 
     # Profile velocity, deg/s. Gentle default: a sample holder spinning at the
     # stage's 1800 deg/s would throw anything loosely mounted.
@@ -56,9 +65,9 @@ class Motion:
     # before that the encoder's zero is wherever the stage happened to be when
     # the controller was switched on, and "45 deg" means nothing.
     require_home: bool = True
-    # Home automatically when the service starts. Off by default: homing turns
-    # the stage up to a full revolution, which nobody should get unannounced.
-    home_on_start: bool = False
+    # (home_on_start was REMOVED 2026-09-27: homing at start is a write that
+    # turns the stage, which the adopt-on-start rule forbids. An old .ini
+    # that still has the key loads fine -- unknown keys are ignored.)
 
 
 @dataclass
@@ -112,6 +121,16 @@ class Hardware:
     start_grace_s: float = 0.15
     # Simulator only: the angle the stage "powered up" at (un-homed).
     sim_start_deg: float = 137.0
+    # Simulator only: the profile stored in the simulated K-Cube at power-up
+    # (a real one keeps it in its own memory). Deliberately NOT the Motion
+    # defaults, so the adopt-on-start path is exercised: the GUI must show
+    # 45 deg/s, not the 30 in the config.
+    sim_start_velocity: float = 45.0
+    sim_start_acceleration: float = 90.0
+    # Simulator only: the controller was already homed before this program
+    # started (it stays homed until power-cycled); the counter then reads
+    # the true angle from the index, i.e. sim_start_deg.
+    sim_start_homed: bool = False
 
 
 @dataclass

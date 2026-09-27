@@ -13,7 +13,8 @@ def test_defaults_are_safe():
     # there is no way to ask for emission at start in the config at all
     assert not any("emission" in f for f in vars(cfg.startup))
     assert cfg.limits.power_max_pct < 100
-    assert cfg.hardware.emission_off_on_start is True
+    assert cfg.hardware.emission_off_on_start is False     # adopt, 2026-09-27
+    assert cfg.hardware.client_timeout_s > 0
     assert cfg.hardware.watchdog_s > 0
     assert names(cfg.filters.names) == ["VIS-nIR", "nIR2", "IR"]
 
