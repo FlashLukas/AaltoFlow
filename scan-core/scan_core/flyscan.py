@@ -373,6 +373,26 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
     warned = {"lag": False}
 
+    def approach(target):
+        """Go to a row's run-in and be THERE before the row starts.
+
+        The Settable's blocking set is not enough on its own: a module whose
+        settle rule is a bare "moving" flag can answer from a status frame
+        from BEFORE the move (gotcha #2) -- on the rig (2026-09-28) the
+        approach to row 0 returned at once, the fly speed was set while the
+        stage was still on its way, and the fly move turned it round: the
+        first 8 pixels of the row stayed empty. So, as at the row's end, the
+        MEASURED position decides. With `move` the placement's own settle
+        (the camera's laser_settled, checked on every frame) is already a
+        measurement, and a camera coordinate is never still enough to wait
+        for rest -- so this extra wait is for a stage flown in its own
+        coordinates.
+        """
+        value = pos_p.set(target)
+        if move_p is None:
+            _await_position(rb, value, 0.5 * width, row_timeout, log)
+        return value
+
     def snapshot():
         return _to_dataset(recipe, compiled, registry,
                            {k: v.copy() for k, v in data.items()},
@@ -399,7 +419,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             a, b = min(max(a, lo), hi), min(max(b, lo), hi)
             if state["fly_speed"]:
                 use_speed(orig_speed)
-            current[pos_p.id] = pos_p.set(a)          # blocking: settled at the run-in
+            current[pos_p.id] = approach(a)           # blocking: AT the run-in, at rest
 
             # -- the outer (stepped) dims, exactly as the odometer does them
             first_idx = tuple(oidx) + ((npix - 1) if backwards else 0,)
@@ -423,7 +443,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             if outer_moved:
                 # an outer axis that moves the same stage may have moved the
                 # run-in too: make sure (a no-op if it did not)
-                current[pos_p.id] = pos_p.set(a)
+                current[pos_p.id] = approach(a)
             use_speed(speed)
 
             while True:
@@ -437,7 +457,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 # of the row (at the approach speed) and fly it again
                 if state["fly_speed"]:
                     use_speed(orig_speed)
-                current[pos_p.id] = pos_p.set(a)
+                current[pos_p.id] = approach(a)
                 use_speed(speed)
             current[pos_p.id] = b
             _bin_into(chunks, rb, params, edges, lag, data, oidx)
@@ -706,6 +726,33 @@ def _stop_mover(move_p, drive, speed, log, quiet=False):
     except Exception as exc:
         if not quiet:
             log(f"fly: could not stop {move_p.id} ({exc})")
+
+
+def _await_position(rb, target, tol, timeout, log, rest_s=0.2, poll_s=0.05):
+    """Block until the readback `rb` is within `tol` of `target` AND at rest.
+
+    At rest = has not changed by more than a quarter of `tol` for `rest_s`
+    (a step counter is exactly still; a sensor jitters a little). A stage
+    that has not started yet is simply waited for -- it will: the command
+    was accepted. Raises TimeoutError after `timeout` s, naming both numbers.
+    """
+    deadline = time.monotonic() + timeout
+    last, since, v = None, time.monotonic(), float("nan")
+    while True:
+        try:
+            v = float(rb.get())
+        except Exception:
+            v = float("nan")
+        now = time.monotonic()
+        if math.isfinite(v):
+            if last is None or abs(v - last) > 0.25 * max(tol, 1e-12):
+                last, since = v, now
+            elif abs(v - target) <= tol and now - since >= rest_s:
+                return v
+        if now >= deadline:
+            raise TimeoutError(f"fly: {rb.id} did not arrive at the run-in {target:g} "
+                               f"within {timeout:g} s (at {v:g})")
+        time.sleep(poll_s)
 
 
 def _last_value(chunks, rb):

@@ -279,3 +279,23 @@ def test_a_row_ends_on_the_measured_position_not_on_a_stale_moving_flag(rig):
     ds = run(r, reg)
     assert np.all(ds["det.a_n"].values >= 3)
     assert np.max(np.abs(ds["det.a"].values - signal(ds["stage.x"].values))) < 0.03
+
+
+def test_the_approach_to_the_first_row_is_waited_for_on_the_measured_position(rig):
+    """From the rig, 2026-09-28: KIM's settle rule is flag_only(moving); the
+    stale "not moving" frame right after move_to made the APPROACH return at
+    once -- the fly speed was set while the stage was still on its way, the fly
+    move turned it round, and the first 8 pixels of row 0 stayed empty. Here the
+    stage never reports moving and starts 14 um away from the run-in."""
+    world, _, _, reg = rig
+    world.moving = lambda: False
+    world.speed = 12.0
+    world.move(10.0)
+    time.sleep(1.0)                        # the stage is really at +10
+    r = Recipe(name="wire", axes=[{"type": "fly", "param": "stage.x", "start": -4,
+                                   "stop": 8, "num": 25, "speed": 15,
+                                   "speed_param": "stage.speed"}],
+               detectors=["det.a"])
+    ds = run(r, reg)
+    assert np.all(ds["det.a_n"].values >= 3), ds["det.a_n"].values
+    assert world.speed == 12.0

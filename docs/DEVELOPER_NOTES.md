@@ -479,7 +479,9 @@ zpiezo has no GUI.
     that only costs a point measured early; for a fly scan it ended the ROW
     before the stage had left, with every pixel empty. The fly engine therefore
     ends a row on the MEASURED position (at the far end and at rest, or stalled
-    for 1 s -- logged), never on the settle rule alone. General lesson: a
+    for 1 s -- logged), never on the settle rule alone -- and (found on the rig
+    2026-09-28) it waits for the APPROACH to each row's run-in the same way:
+    the stale frame had made row 0 start wherever the stage happened to be. General lesson: a
     "done" signal is only as good as the wait it was designed for.
 
 ---
@@ -496,8 +498,8 @@ cd "<root>\kim-control"
 ```
 
 Expected test counts (all measured 2026-09-27): clMag 22 · smb 29 · stage 50 · piezo 37 · camera 128 · zpiezo 14 · kim 92 · hf2 60 · pm16 49 · vna 110 · mag2d 46 ·
-mag2dcal 96 · ppms 43 · scan-core 354 · mission-control 16 · suite-common 53 = **1199**
-(2026-09-27: fly scans -- scan-core +46 over 308, hf2 +8, kim +5, pm16 +5, camera +9)
+mag2dcal 96 · ppms 43 · scan-core 355 · mission-control 16 · suite-common 53 = **1200**
+(2026-09-27: fly scans -- scan-core +47 over 308, hf2 +8, kim +5, pm16 +5, camera +9)
 (+ aaltoview 42, own repo). Plus the contract check:
 `python tools/check_modules.py --live` (120 checks, 0 failed on 2026-09-27; since
 2026-09-27 it also exercises the stream verbs of every module that declares one).
