@@ -113,7 +113,7 @@ axes:
   - {type: linear, param: camera.laser_y, start: -10, stop: 10, num: 21}   # rows placed by the camera
   - {type: fly, param: camera.laser_x, start: -15, stop: 15, num: 61,     # flown, binned by the camera
      move: kim.position_y, speed: 2, speed_param: kim.velocity_y}
-detectors: [pm16.power, camera.laser_y]      # laser_y per pixel = how straight the row was
+detectors: [pm16.power, camera.laser_y]      # stored as camera.laser_y_measured: how straight each row was
 ```
 
 The image is then in the SAMPLE's coordinates: KIM's counter drift does not

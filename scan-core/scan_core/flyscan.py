@@ -387,12 +387,28 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             oidx = _zigzag(raw, outer_shape) if (recipe.zigzag and outer_shape) else raw
             backwards = bool(recipe.zigzag) and sum(raw) % 2 == 1
 
+            # -- back to the ORDINARY speed, and to this row's run-in, FIRST.
+            # Before the outer axes move, not after: (1) anything that moves
+            # the stage between rows must not crawl at the fly speed; (2) when
+            # the outer axis is a PLACEMENT that keeps the other coordinate
+            # (camera.laser_y keeps the camera's x target), it would otherwise
+            # keep the PREVIOUS row's start and drag the laser back across the
+            # whole row -- seen on the rig, 2026-09-27: slow returns, and with
+            # zig-zag a pointless trip to the far side before every backward row.
+            a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
+            a, b = min(max(a, lo), hi), min(max(b, lo), hi)
+            if state["fly_speed"]:
+                use_speed(orig_speed)
+            current[pos_p.id] = pos_p.set(a)          # blocking: settled at the run-in
+
             # -- the outer (stepped) dims, exactly as the odometer does them
             first_idx = tuple(oidx) + ((npix - 1) if backwards else 0,)
             ctx["flat"] = row * npix
             ctx["index"] = first_idx
+            outer_moved = False
             for k, d in enumerate(outer):
                 if oidx[k] != prev[k]:
+                    outer_moved = True
                     if prev[k] is not None:
                         run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
                     for pid, values in d.params:
@@ -404,11 +420,10 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # has refused every per-point one)
             run_hooks(compiled.hooks, "before_point", ctx)
 
-            a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
-            a, b = min(max(a, lo), hi), min(max(b, lo), hi)
-            if state["fly_speed"]:
-                use_speed(orig_speed)
-            current[pos_p.id] = pos_p.set(a)          # blocking: settled at the run-in
+            if outer_moved:
+                # an outer axis that moves the same stage may have moved the
+                # run-in too: make sure (a no-op if it did not)
+                current[pos_p.id] = pos_p.set(a)
             use_speed(speed)
 
             while True:
