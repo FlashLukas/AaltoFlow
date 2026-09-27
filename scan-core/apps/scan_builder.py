@@ -82,7 +82,8 @@ class AxisRow(QtWidgets.QFrame):
     move = QtCore.Signal(object, int)      # (self, +1/-1)
     preview = QtCore.Signal(object)        # double-click: show the actual setpoints
 
-    def __init__(self, param, level_getter, speed_param=None):
+    def __init__(self, param, level_getter, speed_param=None, move_choices=(),
+                 speed_lookup=None):
         super().__init__()
         self.param = param
         self.raw = None                    # set for non-editable (raster/zip) rows
@@ -134,7 +135,7 @@ class AxisRow(QtWidgets.QFrame):
             if w is self.num:
                 self.num_lbl = tl
 
-        self._build_fly(lay, speed_param)
+        self._build_fly(lay, speed_param, move_choices, speed_lookup)
 
         # A spin box that silently refuses to go above 160 is baffling unless
         # you can see that 160 is the closed-loop ceiling -- and these limits
@@ -152,7 +153,7 @@ class AxisRow(QtWidgets.QFrame):
         rm.clicked.connect(lambda: self.remove.emit(self))
         lay.addWidget(up); lay.addWidget(dn); lay.addWidget(rm)
 
-    def _build_fly(self, lay, speed_param):
+    def _build_fly(self, lay, speed_param, move_choices=(), speed_lookup=None):
         """The FLY option: move continuously across this axis instead of
         stopping at every point (scan_core/flyscan.py).
 
@@ -161,7 +162,14 @@ class AxisRow(QtWidgets.QFrame):
         there is nothing to bin by -- and only meaningful on the innermost
         axis (the summary says so if it is ticked anywhere else). With it
         ticked, `pts` become pixels and a speed box appears.
+
+        A MEASURED COORDINATE (camera.laser_x: where the laser is on the sample)
+        streams but is not a stage: `move_choices` lists the stages that could
+        fly it, and a "move with" box appears. The speed then belongs to the
+        chosen stage (`speed_lookup(stage_id)` finds its speed knob).
         """
+        self.move_choices = list(move_choices or [])
+        self._speed_lookup = speed_lookup or (lambda _id: None)
         #: the settable that sets this position's speed (find_speed_param);
         #: None = the module offers none
         self.speed_param = speed_param
@@ -200,19 +208,54 @@ class AxisRow(QtWidgets.QFrame):
             if speed_param is not None else
             "The module offers no speed setting: the stage moves at whatever\n"
             "speed it has. This number is then only used for the time estimate.")
-        for w, t in ((self.fly, "fly"), (self.speed, f"{unit}/s")):
+        self.move_box = QtWidgets.QComboBox()
+        for mid in self.move_choices:
+            self.move_box.addItem(mid, mid)
+        self.move_box.setToolTip(
+            "The stage that flies this row. The grid, the placement of each row\n"
+            "and the binning stay in THIS parameter's coordinates; which way the\n"
+            "stage has to go is learned on the first row. If the scan stops with\n"
+            "'does not move', pick the other axis (the camera may be mounted\n"
+            "rotated against the stage).")
+        widgets = [(self.fly, "fly")]
+        if self.move_choices:
+            widgets.append((self.move_box, "move with"))
+        widgets.append((self.speed, f"{unit}/s"))
+        for w, t in widgets:
             box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
             tl = QtWidgets.QLabel(t); tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
             box.addWidget(tl); box.addWidget(w); lay.addLayout(box)
             if w is self.speed:
                 self.speed_lbl = tl
+            if w is self.move_box:
+                self.move_lbl = tl
+        if self.move_choices:
+            self.move_box.currentIndexChanged.connect(lambda *_: self._move_changed())
+            self._move_changed()
         self.fly.toggled.connect(self._fly_toggled)
         self.speed.valueChanged.connect(lambda *_: self.changed.emit())
         self._fly_toggled(False)
 
+    def _move_changed(self):
+        """The flying stage changed: its speed knob sets the fly speed now."""
+        sp = self._speed_lookup(self.move_box.currentData())
+        self.speed_param = sp
+        if sp is not None:
+            slo, shi = sp.limits
+            lo = max(0.001, float(slo)) if math.isfinite(slo) else 0.001
+            hi = min(1e4, float(shi)) if math.isfinite(shi) else 1e4
+            self.speed.setRange(lo, max(lo, hi))
+        self.changed.emit()
+
+    def move_param(self) -> str | None:
+        return self.move_box.currentData() if self.move_choices else None
+
     def _fly_toggled(self, on):
         self.speed.setVisible(on)
         self.speed_lbl.setVisible(on)
+        if self.move_choices:
+            self.move_box.setVisible(on)
+            self.move_lbl.setVisible(on)
         self.num_lbl.setText("pixels" if on else "pts")
         self.changed.emit()
 
@@ -345,6 +388,8 @@ class AxisRow(QtWidgets.QFrame):
             ax = {"type": "fly", "param": self.param.id,
                   "start": self.start.value(), "stop": self.stop.value(),
                   "num": self.num.value(), "speed": self.speed.value()}
+            if self.move_param():
+                ax["move"] = self.move_param()
             if self.speed_param is not None:
                 ax["speed_param"] = self.speed_param.id
             return ax
@@ -2124,8 +2169,24 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def add_axis(self, pid, raw=None):
         p = self.registry.get(pid)
         sp = find_speed_param(self.registry, pid)
+        # A streamed coordinate with no speed knob of its own is MEASURED, not
+        # driven (camera.laser_x): offer the stages that could fly it -- same
+        # unit, another module, with a speed knob.
+        choices = []
+        if sp is None and p is not None and getattr(p, "stream", None) is not None:
+            own = pid.rsplit(".", 1)[0] if "." in pid else ""
+            choices = [q.id for q in self.registry.settables()
+                       if q.id != pid and q.unit == p.unit
+                       and (q.id.rsplit(".", 1)[0] if "." in q.id else "") != own
+                       and find_speed_param(self.registry, q.id)]
+
+        def lookup(mid, _reg=self.registry):
+            s_id = find_speed_param(_reg, mid) if mid else None
+            return _reg.get(s_id) if s_id else None
+
         row = AxisRow(p, self._level_of,
-                      speed_param=self.registry.get(sp) if sp else None)
+                      speed_param=self.registry.get(sp) if sp else None,
+                      move_choices=choices, speed_lookup=lookup)
         row.raw = raw
         row.changed.connect(self._rebuild_summary)
         row.remove.connect(self._remove_row)
@@ -2407,6 +2468,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
                     if sp and self.registry.get(sp) is None:
                         missing.append(sp)
                     row.fly.setChecked(True)
+                    if ax.get("move"):
+                        i = row.move_box.findData(ax["move"])
+                        if i >= 0:
+                            row.move_box.setCurrentIndex(i)
+                        else:
+                            missing.append(ax["move"])
                     if ax.get("speed") is not None:
                         row.speed.setValue(float(ax["speed"]))
                     if (ax.get("readback") or ax.get("lag_correction") is False

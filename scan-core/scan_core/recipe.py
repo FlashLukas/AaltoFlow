@@ -348,7 +348,8 @@ def _axis_param_ids(ax: dict) -> list[str]:
     if t == "fly":
         # the speed knob too: the scan drives it, so it must be settable and
         # cannot also be held as a condition
-        return [ax["param"]] + ([ax["speed_param"]] if ax.get("speed_param") else [])
+        return ([ax["param"]] + ([ax["speed_param"]] if ax.get("speed_param") else [])
+                + ([ax["move"]] if ax.get("move") else []))
     if t == "zip":
         return [m["param"] for m in ax["members"]]
     if t == "raster":

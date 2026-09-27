@@ -326,9 +326,26 @@ uv run python run_fly_demo.py                          # the simulator, the figu
 uv run python run_fly_demo.py --lab --from 0 --to 20   # the running kim + pm16 (or --det hf2)
 ```
 
-On the kim stage "measured position" means the step counter, the best readback
-an open-loop stage has; it drifts from the true position over long scans just as
-a stepped scan's does.
+On the kim stage "measured position" means the step counter; it drifts from
+the true position over long scans just as a stepped scan's does. To get rid of
+that, fly in the **camera's** coordinates:
+
+```yaml
+axes:
+  - {type: linear, param: camera.laser_y, start: -10, stop: 10, num: 21}
+  - {type: fly, param: camera.laser_x, start: -15, stop: 15, num: 61,
+     move: kim.position_y, speed: 2, speed_param: kim.velocity_y}
+```
+
+`camera.laser_x/y` is where the laser is on the sample, measured from the
+tracked template. The grid, the placement of every row (the camera puts the
+laser there, closed loop) and the binning are all in those coordinates; `move`
+names the stage that flies the row (in the builder: "move with"). How stage and
+camera relate is not assumed: the stage is sent well past the end, the row ends
+when the camera sees the far edge, and the direction is learned on the first
+row (logged). A stage axis that does not move the camera coordinate stops the
+scan with "does not move ... the other axis?" -- on the KIM rig the camera is
+mounted 90 deg to the stage, so camera x is kim Y.
 
 ## A queue of scans
 
