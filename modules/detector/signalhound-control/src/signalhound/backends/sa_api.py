@@ -68,8 +68,11 @@ SA_COMPRESSION_WARNING = 2     # saCompressionWarning: the input overloads the f
 DEVICE_TYPES = {0: "", 1: "SA44", 2: "SA44B", 3: "SA124A", 4: "SA124B"}
 
 # name -> (restype, argtypes). Written from the header; ctypes checks the
-# Python arguments against these before anything reaches the DLL.  # VERIFY
-# on the installed DLL version (the API has kept these stable since 3.x).
+# Python arguments against these before anything reaches the DLL. Checked
+# 2026-09-28 against the installed sa_api.dll 3.2.4 (Spike): every name is
+# exported, and open / query / configure / sweep work with these types on an
+# SA44B. The header itself is not installed with Spike, so the TG prototypes
+# are only checked by name so far.  # VERIFY the TG calls on the first TG run
 _PROTOTYPES = {
     "saGetSerialNumberList": (c_int, [POINTER(c_int), POINTER(c_int)]),
     "saOpenDevice": (c_int, [POINTER(c_int)]),
@@ -98,6 +101,21 @@ _PROTOTYPES = {
 
 #: The module name written into the hardware lock (the other service sees it).
 LOCK_MODULE = "signalhound"
+
+#: Where Signal Hound's installers put sa_api.dll. Spike (the usual install on
+#: a lab PC) keeps it in its own folder, which is NOT on the PATH -- found on
+#: the lab PC 2026-09-28, where the service could not start without this.
+DLL_SEARCH = [r"C:\Program Files\Signal Hound\Spike\sa_api.dll"]
+
+# Sweep time of the SA44B in spectrum mode, fitted to sweeps measured on the
+# lab's analyser (2026-09-28, sa_api 3.2.4): ~135 MHz of span per second,
+# almost independent of the RBW down to 10 Hz, plus a cost per output bin (the
+# FFT work of a narrow RBW shows up as MORE BINS, not as a slower span rate)
+# and a fixed overhead. Within ~2x of every measurement (e.g. 4.3 GHz: 32 s;
+# RBW 10 Hz over 100 kHz: 0.68 s); the rule it replaces was off by up to 1000x.
+_SPAN_RATE_HZ_PER_S = 135e6
+_TIME_PER_BIN_S = 1.0e-5
+_SWEEP_OVERHEAD_S = 0.05
 
 
 def lock_address(serial: int) -> str:
@@ -136,6 +154,7 @@ class SaApiAnalyzer:
         self._tg = False
         self._grid: Grid | None = None
         self._detector = "average"
+        self._ref_level = float("inf")       # set by configure; inf = never "above"
         self._warnings: set[int] = set()
         self._pending = False
         self._lock: hwlock.HardwareLock | None = None   # our claim on the analyser
@@ -144,14 +163,22 @@ class SaApiAnalyzer:
     def _load(self):
         if self._dll is not None:
             return self._dll
-        path = self.cfg.hardware.dll_path or "sa_api.dll"
-        try:
-            dll = ctypes.CDLL(path)          # VERIFY: cdecl (CDLL), not stdcall (WinDLL)
-        except OSError as exc:
-            raise SaApiError(
-                f"cannot load {path!r} ({exc}). Install Signal Hound's Spike / SDK and "
-                "put sa_api.dll on the PATH, or set hardware.dll_path") from None
-        return dll
+        # CDLL: the DLL is 64-bit, where cdecl and stdcall are the same calling
+        # convention (checked 2026-09-28: x86-64 PE, all 22 functions exported
+        # undecorated).
+        # An explicit hardware.dll_path is used as given; with none, the PATH
+        # first, then Spike's install folder.
+        explicit = self.cfg.hardware.dll_path
+        paths = [explicit] if explicit else ["sa_api.dll", *DLL_SEARCH]
+        errors = []
+        for path in paths:
+            try:
+                return ctypes.CDLL(path)
+            except OSError as exc:
+                errors.append(f"{path!r} ({exc})")
+        raise SaApiError(
+            f"cannot load sa_api.dll: {'; '.join(errors)}. Install Signal Hound's Spike / SDK "
+            "and put sa_api.dll on the PATH, or set hardware.dll_path") from None
 
     def _bind(self, dll) -> None:
         for name, (restype, argtypes) in _PROTOTYPES.items():
@@ -313,8 +340,10 @@ class SaApiAnalyzer:
         self._call("saConfigLevel", h, s.ref_level_dBm)
         self._call("saConfigGainAtten", h, int(s.atten), int(s.gain), bool(s.preamp))
         # VBW <= RBW is required by the API; the brain guarantees it.
-        # VERIFY: which RBWs the API accepts at a large span (it may clamp:
-        # saBandwidthClamped warning) -- the actual grid is reported below.
+        # Measured 2026-09-28 (SA44B): 100 kHz and 250 kHz are accepted even
+        # over a 4.3 GHz span with no saBandwidthClamped warning, and 10 Hz
+        # over 100 kHz works. An unsnapped RBW (150 kHz) is accepted SILENTLY
+        # and gives the same grid as 100 kHz -- which is why the brain snaps.
         self._call("saConfigSweepCoupling", h, s.rbw_Hz, s.vbw_Hz, bool(s.reject))
         if s.tg_on:
             # VERIFY: the API documents no TG output level for TG sweep mode.
@@ -340,18 +369,28 @@ class SaApiAnalyzer:
         if n.value < 2:
             raise SaApiError(f"saQuerySweepInfo reported {n.value} bins")
         self._detector = s.detector
+        self._ref_level = float(s.ref_level_dBm)
         self._grid = Grid(float(start.value), float(step.value), int(n.value))
         return self._grid
 
     def sweep_time_s(self, settings: SweepSettings, points: int) -> float:
-        return estimate_sweep_time_s(settings, points)   # an estimate; no I/O
+        """An estimate for the progress bar; never talks to the instrument
+        (status() asks ten times a second). Spectrum mode uses the model
+        measured on the SA44B (constants above); TG mode is not measured yet
+        and keeps the generic estimate."""
+        if settings.tg_on:
+            return estimate_sweep_time_s(settings, points)
+        t = (_SWEEP_OVERHEAD_S + settings.span_Hz / _SPAN_RATE_HZ_PER_S
+             + _TIME_PER_BIN_S * max(int(points), 0))
+        return float(min(t, 600.0))
 
     def start_sweep(self) -> None:
-        # VERIFY: the SA44B/SA124B sweep ON REQUEST (the sweep is taken inside
-        # saGetSweep), so a sweep "starts" when finish_sweep asks for it -- which
-        # is after the brain's trigger, so an acquisition is fresh. If the API
-        # turns out to buffer a sweep taken earlier, discard the first
-        # saGetSweep after each configure/trigger here.
+        # The SA44B sweeps ON REQUEST (the sweep is taken inside saGetSweep),
+        # so a sweep "starts" when finish_sweep asks for it -- after the
+        # brain's trigger, so an acquisition is fresh. Checked 2026-09-28:
+        # saGetSweep's duration scales with the span (32 s for 4.3 GHz, i.e. it
+        # sweeps then, it does not hand back a buffer), and consecutive sweeps
+        # of the noise floor all differ (median |diff| ~3.9 dB).
         if self._grid is None:
             raise SaApiError("start_sweep before configure")
         self._pending = True
@@ -367,10 +406,17 @@ class SaApiAnalyzer:
         self._warnings.discard(SA_COMPRESSION_WARNING)
         self._call("saGetSweep_32f", self._h,
                    mn.ctypes.data_as(POINTER(c_float)), mx.ctypes.data_as(POINTER(c_float)))
-        overload = SA_COMPRESSION_WARNING in self._warnings
         self._warnings |= before - {SA_COMPRESSION_WARNING}
-        # AVERAGE detector: min and max are the same array (docs). Peak: the max.
+        # AVERAGE detector: min and max are the same array (checked on the
+        # SA44B 2026-09-28: identical to the last bit). Peak: the max array.
         trace = (mx if self._detector == "peak" else mn).astype(float)
+        # Overload: the API's saCompressionWarning, OR any bin above the
+        # reference level. On the SA44B the warning never came (2026-09-28): a
+        # -50 dBm tone against a -60/-70/-80 dBm reference read 3 dB low --
+        # compressed -- with status 0. The reference level is where the API
+        # sets the front-end gain, so a signal above it is not to be trusted.
+        overload = (SA_COMPRESSION_WARNING in self._warnings
+                    or bool(np.nanmax(mx) > self._ref_level))
         return trace, {"overload": overload}
 
     def abort_sweep(self) -> None:
