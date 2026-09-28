@@ -147,3 +147,25 @@ def test_placing_the_laser_switches_the_array_stabiliser_off_and_back(tracked):
     assert not brain.status().stabilize_on or _wait(lambda: not brain.status().stabilize_on)
     brain.set_stabilize(True)                   # and the other way round
     assert not brain._laser_goto
+
+
+def test_a_target_arriving_mid_frame_is_not_marked_done():
+    """The engine measures a frame against the OLD target; a new target arrives
+    (request thread) before that frame reaches its decision. The old frame
+    must not fill the new window or mark the new target done -- otherwise the
+    loop stops without moving and laser_settled never comes."""
+    from camera.camera import CameraStatus
+
+    cfg = Config()
+    cfg.stabilizer.images_to_average = 1       # one frame decides
+    brain, _cam, _xy, _z = build_sim_system(cfg)   # not started: we drive the step
+    brain._commit_laser_target((0.0, 0.0))     # the laser IS at this one
+    new = (5.0, 0.0)
+    # _stage_settling runs after the step has read the target and before it
+    # decides: the moment a request would slip in.
+    brain._stage_settling = lambda: (brain._commit_laser_target(new), False)[1]
+    st = CameraStatus(spot_x=100.0, spot_y=100.0)
+    brain._laser_step((100.0, 100.0), 0.1, 0.1, st)
+    assert brain._laser_target == new
+    assert brain._laser_goto and not brain._laser_done
+    assert len(brain._avg_buf) == 0

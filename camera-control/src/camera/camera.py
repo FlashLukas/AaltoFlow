@@ -217,6 +217,8 @@ class Camera:
         self._laser_target: tuple | None = None
         self._laser_goto = False
         self._laser_done = False
+        # set_laser_target (request thread) vs _laser_step (engine thread)
+        self._laser_lock = threading.Lock()
         # The fly-scan record of the laser position on the sample (stream.py).
         self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
 
@@ -791,24 +793,37 @@ class Camera:
         move it without a fight.
         """
         stb = self.cfg.stabilizer
-        tx, ty = self._laser_target
+        tgt = self._laser_target
+        if tgt is None:
+            return
+        tx, ty = tgt
         point = (anchor[0] + tx / px_x, anchor[1] + ty / px_y)
         inst = np.array([point[0] - st.spot_x, point[1] - st.spot_y], dtype=float)
         st.distance_um = float(np.hypot(*V.pixels_to_um(inst[0], inst[1], px_x, px_y)))
         if self._stage_settling():
             self._avg_buf.clear()
             return
-        self._avg_buf.append(inst)
-        if len(self._avg_buf) < self._avg_buf.maxlen:
-            return
-        avg = np.mean(self._avg_buf, axis=0)
-        dist_um = np.array(V.pixels_to_um(avg[0], avg[1], px_x, px_y))
-        st.distance_um = float(np.hypot(dist_um[0], dist_um[1]))
-        if st.distance_um <= max(0.0, float(stb.stable_radius_um)):
-            self._avg_buf.clear()
-            self._laser_goto = False
-            self._laser_done = True
-            return
+        # A new target can arrive (request thread) while this frame is being
+        # worked on. Without the lock and the identity check, this frame's
+        # distance -- measured to the OLD target -- could land in the new
+        # target's fresh window, or "done" be stamped on the new target, which
+        # then never moves (a scan waiting for laser_settled times out).
+        # set_laser_target makes a NEW tuple every call, so `is` also tells a
+        # repeated request for the same point apart.
+        with self._laser_lock:
+            if self._laser_target is not tgt:
+                return
+            self._avg_buf.append(inst)
+            if len(self._avg_buf) < self._avg_buf.maxlen:
+                return
+            avg = np.mean(self._avg_buf, axis=0)
+            dist_um = np.array(V.pixels_to_um(avg[0], avg[1], px_x, px_y))
+            st.distance_um = float(np.hypot(dist_um[0], dist_um[1]))
+            if st.distance_um <= max(0.0, float(stb.stable_radius_um)):
+                self._avg_buf.clear()
+                self._laser_goto = False
+                self._laser_done = True
+                return
         gain = min(max(float(stb.gain), 0.01), 2.0)
         self._correct(avg, dist_um, gain, True, True, "laser placement")
 
@@ -1612,11 +1627,16 @@ class Camera:
             self._stabilize_on = False
             self._settled_for = None
             self._emit("info", "stabiliser off: the laser is now placed by coordinate")
-        self._laser_done = False              # before the target: no frame may pair
-        self._laser_target = target           # the new target with an old "done"
-        self._avg_buf.clear()
-        self._laser_goto = True
+        self._commit_laser_target(target)
         return list(target)
+
+    def _commit_laser_target(self, target: tuple) -> None:
+        """Hand a new target to the placement loop, atomically w.r.t. _laser_step."""
+        with self._laser_lock:
+            self._laser_done = False          # before the target: no frame may pair
+            self._laser_target = target       # the new target with an old "done"
+            self._avg_buf.clear()
+            self._laser_goto = True
 
     def cancel_laser_target(self) -> None:
         """Stop the placement loop where it is (the target is kept)."""
