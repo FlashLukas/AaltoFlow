@@ -136,8 +136,12 @@ class Console:
                 print(f"  sample #{n}: settle {smp.get('settle_s', 0) * 1e3:.2f} ms, "
                       f"{smp.get('n_avg')} pts averaged")
                 for i in range(2):
+                    # theta is null for a switched-off demodulator (NaN on the
+                    # wire): format it like _v does, or the console dies here
+                    th = smp['theta_deg'][i]
+                    th = "   --  " if th is None else f"{th:+7.2f}"
                     print(f"    ch{i + 1}: X={_v(smp['x'][i])} Y={_v(smp['y'][i])} "
-                          f"R={_v(smp['r'][i])} theta={smp['theta_deg'][i]:+7.2f} deg")
+                          f"R={_v(smp['r'][i])} theta={th} deg")
                 print(f"    aux1={_v(smp['aux_in'][0])} aux2={_v(smp['aux_in'][1])}")
                 return
             time.sleep(0.02)

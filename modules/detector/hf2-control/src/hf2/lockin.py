@@ -406,13 +406,31 @@ class LockIn:
                 next_t = time.monotonic()        # fell behind: do not burst
             if self._stop.is_set():
                 break
-            self.poll_once()
+            # poll_once() guards the hardware READ, but anything after it (a
+            # malformed reply, a cfg value set over the wire that int() cannot
+            # parse) would otherwise end this thread for good -- and a dead
+            # poll thread is the worst failure: status keeps publishing the
+            # last live values, the panel looks healthy, every acquire times
+            # out. Report it like a failed read and keep polling.
+            try:
+                self.poll_once()
+            except Exception as exc:
+                self._report_hw_error(exc)
 
     def poll_once(self) -> None:
         """One read of both demodulators + aux, then advance any acquisition.
         Public so tests (and a single-threaded script) can drive it."""
         chans = [self.cfg.channel(i) for i in range(N_CHANNELS)]
         on = list(self._demod_on)
+        # The time of this reading is taken BEFORE the read, not after it. The
+        # values describe the instrument as it was when the read began (the
+        # HF2 even hands back its latest sample, older still). If acquire()
+        # arrives while the read is in flight -- a USB read takes milliseconds
+        # -- a clock read AFTER it would call this pre-trigger reading
+        # "settled" as soon as the settle time is shorter than the read, and
+        # latch the PREVIOUS scan point's value. Stamping the start is the
+        # conservative side: a reading only counts if it began after t_settle.
+        t_read = self._clock()
         try:
             with self._hw:
                 # Only demodulators that stream data: asking a switched-off one
@@ -444,7 +462,6 @@ class LockIn:
                            (x[0], y[0], live["r"][0], live["theta_deg"][0],
                             x[1], y[1], live["r"][1], live["theta_deg"][1],
                             aux[0], aux[1]))
-        now = self._clock()
         recovered = False
         with self._lock:
             recovered = bool(self._hw_error)
@@ -452,12 +469,12 @@ class LockIn:
             self._live = live
             self._ref_freq = ref
             self._locked = locked
-            self._advance_acquisition(now, x, y, f, aux)
+            self._advance_acquisition(t_read, x, y, f, aux)
         if recovered:
             self._emit("info", "hardware reads recovered")
 
     def _advance_acquisition(self, now, x, y, f, aux) -> None:
-        """Called with _lock held."""
+        """Called with _lock held. `now` = when the reading BEGAN (poll_once)."""
         a = self._acq
         if a is None or now < a["t_settle"]:
             return
@@ -507,11 +524,19 @@ class LockIn:
             raise ValueError(f"channel must be 1 or 2, got {channel!r}")
         return c - 1
 
-    def _sanitise_config(self) -> None:
-        """Clamp every per-channel setting in cfg, in place."""
-        lim = self.cfg.limits
+    def check_config(self, cfg: Config) -> None:
+        """Raise ValueError/TypeError if `cfg` would be refused by
+        apply_config(). Works on the object given (pass a COPY): the service
+        uses it to vet a set_config request before anything touches the live
+        cfg, so a refused request changes nothing."""
+        self._sanitise_config(cfg)
+
+    def _sanitise_config(self, cfg: Config | None = None) -> None:
+        """Clamp every per-channel setting in cfg (default: the live one), in place."""
+        cfg = self.cfg if cfg is None else cfg
+        lim = cfg.limits
         for i in range(N_CHANNELS):
-            ch = self.cfg.channel(i)
+            ch = cfg.channel(i)
             ch.reference = _parse_mode(ch.reference)
             ch.time_constant_s = _clamp(float(ch.time_constant_s), lim.tc_min_s, lim.tc_max_s)[0]
             ch.order = int(_clamp(int(ch.order), lim.order_min, lim.order_max)[0])

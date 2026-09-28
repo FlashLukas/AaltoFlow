@@ -111,8 +111,12 @@ class SettingsPanel(QtWidgets.QWidget):
             return False
         try:
             self.ctrl.apply_config()
-        except ValueError as exc:
-            self.error.setText(str(exc))
+        except Exception as exc:
+            # Not only ValueError (a refused value): the push to the instrument
+            # can fail too (RuntimeError from LabOne, a demod index the unit
+            # does not have). Escaping a Qt slot, that error only reached the
+            # console and the panel looked as if Apply had worked.
+            self.error.setText(f"not applied: {exc}")
             return False
         self.on_applied()
         return True
@@ -213,7 +217,13 @@ class SettingsPanel(QtWidgets.QWidget):
         if path:
             _copy_config_into(self.cfg, Config.load(path))
             self._refresh_widgets_from_cfg()
-            self.ctrl.apply_config()
+            try:
+                self.ctrl.apply_config()
+            except Exception as exc:          # same reason as in apply()
+                self.error.setText(f"not applied: {exc}")
+                return
+            self.error.setText("")
+            self.on_applied()
 
 
 class SettingsDialog(QtWidgets.QDialog):

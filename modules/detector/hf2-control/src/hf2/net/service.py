@@ -9,6 +9,7 @@ hardware directly except through the brain's locked setters.
 
 from __future__ import annotations
 
+import copy
 import json
 import queue
 import threading
@@ -42,8 +43,26 @@ class Hf2Service:
     # -------------------------------------------------------------- lifecycle
 
     def start(self) -> None:
-        self.lockin._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
-        self.lockin.start()
+        # Bind BOTH sockets here, in the caller's thread, and BEFORE the
+        # instrument is opened. They used to be bound inside the two daemon
+        # threads: a port already in use (a second copy, an orphan -- gotcha
+        # #7) then killed only that thread, with a traceback nobody reads, while
+        # the process lived on holding the lock-in and its hwlock claim and
+        # answering nothing. Now a taken port raises out of start(), before
+        # anything was opened or claimed. (Handing a socket to the thread that
+        # will use it is allowed in ZeroMQ; Thread.start() is the memory
+        # barrier it asks for.)
+        self._pub_sock = self._ctx.socket(zmq.PUB)
+        self._rep_sock = self._ctx.socket(zmq.REP)
+        try:
+            self._pub_sock.bind(self.pub_addr)
+            self._rep_sock.bind(self.cmd_addr)
+            self.lockin._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
+            self.lockin.start()
+        except BaseException:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
         self._pub_t = threading.Thread(target=self._publisher, name="svc-pub", daemon=True)
         self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
         self._pub_t.start()
@@ -84,8 +103,7 @@ class Hf2Service:
         return self._rev
 
     def _publisher(self) -> None:
-        pub = self._ctx.socket(zmq.PUB)
-        pub.bind(self.pub_addr)
+        pub = self._pub_sock                 # bound in start()
         last = 0.0
         while not self._stop.is_set():
             try:
@@ -105,8 +123,7 @@ class Hf2Service:
         pub.close(0)
 
     def _commander(self) -> None:
-        rep = self._ctx.socket(zmq.REP)
-        rep.bind(self.cmd_addr)
+        rep = self._rep_sock                 # bound in start()
         poller = zmq.Poller()
         poller.register(rep, zmq.POLLIN)
         while not self._stop.is_set():
@@ -159,6 +176,14 @@ class Hf2Service:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(li.cfg)}
             elif cmd == "set_config":
+                # Vet the request on a COPY first. apply_config_dict writes
+                # straight into the live cfg, so a request refused only
+                # afterwards (reference "sideways") used to stay behind in cfg
+                # -- reported by status and describe as if the instrument ran
+                # it. A refusal must change nothing.
+                trial = copy.deepcopy(li.cfg)
+                apply_config_dict(trial, msg["config"])
+                li.check_config(trial)
                 apply_config_dict(li.cfg, msg["config"])
                 li.apply_config()
             elif cmd == "shutdown":

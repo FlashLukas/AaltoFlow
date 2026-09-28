@@ -94,7 +94,13 @@ class Hf2Client:
         return self.cfg
 
     def apply_config(self) -> None:
-        self._cmd({"cmd": "set_config", "config": config_to_dict(self.cfg)})
+        """Push self.cfg to the service. RAISES ValueError when the service
+        refuses (or does not answer), exactly like a local LockIn does -- the
+        Settings panel catches that and shows it. Returning the reply instead
+        made a refused Apply look successful in a remote GUI."""
+        r = self._cmd({"cmd": "set_config", "config": config_to_dict(self.cfg)})
+        if not r.get("ok"):
+            raise ValueError(r.get("error", "set_config refused"))
 
     def describe(self) -> dict:
         r = self._cmd({"cmd": "describe"})
