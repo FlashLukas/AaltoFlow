@@ -487,8 +487,9 @@ hear what AaltoFlow was used for -- open an issue and tell us.
 
 ## Credits and license
 
-AaltoFlow was developed by Lukáš Flajšman in the NanoSpin group, Aalto
-University. The copyright is held by Aalto University.
+AaltoFlow was developed by Lukáš Flajšman in the NanoSpin group of
+Prof. Sebastiaan van Dijken, Aalto University. The copyright is held by Aalto
+University.
 
 MIT — see [LICENSE](LICENSE). One optional dependency is GPL-3.0: kim-control's
 hardware driver uses [pylablib](https://github.com/AlexShkarin/pyLabLib), so
