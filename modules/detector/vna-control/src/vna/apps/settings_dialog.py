@@ -4,7 +4,8 @@ Nothing here talks to hardware: it edits `cfg` in place and calls
 `vna.apply_config()`, so a local analyser and a remote service behave the same.
 
 The forms are GENERATED from the dataclass fields -- one tab per group, a
-checkbox for a bool, a text box otherwise -- so adding a field to config.py
+checkbox for a bool, a drop-down for a fixed-choice
+string (_CHOICES), a text box otherwise -- so adding a field to config.py
 adds it here with no GUI edit. Numbers are text boxes parsed with float(),
 because "5e-8" must work and QDoubleValidator follows the Windows locale
 (suite gotcha #18).
@@ -17,6 +18,8 @@ from dataclasses import fields as dataclass_fields
 from PySide6 import QtWidgets
 
 from ..config import Config, _cast
+from ..field import FIELD_SOURCES
+from ..model import SPARAMS
 
 _TABS = [("sweep", "Sweep"), ("acquisition", "Acquisition"), ("field", "Field"),
          ("sample", "Sample"), ("line", "Line"), ("hardware", "Hardware"),
@@ -41,6 +44,40 @@ _HINTS = {
     "limits": "The envelope every setpoint is clamped to.",
     "ui": "theme: dark or light. Applies the next time the GUI starts.",
 }
+
+
+# Settings that only take one of a FIXED set of values get a drop-down instead
+# of a text box, so a typo ("Light", "s21") cannot reach the config. The lists
+# come from the code that checks the value (the same tuples where the code has
+# one), so they cannot drift apart. (group, field) -> allowed values, spelled
+# EXACTLY as the code expects them.
+_CHOICES = {
+    ("ui", "theme"): ["dark", "light"],
+    ("sweep", "sparam"): list(SPARAMS),
+    ("field", "source"): list(FIELD_SOURCES),
+    ("sample", "geometry"): ["in_plane", "out_of_plane"],   # analyzer.GEOMETRIES
+    ("hardware", "driver"): ["pna", "cmt"],             # backends/__init__.py, --driver
+    ("hardware", "data_format"): ["REAL,64", "ASCII"],   # backends pna.py / cmt.py
+}
+
+
+def _set_combo(box, choices, value) -> None:
+    """Fill `box` with `choices` and select `value`.
+
+    A value that is NOT in the list (an old or hand-edited .ini) is added,
+    marked, rather than silently replaced by the first choice on Apply. Each
+    item carries the real value as its data, so the mark never reaches cfg.
+    blockSignals: a programmatic change is not a user edit (gotcha #13).
+    """
+    value = str(value)
+    box.blockSignals(True)
+    box.clear()
+    for c in choices:
+        box.addItem(c, c)
+    if value not in choices:
+        box.addItem(f"{value}  (not a known value)", value)
+    box.setCurrentIndex(box.findData(value))
+    box.blockSignals(False)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -81,6 +118,9 @@ class SettingsDialog(QtWidgets.QDialog):
             val = getattr(obj, f.name)
             if f.type in ("bool", bool):
                 w = QtWidgets.QCheckBox(); w.setChecked(bool(val))
+            elif (group, f.name) in _CHOICES:
+                w = QtWidgets.QComboBox()
+                _set_combo(w, _CHOICES[(group, f.name)], val)
             else:
                 w = QtWidgets.QLineEdit(f"{val:g}" if isinstance(val, float) else str(val))
             self.w[(group, f.name)] = (w, f.type)
@@ -98,6 +138,8 @@ class SettingsDialog(QtWidgets.QDialog):
             try:
                 if isinstance(w, QtWidgets.QCheckBox):
                     parsed[(group, name)] = w.isChecked()
+                elif isinstance(w, QtWidgets.QComboBox):
+                    parsed[(group, name)] = _cast(str(w.currentData()), typ)
                 else:
                     parsed[(group, name)] = _cast(w.text().strip(), typ)
             except ValueError:
@@ -112,6 +154,8 @@ class SettingsDialog(QtWidgets.QDialog):
             val = getattr(getattr(self.cfg, group), name)
             if isinstance(w, QtWidgets.QCheckBox):
                 w.setChecked(bool(val))
+            elif isinstance(w, QtWidgets.QComboBox):
+                _set_combo(w, _CHOICES[(group, name)], val)
             else:
                 w.setText(f"{val:g}" if isinstance(val, float) else str(val))
 
