@@ -78,17 +78,15 @@ def test_tg_mode_initiates_a_tg_sweep_with_the_level():
 
 def test_real_backend_is_not_kept_waiting_for_the_sweep_time():
     """saGetSweep TAKES the sweep; idling for the estimated sweep time before
-    calling it would double every sweep. With a 100 Hz RBW the estimate is
-    minutes -- the brain must still return at once."""
+    calling it would double every sweep. Over 50 MHz - 4.35 GHz the estimate
+    is ~30 s (as measured on the SA44B) -- the brain must still return at once."""
     cfg = Config()
     cfg.acquisition.continuous = False
-    cfg.sweep.span_Hz = 1e6
     dll = FakeSaApi(bins=101)
     v = SpectrumAnalyzer(SaApiAnalyzer(cfg, dll=dll), cfg)
     v.start(run=False)
     try:
-        v.set_rbw(100.0)
-        v.set_span(1e6)
+        v.set_start_stop(50e6, 4.35e9)
         assert v.status().sweep_time_s > 10.0        # the estimate is long ...
         t0 = time.monotonic()
         v.acquire()
@@ -218,3 +216,83 @@ def test_the_first_deliberate_request_configures():
         assert "saInitiate" in dll.writes() and v.status().configured is True
     finally:
         v.shutdown()
+
+
+# ---- 2026-09-28, first run on a real SA44B (sa_api 3.2.4) ---------------------
+
+def test_overload_is_flagged_from_the_level_when_the_api_stays_silent():
+    """The SA44B never returned saCompressionWarning: a -50 dBm tone against a
+    -60/-70/-80 dBm reference level read 3 dB low (compressed) with status 0.
+    So a trace ABOVE the reference level is reported as an overload too."""
+    b, dll, cfg = _open(bins=11)                   # tone -20 dBm, no API warning
+    cfg.sweep.ref_level_dBm = -40.0
+    b.configure(SweepSettings.from_config(cfg))
+    b.start_sweep()
+    _, meta = b.finish_sweep()
+    assert meta["overload"] is True
+    cfg.sweep.ref_level_dBm = -10.0                # tone below the reference: fine
+    b.configure(SweepSettings.from_config(cfg))
+    b.start_sweep()
+    _, meta = b.finish_sweep()
+    assert meta["overload"] is False
+
+
+def test_the_dll_is_found_in_the_spike_folder_when_not_on_the_path(monkeypatch, tmp_path):
+    """Spike installs sa_api.dll in its own folder, which is not on the PATH."""
+    import ctypes
+    from signalhound.backends import sa_api
+    spike = tmp_path / "Spike" / "sa_api.dll"
+    spike.parent.mkdir()
+    spike.write_bytes(b"")
+    monkeypatch.setattr(sa_api, "DLL_SEARCH", [str(spike)])
+    tried = []
+
+    def fake_cdll(path):
+        tried.append(path)
+        if path != str(spike):
+            raise OSError("not found")
+        return FakeSaApi()
+    monkeypatch.setattr(ctypes, "CDLL", fake_cdll)
+    b = SaApiAnalyzer(Config())                    # dll_path "" = search
+    b.open()
+    assert tried == ["sa_api.dll", str(spike)] and b.device_model() == "SA44B"
+    b.close()
+
+
+def test_sweep_time_follows_the_measured_sa44b():
+    """Measured 2026-09-28: 50 MHz-4.35 GHz took 32 s (estimate said 4.3 s);
+    RBW 10 Hz over 100 kHz took 0.68 s and RBW 1 kHz over 1 MHz 0.06 s (the
+    estimate said 600 s and 10 s). Within a factor ~2 is the goal."""
+    cfg = Config()
+    b = SaApiAnalyzer(cfg, dll=FakeSaApi())
+
+    def t(center, span, rbw, points):
+        s = SweepSettings.from_config(cfg)
+        s = SweepSettings(**{**s.__dict__, "center_Hz": center, "span_Hz": span,
+                             "rbw_Hz": rbw, "vbw_Hz": rbw, "tg_on": False})
+        return b.sweep_time_s(s, points)
+    for (center, span, rbw, pts), real in (((2.2e9, 4.3e9, 100e3, 150500), 32.0),
+                                           ((2.2e9, 4.3e9, 250e3, 21500), 31.9),
+                                           ((1e9, 20e6, 100e3, 702), 0.16),
+                                           ((1e9, 1e6, 1e3, 4217), 0.06),
+                                           ((1e9, 100e3, 10.0, 53929), 0.68),
+                                           ((1e9, 100e3, 100.0, 3372), 0.12)):
+        est = t(center, span, rbw, pts)
+        assert real / 2.5 <= est <= real * 2.5, (span, rbw, est, real)
+
+
+def test_device_not_found_says_who_may_hold_it():
+    """Found 2026-09-28: a second service with serial 0 cannot open a box the
+    first one holds and saw only "Device not found (-8)" -- it never reaches
+    hwlock. The message now says what usually causes it."""
+    cfg = Config()
+    dll = FakeSaApi(fail={"saOpenDevice": -8})
+    with pytest.raises(SaApiError, match="another .*service.* or Spike") as e:
+        SaApiAnalyzer(cfg, dll=dll).open()
+    assert "fake error -8" in str(e.value)                       # the API's own words kept
+    dll = FakeSaApi(fail={"saConfigSweepCoupling": -8})
+    b = SaApiAnalyzer(cfg, dll=dll)
+    b.open()
+    with pytest.raises(SaApiError) as e:                            # only on OPEN
+        b.configure(SweepSettings.from_config(cfg))
+    assert "Spike" not in str(e.value)
