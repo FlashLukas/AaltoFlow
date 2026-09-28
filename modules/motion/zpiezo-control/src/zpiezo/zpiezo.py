@@ -6,6 +6,7 @@ the backend, and reports a status snapshot.  No control loop.
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import asdict, dataclass
 
@@ -71,36 +72,56 @@ class ZPiezo:
                 self.set_voltage(self.cfg.limits.v_min)   # park low = safe
             except Exception:
                 pass
-        try:
-            self.backend.close()
-        except Exception:
-            pass
-        self._connected = False
+        with self._lock:                  # never close under a running read
+            try:
+                self.backend.close()
+            except Exception:
+                pass
+            self._connected = False
 
     # -- control ----------------------------------------------------------- #
     def set_voltage(self, volts: float) -> float:
         v = float(volts)
+        # NaN is not a voltage, and it slips through the clamp below:
+        # min(max(nan, lo), hi) is nan.  (inf is fine -- it clamps.)
+        if math.isnan(v):
+            raise ValueError("voltage is not a number (nan)")
         lim = self.cfg.limits
         if lim.enforce:
             clamped = min(max(v, lim.v_min), lim.v_max)
             if clamped != v:
                 self._emit("warn", f"voltage clamped {v:.3f} -> {clamped:.3f} V")
             v = clamped
-        self._target = v
-        self.backend.set_voltage(v)
+        # EVERY backend call goes through self._lock (deep cleaning 2026-09-28).
+        # Two threads use this brain at once: the publisher reads the voltage
+        # 8x a second for status, the commander sets it on request.  On the
+        # KCube each pylablib call is several send/receive pairs on ONE USB
+        # serial link, and pylablib has no lock of its own -- two calls at the
+        # same time can each receive the other's reply.
+        with self._lock:
+            self._target = v
+            self.backend.set_voltage(v)
         return v
 
     def read_voltage(self) -> float:
-        return float(self.backend.read_voltage())
+        with self._lock:
+            return float(self.backend.read_voltage())
 
     def status(self) -> ZStatus:
-        try:
-            v = self.backend.read_voltage()
-            lo, hi = self.backend.range()
-        except Exception:
-            v, lo, hi = self._target, self.cfg.limits.v_min, self.cfg.limits.v_max
-        return ZStatus(connected=self._connected, voltage=v, target=self._target,
-                       v_min=lo, v_max=hi)
+        with self._lock:
+            try:
+                v = float(self.backend.read_voltage())
+            except Exception:
+                v = self._target
+            target, connected = self._target, self._connected
+        # The envelope reported is the one the brain CLAMPS to: cfg.limits.
+        # It used to come from backend.range(), which is a copy taken when the
+        # backend was built -- after a set_config narrowed the limits, status
+        # and `info` still announced the old ones (and the camera sizes its
+        # autofocus sweep from `info`).
+        lim = self.cfg.limits
+        return ZStatus(connected=connected, voltage=v, target=target,
+                       v_min=float(lim.v_min), v_max=float(lim.v_max))
 
     # -- config ------------------------------------------------------------ #
     def get_config(self):
@@ -119,15 +140,16 @@ class ZPiezo:
             self.set_voltage(self._target)
 
     def set_config(self, data: dict) -> None:
-        groups = {"limits": self.cfg.limits, "hardware": self.cfg.hardware}
-        for gname, values in (data or {}).items():
-            obj = groups.get(gname)
-            if obj is None or not isinstance(values, dict):
-                continue
-            for k, val in values.items():
-                if hasattr(obj, k):
-                    setattr(obj, k, val)
-        self.apply_config()
+        """Apply a (partial) config dict -- all of it, or nothing.
+
+        Values are cast to each field's type and the resulting envelope is
+        checked BEFORE anything changes (``config.apply_config_dict``); a bad
+        request raises and leaves both the config and the focus untouched.
+        """
+        from .config import apply_config_dict
+        with self._lock:
+            apply_config_dict(self.cfg, data)
+            self.apply_config()
 
     def _emit(self, level: str, msg: str) -> None:
         try:

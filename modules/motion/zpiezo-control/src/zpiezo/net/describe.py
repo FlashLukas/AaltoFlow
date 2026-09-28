@@ -103,7 +103,14 @@ def build_manifest(brain) -> dict:
            step=brain.cfg.hardware.step_v, decimals=3, plottable=True,
            read_path=["voltage"],
            set={"verb": "set_voltage", "arg": "volts"},
-           settle={"policy": "echoes", "key": "voltage", "tol": 1e-3},
+           # tol = 10 mV, not 1 mV (deep cleaning 2026-09-28).  The KPZ101
+           # holds its output as 0..32767 of the voltage range, and pylablib
+           # TRUNCATES when it converts volts -> device units, so the read-back
+           # sits up to one step BELOW what was sent: 2.3 mV on the 75 V range,
+           # 4.6 mV on 150 V.  With 1 mV a scan waiting for the echo timed out
+           # on most points.  10 mV is ~3 nm of a 20 um / 75 V stack.
+           # VERIFY on the KCube: read-back error after set_output_voltage.
+           settle={"policy": "echoes", "key": "voltage", "tol": 0.01},
            help="Piezo drive voltage. There is no control loop: it holds what "
                 "it is told. Out-of-range requests are CLAMPED, not refused."),
 

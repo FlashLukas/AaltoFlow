@@ -19,7 +19,10 @@ DEFAULT_CMD_PORT = 5565
 def build_request(line: str) -> dict:
     parts = line.split()
     verb, a = parts[0], parts[1:]
-    if verb in ("status", "info", "get_config", "read_voltage"):
+    # every no-argument verb, including the universal `describe` and `shutdown`
+    # (they used to fall through to json.loads and fail as "parse error")
+    if verb in ("status", "info", "get_config", "read_voltage", "describe",
+                "shutdown"):
         return {"cmd": verb}
     if verb == "set_voltage":
         return {"cmd": "set_voltage", "volts": float(a[0])}

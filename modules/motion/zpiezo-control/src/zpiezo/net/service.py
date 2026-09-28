@@ -35,12 +35,36 @@ class ZPiezoService:
         self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
+        # Bind BOTH ports first, here in the calling thread, and only then open
+        # the KCube (deep cleaning 2026-09-28).  The binds used to happen inside
+        # the two threads: a port already in use killed the thread with an
+        # exception nobody saw, and the service ran on -- deaf, but holding the
+        # KCube (and its hwlock).  Now a clash is a RuntimeError before any
+        # hardware is touched; run_service.py turns it into one line + exit 2.
+        # (Creating a ZeroMQ socket in one thread and handing it to another is
+        # allowed; starting the thread is the memory barrier ZeroMQ asks for.)
+        pub = self._ctx.socket(zmq.PUB)
+        rep = self._ctx.socket(zmq.REP)
+        try:
+            pub.bind(f"tcp://{self.host}:{self.pub_port}")
+            rep.bind(f"tcp://{self.host}:{self.cmd_port}")
+        except zmq.ZMQError as exc:
+            pub.close(0)
+            rep.close(0)
+            raise RuntimeError(
+                f"cannot listen on ports {self.cmd_port}/{self.pub_port} ({exc}); "
+                f"is another service already using them?") from exc
         self.brain._on_event = lambda level, msg: self._events.put({"level": level, "msg": msg})
-        self.brain.start()
+        try:
+            self.brain.start()
+        except BaseException:
+            pub.close(0)
+            rep.close(0)
+            raise
         self._stop.clear()
         self._threads = [
-            threading.Thread(target=self._publisher, name="z-pub", daemon=True),
-            threading.Thread(target=self._commander, name="z-cmd", daemon=True),
+            threading.Thread(target=self._publisher, args=(pub,), name="z-pub", daemon=True),
+            threading.Thread(target=self._commander, args=(rep,), name="z-cmd", daemon=True),
         ]
         for t in self._threads:
             t.start()
@@ -89,9 +113,7 @@ class ZPiezoService:
             self._rev_at = now
         return self._rev
 
-    def _publisher(self) -> None:
-        sock = self._ctx.socket(zmq.PUB)
-        sock.bind(f"tcp://{self.host}:{self.pub_port}")
+    def _publisher(self, sock) -> None:
         period = 1.0 / self.status_hz
         nxt = time.monotonic()
         try:
@@ -112,9 +134,7 @@ class ZPiezoService:
         finally:
             sock.close(0)
 
-    def _commander(self) -> None:
-        sock = self._ctx.socket(zmq.REP)
-        sock.bind(f"tcp://{self.host}:{self.cmd_port}")
+    def _commander(self, sock) -> None:
         poller = zmq.Poller()
         poller.register(sock, zmq.POLLIN)
         try:
@@ -152,14 +172,19 @@ class ZPiezoService:
             self._stop.set()
             return {"ok": True, "stopping": True}
         if cmd == "info":
-            lo, hi = b.backend.range()
+            # The LIVE envelope (cfg.limits), not backend.range(): that is a copy
+            # taken at build time and went stale after a set_config.  The camera
+            # sizes its autofocus sweep from these two numbers.
+            lim = b.cfg.limits
             return {"ok": True, "info": {"idn": b.backend.idn(),
-                                         "limits": {"v_min": lo, "v_max": hi}}}
+                                         "limits": {"v_min": float(lim.v_min),
+                                                    "v_max": float(lim.v_max)}}}
         if cmd == "get_config":
             return {"ok": True, "config": P.config_to_dict(b.cfg)}
         if cmd == "set_config":
-            P.apply_config_dict(b.cfg, req.get("config", {}))
-            b.apply_config()
+            # brain.set_config validates first (all or nothing) and raises on a
+            # bad envelope -> the commander turns that into {"ok": false}.
+            b.set_config(req.get("config", {}))
             return {"ok": True}
         if cmd == "set_voltage":
             return {"ok": True, "voltage": b.set_voltage(req["volts"])}

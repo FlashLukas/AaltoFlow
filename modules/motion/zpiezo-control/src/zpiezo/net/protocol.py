@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..config import Config
+from ..config import apply_config_dict as _apply_config_dict
 from ..zpiezo import ZStatus
 
 DEFAULT_HOST = "127.0.0.1"
@@ -26,12 +27,6 @@ def config_to_dict(cfg: Config) -> dict:
     return {"limits": asdict(cfg.limits), "hardware": asdict(cfg.hardware)}
 
 
-def apply_config_dict(cfg: Config, data: dict) -> None:
-    groups = {"limits": cfg.limits, "hardware": cfg.hardware}
-    for gname, values in (data or {}).items():
-        obj = groups.get(gname)
-        if obj is None or not isinstance(values, dict):
-            continue
-        for k, val in values.items():
-            if hasattr(obj, k):
-                setattr(obj, k, val)
+# ONE implementation (cast + envelope check, all or nothing) lives in config.py;
+# re-exported here because clients of the old layout import it from protocol.
+apply_config_dict = _apply_config_dict
