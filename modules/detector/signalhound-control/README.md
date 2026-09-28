@@ -159,12 +159,14 @@ The echo is stored AFTER the hardware call (gotcha #40), and a TG acquisition's
 result, `tg_sample_id` and `tg_acquiring = false` appear in ONE critical
 section (gotcha #28) -- after the SA and the CW have been restored.
 
-### `tg_cw` {on: bool, freq_hz?: float, level_dbm?: float}
+### `tg_cw` {on?: bool, freq_hz?: float, level_dbm?: float}
 
 -> `{"ok": true, "tg_cw": {"on", "freq_hz", "level_dbm"}, "deferred": bool}`
 
 * `on: true` = CW at `freq_hz` / `level_dbm`; `on: false` = **park** (the TG
   has no off); the reply's freq/level are then the CW kept for the next "on".
+* A missing `on` KEEPS on/off as it is: a retune while parked stays parked and
+  is remembered for the next "on"; while on, it retunes the CW.
 * A missing `freq_hz` / `level_dbm` KEEPS the one in force. When there is none
   (still `unknown` after start) the **park** value is used -- so ANY accepted
   call leaves `tg_mode` known (`cw` or `parked`).

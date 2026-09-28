@@ -151,6 +151,22 @@ def test_after_unknown_any_accepted_call_makes_the_state_known(sa):
     assert r["level_dbm"] == PARK[1] and sa.status().tg_mode == "cw"
 
 
+def test_a_frequency_or_level_alone_keeps_on_off_as_it_is(sa):
+    """Found by the live test of the three processes (2026-09-28): shsg sends
+    a frequency change WITHOUT `on` while its RF is off. That must not switch
+    the TG on, and must be kept for the next "on" -- not refused."""
+    sa.tg_cw(False)                                   # parked
+    r = sa.tg_cw(None, freq_hz=1e9)
+    assert r["on"] is False and sa.status().tg_mode == "parked"
+    assert sa.sim.tg_cw == PARK                       # still physically parked
+    sa.tg_cw(None, level_dbm=-20.0)
+    on = sa.tg_cw(True)
+    assert (on["freq_hz"], on["level_dbm"]) == (1e9, -20.0)
+    assert sa.sim.tg_cw == (1e9, -20.0)
+    sa.tg_cw(None, freq_hz=1.1e9)                     # while ON: retunes, stays on
+    assert sa.status().tg_mode == "cw" and sa.sim.tg_cw == (1.1e9, -20.0)
+
+
 def test_off_after_unknown_parks(sa):
     sa.tg_cw(False)
     assert sa.status().tg_mode == "parked" and sa.sim.tg_cw == PARK
@@ -712,7 +728,8 @@ def test_the_contract_over_the_wire(wire):
     assert r["tg_cw"]["on"] is False and _wait(cli, lambda s: s["tg_mode"] == "parked")
     r = cli._cmd({"cmd": "tg_cw", "on": True, "freq_hz": 9e9})
     assert r["ok"] is False and "4.4 GHz" in r["error"]
-    assert cli._cmd({"cmd": "tg_cw"})["ok"] is False                           # no `on`
+    r = cli._cmd({"cmd": "tg_cw", "freq_hz": 1.3e9})                           # no `on`: keep off
+    assert r["ok"] is True and r["tg_cw"]["on"] is False and r["tg_cw"]["freq_hz"] == 1.3e9
 
     r = cli._cmd({"cmd": "tg_sweep_acquire", "start_hz": 0.9e9, "stop_hz": 1.1e9,
                   "averages": 2, "points": 2000})

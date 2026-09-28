@@ -192,7 +192,9 @@ class SignalhoundService:
             # TG, out of range, busy) is not a malformed request: its reason
             # goes back as the error, without a "bad request" prefix.
             elif cmd in ("tg_cw", "tg_sweep_acquire", "get_tg_trace"):
-                on = _bool(msg["on"]) if cmd == "tg_cw" else None
+                # `on` is optional: a frequency / level change alone keeps the
+                # TG on or parked as it is (shsg retunes while its RF is off)
+                on = (_bool(msg["on"]) if cmd == "tg_cw" and "on" in msg else None)
                 try:
                     if cmd == "tg_cw":
                         out = v.tg_cw(on, _opt(msg, "freq_hz"), _opt(msg, "level_dbm"))

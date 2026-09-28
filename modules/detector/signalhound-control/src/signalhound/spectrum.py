@@ -587,7 +587,7 @@ class SpectrumAnalyzer:
 
     # ---- the tracking generator: the contract with shsg / shsna --------------------
 
-    def tg_cw(self, on, freq_hz=None, level_dbm=None) -> dict:
+    def tg_cw(self, on=None, freq_hz=None, level_dbm=None) -> dict:
         """The TG as a CW source (for shsg). Returns {on, freq_hz, level_dbm,
         deferred}: the state now APPLIED -- the same values status then shows
         (the echo to settle on) -- or, with deferred True, the state that will
@@ -606,7 +606,6 @@ class SpectrumAnalyzer:
 
         Refused (ValueError) with no TG or out of range (the TG44A: 10 Hz -
         4.4 GHz, -30 ... -10 dBm)."""
-        on = bool(on)
         if not self._connected:
             raise ValueError("not connected")
         if not self._tg:
@@ -620,6 +619,9 @@ class SpectrumAnalyzer:
                 cur = dict(self._tg_cw)
         f = cur["freq_hz"] if freq_hz is None else _finite(freq_hz, "TG frequency")
         lvl = cur["level_dbm"] if level_dbm is None else _finite(level_dbm, "TG level")
+        # on=None: keep on/off as it is (a retune while parked stays parked and
+        # is remembered for the next "on"). After "unknown" that means parked.
+        on = bool(cur.get("on", False)) if on is None else bool(on)
         if not math.isfinite(f):
             f = float(hw.tg_park_hz)            # nothing to keep yet: the park value
         if not math.isfinite(lvl):
