@@ -1,6 +1,6 @@
 [project]
 name = "suite-common"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "AaltoFlow suite: module discovery (module.toml) and this PC's launcher settings, shared by mission-control and scan-core"
 requires-python = ">=3.11"

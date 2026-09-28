@@ -1,6 +1,6 @@
 [project]
 name = "ccs200-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Thorlabs CCS200/M compact CCD spectrometer (or a simulator): spectra, dark subtraction, peak analysis"
 requires-python = ">=3.11"

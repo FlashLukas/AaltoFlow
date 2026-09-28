@@ -1,6 +1,6 @@
 [project]
 name = "gsp818-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Spectrum analyser -- GW Instek GSP-818 with tracking generator (or a simulator): spectrum in dBm, thru-normalised transmission"
 requires-python = ">=3.11"

@@ -1,6 +1,6 @@
 [project]
 name = "camera-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Vision brain + coordinator: camera spot/pattern tracking, stabilisation and autofocus for the TRMOKE microscope"
 readme = "README.md"

@@ -1,6 +1,6 @@
 [project]
 name = "zpiezo-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for a single-axis Z focus piezo (Thorlabs KCube)"
 readme = "README.md"

@@ -1,6 +1,6 @@
 [project]
 name = "ls455-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Lake Shore 455 DSP gaussmeter (single-axis Hall probe) over GPIB or RS-232"
 requires-python = ">=3.11"

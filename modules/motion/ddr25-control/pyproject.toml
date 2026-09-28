@@ -1,6 +1,6 @@
 [project]
 name = "ddr25-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for a Thorlabs DDR25/M direct-drive rotation stage on a K-Cube brushless controller"
 readme = "README.md"

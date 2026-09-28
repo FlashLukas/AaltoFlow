@@ -1,6 +1,6 @@
 [project]
 name = "sr7230-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Signal Recovery (Ametek) 7230 DSP lock-in amplifier: control service, GUI and simulator"
 requires-python = ">=3.11"

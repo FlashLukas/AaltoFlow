@@ -1,6 +1,6 @@
 [project]
 name = "windfreak-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Windfreak SynthHD PRO v2 two-channel RF synthesizer control (USB serial), an AaltoFlow module"
 requires-python = ">=3.11"

@@ -1,6 +1,6 @@
 [project]
 name = "pm400-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Thorlabs PM400 optical power / energy meter console with swappable heads (TLPMX driver via ctypes)"
 requires-python = ">=3.11"

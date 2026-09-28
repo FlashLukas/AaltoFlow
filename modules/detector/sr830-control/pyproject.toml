@@ -1,6 +1,6 @@
 [project]
 name = "sr830-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Stanford Research SR830 DSP lock-in amplifier (GPIB): one demodulator, four aux inputs, sine output"
 requires-python = ">=3.11"

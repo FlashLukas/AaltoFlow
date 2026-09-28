@@ -1,6 +1,6 @@
 [project]
 name = "cs260-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Newport (Oriel) Cornerstone 260 1/4 m monochromator over GPIB: wavelength, grating, shutter, filter wheel, output port -- or a simulator"
 requires-python = ">=3.11"

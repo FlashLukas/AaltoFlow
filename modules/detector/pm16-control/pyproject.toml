@@ -1,6 +1,6 @@
 [project]
 name = "pm16-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Thorlabs PM16 USB optical power meter (TLPMX driver via ctypes), sibling to smb-control"
 requires-python = ">=3.11"

@@ -1,6 +1,6 @@
 [project]
 name = "smaract-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for a SmarAct CLL42 linear positioner on an SCU controller"
 readme = "README.md"

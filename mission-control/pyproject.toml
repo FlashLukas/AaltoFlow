@@ -1,6 +1,6 @@
 [project]
 name = "mission-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "AaltoFlow launcher: discovers every module, starts services, opens GUIs"
 requires-python = ">=3.11"

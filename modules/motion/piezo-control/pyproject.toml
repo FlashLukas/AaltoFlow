@@ -1,6 +1,6 @@
 [project]
 name = "piezo-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for a 2D piezo stage (piezosystem jena d-Drive + PXY-200)"
 readme = "README.md"

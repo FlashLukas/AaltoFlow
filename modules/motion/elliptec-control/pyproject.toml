@@ -1,6 +1,6 @@
 [project]
 name = "elliptec-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for Thorlabs Elliptec ELL14 rotation mounts (ELL14K kit), one axis per bus address"
 readme = "README.md"

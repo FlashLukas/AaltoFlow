@@ -1,6 +1,6 @@
 [project]
 name = "k2450-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Keithley 2450 SourceMeter (SMU) control over VISA/SCPI, with a simulator"
 requires-python = ">=3.11"

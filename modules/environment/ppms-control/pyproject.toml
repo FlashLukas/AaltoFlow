@@ -1,6 +1,6 @@
 [project]
 name = "ppms-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Quantum Design DynaCool (PPMS family): magnetic field, temperature and chamber through MultiVu, or a simulator"
 requires-python = ">=3.11"

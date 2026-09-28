@@ -1,6 +1,6 @@
 [project]
 name = "smb-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Rohde & Schwarz SMB100A RF signal generator control (GPIB/SCPI), sibling to clMag-control"
 requires-python = ">=3.11"

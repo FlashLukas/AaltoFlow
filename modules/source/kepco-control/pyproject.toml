@@ -1,6 +1,6 @@
 [project]
 name = "kepco-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Kepco BOP 20-10 bipolar operational power supply control (GPIB/SCPI), simulation first"
 requires-python = ">=3.11"

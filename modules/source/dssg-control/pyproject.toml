@@ -1,6 +1,6 @@
 [project]
 name = "dssg-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "DS Instruments SG12000L USB/Ethernet microwave signal generator control (SCPI over virtual COM port or TCP)"
 requires-python = ">=3.11"

@@ -1,6 +1,6 @@
 [project]
 name = "dsamp-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "DS Instruments GB/PA smart variable-gain RF amplifier (USB virtual COM port, SCPI)"
 requires-python = ">=3.11"

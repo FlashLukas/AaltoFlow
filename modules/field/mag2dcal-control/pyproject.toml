@@ -1,6 +1,6 @@
 [project]
 name = "mag2dcal-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "2-axis vector electromagnet on an NI DAQ, clMag style: measured B(V) calibration per hysteresis leg, one-way PI trim, frozen output, long-term stabilizer"
 requires-python = ">=3.11"

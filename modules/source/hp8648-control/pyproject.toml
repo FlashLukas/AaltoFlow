@@ -1,6 +1,6 @@
 [project]
 name = "hp8648-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "HP / Agilent 8648D RF signal generator control (GPIB/SCPI), an AaltoFlow module"
 requires-python = ">=3.11"

@@ -1,6 +1,6 @@
 [project]
 name = "agilis-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for a Newport Agilis 2-axis piezo stick-slip stage on an AG-UC2 controller"
 readme = "README.md"

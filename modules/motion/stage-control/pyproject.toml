@@ -1,6 +1,6 @@
 [project]
 name = "stage-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Control module for a 3D coarse stage (Thorlabs BSC203, 3 stepper motors)"
 readme = "README.md"

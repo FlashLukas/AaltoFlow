@@ -1,6 +1,6 @@
 [project]
 name = "signalhound-control"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 description = "Signal Hound SA44B / SA124B spectrum analyser with USB-TG44A tracking generator (or a simulator): spectra and thru-normalised transmission"
 requires-python = ">=3.11"
