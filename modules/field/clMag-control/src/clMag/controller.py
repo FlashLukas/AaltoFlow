@@ -32,6 +32,7 @@ setpoint to the supply, so current physically never jumps.
 
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -67,6 +68,28 @@ class Status:
     locked: bool
     aux: Optional[dict] = None    # {"ao": {...}, "ai": {...}, "do": {...}}
     output_on: bool = False       # the supply's output switch, as read back
+    # How many queued commands the control thread has FINISHED taking up
+    # (deep cleaning 2026-09-28). Every command call returns its own number;
+    # "cmd_done >= my number" is the only way a client can tell that a status
+    # frame already reflects its command -- the state or the setpoint alone
+    # can look identical before and after (gotcha #2).
+    cmd_done: int = 0
+
+
+def _finite(name: str, value) -> float:
+    """Refuse NaN / inf before it reaches the control loop.
+
+    Why this matters: every safety clamp here is a comparison (`amps > lim`),
+    and EVERY comparison with NaN is False -- so a NaN walked straight through
+    the +-3 A clamp and the ramp then climbed 0.05 A per tick for ever; a NaN
+    demag amplitude made the step-list loop never end; a NaN AO voltage came
+    out as +10 V. JSON happily carries NaN, so this was reachable over the
+    wire. Raising here (in the CALLER's thread) makes the service answer
+    ok:false instead."""
+    v = float(value)
+    if not math.isfinite(v):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return v
 
 
 class Controller:
@@ -92,6 +115,15 @@ class Controller:
 
         self._state = State.IDLE
         self._commands: "queue.Queue[Tuple]" = queue.Queue()
+        # command numbering (see Status.cmd_done): _cmd_seq is handed out under
+        # a lock in the callers' threads; _cmd_done is advanced only by the
+        # control thread, after it has taken a command up.
+        self._cmd_seq = 0
+        self._cmd_seq_lock = threading.Lock()
+        self._cmd_done = 0
+        # throttle for repeated loop errors (a dead GPIB would fail every tick)
+        self._last_err = ("", 0.0)
+        self._acq_errors_seen = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -182,21 +214,41 @@ class Controller:
                 self._csv = None
         self._event("info", "controller shut down (output off)")
 
-    def set_current(self, amps: float) -> None:
-        self._commands.put(("set_current", amps))
+    # Each command returns its sequence number (see Status.cmd_done). Values
+    # are checked HERE, in the caller's thread, so a bad value is refused with
+    # a ValueError instead of reaching (and possibly killing) the control loop.
 
-    def set_field(self, field_mT: float, use_pid: bool = True) -> None:
-        self._commands.put(("set_field", field_mT, use_pid))
+    def _enqueue(self, *cmd) -> int:
+        with self._cmd_seq_lock:
+            self._cmd_seq += 1
+            seq = self._cmd_seq
+            self._commands.put((seq,) + cmd)
+        return seq
 
-    def demag(self, amplitude_A: float) -> None:
-        self._commands.put(("demag", amplitude_A))
+    def set_current(self, amps: float) -> int:
+        return self._enqueue("set_current", _finite("current_A", amps))
+
+    def set_field(self, field_mT: float, use_pid: bool = True) -> int:
+        return self._enqueue("set_field", _finite("field_mT", field_mT), use_pid)
+
+    def demag(self, amplitude_A: float) -> int:
+        return self._enqueue("demag", _finite("amplitude_A", amplitude_A))
 
     def calibrate(self, n_per_leg: int = 50, dwell_s: float = 0.5,
-                  on_done: Optional[Callable[[FieldCalibration], None]] = None) -> None:
-        self._commands.put(("calibrate", n_per_leg, dwell_s, on_done))
+                  on_done: Optional[Callable[[FieldCalibration], None]] = None) -> int:
+        # The sweep grid divides by (n_per_leg - 1): 1 point was a
+        # ZeroDivisionError and 0 an IndexError -- both on the control thread,
+        # which they killed.
+        n_per_leg = int(n_per_leg)
+        if n_per_leg < 2:
+            raise ValueError(f"n_per_leg must be >= 2, got {n_per_leg}")
+        dwell_s = _finite("dwell_s", dwell_s)
+        if dwell_s < 0:
+            raise ValueError(f"dwell_s must be >= 0, got {dwell_s}")
+        return self._enqueue("calibrate", n_per_leg, dwell_s, on_done)
 
-    def set_lock(self, locked: bool) -> None:
-        self._commands.put(("lock", locked))
+    def set_lock(self, locked: bool) -> int:
+        return self._enqueue("lock", locked)
 
     def apply_config(self) -> None:
         """Re-read tunables that were baked into derived objects at construction.
@@ -224,6 +276,10 @@ class Controller:
             self._event("info", f"calibration set ({len(cal.currents_A)} points)")
 
     def status(self) -> Status:
+        # Read cmd_done FIRST: the control thread changes the state and only
+        # THEN advances cmd_done, so a count read before the state can never
+        # be newer than the state published with it.
+        cmd_done = self._cmd_done
         _, field = self.acq.latest.get()
         return Status(
             state=self._state.value,
@@ -234,6 +290,7 @@ class Controller:
             locked=self.locked,
             aux=self.aux_snapshot(),
             output_on=self._output_on,
+            cmd_done=cmd_done,
         )
 
     # ---- AUX I/O (general-purpose DAQ, independent of the field loop) -----
@@ -241,6 +298,7 @@ class Controller:
     def aux_set_ao(self, channel: str, volts: float) -> None:
         if self.aux is None:
             return
+        volts = _finite("volts", volts)      # NaN used to come out as +v_max
         lo, hi = self.cfg.aux.v_min, self.cfg.aux.v_max
         clamped = max(lo, min(hi, volts))
         with self._aux_lock:
@@ -325,18 +383,27 @@ class Controller:
                 cmd = self._commands.get_nowait()
             except queue.Empty:
                 return
-            kind = cmd[0]
-            if kind == "lock":
-                self.locked = cmd[1]
-                self._event("info", f"external lock {'engaged' if cmd[1] else 'released'}")
-            elif kind == "set_current":
-                self._begin_set_current(cmd[1])
-            elif kind == "set_field":
-                self._begin_set_field(cmd[1], cmd[2], now)
-            elif kind == "demag":
-                self._begin_demag(cmd[1])
-            elif kind == "calibrate":
-                self._begin_calibrate(cmd[1], cmd[2], cmd[3], now)
+            seq, cmd = cmd[0], cmd[1:]
+            try:
+                self._do_command(cmd, now)
+            finally:
+                # advanced even if the command was refused or raised: "done"
+                # means "taken up", and a waiting client must not hang on it.
+                self._cmd_done = seq
+
+    def _do_command(self, cmd, now: float) -> None:
+        kind = cmd[0]
+        if kind == "lock":
+            self.locked = cmd[1]
+            self._event("info", f"external lock {'engaged' if cmd[1] else 'released'}")
+        elif kind == "set_current":
+            self._begin_set_current(cmd[1])
+        elif kind == "set_field":
+            self._begin_set_field(cmd[1], cmd[2], now)
+        elif kind == "demag":
+            self._begin_demag(cmd[1])
+        elif kind == "calibrate":
+            self._begin_calibrate(cmd[1], cmd[2], cmd[3], now)
 
     # ----------------------------------------------------- command beginnings
 
@@ -355,6 +422,29 @@ class Controller:
     def _begin_set_field(self, field_mT: float, use_pid: bool, now: float) -> None:
         if not self._require_calibration():
             return
+        # A target outside the calibrated range cannot be reached (the range
+        # ends at +-current_max), so it is refused like "no calibration": no
+        # adopted setpoint, one red event. It used to be accepted, jump to the
+        # full 3 A and sit in SEEK for ever. describe advertises exactly this
+        # range as the field's min/max.
+        lo, hi = self.calibration.range_mT
+        if not (lo <= field_mT <= hi):
+            self._event("error", f"field {field_mT:.3f} mT is outside the calibrated "
+                                 f"range {lo:.3f}..{hi:.3f} mT; refused")
+            return
+        # Asking again for the field we are ALREADY stable at (and still within
+        # tolerance of) is a no-op. It used to start a whole new seek: jump
+        # field_step BELOW the target and climb back. Meanwhile a client still
+        # saw the previous frame -- same setpoint, field_stable True -- and read
+        # its detector while the magnet was being pulled 2 mT away. That is
+        # gotcha #2 in a form the setpoint-adoption guard cannot catch, because
+        # the old and the new setpoint are the same number.
+        if (use_pid and self._state == State.STABLE and self._field_stable
+                and self._setpoint_field == field_mT):
+            _, measured = self.acq.latest.get()
+            if abs(measured - field_mT) <= self.cfg.limits.field_tolerance_mT:
+                self._event("info", f"already stable at {field_mT:.3f} mT")
+                return
         self._take_control()
         self._setpoint_field = field_mT
         self._field_stable = False
@@ -437,25 +527,63 @@ class Controller:
             dt = now - last
             last = now
 
-            self._drain_commands(now)
-            _, field = self.acq.latest.get()
-            self._tick(now, dt, field)
+            # The loop must NEVER die (the same rule as the service's command
+            # loop). A dead control thread used to leave the magnet at whatever
+            # current it had, while every later command was still answered
+            # "ok" by the service and then silently never executed.
+            try:
+                self._iteration(now, dt)
+            except Exception as exc:                     # noqa: BLE001
+                self._on_loop_error(exc, now)
+            time.sleep(max(0.0, self.cfg.ramp.delay_s))
 
-            # command the supply. While the output is frozen (settling on a
-            # field target) we hold EXACTLY the same value so the ramp direction
-            # cannot flip; otherwise we advance the ramp one step toward target.
-            # Before the first command (_driving False) nothing is sent at all:
-            # the supply keeps the state it was found in.
-            if not self._driving:
-                pass
-            elif self._output_frozen:
-                self.kepco.set_current(self._freeze_current)
-            else:
-                self.ramper.step()
-                self.kepco.set_current(self.ramper.setpoint)
-            self._log(now, field)
+    def _iteration(self, now: float, dt: float) -> None:
+        self._drain_commands(now)
+        self._check_acquisition()
+        _, field = self.acq.latest.get()
+        self._tick(now, dt, field)
 
-            time.sleep(self.cfg.ramp.delay_s)
+        # command the supply. While the output is frozen (settling on a
+        # field target) we hold EXACTLY the same value so the ramp direction
+        # cannot flip; otherwise we advance the ramp one step toward target.
+        # Before the first command (_driving False) nothing is sent at all:
+        # the supply keeps the state it was found in.
+        if not self._driving:
+            pass
+        elif self._output_frozen:
+            self.kepco.set_current(self._freeze_current)
+        else:
+            self.ramper.step()
+            self.kepco.set_current(self.ramper.setpoint)
+        self._log(now, field)
+
+    def _on_loop_error(self, exc: Exception, now: float) -> None:
+        """One control tick raised. Stop WHERE WE ARE (no further ramping, no
+        seek, not stable), report it, and keep the loop alive so the next
+        command -- and the shutdown ramp to zero -- still work."""
+        self._state = State.IDLE
+        self._setpoint_field = None
+        self._field_stable = False
+        self._settling = False
+        self._output_frozen = False
+        self.ramper.go_to(self.ramper.setpoint)
+        # A dead instrument fails EVERY tick: report the first failure and then
+        # at most every 2 s, or the event log becomes a 100-lines/s flood.
+        msg = f"control loop error: {type(exc).__name__}: {exc}"
+        last_msg, last_t = self._last_err
+        if msg != last_msg or now - last_t >= 2.0:
+            self._last_err = (msg, now)
+            self._event("error", msg + " -- stopped where it was (IDLE)")
+
+    def _check_acquisition(self) -> None:
+        """Report failed Hall-probe reads. The acquisition thread survives them
+        but has no event channel of its own, and while reads fail the measured
+        field is the LAST GOOD one -- the operator has to be told."""
+        n = getattr(self.acq, "errors", 0)
+        if n != self._acq_errors_seen:
+            self._acq_errors_seen = n
+            self._event("error", f"Hall probe read failed ({n} so far): "
+                                 f"{getattr(self.acq, 'last_error', '')}")
 
     def _tick(self, now: float, dt: float, field: float) -> None:
         st = self._state
@@ -514,11 +642,15 @@ class Controller:
         correction = self.pi.update(error, dt, clamp_sign=self._approach_sign)
         cmd = self._jump_current + correction
         # never command current past the calibration's target estimate (+margin):
-        # this bounds any overshoot regardless of PI gains.
+        # this bounds any overshoot regardless of PI gains. The cap itself is
+        # kept inside +-current_max: near the top of the range est + 0.08 A lies
+        # beyond 3 A, and _clamp_current then reported "over limit" in red on
+        # EVERY 10 ms tick of a seek that could not arrive (100 lines/s).
+        lim = self.cfg.limits.current_max_A
         if self._approach_sign > 0:
-            cmd = min(cmd, self._target_current_est + self._seek_cap_margin_A)
+            cmd = min(cmd, self._target_current_est + self._seek_cap_margin_A, lim)
         else:
-            cmd = max(cmd, self._target_current_est - self._seek_cap_margin_A)
+            cmd = max(cmd, self._target_current_est - self._seek_cap_margin_A, -lim)
         self.ramper.go_to(self._clamp_current(cmd))
 
         if abs(error) <= tol / 2:

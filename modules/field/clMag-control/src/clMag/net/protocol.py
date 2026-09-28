@@ -31,6 +31,7 @@ def status_to_dict(status) -> dict:
         "field_stable": status.field_stable,
         "locked": status.locked,
         "output_on": status.output_on,
+        "cmd_done": status.cmd_done,
         "aux": status.aux,
     }
 

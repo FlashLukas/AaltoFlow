@@ -141,17 +141,22 @@ class ClMagService:
 
     def _dispatch(self, msg: dict) -> dict:
         cmd = msg.get("cmd")
+        # Queued commands answer with their sequence number `seq`; a status
+        # frame whose `cmd_done` >= seq already reflects the command (the one
+        # guard against a stale frame that works for every verb, gotcha #2).
         try:
             if cmd == "set_field":
-                self.ctrl.set_field(float(msg["field_mT"]), bool(msg.get("use_pid", True)))
+                return {"ok": True, "seq": self.ctrl.set_field(
+                    float(msg["field_mT"]), bool(msg.get("use_pid", True)))}
             elif cmd == "set_current":
-                self.ctrl.set_current(float(msg["current_A"]))
+                return {"ok": True, "seq": self.ctrl.set_current(float(msg["current_A"]))}
             elif cmd == "demag":
-                self.ctrl.demag(float(msg["amplitude_A"]))
+                return {"ok": True, "seq": self.ctrl.demag(float(msg["amplitude_A"]))}
             elif cmd == "calibrate":
-                self.ctrl.calibrate(int(msg.get("n_per_leg", 50)), float(msg.get("dwell_s", 0.5)))
+                return {"ok": True, "seq": self.ctrl.calibrate(
+                    int(msg.get("n_per_leg", 50)), float(msg.get("dwell_s", 0.5)))}
             elif cmd == "set_lock":
-                self.ctrl.set_lock(bool(msg["locked"]))
+                return {"ok": True, "seq": self.ctrl.set_lock(bool(msg["locked"]))}
             elif cmd == "set_stabilizer":
                 self.ctrl.stabilizer_enabled = bool(msg["enabled"])
             elif cmd == "status":

@@ -63,6 +63,8 @@ class AcquisitionThread(threading.Thread):
         self._stop = threading.Event()
         self.latest = Latest()
         self.ring = deque(maxlen=ring_size)   # (t, field) for plotting/logging
+        self.errors = 0          # failed probe reads since start
+        self.last_error = ""     # text of the most recent one
 
     def set_profile(self, name: str) -> None:
         assert name in ("fast", "precise")
@@ -79,7 +81,18 @@ class AcquisitionThread(threading.Thread):
     def run(self) -> None:
         while not self._stop.is_set():
             samples, rate = self._current_profile()
-            volts = self._probe.read_voltage(samples, rate)   # blocks ~samples/rate
+            try:
+                volts = self._probe.read_voltage(samples, rate)   # blocks ~samples/rate
+            except Exception as exc:                              # noqa: BLE001
+                # ONE failed DAQ read used to kill this thread for good, and
+                # nothing noticed: `latest` kept the last field for ever, so
+                # the status published a frozen "measured" field and a STABLE
+                # magnet stayed "stable". Now: count it (the controller turns
+                # the count into an error event), wait a moment, try again.
+                self.errors += 1
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self._stop.wait(0.1)
+                continue
             field = self._hall.volts_to_field(volts)
             t = time.monotonic()
             self.latest.set(t, field, samples)

@@ -95,8 +95,12 @@ def build_manifest(ctrl) -> dict:
            group="Field", order=20, min=-imax, max=imax, step=0.05,
            decimals=3, plottable=True, read_path=["current_A"],
            set={"verb": "set_current", "arg": "current_A"},
-           settle={"policy": "state_in", "key": "state",
-                   "states": ["IDLE", "HOLD"]},
+           # "echoes", not "state IDLE": until the control thread dequeues the
+           # command the state is still the OLD IDLE, so a current sweep read
+           # its detector one point behind (gotcha #2; deep cleaning
+           # 2026-09-28). current_A is the ramp setpoint, which snaps EXACTLY
+           # onto the target when the ramp ends, so the echo is exact.
+           settle={"policy": "echoes", "key": "current_A"},
            help="Direct current control, bypassing the field loop."),
 
         _p("locked", "Lock output", "control", "bool", group="Safety", order=30,

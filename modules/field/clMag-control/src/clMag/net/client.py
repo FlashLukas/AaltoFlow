@@ -44,6 +44,15 @@ class RemoteStatus:
         self.output_on = d.get("output_on", False)
         self.aux = d.get("aux") or {}
         self.describe_rev = d.get("describe_rev")   # None from an older service
+        self.cmd_done = d.get("cmd_done")           # None from an older service
+
+
+def _taken_up(st, seq) -> bool:
+    """Has the service taken up command number `seq`? True when there is no
+    number to check (no command sent, or an older service without cmd_done)."""
+    if seq is None or st.cmd_done is None:
+        return True
+    return st.cmd_done >= seq
 
 
 class RemoteCalibration:
@@ -76,6 +85,9 @@ class ClMagClient:
         self._req_lock = threading.Lock()
         self._stop = threading.Event()
         self._stab = True
+        # sequence number of the last command this client queued (the service
+        # answers with `seq`); None until one has been sent / from old services
+        self._last_seq = None
         self.calibration = None
         self.cfg = Config()          # kept in sync with the service via get/set_config
         self._on_event = lambda level, msg: None
@@ -123,19 +135,29 @@ class ClMagClient:
         return RemoteStatus(d)
 
     def set_field(self, field_mT: float, use_pid: bool = True):
-        self._cmd({"cmd": "set_field", "field_mT": field_mT, "use_pid": use_pid})
+        return self._queued({"cmd": "set_field", "field_mT": field_mT, "use_pid": use_pid})
 
     def set_current(self, amps: float):
-        self._cmd({"cmd": "set_current", "current_A": amps})
+        return self._queued({"cmd": "set_current", "current_A": amps})
 
     def demag(self, amplitude_A: float):
-        self._cmd({"cmd": "demag", "amplitude_A": amplitude_A})
+        return self._queued({"cmd": "demag", "amplitude_A": amplitude_A})
 
     def calibrate(self, n_per_leg: int = 50, dwell_s: float = 0.5):
-        self._cmd({"cmd": "calibrate", "n_per_leg": n_per_leg, "dwell_s": dwell_s})
+        return self._queued({"cmd": "calibrate", "n_per_leg": n_per_leg, "dwell_s": dwell_s})
 
     def set_lock(self, locked: bool):
-        self._cmd({"cmd": "set_lock", "locked": locked})
+        return self._queued({"cmd": "set_lock", "locked": locked})
+
+    def _queued(self, d: dict):
+        """Send a command the service QUEUES; remember its sequence number so
+        the wait helpers can tell a frame from before it from one after it.
+        Returns the number, or None (refused, or an older service)."""
+        r = self._cmd(d)
+        seq = r.get("seq") if r.get("ok") else None
+        if seq is not None:
+            self._last_seq = seq
+        return seq
 
     # ---- blocking helpers (what a coordinator needs) ---------------------
     #
@@ -148,7 +170,7 @@ class ClMagClient:
     # helpers are that. scan-core's Settable.set wraps set_field_blocking.
 
     def wait_stable(self, target_mT=None, timeout_s: float = 30.0,
-                    poll_s: float = 0.05):
+                    poll_s: float = 0.05, seq=None):
         """Block until the field has settled; return the final status.
 
         Two conditions must hold, not one. Waiting on `field_stable` alone is a
@@ -162,11 +184,18 @@ class ClMagClient:
         stable flag. Passing `target_mT=None` skips that guard; only do that
         when you know no command is in flight.
 
+        `seq` (the number set_field returned) closes the last gap: a frame
+        from BEFORE the command can carry the same setpoint -- setting the
+        field it already had -- so with `seq` we also require the service to
+        have taken the command up (`cmd_done >= seq`).
+
         Raises TimeoutError rather than returning a flag, because a scan that
         silently records unsettled points produces data that looks fine and is
         wrong.
         """
         def settled(st):
+            if not _taken_up(st, seq):
+                return False
             if target_mT is not None:
                 sp = st.setpoint_field_mT
                 if sp is None or abs(sp - target_mT) > _SETPOINT_EPS_MT:
@@ -186,16 +215,22 @@ class ClMagClient:
         target is outside what the magnet can reach, or the PI needs retuning on
         the real plant -- the service's event stream says which.
         """
-        self.set_field(field_mT, use_pid=use_pid)
-        return self.wait_stable(field_mT, timeout_s=timeout_s, poll_s=poll_s)
+        seq = self.set_field(field_mT, use_pid=use_pid)
+        return self.wait_stable(field_mT, timeout_s=timeout_s, poll_s=poll_s, seq=seq)
 
     def wait_idle(self, timeout_s: float = 60.0, poll_s: float = 0.05):
         """Block until the service is back in IDLE; return the final status.
 
         For the operations with no setpoint to adopt -- `demag`, `calibrate` --
         where "finished" means the state machine came home.
+
+        It waits for the LAST command this client queued to have been taken
+        up first. Without that, a demag sent to an idle service returned at
+        once: the cached frame said IDLE because the control thread had not
+        dequeued the demag yet (deep cleaning 2026-09-28).
         """
-        return self._wait_for(lambda st: st.state == "IDLE",
+        seq = self._last_seq
+        return self._wait_for(lambda st: _taken_up(st, seq) and st.state == "IDLE",
                               timeout_s, poll_s, "IDLE")
 
     def _wait_for(self, predicate, timeout_s: float, poll_s: float, what: str):

@@ -14,6 +14,7 @@ into the GUI thread.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 
@@ -254,7 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         fcard, flay = _card("Field")
         self.field_spin = QtWidgets.QDoubleSpinBox()
         lo, hi = cal.range_mT
-        self.field_spin.setRange(round(lo, 1), round(hi, 1))
+        self.field_spin.setRange(*_inward_range(lo, hi))
         self.field_spin.setDecimals(2); self.field_spin.setSingleStep(1.0)
         self.field_spin.setValue(50.0); self.field_spin.setSuffix("  mT")
         flay.addWidget(self.field_spin)
@@ -403,7 +404,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cal = self.ctrl.get_calibration()
         if cal and getattr(cal, "currents_A", None):
             lo, hi = cal.range_mT
-            self.field_spin.setRange(round(lo, 1), round(hi, 1))
+            self.field_spin.setRange(*_inward_range(lo, hi))
         lim = self.cfg.limits.current_max_A
         self.current_spin.setRange(-lim, lim)
         self.demag_spin.setRange(0.0, lim)
@@ -461,6 +462,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.stop()
         self.ctrl.shutdown()      # ramp to zero + output off
         super().closeEvent(ev)
+
+
+def _inward_range(lo: float, hi: float):
+    """The calibrated field range rounded INWARD to 0.1 mT for the spin box.
+
+    round() could round the top UP (95.28 -> 95.3), offering a field the
+    service refuses as outside the calibration (deep cleaning 2026-09-28)."""
+    return math.ceil(lo * 10.0) / 10.0, math.floor(hi * 10.0) / 10.0
 
 
 def run_app(ctrl, cfg, cal, remote: bool = False) -> int:
