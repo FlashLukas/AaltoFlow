@@ -12,8 +12,9 @@ Sources used (2026-09-27), every call below is written from them:
     saDeviceType: SA44 = 1, SA44B = 2, SA124A = 3, SA124B = 4)
   * "Modes of operation" in the same docs (the order of the configuration
     calls for swept and TG sweep mode) and SA-API-Manual.pdf.
-None of it has been run against the instrument yet: every call whose
-behaviour could not be confirmed on hardware is marked # VERIFY.
+First run on a real SA44B + USB-TG44A on 2026-09-28 (sa_api 3.2.4); what
+was measured is written next to each call below. Still unconfirmed: saStoreTgThru
+(# VERIFY 6).
 
 START-UP (Lukas's rule, 2026-09-27: read, do not change). `open()` only
 opens the device and asks what it is: saGetDeviceType, saGetSerialNumber,
@@ -22,8 +23,14 @@ The analyser keeps no settings of its own (the API holds them in the host
 process and has no getter for them), so there is nothing else to adopt, and
 nothing is configured, initiated or aborted until the brain is asked to sweep.
 saAttachTg PAIRS the TG44A with this handle; it is the only way to learn
-whether a TG is there, and it is not documented to switch the TG output
-(# VERIFY 3). `hardware.attach_tg = False` skips it.
+whether a TG is there, and it does NOT change the TG output (measured
+2026-09-28: a CW tone left on by another program was unchanged after
+saAttachTg, 0.14 s). `hardware.attach_tg = False` skips it.
+
+THE TG44A HAS NO "OFF" IN THIS API (measured 2026-09-28): once it has been set
+(saSetTg, or a TG sweep, which leaves it at the LAST swept frequency) it keeps
+emitting CW -- through saAbort, saCloseDevice and after the program has exited.
+Only another setting, or unplugging it, changes that.
 
 How a sweep goes: `configure` aborts whatever runs, sends every setting,
 `saInitiate`s the mode and asks `saQuerySweepInfo` which bins it will return.
@@ -35,10 +42,12 @@ sweep time first (which would double every sweep).
 The thru reference for transmission is kept by the BRAIN (as the suite keeps
 every reference), not with saStoreTgThru, so the GUI, the console and a scan
 all divide by the same, inspectable trace, and a mismatch (other grid, other
-TG level) is refused rather than silently applied. # VERIFY that a TG sweep
-returns absolute dBm when no thru has been stored in the API; if it does not,
-call saStoreTgThru(TG_THRU_0DB) once in `configure` on a thru and keep the
-brain's reference anyway.
+TG level) is refused rather than silently applied. MEASURED 2026-09-28: a TG
+sweep does NOT return absolute dBm but TRANSMISSION in dB relative to the TG's
+factory-calibrated output: through a 20 dB pad it read -19.4 dB flat over
+900-1100 MHz, the same at TG level -30 and -20 dBm. # VERIFY 6: whether
+saStoreTgThru(TG_THRU_0DB) then moves it to ~0 dB (inconclusive: the test
+reconfigured between storing and sweeping).
 """
 
 from __future__ import annotations
@@ -73,7 +82,8 @@ DEVICE_TYPES = {0: "", 1: "SA44", 2: "SA44B", 3: "SA124A", 4: "SA124B"}
 # 2026-09-28 against the installed sa_api.dll 3.2.4 (Spike): every name is
 # exported, and open / query / configure / sweep work with these types on an
 # SA44B. The header itself is not installed with Spike, so the TG prototypes
-# are only checked by name so far.  # VERIFY the TG calls on the first TG run
+# and the TG calls (saAttachTg, saIsTgAttached, saSetTg, saConfigTgSweep,
+# saStoreTgThru) work with these types on a USB-TG44A.
 _PROTOTYPES = {
     "saGetSerialNumberList": (c_int, [POINTER(c_int), POINTER(c_int)]),
     "saOpenDevice": (c_int, [POINTER(c_int)]),
@@ -294,10 +304,11 @@ class SaApiAnalyzer:
         ok = c_bool(False)
         self._call("saIsTgAttached", self._h, byref(ok))
         self._tg = bool(ok.value)
-        # VERIFY: attaching must leave the TG output as it was (off, unless a
-        # previous program left it emitting) until a TG sweep is initiated.
-        # The API has no explicit "TG output off" call, and start-up does not
-        # try to force one (start-up rule).
+        # Measured 2026-09-28: attaching leaves the TG output as it was. The
+        # API has no "TG output off" call, and start-up does not try to force
+        # one (start-up rule). NOTE: saGetTgFreqAmpl reports only what THIS
+        # handle has set (0 Hz / 0 dBm right after attaching, although the TG
+        # was emitting -30 dBm at 1 GHz) -- it cannot read the TG's real state.
 
     def close(self) -> None:
         """Abort (which also stops a TG sweep, i.e. the TG output), close, and
@@ -317,7 +328,10 @@ class SaApiAnalyzer:
         names = ("saAbort", "saCloseDevice") if abort else ("saCloseDevice",)
         for name in names:
             try:
-                getattr(self._dll, name)(self._h)   # VERIFY: TG output stops on abort
+                # saAbort stops a sweep but NOT the TG output (measured
+                # 2026-09-28): the TG keeps emitting its last CW tone after
+                # close. There is no "off" to send here.
+                getattr(self._dll, name)(self._h)
             except Exception:
                 pass
         self._h = None
@@ -359,23 +373,24 @@ class SaApiAnalyzer:
         # and gives the same grid as 100 kHz -- which is why the brain snaps.
         self._call("saConfigSweepCoupling", h, s.rbw_Hz, s.vbw_Hz, bool(s.reject))
         if s.tg_on:
-            # VERIFY: the API documents no TG output level for TG sweep mode.
-            # saSetTg (frequency, amplitude in dBm) "can only be performed if a
-            # tracking generator is paired ... and is currently NOT configured
-            # and initiated for TG sweeps" (sa_api.h). So it goes HERE: after
-            # saAbort (device idle) and BEFORE saConfigTgSweep, in the hope
-            # that the TG sweep keeps that amplitude. Check with a power meter
-            # on the TG output at two levels.
+            # saSetTg is only allowed while the TG is NOT in TG sweep mode
+            # (sa_api.h), hence here, after saAbort and before saConfigTgSweep.
+            # MEASURED 2026-09-28: the TG sweep IGNORES this level (-30 and
+            # -20 dBm gave identical traces) and returns transmission in dB, not
+            # dBm. As a CW source (spectrum mode) the level IS honoured: -30 ->
+            # -50.04, -20 -> -40.06 dBm through a 20 dB pad, 0.03 s per change.
+            # tg_points: at most 1001 (5000 was cut to 1001 silently; the grid
+            # is read back below). Sweep time ~0.2 s + 1.3 ms/point.
             self._call("saSetTg", h, s.center_Hz, s.tg_level_dBm)
             self._call("saConfigTgSweep", h, int(s.tg_points),
                        bool(s.tg_high_dynamic_range), bool(s.tg_passive_device))
             self._call("saInitiate", h, SA_TG_SWEEP, 0)
         else:
-            # VERIFY: after a TG sweep (or the saSetTg above) the TG44A may
-            # keep emitting a CW tone at its last frequency even in plain
-            # spectrum mode -- the API has no "TG output off" call. Look for
-            # a spur at the old centre with the TG on a spectrum sweep; if it
-            # is there, the fix is to close and reopen the device here.
+            # MEASURED 2026-09-28: after a TG sweep (or saSetTg) the TG44A
+            # keeps emitting CW at its last frequency in plain spectrum mode --
+            # it shows as a spur. Closing and reopening does NOT stop it (the
+            # TG is not reset by the API), so there is no fix in this call;
+            # it is the reason a CW source and spectrum sweeps CAN coexist.
             self._call("saInitiate", h, SA_SWEEPING, 0)
         n, start, step = c_int(0), c_double(0.0), c_double(0.0)
         self._call("saQuerySweepInfo", h, byref(n), byref(start), byref(step))
