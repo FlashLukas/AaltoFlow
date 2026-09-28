@@ -220,6 +220,22 @@ class CameraService:
             return {"ok": True, "on": b.set_tracking(bool(req["on"]))}
         if cmd == "set_stabilize":
             return {"ok": True, "on": b.set_stabilize(bool(req["on"]))}
+        if cmd == "set_laser_target":
+            # place the laser at (x, y) um from the main template; either may
+            # be left out (= keep). Replies at once; wait for laser_settled.
+            t = self.brain.set_laser_target(req.get("x"), req.get("y"))
+            return {"ok": True, "target": t}
+        if cmd == "cancel_laser_target":
+            self.brain.cancel_laser_target()
+            return {"ok": True}
+        if cmd == "stream_start":
+            # a fly scan: record the laser position every frame (stream.py);
+            # the stabiliser and the placement loop stand down meanwhile
+            return {"ok": True, "stream_id": self.brain.stream.start()}
+        if cmd == "stream_read":
+            return {"ok": True, "stream": self.brain.stream.read()}
+        if cmd == "stream_stop":
+            return {"ok": True, "stream": self.brain.stream.stop()}
         if cmd == "set_selected_index":
             # either index may be omitted = keep it (a scan sweeps X and Y as
             # two separate axes, each sending only its own)

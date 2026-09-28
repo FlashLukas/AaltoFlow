@@ -187,6 +187,18 @@ class CameraClient:
     def set_selected_index(self, ix: int, iy: int) -> list:
         return self._rpc(cmd="set_selected_index", ix=ix, iy=iy)["index"]
 
+    # the laser on the sample (um from the main template)
+    def set_laser_target(self, x: float | None = None, y: float | None = None) -> list:
+        msg = {"cmd": "set_laser_target"}
+        if x is not None:
+            msg["x"] = float(x)
+        if y is not None:
+            msg["y"] = float(y)
+        return self._rpc(**msg)["target"]
+
+    def cancel_laser_target(self) -> None:
+        self._rpc(cmd="cancel_laser_target")
+
     # motion / position
     def move_xy(self, x: float, y: float) -> list:
         return self._rpc(cmd="move_xy", x=x, y=y)["target"]

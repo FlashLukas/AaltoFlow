@@ -328,7 +328,14 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                                         {**attrs, "complex_part": "imag",
                                          "complex_pair": det})
         else:
-            data_vars[det] = (names, arr, attrs)
+            # A detector that IS an axis parameter (recording the MEASURED
+            # camera y while stepping its setpoint) would share the axis
+            # coordinate's name, and xarray refuses that -- at the END of the
+            # scan, taking the data with it. Store it beside the coordinate.
+            name = f"{det}_measured" if det in coords else det
+            if name != det:
+                attrs["measured_of"] = det
+            data_vars[name] = (names, arr, attrs)
 
     # The CONDITIONS the measurement was taken under, as scalar coordinates:
     # rf power, the field a frequency sweep sat in, the wavelength. They are in
@@ -345,7 +352,8 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             continue
 
     for name, extra in (var_attrs or {}).items():
-        target = data_vars.get(name) or coords.get(name)
+        target = (data_vars.get(name) or data_vars.get(f"{name}_measured")
+                  or coords.get(name))
         if target is not None and len(target) == 3:
             target[2].update(extra)
 

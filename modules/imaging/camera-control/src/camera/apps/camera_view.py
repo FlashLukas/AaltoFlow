@@ -30,6 +30,7 @@ SPOT_GREEN = "#2bff6a"                 # the spot position (crosshair) + detecte
 SPOT_TINT_BGRA = (106, 255, 43, 105)   # thresholded pixels, same green, translucent
 OUTLINE = QColor(0, 0, 0, 200)         # under every green line: readable on white too
 AIM_COLOUR = "#ff4fd8"                 # the stabiliser's target (selected scan point)
+LASER_TARGET_COLOUR = "#35d4ff"        # where the laser is being PLACED (set_laser_target)
 
 
 def outlined_pen(p: QPainter, colour: str, width: float, style=Qt.SolidLine):
@@ -508,6 +509,25 @@ class CameraView(QWidget):
             for _ in outlined_pen(p, AIM_COLOUR, 2.0):
                 p.drawLine(QPointF(ap.x() - a, ap.y() - a), QPointF(ap.x() + a, ap.y() + a))
                 p.drawLine(QPointF(ap.x() - a, ap.y() + a), QPointF(ap.x() + a, ap.y() - a))
+
+        # -- where the laser is being PLACED (Laser on sample card) ------------ #
+        # A diamond at the target point of the sample, drawn while a target is
+        # set and the pattern is matched (the target hangs off the pattern, so
+        # it moves with the sample); a line from the spot while it is still
+        # being placed. Cyan, so it never reads as the stabiliser's pink "x".
+        tx = getattr(s, "laser_target_x_um", float("nan"))
+        ty = getattr(s, "laser_target_y_um", float("nan"))
+        pxx, pxy = getattr(s, "pixel_size_x", 0.0), getattr(s, "pixel_size_y", 0.0)
+        if (getattr(s, "match_found", False) and tx == tx and ty == ty
+                and pxx > 0 and pxy > 0):
+            tp = self._img_to_widget(s.anchor_x + tx / pxx, s.anchor_y + ty / pxy)
+            d = 8
+            diamond = QPolygonF([QPointF(tp.x(), tp.y() - d), QPointF(tp.x() + d, tp.y()),
+                                 QPointF(tp.x(), tp.y() + d), QPointF(tp.x() - d, tp.y())])
+            for _ in outlined_pen(p, LASER_TARGET_COLOUR, 2.0):
+                p.drawPolygon(diamond)
+                if getattr(s, "laser_goto", False) and getattr(s, "spot_calibrated", False):
+                    p.drawLine(self._img_to_widget(s.spot_x, s.spot_y), tp)
 
         # -- optional text labels on the image (Imaging card checkboxes) ------- #
         # Micrometres once an objective calibration gives the pixel size (Lukáš,

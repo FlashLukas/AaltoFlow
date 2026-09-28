@@ -95,6 +95,39 @@ Every action is a ZeroMQ command (see `scripts/camera_console.py` for the verbs)
 `load_pattern` / `save_pattern`, `set_objective`, `get_frame`, plus the universal
 `status` / `info` / `get_config` / `set_config`.
 
+## The laser on the sample, and fly scans in camera coordinates
+
+In the **Control XY stage** tab (under the image), the **Laser on sample** card shows it live (x / y in um), with
+a target, **Here** (take the current position), **Place** and **Cancel**, a
+"Placed" lamp, and a cyan diamond at the target in the image. Placing uses the
+Stabiliser card's settings (correct %, average, settle, stable within): at
+100 % and 2-3 frames it is quickest.
+
+`laser_x` / `laser_y` (um) = where the laser is ON THE SAMPLE, measured from the
+main template every frame -- the same number as `spot_from_template_x/y`, but
+settable: `set_laser_target{x, y}` (either may be left out) moves the sample
+until the laser is there, with the stabiliser's own average-then-correct loop,
+then lets go of the stage; `laser_settled` says it arrived. Placing the laser
+switches the array stabiliser off (and switching the stabiliser on cancels a
+placement): one stage cannot hold two targets.
+
+`stream_start` / `stream_read` / `stream_stop` record `laser_x/laser_y` every
+frame. That is what a scan-core **fly scan in camera coordinates** bins by:
+
+```yaml
+axes:
+  - {type: linear, param: camera.laser_y, start: -10, stop: 10, num: 21}   # rows placed by the camera
+  - {type: fly, param: camera.laser_x, start: -15, stop: 15, num: 61,     # flown, binned by the camera
+     move: kim.position_y, speed: 2, speed_param: kim.velocity_y}
+detectors: [pm16.power, camera.laser_y]      # stored as camera.laser_y_measured: how straight each row was
+```
+
+The image is then in the SAMPLE's coordinates: KIM's counter drift does not
+enter at all. While a fly scan records, the stabiliser and the placement loop
+stand down (they would fight the moving stage). Needs what the stabiliser
+needs: a tracked template, a calibrated spot, and kim's camera calibration at
+the objective in use.
+
 ## Hardware pass (at the lab PC — later session)
 
 The simulator needs no hardware. To go live:

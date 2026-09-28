@@ -28,6 +28,9 @@ class Parameter:
     #: defaults, so every existing Parameter has them without being touched.
     stream = None
     stream_channel = None
+    #: wire value = value in `unit` x stream_scale (a module's descriptor
+    #: `scale`): the fly scan divides streamed values by it
+    stream_scale = 1.0
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id

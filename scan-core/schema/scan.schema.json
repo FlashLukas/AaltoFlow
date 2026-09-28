@@ -125,6 +125,7 @@
                       "description": "fly speed, in the position's unit per second"},
             "speed_param": {"type": "string", "description": "the settable the speed is set on"},
             "readback": {"type": "string", "description": "the streamed position to bin by (default: param)"},
+            "move": {"type": "string", "description": "the stage that flies the row when param is a coordinate measured by something else (camera.laser_x); the grid, placement and binning stay in param's coordinates"},
             "lag_correction": {"type": "boolean", "description": "move each sample back by its channel's declared delay (default true)"},
             "timeout_s": {"type": "number", "description": "longest one row may take (default 3x the expected time + 30 s)"},
             "name": {"type": "string"}

@@ -26,7 +26,7 @@ The buffer is bounded (a scan that forgets to read cannot eat the memory);
 when it overflows the oldest samples go and `overflow` says so.
 
 The suite's convention: this file is COPIED into each module that streams
-(hf2, kim), like theme.py, so the modules stay independent packages.
+(hf2, kim, pm16), like theme.py, so the modules stay independent packages.
 """
 
 from __future__ import annotations

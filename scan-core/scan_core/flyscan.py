@@ -27,6 +27,20 @@ How it plugs in (everything stepped stays exactly as it was):
     after `stop`. `speed` is set on `speed_param` for the fly move and the
     old speed is put back for the approach and at the end.
 
+  * FLYING IN SOMEONE ELSE'S COORDINATES (`move`). The camera measures where
+    the laser is ON THE SAMPLE (camera.laser_x/y, um from the template), which
+    an open-loop stage's step counter cannot. With
+
+        {type: fly, param: camera.laser_x, start: -20, stop: 20, num: 81,
+         move: kim.position_y, speed: 3, speed_param: kim.velocity_y}
+
+    the grid, the placement at each row start and the binning are all in the
+    CAMERA's coordinates (param), while the stage named by `move` does the
+    flying. How the two relate -- which way, how many um per um -- is not
+    assumed: the stage is sent well past the end, the row ends when the camera
+    SEES the far edge, and the direction is learned from the first row (a
+    first guess that proves wrong is logged, and the row is flown again).
+
   * The recipe's `zigzag` flag means what it means for a stepped scan: every
     other row is flown BACKWARDS. That is the fly-back saved -- and also the
     best check that the lag correction is right: a forward and a backward row
@@ -246,6 +260,15 @@ def validate_fly(recipe, registry) -> list[str]:
             if not (lo <= speed <= hi) or speed <= 0:
                 errs.append(f"fly speed {speed:g} is outside the limits of "
                             f"'{sp}' [{lo:g},{hi:g}]")
+    mv = ax.get("move")
+    if mv:
+        q = registry.get(mv)
+        if q is None:
+            errs.append(f"fly axis `move` parameter '{mv}' is not available")
+        elif q.kind != "settable":
+            errs.append(f"fly axis `move` parameter '{mv}' is not settable")
+        elif mv == pid:
+            errs.append("fly axis `move` names the axis parameter itself; leave it out")
     rb = ax.get("readback") or pid
     q = registry.get(rb)
     if q is None:
@@ -306,6 +329,9 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     rb = registry.get(ax.get("readback") or pos_p.id)
     speed = float(ax["speed"])
     speed_p = registry.get(ax["speed_param"]) if ax.get("speed_param") else None
+    # `move`: another stage flies the row, the grid stays in param's coordinates
+    move_p = registry.get(ax["move"]) if ax.get("move") else None
+    drive = {"k": None, "reversed": 0} if move_p is not None else None
     lag = ax.get("lag_correction", True) is not False
     _, edges = pixel_grid(ax["start"], ax["stop"], npix)
     width = abs(edges[1] - edges[0]) if npix else 0.0
@@ -347,6 +373,26 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
     warned = {"lag": False}
 
+    def approach(target):
+        """Go to a row's run-in and be THERE before the row starts.
+
+        The Settable's blocking set is not enough on its own: a module whose
+        settle rule is a bare "moving" flag can answer from a status frame
+        from BEFORE the move (gotcha #2) -- on the rig (2026-09-28) the
+        approach to row 0 returned at once, the fly speed was set while the
+        stage was still on its way, and the fly move turned it round: the
+        first 8 pixels of the row stayed empty. So, as at the row's end, the
+        MEASURED position decides. With `move` the placement's own settle
+        (the camera's laser_settled, checked on every frame) is already a
+        measurement, and a camera coordinate is never still enough to wait
+        for rest -- so this extra wait is for a stage flown in its own
+        coordinates.
+        """
+        value = pos_p.set(target)
+        if move_p is None:
+            _await_position(rb, value, 0.5 * width, row_timeout, log)
+        return value
+
     def snapshot():
         return _to_dataset(recipe, compiled, registry,
                            {k: v.copy() for k, v in data.items()},
@@ -361,12 +407,41 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             oidx = _zigzag(raw, outer_shape) if (recipe.zigzag and outer_shape) else raw
             backwards = bool(recipe.zigzag) and sum(raw) % 2 == 1
 
+            # -- back to the ORDINARY speed, and to this row's run-in, FIRST.
+            # Before the outer axes move, not after: (1) anything that moves
+            # the stage between rows must not crawl at the fly speed; (2) when
+            # the outer axis is a PLACEMENT that keeps the other coordinate
+            # (camera.laser_y keeps the camera's x target), it would otherwise
+            # keep the PREVIOUS row's start and drag the laser back across the
+            # whole row -- seen on the rig, 2026-09-27: slow returns, and with
+            # zig-zag a pointless trip to the far side before every backward row.
+            a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
+            a, b = min(max(a, lo), hi), min(max(b, lo), hi)
+            # Already there? With zig-zag a row starts where the last one
+            # ended: switching to the approach speed, "approaching" and
+            # switching back cost ~0.9 s a row on the rig for nothing.
+            # Judged on where the last row's STREAM saw the stage stop, not on
+            # rb.get(): a status cache (kim: 8 Hz) can still show the stage a
+            # tenth of a second back along the row -- 0.25 um at 2 um/s, just
+            # outside half a pixel, so the round-trip came back (rig, 2026-09-28).
+            end = state.get("rb_end")
+            at_runin = (move_p is None and state["fly_speed"] and end is not None
+                        and abs(end - a) <= 0.5 * width)
+            if not at_runin:
+                if state["fly_speed"]:
+                    use_speed(orig_speed)
+                current[pos_p.id] = approach(a)       # blocking: AT the run-in, at rest
+            else:
+                current[pos_p.id] = a
+
             # -- the outer (stepped) dims, exactly as the odometer does them
             first_idx = tuple(oidx) + ((npix - 1) if backwards else 0,)
             ctx["flat"] = row * npix
             ctx["index"] = first_idx
+            outer_moved = False
             for k, d in enumerate(outer):
                 if oidx[k] != prev[k]:
+                    outer_moved = True
                     if prev[k] is not None:
                         run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
                     for pid, values in d.params:
@@ -378,18 +453,32 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # has refused every per-point one)
             run_hooks(compiled.hooks, "before_point", ctx)
 
-            a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
-            a, b = min(max(a, lo), hi), min(max(b, lo), hi)
-            if state["fly_speed"]:
-                use_speed(orig_speed)
-            current[pos_p.id] = pos_p.set(a)          # blocking: settled at the run-in
-            use_speed(speed)
+            # (an outer axis in stage coordinates is another axis: it leaves the
+            # run-in where it was, so "already there" still holds)
+            if outer_moved and not at_runin:
+                # an outer axis that moves the same stage may have moved the
+                # run-in too: make sure (a no-op if it did not)
+                if state["fly_speed"]:
+                    use_speed(orig_speed)
+                current[pos_p.id] = approach(a)
+            if not state["fly_speed"]:
+                use_speed(speed)
 
-            aborted, chunks = _fly_one_row(pos_p, b, row_timeout, groups,
-                                           should_abort, row, npix, total, t0,
-                                           on_progress, rb, params, edges, lag,
-                                           data, oidx, snapshot, on_point, log)
+            while True:
+                aborted, chunks, again = _fly_one_row(
+                    pos_p, b, row_timeout, groups, should_abort, row, npix, total,
+                    t0, on_progress, rb, params, edges, lag, data, oidx, snapshot,
+                    on_point, log, a=a, move_p=move_p, drive=drive, speed=speed)
+                if not again:
+                    break
+                # the first guess of the direction was wrong: back to the start
+                # of the row (at the approach speed) and fly it again
+                if state["fly_speed"]:
+                    use_speed(orig_speed)
+                current[pos_p.id] = approach(a)
+                use_speed(speed)
             current[pos_p.id] = b
+            state["rb_end"] = _last_value(chunks, rb)   # where the stream saw it stop
             _bin_into(chunks, rb, params, edges, lag, data, oidx)
             if not warned["lag"]:
                 warned["lag"] = True
@@ -428,13 +517,17 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
 def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
                  total, t0, on_progress, rb, params, edges, lag, data, oidx,
-                 snapshot, on_point, log):
+                 snapshot, on_point, log, a=None, move_p=None, drive=None,
+                 speed=None):
     """Start the streams, fly to `target`, collect as it goes.
 
     The move is the position Settable's ordinary BLOCKING set, run in a helper
     thread with a long timeout; this thread meanwhile drains the streams every
     POLL_S, so the row fills in on the live plot and Abort is seen at once.
-    Returns (aborted, {group id: [chunks]}).
+    With `move_p` (flying in another parameter's coordinates) the stage
+    `move_p` is sent well past the end instead, and the row ends when the
+    READBACK crosses `target`; see _drive_check. Returns (aborted, {group id:
+    [chunks]}, again) -- again = the direction guess was wrong, fly it again.
     """
     chunks = {g: [] for g in groups}
     for spec in groups.values():
@@ -453,10 +546,23 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
     if lead > 0:
         time.sleep(min(lead, 5.0))
     result: dict = {}
+    mover, goal = pos_p, target
+    if move_p is not None:
+        # Send the stage FAR past the end, in the direction learned so far
+        # (first row: a guess). The camera, not this number, ends the row.
+        k = drive["k"] or 1.0
+        width = abs(edges[1] - edges[0]) if len(edges) > 1 else 0.0
+        way = 1.0 if target >= a else -1.0
+        p0 = float(move_p.get())
+        lo, hi = move_p.limits
+        goal = min(max(p0 + k * way * (1.5 * abs(target - a) + 2 * width), lo), hi)
+        mover = move_p
+        drive.update(r0=None, t_go=time.monotonic(), way=way, p0=p0,
+                     width=width, sent=False, t_sent=0.0, goal=goal)
 
     def move():
         try:
-            pos_p.set(target, timeout_s=timeout)
+            mover.set(goal, timeout_s=timeout)
         except BaseException as exc:          # handed back to the scan thread
             result["error"] = exc
 
@@ -482,6 +588,16 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
         now = time.monotonic()
         if here is not None and (track["pos"] is None or abs(here - track["pos"]) > 1e-9):
             track["pos"], track["since"] = here, now
+        if move_p is not None:
+            verdict = _drive_check(drive, here, target, move_p, rb, speed, th,
+                                   track, now, log)
+            if verdict == "wait":
+                if now >= t_deadline:
+                    raise TimeoutError(f"fly: {rb.id} did not reach {target:g} "
+                                       f"within {timeout:g} s")
+                return False
+            result.setdefault("verdict", verdict)
+            return True
         if th.is_alive():
             return False
         if "error" in result:
@@ -504,7 +620,10 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
             chunks[g].append(spec.read())
         if should_abort and should_abort():
             aborted = True
-            _stop_stage(pos_p, chunks, rb, log)
+            if move_p is not None:
+                _stop_mover(move_p, drive, speed, log)
+            else:
+                _stop_stage(pos_p, chunks, rb, log)
             th.join(5.0)
             break
         _bin_into(chunks, rb, params, edges, lag, data, oidx)
@@ -519,7 +638,10 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
         if on_point and now - last_live >= POLL_S:
             last_live = now
             on_point(done, total, snapshot)
-    if not aborted and "error" not in result:
+    if move_p is not None and not aborted:
+        th.join(15.0)                         # the stop has been sent: let it land
+    again = result.get("verdict") == "reverse"
+    if not aborted and "error" not in result and not again:
         # THE TAIL. A lagging channel's last samples belong to the end of the
         # row but are only RECORDED up to its delay after the stage stops, so
         # keep recording that long -- otherwise the last pixel of every row
@@ -536,20 +658,131 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
     err = result.get("error")
     if isinstance(err, ScanAborted):
         aborted = True
-        _stop_stage(pos_p, chunks, rb, log)
-    elif err is not None and not aborted:
+        if move_p is not None:
+            _stop_mover(move_p, drive, speed, log)
+        else:
+            _stop_stage(pos_p, chunks, rb, log)
+    elif err is not None and not aborted and not (move_p is not None and drive.get("sent")):
+        # (a mover stopped on purpose may report the stop as an error -- a
+        # settle wait whose target moved; the row itself is fine)
         raise err
-    return aborted, chunks
+    return aborted, chunks, again
+
+
+def _drive_check(drive, here, target, move_p, rb, speed, th, track, now, log):
+    """Where is a row flown by ANOTHER stage (fly axis with `move`)?
+
+    Returns "wait", "done" (the readback crossed the far edge; the stage has
+    been told to stop), "reverse" (the first guess of direction was wrong;
+    the stage has been stopped), or "stall" (the stage stopped without the
+    readback reaching the end -- logged).
+    """
+    way = drive["way"]
+    if here is not None and drive["r0"] is None:
+        drive["r0"] = here
+    # "At rest" is judged on the STAGE here, never on the readback: a camera
+    # coordinate is never still (pixel noise, drift), so waiting for it to stop
+    # changing would wait forever.
+    if drive["sent"]:
+        # the stop has been sent (and waited for by _stop_mover): give the
+        # lagging channels their tail and finish
+        if not th.is_alive() and now - drive["t_sent"] >= SETTLED_S:
+            return drive["sent"]
+        return "wait"
+    arrived = False
+    if not th.is_alive():
+        # the move returned -- which a stale "not moving" frame can make it do
+        # before the stage has even left (gotcha #35): believe it only when
+        # the stage REPORTS being at the far goal
+        try:
+            arrived = abs(float(move_p.get()) - drive["goal"]) <= max(drive["width"], 0.3)
+        except Exception:
+            arrived = True
+    if here is None or drive["r0"] is None:
+        return "stall" if arrived else "wait"
+    moved = here - drive["r0"]
+    need = max(drive["width"], 0.3)
+    if drive["k"] is None and abs(moved) >= need:
+        if moved * way < 0:
+            if drive["reversed"]:
+                raise RuntimeError(f"fly: {rb.id} runs AGAINST {move_p.id} in both "
+                                   f"directions -- is the pattern still tracked?")
+            drive["reversed"] += 1
+            drive["k"] = -1.0
+            log(f"fly: moving {move_p.id} up moves {rb.id} DOWN -- learned; "
+                f"flying this row again")
+            _stop_mover(move_p, drive, speed, log, quiet=True)
+            drive["sent"], drive["t_sent"] = "reverse", time.monotonic()
+            return "wait"
+        drive["k"] = 1.0 if drive["k"] is None else drive["k"]
+    if (here - target) * way >= 0:
+        _stop_mover(move_p, drive, speed, log, quiet=True)
+        drive["sent"], drive["t_sent"] = "done", time.monotonic()
+        return "wait"
+    if arrived:
+        log(f"fly: {move_p.id} stopped with {rb.id} at {here:g}, short of "
+            f"{target:g} -- out of travel, or its um are much smaller than "
+            f"{rb.id}'s")
+        return "stall"
+    if now - drive["t_go"] > max(3.0, 20 * need / max(speed or 1.0, 1e-9)) \
+            and abs(moved) < 0.5 * need:
+        _stop_mover(move_p, drive, speed, log, quiet=True)
+        raise RuntimeError(f"fly: moving {move_p.id} does not move {rb.id} -- the "
+                           f"other axis? (change `move` on the fly axis)")
+    return "wait"
+
+
+def _stop_mover(move_p, drive, speed, log, quiet=False):
+    """Stop the flying stage: a setpoint just AHEAD of where it last reported
+    being. Its status can be a frame old, and a setpoint behind it would make
+    an open-loop stage walk BACK over the row; a little further on is harmless."""
+    try:
+        here = float(move_p.get())
+        way = (drive.get("k") or 1.0) * drive.get("way", 1.0)
+        move_p.set(here + way * float(speed or 0.0) * 0.15, timeout_s=10.0)
+    except ScanAborted:
+        pass
+    except Exception as exc:
+        if not quiet:
+            log(f"fly: could not stop {move_p.id} ({exc})")
+
+
+def _await_position(rb, target, tol, timeout, log, rest_s=0.2, poll_s=0.05):
+    """Block until the readback `rb` is within `tol` of `target` AND at rest.
+
+    At rest = has not changed by more than a quarter of `tol` for `rest_s`
+    (a step counter is exactly still; a sensor jitters a little). A stage
+    that has not started yet is simply waited for -- it will: the command
+    was accepted. Raises TimeoutError after `timeout` s, naming both numbers.
+    """
+    deadline = time.monotonic() + timeout
+    last, since, v = None, time.monotonic(), float("nan")
+    while True:
+        try:
+            v = float(rb.get())
+        except Exception:
+            v = float("nan")
+        now = time.monotonic()
+        if math.isfinite(v):
+            if last is None or abs(v - last) > 0.25 * max(tol, 1e-12):
+                last, since = v, now
+            elif abs(v - target) <= tol and now - since >= rest_s:
+                return v
+        if now >= deadline:
+            raise TimeoutError(f"fly: {rb.id} did not arrive at the run-in {target:g} "
+                               f"within {timeout:g} s (at {v:g})")
+        time.sleep(poll_s)
 
 
 def _last_value(chunks, rb):
     """The most recent finite readback position recorded, or None."""
+    scale = float(getattr(rb, "stream_scale", 1.0) or 1.0)
     for c in reversed(chunks.get(id(rb.stream), [])):
         v = c["values"].get(rb.stream_channel)
         if v is not None and len(v):
             fin = v[np.isfinite(v)]
             if len(fin):
-                return float(fin[-1])
+                return float(fin[-1]) / scale
     return None
 
 
@@ -576,8 +809,16 @@ def _stop_stage(pos_p, chunks, rb, log):
         log(f"fly: aborted mid-row, could not stop the stage ({exc})")
 
 
-def _joined(chunks, spec, channel):
-    """(t, values, delay) of one channel over all chunks read so far."""
+def _joined(chunks, p):
+    """(t, values, delay) of parameter p's channel over all chunks read so far.
+
+    Values come back in the PARAMETER's unit: a stream carries wire units, and
+    `stream_scale` (the descriptor's `scale`, wire = display x scale) converts
+    them exactly as the parameter's one-value getter does -- pm16 streams watts
+    and offers milliwatts.
+    """
+    spec, channel = p.stream, p.stream_channel
+    scale = float(getattr(p, "stream_scale", 1.0) or 1.0)
     ts, vs, delay = [], [], 0.0
     for c in chunks.get(id(spec), []):
         v = c["values"].get(channel)
@@ -588,14 +829,15 @@ def _joined(chunks, spec, channel):
         delay = c["delay_s"].get(channel, delay)
     if not ts:
         return np.array([]), np.array([]), 0.0
-    return np.concatenate(ts), np.concatenate(vs), float(delay)
+    vals = np.concatenate(vs)
+    return np.concatenate(ts), (vals / scale if scale != 1.0 else vals), float(delay)
 
 
 def _bin_into(chunks, rb, params, edges, lag, data, oidx):
     """Re-bin everything recorded on this row so far into its data row."""
-    t_pos, pos, pos_delay = _joined(chunks, rb.stream, rb.stream_channel)
+    t_pos, pos, pos_delay = _joined(chunks, rb)
     for det, p in params.items():
-        t, v, delay = _joined(chunks, p.stream, p.stream_channel)
+        t, v, delay = _joined(chunks, p)
         m, n, s = bin_samples(t_pos, pos, t, v, edges,
                               delay_s=delay if lag else 0.0,
                               pos_delay_s=pos_delay if lag else 0.0)
@@ -625,7 +867,7 @@ def _var_attrs(params, fly, ax, rb_id) -> dict:
 def _warn_quality(chunks, rb, params, data, oidx, speed, width, log):
     """After the first row: say so if the numbers make the image unreliable."""
     for det, p in params.items():
-        _, _, delay = _joined(chunks, p.stream, p.stream_channel)
+        _, _, delay = _joined(chunks, p)
         smear = speed * delay
         if width > 0 and smear > width:
             log(f"fly: {det} lags {delay * 1e3:.3g} ms = {smear:.3g} "

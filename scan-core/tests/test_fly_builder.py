@@ -98,3 +98,59 @@ def test_running_from_the_builder_flies(builder):
     assert ds["pos_x"].attrs.get("fly") == "true"
     assert np.all(ds["lockin_r_n"].values >= 2)
     assert np.all(np.isfinite(ds["lockin_r"].values))
+
+
+def _camera_rig():
+    """A registry shaped like the KIM rig: a MEASURED camera coordinate (it
+    streams, has no speed knob) and a KIM stage whose axes do."""
+    from scan_core.registry import Registry, Settable, StreamSpec
+    reg = Registry()
+    spec = StreamSpec("g", lambda: None, lambda: {})
+    for pid, unit in (("camera.laser_x", "um"), ("camera.laser_y", "um"),
+                      ("kim.position_x", "um"), ("kim.position_y", "um"),
+                      ("kim.velocity_x", "um/s"), ("kim.velocity_y", "um/s")):
+        p = reg.add(Settable(pid, pid, unit, (-50, 50) if unit == "um" else (0.1, 40),
+                             lambda v: None, lambda: 2.0))
+        if pid.startswith("camera"):
+            p.stream, p.stream_channel = spec, pid[-7:]
+    return reg
+
+
+def test_a_measured_coordinate_gets_a_move_with_box(builder):
+    builder.set_registry(_camera_rig())
+    builder.add_axis("camera.laser_x")
+    row = builder.rows[-1]
+    assert row.move_choices == ["kim.position_x", "kim.position_y"]
+    row.fly.setChecked(True)
+    assert row.move_box.isVisibleTo(row)
+    row.move_box.setCurrentIndex(1)            # the rig's camera is rotated 90 deg
+    row.speed.setValue(3.0)
+    ax = builder.build_recipe().axes[-1]
+    assert ax["move"] == "kim.position_y" and ax["speed_param"] == "kim.velocity_y"
+    assert ax["param"] == "camera.laser_x" and ax["speed"] == 3.0
+    # and back from a saved definition
+    recipe = builder.build_recipe()
+    assert builder.load_recipe(recipe) == []
+    assert builder.rows[-1].move_param() == "kim.position_y"
+    assert builder.build_recipe().axes == recipe.axes
+
+
+def test_a_stage_position_gets_no_move_with_box(builder):
+    builder.set_registry(_camera_rig())
+    builder.add_axis("kim.position_x")
+    assert builder.rows[-1].move_choices == []
+
+
+def test_ticking_fly_greys_the_detectors_that_cannot_fly_and_gives_them_back(builder):
+    from PySide6 import QtCore
+    items = {it.data(0, QtCore.Qt.UserRole): it for it in builder._det_items()}
+    items["s21"].setCheckState(0, QtCore.Qt.Checked)        # a whole trace: cannot fly
+    row = _fly_row(builder)
+    assert items["s21"].isDisabled() and items["s21"].checkState(0) == QtCore.Qt.Unchecked
+    assert "cannot be recorded in a FLY scan" in items["s21"].toolTip(0)
+    assert not items["lockin_r"].isDisabled()                # streams: stays available
+    assert "set aside while flying" in builder.detail.text()
+    assert builder.build_recipe().validate(builder.registry) == []
+    row.fly.setChecked(False)                                # back to stepping
+    assert not items["s21"].isDisabled()
+    assert items["s21"].checkState(0) == QtCore.Qt.Checked   # the selection came back

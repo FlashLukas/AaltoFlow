@@ -174,6 +174,10 @@ DET_MANIFEST = {"schema": 1, "module": "det", "revision": 1, "parameters": [
      "read_path": ["b"], "stream": {"group": "signal", "channel": "b"}},
     {"id": "plain", "label": "Plain", "kind": "indicator", "type": "float",
      "read_path": ["a"]},
+    # offered in mV, streamed (like status) in V: wire = display x scale
+    {"id": "b_mV", "label": "B in mV", "kind": "indicator", "type": "float",
+     "unit": "mV", "scale": 1e-3, "read_path": ["b"],
+     "stream": {"group": "signal", "channel": "b"}},
 ]}
 
 DELAY = 0.05                        # the detector's declared lag, s
@@ -231,7 +235,7 @@ def test_a_fly_scan_over_the_wire_bins_on_this_pcs_clock(rig):
     r = Recipe(name="wire", axes=[{"type": "fly", "param": "stage.x", "start": -6,
                                    "stop": 12, "num": 37, "speed": 12,
                                    "speed_param": "stage.speed"}],
-               detectors=["det.a", "det.b"])
+               detectors=["det.a", "det.b", "det.b_mV"])
     assert r.validate(reg) == []
     ds = run(r, reg)            # a 1.5 s row with a 2 s settle timeout: needs the override
     x = ds["stage.x"].values
@@ -239,6 +243,9 @@ def test_a_fly_scan_over_the_wire_bins_on_this_pcs_clock(rig):
     # right shape AND right place: the bump peaks at 3 um, not 3 s x 12 um/s away
     assert np.max(np.abs(ds["det.a"].values - signal(x))) < 0.03
     assert np.allclose(ds["det.b"].values, 2.0)
+    # the descriptor's scale applies to the stream as to a one-value read
+    assert np.allclose(ds["det.b_mV"].values, 2000.0)
+    assert reg.get("det.b_mV").get() == pytest.approx(2000.0)
     assert np.all(ds["det.a_n"].values >= 3)
     # one start / stop per stream group, and the speed put back
     starts = [m for m in det.commands if m["cmd"] == "stream_start"]
@@ -272,3 +279,23 @@ def test_a_row_ends_on_the_measured_position_not_on_a_stale_moving_flag(rig):
     ds = run(r, reg)
     assert np.all(ds["det.a_n"].values >= 3)
     assert np.max(np.abs(ds["det.a"].values - signal(ds["stage.x"].values))) < 0.03
+
+
+def test_the_approach_to_the_first_row_is_waited_for_on_the_measured_position(rig):
+    """From the rig, 2026-09-28: KIM's settle rule is flag_only(moving); the
+    stale "not moving" frame right after move_to made the APPROACH return at
+    once -- the fly speed was set while the stage was still on its way, the fly
+    move turned it round, and the first 8 pixels of row 0 stayed empty. Here the
+    stage never reports moving and starts 14 um away from the run-in."""
+    world, _, _, reg = rig
+    world.moving = lambda: False
+    world.speed = 12.0
+    world.move(10.0)
+    time.sleep(1.0)                        # the stage is really at +10
+    r = Recipe(name="wire", axes=[{"type": "fly", "param": "stage.x", "start": -4,
+                                   "stop": 8, "num": 25, "speed": 15,
+                                   "speed_param": "stage.speed"}],
+               detectors=["det.a"])
+    ds = run(r, reg)
+    assert np.all(ds["det.a_n"].values >= 3), ds["det.a_n"].values
+    assert world.speed == 12.0

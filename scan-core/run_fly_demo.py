@@ -12,16 +12,20 @@ Two modes.
       uv run python run_fly_demo.py
       uv run python run_fly_demo.py --tc 30 --speed 30
 
-  --lab: the running kim and hf2 services (Mission Control, or two terminals):
+  --lab: the running kim service plus a detector service -- the PM16 power
+  meter (default) or the hf2 lock-in (Mission Control, or two terminals):
 
-      cd ..\\modules\\motion\\kim-control ; uv run scripts/run_service.py
-      cd ..\\modules\\detector\\hf2-control ; uv run scripts/run_service.py
+      cd ..\modules\motion\kim-control    ; uv run scripts/run_service.py --real
+      cd ..\modules\detector\pm16-control ; uv run scripts/run_service.py --real
 
       uv run python run_fly_demo.py --lab --from 0 --to 20 --pixels 41 --speed 4
+      uv run python run_fly_demo.py --lab --det hf2 ...
 
-  flies kim X at --speed um/s over --rows rows of kim Y, recording hf2 X1/R1
-  continuously, and prints how many samples landed in each pixel. Writes
-  out/fly_lab.nc. Ports: --kim-port / --hf2-port if not the launcher's.
+  flies kim X at --speed um/s over --rows rows of kim Y, recording the
+  detector continuously, and prints how many samples landed in each pixel.
+  Writes out/fly_lab.nc. Ports: --kim-port / --det-port if not the launcher's.
+  The rows start at kim's CURRENT Y and step by --row-pitch; X runs --from
+  --to in absolute kim coordinates.
 """
 
 from __future__ import annotations
@@ -91,11 +95,12 @@ def sim(args) -> int:
 def lab(args) -> int:
     from scan_core.instrument import InstrumentError
     from scan_core.lab import build_lab_registry
+    det = args.det
     endpoints = {name: (args.host, port, port + 1)
-                 for name, port in (("kim", args.kim_port), ("hf2", args.hf2_port)) if port}
-    print(f"connecting to kim and hf2 on {args.host} ...")
+                 for name, port in (("kim", args.kim_port), (det, args.det_port)) if port}
+    print(f"connecting to kim and {det} on {args.host} ...")
     try:
-        reg, labs = build_lab_registry(host=args.host, include=("kim", "hf2"), prefix=True,
+        reg, labs = build_lab_registry(host=args.host, include=("kim", det), prefix=True,
                                        endpoints=endpoints or None, on_warn=lambda m: None)
     except InstrumentError as exc:
         print(f"\nFAILED: {exc}\n\nStart both services first (see the top of this file).")
@@ -104,13 +109,14 @@ def lab(args) -> int:
         y0 = float(reg.get("kim.position_y").get())
         recipe = Recipe(
             name="fly_lab",
-            comment="fly scan: kim X continuous, hf2 streamed",
+            comment=f"fly scan: kim X continuous, {det} streamed",
             axes=[{"type": "linear", "param": "kim.position_y", "start": y0,
                    "stop": y0 + args.row_pitch * (args.rows - 1), "num": args.rows},
                   {"type": "fly", "param": "kim.position_x", "start": args.lo,
                    "stop": args.hi, "num": args.pixels, "speed": args.speed,
                    "speed_param": "kim.velocity_x"}],
-            detectors=["hf2.x1", "hf2.r1"], zigzag=args.zigzag)
+            detectors=(["hf2.x1", "hf2.r1"] if det == "hf2" else ["pm16.power"]),
+            zigzag=args.zigzag)
         errs = recipe.validate(reg)
         if errs:
             print("recipe is not valid:\n  " + "\n  ".join(errs))
@@ -119,7 +125,7 @@ def lab(args) -> int:
         ds = run(recipe, reg, on_log=lambda m: print("  " + m),
                  on_progress=lambda d, t, eta: None)
         dt = time.monotonic() - t0
-        n = ds["hf2.x1_n"].values
+        n = ds[f"{recipe.detectors[0]}_n"].values
         print(f"fly_lab: {args.rows} x {args.pixels} pixels in {dt:.1f} s")
         print(f"  samples per pixel: median {np.nanmedian(n):.0f}, min {np.nanmin(n):.0f}, "
               f"max {np.nanmax(n):.0f}; empty pixels: {int(np.sum(n == 0))}")
@@ -150,7 +156,9 @@ def main() -> int:
     ap.add_argument("--row-pitch", type=float, default=1.0, help="lab: Y step, um")
     ap.add_argument("--zigzag", action="store_true", help="lab: fly every other row back")
     ap.add_argument("--kim-port", type=int, default=None)
-    ap.add_argument("--hf2-port", type=int, default=None)
+    ap.add_argument("--det", choices=("pm16", "hf2"), default="pm16",
+                    help="lab: the detector to fly with")
+    ap.add_argument("--det-port", type=int, default=None)
     args = ap.parse_args()
     if args.lab:
         args.rows = args.rows or 3

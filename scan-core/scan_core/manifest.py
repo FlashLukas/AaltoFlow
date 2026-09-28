@@ -433,6 +433,8 @@ def _attach_stream(param, d: dict, inst: Instrument, module: str,
         streams[key] = _stream_from(group, spec, inst)
     param.stream = streams[key]
     param.stream_channel = channel
+    # the stream carries WIRE units, like status: convert with the same scale
+    param.stream_scale = float(d.get("scale", 1.0) or 1.0)
 
 
 def _stream_from(group: str, spec: dict, inst: Instrument) -> StreamSpec:

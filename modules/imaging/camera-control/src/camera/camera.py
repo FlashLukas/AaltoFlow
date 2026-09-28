@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import os
 import re
 import threading
@@ -39,6 +40,7 @@ import numpy as np
 from . import objectives as OBJ
 from . import vision as V
 from .config import Config
+from .stream import StreamRecorder
 from .template_io import BackupPattern, Reference, load_template, save_template
 
 # Saved by save_config(), loaded by scripts/run_service.py when present, so a
@@ -53,6 +55,11 @@ class _AutofocusKilled(Exception):
 # --------------------------------------------------------------------------- #
 # Status snapshot (a plain dataclass; asdict -> the wire/GUI)
 # --------------------------------------------------------------------------- #
+#: The fly-scan stream: where the laser is on the sample, in um from the MAIN
+#: template (= spot_from_template_x/y_um), one sample per processed frame.
+STREAM_CHANNELS = ("laser_x", "laser_y")
+
+
 @dataclass
 class CameraStatus:
     connected: bool = False
@@ -114,6 +121,19 @@ class CameraStatus:
     # or a calibrated spot (Python's json carries NaN; every consumer is Python).
     spot_from_template_x_um: float = float("nan")
     spot_from_template_y_um: float = float("nan")
+    # PLACING THE LASER at a point on the sample given in those same template
+    # coordinates (set_laser_target): the target, whether the placement loop is
+    # still correcting, and whether the laser is there. `laser_settled` is
+    # evaluated EVERY frame -- a finished placement AND the measured position
+    # within stable_radius_um of the target -- so a frame from after the stage
+    # has flown away can never say "settled" at the old target.
+    laser_target_x_um: float = float("nan")
+    laser_target_y_um: float = float("nan")
+    laser_goto: bool = False
+    laser_settled: bool = False
+    # a fly scan is recording the laser position (stream): the stabiliser and
+    # the placement loop stand down, or they would fight the flying stage
+    streaming: bool = False
 
     # Z position in the Z device's unit. The names say "voltage"/"_v" for
     # historical reasons (the piezo rig drives Z in volts); on the KIM rig these
@@ -191,6 +211,16 @@ class Camera:
         # engine stores the index it read at the START of its frame, so a frame
         # that straddles a set_selected_index marks the old point, not the new.
         self._settled_for: tuple | None = None
+        # Laser placement (set_laser_target): the target in template um, the
+        # loop running, and a placement finished since the last request. Brain
+        # attributes, copied into each frame (gotcha #1).
+        self._laser_target: tuple | None = None
+        self._laser_goto = False
+        self._laser_done = False
+        # set_laser_target (request thread) vs _laser_step (engine thread)
+        self._laser_lock = threading.Lock()
+        # The fly-scan record of the laser position on the sample (stream.py).
+        self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
 
         # Objective table -> pixel size.
         self._objectives = OBJ.load_objectives(self.cfg.image.objectives_file)
@@ -328,6 +358,10 @@ class Camera:
 
     def _process(self) -> None:
         gray = self._grab_gray()
+        # When this frame was taken, on the WALL clock (a fly scan lines the
+        # stream up with other instruments'). The grab returns once the frame
+        # is exposed and read out; the exposure is ~1 ms here, so "now" is it.
+        t_frame = time.time()
 
         # Temporal (running) average across frames.
         self._temporal.append(gray.astype(np.float32))
@@ -402,21 +436,46 @@ class Camera:
                     st.spot_from_template_x_um, st.spot_from_template_y_um = V.pixels_to_um(
                         st.spot_x - anchor[0], st.spot_y - anchor[1], px_x, px_y)
 
-        # -- stabiliser ------------------------------------------------- #
-        # Stands down from the moment an autofocus is REQUESTED (not only once
-        # it runs): a correction sent in the frame between would still be
+        # -- laser placement + stabiliser --------------------------------- #
+        # Both stand down from the moment an autofocus is REQUESTED (not only
+        # once it runs): a correction sent in the frame between would still be
         # walking when Z starts, and a point_settled from this frame would let
-        # a scan go on before focus has even begun.
+        # a scan go on before focus has even begun. Both also stand down while
+        # a fly scan records the camera: the stage is being flown on purpose.
         af_pending = self._af_busy
-        if (geo is not None and st.stabilize_on and spot_position_ok and st.match_found
-                and not af_pending):
+        streaming = self.stream.running
+        st.streaming = streaming
+        anchor_now = self._last_template_xy if (self.reference is not None
+                                                 and st.tracking_on and st.match_found) else None
+        goto = (self._laser_goto and anchor_now is not None and spot_position_ok
+                and not af_pending and not streaming)
+        if goto:
+            self._laser_step(anchor_now, px_x, px_y, st)
+        elif (geo is not None and st.stabilize_on and spot_position_ok and st.match_found
+                and not af_pending and not streaming and not self._laser_goto):
             stable = self._stabilise_step(geo, px_x, px_y, st)
             st.stable = stable
         else:
             self._avg_buf.clear()
             self._settled_for = None          # a lost match or a stopped loop is not settled
-        st.point_settled = (st.stabilize_on and not af_pending and self._settled_for
+        st.point_settled = (st.stabilize_on and not af_pending and not streaming
+                            and not self._laser_goto and self._settled_for
                             == (st.selected_index_x, st.selected_index_y))
+
+        # -- where the laser is, against where it was asked to be ---------- #
+        tgt = self._laser_target
+        if tgt is not None:
+            st.laser_target_x_um, st.laser_target_y_um = tgt
+        st.laser_goto = bool(self._laser_goto)
+        here = (st.spot_from_template_x_um, st.spot_from_template_y_um)
+        st.laser_settled = bool(
+            tgt is not None and self._laser_done and not self._laser_goto
+            and math.isfinite(here[0]) and math.isfinite(here[1])
+            and math.hypot(here[0] - tgt[0], here[1] - tgt[1])
+            <= max(0.0, float(self.cfg.stabilizer.stable_radius_um)))
+        # every processed frame goes into a running fly-scan stream; NaN when
+        # there is no position this frame (template lost, spot not calibrated)
+        self.stream.append(t_frame, here)
 
         # -- alignment-accuracy log (residual spot->point distance, um) -- #
         if geo is not None and spot_position_ok and self._acc_on:
@@ -699,7 +758,15 @@ class Camera:
             return stable
 
         self._settled_for = None                      # about to move: no longer settled
+        self._correct(avg, dist_um, gain, stb.move_with_x, stb.move_with_y, "stabiliser")
+        return stable
 
+    def _correct(self, avg, dist_um, gain, move_x, move_y, who) -> None:
+        """Move the sample to null a measured (point - spot) distance.
+
+        Shared by the stabiliser and the laser placement loop. `avg` is the
+        averaged distance in px, `dist_um` the same in um.
+        """
         # Move the sample to null the distance: the selected point is ON the
         # sample, so shifting the image by s moves it by s; to bring
         # (selected_point - spot) to zero, shift the image by -gain * distance.
@@ -712,33 +779,90 @@ class Camera:
         # fall back to guessing: a wrong-sign stabiliser pushes the sample away.
         image_move = getattr(self.xy, "move_image_px", None)
         if image_move is not None:
-            shift = (-gain * avg[0] if stb.move_with_x else 0.0,
-                     -gain * avg[1] if stb.move_with_y else 0.0)
+            shift = (-gain * avg[0] if move_x else 0.0,
+                     -gain * avg[1] if move_y else 0.0)
             try:
                 image_move(shift[0], shift[1], context=self.image_context())
             except Exception as exc:
-                self._warn_limited("stabiliser", f"stabiliser move refused: {exc}")
+                self._warn_limited(who, f"{who} move refused: {exc}")
             self._avg_buf.clear()
-            return stable
+            return
 
         # Piezo rig: stage axes assumed aligned with the image (+stage x -> +px x).
         try:
             cx, cy = self.xy.read_xy()
         except Exception:
             self._avg_buf.clear()
-            return stable
+            return
         new_x, new_y = cx, cy
-        if stb.move_with_x:
+        if move_x:
             new_x = cx - gain * dist_um[0]
-        if stb.move_with_y:
+        if move_y:
             new_y = cy - gain * dist_um[1]
         new_x, new_y = self._clamp_xy(new_x, new_y)
         try:
             self.xy.move_xy(new_x, new_y)
         except Exception as exc:
-            self._emit("warn", f"stabiliser move failed: {exc}")
+            self._emit("warn", f"{who} move failed: {exc}")
         self._avg_buf.clear()                         # restart averaging post-move
-        return stable
+
+    def _laser_step(self, anchor, px_x, px_y, st) -> None:
+        """One cycle of PLACING THE LASER at the target (set_laser_target).
+
+        The stabiliser's own recipe -- wait out a move, average a window of
+        fresh frames, correct once on the mean -- aimed at a free point of the
+        sample instead of an array point: the point `target` um from the main
+        template. When a whole averaged window is within stable_radius_um the
+        placement is DONE and the loop lets go of the stage, so a fly scan can
+        move it without a fight.
+        """
+        stb = self.cfg.stabilizer
+        tgt = self._laser_target
+        if tgt is None:
+            return
+        tx, ty = tgt
+        point = (anchor[0] + tx / px_x, anchor[1] + ty / px_y)
+        inst = np.array([point[0] - st.spot_x, point[1] - st.spot_y], dtype=float)
+        st.distance_um = float(np.hypot(*V.pixels_to_um(inst[0], inst[1], px_x, px_y)))
+        if self._stage_settling():
+            self._avg_buf.clear()
+            return
+        # A new target can arrive (request thread) while this frame is being
+        # worked on. Without the lock and the identity check, this frame's
+        # distance -- measured to the OLD target -- could land in the new
+        # target's fresh window, or "done" be stamped on the new target, which
+        # then never moves (a scan waiting for laser_settled times out).
+        # set_laser_target makes a NEW tuple every call, so `is` also tells a
+        # repeated request for the same point apart.
+        with self._laser_lock:
+            if self._laser_target is not tgt:
+                return
+            self._avg_buf.append(inst)
+            if len(self._avg_buf) < self._avg_buf.maxlen:
+                return
+            avg = np.mean(self._avg_buf, axis=0)
+            dist_um = np.array(V.pixels_to_um(avg[0], avg[1], px_x, px_y))
+            st.distance_um = float(np.hypot(dist_um[0], dist_um[1]))
+            if st.distance_um <= max(0.0, float(stb.stable_radius_um)):
+                self._avg_buf.clear()
+                self._laser_goto = False
+                self._laser_done = True
+                return
+        gain = min(max(float(stb.gain), 0.01), 2.0)
+        self._correct(avg, dist_um, gain, True, True, "laser placement")
+
+    def _stage_settling(self) -> bool:
+        """True while a correction is still arriving: within settle_s of the last
+        move, or (open-loop stage) while it reports moving. Frames from then
+        describe a position about to change."""
+        if time.monotonic() - self._stab_move_t < max(0.0, float(self.cfg.stabilizer.settle_s)):
+            return True
+        if getattr(self.xy, "open_loop", False):
+            try:
+                return bool(self.xy.moving())
+            except Exception:
+                return False
+        return False
 
     # ------------------------------------------------------------------ #
     # continuous focus  (dither hill-climb on Z)
@@ -1461,6 +1585,8 @@ class Camera:
         return bool(on)
 
     def set_stabilize(self, on: bool) -> bool:
+        if on:
+            self._laser_goto = False          # one target at a time (set_laser_target)
         self._stabilize_on = bool(on)
         self._avg_buf.clear()
         self._settled_for = None
@@ -1485,6 +1611,68 @@ class Camera:
         self._avg_buf.clear()   # restart averaging on a new target
         self._settled_for = None
         return (sc.selected_index_x, sc.selected_index_y)
+
+    def set_laser_target(self, x: float | None = None, y: float | None = None) -> list:
+        """Put the laser at (x, y) um from the main template -- a point ON the
+        sample, not on the stage -- and keep correcting until it is there.
+
+        Either coordinate may be None = keep the current target (or, with no
+        target yet, stay where the laser is now), so a scan can step y and fly
+        x as two axes. Needs a tracked template and a calibrated spot, like the
+        stabiliser. The loop lets go once the laser is within stable_radius_um;
+        `laser_settled` then says so.
+        """
+        if self.reference is None or not self._tracking_on:
+            raise RuntimeError("no template tracked: load or capture a pattern and "
+                               "switch tracking on first")
+        if not self.cfg.spot.ref_set:
+            raise RuntimeError("no spot position: calibrate the spot first (Spot tab)")
+        st = self._status
+        old = self._laser_target
+        here = (st.spot_from_template_x_um, st.spot_from_template_y_um)
+
+        def pick(v, i):
+            if v is not None:
+                v = float(v)
+                if not math.isfinite(v):
+                    raise ValueError("laser target must be a finite number")
+                return v
+            if old is not None:
+                return old[i]
+            if not math.isfinite(here[i]):
+                raise RuntimeError("the laser position is not known (template lost?)")
+            return float(here[i])
+
+        target = (pick(x, 0), pick(y, 1))
+        if self._stabilize_on:
+            # Holding an ARRAY point and placing the laser at a free point are
+            # two targets for one stage: the stabiliser would pull the laser
+            # back as soon as the placement let go (between two fly rows, say).
+            self._stabilize_on = False
+            self._settled_for = None
+            self._emit("info", "stabiliser off: the laser is now placed by coordinate")
+        self._commit_laser_target(target)
+        return list(target)
+
+    def _commit_laser_target(self, target: tuple) -> None:
+        """Hand a new target to the placement loop, atomically w.r.t. _laser_step."""
+        with self._laser_lock:
+            self._laser_done = False          # before the target: no frame may pair
+            self._laser_target = target       # the new target with an old "done"
+            self._avg_buf.clear()
+            self._laser_goto = True
+
+    def cancel_laser_target(self) -> None:
+        """Stop the placement loop where it is (the target is kept)."""
+        self._laser_goto = False
+
+    def stream_delays(self) -> dict:
+        """How late the laser position is: half the span of the running
+        average (running_avg_frames), whose centroid lags the newest frame."""
+        n = max(1, int(self.cfg.camera.running_avg_frames))
+        fps = float(self._status.fps or self.cfg.camera.frame_rate or 0.0)
+        d = 0.5 * (n - 1) / fps if fps > 0 else 0.0
+        return {c: d for c in STREAM_CHANNELS}
 
     def move_xy(self, x_um: float, y_um: float) -> list:
         x, y = self._clamp_xy(float(x_um), float(y_um))

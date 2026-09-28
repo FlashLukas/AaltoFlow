@@ -539,6 +539,11 @@ Rules that matter:
 * **Record in the thread that already reads the hardware** (hf2's poll thread),
   or in a small sampler thread started by `stream_start` (kim), under the same
   lock as every other backend call. `append` must stay cheap.
+* **Stream in WIRE units**, like status: scan-core applies the descriptor's
+  `scale` (pm16 streams W, the scan records mW).
+* **Stamp an averaged reading at the MIDDLE of its window** (pm16: each
+  reading is a 60 ms mean) and declare delay 0; stamping the end would add
+  half the window as an uncorrected lag.
 * **Bound the buffer** and say `overflow` when it drops samples.
 * **Time the loop with `time.sleep`, not `Event.wait(period)`**: on Windows a
   timed wait rounds up to the 15.6 ms system tick (docs/DEVELOPER_NOTES.md

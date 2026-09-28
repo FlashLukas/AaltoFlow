@@ -40,8 +40,13 @@ from dataclasses import dataclass, field
 
 from .backends.base import FLAG_OK, PowerMeterBackend
 from .config import Config
+from .stream import StreamRecorder
 
 _NAN = float("nan")
+
+#: The fly-scan stream's one channel: the power in WATTS (the wire unit, like
+#: status; the manifest's scale turns it into the mW a scan records).
+STREAM_CHANNELS = ("power",)
 
 
 @dataclass
@@ -131,6 +136,10 @@ class PowerMeter:
         self._acq: dict | None = None
         self._sample: dict = {}
 
+        # The fly-scan record (stream.py): every reading the poll thread takes,
+        # time stamped, while a scan has it running. Costs nothing when stopped.
+        self.stream = StreamRecorder(STREAM_CHANNELS)
+
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         # replaced by the service / GUI to forward events; default = no-op
@@ -202,6 +211,7 @@ class PowerMeter:
         """Stop polling and disconnect. Safe to call more than once. A power
         meter has no output to make safe, so nothing is changed on the way out."""
         self._stop.set()
+        self.stream.stop()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
         self._thread = None
@@ -383,8 +393,12 @@ class PowerMeter:
             t = self._clock()
             self.poll_once()
             # A PM16 reading blocks ~60 ms by itself; only sleep what is left of
-            # the period, so the loop runs as fast as the meter allows.
-            self._stop.wait(max(0.005, period - (self._clock() - t)))
+            # the period, so the loop runs as fast as the meter allows. At least
+            # 1 ms, so a setter waiting for the hardware lock gets its turn.
+            # time.sleep, not self._stop.wait: on Windows a timed Event.wait
+            # rounds up to the 15.6 ms timer tick (docs/DEVELOPER_NOTES.md
+            # gotcha #34), which alone cost ~20 % of the readings.
+            time.sleep(max(0.001, period - (self._clock() - t)))
 
     def poll_once(self) -> None:
         """One reading (or one zero-state check), then advance any acquisition.
@@ -404,14 +418,24 @@ class PowerMeter:
                 return
             with self._hw:
                 t_start = self._clock()
+                w_start = time.time()
                 power, flag = self.backend.measure_power()
                 t_end = self._clock()
+                w_end = time.time()
                 auto_range = self.cfg.sensor.auto_range
                 rng = self.backend.get_range() if auto_range else None
         except Exception as exc:          # never let the polling thread die
             self._report_hw_error(exc)
             return
 
+        # The stream sample is stamped at the MIDDLE of the reading: a PM16
+        # reading is the mean over its ~60 ms, and the middle of that window
+        # is where a boxcar average's centroid sits -- so its declared delay
+        # is 0, and a fly scan's lookup needs no correction. (What it cannot
+        # undo is the smearing over speed x 60 ms.) An overrange reading goes
+        # in as NaN: the binning skips it rather than averaging a clipped value.
+        self.stream.append(0.5 * (w_start + w_end),
+                           (float(power) if flag == FLAG_OK else _NAN,))
         recovered = False
         with self._lock:
             recovered = bool(self._hw_error)

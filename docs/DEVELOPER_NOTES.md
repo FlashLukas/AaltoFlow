@@ -167,7 +167,11 @@ still assumes piezo/zpiezo.
   `{"stream": {"t", "values", "delay_s", "overflow", "now"}}` with `time.time()`
   stamps and each channel's lag (a lock-in: order x tau). scan-core's `fly` axis
   moves a stage without stopping and bins the streamed detectors by the streamed
-  position. hf2 (all scan detectors) and kim (position_x/y/z) stream so far.
+  position. hf2 (all scan detectors), pm16 (power), kim (position_x/y/z) and
+  camera (laser_x/y: the laser on the sample, from the tracked template) stream
+  so far. A fly axis with `move: <stage>` flies in ANOTHER parameter's
+  coordinates (camera.laser_x): the grid, row placement and binning are the
+  camera's, the stage only moves; rows end when the camera sees the far edge. Values travel in WIRE units; the descriptor's `scale` applies.
   Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
   checks the verbs wherever a stream is declared.
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
@@ -519,7 +523,9 @@ zpiezo has no GUI.
     that only costs a point measured early; for a fly scan it ended the ROW
     before the stage had left, with every pixel empty. The fly engine therefore
     ends a row on the MEASURED position (at the far end and at rest, or stalled
-    for 1 s -- logged), never on the settle rule alone. General lesson: a
+    for 1 s -- logged), never on the settle rule alone -- and (found on the rig
+    2026-09-28) it waits for the APPROACH to each row's run-in the same way:
+    the stale frame had made row 0 start wherever the stage happened to be. General lesson: a
     "done" signal is only as good as the wait it was designed for.
 36. **An old flat module folder left behind after the move to modules/**
     (2026-09-27). `git pull` moves the files git TRACKS into
@@ -608,11 +614,11 @@ cd "<root>\modules\motion\kim-control"
 .\dev.ps1 run python scripts\smoke_test.py
 ```
 
-Expected test counts (all measured 2026-09-27): clMag 22 · smb 29 · stage 50 · piezo 37 · camera 119 · zpiezo 14 · kim 92 · hf2 60 · pm16 44 · vna 110 · mag2d 46 ·
-mag2dcal 96 · ppms 43 · scan-core 346 · mission-control 16 · suite-common 53 = **1177**
-(2026-09-27: fly scans -- scan-core +38 over 308, hf2 +8, kim +5)
+Expected test counts (all measured 2026-09-27): clMag 22 · smb 29 · stage 50 · piezo 37 · camera 129 · zpiezo 14 · kim 92 · hf2 60 · pm16 49 · vna 110 · mag2d 46 ·
+mag2dcal 96 · ppms 43 · scan-core 357 · mission-control 16 · suite-common 53 = **1203**
+(2026-09-27: fly scans -- scan-core +49 over 308, hf2 +8, kim +5, pm16 +5, camera +10)
 (+ aaltoview 42, own repo). Plus the contract check:
-`python tools/check_modules.py --live` (118 checks, 0 failed on 2026-09-27; since
+`python tools/check_modules.py --live` (120 checks, 0 failed on 2026-09-27; since
 2026-09-27 it also exercises the stream verbs of every module that declares one).
 
 **Offscreen GUI render**: this is now a tool, not a recipe to retype ---

@@ -39,7 +39,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help="", wait=None):
+       settle=None, args=None, danger=False, help="", wait=None, stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -51,7 +51,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("help", help), ("wait", wait)):
+                 ("help", help), ("wait", wait), ("stream", stream)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -107,6 +107,11 @@ def build_manifest(brain) -> dict:
     # Unit and bounds come from the LIVE Z / XY backends: volts on the piezo
     # rig, micrometres on the KIM rig, whose range follows kim's leash. When a
     # bound changes, so does the revision, and clients re-fetch.
+    # the laser coordinates can reach +- the image size (the template must stay in view)
+    frame = getattr(brain, "_last_frame", None)
+    h_px, w_px = (frame.shape[:2] if frame is not None else (480, 640))
+    lx = round(float(w_px) * float(brain.cfg.image.pixel_size_x_um), 3)
+    ly = round(float(h_px) * float(brain.cfg.image.pixel_size_y_um), 3)
     z_unit = brain.z_unit()
     zlim = brain.z_limits() or (None, None)
     xylim = brain.xy_limits() or ((None, None), (None, None))
@@ -221,6 +226,37 @@ def build_manifest(brain) -> dict:
            unit="um", group="Scan array", order=88, decimals=3, plottable=True,
            read_path=["spot_from_template_y_um"],
            help="As X; image +y is DOWN."),
+
+        # ---- the laser ON THE SAMPLE, in template coordinates ---------------
+        # A point of the sample, measured optically from the main template --
+        # immune to an open-loop stage's counter drift. Setting one PLACES the
+        # laser there (closed loop on the camera image, like the stabiliser),
+        # and a fly scan can bin by it: fly the stage, record laser_x. Bounds =
+        # the image size either way: the template has to stay in view (or a
+        # backup pattern take over). Settle: the target echoed AND
+        # laser_settled, which is re-evaluated every frame.
+        _p("laser_x", "Laser on sample X", "control", "float", unit="um",
+           group="Laser on sample", order=89, decimals=3, plottable=True,
+           min=-lx, max=lx, read_path=["spot_from_template_x_um"],
+           set={"verb": "set_laser_target", "arg": "x"},
+           settle={"policy": "adopt_then_flag", "setpoint_key": "laser_target_x_um",
+                   "flag_key": "laser_settled"},
+           stream={"group": "laser", "channel": "laser_x"},
+           help="Where the laser is on the sample, um from the main template "
+                "(image +x right). Setting it moves the sample until the laser is "
+                "there. Needs tracking and a calibrated spot. In a FLY scan: the "
+                "coordinate the image is binned by."),
+        _p("laser_y", "Laser on sample Y", "control", "float", unit="um",
+           group="Laser on sample", order=90, decimals=3, plottable=True,
+           min=-ly, max=ly, read_path=["spot_from_template_y_um"],
+           set={"verb": "set_laser_target", "arg": "y"},
+           settle={"policy": "adopt_then_flag", "setpoint_key": "laser_target_y_um",
+                   "flag_key": "laser_settled"},
+           stream={"group": "laser", "channel": "laser_y"},
+           help="As X; image +y is DOWN. As the outer axis of a fly scan it puts "
+                "each row on the sample, whatever the stage counter says."),
+        _p("laser_settled", "Laser placed", "indicator", "bool",
+           group="Laser on sample", order=91, read_path=["laser_settled"]),
 
         # ---- position (read-only here; drive XY through piezo-control) -----
         _p("stage_x", "Stage X", "indicator", "float", unit="um",

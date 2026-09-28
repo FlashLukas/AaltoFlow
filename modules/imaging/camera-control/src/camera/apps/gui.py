@@ -360,6 +360,111 @@ class MainWindow(QMainWindow):
         ov.addWidget(w, 3); ov.addWidget(sub, 2)
         return outer
 
+    def _laser_card(self) -> QWidget:
+        """Where the laser is ON THE SAMPLE, and putting it somewhere.
+
+        X / Y = the laser spot measured from the MAIN template, in um, every
+        frame (image +x right, +y down) -- the sample's own coordinates, so a
+        slipping open-loop stage does not enter. Place moves the sample until
+        the laser is at the target (closed loop on the image, like the
+        stabiliser, which it switches off: one stage, one target). The same
+        numbers are `camera.laser_x/y` in scans, and what a fly scan in camera
+        coordinates bins by.
+        """
+        f, l = _card("Laser on sample")
+        f.setFixedWidth(330)
+        r = QHBoxLayout()
+        self.lab_laser = QLabel("x -   y -  um")
+        self.lab_laser.setStyleSheet("font-weight:700;")
+        self.lab_laser.setToolTip("laser spot measured from the main template, um "
+                                  "(image +x right, +y down)")
+        r.addWidget(self.lab_laser, 1)
+        r.addWidget(QLabel("Placed")); self.led_laser = _led(T.OK)
+        r.addWidget(self.led_laser)
+        l.addLayout(r)
+        r = QHBoxLayout()
+        self.laser_tx = QDoubleSpinBox(); self.laser_ty = QDoubleSpinBox()
+        for sp, name in ((self.laser_tx, "X"), (self.laser_ty, "Y")):
+            sp.setRange(-10000.0, 10000.0); sp.setDecimals(3); sp.setSingleStep(0.5)
+            sp.setSuffix(" um")
+            r.addWidget(QLabel(name)); r.addWidget(sp)
+        l.addLayout(r)
+        r = QHBoxLayout()
+        self.b_laser_here = QPushButton("Here")
+        self.b_laser_here.setToolTip("fill the target with where the laser is now")
+        self.b_laser_here.clicked.connect(self._laser_here)
+        self.b_laser_place = QPushButton("Place"); self.b_laser_place.setObjectName("primary")
+        self.b_laser_place.setToolTip("move the sample until the laser is at the target "
+                                      "(switches the stabiliser off)")
+        self.b_laser_place.clicked.connect(self._laser_place)
+        self.b_laser_cancel = QPushButton("Cancel")
+        self.b_laser_cancel.clicked.connect(self._laser_cancel)
+        r.addWidget(self.b_laser_here); r.addWidget(self.b_laser_place)
+        r.addWidget(self.b_laser_cancel); l.addLayout(r)
+        self.lab_laser_state = QLabel("no target"); self.lab_laser_state.setObjectName("muted")
+        l.addWidget(self.lab_laser_state)
+        return f
+
+    def _laser_here(self) -> None:
+        s = self.ctrl.status()
+        x, y = s.spot_from_template_x_um, s.spot_from_template_y_um
+        if x == x and y == y:                  # not NaN
+            self.laser_tx.setValue(x); self.laser_ty.setValue(y)
+        else:
+            self._log_event("warn", "laser position unknown: needs a tracked pattern "
+                                    "and a calibrated spot")
+
+    def _laser_place(self) -> None:
+        try:
+            t = self.ctrl.set_laser_target(self.laser_tx.value(), self.laser_ty.value())
+            self._log_event("info", f"placing the laser at x {t[0]:.3f}, y {t[1]:.3f} um")
+        except Exception as exc:
+            self._log_event("warn", f"cannot place the laser: {exc}")
+
+    def _laser_cancel(self) -> None:
+        try:
+            self.ctrl.cancel_laser_target()
+        except Exception as exc:
+            self._log_event("warn", f"cancel failed: {exc}")
+
+    def _refresh_laser(self, s) -> None:
+        x, y = s.spot_from_template_x_um, s.spot_from_template_y_um
+        known = x == x and y == y
+        self.lab_laser.setText(f"x {x:.3f}   y {y:.3f}  um" if known else "x -   y -  um")
+        _set_led(self.led_laser, bool(getattr(s, "laser_settled", False)), T.OK)
+        tx = getattr(s, "laser_target_x_um", float("nan"))
+        if getattr(s, "streaming", False):
+            text = "a fly scan is recording -- placement stands down"
+        elif getattr(s, "laser_goto", False):
+            text = f"placing ... {s.distance_um:.3f} um to go"
+        elif tx != tx:
+            text = "no target"
+        elif getattr(s, "laser_settled", False):
+            text = "at the target"
+        else:
+            text = (f"target x {tx:.3f}, y {s.laser_target_y_um:.3f} um -- "
+                    f"not there (stopped or moved away)")
+        self.lab_laser_state.setText(text)
+        # Without a matched pattern there ARE no sample coordinates: the whole
+        # card is greyed, and the state line says what is missing (Cancel
+        # stays usable while a placement is still running).
+        ready = bool(s.match_found and s.spot_calibrated and s.tracking_on)
+        stage = bool(getattr(s, "stage_ok", True))
+        if not ready:
+            missing = [what for ok, what in ((s.tracking_on, "tracking on"),
+                                             (s.match_found, "a matched pattern"),
+                                             (s.spot_calibrated, "a calibrated spot")) if not ok]
+            self.lab_laser_state.setText("needs " + ", ".join(missing))
+        for w_ in (self.laser_tx, self.laser_ty, self.lab_laser, self.b_laser_here):
+            w_.setEnabled(ready)
+        self.b_laser_here.setEnabled(ready and known)
+        self.b_laser_place.setEnabled(ready and stage)
+        self.b_laser_cancel.setEnabled(bool(getattr(s, "laser_goto", False)) or (ready and stage))
+        self.b_laser_place.setToolTip(
+            "move the sample until the laser is at the target (switches the "
+            "stabiliser off)" if ready else
+            "needs: pattern tracking on, the pattern matched, a calibrated spot")
+
     def _scanning_subtab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
         row = QHBoxLayout()
@@ -585,6 +690,11 @@ class MainWindow(QMainWindow):
         l.addWidget(self.b_datum)
         l.addStretch(1)
         lay.addWidget(f, 0, Qt.AlignTop)
+
+        # -- the laser on the SAMPLE (template coordinates) -- next to the stage
+        #    controls it belongs with; on the Camera tab it pushed the bottom
+        #    tabs down again (Lukas, 2026-09-28)
+        lay.addWidget(self._laser_card(), 0, Qt.AlignTop)
 
         lay.addStretch(1)                       # spare width stays on the right
         return w
@@ -1157,6 +1267,14 @@ class MainWindow(QMainWindow):
         else:
             self.lab_patterns.setText("no backups")
         _set_led(self.led_stable, s.stable, T.OK)
+        # The stabiliser can be switched by something else -- placing the laser
+        # switches it off, a scan or a console may switch it -- so the box
+        # follows the brain (blockSignals: the change must not be sent back).
+        if self.chk_stab.isChecked() != bool(s.stabilize_on):
+            self.chk_stab.blockSignals(True)
+            self.chk_stab.setChecked(bool(s.stabilize_on))
+            self.chk_stab.blockSignals(False)
+        self._refresh_laser(s)
         _set_led(self.led_af, not s.af_running and s.af_error == "OK", T.OK)
         self.lab_af.setText("run" if s.af_running else s.af_error)
         # Z follows the Z device: volts on the piezo rig, um on the KIM rig,
