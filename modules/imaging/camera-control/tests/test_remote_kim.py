@@ -37,6 +37,7 @@ class FakeKimService:
         self.moves: list[tuple[str, int]] = []
         self.image_moves: list[dict] = []
         self.px_calibrated = True
+        self.hw_error = ""          # kim's "my last read of the KIM101 failed"
         self._lock = threading.Lock()
         self._t = time.monotonic()
         self._stop = threading.Event()
@@ -75,6 +76,7 @@ class FakeKimService:
                 "um_per_step_fwd": [UPS * self.asym] * 3,
                 "um_per_step_bwd": [UPS / self.asym] * 3,
                 "um_per_step_src": ["camera"] * 3,
+                "hw_error": self.hw_error,
             }
 
     def _serve(self):
@@ -505,3 +507,19 @@ def test_the_window_greys_out_the_stage_and_offers_reconnect():
         assert all(b.isHidden() for _l, b in win._stage_bars)
     finally:
         win.close()
+
+
+def test_a_kim_read_failure_raises_instead_of_serving_the_last_good_position(kim):
+    # kim keeps the LAST GOOD position when its USB read fails (and reports
+    # moving) -- sensible for its own display, but the camera must not steer
+    # the stabiliser or score an autofocus level with it (2026-09-28).
+    svc, xy, z = kim
+    assert _wait(lambda: xy.link._cache is not None)
+    svc.hw_error = "KIM101 USB read failed"
+    assert _wait(lambda: xy.link._cache.get("hw_error"))
+    for read in (xy.read_xy, xy.read_steps, z.read_z):
+        with pytest.raises(RuntimeError, match="USB read failed"):
+            read()
+    svc.hw_error = ""
+    assert _wait(lambda: not xy.link._cache.get("hw_error"))
+    xy.read_xy(); z.read_z()                    # healthy again

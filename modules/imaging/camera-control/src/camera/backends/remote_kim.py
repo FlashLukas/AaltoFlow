@@ -232,6 +232,19 @@ class KimLink:
             raise
 
 
+def _position(st: dict, key: str) -> list:
+    """A position list from kim's status, refused while kim's own read failed.
+
+    kim keeps publishing its LAST GOOD position when a USB read of the KIM101
+    fails (and flags it in hw_error, 2026-09-28). That is right for its display,
+    but here a position steers the stabiliser and scores autofocus levels, so a
+    stale one must stop the loop, not feed it.
+    """
+    if st.get("hw_error"):
+        raise RuntimeError(f"kim: {st['hw_error']}")
+    return st[key]
+
+
 def _axis_range_um(st: dict, axis: int) -> tuple:
     ups = float(st["um_per_step"][axis])
     return (float(st["limit_lo"][axis]) * ups, float(st["limit_hi"][axis]) * ups)
@@ -259,7 +272,7 @@ class KimXYStage:
         return self.link.reconnect()
 
     def read_xy(self) -> tuple:
-        pos = self.link.status()["position_um"]
+        pos = _position(self.link.status(), "position_um")
         return (float(pos[0]), float(pos[1]))
 
     def move_xy(self, x_um: float, y_um: float) -> None:
@@ -276,7 +289,7 @@ class KimXYStage:
     # kim's um are step count x a NOMINAL um_per_step that has not been measured
     # on this rig, so jogging is offered in steps, the unit that is actually true.
     def read_steps(self) -> tuple:
-        pos = self.link.status()["position_steps"]
+        pos = _position(self.link.status(), "position_steps")
         return (int(pos[0]), int(pos[1]))
 
     def steps_for_um(self, axis: int, um: float) -> int:
@@ -357,7 +370,7 @@ class KimZFocus:
         return "um"
 
     def read_z(self) -> float:
-        return float(self.link.status()["position_um"][2])
+        return float(_position(self.link.status(), "position_um")[2])
 
     def set_z(self, um: float) -> None:
         reply = self.link.rpc(cmd="move_to_um", axis="Z", position=float(um))

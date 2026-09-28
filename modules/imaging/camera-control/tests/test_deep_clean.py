@@ -394,3 +394,39 @@ def test_config_with_a_percent_sign_saves_and_loads(tmp_path):
     path = str(tmp_path / "camera.ini")
     save_config(cfg, path)
     assert load_config(path).image.save_path == cfg.image.save_path
+
+
+# --------------------------------------------------------------------------- #
+# 4b. (2026-09-28) a status that reports a failed HARDWARE read must raise too
+# --------------------------------------------------------------------------- #
+class _BrokenLinkService(_RefusingService):
+    """Answers `status` with ok: true, but the instrument's own read failed:
+    zpiezo then publishes voltage NaN (no good read yet), piezo keeps its last
+    good position -- and both set hw_error. Neither value is a real reading."""
+
+    def _serve(self):
+        poller = zmq.Poller()
+        poller.register(self._rep, zmq.POLLIN)
+        while not self._stop.is_set():
+            if dict(poller.poll(50)):
+                self._rep.recv_json()
+                self._rep.send_json({"ok": True, "status": {
+                    "voltage": float("nan"), "position": [12.0, 34.0],
+                    "moving": [True, True], "hw_error": "USB read failed"}})
+
+
+def test_a_remote_read_with_hw_error_raises_instead_of_returning_a_stale_value():
+    from camera.backends.remote_xy import RemoteXYStage
+    from camera.backends.remote_z import RemoteZFocus
+
+    svc = _BrokenLinkService()
+    z = RemoteZFocus("127.0.0.1", svc.port, timeout_ms=1000)
+    xy = RemoteXYStage("127.0.0.1", svc.port, timeout_ms=1000)
+    z.open(); xy.open()
+    try:
+        with pytest.raises(RuntimeError, match="USB read failed"):
+            z.read_z()                    # would have been NaN -> autofocus on garbage
+        with pytest.raises(RuntimeError, match="USB read failed"):
+            xy.read_xy()                  # would have been the stale (12, 34)
+    finally:
+        z.close(); xy.close(); svc.close()

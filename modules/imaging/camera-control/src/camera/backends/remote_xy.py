@@ -71,6 +71,10 @@ class RemoteXYStage:
     def read_xy(self) -> tuple:
         reply = self._rpc(cmd="status")
         st = reply.get("status", {})
+        # piezo keeps the LAST GOOD position when its sensor read fails and
+        # flags it in hw_error -- a stale position would steer the stabiliser.
+        if st.get("hw_error"):
+            raise RuntimeError(f"piezo: {st['hw_error']}")
         pos = st.get("position", [0.0, 0.0])
         return (float(pos[0]), float(pos[1]))
 

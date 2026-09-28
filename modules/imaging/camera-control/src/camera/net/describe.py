@@ -184,6 +184,24 @@ def build_manifest(brain) -> dict:
            group="Pattern", order=70, read_path=["match_found"]),
         _p("match_score", "Match score", "indicator", "float", group="Pattern",
            order=71, decimals=4, plottable=True, read_path=["match_score"]),
+        # A LOST pattern is a latched fault (2026-09-28): scan-core pauses on a
+        # non-empty `fault`, and it stays until a human clears it.
+        _p("fault", "Fault", "indicator", "string", group="Status", order=3,
+           read_path=["fault"],
+           help="Empty when fine. Set (and LATCHED) when the tracked pattern is "
+                "lost -- the text names the likely cause: out of image, the laser "
+                "spot on the pattern, or out of focus. The stabiliser holds the "
+                "stage and no point counts as settled until Clear fault."),
+        _p("hw_error", "Hardware error", "indicator", "string", group="Status",
+           order=4, read_path=["hw_error"],
+           help="Empty when fine; a failed camera grab or stage / Z read-back."),
+        _p("clear_fault", "Clear fault", "action", "action", group="Pattern",
+           order=72,
+           help="After a lost pattern: correct the cause first (focus, move the "
+                "pattern back into view, move the spot off it -- or switch "
+                "tracking off and on to search the whole frame, watching the "
+                "result), then clear. Refused while tracking is on and the "
+                "pattern is still not found."),
 
         _p("distance_um", "Spot to point", "indicator", "float", unit="um",
            group="Loops", order=80, decimals=3, plottable=True,

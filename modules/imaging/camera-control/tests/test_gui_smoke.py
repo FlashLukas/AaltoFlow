@@ -405,3 +405,47 @@ def test_laser_card_is_greyed_without_a_pattern_and_sits_by_the_stage_controls()
         win.close()
     finally:
         brain.shutdown()
+
+
+def test_fault_banner_shows_the_fault_and_clears_it():
+    """2026-09-28: a lost pattern is a latched fault -- red banner with the
+    cause and a Clear fault button; hidden when there is nothing to show; a
+    refused clear lands in the log instead of an exception; the Pattern tab
+    offers autofocus_on_loss."""
+    from PySide6.QtWidgets import QApplication, QCheckBox
+    from camera.apps.gui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config()
+    brain, cam, xy, z = build_sim_system(cfg)
+    brain._process()
+    tcx, tcy = cam.template_center_px()
+    brain.capture_reference((tcx, tcy, 60, 60))
+    brain.set_tracking(True)
+    brain._process()
+    win = MainWindow(brain, cfg, remote=False)
+    try:
+        win._refresh()
+        assert win.fault_bar.isHidden()
+        # latch a fault while the pattern is not matched: the clear is refused
+        with brain._lock:
+            brain._fault = "pattern lost: out of focus or unknown cause"
+            brain._status.fault = brain._fault
+            brain._status.match_found = False
+        win._refresh()
+        assert not win.fault_bar.isHidden() and not win.b_clear_fault.isHidden()
+        assert "out of focus" in win.lab_fault.text()
+        win.b_clear_fault.click()
+        assert "refused" in win.log.toPlainText()
+        assert brain.status().fault
+        # matched again -> the clear goes through and the banner hides
+        brain._process()
+        assert brain.status().match_found
+        win.b_clear_fault.click()
+        win._refresh()
+        assert brain.status().fault == "" and win.fault_bar.isHidden()
+        # the option is in the Pattern settings form
+        w = win._form_widgets["pattern"]["autofocus_on_loss"]
+        assert isinstance(w, QCheckBox)
+    finally:
+        win.close()

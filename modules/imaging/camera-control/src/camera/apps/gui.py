@@ -346,12 +346,15 @@ class MainWindow(QMainWindow):
         cards.append(f)
         right_w = QWidget(); grid = QGridLayout(right_w)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.addWidget(self._stage_bar(), 0, 0, 1, 2)
+        # The FAULT banner goes first, above everything: a lost pattern stops
+        # the stabiliser and pauses a scan, so it must be the first thing seen.
+        grid.addWidget(self._fault_bar(), 0, 0, 1, 2)
+        grid.addWidget(self._stage_bar(), 1, 0, 1, 2)
         # column 1: what you do to the SAMPLE's image (focus, pattern);
         # column 2: what runs on it (stabiliser) and what is drawn (imaging).
-        for (r, c), card in zip(((1, 0), (2, 0), (1, 1), (2, 1)), cards):
+        for (r, c), card in zip(((2, 0), (3, 0), (2, 1), (3, 1)), cards):
             grid.addWidget(card, r, c)
-        grid.setRowStretch(3, 1)
+        grid.setRowStretch(4, 1)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         lay.addWidget(right_w, 5)
 
@@ -585,6 +588,45 @@ class MainWindow(QMainWindow):
         row.addWidget(lab, 1); row.addWidget(btn)
         self.__dict__.setdefault("_stage_bars", []).append((lab, btn))
         return bar
+
+    def _fault_bar(self) -> QWidget:
+        """Red banner: the latched FAULT (a lost pattern) and any hardware error.
+
+        Hidden while both are empty. "Clear fault" is refused by the camera
+        while the pattern is still not found; the refusal is shown in the log.
+        """
+        bar = QFrame(); bar.setObjectName("card")
+        row = QHBoxLayout(bar); row.setContentsMargins(8, 4, 8, 4)
+        self.lab_fault = QLabel(""); self.lab_fault.setWordWrap(True)
+        self.b_clear_fault = QPushButton("Clear fault"); self.b_clear_fault.setObjectName("danger")
+        self.b_clear_fault.setToolTip("Correct the cause first (focus, bring the pattern back "
+                                      "into view, move the spot off it), then clear. The "
+                                      "stabiliser holds the stage until then.")
+        self.b_clear_fault.clicked.connect(self._clear_fault)
+        row.addWidget(self.lab_fault, 1); row.addWidget(self.b_clear_fault)
+        self.fault_bar = bar
+        bar.setVisible(False)
+        return bar
+
+    def _clear_fault(self) -> None:
+        try:
+            self.ctrl.clear_fault()
+        except Exception as exc:
+            self._log_event("warn", f"clear fault refused: {exc}")
+
+    def _sync_fault(self, s) -> None:
+        fault = getattr(s, "fault", "") or ""
+        hw = getattr(s, "hw_error", "") or ""
+        lines = []
+        if fault:
+            lines.append(f"FAULT: {fault}")
+        if hw:
+            lines.append(f"HARDWARE: {hw}")
+        self.fault_bar.setVisible(bool(lines))
+        self.b_clear_fault.setVisible(bool(fault))
+        if lines:
+            self.lab_fault.setText(" | ".join(lines))
+            self.lab_fault.setStyleSheet(f"color:{T.DANGER}; font-weight:700;")
 
     def _stage_controls(self) -> list:
         names = ("z_spin", "b_setz", "z_step", "b_z_up", "b_z_dn", "b_af", "chk_cont",
@@ -1311,6 +1353,7 @@ class MainWindow(QMainWindow):
         self.lab_best.setText(f"{s.best_focus_v:.2f} {s.z_unit}")
         self._refresh_xy(s)
         self._sync_stage(s)                 # after _refresh_xy: it may re-enable Datum
+        self._sync_fault(s)
         self.lab_pxsize.setText(f"pixel: {s.pixel_size_x:.4f} um | obj: {s.objective_name}")
         self.lab_z.setText(f"at {s.z_voltage:.2f} {s.z_unit}")
         if not self._z_target_synced and s.connected:

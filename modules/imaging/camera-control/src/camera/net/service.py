@@ -268,6 +268,10 @@ class CameraService:
             return {"ok": True, "on": b.set_tracking(bool(req["on"]))}
         if cmd == "set_stabilize":
             return {"ok": True, "on": b.set_stabilize(bool(req["on"]))}
+        if cmd == "clear_fault":
+            # the user has corrected a lost pattern; refused (-> error reply)
+            # while the pattern is still not found
+            return {"ok": True, "result": b.clear_fault()}
         if cmd == "set_laser_target":
             # place the laser at (x, y) um from the main template; either may
             # be left out (= keep). Replies at once; wait for laser_settled.

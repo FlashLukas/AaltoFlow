@@ -147,6 +147,23 @@ class Pattern:
     edge_margin_px: int = 60
     offset_learn_rate: float = 0.05
     offset_warn_px: float = 15.0
+    # LOSING THE PATTERN (2026-09-28, Lukas: "if it is lost it is out of focus,
+    # out of image, the spot is in the pattern, or something else happened that
+    # is terrible. All need correction."). Not matched for `lost_frames` frames
+    # in a row = LOST: the camera raises a latched `fault` (a scan pauses on it)
+    # naming the likely cause, and the stabiliser holds until "Clear fault".
+    # The cause is read from where the pattern was LAST seen: within
+    # loss_edge_margin_px of the image edge -> out of image; within
+    # loss_spot_margin_px of the laser spot -> the spot is on the pattern;
+    # otherwise out of focus (or unknown). There is deliberately NO search of
+    # the whole frame after a loss -- it can lock onto a look-alike feature.
+    lost_frames: int = 5
+    loss_edge_margin_px: int = 40
+    loss_spot_margin_px: int = 30
+    # Only for the "out of focus / unknown" case: run ONE autofocus, then look
+    # for the pattern again at its last place. Found -> fault cleared (a warning
+    # is logged); not found -> the fault latches. Off by default.
+    autofocus_on_loss: bool = False
 
 
 @dataclass
@@ -161,8 +178,11 @@ class Autofocus:
     offset_from_found_v: float = 0.0   # park this far from the found best focus
     fit_curve: bool = True             # True: parabola fit; False: raw argmax
     continuous_enabled: bool = False   # hold focus every frame
-    continuous_gain: float = 0.2       # correction fraction per frame (0..1)
-    continuous_target: float = 0.0     # 0 = hold the last measured focus metric
+    # NB (2026-09-28): continuous_gain is used as the Z step per frame, in the
+    # Z unit (V / um) -- NOT a fraction; continuous_target is not used at all.
+    # Kept as they are until Lukas decides (camera CLAUDE.local.md).
+    continuous_gain: float = 0.2       # Z dither step per frame, Z unit
+    continuous_target: float = 0.0     # (unused) 0 = hold the last measured focus metric
     # Open-loop Z only (KIM / PIA25). A slip-stick step is not the same size up
     # as down, so a move that REVERSES direction lands off target. Every sweep
     # level and the final park are therefore approached from BELOW: first go

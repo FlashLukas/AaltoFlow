@@ -190,6 +190,9 @@ class CameraClient:
     def set_tracking(self, on: bool) -> bool:
         return self._rpc(cmd="set_tracking", on=bool(on))["on"]
 
+    def clear_fault(self) -> str:
+        return self._rpc(cmd="clear_fault").get("result", "")
+
     def set_stabilize(self, on: bool) -> bool:
         return self._rpc(cmd="set_stabilize", on=bool(on))["on"]
 

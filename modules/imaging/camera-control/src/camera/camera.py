@@ -134,6 +134,17 @@ class CameraStatus:
     # a fly scan is recording the laser position (stream): the stabiliser and
     # the placement loop stand down, or they would fight the flying stage
     streaming: bool = False
+    # FAULT (2026-09-28): "" when fine, else why the camera cannot be trusted to
+    # hold the sample -- today: the tracked pattern was LOST (out of image, spot
+    # on the pattern, out of focus). LATCHED: it stays until the user sends
+    # `clear_fault`, even if the pattern is found again, because whatever lost
+    # it needs a human look. While it is set the stabiliser and the laser
+    # placement hold the stage, and point_settled / laser_settled are False, so
+    # a scan waiting on them does not measure; scan-core pauses on it.
+    fault: str = ""
+    # A failed hardware read this frame ("" when fine; the suite's convention):
+    # the camera grab, or reading the stage / Z back.
+    hw_error: str = ""
 
     # Z position in the Z device's unit. The names say "voltage"/"_v" for
     # historical reasons (the piezo rig drives Z in volts); on the KIM rig these
@@ -232,6 +243,12 @@ class Camera:
         # Bumped (under _lock) by every setter that resets the tracking; a frame
         # that was matching meanwhile must not write its stale anchor back.
         self._anchor_gen = 0
+        # Pattern loss (see _update_loss). Brain attributes, copied into every
+        # frame's snapshot (gotcha #1). _fault and _recovery are written under
+        # _lock: the engine sets them, clear_fault (request thread) clears them.
+        self._fault = ""
+        self._lost_count = 0          # frames in a row without the pattern
+        self._recovery: dict | None = None   # a running autofocus_on_loss attempt
         self._avg_buf: deque = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal: deque = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
         self._cf_dir = 1.0            # continuous-focus dither direction
@@ -368,7 +385,24 @@ class Camera:
         return V.preprocess(V.to_gray(raw), img.rotation_deg, img.symmetry, clip)
 
     def _process(self) -> None:
-        gray = self._grab_gray()
+        try:
+            gray = self._grab_gray()
+        except Exception as exc:
+            # No new frame. Until 2026-09-28 the exception went up to _run, was
+            # logged every frame, and the LAST snapshot stayed published as it
+            # was -- including a point_settled=True from before the camera
+            # failed, which a scan would believe. Now: say so in hw_error, and
+            # withdraw every "settled" flag from the snapshot a scan reads.
+            why = f"camera grab failed: {type(exc).__name__}: {exc}"
+            with self._lock:
+                self._status.hw_error = why
+                self._status.point_settled = False
+                self._status.stable = False
+                self._status.laser_settled = False
+            self._settled_for = None
+            self._avg_buf.clear()
+            self._warn_limited("grab", why)
+            return
         # When this frame was taken, on the WALL clock (a fly scan lines the
         # stream up with other instruments'). The grab returns once the frame
         # is exposed and read out; the exposure is ~1 ms here, so "now" is it.
@@ -458,22 +492,34 @@ class Camera:
         # a scan go on before focus has even begun. Both also stand down while
         # a fly scan records the camera: the stage is being flown on purpose.
         af_pending = self._af_busy
+        # A lost pattern: count it, and after lost_frames raise the fault (and
+        # maybe start the autofocus recovery). Done BEFORE the loops below, so
+        # the frame that declares the loss already holds the stage.
+        self._update_loss(st, gray.shape[:2], af_pending)
+        af_pending = self._af_busy           # the recovery may just have queued one
+        with self._lock:
+            faulted = bool(self._fault)
         streaming = self.stream.running
         st.streaming = streaming
         anchor_now = self._last_template_xy if (self.reference is not None
                                                  and st.tracking_on and st.match_found) else None
+        # While FAULTED neither loop moves the stage, even when the pattern is
+        # matched again: whatever lost it (a spurious match, a half-defocused
+        # image) has not been looked at by anyone yet.
         goto = (self._laser_goto and anchor_now is not None and spot_position_ok
-                and not af_pending and not streaming)
+                and not af_pending and not streaming and not faulted)
         if goto:
             self._laser_step(anchor_now, px_x, px_y, st)
         elif (geo is not None and st.stabilize_on and spot_position_ok and st.match_found
-                and not af_pending and not streaming and not self._laser_goto):
+                and not af_pending and not streaming and not self._laser_goto
+                and not faulted):
             stable = self._stabilise_step(geo, px_x, px_y, st)
             st.stable = stable
         else:
             self._avg_buf.clear()
             self._settled_for = None          # a lost match or a stopped loop is not settled
         st.point_settled = (st.stabilize_on and not af_pending and not streaming
+                            and not faulted
                             and not self._laser_goto and self._settled_for
                             == (st.selected_index_x, st.selected_index_y))
 
@@ -503,13 +549,16 @@ class Camera:
             self._continuous_focus_step(gray, st)
 
         # -- motion / z read-back --------------------------------------- #
+        # A failed read-back is not fatal for the frame, but it is published as
+        # hw_error (it used to vanish in a bare `pass`).
+        hw_errors = []
         try:
             st.stage_x, st.stage_y = self.xy.read_xy()
             st.stage_moving = self.xy.moving()
             if callable(getattr(self.xy, "read_steps", None)):
                 st.stage_steps_x, st.stage_steps_y = self.xy.read_steps()
-        except Exception:
-            pass
+        except Exception as exc:
+            hw_errors.append(f"stage read failed: {type(exc).__name__}: {exc}")
         st.stage_ok, st.stage_error = self.stage_state()
         st.xy_step_unit = self.xy_step_unit()
         st.xy_has_datum = callable(getattr(self.xy, "zero_counter", None))
@@ -520,8 +569,9 @@ class Camera:
         if self.cfg.hardware.use_z:
             try:
                 st.z_voltage = self.z.read_z()
-            except Exception:
-                pass
+            except Exception as exc:
+                hw_errors.append(f"Z read failed: {type(exc).__name__}: {exc}")
+        st.hw_error = "; ".join(hw_errors)
         st.z_unit = self.z_unit()
         zlim = self.z_limits()
         if zlim is not None:
@@ -536,6 +586,13 @@ class Camera:
             if self._af_busy:              # a request that arrived mid-frame
                 st.point_settled = False
                 st.stable = False
+            # the fault as it is NOW (clear_fault may have run mid-frame); a
+            # fault never goes out together with a "settled" flag
+            st.fault = self._fault
+            if st.fault:
+                st.point_settled = False
+                st.stable = False
+                st.laser_settled = False
 
         # fps
         now = time.monotonic()
@@ -567,6 +624,10 @@ class Camera:
           that does not fit cannot match -- and a full-frame search would find
           a false one). Nothing known yet (first frame, or `full_image`): whole
           frame, driver first; once one matches, the rest are predicted from it.
+          "Nothing known" happens only after a RESET (tracking switched on, a
+          pattern drawn or loaded) -- never after a loss: a lost pattern keeps
+          its last anchor, is searched only there, and raises a fault
+          (_update_loss explains why there is no whole-frame relock).
         * The driver keeps driving while it is matched and more than
           `edge_margin_px` inside the frame. Then the matched pattern with the
           most room takes over -- so two patterns side by side cannot flip-flop.
@@ -701,6 +762,142 @@ class Camera:
             self._anchor_gen += 1
             self._last_template_xy = anchor
             self._driver, self._driver_xy = 0, driver_xy
+
+    # ------------------------------------------------------------------ #
+    # losing the pattern: a latched fault, maybe one autofocus (2026-09-28)
+    # ------------------------------------------------------------------ #
+    # WHY THERE IS NO WHOLE-FRAME RELOCK. When the pattern is not found in its
+    # box, the tempting fix is to search the whole frame and carry on from the
+    # best match there. Lukas (2026-09-28): "A whole-frame relock is dangerous
+    # for spurious templates. The template never changes abruptly, so if it is
+    # lost it is out of focus, out of image, the spot is in the pattern, or
+    # something else happened that is terrible. All need correction." A sample
+    # full of similar structures (an array of discs, a grating) matches the
+    # template in many places at a score close to the real one; relocking on
+    # one of them would pin the scan array to the wrong structure and the
+    # stabiliser would then DRIVE the sample there -- a scan would carry on,
+    # measuring the wrong place, with every flag green. So a loss stops the
+    # loops (fault) and waits for a human. The only automatic attempt is ONE
+    # autofocus (autofocus_on_loss), after which the pattern is looked for
+    # again ONLY at its last place. (Switching tracking off and on still
+    # searches the whole frame once: that is the user, watching, asking for it.)
+    def _update_loss(self, st, frame_hw: tuple, af_pending: bool) -> None:
+        """Engine thread, once per frame, after tracking: count frames without
+        the pattern, declare a loss, run / judge the autofocus recovery."""
+        pat = self.cfg.pattern
+        n_lost = max(1, int(pat.lost_frames))
+        with self._lock:
+            rec = self._recovery
+        if rec is not None:
+            if self._af_busy:
+                return                          # the recovery autofocus is still to come
+            if rec["phase"] == "af":
+                state = self._af_state
+                if state != "OK":
+                    self._latch(f"{rec['why']}; the autofocus recovery failed ({state})")
+                    return
+                rec["phase"], rec["frames"] = "relock", 0
+            if st.match_found:
+                with self._lock:
+                    self._recovery = None
+                    self._fault = ""
+                self._lost_count = 0
+                self._emit("warn", "pattern recovered by autofocus")
+                return
+            rec["frames"] += 1
+            if rec["frames"] >= n_lost:
+                self._latch(f"{rec['why']}; not found again after the autofocus recovery")
+            return
+
+        # Lost = tracking on, a pattern that WAS locked (an anchor is known), and
+        # no match now. Right after a reset nothing is known yet and nothing is
+        # "lost": that first search is the user's own (whole frame).
+        lost_now = (self.reference is not None and st.tracking_on and not st.match_found
+                    and self._last_template_xy is not None)
+        if not lost_now or af_pending:
+            # (a queued autofocus is about to move Z anyway; judge afterwards)
+            if not lost_now:
+                self._lost_count = 0
+            return
+        self._lost_count += 1
+        with self._lock:
+            if self._fault or self._lost_count < n_lost:
+                return
+        kind, why = self._loss_cause(frame_hw)
+        if (pat.autofocus_on_loss and kind == "focus" and self.cfg.hardware.use_z):
+            with self._lock:
+                self._recovery = {"phase": "af", "why": why, "frames": 0}
+                self._fault = f"{why}; autofocus recovery running"
+            self._emit("warn", f"{why}: trying ONE autofocus (autofocus_on_loss)")
+            self.autofocus()
+            return
+        self._latch(why)
+
+    def _latch(self, why: str) -> None:
+        with self._lock:
+            self._recovery = None
+            self._fault = why
+        self._emit("error", f"FAULT: {why}. The stabiliser holds; correct it, "
+                            f"then Clear fault.")
+
+    def _loss_cause(self, frame_hw: tuple) -> tuple[str, str]:
+        """(kind, message) from where the pattern was LAST seen in the image.
+
+        kind: "edge" (out of image), "spot" (the laser spot is on the pattern)
+        or "focus" (neither -- out of focus, or something unknown).
+        """
+        pat = self.cfg.pattern
+        H, W = frame_hw
+        xy = self._driver_xy
+        if xy is None or self.reference is None:
+            return "focus", "pattern lost: out of focus or unknown cause"
+        k = self._driver if self._driver <= len(self.reference.backups) else 0
+        tpl = (self.reference.template if k == 0
+               else self.reference.backups[k - 1].template)
+        th, tw = tpl.shape[:2]
+        x, y = xy
+        room = min(x - tw / 2, W - x - tw / 2, y - th / 2, H - y - th / 2)
+        if room <= float(pat.loss_edge_margin_px):
+            return "edge", (f"pattern lost: out of image (last seen {max(0.0, room):.0f} px "
+                            f"from the image edge)")
+        sp = self.cfg.spot
+        if sp.ref_set:
+            # distance from the spot to the pattern's BOX (0 = spot inside it)
+            dx = max(0.0, abs(sp.ref_x - x) - tw / 2)
+            dy = max(0.0, abs(sp.ref_y - y) - th / 2)
+            d = float(np.hypot(dx, dy))
+            if d <= float(pat.loss_spot_margin_px):
+                return "spot", (f"pattern lost: the laser spot is on the pattern "
+                                f"(last seen {d:.0f} px from the spot)")
+        return "focus", (f"pattern lost: out of focus or unknown cause "
+                         f"(last seen at {x:.0f}, {y:.0f} px)")
+
+    def clear_fault(self) -> str:
+        """The user has looked and corrected: resume the loops.
+
+        Refused while tracking is on and the pattern is still not matched --
+        clearing then would only raise the same fault again, or (worse) let the
+        loops act on nothing. With tracking OFF there is nothing to lose, so
+        clearing is allowed (the user has decided to go on without it).
+        """
+        with self._lock:
+            if not self._fault:
+                return "no fault"
+            if self._recovery is not None and self._tracking_on:
+                raise RuntimeError("the autofocus recovery is still running: wait for "
+                                   "it (or Kill AF), then clear")
+            if (self._tracking_on and self.reference is not None
+                    and not self._status.match_found):
+                raise RuntimeError("the pattern is still not found: correct it first "
+                                   "(focus, move it back into view, or switch tracking "
+                                   "off and on to search the whole frame), then clear")
+            was = self._fault
+            self._fault = ""
+            self._recovery = None
+            self._lost_count = 0
+            self._status.fault = ""
+        self._emit("info", f"fault cleared by the user (was: {was})")
+        return "cleared"
 
     @staticmethod
     def _pattern_name(k: int) -> str:
@@ -1006,7 +1203,9 @@ class Camera:
         the start, and the stabiliser treats the end of AF like the end of a
         correction move (settle_s before it measures again). Tracking and the
         stabiliser stay SWITCHED ON: they resume by themselves afterwards and
-        re-find the pattern wherever it wandered to.
+        look for the pattern where it was before the run (its safety box only,
+        never the whole frame -- see _update_loss). A pattern that wandered
+        further than that is LOST: a fault, not a silent relock elsewhere.
         """
         self._pause_image_loops()
         try:

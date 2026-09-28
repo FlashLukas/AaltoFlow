@@ -76,7 +76,13 @@ class RemoteZFocus:
 
     def read_z(self) -> float:
         reply = self._rpc(cmd="status")
-        return float(reply.get("status", {}).get("voltage", 0.0))
+        st = reply.get("status", {})
+        # zpiezo answers status even when ITS read of the KCube failed; it then
+        # keeps the last good value (NaN if there never was one) and says so in
+        # hw_error. Neither is a reading, so autofocus must not score it.
+        if st.get("hw_error"):
+            raise RuntimeError(f"zpiezo: {st['hw_error']}")
+        return float(st.get("voltage", 0.0))
 
     def z_range(self) -> tuple:
         return self._range
