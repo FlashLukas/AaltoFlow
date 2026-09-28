@@ -57,3 +57,8 @@ wheelhouse/
 
 # Personal working notes (Claude Code loads them; they stay private)
 CLAUDE.local.md
+
+# Build/run outputs at the root: release packs + catalog (tools/release_modules.py)
+# and the report tools/deploy_lab.ps1 writes after a deploy.
+/dist/
+/deploy_report.txt
