@@ -24,10 +24,12 @@ a fixed parameter set; adding one knob meant editing seven places. Here, adding 
 knob means registering one `Parameter`.
 
 > **Status: mostly simulation.** Every module runs, is tested and has a GUI.
-> Hardware passes are under way on the lab PC: `pm16-control` (Thorlabs PM16
-> power meter) was verified end to end on the real instrument on 2026-09-15.
-> Elsewhere, every unverified hardware call is marked `# VERIFY`; each module's
-> README records its own hardware status. See [Hardware passes](#hardware-passes).
+> Hardware passes are under way on the lab PC: pm16 (Thorlabs PM16 power meter),
+> kim (KIM101 inertia stage), the IDS camera and the Signal Hound SA44B have run
+> on the real instruments. **[Verified instruments](docs/VERIFIED_INSTRUMENTS.md)**
+> lists what was checked, the tests and commits behind it, and the caveats found.
+> Elsewhere, every unverified hardware call is marked `# VERIFY`. See
+> [Hardware passes](#hardware-passes).
 
 One-page **flyers** (PDF and PNG) for the suite, the camera, clMag, the KIM stage
 and the Navigator are in [`docs/flyers/`](docs/flyers/); two demo **videos**, a short
@@ -440,6 +442,8 @@ vendor dependency in `pyproject.toml`, `uv sync`, run the service with `--real`,
 exercise it from the console before the GUI, and work through every `# VERIFY`.
 Keep the simulation path working. The per-module checklists are in
 [`docs/DEVELOPER_NOTES.md`](docs/DEVELOPER_NOTES.md) section 11.
+After a pass, record it in [`docs/VERIFIED_INSTRUMENTS.md`](docs/VERIFIED_INSTRUMENTS.md):
+what was checked, the commit, the caveats.
 
 ## Repository layout
 
