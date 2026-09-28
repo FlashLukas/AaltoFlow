@@ -117,10 +117,16 @@ def build_manifest(brain) -> dict:
                read_path=["position", i],
                set={"verb": "move_axis", "arg": "position",
                     "extra": {"axis": ax}},
-               # No per-knob done-flag: the stage reports `moving` per axis and
-               # does not echo a target, so "arrived" means "stopped".
-               settle={"policy": "flag_only", "key": "moving", "invert": True,
-                       "index": i}),
+               # Target echo (Lukas, 2026-09-28).  `moving` alone is not
+               # enough: right after move_axis the status a scan sees can be
+               # a frame from BEFORE the move, `moving` still False, and the
+               # scan "arrives" at once at the old place.  So first wait for
+               # the service to publish OUR target (`target_mm`, device mm =
+               # this control's coordinates), then believe `moving`.  The
+               # brain's ordering rule (Stage.status) makes sure a frame with
+               # the new target never carries a pre-move `moving`.
+               settle={"policy": "adopt_then_flag", "setpoint_key": "target_mm",
+                       "flag_key": "moving", "invert": True, "index": i}),
 
             _p(f"velocity_{low}", f"Velocity {ax}", "control", "float",
                unit="mm/s", group="Motion", order=40 + i, decimals=3,
@@ -131,6 +137,11 @@ def build_manifest(brain) -> dict:
 
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
                group="Status", order=20 + i, read_path=["moving", i]),
+            _p(f"target_{low}", f"Target {ax}", "indicator", "float",
+               unit="mm", group="Position", order=60 + i, decimals=4,
+               read_path=["target_mm", i],
+               help="The target of the last move of this axis (device mm); "
+                    "empty after Home."),
             _p(f"relative_{low}", f"Relative {ax}", "indicator", "float",
                unit="mm", group="Position", order=70 + i, decimals=4,
                read_path=["relative", i]),
@@ -144,6 +155,10 @@ def build_manifest(brain) -> dict:
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
+        _p("hw_error", "Hardware error", "indicator", "string", group="Status",
+           order=2, read_path=["hw_error"],
+           help="Empty while the controller answers; the error text while its "
+                "reads fail (the values shown are then the last good ones)."),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
            danger=True, help="Halts every axis immediately."),
         _p("set_zero", "Zero here", "action", "action", group="Routines",

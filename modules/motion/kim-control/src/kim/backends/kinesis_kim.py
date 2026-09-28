@@ -244,6 +244,11 @@ class KinesisKim:
             self._call("move_by", int(delta_steps), auto_enable=False, channel=ch)
 
     def is_moving(self, axis: int) -> bool:
+        # VERIFY on the KIM101: must report True as soon as a move has been
+        # ACCEPTED (i.e. on the first query after move_to returned). The scan
+        # settle rule (target echo + moving, kim.py _set_target) relies on it;
+        # if the status bits lag the command, a scan could settle one frame
+        # early. Test: move_to far away, then is_moving() at once, many times.
         return bool(self._call("is_moving", channel=self._ch(axis)))
 
     def stop(self, axis: int) -> None:

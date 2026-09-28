@@ -14,10 +14,17 @@ from dataclasses import asdict, dataclass
 @dataclass
 class ZStatus:
     connected: bool = False
-    voltage: float = 0.0       # measured/commanded drive voltage, V
+    # The drive voltage READ BACK from the KCube, V.  This is what a scan's
+    # `echoes(voltage)` settle waits for, so it is never the commanded value:
+    # while reads fail it stays at the last good read-back (NaN if there never
+    # was one) and hw_error says why.
+    voltage: float = 0.0
     target: float = 0.0        # last commanded (clamped) target, V
     v_min: float = 0.0
     v_max: float = 75.0
+    # "" while the KCube answers; the error text while its reads fail.
+    # scan-core pauses a scan on a non-empty hw_error.
+    hw_error: str = ""
 
 
 class ZPiezo:
@@ -28,6 +35,10 @@ class ZPiezo:
         self._lock = threading.RLock()
         self._target = 0.0
         self._connected = False
+        # Last good read-back and the running error episode ("" = none);
+        # both guarded by self._lock.
+        self._last_v = float("nan")
+        self._hw_error = ""
         self._on_event = lambda level, msg: None
 
     # -- lifecycle --------------------------------------------------------- #
@@ -56,6 +67,7 @@ class ZPiezo:
             return
         with self._lock:
             self._target = v
+            self._last_v = v
         self._emit("info", f"adopted drive voltage {v:.3f} V from the instrument")
         lim = self.cfg.limits
         if lim.enforce and not (lim.v_min <= v <= lim.v_max):
@@ -108,12 +120,38 @@ class ZPiezo:
             return float(self.backend.read_voltage())
 
     def status(self) -> ZStatus:
+        """Snapshot.  NEVER raises.
+
+        The read-back is taken under self._lock, the same lock set_voltage
+        holds for its write, so `voltage` is always what the KCube holds after
+        the last write completed -- never ahead of it (there is no stepped
+        approach here: set_voltage writes once).
+
+        A failed read (2026-09-28) used to fall back to voltage = TARGET, i.e.
+        the COMMANDED value.  A scan waiting for `echoes(voltage)` then settled
+        at once, on a voltage nobody had read back.  Now the last GOOD read-back
+        stays (NaN if there never was one), hw_error carries the message, and
+        one error event goes out per failure episode, not one per frame.
+        """
+        note = None
         with self._lock:
             try:
                 v = float(self.backend.read_voltage())
-            except Exception:
-                v = self._target
-            target, connected = self._target, self._connected
+            except Exception as exc:  # noqa: BLE001 -- status must never raise
+                msg = f"{type(exc).__name__}: {exc}"
+                if not self._hw_error:
+                    note = ("error", f"zpiezo: voltage read failed ({msg}); "
+                                     f"showing the last good read-back")
+                self._hw_error = msg
+                v = self._last_v
+            else:
+                self._last_v = v
+                if self._hw_error:
+                    note = ("info", "zpiezo: voltage reads recovered")
+                self._hw_error = ""
+            target, connected, hw_error = self._target, self._connected, self._hw_error
+        if note:
+            self._emit(*note)                 # outside the lock
         # The envelope reported is the one the brain CLAMPS to: cfg.limits.
         # It used to come from backend.range(), which is a copy taken when the
         # backend was built -- after a set_config narrowed the limits, status
@@ -121,7 +159,8 @@ class ZPiezo:
         # autofocus sweep from `info`).
         lim = self.cfg.limits
         return ZStatus(connected=connected, voltage=v, target=target,
-                       v_min=float(lim.v_min), v_max=float(lim.v_max))
+                       v_min=float(lim.v_min), v_max=float(lim.v_max),
+                       hw_error=hw_error)
 
     # -- config ------------------------------------------------------------ #
     def get_config(self):

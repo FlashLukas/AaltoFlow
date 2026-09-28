@@ -118,6 +118,10 @@ def build_manifest(brain) -> dict:
            group="Focus", order=20, decimals=3, read_path=["target"]),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
+        _p("hw_error", "Hardware error", "indicator", "string", group="Status",
+           order=2, read_path=["hw_error"],
+           help="Empty while the KCube answers; the error text while its reads "
+                "fail (the voltage shown is then the last good read-back)."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "zpiezo",
                 "label": "Z focus piezo", "parameters": params}

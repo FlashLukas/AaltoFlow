@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .backends.base import PiezoBackend
 from .config import (
@@ -68,6 +68,18 @@ class PiezoStatus:
     travel_max: list     # effective upper travel limit per axis (mode-dependent)
     ramp_mode: str       # "hardware" | "software" | "off"
     connected: bool
+    # TARGET ECHO (Lukas, 2026-09-28): the target AS REQUESTED by the last move
+    # of each axis, um -- what the `position_x/y` settle waits for (see
+    # describe.py).  Unlike `target` above it is stored only AFTER the setpoint
+    # went to the controller, together with the state `moving` is computed
+    # from; see the ordering rule in Piezo.status().  None = unknown (start
+    # without a readable setpoint).  None and never NaN: scan-core's adopt
+    # check abs(float(sp) - target) > tol is False for NaN, i.e. "adopted".
+    target_um: list = field(default_factory=lambda: [None, None])
+    # "" while the controller answers; the error text while position reads
+    # fail.  `position` is then the LAST GOOD read-out and a closed-loop axis
+    # reports moving (unknown is not "at rest").  scan-core pauses on it.
+    hw_error: str = ""
 
 
 class Piezo:
@@ -100,6 +112,12 @@ class Piezo:
         # the controller's slew limiter needs for the distance has passed.
         # Monotonic time per axis at which the current direct move is done.
         self._hw_eta = [0.0, 0.0]
+        # Target echo per axis (guarded by _ramp_lock), see PiezoStatus.
+        self._echo: list = [None, None]
+        # Last good position read-out, and the running error episode (""=none).
+        self._last_pos = [float("nan"), float("nan")]
+        self._hw_error = ""
+        self._err_lock = threading.Lock()
         self._stop = threading.Event()
         self._ramp_thread: threading.Thread | None = None
 
@@ -164,6 +182,10 @@ class Piezo:
             if target is None or target != target:
                 self._emit("warn", f"{name}: position not readable at start; target shown as 0")
                 target = 0.0
+            else:
+                # The echo starts at the adopted setpoint, so a scan whose
+                # first point is "stay here" can settle.  Unknown -> None.
+                self._echo[axis] = target
             self._target[axis] = target
             self._cmd[axis] = target
             # An adopted target outside this mode's travel is REPORTED, not
@@ -243,32 +265,44 @@ class Piezo:
         self._emit("info", "piezo shut down")
 
     def status(self) -> PiezoStatus:
-        """Snapshot of live state.  NEVER raises."""
-        try:
-            pos = [self.backend.read_position(a) for a in range(2)]
-        except Exception:
-            pos = [float("nan")] * 2
-        with self._ramp_lock:
+        """Snapshot of live state.  NEVER raises.
+
+        ORDERING RULE (target echo, 2026-09-28).  Every move stores its echo
+        AFTER writing the setpoint to the controller, inside the same
+        `_ramp_lock` section that starts the ramp or records the slew time
+        (move_axis / _begin_software_ramp).  Here the echo is read FIRST, in
+        one locked section together with that ramp / slew state, and the
+        position read-out comes AFTER.  So a frame carrying a new target always
+        has (a) the ramp / slew state of THAT move and (b) a position read
+        after its setpoint was written -- it can never pair the new target with
+        a `moving = False` computed from before the move.
+
+        `moving`, per axis:
+          * the software ramp is still walking the setpoint -> True (until
+            the LAST step is written, Lukas's rule);
+          * closed loop -> the sensor is true, so "there" = |read-out -
+            target| <= SETTLE_TOL (also after a software ramp: the servo may
+            still be catching up with the last step); an unreadable sensor
+            counts as moving;
+          * open loop -> the read-out is off by the hysteresis for good, so
+            the controller's expected slew time decides (_hw_eta).
+        """
+        with self._ramp_lock:                 # FIRST: echo + the move's state
+            echo = list(self._echo)
             ramping = list(self._ramp_active)
             vel = list(self._ramp_vel)
             eta = list(self._hw_eta)
-        target = list(self._target)
+            target = list(self._target)
+        pos, failed = self._read_positions()  # AFTER: see the ordering rule
         now = time.monotonic()
         moving = []
         for a in range(2):
-            if ramping[a] or self.cfg.motion.ramp_mode == "software":
-                # The software ramp is walking the setpoint (a ramp still
-                # running after a switch to hardware/off counts too).
-                moving.append(ramping[a])
+            if ramping[a]:
+                moving.append(True)
             elif self._closed[a]:
-                # Closed loop: the sensor reads the true position, so "there"
-                # means read-out == target.
                 p = pos[a]
-                moving.append(False if p != p else abs(p - target[a]) > SETTLE_TOL)
+                moving.append(failed or p != p or abs(p - target[a]) > SETTLE_TOL)
             else:
-                # Open loop: the read-out is off the target by the hysteresis
-                # for good, so comparing them said "moving" FOREVER (and a
-                # scan waiting on it stalled).  Use the slew time instead.
                 moving.append(now < eta[a])
         rel_origin = [axis_rel_origin(self.cfg, a) for a in range(2)]
         relative = [pos[a] - rel_origin[a] for a in range(2)]
@@ -283,7 +317,38 @@ class Piezo:
             travel_max=[travel_max(self.cfg, self._closed[a]) for a in range(2)],
             ramp_mode=self.cfg.motion.ramp_mode,
             connected=self._connected,
+            target_um=echo,
+            hw_error=self._hw_error,
         )
+
+    def _read_positions(self):
+        """Read both axes; on failure report LOUDLY (Lukas, 2026-09-28).
+
+        Before, a failed read published NaN, and NaN made a closed-loop axis
+        report `moving = False` -- a healthy-looking stage "at rest".  Now the
+        last good read-out is kept, `hw_error` carries the message, and ONE
+        error event goes out per failure episode (status runs at 8 Hz; one
+        event per frame would bury the log).  Returns (positions, failed).
+        """
+        try:
+            pos = [float(self.backend.read_position(a)) for a in range(2)]
+        except Exception as exc:  # noqa: BLE001 -- status must never raise
+            msg = f"{type(exc).__name__}: {exc}"
+            with self._err_lock:
+                first = not self._hw_error
+                self._hw_error = msg
+                pos = list(self._last_pos)
+            if first:
+                self._emit("error", f"piezo: position read failed ({msg}); "
+                                    f"showing the last good read-out")
+            return pos, True
+        with self._err_lock:
+            self._last_pos = list(pos)
+            recovered = bool(self._hw_error)
+            self._hw_error = ""
+        if recovered:
+            self._emit("info", "piezo: position reads recovered")
+        return pos, False
 
     # ------------------------------------------------------------------ #
     # clamping helpers
@@ -363,6 +428,12 @@ class Piezo:
                         self._cmd[axis] = setpoint
                     except Exception as exc:
                         self._ramp_active[axis] = False
+                        # The ramp died short of its target.  If the echo kept
+                        # the target, a waiting scan would see moving=False and
+                        # take a point the drive never reached.  Echo where the
+                        # drive IS (the last step written): the scan then times
+                        # out instead of recording the wrong place.
+                        self._echo[axis] = self._cmd[axis]
                         failed = exc
                 if failed is not None:
                     # Emitted outside the lock: a listener must never run
@@ -370,7 +441,7 @@ class Piezo:
                     self._emit("error", f"{AXES[axis]} ramp write failed: {failed}")
             self._stop.wait(period)
 
-    def _begin_software_ramp(self, axis: int, target: float) -> None:
+    def _begin_software_ramp(self, axis: int, target: float, echo: float) -> None:
         # Start from the setpoint we last WROTE, not from the read-out.  In
         # software mode the controller's own slew is 0, so the drive sits
         # exactly at that setpoint (also mid-ramp: it is the last ramp step).
@@ -387,6 +458,10 @@ class Piezo:
                 # Already there -> write once so the backend setpoint matches.
                 self.backend.set_setpoint(axis, target)
                 self._cmd[axis] = target
+            # Echo LAST, in the same locked section that armed the ramp: a
+            # frame with this target then always sees the ramp running (or
+            # finished) -- never the state from before this move.
+            self._echo[axis] = echo
 
     # ------------------------------------------------------------------ #
     # motion verbs
@@ -404,8 +479,12 @@ class Piezo:
         """
         target = self._clamp_axis(axis, position)
         self._target[axis] = target
+        # The echo is the target as the controller is told: the request
+        # itself, unrounded, unless the travel limits clamped it.  ORDER: the
+        # setpoint write (or the ramp start) FIRST, the echo AFTER, in the same
+        # locked section -- see the ordering rule in status().
         if self.cfg.motion.ramp_mode == "software":
-            self._begin_software_ramp(axis, target)
+            self._begin_software_ramp(axis, target, echo=target)
         else:
             # Cancel any leftover software ramp, then command directly -- in
             # ONE locked section, so a ramp step cannot land after our write.
@@ -413,6 +492,7 @@ class Piezo:
                 self._ramp_active[axis] = False
                 self.backend.set_setpoint(axis, target)
                 self._direct_write(axis, target)
+                self._echo[axis] = target      # AFTER the write
         self._emit("info", f"move {AXES[axis]} -> {target:.4g} um")
         return target
 
@@ -482,6 +562,11 @@ class Piezo:
             except Exception:
                 pass
             self._hw_eta[axis] = time.monotonic()
+            # After STOP the axis is not at the requested target.  Keeping
+            # that target as the echo would let a scan waiting for it "arrive"
+            # as soon as moving is False; echo the held position instead (a
+            # waiting scan then times out, loudly).
+            self._echo[axis] = self._cmd[axis]
         self._emit("warn", f"stop {AXES[axis]} at {hold:.4g} um")
 
     def stop_all(self) -> None:

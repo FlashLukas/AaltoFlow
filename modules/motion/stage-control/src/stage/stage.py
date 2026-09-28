@@ -30,7 +30,8 @@ Coordinate frames
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 from .backends.base import StageBackend
 from .config import (
@@ -71,6 +72,17 @@ class StageStatus:
     offsets: list       # mm per axis
     matrix: list        # [m00, m01, m10, m11]
     connected: bool
+    # The target AS REQUESTED by the last move of each axis, in DEVICE mm --
+    # the coordinates of the `position_x/y/z` controls it settles (see
+    # describe.py).  None = no requested target (after `home`, or when the
+    # position could not be read at start).  Deliberately None and not NaN:
+    # scan-core's adopt check is abs(float(sp) - target) > tol, which is
+    # False for NaN, so a NaN echo would count as "adopted".
+    target_mm: list = field(default_factory=lambda: [None, None, None])
+    # "" while the controller answers; the error text while its reads fail.
+    # The values above are then the LAST GOOD ones and `moving` is True
+    # (unknown is not "at rest").  scan-core pauses a scan on a non-empty one.
+    hw_error: str = ""
 
 
 class Stage:
@@ -79,6 +91,16 @@ class Stage:
         self.cfg = cfg
         self.positions = PositionList()
         self._connected = False
+        # Target echo (Lukas, 2026-09-28), device mm per axis; see StageStatus.
+        # Written only AFTER the hardware move was issued (see move_axis).
+        self._echo: list = [None, None, None]
+        # Last good hardware reads, kept for a failed read (hw_error), and the
+        # "an error episode is running" text that limits error events to one
+        # per episode.  _status_lock: status() is called by the publisher AND
+        # by the command thread (the `status` verb); both touch these.
+        self._last_good: dict | None = None
+        self._hw_error = ""
+        self._status_lock = threading.Lock()
         # The service replaces this hook to forward events onto the wire; the
         # GUI replaces it to append to its log.  Levels: "info"|"warn"|"error".
         self._on_event = lambda level, msg: None
@@ -145,9 +167,26 @@ class Stage:
         self._connected = True
         self._ensure_matrix_ok()  # a config file could carry a singular matrix
         self._adopt_motion_params()
+        self._adopt_targets()
         if self.cfg.motion.home_on_start:
             self.home_all()
         self._emit("info", f"stage started ({self.backend.idn()})")
+
+    def _adopt_targets(self) -> None:
+        """Start the target echo at where each axis IS (a read, no move).
+
+        Without it the echo would say None until the first move, and a scan
+        whose first point is the current position could not settle.  An axis
+        still moving at start (a Kinesis move left running) has no target we
+        know of, so it stays None.
+        """
+        for axis in range(3):
+            try:
+                if self.backend.is_moving(axis):
+                    continue
+                self._echo[axis] = float(self.backend.read_position(axis))
+            except Exception as exc:  # noqa: BLE001 -- a read must not stop start()
+                self._emit("warn", f"{AXES[axis]}: position not readable at start ({exc})")
 
     def _adopt_motion_params(self) -> None:
         """Copy the controller's velocity/acceleration into cfg.motion (reads only).
@@ -191,19 +230,37 @@ class Stage:
         self._emit("info", "stage shut down")
 
     def status(self) -> StageStatus:
-        """Snapshot of live state.  NEVER raises."""
-        try:
-            pos = [self.backend.read_position(a) for a in range(3)]
-            moving = [self.backend.is_moving(a) for a in range(3)]
-            homed = [self.backend.is_homed(a) for a in range(3)]
-            vel = [self.backend.read_velocity(a) for a in range(3)]
-            acc = [self.backend.read_acceleration(a) for a in range(3)]
-        except Exception:
-            pos = [float("nan")] * 3
-            moving = [False] * 3
-            homed = [False] * 3
-            vel = [0.0] * 3
-            acc = [0.0] * 3
+        """Snapshot of live state.  NEVER raises.
+
+        ORDERING RULE (target echo, 2026-09-28): the echo is read FIRST, the
+        hardware (`moving` above all) AFTER.  The setter does the reverse:
+        hardware move first, echo after (move_axis).  Together: whenever this
+        snapshot carries a new target, the move for it was already on the wire
+        when `moving` was read, so the frame cannot pair the new target with a
+        `moving = False` from before the move -- the stale frame that let a
+        scan "arrive" at once, at the old position.  (Read the other way round,
+        a move landing between the two reads would produce exactly that.)
+        # VERIFY on the BSC203: that is_moving() sent right after move_to
+        # already reports the move (the controller should answer the status
+        # request only after it processed the move sent before it on the same
+        # USB link).
+        """
+        with self._status_lock:
+            echo = list(self._echo)            # FIRST -- see the ordering rule
+            try:
+                pos = [float(self.backend.read_position(a)) for a in range(3)]
+                moving = [bool(self.backend.is_moving(a)) for a in range(3)]
+                homed = [bool(self.backend.is_homed(a)) for a in range(3)]
+                vel = [float(self.backend.read_velocity(a)) for a in range(3)]
+                acc = [float(self.backend.read_acceleration(a)) for a in range(3)]
+            except Exception as exc:  # noqa: BLE001 -- status must never raise
+                pos, moving, homed, vel, acc = self._failed_read(exc)
+            else:
+                self._last_good = {"pos": pos, "homed": homed, "vel": vel, "acc": acc}
+                if self._hw_error:
+                    self._hw_error = ""
+                    self._emit("info", "stage: hardware reads recovered")
+            hw_error = self._hw_error
         logical = list(self.logical_from_device(*pos))
         rel_origin = [axis_rel_origin(self.cfg, a) for a in range(3)]
         relative = [pos[a] - rel_origin[a] for a in range(3)]
@@ -219,7 +276,34 @@ class Stage:
             offsets=[axis_offset(self.cfg, a) for a in range(3)],
             matrix=list(matrix_tuple(self.cfg)),
             connected=self._connected,
+            target_mm=echo,
+            hw_error=hw_error,
         )
+
+    def _failed_read(self, exc: Exception):
+        """What status() reports while the controller does not answer.
+
+        Loud, not quiet (Lukas, 2026-09-28).  This used to publish NaN
+        positions, velocity 0 and `moving = False` -- a stage "at rest" that
+        looked healthy, on which a scan would happily settle.  Now:
+          * hw_error carries the message (scan-core pauses on it),
+          * position / homed / velocity / acceleration are the LAST GOOD reads
+            (NaN only if there never was one),
+          * moving is True: we do not know, and False means "arrived",
+          * ONE error event per episode, not one per status frame (8 Hz).
+        Call with _status_lock held.
+        """
+        msg = f"{type(exc).__name__}: {exc}"
+        if not self._hw_error:
+            self._emit("error", f"stage: hardware read failed ({msg}); "
+                                f"showing the last good values")
+        self._hw_error = msg
+        lg = self._last_good
+        if lg is None:
+            nan = float("nan")
+            return [nan] * 3, [True] * 3, [False] * 3, [nan] * 3, [nan] * 3
+        return (list(lg["pos"]), [True] * 3, list(lg["homed"]),
+                list(lg["vel"]), list(lg["acc"]))
 
     # ------------------------------------------------------------------ #
     # clamping helpers
@@ -247,9 +331,17 @@ class Stage:
     # motion verbs (device frame)
     # ------------------------------------------------------------------ #
     def move_axis(self, axis: int, position: float) -> float:
-        """Move ONE motor to an absolute DEVICE position (mm)."""
+        """Move ONE motor to an absolute DEVICE position (mm).
+
+        Every move verb (relative, logical, go-to-slot) ends here, so this is
+        the one place that stores the target echo.  ORDER MATTERS: the move
+        goes to the hardware FIRST and the echo is stored AFTER (see status()).
+        The echo is the target as the hardware was told: the request itself,
+        unrounded, unless the travel limits clamped it.
+        """
         target = self._clamp_axis(axis, float(position))
         self.backend.move_to(axis, target)
+        self._echo[axis] = target              # AFTER the hardware move
         self._emit("info", f"move {AXES[axis]} -> {target:.4g} mm")
         return target
 
@@ -261,21 +353,37 @@ class Stage:
 
     def home(self, axis: int) -> None:
         self.backend.home(axis)
+        # Homing is not a requested position: clear the echo, so a frame from
+        # before the home can never match a later request.
+        self._echo[axis] = None
         self._emit("info", f"homing {AXES[axis]}")
 
     def home_all(self) -> None:
         for axis in range(3):
             self.backend.home(axis)
+            self._echo[axis] = None
         self._emit("info", "homing all axes")
 
     def stop(self, axis: int) -> None:
         self.backend.stop(axis)
+        self._echo_where_stopped(axis)
         self._emit("warn", f"stop {AXES[axis]}")
 
     def stop_all(self) -> None:
         for axis in range(3):
             self.backend.stop(axis)
+            self._echo_where_stopped(axis)
         self._emit("warn", "STOP all axes")
+
+    def _echo_where_stopped(self, axis: int) -> None:
+        """After STOP the axis is NOT at the requested target.  If the echo kept
+        that target, a scan waiting for it would see `moving = False` and take
+        the point as arrived.  So the echo becomes where the axis stopped (a
+        waiting scan then times out, loudly), or None if that is unreadable."""
+        try:
+            self._echo[axis] = float(self.backend.read_position(axis))
+        except Exception:  # noqa: BLE001
+            self._echo[axis] = None
 
     # ------------------------------------------------------------------ #
     # parameter verbs

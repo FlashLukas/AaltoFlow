@@ -56,6 +56,10 @@ class RemoteStatus:
     um_per_step_fwd: list = field(default_factory=lambda: [0.02, 0.02, 0.02])
     um_per_step_bwd: list = field(default_factory=lambda: [0.02, 0.02, 0.02])
     um_per_step_src: list = field(default_factory=lambda: ["config"] * 3)
+    #: target echo per axis, um (None = not known yet); see KimStatus.target_um
+    target_um: list = field(default_factory=lambda: [None, None, None])
+    #: "" while the service reads its KIM101 fine, else the read error
+    hw_error: str = ""
 
 
 def _status_from_dict(d: dict) -> RemoteStatus:
@@ -85,6 +89,8 @@ def _status_from_dict(d: dict) -> RemoteStatus:
         px_calibrated=d.get("px_calibrated", False),
         calib_running=d.get("calib_running", False),
         calib_progress=d.get("calib_progress", ""),
+        target_um=d.get("target_um") or [None, None, None],
+        hw_error=d.get("hw_error", ""),
     )
 
 

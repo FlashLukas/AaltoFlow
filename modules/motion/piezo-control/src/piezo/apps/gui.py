@@ -283,6 +283,18 @@ class MainWindow(QWidget):
         top.addWidget(settings_btn)
         root.addLayout(top)
 
+        # Hardware-error banner (2026-09-28).  Hidden while the controller
+        # answers; when its reads fail the brain keeps showing the LAST GOOD
+        # read-out, so without this red line a frozen number would look like a
+        # stage at rest.  Colour read from COLORS here, after set_theme
+        # (never cached at import: gotcha #6).
+        self._hw_err_lbl = QLabel("")
+        self._hw_err_lbl.setWordWrap(True)
+        self._hw_err_lbl.setStyleSheet(
+            f"color: {theme.COLORS['danger']}; font-weight: bold;")
+        self._hw_err_lbl.hide()
+        root.addWidget(self._hw_err_lbl)
+
         splitter = QSplitter(Qt.Horizontal)
 
         # LEFT: visual side
@@ -632,6 +644,10 @@ class MainWindow(QWidget):
                 btn.blockSignals(False)
             btn.setText("closed" if st.closed_loop[a] else "open")
         self._indicator.set_state(st.position, st.target, st.moving, st.closed_loop, st.travel_max)
+        err = getattr(st, "hw_error", "") or ""
+        if err:
+            self._hw_err_lbl.setText(f"HARDWARE ERROR: {err}  (read-out shown is the last good one)")
+        self._hw_err_lbl.setVisible(bool(err))
 
     def _sync_controls_from_status(self) -> None:
         """Set the loop buttons / ramp combo from the live status once at start."""

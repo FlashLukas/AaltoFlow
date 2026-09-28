@@ -123,8 +123,10 @@ def test_axes_are_expanded_flat_with_their_own_limits():
             assert (p["min"], p["max"]) == (lo, hi)
             # the axis travels in the set block's extra, not in the value
             assert p["set"]["extra"]["axis"] == ax.upper()
-            # per-axis moving flag, indexed into the status list
-            assert p["settle"]["key"] == "moving"
+            # per-axis moving flag, indexed into the status list, behind the
+            # per-axis target echo (2026-09-28, see test_target_echo.py)
+            assert p["settle"]["setpoint_key"] == "target_mm"
+            assert p["settle"]["flag_key"] == "moving"
             assert p["settle"]["invert"] is True
     finally:
         brain.shutdown()

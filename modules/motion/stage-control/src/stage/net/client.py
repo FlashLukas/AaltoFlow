@@ -42,6 +42,10 @@ class RemoteStatus:
     connected: bool
     #: Manifest revision from the service; None if it predates `describe`.
     describe_rev: int | None = None
+    #: Target echo per axis, device mm (None = no requested target).
+    target_mm: list | None = None
+    #: "" while healthy; the service's message while its hardware reads fail.
+    hw_error: str = ""
 
 
 def _status_from_dict(d: dict) -> RemoteStatus:
@@ -58,6 +62,8 @@ def _status_from_dict(d: dict) -> RemoteStatus:
         offsets=d.get("offsets", [0, 0, 0]),
         matrix=d.get("matrix", [1, 0, 0, 1]),
         connected=d.get("connected", False),
+        target_mm=d.get("target_mm", [None, None, None]),
+        hw_error=d.get("hw_error", "") or "",
     )
 
 

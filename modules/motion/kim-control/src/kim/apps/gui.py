@@ -292,6 +292,16 @@ class MainWindow(QWidget):
         top.addWidget(settings_btn)
         root.addLayout(top)
 
+        # A failed hardware read, in red, above everything else (2026-09-28).
+        # The positions below then repeat the LAST GOOD reading, so this line
+        # is what tells you they are stale. Hidden while the link is fine.
+        self._hw_error_lbl = QLabel("")
+        self._hw_error_lbl.setWordWrap(True)
+        self._hw_error_lbl.setStyleSheet(
+            f"color:{theme.COLORS['danger']}; font-weight:700;")
+        self._hw_error_lbl.hide()
+        root.addWidget(self._hw_error_lbl)
+
         controls = QWidget()
         col = QVBoxLayout(controls)
         col.setContentsMargins(0, 0, 0, 0)
@@ -830,10 +840,13 @@ class MainWindow(QWidget):
         if dlg.exec():
             self._push_config()
             self._sync_leash_fields()
-            # re-apply the current presets so edited fast/slow + voltage values
-            # (and any calibration change) take effect immediately
-            self._do(lambda: self.ctrl.set_speed(self._speed_btn.isChecked()))
-            self._do(lambda: self.ctrl.set_step_size(self._steps_btn.isChecked()))
+            # The Fast/Slow and Large/Small presets are NOT re-applied here
+            # (Lukas, 2026-09-28). This used to press both preset buttons again,
+            # so OK after changing only the theme turned an adopted 112 V /
+            # 500 steps/s into the preset's 125 V / 300. A preset is written
+            # only when its button is clicked; edited fast/slow numbers take
+            # effect on the next click. (_push_config writes only drive values
+            # that differ from the controller -- see Kim.apply_config.)
             self._on_event("info", "settings applied")
 
     def _push_config(self) -> None:
@@ -1072,6 +1085,13 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------ #
     def _refresh(self) -> None:
         st = self.ctrl.status()
+        err = getattr(st, "hw_error", "") or ""
+        if err:
+            self._hw_error_lbl.setText(
+                f"HARDWARE ERROR: {err} -- positions show the last good reading")
+            self._hw_error_lbl.show()
+        elif not self._hw_error_lbl.isHidden():
+            self._hw_error_lbl.hide()
         # what the service converts µm with, so this GUI converts the same way
         old_live = getattr(self, "_cal_live", None)
         self._cal_live = (list(getattr(st, "um_per_step_fwd", st.um_per_step)),

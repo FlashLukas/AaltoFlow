@@ -20,13 +20,16 @@ class RemoteStatus:
     v_max: float = 75.0
     #: Manifest revision from the service; None if it predates `describe`.
     describe_rev: int | None = None
+    #: "" while healthy; the service's message while its voltage reads fail.
+    hw_error: str = ""
 
 
 def _status_from_dict(d: dict) -> RemoteStatus:
     return RemoteStatus(
         describe_rev=d.get("describe_rev"),
         connected=d.get("connected", False), voltage=d.get("voltage", 0.0),
-        target=d.get("target", 0.0), v_min=d.get("v_min", 0.0), v_max=d.get("v_max", 75.0))
+        target=d.get("target", 0.0), v_min=d.get("v_min", 0.0), v_max=d.get("v_max", 75.0),
+        hw_error=d.get("hw_error", "") or "")
 
 
 class ZPiezoClient:

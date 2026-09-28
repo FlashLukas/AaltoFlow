@@ -121,8 +121,13 @@ def build_manifest(brain) -> dict:
                decimals=3, plottable=True, read_path=["position", i],
                set={"verb": "move_axis", "arg": "position",
                     "extra": {"axis": ax}},
-               settle={"policy": "flag_only", "key": "moving", "invert": True,
-                       "index": i},
+               # Target echo (Lukas, 2026-09-28).  `moving` alone let a
+               # scan settle on a status frame from BEFORE the move (moving
+               # still False).  First wait for OUR target in `target_um`,
+               # then believe `moving`; Piezo.status() guarantees a frame
+               # with the new target never carries a pre-move `moving`.
+               settle={"policy": "adopt_then_flag", "setpoint_key": "target_um",
+                       "flag_key": "moving", "invert": True, "index": i},
                help=f"Travel ceiling is {hi:g} um in "
                     f"{'closed' if (i < len(closed) and closed[i]) else 'open'}"
                     f" loop; it changes when the loop mode changes."),
@@ -159,6 +164,10 @@ def build_manifest(brain) -> dict:
                 "two limiters stack and the stage lags the ramp."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
+        _p("hw_error", "Hardware error", "indicator", "string", group="Status",
+           order=2, read_path=["hw_error"],
+           help="Empty while the controller answers; the error text while its "
+                "position reads fail (the read-out shown is the last good one)."),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
            danger=True),
         _p("set_zero", "Zero here", "action", "action", group="Routines",

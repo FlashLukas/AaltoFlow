@@ -133,8 +133,19 @@ def build_manifest(brain) -> dict:
                plottable=True, read_path=["position_um", i],
                set={"verb": "move_to_um", "arg": "position",
                     "extra": {"axis": ax}},
-               settle={"policy": "flag_only", "key": "moving", "invert": True,
-                       "index": i},
+               # TARGET ECHO (2026-09-28): first wait until status echoes the
+               # position we asked for (`target_um`), THEN believe `moving`.
+               # `moving` alone answered from the frame BEFORE the move had
+               # started ("not moving") and the scan took the point before
+               # the stage left (gotcha #2). The brain stores the echo only
+               # after the hardware accepted the move, and reads it before
+               # `moving` (kim.py, _set_target), so the pair is consistent.
+               # tol = half a step: a target that ends up as a step COUNT (a
+               # STOP, a stop-here at the end of a fly row) is echoed rounded
+               # to the step grid, and must still count as "our" target.
+               settle={"policy": "adopt_then_flag", "setpoint_key": "target_um",
+                       "flag_key": "moving", "invert": True, "index": i,
+                       "tol": 0.5 * k},
                # a fly scan records the counter position continuously and
                # bins its detectors by it (stream_start / _read / _stop)
                stream={"group": "position", "channel": low},
@@ -188,6 +199,11 @@ def build_manifest(brain) -> dict:
                 "absolute travel limits -- so the position bounds above change."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
+        # "" while the KIM101 answers; the error text while reads fail. The
+        # positions then repeat the last good reading, so this is the field
+        # that says they are stale (scan-core pauses a scan on it).
+        _p("hw_error", "Hardware error", "indicator", "string", group="Status",
+           order=2, read_path=["hw_error"]),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
            danger=True),
     ]

@@ -40,6 +40,10 @@ class RemoteStatus:
     connected: bool
     #: Manifest revision from the service; None if it predates `describe`.
     describe_rev: int | None = None
+    #: Target echo per axis, um (None = unknown).
+    target_um: list | None = None
+    #: "" while healthy; the service's message while its position reads fail.
+    hw_error: str = ""
 
 
 def _status_from_dict(d: dict) -> RemoteStatus:
@@ -55,6 +59,8 @@ def _status_from_dict(d: dict) -> RemoteStatus:
         travel_max=d.get("travel_max", [200.0, 200.0]),
         ramp_mode=d.get("ramp_mode", "software"),
         connected=d.get("connected", False),
+        target_um=d.get("target_um", [None, None]),
+        hw_error=d.get("hw_error", "") or "",
     )
 
 

@@ -115,6 +115,16 @@ class KimStatus:
     speed_fast: bool      # movement preset: True = fast, False = slow
     step_large: bool      # step-size preset: True = large (max V), False = small (min V)
     connected: bool
+    # The TARGET ECHO, um per axis (2026-09-28): where the last move command
+    # sent each axis, as the caller asked for it -- an absolute move echoes the
+    # requested number unrounded, a relative move / jog / goto the resulting
+    # target. A scan waits until this equals what it asked for AND `moving` is
+    # False (scan-core's adopt_then_flag); without it, the status frame from
+    # BEFORE the move ("not moving") looked like "arrived" (gotcha #2).
+    target_um: list = None
+    # "" while the controller answers; the error text while the last read
+    # failed. A scan pauses on a non-empty one, and the GUI shows it in red.
+    hw_error: str = ""
     px_calibrated: bool = False   # is a camera px/step table loaded?
     calib_running: bool = False   # is the camera calibration running right now?
     calib_progress: str = ""      # its latest progress / result / error line
@@ -146,6 +156,18 @@ class Kim:
         self.stream = StreamRecorder(STREAM_CHANNELS)
         self._stream_thread: threading.Thread | None = None
         self._stream_stop = threading.Event()
+        # Target echo per axis (um), see KimStatus.target_um. None until
+        # start() adopts the current position. Written ONLY by the move paths,
+        # always AFTER the hardware accepted the move (see _set_target).
+        self._target_um: list = [None, None, None]
+        # Hardware-read health: the last good raw readings (so a failed read
+        # repeats them instead of publishing zeros) and the current error
+        # text. The lock makes "first failure -> one error event" and
+        # "recovered -> one info event" happen once even when two threads
+        # (status publisher, describe, the GUI) read status at the same time.
+        self._hw_error = ""
+        self._hw_lock = threading.Lock()
+        self._last_good: dict | None = None
         try:
             self._pxcal = pxcal.load(self.px_file())
         except Exception as exc:
@@ -240,7 +262,47 @@ class Kim:
         self.backend.open()
         self._connected = True
         self._adopt_drive_state()
+        self._adopt_targets()
+        self.status()      # a first good reading, so a link lost later freezes on it, not on 0
         self._emit("info", f"kim started ({self.backend.idn()})")
+
+    def _adopt_targets(self) -> None:
+        """Target echo at start = where each axis IS (a query, no move).
+
+        Nothing has been commanded yet, so "the target" is the current
+        position; a scan asking for exactly this position then settles at
+        once, which is right: the stage is already there.
+        """
+        for axis in range(3):
+            try:
+                self._target_um[axis] = self.steps_to_um(
+                    axis, int(self.backend.read_position(axis)))
+            except Exception:
+                self._target_um[axis] = None      # unknown; the next move sets it
+
+    def _set_target(self, axis: int, target_um: float) -> None:
+        """Store the target echo. CALL ONLY AFTER backend.move_to() RETURNED.
+
+        THE ORDERING RULE that makes the echo trustworthy (two threads: the
+        commander runs the move verbs, the publisher builds status):
+          1. the setter sends the move to the hardware FIRST, and stores the
+             new echo target only AFTERWARDS (here);
+          2. status() reads the echo target BEFORE it asks the hardware
+             whether the axis is moving.
+        So a status frame that shows the NEW target read `moving` after the
+        move command had been accepted -- never the stale "not moving" from
+        before it. (Reverse either order and a frame can pair the new target
+        with the old "not moving": the scan would take the point before the
+        stage left.)
+
+        # VERIFY on the KIM101: this relies on the controller reporting
+        # "moving" as soon as it has ACCEPTED a move (pylablib's move_to
+        # returns once the command is sent). If the first is_moving() after a
+        # move can still say False, a scan could settle one frame early; then
+        # add a hold-off here (e.g. poll is_moving until it turns True, with a
+        # short timeout for zero-length moves).
+        """
+        self._target_um[axis] = float(target_um)
 
     def _adopt_drive_state(self) -> None:
         """Read rate / acceleration / voltage per axis into cfg.motion. Queries only."""
@@ -352,19 +414,35 @@ class Kim:
                 next_t = time.monotonic()
 
     def status(self) -> KimStatus:
-        """Snapshot of live state.  NEVER raises."""
+        """Snapshot of live state.  NEVER raises.
+
+        A failed hardware read is LOUD (Lukas, 2026-09-28): `hw_error` carries
+        the message, `connected` goes False, and the positions / drive values
+        are the LAST GOOD ones -- not zeros, which looked like a live stage at
+        the origin. `moving` is reported True on every axis while the link is
+        down: "at rest" cannot be confirmed, and a scan that trusted a stale
+        False would settle on a dead link. One error event per failure
+        episode (not one per status frame), one info event when it recovers.
+        """
+        # ORDERING RULE (see _set_target): the echo target is read BEFORE the
+        # hardware is asked whether the axis moves.
+        targets = list(self._target_um)
         try:
             pos = [int(self.backend.read_position(a)) for a in range(3)]
             moving = [bool(self.backend.is_moving(a)) for a in range(3)]
             rate = [float(self.backend.read_step_rate(a)) for a in range(3)]
             acc = [float(self.backend.read_acceleration(a)) for a in range(3)]
             volt = [float(self.backend.read_voltage(a)) for a in range(3)]
-        except Exception:
-            pos = [0, 0, 0]
-            moving = [False] * 3
-            rate = [0.0] * 3
-            acc = [0.0] * 3
-            volt = [0.0] * 3
+            self._last_good = {"pos": pos, "rate": rate, "acc": acc, "volt": volt}
+            self._hw_ok()
+        except Exception as exc:
+            self._hw_failed(exc)
+            good = self._last_good or {"pos": [0, 0, 0], "rate": [0.0] * 3,
+                                       "acc": [0.0] * 3, "volt": [0.0] * 3}
+            pos, rate = list(good["pos"]), list(good["rate"])
+            acc, volt = list(good["acc"]), list(good["volt"])
+            moving = [True] * 3
+        hw_error = self._hw_error
         cal = [self.um_per_step(a) for a in range(3)]
         rel_origin = [axis_rel_origin(self.cfg, a) for a in range(3)]
         rel_steps = [pos[a] - rel_origin[a] for a in range(3)]
@@ -390,11 +468,29 @@ class Kim:
             leash_half=[axis_leash_half(self.cfg, a) for a in range(3)],
             speed_fast=bool(self._speed_fast),
             step_large=bool(self._step_large),
-            connected=self._connected,
+            connected=bool(self._connected and not hw_error),
+            target_um=[None if t is None else float(t) for t in targets],
+            hw_error=hw_error,
             px_calibrated=self._pxcal is not None,
             calib_running=self.calibration_running(),
             calib_progress=self._calib_progress,
         )
+
+    def _hw_failed(self, exc: Exception) -> None:
+        msg = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        with self._hw_lock:
+            first = not self._hw_error
+            self._hw_error = msg
+        if first:                         # once per episode, not once per frame
+            self._emit("error", f"hardware read failed: {msg} -- positions frozen at the "
+                                f"last good reading; is the KIM101 still connected?")
+
+    def _hw_ok(self) -> None:
+        with self._hw_lock:
+            was = self._hw_error
+            self._hw_error = ""
+        if was:
+            self._emit("info", "hardware link recovered")
 
     # ------------------------------------------------------------------ #
     # clamping helpers
@@ -438,9 +534,26 @@ class Kim:
     # ------------------------------------------------------------------ #
     def move_to_step(self, axis: int, position_steps: int) -> int:
         """Move ONE axis to an ABSOLUTE step position (clamped to limits)."""
+        return self._move_to_step(axis, position_steps, None)
+
+    def _move_to_step(self, axis: int, position_steps, requested_um) -> int:
+        """The one absolute move: clamp, send, THEN store the echo target.
+
+        `requested_um` = the micrometre value the caller asked for (move_to_um),
+        echoed unrounded so a scan's "is my setpoint adopted?" check matches
+        exactly. If the clamp changed the target, the echo is where the stage
+        is really going: a scan asking for an unreachable point then never sees
+        its setpoint adopted and times out -- loud, instead of settling
+        somewhere else.
+        """
         self._guard_calibration("move")
-        target = self._clamp_steps(axis, int(round(position_steps)))
-        self.backend.move_to(axis, target)
+        wanted = int(round(position_steps))
+        target = self._clamp_steps(axis, wanted)
+        self.backend.move_to(axis, target)                # 1) hardware first ...
+        if requested_um is not None and target == wanted:
+            self._set_target(axis, float(requested_um))   # 2) ... then the echo
+        else:
+            self._set_target(axis, self.steps_to_um(axis, target))
         self._emit("info", f"move {AXES[axis]} -> {target} steps")
         return target
 
@@ -453,7 +566,8 @@ class Kim:
         self._guard_calibration("move")
         current = int(self.backend.read_position(axis))
         target = self._clamp_steps(axis, current + int(round(delta_steps)))
-        self.backend.move_to(axis, target)
+        self.backend.move_to(axis, target)                       # hardware first,
+        self._set_target(axis, self.steps_to_um(axis, target))   # then the echo
         self._emit("info", f"move {AXES[axis]} by {int(round(delta_steps))} steps -> {target}")
         return target
 
@@ -468,7 +582,7 @@ class Kim:
         """
         steps = self.um_to_steps(axis, position_um)
         self._emit("info", f"move {AXES[axis]} -> {float(position_um):.4g} um")
-        return self.move_to_step(axis, steps)
+        return self._move_to_step(axis, steps, float(position_um))
 
     def move_relative_um(self, axis: int, delta_um: float) -> int:
         """Move ONE axis BY a micrometre distance from its current position.
@@ -487,13 +601,25 @@ class Kim:
     def stop(self, axis: int) -> None:
         self.abort_px_calibration()      # STOP always wins over a running calibration
         self.backend.stop(axis)
+        self._target_after_stop(axis)
         self._emit("warn", f"stop {AXES[axis]}")
 
     def stop_all(self) -> None:
         self.abort_px_calibration()
         for axis in range(3):
             self.backend.stop(axis)
+            self._target_after_stop(axis)
         self._emit("warn", "STOP all axes")
+
+    def _target_after_stop(self, axis: int) -> None:
+        """After a STOP the target is where the axis stopped, not where it was
+        going: a scan still waiting for the old target must NOT see it echoed
+        together with "not moving" and take the point short of it -- it keeps
+        waiting (and times out, loudly). Same order as a move: stop first."""
+        try:
+            self._set_target(axis, self.steps_to_um(axis, int(self.backend.read_position(axis))))
+        except Exception:
+            self._target_um[axis] = None
 
     # ------------------------------------------------------------------ #
     # datum + relative read-out origin (the two "zeros")
@@ -503,6 +629,8 @@ class Kim:
         self._guard_calibration("reset the counter")
         self.backend.zero_counter(axis)
         set_axis_rel_origin(self.cfg, axis, 0)  # the display origin follows
+        # the coordinates moved under the old target: the target is "here" = 0
+        self._set_target(axis, 0.0)
         self._emit("info", f"{AXES[axis]} step counter zeroed (datum set here)")
 
     def zero_counter_all(self) -> None:
@@ -688,6 +816,7 @@ class Kim:
         """The calibrator's move: same clamps and leash, no per-move log line."""
         target = self._clamp_steps(axis, int(target_steps))
         self.backend.move_to(axis, target)
+        self._set_target(axis, self.steps_to_um(axis, target))   # after the move
         return target
 
     def _calibration_voltage(self, axis: int, volts: float) -> float:
@@ -842,8 +971,12 @@ class Kim:
                         and not self.backend.is_moving(axis))
             except Exception:
                 here = False              # cannot tell: send the move as before
-            targets.append(self._clamp_steps_quiet(axis, want) if here
-                           else self.move_to_step(axis, want))
+            if here:
+                # no move sent; the echo still says where the slot put this axis
+                targets.append(self._clamp_steps_quiet(axis, want))
+                self._set_target(axis, self.steps_to_um(axis, targets[-1]))
+            else:
+                targets.append(self.move_to_step(axis, want))
         self._emit("info", f"go to slot {slot} '{p.name}'")
         return targets
 
@@ -865,9 +998,28 @@ class Kim:
         return self.cfg
 
     def apply_config(self) -> None:
-        """Re-push drive parameters after the config was edited in place."""
+        """Push the drive parameters after the config was edited in place.
+
+        Only a value that DIFFERS from what the controller reports is written
+        (2026-09-28). Settings OK and set_config both end here, and most of the
+        time nothing in the drive changed (the theme, a leash, a step size):
+        re-sending the same numbers is not harmless -- set_voltage clamps, so
+        an adopted value outside the window would be "corrected" by a click on
+        OK, which is exactly the silent change the adopt-on-start rule forbids.
+        A controller that cannot be read is written, as before.
+        """
+        def differs(read, want) -> bool:
+            try:
+                return abs(float(read()) - float(want)) > 1e-9
+            except Exception:
+                return True
+
+        b = self.backend
         for axis in range(3):
-            self.set_step_rate(axis, axis_rate(self.cfg, axis))
-            self.set_acceleration(axis, axis_acceleration(self.cfg, axis))
-            self.set_voltage(axis, axis_voltage(self.cfg, axis))
+            if differs(lambda: b.read_step_rate(axis), axis_rate(self.cfg, axis)):
+                self.set_step_rate(axis, axis_rate(self.cfg, axis))
+            if differs(lambda: b.read_acceleration(axis), axis_acceleration(self.cfg, axis)):
+                self.set_acceleration(axis, axis_acceleration(self.cfg, axis))
+            if differs(lambda: b.read_voltage(axis), axis_voltage(self.cfg, axis)):
+                self.set_voltage(axis, axis_voltage(self.cfg, axis))
         self._emit("info", "config applied")

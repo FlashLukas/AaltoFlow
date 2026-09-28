@@ -29,6 +29,9 @@ def _settle(brain, axis, timeout=6.0):
 def main() -> int:
     cfg = Config()
     cfg.calibration.um_per_step_x = 0.02  # 20 nm/step
+    # ...and USE it: with the project's px_calibration.json present the camera
+    # table wins (since 2026-09-16), and 120 um would not be 6000 steps.
+    cfg.calibration.use_px_calibration = False
     brain, _ = build_sim_system(cfg)
     brain._on_event = lambda level, msg: print(f"  [{level}] {msg}")
 
@@ -107,9 +110,12 @@ def main() -> int:
     brain.store_position(0, "spot")
     p = brain.get_positions()[0]
     assert p["used"] and p["name"] == "spot", p
-    brain.save_positions("/tmp/_kim_smoke_positions.json")
+    # the OS temp folder: "/tmp" does not exist on Windows
+    import tempfile
+    pos_file = str(Path(tempfile.gettempdir()) / "_kim_smoke_positions.json")
+    brain.save_positions(pos_file)
     brain.clear_position(0)
-    brain.load_positions("/tmp/_kim_smoke_positions.json")
+    brain.load_positions(pos_file)
     assert brain.get_positions()[0]["used"], "reload failed"
     print("  position list OK")
 

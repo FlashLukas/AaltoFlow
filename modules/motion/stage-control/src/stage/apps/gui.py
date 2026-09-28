@@ -257,6 +257,18 @@ class MainWindow(QWidget):
         top.addWidget(settings_btn)
         root.addLayout(top)
 
+        # Hardware-error banner (2026-09-28).  Hidden while the controller
+        # answers; when its reads fail the service keeps showing the LAST GOOD
+        # numbers, so without this red line a frozen read-out would look like
+        # a stage at rest.  The colour is read from COLORS here, after
+        # set_theme (never cached at import: gotcha #6).
+        self._hw_err_lbl = QLabel("")
+        self._hw_err_lbl.setWordWrap(True)
+        self._hw_err_lbl.setStyleSheet(
+            f"color: {theme.COLORS['danger']}; font-weight: bold;")
+        self._hw_err_lbl.hide()
+        root.addWidget(self._hw_err_lbl)
+
         # body: splitter [controls | image pane]
         splitter = QSplitter(Qt.Horizontal)
 
@@ -543,6 +555,10 @@ class MainWindow(QWidget):
             self._sub_lbl[a].setText(f"{rel_txt} · {log_txt}")
         self._indicator.set_state(st.position, st.moving, st.homed)
         self._image.update_marker()
+        err = getattr(st, "hw_error", "") or ""
+        if err:
+            self._hw_err_lbl.setText(f"HARDWARE ERROR: {err}  (values shown are the last good ones)")
+        self._hw_err_lbl.setVisible(bool(err))
 
     def _on_event(self, level: str, msg: str) -> None:
         color = {"info": theme.COLORS["muted"], "warn": theme.COLORS["accent_hi"], "error": theme.COLORS["danger"]}.get(level, theme.COLORS["text"])
