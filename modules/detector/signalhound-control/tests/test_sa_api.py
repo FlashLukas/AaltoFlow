@@ -281,3 +281,20 @@ def test_sweep_time_follows_the_measured_sa44b():
                                            ((1e9, 100e3, 100.0, 3372), 0.12)):
         est = t(center, span, rbw, pts)
         assert real / 2.5 <= est <= real * 2.5, (span, rbw, est, real)
+
+
+def test_device_not_found_says_who_may_hold_it():
+    """Found 2026-09-28: a second service with serial 0 cannot open a box the
+    first one holds and saw only "Device not found (-8)" -- it never reaches
+    hwlock. The message now says what usually causes it."""
+    cfg = Config()
+    dll = FakeSaApi(fail={"saOpenDevice": -8})
+    with pytest.raises(SaApiError, match="another .*service.* or Spike") as e:
+        SaApiAnalyzer(cfg, dll=dll).open()
+    assert "fake error -8" in str(e.value)                       # the API's own words kept
+    dll = FakeSaApi(fail={"saConfigSweepCoupling": -8})
+    b = SaApiAnalyzer(cfg, dll=dll)
+    b.open()
+    with pytest.raises(SaApiError) as e:                            # only on OPEN
+        b.configure(SweepSettings.from_config(cfg))
+    assert "Spike" not in str(e.value)

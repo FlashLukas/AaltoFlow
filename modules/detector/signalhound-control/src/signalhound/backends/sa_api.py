@@ -63,6 +63,7 @@ TG_THRU_0DB = 0x1
 
 SA_NO_ERROR = 0
 SA_TG_NOT_FOUND = -10          # saTrackingGeneratorNotFound
+SA_DEVICE_NOT_FOUND = -8       # saDeviceNotFoundErr -- also "already open elsewhere"
 SA_COMPRESSION_WARNING = 2     # saCompressionWarning: the input overloads the front end
 
 DEVICE_TYPES = {0: "", 1: "SA44", 2: "SA44B", 3: "SA124A", 4: "SA124B"}
@@ -230,10 +231,22 @@ class SaApiAnalyzer:
             self._dll = self._load()
             self._bind(self._dll)
             h = c_int(-1)
-            if int(hw.serial):
-                self._call("saOpenDeviceBySerialNumber", byref(h), int(hw.serial))
-            else:
-                self._call("saOpenDevice", byref(h))    # the first unopened analyser
+            try:
+                if int(hw.serial):
+                    self._call("saOpenDeviceBySerialNumber", byref(h), int(hw.serial))
+                else:
+                    self._call("saOpenDevice", byref(h))    # the first unopened analyser
+            except SaApiError as exc:
+                # "Device not found" also means "found, but already open": the
+                # API opens a box only once per PC, so a second service (or
+                # Spike) holding it looks exactly like no box at all. Seen on
+                # the lab PC 2026-09-28 -- a second service with serial 0 never
+                # got as far as the hardware lock, whose message says "busy".
+                if f"({SA_DEVICE_NOT_FOUND})" in str(exc):
+                    raise SaApiError(
+                        f"{exc} -- if the analyser is plugged in, another AaltoFlow service "
+                        "or Spike may hold it (one program per analyser)") from None
+                raise
             self._h = int(h.value)
         except BaseException:
             self._release()
