@@ -79,3 +79,20 @@ def test_settle_keys_exist_in_status(meter):
 
 def test_zero_is_marked_dangerous(meter):
     assert _by_id(build_manifest(meter))["zero"]["danger"] is True
+
+
+def test_acquire_timeout_covers_the_longest_allowed_acquisition(meter):
+    """describe must tell the truth about how long a scan should wait. With
+    the allowed maximum of readings, an acquisition takes readings x ~60 ms
+    (1000 -> ~60 s), but the manifest used to promise the fixed config value
+    (30 s) -- a scan would give up on a perfectly healthy acquisition.
+    (deep cleaning 2026-09-28)"""
+    meter.set_acquisition(meter.cfg.limits.readings_max)
+    n = meter.cfg.acquisition.readings
+    per_reading = meter.status().average_time_s            # 60 ms on the PM16
+    acq = _by_id(build_manifest(meter))["power"]["acquire"]
+    assert acq["timeout_s"] >= 1.5 * n * per_reading
+    # the default (5 readings) keeps the configured value
+    meter.set_acquisition(5)
+    acq = _by_id(build_manifest(meter))["power"]["acquire"]
+    assert acq["timeout_s"] == meter.cfg.acquisition.timeout_s

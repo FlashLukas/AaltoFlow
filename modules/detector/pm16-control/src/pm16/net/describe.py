@@ -25,6 +25,8 @@ import json
 import math
 import zlib
 
+from ..config import acquire_timeout_s
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -95,7 +97,11 @@ def build_manifest(meter) -> dict:
         "target_key": "acq_id",
         "ready": {"policy": "adopt_then_flag", "setpoint_key": "acq_id",
                   "flag_key": "acquiring", "invert": True},
-        "timeout_s": cfg.acquisition.timeout_s,
+        # Long enough for THIS many readings, not just the configured floor
+        # (1000 readings x 60 ms outlast the default 30 s).
+        "timeout_s": acquire_timeout_s(cfg.acquisition.readings,
+                                       cfg.acquisition.timeout_s,
+                                       meter.status().average_time_s),
     }
 
     params = [

@@ -243,3 +243,63 @@ def test_status_never_touches_hardware(system):
         setattr(sim, name, boom)
     s = meter.status()
     assert s.connected and not math.isnan(s.wavelength_nm)
+
+
+# ---- deep cleaning 2026-09-28: races around the zero adjustment ---------------
+
+def test_poll_waiting_for_the_hardware_does_not_read_into_a_zero(system):
+    """The poll thread used to look at `zeroing` BEFORE it took the hardware
+    lock. If zero() held the lock at that moment, the poll thread then woke
+    up and called measure_power in the middle of the dark adjustment -- on the
+    sim that raises (a false "hardware read failed"); on a real meter it is a
+    read during the zero. The zeroing check must happen under the lock."""
+    import threading
+    import time as _time
+    meter, sim, _, events = system
+    sim.zero_time_s = 10.0
+    meter._hw.acquire()                  # a setter / zero() holds the meter ...
+    t = threading.Thread(target=meter.poll_once)
+    t.start()                            # ... while the poll thread queues for it
+    _time.sleep(0.2)
+    meter.zero()                         # zero starts while the poll thread waits
+    meter._hw.release()
+    t.join(2.0)
+    s = meter.status()
+    assert s.zeroing
+    assert s.hw_error == "", f"a reading was attempted during the zero: {s.hw_error}"
+    assert not any(lvl == "error" for lvl, _ in events)
+
+
+def test_acquire_cannot_slip_in_between_zero_check_and_zero_start(system):
+    """zero() checked 'no acquisition running', released the lock, and only
+    then started the dark adjustment; an acquire() in that gap ran straight
+    into the zero. The check and the 'zeroing' mark must be one step."""
+    meter, sim, _, _ = system
+    sim.zero_time_s = 10.0
+    real_start = sim.start_zero
+    slipped = []
+
+    def start_zero_with_a_trigger_in_the_gap():
+        try:
+            slipped.append(meter.acquire())
+        except ValueError:
+            pass                        # refused: what we want
+        real_start()
+
+    sim.start_zero = start_zero_with_a_trigger_in_the_gap
+    meter.zero()
+    assert not slipped, "an acquisition started while the zero was starting"
+    assert meter.status().zeroing and not meter.status().acquiring
+
+
+def test_failed_zero_start_does_not_leave_zeroing_set(system):
+    meter, sim, _, _ = system
+
+    def refuse():
+        raise RuntimeError("meter refused the dark adjustment")
+
+    sim.start_zero = refuse
+    with pytest.raises(RuntimeError):
+        meter.zero()
+    assert not meter.status().zeroing
+    meter.acquire()                     # readings still possible

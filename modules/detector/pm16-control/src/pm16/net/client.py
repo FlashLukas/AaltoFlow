@@ -16,7 +16,7 @@ import time
 
 import zmq
 
-from ..config import Config
+from ..config import Config, acquire_timeout_s
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, config_to_dict, apply_config_dict)
 
@@ -141,7 +141,15 @@ class Pm16Client:
         acquiring", and trusting that would return the previous sample.
         """
         n = self.acquire()
-        limit = timeout_s if timeout_s is not None else self.cfg.acquisition.timeout_s
+        if timeout_s is None:
+            # The SERVICE's readings-per-acquisition (self.cfg may be stale):
+            # 1000 readings take ~60 s, longer than the configured 30 s floor.
+            st = self._status_dict()
+            limit = acquire_timeout_s(
+                st.get("acq_readings") or self.cfg.acquisition.readings,
+                self.cfg.acquisition.timeout_s, st.get("average_time_s"))
+        else:
+            limit = timeout_s
         deadline = time.monotonic() + limit
         while time.monotonic() < deadline:
             st = self._status_dict()

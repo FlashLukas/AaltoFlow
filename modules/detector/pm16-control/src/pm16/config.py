@@ -152,6 +152,62 @@ class Config:
         return cls(**kwargs)
 
 
+#: What one PM16 reading costs when the meter does not say (measured 2026-09-15:
+#: 60 ms averaging, ~17 readings per second through the poll thread).
+READING_S = 0.06
+
+
+def acquire_timeout_s(readings: int, floor_s: float, reading_s: float = READING_S) -> float:
+    """How long a client should wait for ONE acquisition.
+
+    `floor_s` (the config's `acquisition.timeout_s`) is a floor, not the whole story: an acquisition
+    averages `readings` fresh readings of ~60 ms each, so the allowed maximum
+    of 1000 readings takes about a minute -- longer than the default 30 s. A
+    wait shorter than the acquisition itself would abort a healthy one. So:
+    twice the expected duration plus 5 s of slack, and never less than the
+    configured value. (deep cleaning 2026-09-28)
+    """
+    try:
+        per = float(reading_s)
+    except (TypeError, ValueError):
+        per = READING_S
+    if not (per > 0 and per < 10):          # NaN / nonsense -> the measured value
+        per = READING_S
+    n = max(1, int(readings))
+    return max(float(floor_s), 2.0 * n * per + 5.0)
+
+
+def parse_bool(v) -> bool:
+    """A bool from the wire or a text box. bool("false") is True (gotcha #3),
+    so text is PARSED, and anything that is not clearly yes/no is refused
+    rather than guessed."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("1", "true", "yes", "on"):
+            return True
+        if t in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"not a yes/no value: {v!r}")
+
+
+def cast_value(v, type_name):
+    """A value from the wire (JSON) to a config field's declared type; raises
+    ValueError/TypeError on nonsense instead of storing it."""
+    if type_name in ("bool", bool):
+        return parse_bool(v)
+    if type_name in ("int", int):
+        return int(float(v))
+    if type_name in ("float", float):
+        return float(v)
+    if type_name in ("str", str):
+        return str(v)
+    return v
+
+
 def _cast(raw: str, type_name):
     """Cast a string read from the .ini back to the field's declared type.
 

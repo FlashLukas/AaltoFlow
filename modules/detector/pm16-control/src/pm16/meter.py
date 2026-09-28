@@ -309,13 +309,22 @@ class PowerMeter:
         reaches it now becomes the new zero."""
         if not self._connected:
             raise ValueError("not connected")
-        with self._lock:
-            if self._acq is not None:
-                raise ValueError("an acquisition is running; zero afterwards")
         with self._hw:
-            self.backend.start_zero()
-        with self._lock:
-            self._zeroing = True
+            # Check "no acquisition" and mark "zeroing" in ONE step, before the
+            # meter is told (deep cleaning 2026-09-28). Checking, letting go of
+            # the lock and marking afterwards left a gap in which an acquire()
+            # could start and then run straight into the dark adjustment.
+            # Holding _hw also keeps the poll thread out until the mark is set.
+            with self._lock:
+                if self._acq is not None:
+                    raise ValueError("an acquisition is running; zero afterwards")
+                self._zeroing = True
+            try:
+                self.backend.start_zero()
+            except BaseException:
+                with self._lock:
+                    self._zeroing = False      # it never started: readings may go on
+                raise
         self._emit("warn", "zero adjustment started (sensor must be covered)")
 
     def cancel_zero(self) -> None:
@@ -403,29 +412,35 @@ class PowerMeter:
     def poll_once(self) -> None:
         """One reading (or one zero-state check), then advance any acquisition.
         Public so tests and single-threaded scripts can drive it."""
-        with self._lock:
-            zeroing = self._zeroing
+        zeroing = False
         try:
-            if zeroing:
-                with self._hw:
+            with self._hw:
+                # Look at `zeroing` only once we HOLD the hardware lock (deep
+                # cleaning 2026-09-28): zero() may have started the dark
+                # adjustment while this thread was queueing for the lock, and a
+                # reading taken then would land in the middle of the zero.
+                with self._lock:
+                    zeroing = self._zeroing
+                if zeroing:
                     running = self.backend.zero_running()
                     dark = self.backend.dark_offset() if not running else _NAN
-                if not running:
-                    with self._lock:
-                        self._zeroing = False
-                        self._dark = dark
-                    self._emit("info", f"zero adjustment finished, dark offset {dark:.4g}")
-                return
-            with self._hw:
-                t_start = self._clock()
-                w_start = time.time()
-                power, flag = self.backend.measure_power()
-                t_end = self._clock()
-                w_end = time.time()
-                auto_range = self.cfg.sensor.auto_range
-                rng = self.backend.get_range() if auto_range else None
+                else:
+                    t_start = self._clock()
+                    w_start = time.time()
+                    power, flag = self.backend.measure_power()
+                    t_end = self._clock()
+                    w_end = time.time()
+                    auto_range = self.cfg.sensor.auto_range
+                    rng = self.backend.get_range() if auto_range else None
         except Exception as exc:          # never let the polling thread die
             self._report_hw_error(exc)
+            return
+        if zeroing:
+            if not running:
+                with self._lock:
+                    self._zeroing = False
+                    self._dark = dark
+                self._emit("info", f"zero adjustment finished, dark offset {dark:.4g}")
             return
 
         # The stream sample is stamped at the MIDDLE of the reading: a PM16

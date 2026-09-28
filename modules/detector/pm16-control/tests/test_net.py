@@ -92,3 +92,42 @@ def test_bad_request_is_an_error_not_a_crash(service_and_client):
     assert r["ok"] is False
     assert cli._cmd({"cmd": "nonsense"})["ok"] is False
     assert cli._cmd({"cmd": "status"})["ok"] is True  # the loop survived
+
+
+# ---- deep cleaning 2026-09-28: malformed requests must not poison the brain --
+# Driven through _dispatch directly: no sockets, nothing to collide with.
+
+@pytest.fixture
+def dispatch():
+    meter, sim = build_sim_system(Config(), realtime=False)
+    meter.start(poll=False)
+    svc = Pm16Service(meter, host="127.0.0.1", cmd_port=15722, pub_port=15723)
+    yield svc._dispatch, meter, sim
+    meter.shutdown()
+
+
+def test_bad_set_config_is_refused_and_leaves_config_typed(dispatch):
+    """A set_config with a non-number used to be written into cfg BEFORE it
+    was checked: the reply said error, but cfg.sensor.wavelength_nm stayed
+    the string 'abc' -- published as wavelength_set_nm in every status frame
+    (a remote GUI's math.isfinite() then fails on every refresh)."""
+    d, meter, _ = dispatch
+    before = meter.cfg.sensor.wavelength_nm
+    r = d({"cmd": "set_config", "config": {"acquisition": {"readings": 7},
+                                           "sensor": {"wavelength_nm": "abc"}}})
+    assert r["ok"] is False
+    assert meter.cfg.sensor.wavelength_nm == before
+    assert meter.cfg.acquisition.readings != 7        # all or nothing
+    assert isinstance(meter.status().wavelength_set_nm, float)
+
+
+def test_bool_text_over_the_wire_is_parsed_not_truth_tested(dispatch):
+    """Gotcha #3 over the wire: bool("false") is True, so {"on": "false"}
+    switched auto range ON. Text must be parsed like the .ini loader does."""
+    d, meter, sim = dispatch
+    meter.set_auto_range(True)
+    assert d({"cmd": "set_auto_range", "on": "false"})["ok"]
+    assert meter.status().auto_range is False and sim.get_auto_range() is False
+    assert d({"cmd": "set_config", "config": {"sensor": {"auto_range": "true"}}})["ok"]
+    assert meter.cfg.sensor.auto_range is True and sim.get_auto_range() is True
+    assert d({"cmd": "set_auto_range", "on": "maybe"})["ok"] is False

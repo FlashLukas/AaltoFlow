@@ -8,9 +8,9 @@ Two ZeroMQ sockets, same design as every module in the suite:
 from __future__ import annotations
 
 import math
-from dataclasses import asdict
+from dataclasses import asdict, fields
 
-from ..config import Config
+from ..config import Config, cast_value
 
 DEFAULT_CMD_PORT = 5571
 DEFAULT_PUB_PORT = 5572
@@ -46,11 +46,24 @@ def config_to_dict(cfg: Config) -> dict:
 
 def apply_config_dict(cfg: Config, d: dict) -> None:
     """Write values from a config dict back into an existing Config IN PLACE, so
-    shared references stay valid."""
+    shared references stay valid.
+
+    All or nothing (deep cleaning 2026-09-28): every value is first cast to its
+    field's type, and only if ALL of them are valid is anything written. The
+    old version wrote as it went, so {"wavelength_nm": "abc"} was refused by
+    the brain but stayed in the config -- and in every status frame after.
+    """
+    updates = []
     for group, values in d.items():
         grp = getattr(cfg, group, None)
         if grp is None or not isinstance(values, dict):
             continue
+        types = {f.name: f.type for f in fields(grp)}
         for k, v in values.items():
-            if hasattr(grp, k):
-                setattr(grp, k, v)
+            if k in types:
+                try:
+                    updates.append((grp, k, cast_value(v, types[k])))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{group}.{k}: {exc}") from None
+    for grp, k, v in updates:
+        setattr(grp, k, v)

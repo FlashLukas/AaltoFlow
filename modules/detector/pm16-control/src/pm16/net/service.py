@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..config import parse_bool
 from ..meter import PowerMeter
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -131,7 +132,8 @@ class Pm16Service:
             if cmd == "set_wavelength":
                 m.set_wavelength(float(msg["wavelength_nm"]))
             elif cmd == "set_auto_range":
-                m.set_auto_range(bool(msg["on"]))
+                # parse_bool, not bool(): bool("false") is True (gotcha #3)
+                m.set_auto_range(parse_bool(msg["on"]))
             elif cmd == "set_range":
                 m.set_range(float(msg["range_W"]))
             elif cmd == "set_acquisition":
