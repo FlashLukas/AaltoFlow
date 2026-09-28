@@ -309,3 +309,23 @@ def test_the_brain_says_when_the_owner_is_gone(remote_brain):
     assert sna.status().owner["reachable"] is False
     n = _acquire(sna, timeout=5.0)
     assert sna.status().acq_id == n and sna.status().acq_error
+
+
+def test_a_finished_sweep_is_seen_without_waiting_for_the_next_status_frame():
+    """Lab PC 2026-09-28: the client saw 'done' 0.15-0.2 s after the owner.
+    Once the sweep should be over, ask the owner instead of waiting for its
+    next PUB frame (here only once a second)."""
+    cmd = next(_PORTS)
+    owner = FakeOwner(cmd, cmd + 1, sweep_s=0.1, status_hz=0.5).start()
+    be = RemoteSa(_cfg(cmd, cmd + 1))
+    be.open()
+    try:
+        assert _wait(lambda: be.health() == "", 5.0), be.health()
+        for _ in range(3):
+            t0 = time.monotonic()
+            be.start_sweep(100e6, 200e6, 101, 0.0, 1)
+            assert _wait(be.poll, 5.0)
+            assert time.monotonic() - t0 < 0.5
+    finally:
+        be.close()
+        owner.stop()

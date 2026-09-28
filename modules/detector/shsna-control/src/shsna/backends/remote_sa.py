@@ -265,6 +265,10 @@ class RemoteSa:
         self._id = int(reply["tg_acq_id"])
         self._t0 = self._clock()
         self._asked = (float(start_Hz), float(stop_Hz), int(points))
+        # when the owner should be done: from then on poll() ASKS it rather
+        # than wait for its next status frame (lab PC: +0.15-0.2 s per point)
+        self._due = self._t0 + self.estimate_time_s(points, averages)
+        self._last_ask = 0.0
 
     def poll(self) -> bool:
         n = self._id
@@ -275,6 +279,14 @@ class RemoteSa:
             raise SweepFailed(f"TG sweep #{n} did not finish within "
                               f"{self.cfg.hardware.sweep_timeout_s:g} s")
         st = self.link.status()             # ConnectionError when the owner is gone
+        now = self._clock()
+        if (_int(st.get("tg_sample_id")) != n and now >= getattr(self, "_due", now)
+                and now - getattr(self, "_last_ask", 0.0) >= 0.03):
+            # overdue by the estimate: one direct request (~1 ms), at most
+            # every 30 ms, instead of up to one PUB period of waiting
+            self._last_ask = now
+            st = self.link.rpc(cmd="status").get("status") or st
+            self.link.store(st)
         sample_id = _int(st.get("tg_sample_id"))
         started_id = _int(st.get("tg_acq_id"))
         if sample_id == n:

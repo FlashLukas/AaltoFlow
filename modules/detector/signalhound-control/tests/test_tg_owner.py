@@ -833,3 +833,30 @@ def test_a_newer_cw_command_wins_over_an_older_queued_one(sa):
     sa.tg_cw(None, freq_hz=900e6)                 # applied directly, newest
     sa.step()
     assert sa.sim.tg_cw == (900e6, -25.0) and sa.status().tg_cw_freq_hz == 900e6
+
+
+def test_a_tg_request_right_after_a_tg_sweep_starts_at_once():
+    """Lab PC 2026-09-28: 'queued' was 0.11-0.19 s -- a 0.1 s idle poll plus
+    the idle pass reconfiguring the spectrum just when the next windowed
+    request arrived. The request must wake the thread, and the spectrum
+    reconfigure waits a short grace after a TG sweep."""
+    cfg = Config()
+    cfg.acquisition.continuous = False
+    v, sim = build_sim_system(cfg, realtime=False, seed=1)
+    v.start()                                     # the real sweep thread
+    try:
+        v.set_span(20e6)
+        n0 = v.acquire()                          # arms + configures the spectrum
+        t_end = time.monotonic() + 5
+        while v.status().acq_id != n0 or v.status().acquiring:
+            assert time.monotonic() < t_end
+            time.sleep(0.01)
+        for _ in range(3):
+            n = v.tg_sweep_acquire(0.9e9, 1.1e9, points=51)
+            while v.status().tg_sample_id != n:
+                assert time.monotonic() < t_end
+                time.sleep(0.005)
+            t = v.get_tg_trace()
+        assert t["timing_s"]["queued"] < 0.05, t["timing_s"]
+    finally:
+        v.shutdown()

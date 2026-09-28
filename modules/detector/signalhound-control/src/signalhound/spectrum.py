@@ -288,6 +288,11 @@ class SpectrumAnalyzer:
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # set by a TG request, an acquisition or a queued CW change: the idle
+        # sweep thread starts at once instead of after its 0.1 s wait
+        self._wake = threading.Event()
+        # monotonic time the last TG acquisition ended (see the idle pass)
+        self._tg_last_end = float("-inf")
         # replaced by the service / GUI to forward events; default = no-op
         self._on_event = lambda level, msg: None
 
@@ -516,6 +521,7 @@ class SpectrumAnalyzer:
             # snapshot can ever show the new id with a stale "not acquiring".
             self._acq_id += 1
             self._acq = self._new_acq(self._acq_id)
+            self._wake.set()
             return self._acq_id
 
     def abort(self) -> None:
@@ -642,6 +648,7 @@ class SpectrumAnalyzer:
         if not self._hw.acquire(timeout=0.2):
             with self._lock:
                 self._cw_pending = dict(target)
+            self._wake.set()
             self._emit("info", "TG CW change queued until the running sweep ends")
             return {**target, "deferred": True}
         try:
@@ -736,6 +743,7 @@ class SpectrumAnalyzer:
                             # wall-clock marks for the trace's timing breakdown
                             "t_queued": time.monotonic()}
             self._tg_error = ""
+        self._wake.set()
         if n_pts != want_pts:
             self._emit("warn", f"TG sweep #{n}: {want_pts} points clamped to {n_pts} "
                                f"({lim.tg_points_min} ... {lim.tg_points_max})")
@@ -980,6 +988,7 @@ class SpectrumAnalyzer:
         exclusive), else one spectrum sweep if there is a reason to sweep.
         Returns True if a sweep (of either kind) finished. Public so tests can
         drive the analyser without the thread."""
+        self._wake.clear()
         with self._lock:
             pending = self._cw_pending is not None
         if pending:
@@ -996,10 +1005,15 @@ class SpectrumAnalyzer:
                 # only once something was actually set: an untouched analyser
                 # is left as it was opened (start-up rule). Not while paused:
                 # configuring would disturb what paused it.
-                if self._armed and not paused:
+                # ...and not within a short GRACE after a TG sweep: shsna's
+                # next windowed request usually follows at once, and a spectrum
+                # configure (0.15-0.45 s) started now would make it wait
+                # (lab PC 2026-09-28: 'queued' 0.11-0.19 s).
+                grace = time.monotonic() - self._tg_last_end < 0.5
+                if self._armed and not paused and not grace:
                     with self._hw:
                         self._ensure_configured()
-                self._stop.wait(0.1)
+                self._wake.wait(0.1)
                 return False
             return self._sweep_once()
         except Exception as exc:              # never let the sweep thread die
@@ -1184,6 +1198,7 @@ class SpectrumAnalyzer:
 
     def _tg_latch(self, req: dict, trace, err: str) -> None:
         n = req["id"]
+        self._tg_last_end = time.monotonic()
         with self._lock:
             if self._tg_req is req:
                 self._tg_req = None

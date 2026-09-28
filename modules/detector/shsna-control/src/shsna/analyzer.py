@@ -308,6 +308,9 @@ class Analyzer:
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # set by a trigger so the idle sweep thread starts at once instead of
+        # at the end of its 0.1 s wait (latency per scan point)
+        self._wake = threading.Event()
         # replaced by the service / GUI to forward events; default = no-op
         self._on_event = lambda level, msg: None
 
@@ -752,11 +755,12 @@ class Analyzer:
         """One pass of the sweep thread: refresh the owner's health, then one
         acquisition if there is a reason to sweep. Returns True if a sweep
         finished. Public so tests can drive the analyser without the thread."""
+        self._wake.clear()
         self._refresh_health()
         with self._lock:
             wanted = self._acq is not None or self.cfg.acquisition.continuous
         if not wanted:
-            self._stop.wait(0.1)
+            self._wake.wait(0.1)
             return False
         ok = self._sweep_once()
         if not ok:
@@ -997,6 +1001,7 @@ class Analyzer:
             # a fresh attempt: the last failure no longer describes the present
             self._sweep_error = ""
             n = self._acq_id
+        self._wake.set()
         if cleared:
             self._emit("warn", "reference cleared: taking it was interrupted by a new trigger")
         return n
