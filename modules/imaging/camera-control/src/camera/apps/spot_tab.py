@@ -10,6 +10,13 @@ How the spot is used (decided with Lukas, 2026-09-13):
     box around the calibrated position ("search region"). This tab shows that
     live size and whether the live centroid has wandered from the calibration.
 
+SIZE WITHOUT A FIXED THRESHOLD (2026-09-28): a defocused coherent spot has
+rings and a central hole, which a fixed threshold cuts wrongly. The brain also
+measures, every frame, the second moment (D4sigma, ISO 11146) and the area
+above a fraction of the spot's own peak; card 4 picks which of the three sizes
+is "the" size (the trace plots it) and tunes both. On the grabbed frame the
+zoom draws the D4sigma ellipse and its integration box.
+
 So the thresholding here works on a GRABBED frame, not the live stream: grab
 one, move the sliders (the tint, zoom, histogram and detection readout redraw
 on that snapshot), and calibrate when exactly the spot is selected. The input
@@ -36,6 +43,13 @@ from . import theme as T
 from .camera_view import SPOT_GREEN, SPOT_TINT_BGRA, CameraView, outlined_pen
 from .plots import MiniPlot
 from .. import vision as V
+from ..config import CLIP_MODES, SIZE_METHODS
+
+# What each size method is called in the combo, and the unit of its number.
+SIZE_LABELS = {"threshold": "fixed threshold (area)",
+               "relative": "relative to the peak (area)",
+               "d4sigma": "second moment D4sigma (diameter)"}
+SIZE_UNITS = {"threshold": "px²", "relative": "px²", "d4sigma": "px"}
 
 ZOOM_HALF = 48          # px of frame around the spot shown in the zoom (96x96)
 AREA_WINDOW_S = 30.0    # the spot-area trace shows this many seconds
@@ -106,6 +120,14 @@ class SpotZoom(QWidget):
         self._buf = self._mask_buf = None
         self._origin, self._size = (0, 0), (1, 1)
         self._live = self._calib = None
+        self._moments = None                   # vision.SpotMoments of this snapshot
+
+    def set_moments(self, m):
+        """The second moment of the snapshot: drawn as the D4sigma ellipse
+        (its axes are the principal axes of the intensity) and the box it was
+        integrated over. None = nothing to draw."""
+        self._moments = m if (m is not None and m.ok) else None
+        self.update()
 
     def set_data(self, gray, mask, center, live, calib):
         h, w = gray.shape
@@ -159,8 +181,32 @@ class SpotZoom(QWidget):
                 p.drawLine(QPointF(c.x() + 5, c.y()), QPointF(c.x() + g, c.y()))
                 p.drawLine(QPointF(c.x(), c.y() - g), QPointF(c.x(), c.y() - 5))
                 p.drawLine(QPointF(c.x(), c.y() + 5), QPointF(c.x(), c.y() + g))
+        m = self._moments
+        if m is not None:
+            # D4sigma ellipse: the eigenvectors of the 2x2 second-moment
+            # matrix are its axes, 2 sqrt(eigenvalue) x 2 its semi-axes (the
+            # D4sigma diameter is 4 sigma along each principal axis)
+            cov = np.array([[m.sigma2_x, m.sigma2_xy], [m.sigma2_xy, m.sigma2_y]])
+            ev, vec = np.linalg.eigh(cov)
+            ev = np.clip(ev, 0.0, None)
+            ang = float(np.degrees(np.arctan2(vec[1, 1], vec[0, 1])))
+            c = to_w(m.cx, m.cy)
+            p.save()
+            p.translate(c)
+            p.rotate(ang)
+            for _ in outlined_pen(p, T.COLORS["accent"], 1.5):
+                p.drawEllipse(QPointF(0, 0), 2.0 * np.sqrt(ev[1]) * scale,
+                              2.0 * np.sqrt(ev[0]) * scale)
+            p.restore()
+            x0, y0, x1, y1 = m.box
+            a, b = to_w(x0 - 0.5, y0 - 0.5), to_w(x1 - 0.5, y1 - 0.5)
+            for _ in outlined_pen(p, T.COLORS["accent"], 1.0, Qt.DotLine):
+                p.drawRect(QRectF(a, b))
         p.setPen(QColor(T.COLORS["muted"]))
-        p.drawText(6, self.height() - 6, f"{sw}x{sh} px · cross: position · ring: detected")
+        txt = f"{sw}x{sh} px · cross: position · ring: detected"
+        if m is not None:                       # short: the zoom is narrow
+            txt = f"{sw}x{sh} · +: position · ring: detected · amber: D4σ"
+        p.drawText(6, self.height() - 6, txt)
         p.end()
 
 
@@ -325,12 +371,104 @@ class SpotTab(QWidget):
         l.addWidget(b)
         right.addWidget(f)
 
+        f, l = _card("4 · Spot size  (without a fixed threshold)")
+        note = QLabel("A defocused laser spot has rings and a hole, which a fixed threshold "
+                      "cuts wrongly. All three sizes are measured every frame; the chosen one "
+                      "is plotted. The autofocus picks its own (AutoFocus tab: spot_area / "
+                      "spot_relative / spot_d4sigma).")
+        note.setWordWrap(True); note.setObjectName("muted")
+        l.addWidget(note)
+        rows = []                      # (label, widget), laid out two per row below
+        self.cmb_size = QComboBox()
+        for key in SIZE_METHODS:
+            self.cmb_size.addItem(SIZE_LABELS.get(key, key), key)
+        self.cmb_size.setCurrentIndex(max(0, list(SIZE_METHODS).index(sp.size_method)
+                                          if sp.size_method in SIZE_METHODS else 0))
+        self.cmb_size.currentIndexChanged.connect(self._on_edit)
+        rows.append(("size shown", self.cmb_size))
+        self.sp_rel = self._dspin(sp.rel_level, 0.01, 0.99, 0.005, 3,
+                                  "relative: fraction of the peak above background "
+                                  "(0.135 = 1/e², 0.5 = FWHM)")
+        rows.append(("relative level", self.sp_rel))
+        self.sp_clip = self._dspin(sp.clip_sigma, 0.5, 10.0, 0.5, 1,
+                                   "D4sigma: a pixel counts when (blurred) above this many "
+                                   "noise sigmas of the background")
+        rows.append(("clip (noise σ)", self.sp_clip))
+        self.cmb_clipmode = QComboBox()
+        for key in CLIP_MODES:
+            self.cmb_clipmode.addItem({"local": "local (generous)",
+                                       "pixel": "pixel (textbook)"}.get(key, key), key)
+        self.cmb_clipmode.setToolTip("local: decided on a blurred copy, generous (default). "
+                                     "pixel: the textbook per-pixel clip -- deletes faint "
+                                     "wings, sigma^2 too small out of focus.")
+        self.cmb_clipmode.setCurrentIndex(max(0, list(CLIP_MODES).index(sp.clip_mode)
+                                              if sp.clip_mode in CLIP_MODES else 0))
+        self.cmb_clipmode.currentIndexChanged.connect(self._on_edit)
+        rows.append(("which pixels", self.cmb_clipmode))
+        self.sp_detect = self._dspin(sp.detect_px, 0.0, 10.0, 0.5, 1,
+                                     "D4sigma: blur (px) of the copy on which 'significant' is "
+                                     "decided; the values themselves stay raw")
+        rows.append(("decision blur (px)", self.sp_detect))
+        self.sp_blob = QSpinBox(); self.sp_blob.setRange(0, 10000)
+        self.sp_blob.setValue(int(sp.min_blob_px)); self.sp_blob.valueChanged.connect(self._on_edit)
+        self.sp_blob.setToolTip("D4sigma: smaller clumps of 'significant' pixels are noise")
+        rows.append(("min clump (px)", self.sp_blob))
+        self.sp_grow = QSpinBox(); self.sp_grow.setRange(0, 50)
+        self.sp_grow.setValue(int(sp.mask_grow_px)); self.sp_grow.valueChanged.connect(self._on_edit)
+        self.sp_grow.setToolTip("D4sigma: widen the kept region by this many px, so the faint "
+                                "fringe of each wing is counted")
+        rows.append(("grow mask (px)", self.sp_grow))
+        self.sp_boxf = self._dspin(sp.box_factor, 0.5, 5.0, 0.1, 2,
+                                   "D4sigma: box half-size in D4sigma (1.5 = 3 x D4sigma wide, ISO)")
+        rows.append(("box factor", self.sp_boxf))
+        self.sp_iter = QSpinBox(); self.sp_iter.setRange(1, 50)
+        self.sp_iter.setValue(int(sp.max_iter)); self.sp_iter.valueChanged.connect(self._on_edit)
+        rows.append(("max iterations", self.sp_iter))
+        self.sp_smooth = self._dspin(sp.smooth_px, 0.0, 5.0, 0.5, 1,
+                                     "blur the values first (px); its own width is subtracted "
+                                     "again, so the focus cannot move")
+        rows.append(("smooth values (px)", self.sp_smooth))
+        self.chk_asym = QCheckBox("ignore light with no twin opposite the spot centre")
+        self.chk_asym.setToolTip("A feature of the sample next to the spot has no mirror image "
+                                 "through the calibrated centre; the spot always has one.")
+        self.chk_asym.setChecked(bool(sp.reject_asymmetric))
+        self.chk_asym.toggled.connect(self._on_edit)
+        rows.append(("", self.chk_asym))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        # the method first, on a row of its own; the tuning knobs two per row
+        grid.addWidget(QLabel(rows[0][0]), 0, 0)
+        grid.addWidget(rows[0][1], 0, 1, 1, 3)
+        r, c = 1, 0
+        for label, widget in rows[1:]:
+            if not label:                     # a checkbox: a whole row of its own
+                r, c = (r + 1, 0) if c else (r, 0)
+                grid.addWidget(widget, r, 0, 1, 4)
+                r += 1
+                continue
+            grid.addWidget(QLabel(label), r, c)
+            grid.addWidget(widget, r, c + 1)
+            r, c = (r, 2) if c == 0 else (r + 1, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        l.addLayout(grid)
+        self.lab_size = QLabel("-"); self.lab_size.setWordWrap(True)
+        self.lab_size.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l.addWidget(self.lab_size)
+        right.addWidget(f)
+
         f, l = _card("Live  (the brain's per-frame size check)")
         self.lab_live = QLabel("-"); self.lab_live.setWordWrap(True)
         l.addWidget(self.lab_live)
         right.addWidget(f)
         right.addStretch(1)
         self._show_ref()
+
+    def _dspin(self, value, lo, hi, step, decimals, tip):
+        w = QDoubleSpinBox(); w.setRange(lo, hi); w.setSingleStep(step)
+        w.setDecimals(decimals); w.setValue(float(value)); w.setToolTip(tip)
+        w.valueChanged.connect(self._on_edit)
+        return w
 
     def _slider_pair(self, grid, row, label, value):
         sl = QSlider(Qt.Horizontal); sl.setRange(0, 255); sl.setValue(value)
@@ -374,7 +512,19 @@ class SpotTab(QWidget):
                 "symmetric": self.chk_sym.isChecked(),
                 "search_shape": "circle" if self.cmb_shape.currentIndex() == 1 else "rect",
                 "lookup_region_px": self.sp_look.value(),
-                "lookup_region_y_px": self.sp_look_y.value()}
+                "lookup_region_y_px": self.sp_look_y.value(),
+                # threshold-free sizes (card 4)
+                "size_method": self.cmb_size.currentData() or "threshold",
+                "rel_level": self.sp_rel.value(),
+                "clip_sigma": self.sp_clip.value(),
+                "clip_mode": self.cmb_clipmode.currentData() or "local",
+                "detect_px": self.sp_detect.value(),
+                "min_blob_px": self.sp_blob.value(),
+                "mask_grow_px": self.sp_grow.value(),
+                "box_factor": self.sp_boxf.value(),
+                "max_iter": self.sp_iter.value(),
+                "smooth_px": self.sp_smooth.value(),
+                "reject_asymmetric": self.chk_asym.isChecked()}
 
     def _on_shape(self, *_, update=True):
         circle = self.cmb_shape.currentIndex() == 1
@@ -409,6 +559,13 @@ class SpotTab(QWidget):
         self.view.set_frame(gray)
         self.view.set_overlay(self._status, self.cfg)
         self.zoom.set_data(gray, a["mask"], center, live, calib)
+        # the threshold-free sizes of this snapshot, around the calibrated
+        # position (else what the threshold found) -- as the brain does
+        guess = calib or live
+        mom = V.spot_second_moment(gray, guess, sp) if guess is not None else None
+        rel = V.spot_relative_area(gray, guess, sp) if guess is not None else None
+        self.zoom.set_moments(mom)
+        self.lab_size.setText(self._size_text(mom, rel))
 
         if rep.found:
             x, y, w, h = rep.bbox
@@ -447,6 +604,29 @@ class SpotTab(QWidget):
             ([sp.thr_upper, sp.thr_upper], [0.0, top * 1.05], SPOT_GREEN, "upper"),
         ], x_range=(0, 255), y_min=0.0, y_max=top * 1.08)
 
+    def _size_text(self, mom, rel) -> str:
+        """The threshold-free sizes of the grabbed frame, in words."""
+        if mom is None:
+            return "no spot position yet: calibrate (or find the spot with the threshold)"
+        parts = []
+        if mom.ok:
+            parts.append(f"<b>D4σ {mom.d4sigma:.1f} px</b> (x {mom.d4sigma_x:.1f}, y "
+                         f"{mom.d4sigma_y:.1f}) · σ² {mom.sigma2:.1f} px² · centroid "
+                         f"({mom.cx:.1f}, {mom.cy:.1f}) · {mom.n_iter} iteration(s)"
+                         + ("" if mom.converged else " NOT converged")
+                         + (" · box hit the search region: enlarge it" if mom.clipped else ""))
+            parts.append(f"background {mom.background:.1f} ± {mom.noise:.2f} · peak "
+                         f"{mom.peak:.0f} above it")
+        else:
+            parts.append(f"D4σ: {mom.why}")
+        if rel is not None:
+            parts.append(f"relative area {rel.area:.0f} px² above {rel.level:.1f}"
+                         if rel.ok else f"relative area: {rel.why}")
+        if mom.saturated or (rel is not None and rel.saturated):
+            parts.append("<span style='color:%s'>SATURATED: every size is wrong (σ² too "
+                         "big) -- lower the exposure</span>" % T.COLORS["danger"])
+        return "<br>".join(parts)
+
     def _suggest(self):
         if self._gray is None:
             self.log("warn", "grab a frame first")
@@ -479,6 +659,8 @@ class SpotTab(QWidget):
         sp = self.cfg.spot
         sp.ref_x, sp.ref_y, sp.ref_area = res["x"], res["y"], res["area"]
         sp.ref_jitter_px, sp.ref_set = res["jitter_px"], True
+        sp.ref_d4sigma_px = float(res.get("d4sigma_px", 0.0) or 0.0)
+        sp.ref_rel_area = float(res.get("rel_area", 0.0) or 0.0)
         self.sp_x.setValue(float(res["x"])); self.sp_y.setValue(float(res["y"]))
         self._show_ref()
         self._reanalyse()
@@ -527,8 +709,14 @@ class SpotTab(QWidget):
             self.lab_ref.setText(f"<b>set by hand</b> at ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px "
                                  f"(not measured: no jitter or area recorded)")
             return
+        extra = ""
+        if sp.ref_d4sigma_px > 0:
+            extra += f", D4σ {sp.ref_d4sigma_px:.1f} px"
+        if sp.ref_rel_area > 0:
+            extra += f", relative area {sp.ref_rel_area:.0f} px²"
         self.lab_ref.setText(f"<b>calibrated</b> at ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px, "
-                             f"±{sp.ref_jitter_px:.2f} px jitter, area {sp.ref_area:.0f} px²")
+                             f"±{sp.ref_jitter_px:.2f} px jitter, area {sp.ref_area:.0f} px²"
+                             + extra)
 
     # -- spot-area trace -------------------------------------------------------------
     def record(self, status, now: float | None = None):
@@ -541,7 +729,12 @@ class SpotTab(QWidget):
         if fn is None or fn == self._area_last_frame:
             return
         self._area_last_frame = fn
-        area = float(status.spot_area) if getattr(status, "spot_found", False) else 0.0
+        if self.cfg.spot.size_method == "threshold":
+            area = float(status.spot_area) if getattr(status, "spot_found", False) else 0.0
+        else:
+            # the brain's number for the chosen method; NaN (not measured) = 0
+            v = float(getattr(status, "spot_size", float("nan")))
+            area = v if np.isfinite(v) else 0.0
         self._area.append((time.monotonic() if now is None else now, area))
 
     def _clear_area(self):
@@ -559,16 +752,22 @@ class SpotTab(QWidget):
         ys = [p[1] for p in pts]
         series = []
         sp = self.cfg.spot
-        if sp.ref_set and sp.ref_area > 0:   # the reference FIRST, so the data draws on top
-            series.append(([-AREA_WINDOW_S, 0.0], [sp.ref_area, sp.ref_area],
-                           T.COLORS["muted"], "calibrated"))
-        series.append((xs, ys, SPOT_GREEN, "area"))
+        method = sp.size_method if sp.size_method in SIZE_UNITS else "threshold"
+        unit = SIZE_UNITS[method]
+        ref = {"threshold": sp.ref_area, "relative": sp.ref_rel_area,
+               "d4sigma": sp.ref_d4sigma_px}[method]
+        self.area_plot._ylabel = ("spot area px²" if method == "threshold" else
+                                  "relative area px²" if method == "relative" else
+                                  "spot D4σ px")
+        if sp.ref_set and ref > 0:           # the reference FIRST, so the data draws on top
+            series.append(([-AREA_WINDOW_S, 0.0], [ref, ref], T.COLORS["muted"], "calibrated"))
+        series.append((xs, ys, SPOT_GREEN, "area" if method != "d4sigma" else "D4σ"))
         # area starts at 0 (0 = not seen); time axis fixed to the window
         self.area_plot.set_series(series, x_range=(-AREA_WINDOW_S, 0.0), y_min=0.0)
         seen = [a for a in ys if a > 0]
         if seen:
             mean, std = float(np.mean(seen)), float(np.std(seen))
-            self.lab_area.setText(f"last {len(ys)} frames: {mean:.0f} ± {std:.0f} px² "
+            self.lab_area.setText(f"last {len(ys)} frames: {mean:.1f} ± {std:.1f} {unit} "
                                   f"({100.0 * std / mean if mean else 0:.1f} %), "
                                   f"seen in {100.0 * len(seen) / len(ys):.0f} %")
         else:
@@ -581,7 +780,8 @@ class SpotTab(QWidget):
         sp = self.cfg.spot
         if not getattr(status, "spot_found", False):
             where = "around the calibrated position" if sp.ref_set else "in the frame"
-            self.lab_live.setText(f"spot NOT seen {where} this frame")
+            self.lab_live.setText(f"spot NOT seen by the threshold {where} this frame"
+                                  + self._free_sizes(status))
             return
         txt = f"seen · area {status.spot_area:.0f} px²"
         if sp.ref_set and sp.ref_area > 0:
@@ -589,4 +789,18 @@ class SpotTab(QWidget):
         if sp.ref_set:
             d = float(np.hypot(status.spot_live_x - sp.ref_x, status.spot_live_y - sp.ref_y))
             txt += f" · live centroid {d:.2f} px from calibrated"
-        self.lab_live.setText(txt)
+        self.lab_live.setText(txt + self._free_sizes(status))
+
+    @staticmethod
+    def _free_sizes(status) -> str:
+        """This frame's threshold-free sizes from status (no image work)."""
+        d4 = float(getattr(status, "spot_d4sigma_px", float("nan")))
+        rel = float(getattr(status, "spot_rel_area", float("nan")))
+        out = []
+        if np.isfinite(d4):
+            out.append(f"D4σ {d4:.1f} px (σ² {float(status.spot_sigma2_px2):.1f} px²)")
+        if np.isfinite(rel):
+            out.append(f"relative area {rel:.0f} px²")
+        if getattr(status, "spot_saturated", False):
+            out.append("SATURATED")
+        return ("<br>" + " · ".join(out)) if out else ""

@@ -37,7 +37,8 @@ from . import theme as T
 from .camera_view import CameraView
 from .plots import MiniPlot
 from .spot_tab import SpotTab
-from ..config import AF_ROUTINES, AF_SIDES, FOCUS_MECHANISMS, SYMMETRIES, THEMES, XY_UNITS
+from ..config import (AF_ROUTINES, AF_SIDES, CLIP_MODES, FOCUS_MECHANISMS, SIM_SPOTS,
+                      SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
 
 # What a QSpinBox (a C++ int) can hold.
 _INT32_MIN, _INT32_MAX = -2**31, 2**31 - 1
@@ -50,7 +51,16 @@ _ENUMS = {
     "overlay_style": ("fill", "open"),
     "theme": THEMES,
     "xy_unit": XY_UNITS,
+    "size_method": SIZE_METHODS,
+    "clip_mode": CLIP_MODES,
+    "sim_spot_model": SIM_SPOTS,
 }
+
+# What the focus plot's y axis shows, per autofocus mechanism.
+AF_METRIC_LABELS = {"spot_area": "spot area (px²)",
+                    "spot_d4sigma": "spot σ² (px²)",
+                    "spot_relative": "relative area (px²)",
+                    "edges": "edge sharpness", "fft": "high-frequency share"}
 
 
 # --------------------------------------------------------------------------- #
@@ -558,11 +568,20 @@ class MainWindow(QMainWindow):
 
     def _autofocus_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
-        note = QLabel("The spot threshold (also used by the spot_area focus metric) is set "
-                      "on the Spot tab.")
-        note.setObjectName("muted")
+        note = QLabel("The spot threshold (spot_area) and the threshold-free sizes "
+                      "(spot_relative, spot_d4sigma) are tuned on the Spot tab. spot_d4sigma = "
+                      "the spot's second moment σ²: no threshold, rings and a hole counted "
+                      "where they are, and a parabola in Z, so the sweep's fit is exact.")
+        note.setObjectName("muted"); note.setWordWrap(True)
         v.addWidget(note)
         v.addWidget(self._settings_tab([("Autofocus", self.cfg.autofocus)]))
+        # the three spot sizes of the current frame, from status (no image work):
+        # watch them while focusing by hand to see which one behaves
+        f, l = _card("Spot size now")
+        self.lab_af_sizes = QLabel("-"); self.lab_af_sizes.setWordWrap(True)
+        self.lab_af_sizes.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l.addWidget(self.lab_af_sizes)
+        v.addWidget(f)
         f, l = _card("Focus sweep (metric vs Z voltage)")
         self.af_plot = MiniPlot(xlabel="Z (V)", ylabel="metric")
         self.af_plot.setMinimumHeight(170)
@@ -1234,6 +1253,32 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log_event("error", f"scan area failed: {exc}")
 
+    def _refresh_af_sizes(self, s) -> None:
+        """AutoFocus tab: this frame's spot sizes, the metric in use marked."""
+        lab = getattr(self, "lab_af_sizes", None)
+        if lab is None:
+            return
+        mech = self.cfg.autofocus.mechanism
+
+        def num(v, fmt):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return "-"
+            return format(v, fmt) if math.isfinite(v) else "-"
+
+        rows = [("spot_area", "threshold area",
+                 (num(s.spot_area, ".0f") if s.spot_found else "-") + " px²"),
+                ("spot_relative", "relative area", num(s.spot_rel_area, ".0f") + " px²"),
+                ("spot_d4sigma", "D4σ", num(s.spot_d4sigma_px, ".1f") + " px  (σ² "
+                 + num(s.spot_sigma2_px2, ".1f") + " px²)")]
+        txt = " · ".join((f"<b>{name}: {val}</b>" if key == mech else f"{name}: {val}")
+                         for key, name, val in rows)
+        if s.spot_saturated:
+            txt += (f"<br><span style='color:{T.COLORS['danger']}'>the spot is SATURATED: "
+                    f"its size is wrong (σ² too big) -- lower the exposure</span>")
+        lab.setText(txt)
+
     def _update_af_plot(self):
         try:
             c = self.ctrl.get_af_curve()
@@ -1247,7 +1292,7 @@ class MainWindow(QMainWindow):
             return [p[0] for p in pts], [p[1] for p in pts]
 
         self.af_plot._xlabel = f"Z ({self._z_unit})"
-        label = "spot area (px²)" if self.cfg.autofocus.mechanism == "spot_area" else "focus"
+        label = AF_METRIC_LABELS.get(self.cfg.autofocus.mechanism, "focus")
         phases = c.get("phases")
         if phases:
             # one-way routine: coarse search, fine walk, park walk -- each its own
@@ -1351,6 +1396,7 @@ class MainWindow(QMainWindow):
         if (s.z_min, s.z_max) != (self.z_spin.minimum(), self.z_spin.maximum()):
             self.z_spin.setRange(s.z_min, s.z_max)
         self.lab_best.setText(f"{s.best_focus_v:.2f} {s.z_unit}")
+        self._refresh_af_sizes(s)
         self._refresh_xy(s)
         self._sync_stage(s)                 # after _refresh_xy: it may re-enable Datum
         self._sync_fault(s)

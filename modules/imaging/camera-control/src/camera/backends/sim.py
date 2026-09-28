@@ -23,6 +23,7 @@ i.e. a POSITIVE stage step moves features in the +pixel direction.
 
 from __future__ import annotations
 
+import math
 import threading
 
 import cv2
@@ -137,6 +138,109 @@ class SimSlipStickZ(SimZFocus):
 
 
 # --------------------------------------------------------------------------- #
+# A COHERENT laser spot through focus (2026-09-28)
+# --------------------------------------------------------------------------- #
+class CoherentSpot:
+    """A coherent laser spot whose defocused image has rings and a central HOLE.
+
+    Why this model (Lukas, 2026-09-28: "the laser is highly coherent, so a
+    defocused spot has RINGS and can have a HOLE in the centre"): the field is
+    a coherent sum of TWO modes of one Gaussian beam -- the fundamental LG00
+    and the first radial Laguerre-Gauss mode LG10 (a centre with one ring):
+
+        E(r, z) ~ (1/w) exp(-r^2/w^2) [a0 + a1 e^{i(2 psi + phi)} (1 - 2 r^2/w^2)]
+
+    with w(z) = w0 sqrt(1 + zeta^2), zeta = z / zR, and psi = arctan(zeta) the
+    Gouy phase. The ring mode picks up TWICE the Gouy phase of the fundamental
+    (2p+1 with p = 1 vs 0), so the two slide in and out of phase through focus:
+    where 2 psi + phi = 0 the centre is bright (a tight-looking spot), where
+    2 psi + phi = pi and |a0| = |a1| the centre is exactly DARK -- a donut.
+    (The wavefront curvature exp(-i k r^2 / 2R) is common to both modes and
+    drops out of the intensity.) Any real aberrated or truncated coherent beam
+    is such a mode sum, with more modes; two are the smallest case with a hole.
+
+    The property the autofocus relies on: for ANY paraxial coherent field the
+    second moment is exactly a parabola in z. Here, analytically (orthonormal
+    modes, |a0|^2 + |a1|^2 = 1, <r^2> of LG_p0 = w^2 (2p+1)/2, cross term
+    -w^2/2):
+        <r^2>(z) = w(z)^2 [A + B cos(2 psi + phi)],  A = (|a0|^2 + 3|a1|^2)/2,
+                                                     B = -|a0||a1|
+    and w^2 cos(2 psi + phi) = w0^2 [(1 - zeta^2) cos phi - 2 zeta sin phi],
+    a quadratic in zeta. Its vertex is shifted from the geometric waist, so the
+    model offsets zeta such that the SECOND-MOMENT waist sits at defocus 0:
+    "true focus" in this simulator = the smallest sigma^2. (The plane where
+    the centre is brightest is elsewhere -- for the defaults (phi = 3 pi / 4)
+    1.9 zR before it, and the HOLE 0.96 zR after it. For a non-Gaussian beam
+    those planes differ; the second moment is the one that is a clean
+    parabola, and what the D4sigma autofocus finds.)
+
+    Rendered at pixel centres, energy conserving (a defocused spot dims),
+    scaled so the brightest point over all z is ``peak`` counts.
+    """
+
+    def __init__(self, w0_px=10.0, zr=3.0, mix=1.0, phase=0.75 * math.pi, peak=220.0):
+        self.w0 = float(w0_px)
+        self.zr = max(1e-9, float(zr))
+        n = math.sqrt(1.0 + float(mix) ** 2)
+        self.a0, self.a1 = 1.0 / n, float(mix) / n
+        self.phi = float(phase)
+        self.A = 0.5 * (self.a0 ** 2 + 3.0 * self.a1 ** 2)
+        self.B = -self.a0 * self.a1
+        # <r^2> / w0^2 = qa zeta^2 + qb zeta + qc
+        self.qa = self.A - self.B * math.cos(self.phi)
+        self.qb = -2.0 * self.B * math.sin(self.phi)
+        self.qc = self.A + self.B * math.cos(self.phi)
+        self.zeta_star = -self.qb / (2.0 * self.qa)          # the sigma^2 waist
+        # the brightest point over all z (on a grid) sets the counts scale
+        best = 0.0
+        rho2 = np.linspace(0.0, 3.0, 301)
+        for zeta in np.linspace(-6.0, 6.0, 1201):
+            best = max(best, float(self._shape(rho2, zeta).max()))
+        self.scale = float(peak) / best
+
+    def _zeta(self, defocus: float) -> float:
+        return self.zeta_star + float(defocus) / self.zr
+
+    def _shape(self, rho2, zeta):
+        """Relative intensity at r^2 / w(z)^2 = rho2, including the 1/w^2 dimming."""
+        psi = math.atan(zeta)
+        f = self.a0 + self.a1 * np.exp(1j * (2.0 * psi + self.phi)) * (1.0 - 2.0 * rho2)
+        return np.exp(-2.0 * rho2) * np.abs(f) ** 2 / (1.0 + zeta * zeta)
+
+    def w(self, defocus: float) -> float:
+        """The Gaussian beam's 1/e^2 radius at this defocus, px."""
+        z = self._zeta(defocus)
+        return self.w0 * math.sqrt(1.0 + z * z)
+
+    def true_sigma2(self, defocus: float) -> float:
+        """The exact per-axis second moment (px^2) at this defocus (= <r^2>/2)."""
+        z = self._zeta(defocus)
+        return 0.5 * self.w0 ** 2 * (self.qa * z * z + self.qb * z + self.qc)
+
+    def hole_defocus(self) -> float:
+        """Defocus where the centre is darkest (exactly dark when |a0| = |a1|)."""
+        zeta = math.tan((math.pi - self.phi) / 2.0)
+        return (zeta - self.zeta_star) * self.zr
+
+    def intensity(self, xx, yy, cx, cy, defocus):
+        z = self._zeta(defocus)
+        w2 = self.w0 ** 2 * (1.0 + z * z)
+        rho2 = ((xx - cx) ** 2 + (yy - cy) ** 2) / w2
+        return self.scale * self._shape(rho2, z)
+
+    def add_to(self, frame: np.ndarray, center, defocus: float) -> None:
+        """Add the spot's light to a FLOAT ``frame`` in place (no clipping here)."""
+        h, w = frame.shape
+        r = int(math.ceil(4.0 * self.w(defocus))) + 2     # exp(-32): nothing beyond
+        x0, x1 = max(0, int(center[0]) - r), min(w, int(center[0]) + r + 1)
+        y0, y1 = max(0, int(center[1]) - r), min(h, int(center[1]) + r + 1)
+        if x1 <= x0 or y1 <= y0:
+            return
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        frame[y0:y1, x0:x1] += self.intensity(xx, yy, center[0], center[1], defocus)
+
+
+# --------------------------------------------------------------------------- #
 # Camera simulator (renders the scene from the stage + Z)
 # --------------------------------------------------------------------------- #
 def _make_glyph(size: int = 60) -> np.ndarray:
@@ -174,6 +278,17 @@ class SimCamera:
         blur_gain: float = 0.25,       # image blur per volt of defocus
         noise: float = 3.0,
         seed: int = 1234,
+        # The laser spot: "gaussian" (default: the old toy, a Gaussian whose
+        # sigma grows linearly with defocus at full brightness) or "coherent"
+        # (CoherentSpot: rings, a hole, energy conserved). Parameters of the
+        # coherent one: waist radius, Rayleigh range (Z units), ring-mode
+        # amplitude and phase, and the brightest it gets (> 255 saturates).
+        spot_model: str = "gaussian",
+        coherent_w0_px: float = 10.0,
+        coherent_zr: float = 3.0,
+        coherent_mix: float = 1.0,
+        coherent_phase: float = 0.75 * math.pi,
+        coherent_peak: float = 220.0,
     ):
         self.stage = stage
         self.zfocus = zfocus
@@ -193,6 +308,9 @@ class SimCamera:
         self.blur_gain = float(blur_gain)
         self.noise = float(noise)
         self._glyph = _make_glyph(60)
+        self.spot_model = "coherent" if str(spot_model).lower() == "coherent" else "gaussian"
+        self.coherent = CoherentSpot(coherent_w0_px, coherent_zr, coherent_mix,
+                                     coherent_phase, coherent_peak)
         self._rng = np.random.default_rng(seed)
         # Stage position at which the template sits at its home pixel.
         self._stage_ref = stage.read_xy()
@@ -293,8 +411,14 @@ class SimCamera:
         np.maximum(frame, warped, out=frame)
 
     def grab(self) -> np.ndarray:
-        frame = (self._rng.normal(8, self.noise, (self.h, self.w))
-                 .clip(0, 255).astype(np.uint8))
+        coherent = self.spot_model == "coherent"
+        if coherent:
+            # camera noise is added LAST (below): it is made in the sensor and
+            # is not blurred by the defocus of the scene
+            frame = np.full((self.h, self.w), 8, np.uint8)
+        else:
+            frame = (self._rng.normal(8, self.noise, (self.h, self.w))
+                     .clip(0, 255).astype(np.uint8))
 
         # Template pattern moves with the stage.
         tcx, tcy = self.template_center_px()
@@ -309,12 +433,21 @@ class SimCamera:
         if blur_sigma > 0.05:
             frame = cv2.GaussianBlur(frame, (0, 0), blur_sigma)
 
-        # The laser spot: fixed position, sigma grows with defocus (area metric).
-        sigma = self.base_sigma * (1.0 + self.defocus_gain * dz)
-        yy, xx = np.ogrid[:self.h, :self.w]
-        g = 255.0 * np.exp(-(((xx - self.spot_px[0]) ** 2 +
-                              (yy - self.spot_px[1]) ** 2) / (2 * sigma ** 2)))
-        frame = np.maximum(frame, g.astype(np.uint8))
+        if coherent:
+            # light ADDS to the background (the moments rely on it), the power
+            # is conserved (a defocused spot really gets dimmer), then the
+            # sensor adds its noise and clips at 255 (saturation)
+            f = frame.astype(np.float64)
+            self.coherent.add_to(f, self.spot_px, z_now - self.z_focus)
+            f += self._rng.normal(0.0, self.noise, f.shape)
+            frame = np.clip(np.rint(f), 0, 255).astype(np.uint8)
+        else:
+            # The laser spot: fixed position, sigma grows with defocus (area metric).
+            sigma = self.base_sigma * (1.0 + self.defocus_gain * dz)
+            yy, xx = np.ogrid[:self.h, :self.w]
+            g = 255.0 * np.exp(-(((xx - self.spot_px[0]) ** 2 +
+                                  (yy - self.spot_px[1]) ** 2) / (2 * sigma ** 2)))
+            frame = np.maximum(frame, g.astype(np.uint8))
 
         # Apply the simulated camera parameters (exposure/gain/black level/gamma).
         # With the identity defaults this is a no-op; changing them in the GUI

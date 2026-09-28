@@ -79,6 +79,18 @@ class CameraStatus:
     spot_holes: int = 0
     spot_orientation: float = 0.0
     spot_calibrated: bool = False     # True: spot_x/y are the CALIBRATED position, not detected
+    # The spot's SIZE without a fixed threshold (2026-09-28, vision.py "Spot
+    # SIZE"), measured every frame in the search region. Information and
+    # autofocus metrics only -- the position used for motion stays spot_x/y.
+    spot_size_method: str = "threshold"   # cfg.spot.size_method, echoed
+    spot_size: float = float("nan")       # that method's number (px^2, or D4sigma px)
+    spot_rel_area: float = float("nan")   # px^2 above rel_level x (peak - background)
+    spot_d4sigma_px: float = float("nan") # 4 sqrt(sigma^2): ISO beam diameter, px
+    spot_sigma2_px2: float = float("nan") # second moment, mean of x and y, px^2
+    spot_centroid_x: float = float("nan") # intensity centroid (first moment), px
+    spot_centroid_y: float = float("nan")
+    spot_peak: float = 0.0                # brightest pixel above background, counts
+    spot_saturated: bool = False          # a pixel of the spot at the camera's maximum
 
     pattern_loaded: bool = False
     match_found: bool = False
@@ -445,6 +457,10 @@ class Camera:
         if spot_position_ok:
             st.spot_x, st.spot_y = float(sp.ref_x), float(sp.ref_y)
             st.spot_calibrated = True
+        # the threshold-free sizes, around the calibrated position (or, while
+        # calibrating / before calibration, around what the threshold found)
+        guess = center if center is not None else ((det.cx, det.cy) if det.found else None)
+        self._measure_size(gray, guess, st)
 
         # -- pixel size / objective ------------------------------------- #
         px_x = self.cfg.image.pixel_size_x_um
@@ -1125,6 +1141,47 @@ class Camera:
         return False
 
     # ------------------------------------------------------------------ #
+    # spot size without a fixed threshold (2026-09-28)
+    # ------------------------------------------------------------------ #
+    def _measure_size(self, gray, guess, st) -> None:
+        """Fill the threshold-free size fields of ``st`` for this frame.
+
+        Both measurements work only inside the search region around ``guess``
+        (a few hundred pixels square, not the 2-megapixel frame), which is why
+        they are cheap enough to run on every frame -- measured on a 1936 x
+        1096 frame in tests/test_spot_moments.py. A spot the camera clips at
+        its maximum is flagged: a clipped peak loses power where r is small,
+        so sigma^2 comes out too BIG (and the peak of the relative method too
+        small) -- lower the exposure until nothing saturates at focus.
+        """
+        sp = self.cfg.spot
+        st.spot_size_method = sp.size_method
+        if guess is None:
+            return
+        try:
+            mom = V.spot_second_moment(gray, guess, sp)
+            rel = V.spot_relative_area(gray, guess, sp)
+        except Exception as exc:                 # never let a size kill the frame
+            self._warn_limited("size", f"spot size: {type(exc).__name__}: {exc}", 30.0)
+            return
+        if mom.ok:
+            st.spot_d4sigma_px, st.spot_sigma2_px2 = mom.d4sigma, mom.sigma2
+            st.spot_centroid_x, st.spot_centroid_y = mom.cx, mom.cy
+            st.spot_peak = mom.peak
+        if rel.ok:
+            st.spot_rel_area = rel.area
+        st.spot_saturated = bool(mom.saturated or rel.saturated)
+        st.spot_size = {"threshold": st.spot_area if st.spot_found else float("nan"),
+                        "relative": st.spot_rel_area,
+                        "d4sigma": st.spot_d4sigma_px}.get(sp.size_method, float("nan"))
+        if st.spot_saturated and (sp.size_method != "threshold"
+                                  or self.cfg.autofocus.mechanism in ("spot_d4sigma",
+                                                                      "spot_relative")):
+            self._warn_limited("saturated", "the laser spot is SATURATED: its size is wrong "
+                                            "(sigma^2 too big) -- lower the exposure or gain",
+                               30.0)
+
+    # ------------------------------------------------------------------ #
     # continuous focus  (dither hill-climb on Z)
     # ------------------------------------------------------------------ #
     def _continuous_focus_step(self, gray, st) -> None:
@@ -1363,7 +1420,8 @@ class Camera:
                                    "search region? sweep range?)")
             best = V.best_focus_from_sweep(np.asarray(levels)[ok],
                                            np.asarray(metrics, dtype=float)[ok],
-                                           maximise, af.fit_curve)
+                                           maximise, af.fit_curve,
+                                           rel_window=self._fit_rel_window())
             self._af_curve = {"z": [float(v) for v in levels],
                               "metric": [float(v) for v in metrics],
                               "best": float(best), "maximise": bool(maximise)}
@@ -1515,11 +1573,17 @@ class Camera:
             z = z_best
             while True:
                 # Follow the slope: how big may the next step be?
-                if (af.mechanism == "spot_area" and np.isfinite(m_prev)
+                # For every SIZE metric the square root is ~linear in the
+                # defocus far from focus: sqrt(area) is a radius, and
+                # sqrt(sigma^2) = sigma is exactly the hyperbola
+                # sqrt(sigma0^2 + c dz^2) -> sqrt(c)|dz| of a coherent beam.
+                # So the last two levels and the calibrated in-focus size tell
+                # how far focus still is.
+                r_ref = self._ref_size_root()
+                if (r_ref is not None and np.isfinite(m_prev)
                         and m_prev > 0 and m_best > 0):
                     r_prev, r_now = np.sqrt(m_prev), np.sqrt(m_best)
                     k = (r_prev - r_now) / max(abs(z_best - z_prev), 1e-9)  # radius per unit Z
-                    r_ref = np.sqrt(self.cfg.spot.ref_area) if self.cfg.spot.ref_area > 0 else 0.0
                     if k > 0:
                         remaining = max(0.0, r_now - r_ref) / k
                         step = float(np.clip(0.7 * remaining, coarse, max_step))
@@ -1590,7 +1654,8 @@ class Camera:
             raise RuntimeError("the spot was lost during the fine walk")
         zs = np.asarray(fz, dtype=float); ms = np.asarray(fm, dtype=float)
         ok = np.isfinite(ms)
-        best = V.best_focus_from_sweep(zs[ok], ms[ok], maximise, af.fit_curve)
+        best = V.best_focus_from_sweep(zs[ok], ms[ok], maximise, af.fit_curve,
+                                       rel_window=self._fit_rel_window())
         m_goal = best_f[1]
         publish(best)
 
@@ -1639,6 +1704,30 @@ class Camera:
         publish(best)
         return float(best), float(parked), note
 
+    def _fit_rel_window(self) -> float | None:
+        """For sigma^2 the parabola is the true curve, so the fit may use every
+        level up to 2 x the smallest sigma^2 (|dz| up to ~1 Rayleigh range of
+        the second-moment beam) instead of only +-2 levels -- more points, a
+        better vertex. Not further: far out the spot is dim, its faint wings
+        sink below the camera's noise and its 8-bit steps, and sigma^2 comes
+        out too SMALL there (in the coherent simulator 15-50 % at 2-3 Rayleigh
+        ranges on the side where the light sits in a faint outer ring) --
+        with a 3 x window the sweep's vertex moved by 0.7 units, with 2 x by
+        < 0.1."""
+        return 2.0 if self.cfg.autofocus.mechanism == "spot_d4sigma" else None
+
+    def _ref_size_root(self) -> float | None:
+        """sqrt of the in-focus value of the current SIZE metric (from the spot
+        calibration; 0 when not measured), or None for a non-size metric."""
+        sp, mech = self.cfg.spot, self.cfg.autofocus.mechanism
+        if mech == "spot_area":
+            return float(np.sqrt(sp.ref_area)) if sp.ref_area > 0 else 0.0
+        if mech == "spot_d4sigma":          # metric = sigma^2, D4sigma = 4 sigma
+            return float(sp.ref_d4sigma_px) / 4.0 if sp.ref_d4sigma_px > 0 else 0.0
+        if mech == "spot_relative":
+            return float(np.sqrt(sp.ref_rel_area)) if sp.ref_rel_area > 0 else 0.0
+        return None
+
     def _focus_metric(self, gray) -> float:
         """The focus score of one frame; NaN when the spot_area metric sees no spot.
 
@@ -1650,6 +1739,23 @@ class Camera:
         885 px spot, so the sweep focused on the background (Lukáš noticed).
         """
         af, sp = self.cfg.autofocus, self.cfg.spot
+        if af.mechanism in ("spot_d4sigma", "spot_relative"):
+            # No threshold (2026-09-28): the second moment sigma^2 (px^2; for a
+            # coherent beam EXACTLY a parabola in Z, so the sweep's parabola
+            # fit is the right model) or the area above a fraction of the
+            # spot's own peak. Around the calibrated position, like spot_area.
+            if not sp.ref_set:
+                raise RuntimeError(f"the {af.mechanism} focus metric needs a calibrated spot "
+                                   f"(Spot tab -> Calibrate spot)")
+            if af.mechanism == "spot_d4sigma":
+                m = V.spot_second_moment(gray, (sp.ref_x, sp.ref_y), sp)
+                if m.ok and m.saturated:
+                    self._warn_limited("af_saturated", "autofocus: the spot is saturated at "
+                                                       "this Z -- sigma^2 is too big there",
+                                       30.0)
+                return float(m.sigma2) if m.ok else float("nan")
+            r = V.spot_relative_area(gray, (sp.ref_x, sp.ref_y), sp)
+            return float(r.area) if r.ok else float("nan")
         if af.mechanism == "spot_area":
             if not sp.ref_set:
                 raise RuntimeError("the spot_area focus metric needs a calibrated spot "
@@ -2376,7 +2482,7 @@ class Camera:
         if self._af_busy:
             raise RuntimeError("autofocus is running: calibrate the spot once it has finished")
         self._measuring_spot = True     # whole-frame search: the beam may have moved
-        xs, ys, areas = [], [], []
+        xs, ys, areas, d4s, rels = [], [], [], [], []
         try:
             # the frame in flight when the flag went up still used the old
             # search box, so only frames numbered start+2 onwards count
@@ -2392,6 +2498,7 @@ class Camera:
                     if s.frame_number >= start + 2 and s.spot_found:
                         xs.append(s.spot_live_x); ys.append(s.spot_live_y)
                         areas.append(s.spot_area)
+                        d4s.append(s.spot_d4sigma_px); rels.append(s.spot_rel_area)
                 time.sleep(0.005)
         finally:
             self._measuring_spot = False
@@ -2402,11 +2509,19 @@ class Camera:
         sp.ref_x, sp.ref_y = float(np.mean(xs)), float(np.mean(ys))
         sp.ref_area = float(np.mean(areas))
         sp.ref_jitter_px = float(np.hypot(np.std(xs), np.std(ys)))
+        # the threshold-free sizes of the same frames (0 = not measurable):
+        # the one_way autofocus aims with them, the Spot tab compares with them
+        d4s = [v for v in d4s if np.isfinite(v)]
+        rels = [v for v in rels if np.isfinite(v)]
+        sp.ref_d4sigma_px = float(np.mean(d4s)) if d4s else 0.0
+        sp.ref_rel_area = float(np.mean(rels)) if rels else 0.0
         sp.ref_set = True
         self._emit("info", f"spot calibrated: ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px "
                            f"+/- {sp.ref_jitter_px:.2f} px, area {sp.ref_area:.0f} px2, "
-                           f"{len(xs)} frames")
+                           f"D4sigma {sp.ref_d4sigma_px:.1f} px, "
+                           f"relative area {sp.ref_rel_area:.0f} px2, {len(xs)} frames")
         return {"x": sp.ref_x, "y": sp.ref_y, "area": sp.ref_area,
+                "d4sigma_px": sp.ref_d4sigma_px, "rel_area": sp.ref_rel_area,
                 "jitter_px": sp.ref_jitter_px, "frames": len(xs)}
 
     def set_spot_position(self, x: float, y: float) -> dict:
@@ -2424,8 +2539,10 @@ class Camera:
         sp = self.cfg.spot
         sp.ref_x, sp.ref_y = x, y
         sp.ref_area, sp.ref_jitter_px, sp.ref_set = 0.0, 0.0, True
+        sp.ref_d4sigma_px = sp.ref_rel_area = 0.0      # nothing measured
         self._emit("info", f"spot position entered by hand: ({x:.2f}, {y:.2f}) px")
-        return {"x": x, "y": y, "area": 0.0, "jitter_px": 0.0, "frames": 0}
+        return {"x": x, "y": y, "area": 0.0, "d4sigma_px": 0.0, "rel_area": 0.0,
+                "jitter_px": 0.0, "frames": 0}
 
     def clear_spot_position(self) -> None:
         """Forget the spot position: click-to-go and the stabiliser stop using one."""

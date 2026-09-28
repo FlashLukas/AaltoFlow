@@ -178,7 +178,29 @@ def build_manifest(brain) -> dict:
         _p("spot_area", "Spot area", "indicator", "float", unit="px2",
            group="Spot", order=63, decimals=1, plottable=True,
            read_path=["spot_area"],
-           help="Also usable as an autofocus metric."),
+           help="Thresholded area (fixed threshold). Also usable as an autofocus metric."),
+        # The spot's size WITHOUT a threshold (2026-09-28): a defocused
+        # coherent spot has rings and a hole that a fixed threshold cuts
+        # wrongly. sigma^2 is exactly a parabola in Z for a coherent beam.
+        _p("spot_d4sigma", "Spot D4sigma", "indicator", "float", unit="px",
+           group="Spot", order=64, decimals=2, plottable=True,
+           read_path=["spot_d4sigma_px"],
+           help="ISO 11146 second-moment diameter 4 sqrt(sigma^2), no threshold. "
+                "NaN when no spot is measurable."),
+        _p("spot_sigma2", "Spot sigma^2", "indicator", "float", unit="px2",
+           group="Spot", order=65, decimals=2, plottable=True,
+           read_path=["spot_sigma2_px2"],
+           help="Second moment of the intensity about its centroid (mean of x and "
+                "y). The spot_d4sigma autofocus metric; a parabola in Z."),
+        _p("spot_rel_area", "Spot area (relative level)", "indicator", "float",
+           unit="px2", group="Spot", order=66, decimals=1, plottable=True,
+           read_path=["spot_rel_area"],
+           help="Area above rel_level (default 1/e^2) of the spot's own peak. "
+                "The spot_relative autofocus metric."),
+        _p("spot_saturated", "Spot saturated", "indicator", "bool", group="Spot",
+           order=67, read_path=["spot_saturated"],
+           help="A pixel of the spot at the camera's maximum: the sizes are then "
+                "wrong (sigma^2 too big). Lower the exposure."),
 
         _p("match_found", "Template matched", "indicator", "bool",
            group="Pattern", order=70, read_path=["match_found"]),

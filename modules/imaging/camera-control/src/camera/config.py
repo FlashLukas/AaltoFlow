@@ -30,8 +30,11 @@ from __future__ import annotations
 import configparser
 from dataclasses import asdict, dataclass, fields
 
-# The three focus-scoring mechanisms (Autofocus.mechanism).
-FOCUS_MECHANISMS = ("spot_area", "edges", "fft")
+# The focus-scoring mechanisms (Autofocus.mechanism). spot_area = thresholded
+# area (fixed threshold); spot_d4sigma = the spot's second moment sigma^2 (no
+# threshold, a parabola in Z for a coherent beam); spot_relative = the area
+# above a fraction of the spot's own peak. See vision.py "Spot SIZE".
+FOCUS_MECHANISMS = ("spot_area", "edges", "fft", "spot_d4sigma", "spot_relative")
 # Autofocus routines (Autofocus.routine): the symmetric sweep, or the one-way
 # walk made for a hysteretic (slip-stick) Z -- see Camera._af_one_way.
 AF_ROUTINES = ("sweep", "one_way")
@@ -46,6 +49,13 @@ THEMES = ("dark", "light")
 MOTIONS = ("kim", "piezo")
 # Spot search region shape (Spot.search_shape).
 SEARCH_SHAPES = ("rect", "circle")
+# How the spot SIZE is reported as "the" size (Spot.size_method): the fixed
+# threshold (as always), relative to the spot's own peak, or the second moment.
+SIZE_METHODS = ("threshold", "relative", "d4sigma")
+# Which pixels the second moment counts (Spot.clip_mode), see vision.spot_second_moment.
+CLIP_MODES = ("local", "pixel")
+# The simulator's laser spot (Camera.sim_spot_model).
+SIM_SPOTS = ("gaussian", "coherent")
 # XY position / jog unit on a stage that counts steps (Hardware.xy_unit).
 XY_UNITS = ("steps", "um")
 
@@ -68,6 +78,11 @@ class Camera:
     # ExposureTime. It is written to the camera only when the user changes it
     # (live parameter panel, or set_config with a different value). 0 = unknown.
     exposure_us: float = 0.0
+    # SIMULATOR only: the laser spot the simulated camera draws. "gaussian" =
+    # the old toy (grows with defocus at full brightness); "coherent" = rings
+    # and a central hole through focus, power conserved (backends/sim.py
+    # CoherentSpot) -- to try the threshold-free spot sizes without the rig.
+    sim_spot_model: str = "gaussian"
 
 
 @dataclass
@@ -125,6 +140,39 @@ class Spot:
     ref_y: float = 0.0
     ref_area: float = 0.0              # px^2 at calibration time
     ref_jitter_px: float = 0.0         # std of the centroid while calibrating
+    # ... and the other two sizes at calibration time (0 = not measured)
+    ref_d4sigma_px: float = 0.0        # D4sigma = 4 sqrt(sigma^2), px
+    ref_rel_area: float = 0.0          # area above rel_level x peak, px^2
+
+    # SPOT SIZE WITHOUT A FIXED THRESHOLD (2026-09-28, Lukas: a defocused
+    # coherent spot has rings and a hole; a fixed threshold loses it). All
+    # three sizes are measured every frame in the search region; size_method
+    # says which one the Spot tab plots as "the" size. The autofocus picks its
+    # own (autofocus.mechanism). "threshold" keeps everything as it was.
+    size_method: str = "threshold"     # threshold | relative | d4sigma
+    # relative: pixels above rel_level x (peak - background). 0.135 = 1/e^2.
+    rel_level: float = 0.135
+    # d4sigma (second moment, ISO 11146): background from a ring outside the
+    # box; a pixel counts when the image blurred by detect_px is above
+    # clip_sigma x ITS noise ("local"; "pixel" = the textbook per-pixel clip,
+    # biased low for a dim spot); clumps under min_blob_px are dropped and the
+    # mask grown by mask_grow_px (a kept noise pixel adds scatter, a dropped
+    # wing pixel adds bias). The box is box_factor x D4sigma each way from the
+    # centroid (1.5 = 3 x D4sigma wide), iterated up to max_iter times.
+    clip_sigma: float = 3.0
+    clip_mode: str = "local"           # local | pixel
+    detect_px: float = 2.0
+    min_blob_px: int = 20
+    mask_grow_px: int = 4
+    box_factor: float = 1.5
+    max_iter: int = 10
+    # Gaussian blur of the VALUES before the moments (px, 0 = off). Its own
+    # smooth_px^2 is subtracted again, so it cannot move the focus.
+    smooth_px: float = 0.0
+    # both threshold-free sizes: drop every clump of light that has no twin
+    # on the opposite side of the calibrated centre -- a feature of the sample
+    # next to the spot. The spot (round, elliptical, rings) always has one.
+    reject_asymmetric: bool = True
 
 
 @dataclass
@@ -425,6 +473,12 @@ def load_config(path: str) -> Config:
         cfg.hardware.motion = "kim"
     if cfg.spot.search_shape not in SEARCH_SHAPES:
         cfg.spot.search_shape = "rect"
+    if cfg.spot.size_method not in SIZE_METHODS:
+        cfg.spot.size_method = "threshold"
+    if cfg.spot.clip_mode not in CLIP_MODES:
+        cfg.spot.clip_mode = "local"
+    if cfg.camera.sim_spot_model not in SIM_SPOTS:
+        cfg.camera.sim_spot_model = "gaussian"
     if cfg.hardware.xy_unit not in XY_UNITS:
         cfg.hardware.xy_unit = "steps"
     return cfg

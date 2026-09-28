@@ -22,9 +22,16 @@ def build_sim_system(cfg: Config | None = None):
     xy = SimXYStage(x0=x0, y0=y0)
     z = SimZFocus(z0=cfg.hardware.z_step_v * 30, z_focus=7.6,
                   vmin=cfg.limits.z_min_v, vmax=cfg.limits.z_max_v)
+    # the coherent spot (rings + hole) is opt-in: every existing scene and
+    # test keeps the old Gaussian toy; its camera noise is set to 1.5 counts,
+    # nearer a real 8-bit camera than the toy's 3 (the D4sigma size needs the
+    # faint wings, and 3 counts of noise buries more of them)
+    coherent = cfg.camera.sim_spot_model == "coherent"
     cam = SimCamera(xy, z,
                     pixel_size_x_um=cfg.image.pixel_size_x_um,
-                    pixel_size_y_um=cfg.image.pixel_size_y_um)
+                    pixel_size_y_um=cfg.image.pixel_size_y_um,
+                    spot_model="coherent" if coherent else "gaussian",
+                    **({"noise": 1.5} if coherent else {}))
     brain = Camera(cam, xy, z, cfg)
     return brain, cam, xy, z
 
