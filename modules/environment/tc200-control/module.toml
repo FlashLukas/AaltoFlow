@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "tc200"
+name = "Heater controller"
+description = "Thorlabs TC200 heater controller: one resistive heater, PT100 sensor, setpoint in degC"
+category = "environment"
+tags = ["temperature", "heater", "PT100", "PID", "Thorlabs", "TC200"]
+icon = "icon.svg"
+order = 300
+
+[ports]
+cmd = 5613
+pub = 5614
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

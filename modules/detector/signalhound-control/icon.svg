@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- A spectrum analyser screen: the instrument body in metal, a noise floor
+       with one tall peak (the signal) in accent, a marker on the peak, and the
+       tracking-generator output port bottom right. -->
+  <rect x="4" y="7" width="32" height="24" rx="4" fill="none" stroke="#5a626e" stroke-width="2.4"/>
+  <line x1="7.5" y1="25" x2="32.5" y2="25" stroke="#5a626e" stroke-width="1" stroke-dasharray="1.5 2"/>
+  <polyline points="7.5,25 10,24 12,25.2 14,23.8 16,24.6 18,21 20,11.5 22,21 24,24.4 26,23.6 28,25 30,24.2 32.5,24.8"
+            fill="none" stroke="#ff9e2c" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="20" cy="11.5" r="2.2" fill="#ffb454"/>
+  <line x1="12" y1="35" x2="28" y2="35" stroke="#e8eaed" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="32" cy="35" r="2" fill="none" stroke="#e8eaed" stroke-width="1.6"/>
+</svg>

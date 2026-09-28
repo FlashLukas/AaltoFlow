@@ -7,13 +7,16 @@ What it does, so you know what you get:
 
 1. Copies a working module (default `smb-control`, the set-and-forget
    template; `--like clMag` for a closed-loop one, `--like hf2` for a detector)
-   to `<key>-control/`, skipping its venv, caches, lock file and local .ini.
+   to `modules/<category>/<key>-control/` (category from --category, default
+   `other`), skipping its venv, caches, lock file and local .ini.
 2. Renames the package (`src/smb` -> `src/vna`), its class-name prefix
    (`SmbService` -> `VnaService`) and every import.
 3. Takes the NEXT FREE port pair from the suite's scheme (5555 + 2n), checked
    against every module.toml so it cannot clash.
 4. Writes `module.toml` (the launcher shows the module at once), a placeholder
    `icon.svg`, and stub README.md / CLAUDE.local.md (private notes, not in git) saying what is still template.
+5. Refreshes `src/<key>/hwlock.py` from the master copy in suite-common (the
+   address lock must stay byte-identical; check_modules.py fails it otherwise).
 
 The copy RUNS and its tests PASS before you change anything: it is the template
 instrument under a new name. Then you replace its insides -- config, backends,
@@ -31,7 +34,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
-from suite_common.modules import CATEGORIES, MANIFEST, discover_local  # noqa: E402
+from suite_common.modules import (CATEGORIES, MANIFEST, discover_local,  # noqa: E402
+                                  module_home)
 
 SKIP_DIRS = {".venv", "__pycache__", ".pytest_cache", "out", ".suite_cache"}
 SKIP_FILES = {"uv.lock", "CLAUDE.md", "CLAUDE.local.md", "README.md", "module.toml", "icon.svg"}
@@ -88,10 +92,14 @@ def main(argv=None) -> int:
     if template is None:
         print(f"no template module {args.like!r}; available: {', '.join(sorted(local))}")
         return 2
-    dest = root / f"{key}-control"
-    if dest.exists():
-        print(f"{dest} already exists")
-        return 2
+    # Modules are sorted by what they are FOR: modules/<category>/<key>-control.
+    # Three folders below the root, so paths back to the root are ../../../
+    dest = module_home(root, args.category, f"{key}-control")
+    rel = dest.relative_to(root).as_posix()
+    for there in (dest, root / f"{key}-control"):      # also the old flat place
+        if there.exists():
+            print(f"{there} already exists")
+            return 2
 
     old = template.key
     old_pkg_dir = template.dir / "src" / old
@@ -140,6 +148,17 @@ def main(argv=None) -> int:
             path.write_text(new, "utf-8")
             changed += 1
 
+    # The address lock (one physical address, one service) must be a BYTE-EXACT
+    # copy of the master in suite-common: check_modules.py fails a module whose
+    # copy differs. Refresh it AFTER the renaming above, which would otherwise
+    # rewrite the template's key inside it (hwlock.py mentions clMag by name),
+    # and in case the template's copy is older than the master.
+    master = root / "suite-common" / "src" / "suite_common" / "hwlock.py"
+    if master.is_file():
+        shutil.copyfile(master, dest / "src" / key / "hwlock.py")
+    else:
+        print(f"warning: {master} not found; copy it to src/{key}/hwlock.py by hand")
+
     name = args.name or key.upper()
     today = dt.date.today().isoformat()
     gui = "scripts/run_gui.py" if (dest / "scripts" / "run_gui.py").is_file() else ""
@@ -174,7 +193,7 @@ replace its insides it is still the {old} instrument under a new name.**
 Ports {cmd} / {pub}.
 
 ```powershell
-cd {key}-control
+cd {rel.replace('/', chr(92))}
 uv sync --extra gui
 uv run pytest -q
 uv run scripts/run_service.py
@@ -183,7 +202,7 @@ uv run scripts/run_gui.py --connect localhost
 """, "utf-8")
     (dest / "CLAUDE.local.md").write_text(f"""# {key}-control -- module memory (Claude Code)
 
-> Suite overview in `..\\docs\\DEVELOPER_NOTES.md`; module contract in `..\\INSTRUMENT_MODULE_GUIDE.md`.
+> Suite overview in `..\\..\\..\\docs\\DEVELOPER_NOTES.md`; module contract in `..\\..\\..\\INSTRUMENT_MODULE_GUIDE.md`.
 
 Created {today} with `tools/new_module.py {key} --like {old}`: a copy of
 `{old}-control` with the package, class prefix and ports renamed. Ports {cmd} / {pub}.
@@ -197,12 +216,12 @@ Created {today} with `tools/new_module.py {key} --like {old}`: a copy of
 - Generated; tests pass as generated. Nothing instrument-specific yet.
 """, "utf-8")
 
-    print(f"created {dest.relative_to(root)}  (from {old}, ports {cmd}/{pub}, {changed} files rewritten)")
+    print(f"created {rel}  (from {old}, ports {cmd}/{pub}, {changed} files rewritten)")
     print("next:")
-    print(f"  cd {key}-control")
+    print(f"  cd {rel}")
     print("  uv sync --extra gui")
-    print("  uv run pytest -q                  # passes before you change anything")
-    print("  python ../tools/check_modules.py  # contract check")
+    print("  uv run pytest -q                           # passes before you change anything")
+    print(f"  python ../../../tools/check_modules.py {key}  # contract check")
     print("The launcher lists it already (Rescan, or wait a few seconds).")
     return 0
 

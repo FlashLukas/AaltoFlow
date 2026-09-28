@@ -78,9 +78,9 @@ class FakeService:
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
     root = tmp_path_factory.mktemp("suite")
-    _module(root, "magnet-control", "magnet", 16100, order=10)
-    _module(root, "lockin-control", "lockin", 16110, order=20)
-    _module(root, "focus-control", "focus", 16120, gui=False, order=30)
+    _module(root, "modules/other/magnet-control", "magnet", 16100, order=10)
+    _module(root, "modules/other/lockin-control", "lockin", 16110, order=20)
+    _module(root, "modules/other/focus-control", "focus", 16120, gui=False, order=30)
     os.environ["AALTOFLOW_ROOT"] = str(root)
     sys.path.insert(0, str(HERE))
     import mission_control as mc
@@ -123,13 +123,21 @@ def test_measurement_suite_button_is_not_a_module_card(env):
 
 def test_a_new_module_folder_appears_on_rescan(env):
     mc, win, root, app = env
-    _module(root, "vna-control", "vna", 16130, order=40)
+    _module(root, "modules/other/vna-control", "vna", 16130, order=40)
     win.rescan(force=False)                                     # signature changed
     assert "vna" in win.cards
     import shutil
-    shutil.rmtree(root / "vna-control")
+    shutil.rmtree(root / "modules/other/vna-control")
     win.rescan(force=False)
     assert "vna" not in win.cards
+    # a folder dropped straight into the root (the layout before modules/)
+    # is still seen by the rescan -- it uses the same search as discovery
+    _module(root, "scope-control", "scope", 16150, order=45)
+    win.rescan(force=False)
+    assert "scope" in win.cards
+    shutil.rmtree(root / "scope-control")
+    win.rescan(force=False)
+    assert "scope" not in win.cards
 
 
 def test_port_override_updates_the_card(env):
@@ -220,7 +228,7 @@ def test_add_module_from_a_folder(env, tmp_path):
 
         dlg.install_checked(build=False)
         _pump(app, 0.2)
-        assert (root / "pm-control" / "module.toml").is_file()
+        assert (root / "modules/detector/pm-control" / "module.toml").is_file()
         assert "pm" in win.cards                                  # rescanned
         assert win.cards["pm"].spec.cmd not in (16100, 16110, 16120)
         assert mc.port_conflicts(win.found.modules) == []
@@ -313,7 +321,7 @@ def test_add_module_from_the_online_catalog(env, tmp_path):
         _wait(app, lambda: not dlg.busy and "gauss" in win.cards)
         log = dlg.logbox.toPlainText()
         assert "verified (SHA-256)" in log and "files copied" in log
-        assert (root / "gauss-control" / "module.toml").is_file()
+        assert (root / "modules/field/gauss-control" / "module.toml").is_file()
         assert dlg.tree.topLevelItem(0).text(2) == "update"     # re-planned: now installed
     finally:
         dlg.close()
@@ -383,7 +391,7 @@ def test_export_then_import_settings(env, tmp_path):
     backup of what it replaced, and the cards follow an imported
     suite_local.json (here: the magnet's real-hardware flag)."""
     mc, win, root, app = env
-    ini = root / "magnet-control" / "magnet.ini"
+    ini = root / "modules/other/magnet-control" / "magnet.ini"
     local = root / mc.LOCAL_FILE
     had_local = local.exists()
     old_local = local.read_bytes() if had_local else None
@@ -400,7 +408,7 @@ def test_export_then_import_settings(env, tmp_path):
         assert not win.cards["magnet"].spec.real
 
         plan = win.import_settings(str(bundle), confirm=False)
-        assert {e.path for e in plan.overwrite} == {"magnet-control/magnet.ini",
+        assert {e.path for e in plan.overwrite} == {"modules/other/magnet-control/magnet.ini",
                                                     mc.LOCAL_FILE}
         assert "offset = 1" in ini.read_text(encoding="utf-8")
         assert win.cards["magnet"].spec.real                  # the card followed
@@ -425,3 +433,102 @@ def test_import_of_a_non_bundle_is_refused(env, tmp_path, monkeypatch):
                         lambda *a, **k: shown.append(a[2]))
     assert win.import_settings(str(bad)) is None
     assert shown and "not a zip" in shown[0]
+
+
+def test_exclusive_checkbox_is_unchanged(env):
+    """The profile 'Exclusive' checkbox still exists and is off by default."""
+    mc, win, root, app = env
+    assert win.exclusive_check.text() == "Exclusive"
+    assert not win.exclusive_check.isChecked()
+
+
+# ───────────── physical addresses: who holds what (hwlock, 2026-09-27) ─────────────
+# The lock itself lives in suite_common.hwlock and is claimed by each module's
+# real backend. The launcher only SHOWS it. A claim made HERE, in the test
+# process, plays a running service that holds the instrument; the lock folder
+# is a temp folder so the real one on this PC is never touched.
+
+@pytest.fixture
+def lockdir(tmp_path, monkeypatch):
+    d = tmp_path / "locks"
+    monkeypatch.setenv("AALTOFLOW_LOCK_DIR", str(d))
+    return d
+
+
+def test_parse_busy_reads_hwlocks_refusal(env):
+    mc, win, root, app = env
+    line = ("suite_common.hwlock.HardwareBusy: GPIB0::6 is already in use by clMag "
+            "(pid 4242) -- one instrument can be driven by one service at a time; stop that one first")
+    assert mc.parse_busy(line) == {"address": "GPIB0::6", "holder": "clMag", "pid": 4242}
+    assert mc.parse_busy("COM5 is already in use by another service -- x") == {
+        "address": "COM5", "holder": "another service", "pid": None}
+    assert mc.parse_busy("nothing to see") is None
+
+
+def test_card_shows_the_address_its_service_holds(env, lockdir):
+    """A claim by 'magnet' appears on magnet's card after one probe round,
+    and on no other card; released, it disappears again."""
+    mc, win, root, app = env
+    from suite_common import hwlock
+    lock = hwlock.claim("GPIB0::6::INSTR", "magnet")
+    try:
+        win.prober._round()                    # the same path the timer takes
+        _pump(app, 0.1)
+        mag, lockin = win.cards["magnet"], win.cards["lockin"]
+        assert mag.hw.isVisibleTo(mag) and mag.hw.text() == "holds GPIB0::6"
+        assert "GPIB0::6::INSTR" in mag.hw.toolTip()
+        assert not lockin.hw.isVisibleTo(lockin)
+    finally:
+        lock.release()
+    win.prober._round()
+    _pump(app, 0.1)
+    assert not win.cards["magnet"].hw.isVisibleTo(win.cards["magnet"])
+
+
+def test_holdings_match_by_pid_but_never_for_a_remote_card(env):
+    mc, win, root, app = env
+    spec = win.cards["lockin"].spec
+    entries = [{"module": "something-else", "pid": 77, "normalized": "COM5"}]
+    assert mc.holdings_for(spec, entries, pid=77) == entries
+    assert mc.holdings_for(spec, entries, pid=None) == []
+    import dataclasses
+    assert mc.holdings_for(dataclasses.replace(spec, remote=True),
+                           [{"module": "lockin", "pid": 1}]) == []
+
+
+def test_a_service_refused_its_address_says_so_on_the_card(env, lockdir, monkeypatch):
+    """A real child process tries to claim an address this test holds: it is
+    refused by hwlock and exits. The card turns red with the holder's name
+    instead of reporting a generic crash."""
+    mc, win, root, app = env
+    from suite_common import hwlock
+    card = win.cards["focus"]
+    script = root / "modules/other/focus-control/scripts/run_service.py"
+    src = Path(hwlock.__file__).resolve().parents[1]
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(src)!r})\n"
+        "from suite_common import hwlock\n"
+        "hwlock.claim('GPIB::6', 'focus', wait_s=0.2)\n", encoding="utf-8")
+    # No venv in the throwaway module: run the script with this very python.
+    monkeypatch.setattr(mc, "build_command",
+                        lambda d, s, extra, gui, prefer_venv=True: (sys.executable, [s, *extra]))
+    lock = hwlock.claim("GPIB0::6", "magnet")
+    try:
+        card.start_service()
+        end = time.monotonic() + 20
+        while card.service_proc is not None and time.monotonic() < end:
+            _pump(app, 0.05)
+        assert card.service_proc is None, "the refused service should have exited"
+        assert card.busy == {"address": "GPIB0::6", "holder": "magnet", "pid": os.getpid()}
+        assert card.status_txt.text() == "address busy"
+        assert card.hw.isVisibleTo(card)
+        assert card.hw.text() == f"address busy: GPIB0::6 held by magnet (pid {os.getpid()})"
+        log = win.logbox.toPlainText()
+        assert "[focus] ADDRESS BUSY" in log and "[focus] NOT started: GPIB0::6 is held by magnet" in log
+        assert "exited unexpectedly" not in log.split("[focus] ADDRESS BUSY")[-1]
+    finally:
+        lock.release()
+        script.write_text("")
+        card.busy = None
+        card.show_hw()

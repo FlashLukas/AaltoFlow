@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Kepco BOP: a bipolar (four-quadrant) supply. The V-I cross, the load line
+       through the origin in amber, the operating point glowing on it, and the
+       + / - of the two polarities. Colours: accent #ff9e2c, accent_hi #ffb454,
+       text #e8eaed, metal #5a626e (the launcher swaps the first three). -->
+  <rect x="4" y="4" width="32" height="32" rx="6" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <line x1="20" y1="8" x2="20" y2="32" stroke="#5a626e" stroke-width="1.8"/>
+  <line x1="8" y1="20" x2="32" y2="20" stroke="#5a626e" stroke-width="1.8"/>
+  <line x1="10" y1="30" x2="30" y2="10" stroke="#ff9e2c" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="26" cy="14" r="3.2" fill="#ffb454"/>
+  <path d="M9.5 12.5 h6 M12.5 9.5 v6" stroke="#e8eaed" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M24.5 27.5 h6" stroke="#e8eaed" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

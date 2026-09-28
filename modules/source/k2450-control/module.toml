@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "k2450"
+name = "SourceMeter"
+description = "Keithley 2450 SourceMeter (SMU): source V or I, measure IV with compliance"
+category = "source"
+tags = ["SMU", "source meter", "IV", "transport", "Keithley"]
+icon = "icon.svg"
+order = 350
+
+[ports]
+cmd = 5623
+pub = 5624
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

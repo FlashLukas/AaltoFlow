@@ -1,0 +1,37 @@
+[project]
+name = "chopper-control"
+version = "0.1.0"
+license = "MIT"
+description = "Thorlabs MC2000B optical chopper control (USB serial), or a simulator"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui                  the GUI (the headless core installs light)
+#   uv sync --extra gui --extra real     + pyserial, for the real MC2000B (--real)
+#
+# pyserial is an EXTRA rather than commented out: it is pure Python and installs
+# anywhere, so turning --real on should not mean editing (and committing) this
+# file. Trap (gotcha #29): `uv sync` REMOVES extras you do not name, so on the
+# lab PC always sync with both.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+]
+real = [
+    "pyserial>=3.5",     # the MC2000B's USB virtual COM port (backends/mc2000b.py, imported in open())
+]
+
+# Importable code lives under src/ -- the "src layout", same as clMag-control.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

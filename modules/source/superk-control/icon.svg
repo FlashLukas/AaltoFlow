@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- SuperK: a laser head sends WHITE light (text colour) into an AOTF crystal
+       (metal parallelogram); the crystal diffracts out ONE coloured line
+       (accent) while the rest of the white light carries straight on. -->
+  <rect x="2.5" y="15" width="10" height="10" rx="2" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <line x1="12.5" y1="20" x2="18" y2="20" stroke="#e8eaed" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M18 27 L22 13 L28 13 L24 27 Z" fill="none" stroke="#5a626e" stroke-width="2.2" stroke-linejoin="round"/>
+  <line x1="25.5" y1="20" x2="37" y2="20" stroke="#e8eaed" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2 2.2"/>
+  <line x1="25" y1="18" x2="36" y2="8" stroke="#ff9e2c" stroke-width="2.6" stroke-linecap="round"/>
+  <circle cx="36" cy="8" r="2.2" fill="#ffb454"/>
+</svg>

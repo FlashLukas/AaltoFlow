@@ -1,0 +1,17 @@
+"""Make the src/ layout importable during tests without installing."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _private_lock_dir(tmp_path, monkeypatch):
+    """Hardware claims (stage.hwlock) go to a temp folder in EVERY test, so a
+    test that opens the real Kinesis backend against a fake pylablib never
+    collides with -- or blocks -- a stage service running on this PC."""
+    monkeypatch.setenv("AALTOFLOW_LOCK_DIR", str(tmp_path / "hwlocks"))

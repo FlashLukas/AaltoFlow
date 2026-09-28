@@ -21,14 +21,17 @@ are newer).
 
 ## Adding an instrument module
 ```
-python tools/new_module.py <key> --like smb          # or --like clMag / hf2
-cd <key>-control; uv sync --extra gui; uv run pytest -q
+python tools/new_module.py <key> --like smb --category <category>   # or --like clMag / hf2
+cd modules\<category>\<key>-control; uv sync --extra gui; uv run pytest -q
 python tools/check_modules.py <key> --live           # the contract check
 python tools/render_all.py <key>                     # offscreen front panel
 ```
 The generator copies a working module, renames it and takes the next free port
 pair. The launcher, scan-core and the tools discover the new module from its
-`module.toml`; nothing else has to be registered.
+`module.toml`; nothing else has to be registered. Modules live in
+`modules/<category>/<key>-control` (category = the one in its module.toml);
+after pulling the move on another checkout run `python tools/migrate_layout.py`
+(developer notes, gotcha #36).
 
 ## Rules that are not negotiable
 - **The wire contract** (developer notes, section 4): REQ/REP JSON commands,
@@ -41,6 +44,10 @@ pair. The launcher, scan-core and the tools discover the new module from its
 - **Simulation first**: every module runs without hardware. The real driver is
   the ONLY file that imports the vendor library, lazily inside `open()`, and
   every unverified hardware call is marked `# VERIFY`.
+- **One physical address, one service**: every real backend claims its
+  address with hwlock in `open()` (and releases it in `close()`; the simulator
+  never claims). `src/<pkg>/hwlock.py` is a byte-identical copy of
+  `suite-common/src/suite_common/hwlock.py` (gotcha #37).
 - **Threads** (gotcha #1): status snapshots are rebuilt by a worker thread;
   setters change brain attributes, never the snapshot.
 - **Theme**: never rebind `COLORS`; set the theme before building widgets.

@@ -7,7 +7,8 @@ their GUIs, and shows what each one can do.
 
 ## Where the module list comes from
 
-Nothing is listed by hand. Every folder next to this one that contains a
+Nothing is listed by hand. Every folder `modules/<category>/<name>-control`
+(a folder dropped straight next to this one still counts) that contains a
 **`module.toml`** is a module (contract: `../INSTRUMENT_MODULE_GUIDE.md`
 section 11). Its card shows the **name, description and icon** from that file.
 Drop a new module folder in and its card appears within a few seconds (or press

@@ -18,7 +18,9 @@ What it does, in order, and stops loudly at the first thing it cannot fix:
   1. Checks git and uv are available (installs uv if missing; uv then fetches
      its own Python, so no system Python is needed).
   2. Clones the repo into -Target, or pulls if it is already there.
-  3. `uv sync` for all eight Python projects, with the gui extra where needed.
+  3. `uv sync` for every Python project (the instrument modules under
+     modules\<category>\ plus suite-common, mission-control and scan-core),
+     with the gui extra where needed.
   4. Runs every project's test suite.
   5. Runs scan-core's headless demo, which writes real netCDF files.
   6. Live check: starts the clMag service, runs a real 9-point field scan
@@ -56,16 +58,33 @@ param(
 $ErrorActionPreference = "Stop"
 $started = Get-Date
 
-# The projects are FOUND, not listed: every top-level folder with a
-# pyproject.toml (the modules, suite-common, scan-core, mission-control). A
-# project gets `--extra gui` when its pyproject declares a `gui` extra. So a new
-# module is deployed and tested without editing this script. The list is built
-# after the clone/pull (step 2), because before that the folders may not exist.
+# The projects are FOUND, not listed: every folder with a pyproject.toml --
+# the instrument modules in modules\<category>\<name>-control, and the suite's
+# own projects directly in the root (suite-common, scan-core, mission-control;
+# an instrument module left in the root by an older layout is found there too).
+# A project gets `--extra gui` when its pyproject declares a `gui` extra. So a
+# new module is deployed and tested without editing this script. The list is
+# built after the clone/pull (step 2), because before that the folders may not
+# exist. Name = the folder's own name (also the name of its environment in
+# %LOCALAPPDATA%\uv-venvs); Dir = its full path.
 function Get-SuiteProjects($root) {
-    $found = foreach ($py in Get-ChildItem -Path $root -Filter pyproject.toml -Depth 1 -File) {
-        if ($py.Directory.FullName -eq (Resolve-Path $root).Path) { continue }   # the root itself
+    $rootFull = (Resolve-Path $root).Path
+    $files = @()
+    $mods = Join-Path $root "modules"
+    # modules\<category>\<folder>\pyproject.toml = two folder levels below modules\
+    # (-Depth 2 also keeps the search out of each module's .venv)
+    if (Test-Path $mods) { $files += @(Get-ChildItem -Path $mods -Filter pyproject.toml -Depth 2 -File) }
+    $files += @(Get-ChildItem -Path $root -Filter pyproject.toml -Depth 1 -File)
+    $seen = @{}
+    $found = foreach ($py in $files) {
+        $dir = $py.Directory.FullName
+        if ($dir -eq $rootFull) { continue }                        # the root itself
+        if ((Split-Path $dir -Leaf) -eq "modules") { continue }
+        $name = $py.Directory.Name
+        if ($seen.ContainsKey($name)) { continue }                  # modules\ copy wins
+        $seen[$name] = $true
         $text = Get-Content $py.FullName -Raw
-        @{ Name = $py.Directory.Name; Gui = [bool]($text -match '(?m)^\s*gui\s*=\s*\[') }
+        @{ Name = $name; Dir = $dir; Gui = [bool]($text -match '(?m)^\s*gui\s*=\s*\[') }
     }
     # suite-common first: everything else depends on it
     @($found | Sort-Object @{ Expression = { $_.Name -ne "suite-common" } }, @{ Expression = { $_.Name } })
@@ -199,7 +218,7 @@ $Projects = Get-SuiteProjects $Target
 Say ("projects found: " + (($Projects | ForEach-Object { $_.Name }) -join ", "))
 
 foreach ($p in $Projects) {
-    $dir = Join-Path $Target $p.Name
+    $dir = $p.Dir
     $script:ChildEnv.Remove("UV_PROJECT_ENVIRONMENT")
     $e = EnvFor $p.Name
     if ($e) { $script:ChildEnv["UV_PROJECT_ENVIRONMENT"] = $e }
@@ -224,7 +243,7 @@ Step "4/7  Test suites"
 
 $total = 0
 foreach ($p in $Projects) {
-    $dir = Join-Path $Target $p.Name
+    $dir = $p.Dir
     $script:ChildEnv.Remove("UV_PROJECT_ENVIRONMENT")
     $e = EnvFor $p.Name
     if ($e) { $script:ChildEnv["UV_PROJECT_ENVIRONMENT"] = $e }
@@ -267,7 +286,9 @@ if ($NoLive) {
 } elseif (Get-NetTCPConnection -LocalPort 5555 -State Listen -ErrorAction SilentlyContinue) {
     Record "live scan" $false "port 5555 is already in use -- something is running; re-run with -NoLive or stop it"
 } else {
-    $cm = Join-Path $Target "clMag-control"
+    # The live check scans clMag's field; find its folder like any other project
+    $cmProj = $Projects | Where-Object { $_.Name -eq "clMag-control" } | Select-Object -First 1
+    $cm = if ($cmProj) { $cmProj.Dir } else { Join-Path $Target "modules\field\clMag-control" }
     $e = EnvFor "clMag-control"
     # Launch the service with the environment's python directly, NOT `uv run`:
     # uv inserts a wrapper process, and stopping the wrapper orphans the real

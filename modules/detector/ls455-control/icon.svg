@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Lake Shore 455 gaussmeter: an axial Hall probe (handle + stem, metal)
+       with the Hall element glowing at its tip and two flux lines running
+       along its axis. #ff9e2c / #ffb454 / #e8eaed are swapped for the active
+       theme by the launcher; #5a626e is metal. -->
+  <path d="M4 12 H36" fill="none" stroke="#ff9e2c" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M4 28 H36" fill="none" stroke="#ff9e2c" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M33 9 L37 12 L33 15 Z" fill="#ff9e2c"/>
+  <path d="M33 25 L37 28 L33 31 Z" fill="#ff9e2c"/>
+  <rect x="3" y="16" width="11" height="8" rx="2.5" fill="none" stroke="#5a626e" stroke-width="2"/>
+  <rect x="14" y="18.3" width="13" height="3.4" fill="#5a626e"/>
+  <circle cx="28.5" cy="20" r="4.6" fill="#ffb454" opacity="0.35"/>
+  <rect x="26.6" y="17.6" width="3.8" height="4.8" rx="0.8" fill="#ffb454"/>
+  <path d="M6.5 20 H10.5" stroke="#e8eaed" stroke-width="1.4" stroke-linecap="round"/>
+</svg>

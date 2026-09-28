@@ -17,8 +17,8 @@ and the file holds u and the raw S for every point.
 
 Start both services first (Mission Control, or two terminals):
 
-    cd ..\\ppms-control ; uv run scripts/run_service.py          # add --real for MultiVu
-    cd ..\\vna-control  ; uv run scripts/run_service.py --field ppms
+    cd ..\\modules\\environment\\ppms-control ; uv run scripts/run_service.py          # add --real for MultiVu
+    cd ..\\modules\\detector\\vna-control  ; uv run scripts/run_service.py --field ppms
                                                   # add --real --driver cmt for the C1209
 
 then, here:

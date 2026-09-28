@@ -12,8 +12,20 @@ those before the lab does.
 
 Static checks, per module:
   * module.toml parses; key, name, ports, scripts are valid
+  * it sits where it belongs, modules/<category>/<folder> with the category of
+    its module.toml (WARN, not FAIL: discovery still finds a module in the old
+    flat place or under another category folder -- it is just harder to find
+    for a person). A key found twice is a WARN naming both folders.
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
+  * src/<pkg>/hwlock.py exists and is byte-identical to the master copy
+    suite-common/src/suite_common/hwlock.py (FAIL otherwise: a stale copy may
+    normalise addresses differently, and then two modules would not see that
+    they hold the same instrument)
+  * every real backend (src/<pkg>/backends/*.py except base.py, sim*.py and the
+    remote_*.py ZeroMQ clients) calls claim( somewhere -- a plain text search,
+    so it is a WARN, not a FAIL: the one physical address, one service rule
+    (docs/DEVELOPER_NOTES.md, "one address, one service")
   * icon.svg exists and is well-formed XML
   * run_service.py accepts --cmd-port, --pub-port and --real
   * run_gui.py (if any) accepts --connect, --cmd-port and --pub-port
@@ -31,13 +43,14 @@ Live checks (--live), per module with a .venv:
   * it answers `shutdown` and EXITS BY ITSELF within 15 s (the launcher asks
     for this before it kills a service; a killed service cannot close its
     hardware -- docs/DEVELOPER_NOTES.md gotcha #25)
-Exit code 0 when nothing failed.
+Exit code 0 when nothing failed (warnings do not count).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -47,8 +60,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
-from suite_common.modules import (MANIFEST, discover_local, port_conflicts,  # noqa: E402
+from suite_common.modules import (MANIFEST, MODULES_DIR, discover_local,  # noqa: E402
+                                  is_legacy_location, port_conflicts, rel_to_root,
                                   start_order)
+
+# The address lock. Every module carries its OWN copy (modules are installed
+# without suite-common, like theme.py), so the copies must stay identical to
+# this master or two modules could disagree on what "the same address" is.
+HWLOCK_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "hwlock.py"
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -109,6 +128,10 @@ class Report:
     def failed(self):
         return [r for r in self.rows if r[2] == "FAIL"]
 
+    @property
+    def warned(self):
+        return [r for r in self.rows if r[2] == "WARN"]
+
     def print(self):
         width = max([len(r[0]) for r in self.rows] + [6])
         for module, check, result, detail in self.rows:
@@ -116,10 +139,57 @@ class Report:
 
 
 def venv_python(d: Path) -> Path | None:
-    for cand in (d / ".venv" / "Scripts" / "python.exe", d / ".venv" / "bin" / "python"):
+    # A tree inside OneDrive keeps its venvs OUT of the project (dev.ps1 puts
+    # them in %LOCALAPPDATA%\uv-venvs\<folder>, gotcha #8), so look there too.
+    ext = Path(os.environ.get("LOCALAPPDATA", "")) / "uv-venvs" / d.name
+    for cand in (d / ".venv" / "Scripts" / "python.exe", d / ".venv" / "bin" / "python",
+                 ext / "Scripts" / "python.exe"):
         if cand.exists():
             return cand
     return None
+
+
+def package_dir(d: Path) -> Path | None:
+    """src/<pkg>: the one folder under src/ that is a Python package."""
+    src = d / "src"
+    if not src.is_dir():
+        return None
+    pkgs = sorted(p for p in src.iterdir() if (p / "__init__.py").is_file())
+    return pkgs[0] if len(pkgs) == 1 else None
+
+
+def hwlock_check(rep: Report, m, master: bytes | None):
+    """The module's hwlock.py is the master copy, and its real backends claim."""
+    pkg = package_dir(m.dir)
+    if pkg is None:
+        rep.add(m.key, "hwlock.py is the master copy", "FAIL", "no single package under src/")
+        return
+    copy = pkg / "hwlock.py"
+    fix = "copy suite-common/src/suite_common/hwlock.py"
+    if not copy.is_file():
+        rep.add(m.key, "hwlock.py is the master copy", "FAIL", f"src/{pkg.name}/hwlock.py missing: {fix}")
+    elif master is not None and copy.read_bytes() != master:
+        rep.add(m.key, "hwlock.py is the master copy", "FAIL", f"src/{pkg.name}/hwlock.py differs: {fix}")
+    else:
+        rep.add(m.key, "hwlock.py is the master copy", "PASS")
+
+    # Static text check: a real backend that opens an instrument must claim
+    # its address first. The simulator never claims; base.py is the Protocol;
+    # remote_*.py talk to ANOTHER service over ZeroMQ and own no hardware.
+    backends = pkg / "backends"
+    if not backends.is_dir():
+        return
+    silent = []
+    for f in sorted(backends.glob("*.py")):
+        if f.name in ("__init__.py", "base.py") or f.name.startswith(("sim", "remote_")):
+            continue
+        if "claim(" not in f.read_text(encoding="utf-8", errors="replace"):
+            silent.append(f.name)
+    if silent:
+        rep.add(m.key, "real backends claim their address", "WARN",
+                "no claim( in backends/" + ", backends/".join(silent))
+    else:
+        rep.add(m.key, "real backends claim their address", "PASS")
 
 
 def help_text(py: Path, d: Path, script: str) -> str:
@@ -246,10 +316,21 @@ def main(argv=None) -> int:
     rep = Report()
     mods, problems = discover_local(args.root)
     for p in problems:
-        rep.add(Path(p.split(":")[0]).parent.name or "?", f"{MANIFEST} parses", "FAIL", p)
+        if " exists twice: " in p:
+            # discovery used one copy and says which; worth fixing, not fatal
+            rep.add(p.split("'")[1] if "'" in p else "?", "module found once", "WARN", p)
+            continue
+        # A problem reads "<folder>\module.toml: why". Cut at the file NAME,
+        # not at the first ':' -- that is the drive letter's colon in C:\...
+        cut = p.find(MANIFEST)
+        name = Path(p[:cut]).name if cut > 0 else ""
+        rep.add(name or "?", f"{MANIFEST} parses", "FAIL", p)
     keys = {m.key for m in mods}
     for c in port_conflicts(mods):
         rep.add("suite", "ports unique", "FAIL", c)
+    master = HWLOCK_MASTER.read_bytes() if HWLOCK_MASTER.is_file() else None
+    if master is None:
+        rep.add("suite", "hwlock master copy present", "FAIL", str(HWLOCK_MASTER))
 
     if args.modules:
         unknown = set(args.modules) - keys
@@ -259,7 +340,17 @@ def main(argv=None) -> int:
 
     ordered = start_order(mods)
     for m in mods:
-        rep.add(m.key, f"{MANIFEST} parses", "PASS", f"{m.dir.name}, ports {m.cmd}/{m.pub}")
+        where = rel_to_root(args.root, m.dir)
+        rep.add(m.key, f"{MANIFEST} parses", "PASS", f"{where}, ports {m.cmd}/{m.pub}")
+        home = f"{MODULES_DIR}/{m.category}/{m.dir.name}"
+        if is_legacy_location(args.root, m.dir):
+            rep.add(m.key, "sits in modules/<category>/", "WARN",
+                    f"{where} is the old flat place; it belongs in {home} "
+                    "(git mv it, or run tools/migrate_layout.py)")
+        elif where != home:
+            rep.add(m.key, "sits in modules/<category>/", "WARN",
+                    f"{where}, but its {MANIFEST} says category {m.category!r}: "
+                    f"expected {home}")
         missing = [k for k in m.start_after if k not in keys]
         rep.add(m.key, "start_after names existing modules", "FAIL" if missing else "PASS",
                 ", ".join(missing))
@@ -277,6 +368,7 @@ def main(argv=None) -> int:
                 rep.add(m.key, "icon.svg well-formed", "PASS")
             except ET.ParseError as exc:
                 rep.add(m.key, "icon.svg well-formed", "FAIL", str(exc))
+        hwlock_check(rep, m, master)
 
         py = venv_python(m.dir)
         if py is None:
@@ -296,7 +388,9 @@ def main(argv=None) -> int:
 
     rep.print()
     n_fail = len(rep.failed)
-    print(f"\n{len(rep.rows)} checks, {n_fail} failed")
+    n_warn = len(rep.warned)
+    print(f"\n{len(rep.rows)} checks, {n_fail} failed"
+          + (f", {n_warn} warning(s)" if n_warn else ""))
     return 1 if n_fail else 0
 
 

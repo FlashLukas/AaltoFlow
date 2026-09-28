@@ -5,7 +5,17 @@ Run by build_installer.ps1 against the staged copy:
     python gen_components.py <stage-dir> <out-dir>
 
 writes  <out-dir>\components.iss       [Components] [Files] [UninstallDelete]
-        <out-dir>\components_code.iss  the SelectedProjects() function
+        <out-dir>\components_code.iss  the SelectedProjects() function, and the
+                                       old -> new folder map for the upgrade
+                                       migration (LegacyModule* functions)
+
+WHERE MODULES GO. Since 2026-09-27 an instrument module lives in
+modules\<category>\<key>-control (category from its module.toml), in the
+repository and in an installation alike. Every path this script writes is that
+path RELATIVE to the stage / to {app}. An install made before then has the
+module in {app}\<key>-control; AaltoFlow.iss moves such a folder to its new
+place before copying files (see MigrateModuleLayout there), using the map
+generated here.
 
 Why generated: the launcher DISCOVERS modules (every folder with a
 `module.toml`), so a new module is a folder drop -- see
@@ -48,6 +58,14 @@ ALWAYS = ["suite-common", "mission-control"]   # component "core", fixed
 SCAN = "scan-core"                             # component "scan"
 
 
+def _suite_common(stage: Path):
+    """Put the STAGED suite-common on sys.path (standard library only, so it
+    imports with nothing installed) -- see _lab_data_rule for why."""
+    src = str(stage / "suite-common" / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+
+
 def _lab_data_rule(stage: Path):
     """suite_common.catalog.is_lab_data, imported from the STAGED suite-common.
 
@@ -59,16 +77,17 @@ def _lab_data_rule(stage: Path):
     staged tree always contains suite-common (it is a fixed component), and it
     is standard library only, so importing it from here needs nothing installed.
     """
-    src = str(stage / "suite-common" / "src")
-    if src not in sys.path:
-        sys.path.insert(0, src)
+    _suite_common(stage)
     from suite_common.catalog import is_lab_data
     return is_lab_data
 
 
-def data_globs(module_dir: Path) -> list[str]:
-    """Relative patterns inside `module_dir` that hold lab data, not code."""
-    is_lab_data = _lab_data_rule(module_dir.parent)
+def data_globs(module_dir: Path, stage: Path) -> list[str]:
+    """Relative patterns inside `module_dir` that hold lab data, not code.
+
+    `stage` is passed explicitly: a module is no longer always one level
+    below it (modules/<category>/<folder>), so its parent is not the stage."""
+    is_lab_data = _lab_data_rule(stage)
     globs = [f.name for f in sorted(module_dir.iterdir())
              if f.is_file() and is_lab_data(f.name)]
     if (module_dir / "Calibrations").is_dir():
@@ -77,7 +96,10 @@ def data_globs(module_dir: Path) -> list[str]:
 
 
 def files_entry(folder: str, component: str, data: list[str]) -> list[str]:
-    """The [Files] lines for one folder: code overwritten, data kept."""
+    """The [Files] lines for one folder: code overwritten, data kept.
+
+    `folder` is relative to the stage and to {app}, with backslashes
+    ("modules\\motion\\kim-control", or "scan-core")."""
     stage = "{#StageDir}\\" + folder
     lines = []
     if data:
@@ -107,17 +129,29 @@ def main() -> int:
     out = Path(sys.argv[2]).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    modules = []
-    for toml in sorted(stage.glob("*/module.toml")):
+    # The SAME search the launcher does (suite_common.modules.manifest_paths):
+    # modules/<category>/<folder> first, then any legacy flat folder.
+    _suite_common(stage)
+    from suite_common.modules import MODULES_DIR, manifest_paths
+
+    modules, seen = [], set()
+    for toml in manifest_paths(stage):
+        rel = toml.parent.relative_to(stage)
         try:
             man = tomllib.loads(toml.read_text("utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:
-            print(f"  SKIPPED {toml.parent.name}: unreadable module.toml ({exc})")
+            print(f"  SKIPPED {rel.as_posix()}: unreadable module.toml ({exc})")
             continue
         m = man.get("module", {})
         key = str(m.get("key") or toml.parent.name)
+        if key in seen:
+            print(f"  SKIPPED {rel.as_posix()}: module {key!r} is already staged elsewhere")
+            continue
+        seen.add(key)
         modules.append(dict(
-            folder=toml.parent.name,
+            folder="\\".join(rel.parts),         # Inno paths use backslashes
+            leaf=toml.parent.name,
+            nested=rel.parts[0] == MODULES_DIR,
             key=key,
             # Inno component names: lowercase, no spaces. The key is a python
             # identifier by convention, so lowercasing is enough.
@@ -126,7 +160,7 @@ def main() -> int:
             desc=str(m.get("description") or ""),
             order=int(m.get("order") or 999),
         ))
-    modules.sort(key=lambda d: (d["order"], d["folder"]))
+    modules.sort(key=lambda d: (d["order"], d["leaf"]))
     if not modules:
         print("  ERROR: no module.toml found in the staged tree", file=sys.stderr)
         return 1
@@ -143,14 +177,15 @@ def main() -> int:
     for m in modules:
         desc = f'{m["name"]} -- {m["desc"]}' if m["desc"] else m["name"]
         desc = desc.replace('"', "'")
-        comp_lines.append(f'Name: "{m["comp"]}"; Description: "{desc} ({m["folder"]})"; Types: full')
+        comp_lines.append(f'Name: "{m["comp"]}"; Description: "{desc} ({m["leaf"]})"; Types: full')
 
     comp_lines += ["", "[Files]"]
     for folder in ALWAYS:
-        comp_lines += files_entry(folder, "core", data_globs(stage / folder))
-    comp_lines += files_entry(SCAN, "scan", data_globs(stage / SCAN))
+        comp_lines += files_entry(folder, "core", data_globs(stage / folder, stage))
+    comp_lines += files_entry(SCAN, "scan", data_globs(stage / SCAN, stage))
     for m in modules:
-        comp_lines += files_entry(m["folder"], m["comp"], data_globs(stage / m["folder"]))
+        comp_lines += files_entry(m["folder"], m["comp"],
+                                  data_globs(stage / m["folder"], stage))
 
     comp_lines += [
         "",
@@ -177,11 +212,36 @@ def main() -> int:
         code.append(f"  if WizardIsComponentSelected('{m['comp']}') then "
                     f"Result := Result + ',{m['folder']}';")
     code += ["end;", ""]
+
+    # The upgrade migration's map: where each module WAS before 2026-09-27
+    # ({app}\<leaf>) and where it is now. Only modules that moved are listed.
+    moved = [m for m in modules if m["nested"]]
+    code += [
+        "(* Modules that moved from {app}\\<folder> to {app}\\modules\\<category>\\<folder>",
+        "  on 2026-09-27; MigrateModuleLayout in AaltoFlow.iss moves an old install.",
+        "   This comment style because a brace comment would end at the brace of {app}. *)",
+        "function LegacyModuleCount: Integer;",
+        "begin",
+        f"  Result := {len(moved)};",
+        "end;",
+        "",
+        "function LegacyModuleOld(I: Integer): String;",
+        "begin",
+        "  case I of",
+    ]
+    code += [f"    {i}: Result := '{m['leaf']}';" for i, m in enumerate(moved)]
+    code += ["  else Result := '';", "  end;", "end;", "",
+             "function LegacyModuleNew(I: Integer): String;",
+             "begin",
+             "  case I of"]
+    code += [f"    {i}: Result := '{m['folder']}';" for i, m in enumerate(moved)]
+    code += ["  else Result := '';", "  end;", "end;", ""]
     (out / "components_code.iss").write_text("\n".join(code), "utf-8")
 
     print(f"  {len(modules)} modules: " + ", ".join(m["key"] for m in modules))
+    print(f"  {len(moved)} of them in the upgrade migration map (old flat folder -> modules\\...)")
     for folder in ALWAYS + [SCAN] + [m["folder"] for m in modules]:
-        data = data_globs(stage / folder)
+        data = data_globs(stage / folder, stage)
         if data:
             print(f"  lab data kept in {folder}: {', '.join(data)}")
     return 0

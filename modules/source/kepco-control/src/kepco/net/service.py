@@ -1,0 +1,221 @@
+"""The service: wrap a BipolarSupply and expose it over ZeroMQ.
+
+One process owns the instrument (or the simulator) and the brain. It runs two
+threads of its own (the brain runs a third, the worker):
+  * publisher  -- owns the PUB socket; sends a status frame at `status_hz` and
+                  forwards brain events as they happen (one socket, because a
+                  ZeroMQ socket must be used from a single thread).
+  * commander  -- owns the REP socket; receives a JSON command, dispatches it,
+                  and replies. It never blocks on the instrument: setters only
+                  change brain attributes, the worker does the GPIB traffic.
+
+Bind to tcp://0.0.0.0:<port> and the same code serves a client on localhost or
+across the lab network -- only the address the client dials changes.
+
+SAFETY: every way out of serve_forever (Ctrl-C, the `shutdown` verb, an
+exception) runs stop(), which makes the brain ramp to zero and switch the output
+off before the process exits.
+"""
+
+from __future__ import annotations
+
+import json
+import queue
+import threading
+import time
+
+import zmq
+
+from ..supply import BipolarSupply
+from .describe import build_manifest
+from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
+                       TOPIC_EVENT, status_to_dict, config_to_dict,
+                       apply_config_dict)
+
+
+class KepcoService:
+    def __init__(self, supply: BipolarSupply,
+                 host: str = "0.0.0.0",
+                 cmd_port: int = DEFAULT_CMD_PORT,
+                 pub_port: int = DEFAULT_PUB_PORT,
+                 status_hz: float = 10.0):
+        self.supply = supply
+        self._rev = 0
+        self._rev_at = 0.0
+        self.cmd_addr = f"tcp://{host}:{cmd_port}"
+        self.pub_addr = f"tcp://{host}:{pub_port}"
+        self.status_dt = 1.0 / status_hz
+        self._stop = threading.Event()
+        self._stopped = False
+        self._events: "queue.Queue[dict]" = queue.Queue()
+        self._ctx = zmq.Context.instance()
+
+    # -------------------------------------------------------------- lifecycle
+
+    def start(self) -> None:
+        # route brain events into the publisher queue
+        self.supply._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
+        self.supply.start()
+        self._pub_t = threading.Thread(target=self._publisher, name="svc-pub", daemon=True)
+        self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
+        self._pub_t.start()
+        self._cmd_t.start()
+
+    def serve_forever(self) -> None:
+        self.start()
+        print(f"kepco service up  -  commands {self.cmd_addr}  -  status {self.pub_addr}")
+        try:
+            while not self._stop.is_set():
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            print("\nstopping ...")
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self._stop.set()
+        time.sleep(self.status_dt + 0.1)
+        self.supply.shutdown()          # ramp to zero, output off, disconnect
+
+    # ---------------------------------------------------------------- threads
+
+    def status_payload(self) -> dict:
+        """The status dict, built in ONE place for the publisher and the
+        `status` reply, so the two can never drift apart."""
+        st = status_to_dict(self.supply.status())
+        st["describe_rev"] = self.describe_rev()
+        return st
+
+    def describe_rev(self, max_age_s: float = 0.2) -> int:
+        """Current manifest revision, recomputed at most once per `max_age_s`.
+        Short, because a mode change reshapes the manifest."""
+        now = time.monotonic()
+        if now - self._rev_at >= max_age_s:
+            self._rev = build_manifest(self.supply)["revision"]
+            self._rev_at = now
+        return self._rev
+
+    def _publisher(self) -> None:
+        pub = self._ctx.socket(zmq.PUB)
+        pub.bind(self.pub_addr)
+        last = 0.0
+        while not self._stop.is_set():
+            try:
+                while True:
+                    ev = self._events.get_nowait()
+                    pub.send_multipart([TOPIC_EVENT, _json(ev)])
+            except queue.Empty:
+                pass
+            now = time.monotonic()
+            if now - last >= self.status_dt:
+                try:
+                    pub.send_multipart([TOPIC_STATUS, _json(self.status_payload())])
+                except Exception:          # never let the publisher die
+                    pass
+                last = now
+            time.sleep(0.01)
+        pub.close(0)
+
+    def _commander(self) -> None:
+        rep = self._ctx.socket(zmq.REP)
+        rep.bind(self.cmd_addr)
+        poller = zmq.Poller()
+        poller.register(rep, zmq.POLLIN)
+        while not self._stop.is_set():
+            if poller.poll(200):
+                try:
+                    msg = rep.recv_json()
+                    rep.send_json(self._dispatch(msg))
+                except Exception as exc:                       # never let the loop die
+                    try:
+                        rep.send_json({"ok": False, "error": str(exc)})
+                    except zmq.ZMQError:
+                        pass
+        # linger, not 0: after `shutdown` the reply may still be queued, and
+        # close(0) would drop it -- the launcher would then kill us anyway.
+        rep.close(linger=500)
+
+    # -------------------------------------------------------------- dispatch
+
+    def _dispatch(self, msg: dict) -> dict:
+        cmd = msg.get("cmd")
+        s = self.supply
+        s.touch()                        # any command proves a client is alive
+        try:
+            if cmd == "ping":
+                return {"ok": True}
+            elif cmd == "set_mode":
+                s.set_mode(str(msg["mode"]))
+            elif cmd == "set_output":
+                s.set_output(bool(msg["on"]))
+            elif cmd == "output_off_now":
+                s.output_off_now()
+            elif cmd == "set_current":
+                s.set_current(float(msg["current_A"]))
+            elif cmd == "set_voltage":
+                s.set_voltage(float(msg["voltage_V"]))
+            elif cmd == "set_current_limit":
+                s.set_current_limit(float(msg["current_A"]))
+            elif cmd == "set_voltage_limit":
+                s.set_voltage_limit(float(msg["voltage_V"]))
+            elif cmd == "set_ramp":
+                s.set_ramp(rate_A_per_s=_opt_float(msg.get("rate_A_per_s")),
+                           rate_V_per_s=_opt_float(msg.get("rate_V_per_s")),
+                           enabled=None if msg.get("enabled") is None
+                           else bool(msg["enabled"]))
+            elif cmd == "set_acquisition":
+                s.set_acquisition(int(msg["readings"]))
+            elif cmd == "acquire":
+                return {"ok": True, "acq_id": s.acquire()}
+            elif cmd == "get_sample":
+                return {"ok": True, "sample": s.get_sample()}
+            elif cmd == "status":
+                return {"ok": True, "status": self.status_payload()}
+            elif cmd == "describe":
+                return {"ok": True, "describe": build_manifest(s)}
+            elif cmd == "info":
+                return {"ok": True, "info": self._info()}
+            elif cmd == "get_config":
+                return {"ok": True, "config": config_to_dict(s.cfg)}
+            elif cmd == "set_config":
+                apply_config_dict(s.cfg, msg["config"])
+                s.apply_config()
+            elif cmd == "shutdown":
+                # A CLEAN stop, asked for by the launcher before it would kill us
+                # (docs gotcha #25). Setting _stop ends serve_forever, whose
+                # finally: stop() ramps the output down and closes the BOP.
+                self._stop.set()
+                return {"ok": True, "stopping": True}
+            else:
+                return {"ok": False, "error": f"unknown command: {cmd!r}"}
+            return {"ok": True}
+        except ValueError as exc:
+            # the brain refuses with a sentence meant for a person
+            return {"ok": False, "error": str(exc)}
+        except (KeyError, TypeError) as exc:
+            return {"ok": False, "error": f"bad {cmd} request: {exc}"}
+
+    def _info(self) -> dict:
+        s = self.supply
+        st = s.status()
+        ilo, ihi = s.current_range()
+        vlo, vhi = s.voltage_range()
+        return {
+            "idn": st.idn,
+            "mode": s.mode,
+            "current_min_A": ilo, "current_max_A": ihi,
+            "voltage_min_V": vlo, "voltage_max_V": vhi,
+            "current_limit_max_A": s.current_limit_max(),
+            "voltage_limit_max_V": s.voltage_limit_max(),
+        }
+
+
+def _opt_float(v):
+    return None if v is None else float(v)
+
+
+def _json(d: dict) -> bytes:
+    return json.dumps(d).encode("utf-8")

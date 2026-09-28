@@ -14,8 +14,8 @@ inside the file says exactly how it was taken.
 
 Start both services first (Mission Control, or two terminals):
 
-    cd ..\\mag2d-control ; uv run scripts/run_service.py
-    cd ..\\vna-control   ; uv run scripts/run_service.py
+    cd ..\\modules\\field\\mag2d-control ; uv run scripts/run_service.py
+    cd ..\\modules\\detector\\vna-control   ; uv run scripts/run_service.py
 
 then, here:
 

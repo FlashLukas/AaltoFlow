@@ -29,10 +29,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # GUI gets a target named after its key. suite-common is imported straight from
 # its folder, so this script still runs with any plain Python.
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
-from suite_common.modules import discover_local  # noqa: E402
+from suite_common.modules import discover_local, rel_to_root  # noqa: E402
 
-#: target name -> (project directory, does it need the `gui` extra?)
-PROJECTS = {m.key: (m.dir.name, True) for m in discover_local(ROOT)[0] if m.gui}
+#: target name -> (project directory relative to the root, e.g.
+#: "modules/motion/kim-control", does it need the `gui` extra?)
+PROJECTS = {m.key: (rel_to_root(ROOT, m.dir), True) for m in discover_local(ROOT)[0] if m.gui}
 PROJECTS.update({
     # the windows that are not instrument modules
     "scan-core": ("scan-core", True),

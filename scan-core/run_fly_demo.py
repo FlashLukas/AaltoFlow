@@ -15,8 +15,8 @@ Two modes.
   --lab: the running kim service plus a detector service -- the PM16 power
   meter (default) or the hf2 lock-in (Mission Control, or two terminals):
 
-      cd ..\\kim-control  ; uv run scripts/run_service.py --real
-      cd ..\\pm16-control ; uv run scripts/run_service.py --real
+      cd ..\modules\motion\kim-control    ; uv run scripts/run_service.py --real
+      cd ..\modules\detector\pm16-control ; uv run scripts/run_service.py --real
 
       uv run python run_fly_demo.py --lab --from 0 --to 20 --pixels 41 --speed 4
       uv run python run_fly_demo.py --lab --det hf2 ...

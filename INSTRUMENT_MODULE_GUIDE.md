@@ -34,13 +34,14 @@ measured quantity to a setpoint is closed-loop → copy `clMag-control`.
 ## 2. Package layout (src layout, always)
 
 ```
-<inst>-control/
+modules/<category>/<inst>-control/     # e.g. modules/source/smb-control (section 11)
   pyproject.toml            # name "<inst>-control", pyzmq dep, GUI extra, pytest dev group
   README.md                 # run instructions + the OneDrive venv gotcha (§8)
   .gitignore                # .venv/ *.egg-info/ __pycache__/ .pytest_cache/
   src/<inst>/
     __init__.py             # docstring describing the module + __version__
     config.py               # dataclasses + INI save/load (§4)
+    hwlock.py               # EXACT copy of suite-common/src/suite_common/hwlock.py (§3)
     backends/
       __init__.py
       base.py               # typing.Protocol interface for the hardware (§3)
@@ -94,6 +95,71 @@ ONLY on this Protocol, so the simulator and the real driver are interchangeable.
 
 Setters command directly; ramping/sequencing/clamping is the brain's job, not the
 backend's.
+
+### One physical address, one service (`hwlock.py`, 2026-09-27)
+
+An instrument is identified by its PHYSICAL ADDRESS (`GPIB0::6`, `COM5`, a USB
+serial number, an IP address), not by the module that drives it: clMag and
+kepco can both be pointed at the same Kepco BOP, mag2d and mag2dcal at the same
+DAQ card. So every real backend claims its address before it touches the
+instrument, and a second claim of the same address -- from ANY module on this
+PC -- is refused with `HardwareBusy`, whose message names the holder
+(`GPIB0::6 is already in use by clMag (pid 4242) -- ...`). The recipe:
+
+```python
+from .. import hwlock                      # the module's own copy, see below
+MODULE = "smb"                             # the module key: the launcher matches on it
+
+class VisaScpiBackend:
+    def __init__(self, resource: str):
+        self.resource = resource
+        self._lock: hwlock.HardwareLock | None = None
+
+    def open(self) -> None:
+        # 1. claim FIRST: a refused claim must leave the instrument untouched
+        self._lock = hwlock.claim(self.resource, MODULE)   # raises HardwareBusy
+        try:
+            import pyvisa                  # 2. the lazy vendor import, as above
+            ...                            # 3. open the session, adopt its state
+        except Exception:
+            self._lock.release()           # never opened it: do not keep it claimed
+            self._lock = None
+            raise
+
+    def close(self) -> None:
+        try:
+            ...                            # close the session
+        finally:
+            if self._lock is not None:     # release even if closing failed:
+                self._lock.release()       # a stuck claim would block a restart
+                self._lock = None
+```
+
+- **Claim in `open()`, release in `close()`.** Keep the returned lock for as
+  long as the instrument is open.
+- **The simulator never claims.** Ten simulated services can run side by side;
+  only hardware is exclusive.
+- **Claim the address the user configured**, spelled any way VISA accepts it:
+  `normalize()` makes `GPIB::6`, `gpib0::6::INSTR` and `GPIB0::6` one
+  instrument, `ASRL5::INSTR` and `COM5` another. A network instrument is keyed
+  by its HOST (two ports on one box are one box). A backend that discovers its
+  device (a USB meter with no address set) claims each candidate before
+  opening it and moves on to the next one when it is busy.
+- **Let the refusal reach the user.** The service prints the one-line message
+  and exits with **code 4** (`EXIT_HARDWARE_BUSY = 4` in `scripts/run_service.py`
+  -- the same number in every module, so "busy" can be told apart from any other
+  start failure by the number alone; 2 stays "could not start", and mag2d's 3
+  "no cooling water"). Mission Control recognises "is already in use by" and
+  shows the card as *address busy: GPIB0::6 held by clMag* instead of a generic
+  crash.
+- **Keep the copy identical.** Every module carries its own `src/<pkg>/hwlock.py`
+  (a module installs without suite-common, the same convention as `theme.py`).
+  Edit only the master `suite-common/src/suite_common/hwlock.py`, then copy it
+  into every module; `tools/check_modules.py` FAILS a missing or differing copy
+  and WARNS about a real backend file that never calls `claim(`.
+  `tools/new_module.py` refreshes the copy from the master.
+- The lock is **per PC** and the operating system releases it when the process
+  ends, even on a crash -- details in docs/DEVELOPER_NOTES.md, gotcha #37.
 
 ---
 
@@ -653,15 +719,17 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
 1. Read this guide + the memory files. Decide closed-loop vs set-and-forget.
 2. Confirm with the user: connection/interface (GPIB/USB/LAN + VISA address),
    the quantities to control, and their safe limits.
-3. **Generate it:** `python tools/new_module.py x --like smb --name "..." --description "..."`
+3. **Generate it:** `python tools/new_module.py x --like smb --category source --name "..." --description "..."`
    (`--like clMag` for closed-loop, `--like hf2` for a detector with an
-   acquisition). This copies the template, renames package / classes / imports,
+   acquisition). It lands in `modules/<category>/x-control`. This copies the template, renames package / classes / imports,
    takes the next free port pair and writes `module.toml`, a placeholder
    `icon.svg`, a stub README and private notes (`CLAUDE.local.md`, not in git). `uv sync --extra gui; uv run pytest`
    passes at once. The launcher and scan-core already list it.
 4. Rewrite `config.py` groups for X's quantities + a `Limits` envelope.
 5. Rewrite `backends/base.py` Protocol; write `sim.py`; write the real driver with
-   a lazy hardware import and the right SCPI/API.
+   a lazy hardware import and the right SCPI/API, claiming its address with
+   `hwlock.claim()` in `open()` and releasing it in `close()` (§3). Do not edit
+   `hwlock.py` in the module: it is a copy of the suite-common master.
 6. Trim/extend the brain: set-and-forget → strip loop/PID/state; closed-loop →
    keep and retune.
 7. `net/protocol.py` `*_to_dict` helpers; `service.py` `_dispatch` verbs;
@@ -680,7 +748,20 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
 Nothing in the suite lists modules by hand. The launcher (mission-control),
 scan-core, the render and deploy tools all ask **module discovery**
 (`suite-common/src/suite_common/modules.py`), which reads every
-`<root>/<folder>/module.toml`. A folder with that file IS a module.
+`<root>/modules/<category>/<folder>/module.toml`. A folder with that file IS a
+module.
+
+**Where a module lives (since 2026-09-27).** In `modules/<category>/<key>-control`,
+where `<category>` is the `category` of its own `module.toml` -- so the folder
+tree reads like the Add-module wizard: `modules/motion/kim-control`,
+`modules/detector/hf2-control`, `modules/field/clMag-control`. The suite's own
+projects (`mission-control`, `scan-core`, `suite-common`) and `tools`,
+`installer`, `docs` stay in the root. A module folder dropped straight into the
+root is still found (the old layout), but `check_modules.py` warns about it, and
+if the same key exists in both places the `modules/` copy wins and the other is
+reported as a problem. Because a module sits three folders below the root, its
+README links back up with `../../../` (e.g. `../../../front-panels/kim.png`), and
+the tools are `python ../../../tools/check_modules.py <key>` from inside it.
 
 ```toml
 [module]

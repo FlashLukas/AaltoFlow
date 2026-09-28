@@ -311,6 +311,500 @@
       },
       "gui": true,
       "start_after": []
+    },
+    {
+      "key": "kepco",
+      "name": "Bipolar supply",
+      "description": "Kepco BOP 20-10 bipolar supply: current or voltage mode, ramped setpoints, measured V and I (GPIB)",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "power supply",
+        "bipolar",
+        "current source",
+        "Kepco",
+        "GPIB"
+      ],
+      "folder": "kepco-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5581,
+        "pub": 5582
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "windfreak",
+      "name": "RF synthesizer",
+      "description": "Windfreak SynthHD PRO v2 two-channel RF synthesizer",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "RF",
+        "microwave",
+        "signal generator",
+        "synthesizer",
+        "two-channel",
+        "quadrature",
+        "Windfreak"
+      ],
+      "folder": "windfreak-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5583,
+        "pub": 5584
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "gsp818",
+      "name": "Spectrum analyzer (GW Instek)",
+      "description": "GW Instek GSP-818 spectrum analyzer with tracking generator",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "spectrum analyzer",
+        "tracking generator",
+        "GW Instek"
+      ],
+      "folder": "gsp818-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5585,
+        "pub": 5586
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "signalhound",
+      "name": "Spectrum analyser (Signal Hound)",
+      "description": "Signal Hound SA44B / SA124B spectrum analyser with USB-TG44A tracking generator: spectra, thru-normalised transmission",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "spectrum analyser",
+        "tracking generator",
+        "RF",
+        "Signal Hound"
+      ],
+      "folder": "signalhound-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5587,
+        "pub": 5588
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "dsphase",
+      "name": "RF phase shifter",
+      "description": "DS Instruments PS6000L digital RF phase shifter, 0.4-6 GHz, 0.5 deg steps",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "RF",
+        "phase shifter",
+        "DS Instruments",
+        "PS6000L",
+        "USB serial"
+      ],
+      "folder": "dsphase-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5589,
+        "pub": 5590
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "dssg",
+      "name": "RF generator (DS Instruments)",
+      "description": "DS Instruments SG12000L 25 MHz - 12 GHz signal generator, USB or Ethernet",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "RF",
+        "microwave",
+        "signal generator",
+        "DS Instruments",
+        "SCPI",
+        "Ethernet"
+      ],
+      "folder": "dssg-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5591,
+        "pub": 5592
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "dsamp",
+      "name": "RF amplifier",
+      "description": "DS Instruments 6 GHz variable-gain RF amplifier (GB6000L family, USB)",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "RF",
+        "amplifier",
+        "gain",
+        "DS Instruments",
+        "USB serial"
+      ],
+      "folder": "dsamp-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5593,
+        "pub": 5594
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "agilis",
+      "name": "Agilis stage",
+      "description": "Newport Agilis 2-axis stick-slip piezo stage on an AG-UC2 controller (steps + measured um)",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "stick-slip",
+        "piezo",
+        "open-loop",
+        "Newport",
+        "Agilis",
+        "AG-UC2"
+      ],
+      "folder": "agilis-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5595,
+        "pub": 5596
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "smaract",
+      "name": "SmarAct linear stage",
+      "description": "SmarAct CLL42 linear positioner (stick-slip, optical encoder) on an SCU controller",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "stick-slip",
+        "linear stage",
+        "closed loop",
+        "encoder",
+        "fly scan",
+        "SmarAct"
+      ],
+      "folder": "smaract-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5597,
+        "pub": 5598
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "sr830",
+      "name": "Lock-in (SR830)",
+      "description": "Stanford Research SR830 DSP lock-in (100 kHz, GPIB): X, Y, R, theta, aux in/out, sine out",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "lock-in",
+        "Stanford Research",
+        "GPIB",
+        "detector"
+      ],
+      "folder": "sr830-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5599,
+        "pub": 5600
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "cs260",
+      "name": "Monochromator",
+      "description": "Newport (Oriel) Cornerstone 260 1/4 m monochromator (GPIB): wavelength, grating, shutter, filter wheel",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "monochromator",
+        "wavelength",
+        "grating",
+        "spectroscopy",
+        "Newport",
+        "Oriel",
+        "GPIB"
+      ],
+      "folder": "cs260-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5601,
+        "pub": 5602
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "ccs200",
+      "name": "Spectrometer",
+      "description": "Thorlabs CCS200/M compact CCD spectrometer, 200-1000 nm: spectra, dark subtraction, peak",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "spectrometer",
+        "spectrum",
+        "CCD",
+        "UV-VIS-NIR",
+        "Thorlabs"
+      ],
+      "folder": "ccs200-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5603,
+        "pub": 5604
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "ddr25",
+      "name": "Rotation stage",
+      "description": "Thorlabs DDR25/M direct-drive rotation stage on a K-Cube brushless controller: one continuous angle axis",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "rotation",
+        "angle",
+        "polarizer",
+        "Thorlabs",
+        "Kinesis",
+        "K-Cube"
+      ],
+      "folder": "ddr25-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5605,
+        "pub": 5606
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "elliptec",
+      "name": "Elliptec rotation mount",
+      "description": "Thorlabs Elliptec ELL14 rotation mount(s): angle, home, speed; one axis per bus address",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "rotation",
+        "angle",
+        "waveplate",
+        "polarizer",
+        "Elliptec",
+        "Thorlabs"
+      ],
+      "folder": "elliptec-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5607,
+        "pub": 5608
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "chopper",
+      "name": "Optical chopper",
+      "description": "Thorlabs MC2000B optical chopper: frequency, phase, blade, reference modes; waits for the PLL lock",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "chopper",
+        "reference",
+        "lock-in",
+        "modulation",
+        "Thorlabs",
+        "MC2000B"
+      ],
+      "folder": "chopper-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5609,
+        "pub": 5610
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "superk",
+      "name": "Supercontinuum laser",
+      "description": "NKT SuperK EXTREME with SuperK SELECT tunable filters",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "laser",
+        "supercontinuum",
+        "AOTF",
+        "wavelength",
+        "NKT"
+      ],
+      "folder": "superk-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5611,
+        "pub": 5612
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "tc200",
+      "name": "Heater controller",
+      "description": "Thorlabs TC200 heater controller: one resistive heater, PT100 sensor, setpoint in degC",
+      "category": "environment",
+      "category_label": "Environment & safety",
+      "tags": [
+        "temperature",
+        "heater",
+        "PT100",
+        "PID",
+        "Thorlabs",
+        "TC200"
+      ],
+      "folder": "tc200-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5613,
+        "pub": 5614
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "ls455",
+      "name": "Gaussmeter",
+      "description": "Lake Shore 455 DSP gaussmeter, single-axis (axial) Hall probe, readings in mT",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "gaussmeter",
+        "Hall probe",
+        "magnetic field",
+        "Lake Shore",
+        "GPIB",
+        "RS-232"
+      ],
+      "folder": "ls455-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5615,
+        "pub": 5616
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "pm400",
+      "name": "Power / energy meter (PM400)",
+      "description": "Thorlabs PM400 console: photodiode, thermal or pyroelectric head",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "power meter",
+        "energy meter",
+        "optical power",
+        "pulse energy",
+        "Thorlabs"
+      ],
+      "folder": "pm400-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5617,
+        "pub": 5618
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "hp8648",
+      "name": "RF generator (HP 8648D)",
+      "description": "HP / Agilent 8648D CW RF signal generator, 9 kHz - 4 GHz (GPIB)",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "RF",
+        "signal generator",
+        "CW",
+        "HP",
+        "Agilent",
+        "GPIB"
+      ],
+      "folder": "hp8648-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5619,
+        "pub": 5620
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "sr7230",
+      "name": "Lock-in (SR 7230)",
+      "description": "Signal Recovery (Ametek) 7230 DSP lock-in over Ethernet: X/Y/R/theta, settle-aware acquire, auto-phase/sensitivity, OSC OUT",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "lock-in",
+        "Signal Recovery",
+        "Ametek",
+        "detector",
+        "oscillator",
+        "ethernet"
+      ],
+      "folder": "sr7230-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5621,
+        "pub": 5622
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "k2450",
+      "name": "SourceMeter",
+      "description": "Keithley 2450 SourceMeter (SMU): source V or I, measure IV with compliance",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "SMU",
+        "source meter",
+        "IV",
+        "transport",
+        "Keithley"
+      ],
+      "folder": "k2450-control",
+      "version": "0.1.0",
+      "ports": {
+        "cmd": 5623,
+        "pub": 5624
+      },
+      "gui": true,
+      "start_after": []
     }
   ]
 }

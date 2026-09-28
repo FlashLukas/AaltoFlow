@@ -1,0 +1,37 @@
+[project]
+name = "ddr25-control"
+version = "0.1.0"
+license = "MIT"
+description = "Control module for a Thorlabs DDR25/M direct-drive rotation stage on a K-Cube brushless controller"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.7"]
+# The real driver (backends/kinesis.py) talks to the K-Cube through pylablib,
+# which speaks Thorlabs' APT protocol over the FTDI USB serial port. It is the
+# ONLY file that imports it, lazily inside open(), so the simulator needs none
+# of this. Sync with BOTH extras on the lab PC (gotcha #29):
+#     .\dev.ps1 sync --extra gui --extra real
+real = ["pylablib>=1.4", "pyft232>=0.12"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# pylablib lists PyQt5 as a hard dependency for its own GUI widgets, which the
+# Thorlabs driver never imports. Our GUI is PySide6, two Qt bindings in one
+# environment is asking for trouble, and PyQt5-Qt5 has no wheel for this
+# Python on Windows (the sync failed). Same override as kim-control, which runs
+# pylablib on the rig: the marker can never be true, so uv drops PyQt5.
+override-dependencies = ["pyqt5; sys_platform == 'never'"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

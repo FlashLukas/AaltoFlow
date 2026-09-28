@@ -1,0 +1,17 @@
+# virtual environments
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# uv
+.uv/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# this PC's settings (the 7230's IP address): loaded by run_service.py, not shared
+sr7230.ini

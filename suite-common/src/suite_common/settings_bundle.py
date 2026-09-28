@@ -25,6 +25,11 @@ applied to every discovered module folder and to the suite's own folders
     mission-control/profiles.json   the launcher's profile chips
     scan-core/suite_layouts.json    the control panel's layouts
 
+Paths in the zip are relative to the suite root, so a module's files are
+stored as `modules/<category>/<folder>/...` (the layout since 2026-09-27).
+A bundle made BEFORE that move stores them as `<folder>/...`; import still
+accepts those and puts each file into the folder the module has now.
+
 The zip also carries a small manifest, `aaltoflow-settings.json`: format,
 product, when it was made and the file list. Deliberately NO computer name and
 NO user name: a bundle may be mailed around or attached to a bug report.
@@ -56,7 +61,8 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from .catalog import _skipped_dir, is_lab_data
-from .modules import LOCAL_FILE, PRODUCT, default_root, discover_local
+from .modules import (LOCAL_FILE, MODULES_DIR, PRODUCT, default_root, discover_local,
+                      rel_to_root)
 
 BUNDLE_FORMAT = "aaltoflow-settings/1"
 MANIFEST_NAME = "aaltoflow-settings.json"
@@ -74,11 +80,20 @@ NAMED_FILES = (LOCAL_FILE, "mission-control/profiles.json", "scan-core/suite_lay
 # ------------------------------------------------------------ what to save
 
 def _settings_folders(root: Path) -> list[str]:
-    """Folder names (one level below root) whose lab data belongs in a bundle."""
+    """Folders (relative to root, / separators) whose lab data belongs in a
+    bundle: "modules/motion/kim-control", ..., "scan-core"."""
     specs, _problems = discover_local(root)
-    names = {m.dir.name for m in specs if m.dir is not None}
+    names = {rel_to_root(root, m.dir) for m in specs if m.dir is not None}
     names |= {f for f in SUITE_FOLDERS if (root / f).is_dir()}
     return sorted(names)
+
+
+def _split(rel: str, folders) -> tuple[str, str] | None:
+    """(folder, rest) when `rel` lies inside one of `folders`, else None."""
+    for f in sorted(folders, key=len, reverse=True):     # longest match first
+        if rel.startswith(f + "/"):
+            return f, rel[len(f) + 1:]
+    return None
 
 
 def is_settings_path(rel: str, folders: list[str] | set[str]) -> bool:
@@ -88,8 +103,19 @@ def is_settings_path(rel: str, folders: list[str] | set[str]) -> bool:
     """
     if rel in NAMED_FILES:
         return True
-    head, _, rest = rel.partition("/")
-    return bool(rest) and head in folders and is_lab_data(rest)
+    hit = _split(rel, folders)
+    return hit is not None and bool(hit[1]) and is_lab_data(hit[1])
+
+
+def _old_layout_map(folders) -> dict[str, str]:
+    """Leaf folder name -> today's folder, for bundles made before modules/
+    existed ("kim-control" -> "modules/motion/kim-control")."""
+    out = {}
+    for f in folders:
+        leaf = f.rsplit("/", 1)[-1]
+        if f != leaf:
+            out.setdefault(leaf, f)
+    return out
 
 
 def collect(root: Path | None = None) -> list[str]:
@@ -168,7 +194,7 @@ NEW, OVERWRITE, SAME, SKIP = "new", "overwrite", "unchanged", "skipped"
 class BundleEntry:
     path: str                  # relative to the suite root, / separators
     action: str                # NEW / OVERWRITE / SAME / SKIP
-    reason: str = ""           # why it is skipped
+    reason: str = ""           # why it is skipped (or where an old-layout file came from)
     data: bytes = field(default=b"", repr=False)
 
 
@@ -252,6 +278,7 @@ def read_bundle(path: str | Path, root: Path | None = None) -> ImportPlan:
                              f"({fmt}); update {PRODUCT} first")
 
         folders = set(_settings_folders(root))
+        old_layout = _old_layout_map(folders)
         entries: list[BundleEntry] = []
         for info in zf.infolist():
             if info.is_dir() or info.filename == MANIFEST_NAME:
@@ -261,14 +288,23 @@ def read_bundle(path: str | Path, root: Path | None = None) -> ImportPlan:
                 entries.append(BundleEntry(info.filename, SKIP,
                                            "unsafe path (outside the suite folder)"))
                 continue
+            note = ""
+            head, _, rest = rel.partition("/")
+            if (rel not in NAMED_FILES and rest and _split(rel, folders) is None
+                    and head in old_layout):
+                # A bundle from before the move to modules/: "kim-control/kim.ini"
+                # goes to wherever kim-control is now.
+                note = f"was {rel} in the bundle (older layout)"
+                rel = f"{old_layout[head]}/{rest}"
             # Belt and braces: the resolved target must really be under root.
             target = (root / rel).resolve()
             if root not in target.parents:
                 entries.append(BundleEntry(rel, SKIP, "unsafe path (outside the suite folder)"))
                 continue
             head = rel.partition("/")[0]
-            if rel not in NAMED_FILES and "/" in rel and head not in folders:
-                entries.append(BundleEntry(rel, SKIP, f"{head} is not installed here"))
+            if rel not in NAMED_FILES and "/" in rel and _split(rel, folders) is None:
+                what = "/".join(rel.split("/")[:3]) if head == MODULES_DIR else head
+                entries.append(BundleEntry(rel, SKIP, f"{what} is not installed here"))
                 continue
             if not is_settings_path(rel, folders):
                 entries.append(BundleEntry(rel, SKIP, "not a settings file"))
@@ -281,7 +317,7 @@ def read_bundle(path: str | Path, root: Path | None = None) -> ImportPlan:
                 action = SAME if target.read_bytes() == data else OVERWRITE
             else:
                 action = NEW
-            entries.append(BundleEntry(rel, action, data=data))
+            entries.append(BundleEntry(rel, action, reason=note, data=data))
     entries.sort(key=lambda e: e.path)
     return ImportPlan(source=path, manifest=manifest, entries=entries)
 

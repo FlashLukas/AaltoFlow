@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- spectrum analyser: a screen with a noise floor, one carrier and its
+       peak marker. #5a626e = the instrument, #e8eaed = the graticule,
+       #ff9e2c = the trace, #ffb454 = the marker. -->
+  <rect x="4" y="6" width="32" height="26" rx="4" fill="none" stroke="#5a626e" stroke-width="2.4"/>
+  <line x1="8" y1="27" x2="32" y2="27" stroke="#e8eaed" stroke-width="1.2" opacity="0.55"/>
+  <polyline points="8,25 11,24 13,25.5 15,23.5 17,24.5 18.5,20 20,11 21.5,20 23,24.5 25,23.5 27,25 29,24 32,25"
+            fill="none" stroke="#ff9e2c" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M20 5.5 L17.8 2.5 H22.2 Z" fill="#ffb454"/>
+  <line x1="14" y1="35" x2="26" y2="35" stroke="#5a626e" stroke-width="2.4" stroke-linecap="round"/>
+</svg>

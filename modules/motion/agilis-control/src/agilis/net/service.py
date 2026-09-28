@@ -1,0 +1,324 @@
+"""AgilisService -- owns the brain, serves commands, publishes status (section 6).
+
+Two daemon threads, each owning exactly one socket (a ZeroMQ socket must not be
+shared across threads):
+
+  * publisher : PUB socket.  Sends a status frame every 1/status_hz seconds and
+                drains the event queue as events arrive.
+  * commander : REP socket.  poll(200ms) -> recv_json -> _dispatch -> send_json.
+                Wrapped so a bad command can never kill the loop.
+
+The brain's ``_on_event`` hook is redirected into a thread-safe queue so events
+raised on the command thread reach the publisher thread cleanly.
+"""
+
+from __future__ import annotations
+
+import queue
+import threading
+import time
+
+import zmq
+
+from ..agilis import AgilisStage
+from .describe import build_manifest
+from . import protocol as P
+
+
+class AgilisService:
+    def __init__(
+        self,
+        brain: AgilisStage,
+        host: str = "0.0.0.0",
+        cmd_port: int = P.DEFAULT_CMD_PORT,
+        pub_port: int = P.DEFAULT_PUB_PORT,
+        status_hz: float = 8.0,
+    ):
+        self.brain = brain
+        self._rev = 0
+        self._rev_at = 0.0
+        self.host = host
+        self.cmd_port = cmd_port
+        self.pub_port = pub_port
+        self.status_hz = status_hz
+
+        self._ctx = zmq.Context.instance()
+        self._events: "queue.Queue[dict]" = queue.Queue()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    # ------------------------------------------------------------------ #
+    def start(self) -> None:
+        # Route brain events into our queue (they get PUBlished as b"event").
+        self.brain._on_event = lambda level, msg: self._events.put(
+            {"level": level, "msg": msg}
+        )
+        self.brain.start()
+
+        self._stop.clear()
+        self._threads = [
+            threading.Thread(target=self._publisher, name="agilis-pub", daemon=True),
+            threading.Thread(target=self._commander, name="agilis-cmd", daemon=True),
+        ]
+        for t in self._threads:
+            t.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=2.0)
+        try:
+            self.brain.shutdown()
+        except Exception:
+            pass
+
+    def serve_forever(self) -> None:
+        """Convenience: start and block until Ctrl-C."""
+        self.start()
+        try:
+            while not self._stop.is_set():
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
+
+    # ------------------------------------------------------------------ #
+    # publisher thread
+    # ------------------------------------------------------------------ #
+    def status_payload(self) -> dict:
+        """The status dict, built in ONE place.
+
+        The publisher and the `status` command reply must not drift: a client
+        falls back to the REQ path whenever no PUB frame has arrived yet (ZeroMQ
+        SUB is a slow joiner), so a field present in only one of them is a field
+        that vanishes intermittently.
+        """
+        st = P.status_to_dict(self.brain.status())
+        st["describe_rev"] = self.describe_rev()
+        return st
+
+    def describe_rev(self, max_age_s: float = 1.0) -> int:
+        """Current manifest revision, recomputed at most once per `max_age_s`.
+
+        Every status frame carries it so a client can tell, for the cost of one
+        integer compare, whether its cached manifest went stale. Rebuilding the
+        manifest at the status rate would be pure waste.
+        """
+        now = time.monotonic()
+        if now - self._rev_at >= max_age_s:
+            self._rev = build_manifest(self.brain)["revision"]
+            self._rev_at = now
+        return self._rev
+
+    def _publisher(self) -> None:
+        sock = self._ctx.socket(zmq.PUB)
+        sock.bind(f"tcp://{self.host}:{self.pub_port}")
+        period = 1.0 / self.status_hz
+        next_status = time.monotonic()
+        try:
+            while not self._stop.is_set():
+                # 1) forward any pending events immediately
+                try:
+                    while True:
+                        evt = self._events.get_nowait()
+                        sock.send_multipart([P.TOPIC_EVENT, _json(evt)])
+                except queue.Empty:
+                    pass
+
+                # 2) publish status on schedule
+                now = time.monotonic()
+                if now >= next_status:
+                    next_status = now + period
+                    try:
+                        payload = self.status_payload()
+                        sock.send_multipart([P.TOPIC_STATUS, _json(payload)])
+                    except Exception:
+                        pass  # status must never take the publisher down
+
+                time.sleep(0.005)
+        finally:
+            sock.close(0)
+
+    # ------------------------------------------------------------------ #
+    # commander thread
+    # ------------------------------------------------------------------ #
+    def _commander(self) -> None:
+        sock = self._ctx.socket(zmq.REP)
+        sock.bind(f"tcp://{self.host}:{self.cmd_port}")
+        poller = zmq.Poller()
+        poller.register(sock, zmq.POLLIN)
+        try:
+            while not self._stop.is_set():
+                if dict(poller.poll(200)):
+                    try:
+                        req = sock.recv_json()
+                    except Exception:
+                        continue
+                    try:
+                        reply = self._dispatch(req)
+                    except Exception as exc:  # never die on a bad command
+                        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    try:
+                        sock.send_json(reply)
+                    except Exception:
+                        pass
+        finally:
+            # linger, not 0: after `shutdown` the reply may still be queued, and
+            # close(0) would drop it -- the launcher would then kill us anyway.
+            sock.close(linger=500)
+
+    # ------------------------------------------------------------------ #
+    # command dispatch
+    # ------------------------------------------------------------------ #
+    def _dispatch(self, req: dict) -> dict:
+        cmd = (req or {}).get("cmd")
+        b = self.brain
+
+        # -- universal commands (every module implements these) ---------- #
+        if cmd == "status":
+            return {"ok": True, "status": self.status_payload()}
+        if cmd == "describe":
+            return {"ok": True, "describe": build_manifest(self.brain)}
+        if cmd == "shutdown":
+            # A CLEAN stop, asked for by the launcher before it would kill us: a
+            # hard kill gives the brain no chance to close its hardware (it wedged
+            # the PM16 until replugged, docs/DEVELOPER_NOTES.md gotcha #25). Setting _stop
+            # ends serve_forever, whose finally: stop() shuts the brain down.
+            self._stop.set()
+            return {"ok": True, "stopping": True}
+        if cmd == "info":
+            return {
+                "ok": True,
+                "info": {
+                    "idn": b.backend.idn(),
+                    "axes": ["X", "Y"],
+                    "limits": P.config_to_dict(b.cfg)["limits"],
+                    "calibration": P.config_to_dict(b.cfg)["calibration"],
+                    "n_slots": len(b.positions.slots),
+                    # what start() had to WRITE to read the controller (MR,
+                    # plus a safety ST if a leftover jog was found)
+                    "startup_writes": list(b.startup_writes),
+                },
+            }
+        if cmd == "get_config":
+            return {"ok": True, "config": P.config_to_dict(b.cfg)}
+        if cmd == "set_config":
+            P.apply_config_dict(b.cfg, req.get("config", {}))
+            b.apply_config()
+            return {"ok": True}
+
+        # -- motion: STEP language --------------------------------------- #
+        if cmd == "move_to_step":
+            return {"ok": True, "target": b.move_to_step(P.parse_axis(req["axis"]), req["position"])}
+        if cmd == "move_steps":
+            return {"ok": True, "target": b.move_steps(P.parse_axis(req["axis"]), req["delta"])}
+
+        # -- motion: MICROMETRE language --------------------------------- #
+        if cmd == "move_to_um":
+            return {"ok": True, "target": b.move_to_um(P.parse_axis(req["axis"]), req["position"])}
+        if cmd == "move_relative_um":
+            return {"ok": True, "target": b.move_relative_um(P.parse_axis(req["axis"]), req["delta"])}
+
+        # -- continuous jog (dead-man: repeat within motion.jog_timeout_s) -- #
+        if cmd == "jog":
+            return {"ok": True, "mode": b.jog(P.parse_axis(req["axis"]), int(req["speed"]))}
+
+        if cmd == "stop":
+            if req.get("axis") is None:
+                b.stop_all()
+            else:
+                b.stop(P.parse_axis(req["axis"]))
+            return {"ok": True}
+
+        # -- datum + display origin -------------------------------------- #
+        if cmd == "zero_counter":
+            if req.get("axis") is None:
+                b.zero_counter_all()
+            else:
+                b.zero_counter(P.parse_axis(req["axis"]))
+            return {"ok": True}
+        if cmd in ("datum_x", "datum_y"):        # the describe actions (fired by id)
+            b.zero_counter(0 if cmd == "datum_x" else 1)
+            return {"ok": True}
+        if cmd == "set_zero":
+            if req.get("axis") is None:
+                origins = b.set_zero_all()
+            else:
+                origins = [b.set_zero(P.parse_axis(req["axis"]))]
+            return {"ok": True, "rel_origin": origins}
+        if cmd == "clear_zero":
+            if req.get("axis") is None:
+                b.clear_zero_all()
+            else:
+                b.clear_zero(P.parse_axis(req["axis"]))
+            return {"ok": True}
+
+        # -- amplitude + calibration --------------------------------------- #
+        if cmd == "set_amplitude":
+            v = b.set_amplitude(P.parse_axis(req["axis"]), req["value"],
+                                P.parse_direction(req.get("direction", 0)))
+            return {"ok": True, "value": v}
+        if cmd == "set_step_size":
+            return {"ok": True, "step": b.set_step_size(bool(req["large"]))}
+        if cmd == "set_calibration":
+            # direction: 0/absent = both ways, +1 forward only, -1 backward only
+            v = b.set_calibration(P.parse_axis(req["axis"]), req["value"],
+                                  P.parse_direction(req.get("direction", 0)))
+            return {"ok": True, "value": v}
+        # -- limit-switch stage (AG-LS25): MV, MA, PA, step-size routine ---- #
+        if cmd == "move_to_limit":
+            return {"ok": True, "mode": b.move_to_limit(
+                P.parse_axis(req["axis"]), P.parse_direction(req["direction"]) or 1,
+                int(req.get("speed", 3)))}
+        if cmd == "measure_position":
+            return {"ok": True, "routine_id": b.measure_position(P.parse_axis(req["axis"]))}
+        if cmd in ("measure_position_x", "measure_position_y"):
+            return {"ok": True, "routine_id": b.measure_position(0 if cmd.endswith("x") else 1)}
+        if cmd == "move_absolute":
+            return {"ok": True, "routine_id": b.move_absolute(
+                P.parse_axis(req["axis"]), float(req["position"]))}
+        if cmd == "measure_step_size":
+            return {"ok": True, "routine_id": b.measure_step_size(P.parse_axis(req["axis"]))}
+        if cmd in ("measure_step_size_x", "measure_step_size_y"):
+            return {"ok": True, "routine_id": b.measure_step_size(0 if cmd.endswith("x") else 1)}
+
+        if cmd == "set_leash":
+            state = b.set_leash(enabled=req.get("enabled"), leash_steps=req.get("leash_steps"))
+            return {"ok": True, "leash": state}
+
+        # -- fly-scan stream: the position recorded continuously ----------- #
+        if cmd == "stream_start":
+            return {"ok": True, "stream_id": b.stream_start(req.get("rate_hz"))}
+        if cmd == "stream_read":
+            return {"ok": True, "stream": b.stream.read()}
+        if cmd == "stream_stop":
+            return {"ok": True, "stream": b.stream_stop()}
+
+        # -- position list ----------------------------------------------- #
+        if cmd == "store_position":
+            return {"ok": True, "position": b.store_position(int(req["slot"]), req.get("name", ""))}
+        if cmd == "clear_position":
+            b.clear_position(int(req["slot"]))
+            return {"ok": True}
+        if cmd == "goto_position":
+            return {"ok": True, "targets": b.goto_position(int(req["slot"]))}
+        if cmd == "get_positions":
+            return {"ok": True, "positions": b.get_positions()}
+        if cmd == "save_positions":
+            b.save_positions(req["path"])
+            return {"ok": True}
+        if cmd == "load_positions":
+            b.load_positions(req["path"])
+            return {"ok": True, "positions": b.get_positions()}
+
+        return {"ok": False, "error": f"unknown command {cmd!r}"}
+
+
+# zmq's send_json is fine, but events go out on a raw multipart frame, so we
+# serialise those ourselves with the same encoder.
+import json as _json_mod
+
+
+def _json(obj) -> bytes:
+    return _json_mod.dumps(obj).encode("utf-8")

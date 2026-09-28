@@ -1,0 +1,21 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "ccs200"
+name = "Spectrometer"
+description = "Thorlabs CCS200/M compact CCD spectrometer, 200-1000 nm: spectra, dark subtraction, peak"
+category = "detector"
+tags = ["spectrometer", "spectrum", "CCD", "UV-VIS-NIR", "Thorlabs"]
+icon = "icon.svg"
+order = 250
+
+[ports]
+cmd = 5603
+pub = 5604
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []
+

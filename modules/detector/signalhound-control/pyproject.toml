@@ -1,0 +1,33 @@
+[project]
+name = "signalhound-control"
+version = "0.1.0"
+license = "MIT"
+description = "Signal Hound SA44B / SA124B spectrum analyser with USB-TG44A tracking generator (or a simulator): spectra and thru-normalised transmission"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client
+    "numpy>=1.26",  # traces, averaging, and the simulator
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui       the GUI (the headless core installs light)
+#
+# There is NO `real` extra: the real backend talks to Signal Hound's
+# sa_api.dll through ctypes (part of Python itself). The DLL comes with
+# Signal Hound's Spike software / SDK and is loaded only when --real opens
+# the analyser, so nothing has to be pip-installed for the hardware.
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the trace plot
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

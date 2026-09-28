@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- sr7230: the analog panel meter of a lock-in: a scale arc with its
+       overload end, the needle reading R against full scale, and the
+       reference sine it is locked to. Colours: #5a626e metal, #e8eaed text,
+       #ff9e2c accent, #ffb454 accent_hi (the launcher swaps the last three
+       for the active theme). -->
+  <rect x="3.5" y="5.5" width="33" height="29" rx="5" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <path d="M9 24 A11 11 0 0 1 28.5 17" fill="none" stroke="#e8eaed" stroke-width="2" stroke-linecap="round"/>
+  <path d="M28.5 17 A11 11 0 0 1 31 24" fill="none" stroke="#ff9e2c" stroke-width="2.6" stroke-linecap="round"/>
+  <line x1="20" y1="24" x2="25.5" y2="14.5" stroke="#ffb454" stroke-width="2.2" stroke-linecap="round"/>
+  <circle cx="20" cy="24" r="2.2" fill="#ff9e2c"/>
+  <path d="M9 30.5 q2.75 -3.2 5.5 0 t5.5 0 t5.5 0 t5.5 0" fill="none" stroke="#5a626e" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "ddr25"
+name = "Rotation stage"
+description = "Thorlabs DDR25/M direct-drive rotation stage on a K-Cube brushless controller: one continuous angle axis"
+category = "motion"
+tags = ["rotation", "angle", "polarizer", "Thorlabs", "Kinesis", "K-Cube"]
+icon = "icon.svg"
+order = 260
+
+[ports]
+cmd = 5605
+pub = 5606
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

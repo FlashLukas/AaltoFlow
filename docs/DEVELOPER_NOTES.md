@@ -59,12 +59,32 @@ look in `%LOCALAPPDATA%\uv-venvs\<project>\Scripts\python.exe` as well**.
   (PySide6 is a base dependency).
 - Python ≥ 3.11 (scan-core pins `>=3.11`; everything was verified on 3.11).
 
+### Folder layout (since 2026-09-27)
+```
+<root>/
+  modules/<category>/<key>-control/   every instrument module, sorted by what it is
+                                      FOR -- the `category` in its module.toml:
+                                      motion, imaging, detector, source, field,
+                                      environment (e.g. modules/motion/kim-control)
+  suite-common/  mission-control/  scan-core/     the suite's own projects
+  tools/  installer/  docs/  front-panels/  spikes/
+```
+Why: 35 modules in the root buried the few folders a newcomer should open
+first, and the category is already in each module.toml. Only the FOLDER moved:
+module keys, ports, package names and the environments'
+`%LOCALAPPDATA%\uv-venvs\<key>-control` names are unchanged. Everything finds
+modules through ONE function, `suite_common.modules.manifest_paths` (launcher,
+scan-core, tools, installer generator); it still accepts a module dropped
+straight into the root (the old layout), with a warning from `check_modules.py`.
+A module's README links up to the root with `../../../`. See gotcha #36 for
+checkouts and installs made before the move.
+
 ---
 
 ## 3. Architecture overview
 
 ```
-suite-common     ── module discovery: <root>/*/module.toml + suite_local.json (this PC)
+suite-common     ── module discovery: <root>/modules/<category>/*/module.toml + suite_local.json (this PC)
 mission-control  ── discovers modules, spawns run_service.py / run_gui.py (never imports them)
 scan-core suite  ── follows the launcher: connects to the discovered modules that are running
 
@@ -85,6 +105,8 @@ CLIENTS                              WIRE                      SERVICES (one pro
 
 ONE of mag2d / mag2dcal runs at a time (same coils): they speak the SAME verbs
 and status keys, so everything else is unchanged apart from the id prefix.
+In real mode the second one is refused because its DAQ card's address is
+already claimed (the address lock, gotcha #37); in simulation both may run.
 
 vna is a SUBSCRIBER of a magnet's status stream (mag2d by default, mag2dcal, clMag or
 the DynaCool's ppms): it
@@ -173,7 +195,29 @@ still assumes piezo/zpiezo.
   | 10 | mag2d-control | `mag2d`  | 5575 | 5576 | closed-loop, continuous PI (VectorMagnet) |
   | 11 | mag2dcal-control | `mag2dcal` | 5577 | 5578 | closed-loop, calibrated seek + freeze + stabilizer |
   | 12 | ppms-control  | `ppms`   | 5579 | 5580 | set-and-forget, MultiVu runs the loops (Cryostat) |
-  | 13 | *next module* |          | 5581 | 5582 | |
+  | 13 | kepco-control | `kepco` | 5581 | 5582 | set-and-forget + software ramp + acquire (BipolarSupply) |
+  | 14 | windfreak-control | `windfreak` | 5583 | 5584 | set-and-forget, two channels (Synthesizer) |
+  | 15 | gsp818-control | `gsp818` | 5585 | 5586 | array detector, real dBm trace + TG thru reference (SpectrumAnalyzer) |
+  | 16 | signalhound-control | `signalhound` | 5587 | 5588 | array detector, real dBm trace + TG thru reference (SpectrumAnalyzer) |
+  | 17 | dsphase-control | `dsphase` | 5589 | 5590 | set-and-forget (PhaseShifter) |
+  | 18 | dssg-control | `dssg` | 5591 | 5592 | set-and-forget (Synthesizer) |
+  | 19 | dsamp-control | `dsamp` | 5593 | 5594 | set-and-forget, gain envelope (Amplifier) |
+  | 20 | agilis-control | `agilis` | 5595 | 5596 | set-and-forget, open-loop steps (AgilisStage) |
+  | 21 | smaract-control | `smaract` | 5597 | 5598 | set-and-forget, closed-loop encoder (1 axis) |
+  | 22 | sr830-control | `sr830` | 5599 | 5600 | set-and-forget + settle-aware acquire (DspLockIn) |
+  | 23 | cs260-control | `cs260` | 5601 | 5602 | set-and-forget, move-done settle (Monochromator) |
+  | 24 | ccs200-control | `ccs200` | 5603 | 5604 | array detector, spectrum + dark (Spectrometer) |
+  | 25 | ddr25-control | `ddr25` | 5605 | 5606 | set-and-forget, rotary (Rotator) |
+  | 26 | elliptec-control | `elliptec` | 5607 | 5608 | set-and-forget, rotary, bus of addresses (RotationMount) |
+  | 27 | chopper-control | `chopper` | 5609 | 5610 | set-and-forget, spin-up settle (Chopper) |
+  | 28 | superk-control | `superk` | 5611 | 5612 | set-and-forget, class 4 interlocked (SuperK) |
+  | 29 | tc200-control | `tc200` | 5613 | 5614 | closed-loop setpoint, reached = held in band (Heater) |
+  | 30 | ls455-control | `ls455` | 5615 | 5616 | fresh-reading acquire (Gaussmeter) |
+  | 31 | pm400-control | `pm400` | 5617 | 5618 | fresh-reading acquire (Pm400Meter) |
+  | 32 | hp8648-control | `hp8648` | 5619 | 5620 | set-and-forget (SignalSource) |
+  | 33 | sr7230-control | `sr7230` | 5621 | 5622 | set-and-forget + settle-aware acquire (lock-in) |
+  | 34 | k2450-control | `k2450` | 5623 | 5624 | set-and-forget + fresh-reading acquire (SourceMeter) |
+  | 35 | *next module* |          | 5625 | 5626 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander
   (owns REP, `poll(200)`). The loop must never be allowed to die: catch the
@@ -202,7 +246,7 @@ mechanism in section 6. Where they disagree, these notes wins.
   (+ pyqtgraph where plotted), `pytest` dev group. Package name is short and
   lowercase.
   ```
-  <inst>-control/  pyproject.toml  README.md  .gitignore
+  modules/<category>/<inst>-control/  pyproject.toml  README.md  .gitignore
     src/<inst>/  config.py  backends/{base,sim,<real>}.py  <brain>.py  sim_system.py
                  net/{protocol,service,client}.py  apps/{theme,gui,settings_dialog}.py
     scripts/  run_service.py  run_gui.py  <inst>_console.py  smoke_test.py
@@ -483,6 +527,79 @@ zpiezo has no GUI.
     2026-09-28) it waits for the APPROACH to each row's run-in the same way:
     the stale frame had made row 0 start wherever the stage happened to be. General lesson: a
     "done" signal is only as good as the wait it was designed for.
+36. **An old flat module folder left behind after the move to modules/**
+    (2026-09-27). `git pull` moves the files git TRACKS into
+    `modules/<category>/<key>-control`, but the ignored ones -- a rig's tuned
+    `.ini`, `Calibrations\`, `px_calibration.json`, `CLAUDE.local.md`, data, a
+    `.venv` -- stay in the old `<key>-control` folder, where the module no
+    longer looks. Nothing fails; the module just quietly starts from factory
+    settings. And if a whole old copy survives (with its module.toml), there are
+    two modules with one key. Discovery never resolves that silently any more:
+    the `modules/` copy wins and the other is reported as a PROBLEM naming both
+    folders (launcher log, `check_modules.py`). The cure on a checkout: commit or
+    `git stash` locally edited tracked lab files BEFORE `git pull` (camera.ini,
+    objectives.ini, px_calibration.json, clMag's Calibrations), pull (then
+    `git stash pop`), run `python tools/migrate_layout.py` (dry run) and
+    `--apply` -- it moves the leftovers across without overwriting (a differing
+    file is kept as `*.old-layout`) -- then re-sync each module's environment,
+    because the editable install inside it still points at the old `src`. An
+    INSTALLED suite needs none of this: Setup moves each old module folder
+    whole before copying (`MigrateModuleLayout` in `installer/AaltoFlow.iss`),
+    and Mission Control's "Add module" moves an old copy instead of making a
+    second one.
+37. **One instrument is one PHYSICAL ADDRESS, not one module** (2026-09-27).
+    Two services commanding one supply fight, and neither knows the other
+    exists. The first fix listed pairs of module NAMES that must not run
+    together (`[run] excludes`: kepco <-> clMag, mag2d <-> mag2dcal). That was
+    the wrong key: clMag's Kepco sits on GPIB0::6 on one rig and could sit on
+    another address elsewhere, while any NEW module pointed at GPIB0::6 would
+    not be in anybody's list; and a module that drives two instruments on
+    different addresses was forbidden for nothing. Lukas: "the same instrument
+    has to be defined by the same physical address." So every real backend
+    claims its address with `hwlock.claim()` in `open()` (INSTRUMENT_MODULE_GUIDE
+    section 3) and a second claim -- from any module -- raises `HardwareBusy`
+    naming the holder; the name-based `excludes` is gone. What to know:
+    - **Per PC.** It is an operating-system file lock in
+      `%LOCALAPPDATA%\AaltoFlow\locks` (tests set `AALTOFLOW_LOCK_DIR`). GPIB,
+      USB and serial hang on one PC, so that covers them; a network instrument
+      shared between two PCs is NOT protected across the PCs.
+    - **A crash cannot leave an instrument "busy".** The OS drops the lock
+      when the process ends, however it ends; there is no stale-file cleanup to
+      get wrong. `held()` skips a lock file whose lock can be taken.
+    - **Windows frees a KILLED process's lock a moment later**, not at once.
+      A service restarted straight after a hard kill would be refused by its
+      own ghost, so `claim()` retries for up to 2 s (`wait_s`) before it
+      gives up.
+    - **The pid in the lock is not the pid the launcher started.** A venv's
+      `python.exe` is a small launcher that starts the real interpreter as a
+      CHILD (the same thing that makes `uv run` orphan services, gotcha #7), and
+      the child holds the lock. Mission Control therefore matches a card to its
+      locks by module KEY (what the backend passed to `claim`), with the pid only
+      as a second chance. The card shows "holds GPIB0::6"; a service refused its
+      address shows red "address busy: GPIB0::6 held by clMag (pid N)".
+    - **Every module carries a byte-identical copy** of the master
+      `suite-common/src/suite_common/hwlock.py`: two copies that normalise
+      addresses differently would each think they hold a different instrument.
+      `tools/check_modules.py` fails a differing copy.
+
+38. **Two installer traps found by the first upgrade test** (2026-09-28).
+    (a) *Inno Setup reads any line starting with `[` as a new section* -- even
+    inside a Pascal comment in `[Code]`. A comment line beginning "[Files]
+    entries ..." made the whole script fail to compile ("Invalid section tag").
+    Nothing but a real build shows this: never start a comment line in the
+    code section with a square bracket.
+    (b) *Never make a test install by copying a real one.* The copy carries the
+    real install's `unins000.dat`, Setup APPENDS to it, and that record holds
+    the real install's absolute paths -- running the test copy's uninstaller
+    could delete files of the REAL install. For an upgrade test, copy the
+    folders but not `unins000.*`, or install the old version fresh into the
+    test folder; clean up by hand if in doubt (the uninstall registry entry,
+    the Start-menu group). Also: every install runs `[InstallDelete]`, which
+    removes the old "TRMOKE" Start-menu group and desktop link -- back them up
+    before a test on a PC that has a real install. The upgrade migration itself
+    was verified this way: 13 flat folders moved, tuned `camera.ini`,
+    `px_calibration.json` and clMag `Calibrations\` byte-identical afterwards,
+    old `.venv`s removed, 35 modules discovered, no problems.
 
 ---
 
@@ -491,7 +608,7 @@ zpiezo has no GUI.
 Verify **in place**, on the PC the suite runs on:
 
 ```powershell
-cd "<root>\kim-control"
+cd "<root>\modules\motion\kim-control"
 .\dev.ps1 sync --extra gui        # or: uv sync --extra gui   (copy dev.ps1 from clMag-control if missing)
 .\dev.ps1 run pytest -q
 .\dev.ps1 run python scripts\smoke_test.py

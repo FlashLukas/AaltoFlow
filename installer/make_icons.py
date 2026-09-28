@@ -65,7 +65,11 @@ def main() -> int:
     app = QtGui.QGuiApplication([])  # noqa: F841  (kept alive for the renders)
 
     made = 0
-    for svg in sorted(stage.glob("*/icon.svg")):
+    # The suite's own projects sit in the root (mission-control, scan-core);
+    # the instrument modules in modules/<category>/<folder> (since 2026-09-27).
+    # Each .ico is named after its folder, which is unique across both.
+    svgs = sorted(stage.glob("*/icon.svg")) + sorted(stage.glob("modules/*/*/icon.svg"))
+    for svg in svgs:
         target = out / f"{svg.parent.name}.ico"
         try:
             render(svg, target)

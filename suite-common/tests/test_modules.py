@@ -88,7 +88,47 @@ def test_duplicate_key_keeps_the_first(root):
     make_module(root, "zz-kim-copy", "kim", 5600)
     found = M.discover(root)
     assert [m.cmd for m in found.modules if m.key == "kim"] == [5567]
-    assert any("already used" in p for p in found.problems)
+    assert any("exists twice" in p and "kim-control" in p and "zz-kim-copy" in p
+               for p in found.problems)
+
+
+# ---- the layout since 2026-09-27: modules/<category>/<folder> -------------
+
+def test_the_nested_layout_is_found(tmp_path):
+    make_module(tmp_path, "modules/motion/kim-control", "kim", 5567)
+    make_module(tmp_path, "modules/detector/hf2-control", "hf2", 5569)
+    (tmp_path / "scan-core").mkdir()
+    found = M.discover(tmp_path)
+    assert sorted(m.key for m in found.modules) == ["hf2", "kim"]
+    assert found.problems == []
+    assert found.get("kim").dir == tmp_path / "modules" / "motion" / "kim-control"
+    assert M.rel_to_root(tmp_path, found.get("kim").dir) == "modules/motion/kim-control"
+
+
+def test_a_flat_legacy_folder_is_still_found(tmp_path):
+    """A module dropped straight into the root (the layout before the move)
+    still works: nothing is lost if somebody installs one by hand."""
+    make_module(tmp_path, "modules/motion/kim-control", "kim", 5567)
+    make_module(tmp_path, "hf2-control", "hf2", 5569)
+    found = M.discover(tmp_path)
+    assert sorted(m.key for m in found.modules) == ["hf2", "kim"]
+    assert found.problems == []
+    assert M.is_legacy_location(tmp_path, found.get("hf2").dir)
+    assert not M.is_legacy_location(tmp_path, found.get("kim").dir)
+
+
+def test_an_old_flat_copy_never_wins_and_is_reported(tmp_path):
+    """The lab PC pulls the move but keeps an old kim-control folder (ignored
+    files keep it alive). The new copy must be used, and the old one named."""
+    make_module(tmp_path, "modules/motion/kim-control", "kim", 5567)
+    make_module(tmp_path, "kim-control", "kim", 5999)     # sorts FIRST by name
+    found = M.discover(tmp_path)
+    kim = found.get("kim")
+    assert kim.cmd == 5567 and kim.dir.parent.name == "motion"
+    (msg,) = found.problems
+    assert "modules/motion/kim-control" in msg and "kim-control" in msg
+    assert "migrate_layout" in msg
+    assert M.manifest_paths(tmp_path)[0].parent.parent.name == "motion"
 
 
 def test_port_override_and_reset(root):

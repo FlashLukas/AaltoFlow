@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "dsphase"
+name = "RF phase shifter"
+description = "DS Instruments PS6000L digital RF phase shifter, 0.4-6 GHz, 0.5 deg steps"
+category = "source"
+tags = ["RF", "phase shifter", "DS Instruments", "PS6000L", "USB serial"]
+icon = "icon.svg"
+order = 180
+
+[ports]
+cmd = 5589
+pub = 5590
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

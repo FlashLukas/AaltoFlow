@@ -103,8 +103,8 @@ an instrument is a declaration in `scan_core/lab.py` — which verb sets the kno
 which status field reads it back, and how you know it has arrived — not new
 engine code.
 
-**3. mission-control.** The launcher. It *finds* the modules (every folder with a
-`module.toml`), starts their services, opens their GUIs, lets you change ports and
+**3. mission-control.** The launcher. It *finds* the modules (every folder
+`modules/<category>/<name>-control` with a `module.toml`), starts their services, opens their GUIs, lets you change ports and
 add services running on other PCs, and shows each module's variables as the
 service reports them. It never imports the instrument packages; it only spawns
 their scripts, so there is no version coupling. The measurement suite follows
@@ -117,12 +117,18 @@ icon, default ports, scripts) *is* a module, and the launcher, scan-core and the
 tools all find it. The module's controls and measured variables are not in that
 file: the running service reports them itself through `describe`.
 
+The modules are sorted by what they are for: `modules/<category>/<name>-control`,
+where the category (`motion`, `imaging`, `detector`, `source`, `field`,
+`environment`) is the one written in the module's `module.toml`. The suite's own
+projects -- `mission-control`, `scan-core`, `suite-common` -- and `tools`,
+`installer`, `docs` stay in the top folder.
+
 ```powershell
-python tools/new_module.py vna --like smb --name "Network analyser" --description "R&S ZNB"
-cd vna-control
+python tools/new_module.py vna --like smb --category detector --name "Network analyser" --description "R&S ZNB"
+cd modules\detector\vna-control
 uv sync --extra gui
 uv run pytest -q                      # passes as generated
-python ../tools/check_modules.py vna --live
+python ../../../tools/check_modules.py vna --live
 ```
 
 `new_module.py` copies a working template under the new name and takes the next
@@ -228,19 +234,41 @@ instruments on the bench:
 ![scan builder](front-panels/scan-core.png)
 
 Each instrument has its own panel, shown in its own README:
-[clMag](clMag-control/README.md) ·
-[smb](smb-control/README.md) ·
-[stage](stage-control/README.md) ·
-[piezo](piezo-control/README.md) ·
-[camera](camera-control/README.md) ·
-[kim](kim-control/README.md) ·
-[hf2](hf2-control/README.md) ·
-[pm16](pm16-control/README.md) ·
-[vna](vna-control/README.md) ·
-[mag2d](mag2d-control/README.md) ·
-[mag2dcal](mag2dcal-control/README.md) ·
-[ppms](ppms-control/README.md) ·
-[zpiezo](zpiezo-control/README.md) (headless -- a console, not a window).
+[clMag](modules/field/clMag-control/README.md) ·
+[smb](modules/source/smb-control/README.md) ·
+[stage](modules/motion/stage-control/README.md) ·
+[piezo](modules/motion/piezo-control/README.md) ·
+[camera](modules/imaging/camera-control/README.md) ·
+[kim](modules/motion/kim-control/README.md) ·
+[hf2](modules/detector/hf2-control/README.md) ·
+[pm16](modules/detector/pm16-control/README.md) ·
+[vna](modules/detector/vna-control/README.md) ·
+[mag2d](modules/field/mag2d-control/README.md) ·
+[mag2dcal](modules/field/mag2dcal-control/README.md) ·
+[ppms](modules/environment/ppms-control/README.md) ·
+[kepco](modules/source/kepco-control/README.md) ·
+[windfreak](modules/source/windfreak-control/README.md) ·
+[gsp818](modules/detector/gsp818-control/README.md) ·
+[signalhound](modules/detector/signalhound-control/README.md) ·
+[dsphase](modules/source/dsphase-control/README.md) ·
+[dssg](modules/source/dssg-control/README.md) ·
+[dsamp](modules/source/dsamp-control/README.md) ·
+[agilis](modules/motion/agilis-control/README.md) ·
+[smaract](modules/motion/smaract-control/README.md) ·
+[sr830](modules/detector/sr830-control/README.md) ·
+[cs260](modules/source/cs260-control/README.md) ·
+[ccs200](modules/detector/ccs200-control/README.md) ·
+[ddr25](modules/motion/ddr25-control/README.md) ·
+[elliptec](modules/motion/elliptec-control/README.md) ·
+[chopper](modules/source/chopper-control/README.md) ·
+[superk](modules/source/superk-control/README.md) ·
+[tc200](modules/environment/tc200-control/README.md) ·
+[ls455](modules/detector/ls455-control/README.md) ·
+[pm400](modules/detector/pm400-control/README.md) ·
+[hp8648](modules/source/hp8648-control/README.md) ·
+[sr7230](modules/detector/sr7230-control/README.md) ·
+[k2450](modules/source/k2450-control/README.md) ·
+[zpiezo](modules/motion/zpiezo-control/README.md) (headless -- a console, not a window).
 
 They are rendered offscreen and reproducibly, so they do not go stale:
 
@@ -266,9 +294,42 @@ python tools/render_all.py clMag       # or just one
 | 10 | `mag2d-control` | `mag2d` | 5575/5576 | 2-axis vector electromagnet on an NI DAQ: field + angle, PI in mT, water-cooling interlock |
 | 11 | `mag2dcal-control` | `mag2dcal` | 5577/5578 | the same magnet, controlled the way the 1-axis one is: measured B(V) calibration, PI trim, freeze, long-term stabilizer |
 | 12 | `ppms-control` | `ppms` | 5579/5580 | Quantum Design DynaCool through MultiVu (MultiPyVu): field, temperature, chamber (untested on the instrument) |
+| 13 | `kepco-control` | `kepco` | 5581/5582 | Kepco BOP 20-10 bipolar power supply (GPIB), its own module -- not a field loop (simulation; untested on the instrument) |
+| 14 | `windfreak-control` | `windfreak` | 5583/5584 | Windfreak SynthHD PRO v2, two-channel RF synthesizer (USB serial) (simulation; untested on the instrument) |
+| 15 | `gsp818-control` | `gsp818` | 5585/5586 | GW Instek GSP-818 spectrum analyzer with tracking generator (simulation; untested on the instrument) |
+| 16 | `signalhound-control` | `signalhound` | 5587/5588 | Signal Hound SA44B / SA124B with USB-TG44A tracking generator (sa_api.dll) (simulation; untested on the instrument) |
+| 17 | `dsphase-control` | `dsphase` | 5589/5590 | DS Instruments 6 GHz digital RF phase shifter (USB) (simulation; untested on the instrument) |
+| 18 | `dssg-control` | `dssg` | 5591/5592 | DS Instruments SG12000L 12 GHz signal generator (USB or Ethernet) (simulation; untested on the instrument) |
+| 19 | `dsamp-control` | `dsamp` | 5593/5594 | DS Instruments 6 GHz variable-gain RF amplifier (USB) (simulation; untested on the instrument) |
+| 20 | `agilis-control` | `agilis` | 5595/5596 | Newport Agilis 2-axis piezo stage on an AG-UC2 (simulation; untested on the instrument) |
+| 21 | `smaract-control` | `smaract` | 5597/5598 | SmarAct CLL42 linear positioner on an SCU controller (simulation; untested on the instrument) |
+| 22 | `sr830-control` | `sr830` | 5599/5600 | Stanford Research SR830 DSP lock-in (GPIB) (simulation; untested on the instrument) |
+| 23 | `cs260-control` | `cs260` | 5601/5602 | Newport / Oriel Cornerstone 260 monochromator (GPIB) (simulation; untested on the instrument) |
+| 24 | `ccs200-control` | `ccs200` | 5603/5604 | Thorlabs CCS200/M CCD spectrometer (TLCCS) (simulation; untested on the instrument) |
+| 25 | `ddr25-control` | `ddr25` | 5605/5606 | Thorlabs DDR25/M direct-drive rotation stage on a K-Cube (simulation; untested on the instrument) |
+| 26 | `elliptec-control` | `elliptec` | 5607/5608 | Thorlabs ELL14K Elliptec rotation mount (simulation; untested on the instrument) |
+| 27 | `chopper-control` | `chopper` | 5609/5610 | Thorlabs MC2000B-EC optical chopper (MC1F10HP, MC1F60 blades) (simulation; untested on the instrument) |
+| 28 | `superk-control` | `superk` | 5611/5612 | NKT SuperK EXTREME EXW-12 + SELECT / SELECT2 AOTFs on one RF driver (simulation; untested on the instrument) |
+| 29 | `tc200-control` | `tc200` | 5613/5614 | Thorlabs TC200 heater controller with a PT100 (simulation; untested on the instrument) |
+| 30 | `ls455-control` | `ls455` | 5615/5616 | Lake Shore 455 DSP gaussmeter, axial Hall probe (simulation; untested on the instrument) |
+| 31 | `pm400-control` | `pm400` | 5617/5618 | Thorlabs PM400 power/energy meter console (TLPMX) (simulation; untested on the instrument) |
+| 32 | `hp8648-control` | `hp8648` | 5619/5620 | HP / Agilent 8648D RF generator (GPIB) (simulation; untested on the instrument) |
+| 33 | `sr7230-control` | `sr7230` | 5621/5622 | Ametek Signal Recovery 7230 DSP lock-in (simulation; untested on the instrument) |
+| 34 | `k2450-control` | `k2450` | 5623/5624 | Keithley 2450 SourceMeter (simulation; untested on the instrument) |
 
+Each project folder lives in `modules/<category>/` (the links above go there).
 Instrument *n* gets `cmd = 5555 + 2n` and `pub = cmd + 1` by default, declared in
 its `module.toml`; the launcher can change a module's ports on one PC.
+
+**Updating a checkout from before 2026-09-27** (when the modules moved into
+`modules/<category>/`): if you changed tracked lab files on that PC
+(`camera.ini`, `objectives.ini`, `px_calibration.json`, clMag's `Calibrations`),
+commit them or `git stash` them before `git pull` (and `git stash pop` after).
+Then run `python tools/migrate_layout.py` (a dry run) and
+`python tools/migrate_layout.py --apply`: it carries the files git does not
+track (tuned `.ini` files, calibrations, notes, data) from each old
+`<name>-control` folder into the new one, and removes the old folder. Finally
+re-sync each module's environment.
 
 ## Quick start
 
@@ -284,7 +345,7 @@ uv run python mission_control.py
 Or drive one instrument on its own:
 
 ```powershell
-cd clMag-control
+cd modules\field\clMag-control
 uv sync --extra gui
 uv run scripts/run_service.py                      # add --real for hardware
 uv run scripts/run_gui.py --connect localhost      # add --theme light
@@ -352,7 +413,18 @@ uv run pytest -q
 | zpiezo-control | 14 | | suite-common | 45 |
 | kim-control | 87 | | mag2d-control | 46 |
 | ppms-control | 43 | | mag2dcal-control | 96 |
-| | | | **total** | **1071** |
+| kepco-control | 50 | | windfreak-control | 58 |
+| k2450-control | 65 | | gsp818-control | 60 |
+| signalhound-control | 77 | | dsphase-control | 96 |
+| dssg-control | 62 | | dsamp-control | 56 |
+| agilis-control | 76 | | smaract-control | 55 |
+| sr830-control | 92 | | sr7230-control | 95 |
+| cs260-control | 60 | | ccs200-control | 56 |
+| ddr25-control | 64 | | elliptec-control | 66 |
+| chopper-control | 55 | | superk-control | 54 |
+| tc200-control | 66 | | ls455-control | 71 |
+| pm400-control | 77 | | hp8648-control | 54 |
+| | | | **total** | **2536** |
 
 Beyond unit tests, `python tools/check_modules.py --live` starts every module's
 service on scratch ports and checks it against the module contract. The data

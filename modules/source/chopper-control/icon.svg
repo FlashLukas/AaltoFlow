@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- optical chopper: a slotted blade (amber slots = where light passes),
+       its hub, and the beam spot at 12 o'clock. Colours: #ff9e2c accent,
+       #ffb454 accent_hi, #e8eaed text, #5a626e metal (the launcher swaps the
+       first three for the active theme). -->
+  <circle cx="20" cy="20" r="17.2" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <path d="M17.58 4.69 A15.5 15.5 0 0 1 22.42 4.69 L21.25 12.10 A8.0 8.0 0 0 0 18.75 12.10 Z" fill="#ff9e2c"/>
+  <path d="M27.04 6.19 A15.5 15.5 0 0 1 30.96 9.04 L25.66 14.34 A8.0 8.0 0 0 0 23.63 12.87 Z" fill="#ff9e2c"/>
+  <path d="M33.81 12.96 A15.5 15.5 0 0 1 35.31 17.58 L27.90 18.75 A8.0 8.0 0 0 0 27.13 16.37 Z" fill="#ff9e2c"/>
+  <path d="M35.31 22.42 A15.5 15.5 0 0 1 33.81 27.04 L27.13 23.63 A8.0 8.0 0 0 0 27.90 21.25 Z" fill="#ff9e2c"/>
+  <path d="M30.96 30.96 A15.5 15.5 0 0 1 27.04 33.81 L23.63 27.13 A8.0 8.0 0 0 0 25.66 25.66 Z" fill="#ff9e2c"/>
+  <path d="M22.42 35.31 A15.5 15.5 0 0 1 17.58 35.31 L18.75 27.90 A8.0 8.0 0 0 0 21.25 27.90 Z" fill="#ff9e2c"/>
+  <path d="M12.96 33.81 A15.5 15.5 0 0 1 9.04 30.96 L14.34 25.66 A8.0 8.0 0 0 0 16.37 27.13 Z" fill="#ff9e2c"/>
+  <path d="M6.19 27.04 A15.5 15.5 0 0 1 4.69 22.42 L12.10 21.25 A8.0 8.0 0 0 0 12.87 23.63 Z" fill="#ff9e2c"/>
+  <path d="M4.69 17.58 A15.5 15.5 0 0 1 6.19 12.96 L12.87 16.37 A8.0 8.0 0 0 0 12.10 18.75 Z" fill="#ff9e2c"/>
+  <path d="M9.04 9.04 A15.5 15.5 0 0 1 12.96 6.19 L16.37 12.87 A8.0 8.0 0 0 0 14.34 14.34 Z" fill="#ff9e2c"/>
+  <circle cx="20" cy="20" r="4.2" fill="none" stroke="#e8eaed" stroke-width="2"/>
+  <circle cx="20" cy="8.3" r="2.6" fill="#ffb454"/>
+</svg>

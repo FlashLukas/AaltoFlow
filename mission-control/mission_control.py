@@ -3,7 +3,8 @@ AaltoFlow · Mission Control
 ========================
 
 The launcher. It FINDS the suite's modules instead of listing them: every folder
-next to this one that contains a `module.toml` is a module (see
+modules/<category>/<folder> (and, for older installs, a folder next to this one)
+that contains a `module.toml` is a module (see
 suite-common/src/suite_common/modules.py). For each module it shows the name,
 description and icon from that file, and -- once the service runs -- the
 controls and measured variables the service reports through `describe`.
@@ -42,6 +43,7 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from suite_common import get_setting, set_setting
+from suite_common import hwlock
 from suite_common import (ENDPOINTS_ENV, PRODUCT, add_remote, default_root,
                           discover, endpoints_json, gui_args, probe,
                           remove_remote, service_args, set_ports, set_real,
@@ -56,7 +58,7 @@ from suite_common.settings_bundle import (ImportPlan, apply_import, default_bund
                                           export_bundle, read_bundle)
 from suite_common.settings_bundle import summary as settings_summary
 from suite_common.modules import (CATEGORIES, LOCAL_FILE, MANIFEST, ManifestError,
-                                  ModuleSpec, port_conflicts)
+                                  ModuleSpec, manifest_paths, port_conflicts)
 
 # All colours come from theme.COLORS (aliased C); set_theme() swaps the palette
 # IN PLACE at startup, so every C[...] read follows the active theme.
@@ -107,6 +109,8 @@ DEFAULT_PROFILES = [
     # Two VNA-FMR chips because the two magnet modules drive the SAME coils and
     # must not both run: mag2d is the always-on PI, mag2dcal the calibrated seek
     # that freezes and stabilises. Tick "Exclusive" to swap one for the other.
+    # (Forget it in real mode and the second one is refused anyway: its DAQ
+    # card's address is already claimed -- the address lock, hwlock.)
     dict(name="VNA-FMR",         members=["mag2d", "vna"]),
     dict(name="VNA-FMR (cal)",   members=["mag2dcal", "vna"]),
     # The same measurement in the DynaCool: the cryostat's magnet (ppms) and
@@ -334,7 +338,46 @@ def load_cached_describe(module_id: str) -> tuple[dict | None, float | None]:
 class Bridge(QtCore.QObject):
     """Background threads report here; Qt delivers it on the GUI thread."""
     probed = QtCore.Signal(dict)                  # id -> up?
+    held = QtCore.Signal(list)                    # hwlock.held(): addresses claimed on this PC
     described = QtCore.Signal(str, object)        # id, manifest or None
+
+
+# ───────────────────── physical addresses (hwlock) ─────────────────────────
+# Every REAL backend claims its instrument's physical address (GPIB0::6, COM5,
+# a USB serial number) with hwlock before it opens it, and a second service
+# asking for the same address -- from ANY module -- is refused with a line
+# "<address> is already in use by <module> (pid N) -- ...". The launcher does
+# not enforce anything itself: it only SHOWS who holds what, and turns that
+# refusal into a readable card state instead of "exited unexpectedly (code 1)".
+
+BUSY_MARK = "is already in use by"
+_BUSY_RE = re.compile(r"(\S+) is already in use by (.+?)(?: \(pid (\d+)\))?(?: --|$)")
+
+
+def holdings_for(spec: ModuleSpec, entries: list[dict], pid: int | None = None) -> list[dict]:
+    """The hwlock entries that belong to this card's service.
+
+    Matched by module key (what the backend passes to claim()), or by pid when
+    we know the service's pid. The pid alone is not enough: a venv's
+    python.exe is a small LAUNCHER that starts the real interpreter as a child
+    (gotcha #7), and it is the child that holds the lock -- so the pid we
+    started is usually not the pid in the lock file. A remote card holds
+    nothing on THIS PC: the lock is per PC.
+    """
+    if spec.remote:
+        return []
+    key = spec.key.lower()
+    return [e for e in entries
+            if str(e.get("module", "")).lower() == key or (pid and e.get("pid") == pid)]
+
+
+def parse_busy(line: str) -> dict | None:
+    """Pick apart hwlock's refusal: {"address", "holder", "pid"}, or None."""
+    m = _BUSY_RE.search(line)
+    if not m:
+        return None
+    return {"address": m.group(1), "holder": m.group(2).strip(),
+            "pid": int(m.group(3)) if m.group(3) else None}
 
 
 class Prober:
@@ -390,8 +433,17 @@ class Prober:
         with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
             ups = list(pool.map(lambda t: probe(t[1], t[2], 0.3), targets))
         result = {t[0]: up for t, up in zip(targets, ups)}
+        # Which physical addresses are claimed on this PC right now. Read here,
+        # off the GUI thread, with the same rhythm as the port probes: it opens
+        # one small file per address, which is quick, but a slow disk (or a
+        # virus scanner) must never freeze the window.
+        try:
+            held = hwlock.held()
+        except OSError:
+            held = []
         if not self._stop.is_set():
             self.bridge.probed.emit(result)
+            self.bridge.held.emit(held)
 
     def _loop(self):
         while not self._stop.wait(PROBE_PERIOD_S):
@@ -1164,8 +1216,15 @@ class ModuleCard(QtWidgets.QFrame):
         self.name = QtWidgets.QLabel(); self.name.setObjectName("name")
         self.desc = QtWidgets.QLabel(); self.desc.setObjectName("meta")
         self.meta = QtWidgets.QLabel(); self.meta.setObjectName("meta")
+        # The physical address(es) this service holds ("holds GPIB0::6"), or,
+        # in red, why it could not start ("address busy: ... held by clMag").
+        self.hw = QtWidgets.QLabel(); self.hw.setObjectName("meta")
+        self.hw.setWordWrap(True); self.hw.hide()
         namebox.addWidget(self.name); namebox.addWidget(self.desc); namebox.addWidget(self.meta)
+        namebox.addWidget(self.hw)
         row.addLayout(namebox, 1)
+        self.holdings: list[dict] = []      # hwlock entries of this service
+        self.busy: dict | None = None       # parse_busy() of the last refusal
 
         self.real_check = QtWidgets.QCheckBox("real")
         self.real_check.setToolTip("On: start the service with --real (drives the instrument).\n"
@@ -1287,8 +1346,21 @@ class ModuleCard(QtWidgets.QFrame):
     def _pipe(self, proc: QtCore.QProcess, label: str):
         text = bytes(proc.readAllStandardOutput()).decode(errors="replace")
         for line in text.splitlines():
-            if line.strip():
+            if not line.strip():
+                continue
+            if label == "service" and BUSY_MARK in line:
+                self._address_busy(line.strip())
+            else:
                 self.win.log(f"[{self.spec.id}·{label}] {line.rstrip()}")
+
+    def _address_busy(self, line: str):
+        """The service's backend was refused its instrument: another service
+        already holds that physical address. Say so plainly, in red, in the log
+        and on the card -- the traceback around it is noise by comparison."""
+        self.busy = parse_busy(line) or {"address": "?", "holder": "another service",
+                                         "pid": None}
+        self.win.log(f"[{self.spec.id}] ADDRESS BUSY -- {line}", "error")
+        self.show_hw()
 
     def start_service(self):
         if not self.spec.can_start:
@@ -1298,6 +1370,8 @@ class ModuleCard(QtWidgets.QFrame):
                          f"-- not starting a second one.", "warn")
             return
         self._stopping = False
+        self.busy = None                      # a new attempt: forget the last refusal
+        self.show_hw()
         self.win.log(f"[{self.spec.id}] starting in {'REAL' if self.spec.real else 'SIM'} mode "
                      f"on {self.spec.cmd}/{self.spec.pub}")
         self.service_proc = self._spawn(self.spec.service, service_args(self.spec),
@@ -1307,8 +1381,15 @@ class ModuleCard(QtWidgets.QFrame):
         self.win.prober.probe_now()
 
     def _service_finished(self, code, _status):
+        if self.service_proc is not None:
+            self._pipe(self.service_proc, "service")     # the last lines, if any are left
         if self._stopping:
             self.win.log(f"[{self.spec.id}] service stopped.")
+        elif self.busy is not None:
+            b = self.busy
+            self.win.log(f"[{self.spec.id}] NOT started: {b['address']} is held by "
+                         f"{b['holder']}. Stop that service first, then press Service again.",
+                         "error")
         elif code not in (0, None):
             self.win.log(f"[{self.spec.id}] service exited unexpectedly (code {code}).", "warn")
         else:
@@ -1426,16 +1507,51 @@ class ModuleCard(QtWidgets.QFrame):
 
     # ---- status + variables -----------------------------------------------
 
+    def set_holdings(self, entries: list[dict]):
+        """This PC's hwlock.held() list, from the prober: keep ours, show it."""
+        pid = int(self.service_proc.processId() or 0) if self.owns_service else None
+        mine = holdings_for(self.spec, entries, pid)
+        if mine != self.holdings:
+            self.holdings = mine
+            self.show_hw()
+
+    def show_hw(self):
+        """Redraw the address line (and the status lamp, which depends on it)."""
+        if self.busy is not None:
+            b = self.busy
+            who = b["holder"] + (f" (pid {b['pid']})" if b.get("pid") else "")
+            self.hw.setText(f"address busy: {b['address']} held by {who}")
+            self.hw.setStyleSheet(f"color: {C['danger']};")
+            self.hw.setToolTip("Another service already drives this instrument (same physical "
+                               "address). One instrument, one service: stop that one first.")
+            self.hw.show()
+        elif self.holdings:
+            addrs = ", ".join(dict.fromkeys(str(e.get("normalized") or e.get("address"))
+                                            for e in self.holdings))
+            self.hw.setText(f"holds {addrs}")
+            self.hw.setStyleSheet("")
+            self.hw.setToolTip("\n".join(
+                f"{e.get('normalized')} (as '{e.get('address')}') -- pid {e.get('pid')}, "
+                f"since {e.get('since')}" for e in self.holdings)
+                + "\nNo other service on this PC can open these while this one runs.")
+            self.hw.show()
+        else:
+            self.hw.hide()
+        self.set_up(self.up)
+
     def set_up(self, up: bool):
         was = self.up
         self.up = up
         if up and self.owns_service:
+            self.busy = None                  # our own service is running after all
             self.status_dot.setPixmap(dot(C["ok"])); self.status_txt.setText("running")
         elif up:
             self.status_dot.setPixmap(dot(C["accent"]))
             self.status_txt.setText("reachable" if self.spec.remote else "up (external)")
         elif self.owns_service:
             self.status_dot.setPixmap(dot(C["accent_dim"])); self.status_txt.setText("starting…")
+        elif self.busy is not None:
+            self.status_dot.setPixmap(dot(C["danger"])); self.status_txt.setText("address busy")
         else:
             self.status_dot.setPixmap(dot(C["muted"])); self.status_txt.setText("down")
         self.btn_service.setEnabled(self.spec.can_start and not up and not self.owns_service)
@@ -1510,6 +1626,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.bridge = Bridge()
         self.bridge.probed.connect(self._on_probed)
+        self.bridge.held.connect(self._on_held)
         self.bridge.described.connect(self._on_described)
         self.prober = Prober(self.bridge)
         self.suite_proc: QtCore.QProcess | None = None   # scan-core, opened at most once
@@ -1652,7 +1769,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _folder_signature(self):
         """Cheap fingerprint of everything discovery depends on."""
         parts = []
-        for path in sorted(ROOT.glob(f"*/{MANIFEST}")):
+        # the SAME search discovery does (modules/<category>/<folder> and the
+        # old flat place), so a module added anywhere discovery looks is seen
+        for path in manifest_paths(ROOT):
             try:
                 parts.append((str(path), path.stat().st_mtime_ns))
             except OSError:
@@ -1724,6 +1843,10 @@ class MainWindow(QtWidgets.QMainWindow):
             card = self.cards.get(mid)
             if card is not None:
                 card.set_up(up)
+
+    def _on_held(self, entries: list):
+        for card in self.cards.values():
+            card.set_holdings(entries)
 
     def _on_described(self, mid: str, manifest):
         card = self.cards.get(mid)

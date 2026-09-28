@@ -8,10 +8,10 @@ worse than having none. This does it reproducibly instead.
 Run it from inside the project whose panel you want, because it imports that
 project's package from that project's environment:
 
-    cd clMag-control
-    uv run --extra gui python ../tools/render_panels.py clMag
+    cd modules/field/clMag-control
+    uv run --extra gui python ../../../tools/render_panels.py clMag
 
-    cd ../mission-control
+    cd ../../../mission-control
     uv run python ../tools/render_panels.py mission-control
 
 Or refresh everything at once from the repo root:

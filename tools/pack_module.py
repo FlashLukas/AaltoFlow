@@ -5,6 +5,12 @@ Control's "Add module..." installs it from the zip. It holds the module
 folders exactly as COMMITTED (git archive HEAD -- never the working tree, which
 has .venv, caches and this rig's calibrations), plus a pack.json label.
 
+Inside the pack the module folders are FLAT (kim-control/, not
+modules/motion/kim-control/), as they were before the suite sorted its modules
+into category folders on 2026-09-27: an older launcher can still install a new
+pack, and a new launcher puts each module into modules/<category>/ itself, from
+the category in its module.toml.
+
 With --wheels the pack also carries every Python package the modules need, as
 wheel files, so the install needs NO internet -- the answer for a lab subnet
 where PyPI is blocked. The versions are the ones pinned in each module's
@@ -38,7 +44,7 @@ sys.path.insert(0, str(ROOT / "suite-common" / "src"))
 
 from suite_common.catalog import (find_uv, module_version, project_extras,  # noqa: E402
                                   requirements_name, write_pack_json)
-from suite_common.modules import discover_local                             # noqa: E402
+from suite_common.modules import discover_local, rel_to_root                # noqa: E402
 
 
 def git(*args: str) -> bytes:
@@ -56,10 +62,22 @@ def venv_python_version(folder: Path) -> str | None:
 
 
 def export_committed(folder: str, dest: Path) -> None:
-    """The folder as it is in HEAD, unpacked into dest/<folder>."""
+    """The folder as it is in HEAD, unpacked FLAT into dest/<leaf name>.
+
+    `folder` is the path relative to the repo root, e.g.
+    "modules/motion/kim-control"; it lands as dest/kim-control (see the top).
+    """
     data = git("archive", "--format=tar", "HEAD", folder)
+    prefix = folder.rsplit("/", 1)[0] + "/" if "/" in folder else ""
     with tarfile.open(fileobj=io.BytesIO(data)) as tf:
-        tf.extractall(dest, filter="data")
+        members = []
+        for info in tf.getmembers():
+            if prefix and (not info.name.startswith(prefix)
+                           or not info.name[len(prefix):].strip("/")):
+                continue                      # the parent folders themselves
+            info.name = info.name[len(prefix):]
+            members.append(info)
+        tf.extractall(dest, members=members, filter="data")
 
 
 def fetch_wheels(uv: str, folder: Path, key: str, wheels: Path, python: str) -> int:
@@ -103,7 +121,8 @@ def make_pack(keys: list[str], wheels: bool = False, python: str | None = None,
     chosen = [mods[k] for k in keys]
 
     commit = git("rev-parse", "--short", "HEAD").decode().strip()
-    dirty = git("status", "--porcelain", "--", *[m.dir.name for m in chosen]).decode().strip()
+    rels = {m.key: rel_to_root(ROOT, m.dir) for m in chosen}   # modules/<cat>/<folder>
+    dirty = git("status", "--porcelain", "--", *rels.values()).decode().strip()
     if dirty:
         say("note: uncommitted changes in these folders are NOT packed "
             "(the pack is built from the last commit):\n" + dirty)
@@ -122,8 +141,8 @@ def make_pack(keys: list[str], wheels: bool = False, python: str | None = None,
     with tempfile.TemporaryDirectory(prefix="aaltoflow_pack_") as tmp:
         stage = Path(tmp)
         for m in chosen:
-            export_committed(m.dir.name, stage)
-            say(f"{m.key}: {m.dir.name} @ {commit}")
+            export_committed(rels[m.key], stage)
+            say(f"{m.key}: {rels[m.key]} @ {commit}")
             if wheels:
                 n = fetch_wheels(uv, stage / m.dir.name, m.key, stage / "wheels", python)
                 say(f"{m.key}: {n} new wheel files for Python {python}")

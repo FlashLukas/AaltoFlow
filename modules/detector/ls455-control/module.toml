@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "ls455"
+name = "Gaussmeter"
+description = "Lake Shore 455 DSP gaussmeter, single-axis (axial) Hall probe, readings in mT"
+category = "detector"
+tags = ["gaussmeter", "Hall probe", "magnetic field", "Lake Shore", "GPIB", "RS-232"]
+icon = "icon.svg"
+order = 310
+
+[ports]
+cmd = 5615
+pub = 5616
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

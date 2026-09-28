@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "superk"
+name = "Supercontinuum laser"
+description = "NKT SuperK EXTREME with SuperK SELECT tunable filters"
+category = "source"
+tags = ["laser", "supercontinuum", "AOTF", "wavelength", "NKT"]
+icon = "icon.svg"
+order = 290
+
+[ports]
+cmd = 5611
+pub = 5612
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []

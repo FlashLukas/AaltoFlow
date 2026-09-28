@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Two-channel RF synthesizer: a small chassis with two SMA outputs (A, B)
+       and two sine waves 90 degrees apart (the quadrature pair it makes).
+       #ff9e2c accent (channel A), #e8eaed text (channel B), #5a626e metal. -->
+  <rect x="4" y="9" width="32" height="24" rx="4" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <path d="M8 17 C10 12.5 12 12.5 14 17 S18 21.5 20 17 S24 12.5 26 17" fill="none"
+        stroke="#ff9e2c" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M8 21 C10 25.5 12 25.5 14 21 S18 16.5 20 21 S24 25.5 26 21" fill="none"
+        stroke="#e8eaed" stroke-width="1.8" stroke-linecap="round" opacity="0.9"/>
+  <circle cx="31" cy="15.5" r="2.4" fill="#ffb454"/>
+  <circle cx="31" cy="23.5" r="2.4" fill="none" stroke="#e8eaed" stroke-width="1.6"/>
+</svg>

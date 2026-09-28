@@ -1,0 +1,33 @@
+[project]
+name = "kepco-control"
+version = "0.1.0"
+license = "MIT"
+description = "Kepco BOP 20-10 bipolar operational power supply control (GPIB/SCPI), simulation first"
+requires-python = ">=3.11"
+# Runtime dependencies. Only pyzmq: the package imports and the simulator runs
+# on ANY machine. The real backend's dependency is the optional extra `real`.
+dependencies = [
+    "pyzmq>=25",    # the control service + client (localhost / Ethernet)
+]
+
+# Optional extras. Name EVERY extra you want on each sync (gotcha #29):
+#   uv sync --extra gui --extra real
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+]
+real = [
+    "pyvisa>=1.13",  # GPIB via a VISA runtime (NI-VISA / Keysight IO Libraries)
+]
+
+# Importable code lives under src/ -- the "src layout".
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Development-only tools (installed by `uv sync`, not shipped in an .exe).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
