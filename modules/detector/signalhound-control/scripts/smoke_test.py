@@ -3,7 +3,8 @@
     uv run scripts/smoke_test.py
 
 It measures the simulated generator (spectrum mode) and the simulated filter
-(tracking mode, against a thru) and compares with what the scene says.
+(two TG sweeps -- a thru and the filter -- as the shsna module would ask for
+them) and compares with what the scene says.
 
 Output is ASCII only: mission-control captures stdout through a pipe, where
 anything outside cp1252 raises (suite gotcha #14).
@@ -47,14 +48,17 @@ def main() -> int:
           f"{t['peak_dBm']:.2f} dBm (set {sc.tone_dBm:g}), floor {t['floor_dBm']:.1f} dBm, "
           f"{t['points']} bins  {'ok' if good else 'FAIL'}")
 
-    # 2. tracking: a thru, then the filter; transmission = the filter alone
-    sa.set_tg(True)
-    sa.set_scene("dut_inserted", False)
-    sa.take_reference(); _wait(sa)
-    sa.set_scene("dut_inserted", True)
-    sa.acquire(); _wait(sa)
-    tx = sa.get_trace("sample", "transmission")
-    f, y = tx["freqs_Hz"], tx["transmission"]
+    # 2. TG sweeps (the owner side of shsna): a thru, then the filter; the
+    #    difference is the filter alone
+    def tg(dut):
+        sa.set_scene("dut_inserted", dut)
+        sa.tg_sweep_acquire(0.9e9, 1.1e9)
+        while sa.status().tg_acquiring:
+            sa.step()
+        return sa.get_tg_trace()
+    thru, dut = tg(False), tg(True)
+    f = dut["start_hz"] + dut["bin_hz"] * np.arange(dut["points"])
+    y = dut["db"] - thru["db"]
     at = lambda hz: float(y[np.argmin(np.abs(f - hz))])          # noqa: E731
     centre = at(sc.dut_center_Hz)
     edge = at(sc.dut_center_Hz + sc.dut_bandwidth_Hz / 2)

@@ -23,7 +23,9 @@ MODELS = {
 }
 MODEL_ALIASES = {"SA44": "SA44B", "SA124A": "SA124B"}
 
-#: the USB-TG44A tracking generator: frequency range and output level range
+#: the USB-TG44A tracking generator: frequency range and output level range,
+#: from its data sheet. The TG verbs (tg_cw, tg_sweep_acquire) REFUSE values
+#: outside them. # VERIFY both on the TG44A (the CW level with a power meter).
 TG_RANGE_HZ = (10.0, 4.4e9)
 TG_LEVEL_DBM = (-30.0, -10.0)
 
@@ -74,7 +76,15 @@ class Grid:
 @dataclass(frozen=True)
 class SweepSettings:
     """Everything that makes one sweep what it is. Frozen, so the brain can
-    compare "what is configured" with "what is asked for" with a plain ==."""
+    compare "what is configured" with "what is asked for" with a plain ==.
+
+    Two kinds of sweep use it (since 2026-09-28, when the tracking-generator
+    MEASUREMENT moved to the shsna module):
+      * spectrum sweeps -- `from_config`: the settings in cfg.sweep, TG off.
+      * TG sweeps       -- `for_tg_sweep`: what a client module (shsna) asked
+                           for; this module runs them as the TG's owner.
+    The tg_* fields stay in this one class because the backends' `configure`
+    reads them to decide which mode to initiate."""
 
     center_Hz: float
     span_Hz: float
@@ -94,11 +104,34 @@ class SweepSettings:
 
     @classmethod
     def from_config(cls, cfg) -> "SweepSettings":
-        s, t, h = cfg.sweep, cfg.tracking, cfg.hardware
+        """The spectrum sweep the config asks for. The TG fields are fixed
+        placeholders (not NaN: NaN != NaN would make two identical settings
+        compare unequal and the analyser would be reconfigured every sweep)."""
+        s, h = cfg.sweep, cfg.hardware
         return cls(float(s.center_Hz), float(s.span_Hz), float(s.ref_level_dBm),
                    float(s.rbw_Hz), float(s.vbw_Hz), bool(s.reject), str(s.detector),
-                   bool(t.on), float(t.level_dBm), int(t.points),
-                   bool(t.high_dynamic_range), bool(t.passive_device),
+                   False, TG_LEVEL_DBM[1], 0, True, True,
+                   int(h.atten), int(h.gain), bool(h.preamp))
+
+    @classmethod
+    def for_tg_sweep(cls, cfg, start_Hz: float, stop_Hz: float, level_dBm: float | None,
+                     rbw_Hz: float, points: int) -> "SweepSettings":
+        """A tracking-generator sweep from start to stop.
+
+        MEASURED on the TG44A (2026-09-28): a TG sweep IGNORES the level set
+        with saSetTg (-30 and -20 dBm gave identical traces) and returns the
+        transmission in dB relative to the TG's calibrated output, not dBm.
+        So `level_dBm` is optional; None puts the TG44A's maximum in the (unused)
+        field. The reference level is 10 dB above that level (30 dB for an
+        amplifying device); # VERIFY whether TG sweep mode uses it at all."""
+        h, lim = cfg.hardware, cfg.limits
+        lvl = TG_LEVEL_DBM[1] if level_dBm is None else float(level_dBm)
+        head = 10.0 if h.tg_passive_device else 30.0
+        ref = min(lim.ref_max_dBm, lvl + head)
+        vbw = min(float(cfg.sweep.vbw_Hz), float(rbw_Hz))
+        return cls((start_Hz + stop_Hz) / 2, stop_Hz - start_Hz, ref, float(rbw_Hz), vbw,
+                   bool(cfg.sweep.reject), "average", True, lvl, int(points),
+                   bool(h.tg_high_dynamic_range), bool(h.tg_passive_device),
                    int(h.atten), int(h.gain), bool(h.preamp))
 
 
@@ -106,7 +139,7 @@ def sim_grid(s: SweepSettings, max_bins: int) -> Grid:
     """The grid the SIMULATED analyser uses.
 
     Spectrum mode: bins of RBW/2 (two bins per resolution bandwidth, so a tone
-    is never lost between bins), coarser only past `max_bins`. Tracking mode:
+    is never lost between bins), coarser only past `max_bins`. TG sweep:
     the requested point count, exactly. The real analyser chooses its own --
     the brain always uses whatever the backend reports.
     """
@@ -130,12 +163,12 @@ def estimate_sweep_time_s(s: SweepSettings, points: int) -> float:
 
     Spectrum mode: the SA44B/SA124B sweep ~1 GHz/s with a wide RBW; a narrow
     RBW needs a longer FFT per step, so the rate falls roughly as RBW squared.
-    Tracking mode: the TG steps point by point, a few ms each (more with high
-    dynamic range, which uses a narrower bandwidth). Capped at 10 minutes.
+    TG sweep: MEASURED on the SA44B + TG44A (2026-09-28): ~0.2 s + 1.3 ms per
+    point (high dynamic range; # VERIFY without it). Capped at 10 minutes.
     Must NOT talk to the instrument: status() calls it ten times a second.
     """
     if s.tg_on:
-        t = 0.05 + points * (2.0e-3 if s.tg_high_dynamic_range else 0.5e-3)
+        t = 0.2 + points * 1.3e-3
     else:
         rate = 1e9 * min(1.0, (s.rbw_Hz / 100e3) ** 2)       # Hz of span per second
         t = 0.02 + s.span_Hz / max(rate, 1.0)

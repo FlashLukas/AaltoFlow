@@ -4,7 +4,7 @@
 [module]
 key = "signalhound"
 name = "Spectrum analyser (Signal Hound)"
-description = "Signal Hound SA44B / SA124B spectrum analyser with USB-TG44A tracking generator: spectra, thru-normalised transmission"
+description = "Signal Hound SA44B / SA124B spectrum analyser; owner of the USB-TG44A tracking generator, which the shsg (CW) and shsna (TG sweeps) modules use through it"
 category = "detector"
 tags = ["spectrum analyser", "tracking generator", "RF", "Signal Hound"]
 icon = "icon.svg"

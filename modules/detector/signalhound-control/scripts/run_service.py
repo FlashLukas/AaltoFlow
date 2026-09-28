@@ -22,9 +22,11 @@ The service exposes the analyser over ZeroMQ:
 Start-up writes nothing: the analyser is opened and asked what it is (model,
 serial, TG present) and left idle -- no saved setting is sent until a setter,
 "continuous on" or an acquire asks for a sweep (acquisition.sweep_on_start =
-true restores sweeping at start). The tracking generator is never switched on
-at start, and the analyser is aborted and closed (TG output off) on shutdown,
-Ctrl+C or a crash.
+true restores sweeping at start). Nothing is sent to the tracking generator at
+start (its state is reported as "unknown"); it is driven by the client modules
+shsg (CW) and shsna (TG sweeps) through this service. The TG44A has no off, so
+on shutdown or Ctrl+C it is PARKED (hardware.tg_park_hz / tg_park_dbm) before
+the analyser is closed.
 
 Output is ASCII only: the launcher reads it through a pipe (suite gotcha #14).
 """

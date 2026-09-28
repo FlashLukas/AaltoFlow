@@ -377,3 +377,44 @@ class SaApiAnalyzer:
         # saGetSweep has not been called yet, so there is nothing to throw away
         # on the instrument; the next configure aborts anyway.
         self._pending = False
+
+    # ---- the TG as a CW source (owner-side TG contract, added 2026-09-28) -----
+    # This module is the only owner of the analyser AND its TG44A; the shsg
+    # module (a CW source) and shsna (TG sweeps) ask for the TG over the wire.
+    # A TG SWEEP needs nothing new here: it is `configure` with tg_on True.
+    # MEASURED on the SA44B + TG44A (lab PC, 2026-09-28, sa_api 3.2.4):
+    #   * saSetTg takes ~0.03 s, the level is honoured (-30 dBm read -50.04
+    #     through a 20.0 dB pad) and a new frequency moves the tone.
+    #   * a CW stays on while spectrum sweeps run (hardware.tg_cw_during_sweep).
+    #   * there is NO "off": saAbort, saCloseDevice and even exiting the
+    #     program leave the TG emitting its last frequency and level; the brain
+    #     PARKS it (hardware.tg_park_hz / tg_park_dbm) instead.
+    #   * saGetTgFreqAmpl only echoes what THIS handle set (0 Hz / 0 dBm after
+    #     attach while a 1 GHz tone was on), so it cannot adopt a left-over
+    #     state: start-up reports the TG as "unknown".
+    #   * a TG sweep ignores the saSetTg level and returns dB relative to the
+    #     TG's calibrated output; at most 1001 points (the API clamps silently).
+
+    def set_tg_cw(self, freq_hz: float, level_dbm: float) -> None:
+        """TG output: a CW tone at freq_hz, level_dbm.
+
+        saSetTg is documented as allowed only while the TG is NOT configured
+        and initiated for TG sweeps; the brain calls it only after a spectrum
+        configure or an `idle` (saAbort), never in TG sweep mode."""
+        if self._h is None:
+            raise SaApiError("analyser is not open")
+        if not self._tg:
+            raise SaApiError("no tracking generator attached")
+        # VERIFY: the level accuracy over the whole -30 ... -10 dBm and
+        # 10 Hz ... 4.4 GHz (measured so far: -30 dBm, one frequency).
+        self._call("saSetTg", self._h, float(freq_hz), float(level_dbm))
+
+    def idle(self) -> None:
+        """saAbort: stop whatever is initiated (a TG sweep must be stopped
+        before saSetTg is allowed). Does NOT silence the TG (measured). Leaves
+        the analyser unconfigured -- the brain reconfigures before its next
+        sweep (spectrum mode re-initiates in 0.2 - 0.4 s, measured)."""
+        if self._h is None or self._dll is None:
+            return
+        self._pending = False
+        self._call("saAbort", self._h)

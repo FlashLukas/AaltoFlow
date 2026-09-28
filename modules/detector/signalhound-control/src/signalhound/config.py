@@ -9,10 +9,12 @@ ratios in dB, times in s.
 The module drives a Signal Hound SA44B or SA124B spectrum analyser (with an
 optional USB-TG44A tracking generator) through Signal Hound's sa_api.dll
 (`--real`), or SIMULATES one. Next to the usual instrument groups (sweep,
-tracking, acquisition, hardware, limits) there is:
+acquisition, hardware, limits) there is:
   * `scene` -- the PRETEND world on the analyser's input, used only by the
                simulator: a signal generator with harmonics (spectrum mode) and
-               a band-pass filter behind a cable (tracking-generator mode).
+               a band-pass filter behind a cable (what the tracking generator
+               sees, for the TG sweeps and the CW this module runs for its
+               client modules shsg / shsna).
                They are real settings, changeable live, because "what does a
                narrower filter look like on the analyser" is a fair question to
                ask a simulator.
@@ -29,8 +31,7 @@ class Sweep:
     """What the analyser sweeps. Every one is changeable live over the wire.
 
     The analyser -- not we -- decides how many frequency bins a sweep has: it
-    follows from span and RBW (spectrum mode) or from `tracking.points`
-    (tracking-generator mode). The grid actually in use is in status
+    follows from span and RBW. The grid actually in use is in status
     (`points`, `bin_Hz`) and comes from `get_frequencies`.
     """
 
@@ -42,28 +43,6 @@ class Sweep:
     reject: bool = True               # software image rejection (right for steady signals)
     detector: str = "average"         # "average" or "peak" (the API's AVERAGE / MIN_MAX max)
     averages: int = 1                 # sweeps averaged per acquisition (in POWER, not in dB)
-
-
-@dataclass
-class Tracking:
-    """The USB-TG44A tracking generator: a source that follows the sweep, so
-    the analyser measures the TRANSMISSION of whatever sits between the two.
-
-    on          -- sweep with the TG tracking (the API's TG sweep mode). Off =
-                   an ordinary spectrum sweep with the TG idle.
-    level_dBm   -- TG output level; the TG44A covers -30 ... -10 dBm.
-    points      -- requested bins per TG sweep. The API treats it as a
-                   suggestion (within a factor of 2); the grid in use is reported.
-    high_dynamic_range, passive_device -- the two flags of the API's
-                   saConfigTgSweep; both True gives the most dynamic range. Set
-                   passive_device False when the device under test AMPLIFIES.
-    """
-
-    on: bool = False
-    level_dBm: float = -20.0
-    points: int = 401
-    high_dynamic_range: bool = True
-    passive_device: bool = True
 
 
 @dataclass
@@ -89,10 +68,11 @@ class Scene:
 
     Spectrum mode: a signal generator (`tone_*`) with 2nd and 3rd harmonics,
     in front of a noise floor set by the analyser's DANL and the RBW.
-    Tracking mode: TG -> cable -> band-pass filter (the device under test) ->
-    analyser. `dut_inserted` False is the THRU: what a reference is taken with.
-    The TG's own output is not flat (`tg_ripple_dB`) -- which is exactly why
-    transmission is measured against a stored thru.
+    The tracking generator's path: TG -> cable -> band-pass filter (the device
+    under test) -> analyser. A TG sweep (for shsna) measures along it; a TG CW
+    (for shsg) shows up on the spectrum through it. `dut_inserted` False is the
+    THRU. The TG's own output is not flat (`tg_ripple_dB`) -- which is exactly
+    why shsna measures transmission against a stored thru.
     """
 
     tone_on: bool = True
@@ -122,10 +102,29 @@ class Hardware:
     dll_path    -- "" = load sa_api.dll from the PATH / the working directory;
                    otherwise the full path to it (Signal Hound's SDK folder).
     attach_tg   -- look for a USB-TG44A when opening. None found is not an
-                   error: tracking mode is then refused.
+                   error: the TG verbs (tg_cw, tg_sweep_acquire) are then refused.
     atten, gain -- -1 = automatic (the API chooses from the reference level;
                    Signal Hound recommends it). Otherwise atten 0..3, gain 0..2.
     preamp      -- the input pre-amplifier (only matters with manual gain).
+
+    The tracking generator. This module is its ONLY owner (it can only be
+    driven through the analyser's API handle); the client modules shsg (CW
+    source) and shsna (scalar network analyser) ask for it over the wire.
+    tg_cw_during_sweep -- can the TG keep a CW on while the analyser sweeps a
+                   spectrum? True (MEASURED on the SA44B + TG44A, 2026-09-28):
+                   a CW and spectrum sweeps coexist. False: a CW PAUSES
+                   spectrum sweeping (status `spectrum_paused` says so).
+    tg_park_hz, tg_park_dbm -- where the TG is PARKED when nobody wants it:
+                   the TG44A has NO "off" (measured 2026-09-28: saAbort, closing
+                   the device, even exiting the program leave it emitting its
+                   last frequency and level), so "CW off" and shutdown set it
+                   HERE instead (Lukas's decision). The default is the lowest
+                   level at a frequency far below anything measured.
+    tg_sweep_points -- bins of a TG sweep when the client does not ask for a
+                   number (the API allows at most 1001: limits.tg_points_max).
+    tg_high_dynamic_range, tg_passive_device -- the two flags of the API's
+                   saConfigTgSweep; both True gives the most dynamic range. Set
+                   tg_passive_device False when the device under test AMPLIFIES.
     """
 
     model: str = "auto"
@@ -135,14 +134,21 @@ class Hardware:
     atten: int = -1
     gain: int = -1
     preamp: bool = False
+    tg_cw_during_sweep: bool = True   # measured 2026-09-28 (see above)
+    tg_park_hz: float = 10e3
+    tg_park_dbm: float = -30.0
+    tg_sweep_points: int = 401
+    tg_high_dynamic_range: bool = True
+    tg_passive_device: bool = True
 
 
 @dataclass
 class Limits:
     """Hard envelope. Setpoints outside it are clamped and the clamp is
     announced as a warn event. The frequency range is further narrowed by the
-    MODEL that is connected (SA44B: 1 Hz - 4.4 GHz, SA124B: 100 kHz - 12.4 GHz)
-    and, in tracking mode, by the TG44A (10 Hz - 4.4 GHz)."""
+    MODEL that is connected (SA44B: 1 Hz - 4.4 GHz, SA124B: 100 kHz - 12.4 GHz).
+    The TG ones are REFUSALS, not clamps: a client asking the TG for a level or
+    frequency it cannot make gets an error, not a quietly different signal."""
 
     freq_min_Hz: float = 1.0
     freq_max_Hz: float = 13e9
@@ -156,7 +162,7 @@ class Limits:
     tg_level_min_dBm: float = -30.0
     tg_level_max_dBm: float = -10.0
     tg_points_min: int = 11
-    tg_points_max: int = 20001
+    tg_points_max: int = 1001         # the API silently clamps a TG sweep to 1001 (measured)
     max_bins: int = 100001            # simulator: coarser bins beyond this (keeps traces sane)
 
 
@@ -172,7 +178,6 @@ class Config:
     """The whole configuration, one object to pass around."""
 
     sweep: Sweep = None
-    tracking: Tracking = None
     acquisition: Acquisition = None
     scene: Scene = None
     hardware: Hardware = None
@@ -182,7 +187,6 @@ class Config:
     def __post_init__(self):
         # dataclasses can't use a mutable default directly, so fill in here.
         self.sweep = self.sweep or Sweep()
-        self.tracking = self.tracking or Tracking()
         self.acquisition = self.acquisition or Acquisition()
         self.scene = self.scene or Scene()
         self.hardware = self.hardware or Hardware()
@@ -193,7 +197,6 @@ class Config:
 
     _GROUPS = {
         "sweep": Sweep,
-        "tracking": Tracking,
         "acquisition": Acquisition,
         "scene": Scene,
         "hardware": Hardware,

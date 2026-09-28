@@ -48,7 +48,8 @@ def test_info_and_config(service_and_client):
     info = cli.start()
     assert info["simulated"] is True and info["model"] == "SA44B"
     assert info["freq_max_Hz"] == 4.4e9 and info["tg_attached"] is True
-    assert cli.cfg.sweep.span_Hz == 20e6 and cli.cfg.tracking.on is False
+    assert cli.cfg.sweep.span_Hz == 20e6 and not hasattr(cli.cfg, "tracking")
+    assert info["tg_level_min_dBm"] == -30.0 and info["tg_points_max"] == 1001
 
 
 def test_service_start_leaves_the_analyser_unconfigured(service_and_client):
@@ -107,32 +108,9 @@ def test_refusals_are_errors_not_crashes(service_and_client):
         cli.set_detector("quasi-peak")
     assert cli._cmd({"cmd": "set_center"})["ok"] is False          # missing argument
     assert cli._cmd({"cmd": "get_trace", "which": "later"})["ok"] is False
-    assert cli._cmd({"cmd": "take_reference"})["ok"] is False      # TG is off
+    assert cli._cmd({"cmd": "take_reference"})["ok"] is False      # moved to shsna
     assert cli._cmd({"cmd": "nonsense"})["ok"] is False
     assert cli._cmd({"cmd": "status"})["ok"] is True               # the loop survived
-
-
-def test_thru_reference_and_transmission_round_trip(service_and_client):
-    svc, cli = service_and_client
-    cli.set_tg(True)
-    _wait(lambda s: s.tg_on, cli)
-    cli.set_scene("dut_inserted", False)
-    ref = cli.take_reference_blocking(timeout_s=10)
-    assert ref["tg_on"] is True and ref["trace"].shape == (401,)
-    s = _wait(lambda s: s.reference.get("present") is True, cli)
-    assert s.reference["acq_id"] == ref["acq_id"]
-    cli.set_scene("dut_inserted", True)
-    cli.acquire_blocking(timeout_s=10)
-    tx = cli.get_trace("sample", "transmission")
-    local = svc.signalhound.get_trace("sample", "transmission")
-    assert "transmission" in tx and "trace" not in tx
-    assert np.array_equal(tx["transmission"], local["transmission"])
-    i = np.argmin(np.abs(tx["freqs_Hz"] - 1e9))
-    assert tx["transmission"][i] == pytest.approx(-1.5, abs=0.3)
-    cli.clear_reference()
-    assert _wait(lambda s: s.reference.get("present") is False, cli).reference["present"] is False
-    with pytest.raises(ValueError, match="thru reference"):
-        cli.get_trace("sample", "transmission")
 
 
 def test_bool_args_are_parsed_not_cast(service_and_client):

@@ -12,16 +12,14 @@ thread on a Qt signal.
 
 Signature widget: HoundScope -- a miniature analyser screen. On top, a ruler
 of everything the connected model can reach, with the swept window lit (and
-the tracking generator's range under it); below, the latest trace drawn like
-phosphor on a 10 dB/div graticule hung from the reference level, with the
-sweep beam running across as the analyser sweeps. With the TG on, a marker
-rides the beam: the source that tracks the receiver.
+the tracking generator's range under it, a diamond where its CW sits); below,
+the latest trace drawn like phosphor on a 10 dB/div graticule hung from the
+reference level, with the sweep beam running across as the analyser sweeps.
 
-The trace view has two modes, both against the BRAIN's thru reference (so the
-GUI, the console and a scan mean the same reference):
-  Spectrum (dBm)              power per bin, as measured
-  Transmission vs thru (dB)   tracking mode: trace - thru; the TG's flatness
-                              and the cables cancel, the device remains
+THE TRACKING GENERATOR is SHOWN here, never driven (Lukas, 2026-09-28): the
+shsg module uses it as a CW source and shsna for TG sweeps, both through this
+service. The TRACKING GENERATOR card says what it is doing -- unknown, parked,
+a CW, or a TG sweep for shsna (spectrum sweeping then pauses).
 """
 
 from __future__ import annotations
@@ -35,8 +33,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..instruments import DETECTORS, TG_RANGE_HZ, model_range
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
-
-VIEWS = ("Spectrum (dBm)", "Transmission vs thru (dB)")
 
 
 class Bridge(QtCore.QObject):
@@ -71,14 +67,20 @@ def _hz(v: float) -> str:
     return f"{v:.3g} Hz"
 
 
-def _age(seconds: float) -> str:
-    if not (isinstance(seconds, (int, float)) and math.isfinite(seconds)):
-        return "--"
-    if seconds < 90:
-        return f"{seconds:.0f} s ago"
-    if seconds < 5400:
-        return f"{seconds / 60:.0f} min ago"
-    return f"{seconds / 3600:.1f} h ago"
+def tg_line(s) -> str:
+    """One line saying what the tracking generator is doing (it is driven by
+    the shsg / shsna modules, not from this panel)."""
+    if not getattr(s, "tg_attached", False):
+        return "not attached"
+    mode = getattr(s, "tg_mode", "unknown")
+    if mode == "sweep":
+        return f"TG sweep #{s.tg_acq_id} for SNA running -- spectrum paused"
+    if mode == "cw":
+        return f"CW {_hz(s.tg_cw_freq_hz)} at {_fmt(s.tg_cw_level_dbm, 'g')} dBm (SG)"
+    if mode == "parked":
+        return (f"parked: {_hz(s.tg_park_hz)} at {_fmt(s.tg_park_level_dbm, 'g')} dBm "
+                "(it has no off)")
+    return "unknown (may be emitting what another program left on)"
 
 
 # ------------------------------------------------------------- the indicator
@@ -98,7 +100,7 @@ class HoundScope(QtWidgets.QWidget):
         self._ref = -20.0
         self._progress = 0.0
         self._sweeping = False
-        self._tg_on = False
+        self._tg_cw = math.nan              # CW frequency when the TG emits one
         self._overload = False
         self._caption = ""
         self._phase = 0.0
@@ -108,14 +110,16 @@ class HoundScope(QtWidgets.QWidget):
         self._timer.start()
 
     def set_state(self, model, tg_attached, start_Hz, stop_Hz, ref_dBm, progress, sweeping,
-                  tg_on, overload, caption):
+                  tg_cw_Hz, overload, caption):
+        """tg_cw_Hz: the frequency of the TG's CW, NaN when there is none."""
         self._range = model_range(model or "SA44B")[:2]
         self._tg_attached = bool(tg_attached)
         self._window = (start_Hz, stop_Hz)
         if isinstance(ref_dBm, (int, float)) and math.isfinite(ref_dBm):
             self._ref = float(ref_dBm)
         self._progress = float(progress) if math.isfinite(progress) else 0.0
-        self._sweeping, self._tg_on, self._overload = bool(sweeping), bool(tg_on), bool(overload)
+        self._sweeping, self._overload = bool(sweeping), bool(overload)
+        self._tg_cw = float(tg_cw_Hz) if isinstance(tg_cw_Hz, (int, float)) else math.nan
         self._caption = caption
 
     def set_trace(self, freqs, db):
@@ -173,6 +177,15 @@ class HoundScope(QtWidgets.QWidget):
                 x0, x1 = c - 1.5, c + 1.5
             p.setBrush(QtGui.QColor(COLORS["accent"]))
             p.drawRoundedRect(QtCore.QRectF(x0, ry - 1, x1 - x0, rh + 2), 2, 2)
+        if self._tg_attached and math.isfinite(self._tg_cw):
+            # where the TG's CW sits: a small diamond on the ruler, pulsing
+            cx, cy = X(self._tg_cw), ry + rh / 2
+            r = 3.5 + 1.0 * math.sin(2 * math.pi * self._phase)
+            p.setBrush(QtGui.QColor(COLORS["accent_hi"]))
+            p.setPen(QtGui.QPen(QtGui.QColor(COLORS["bg"]), 1))
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(cx, cy - r), QtCore.QPointF(cx + r, cy),
+                                           QtCore.QPointF(cx, cy + r), QtCore.QPointF(cx - r, cy)]))
+            p.setPen(QtCore.Qt.NoPen)
         p.setPen(QtGui.QColor(COLORS["muted"]))
         p.drawText(QtCore.QRectF(rx, ry + rh + 3, 80, 11), QtCore.Qt.AlignLeft, "0")
         p.drawText(QtCore.QRectF(rx + rw - 80, ry + rh + 3, 80, 11), QtCore.Qt.AlignRight,
@@ -227,18 +240,6 @@ class HoundScope(QtWidgets.QWidget):
             p.drawRect(QtCore.QRectF(max(sx + 2, bx - 40), sy + 2, min(40, bx - sx - 2), sh - 4))
             p.setPen(QtGui.QPen(QtGui.QColor(COLORS["accent_hi"]), 1.5))
             p.drawLine(QtCore.QPointF(bx, sy + 2), QtCore.QPointF(bx, sy + sh - 2))
-            if self._tg_on:
-                # the tracking generator rides the beam: source and receiver in step
-                yv = sy + sh / 2
-                if pts:
-                    near = min(pts, key=lambda q: abs(q[0] - bx))
-                    yv = Y(near[1])
-                r = 4.5 + 1.5 * math.sin(2 * math.pi * self._phase)
-                diamond = QtGui.QPolygonF([QtCore.QPointF(bx, yv - r), QtCore.QPointF(bx + r, yv),
-                                           QtCore.QPointF(bx, yv + r), QtCore.QPointF(bx - r, yv)])
-                p.setBrush(QtGui.QColor(COLORS["accent_hi"]))
-                p.setPen(QtGui.QPen(QtGui.QColor(COLORS["bg"]), 1))
-                p.drawPolygon(diamond)
 
         # overload badge
         if self._overload:
@@ -276,9 +277,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._trace_id = -1
         self._last_fetch = 0.0
         self._last_acq = 0
-        self._ref_id = None               # reference acq_id the trace was fetched against
-        self._tx_error = ""               # why transmission could not be shown
-        self._plot_mode = None
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
         self.setCentralWidget(root)
@@ -358,26 +356,6 @@ class MainWindow(QtWidgets.QMainWindow):
         slay.addLayout(row)
         col.addWidget(scard)
 
-        # tracking generator
-        gcard, glay = _card("Tracking generator")
-        row = QtWidgets.QHBoxLayout()
-        self.tg_chk = QtWidgets.QCheckBox("TG on (transmission)")
-        self.tg_chk.clicked.connect(lambda on: self._call(self.ctrl.set_tg, on))       # user only
-        row.addWidget(self.tg_chk, 1)
-        self.tg_state = QtWidgets.QLabel(""); self.tg_state.setObjectName("hint")
-        row.addWidget(self.tg_state)
-        glay.addLayout(row)
-        row = QtWidgets.QHBoxLayout()
-        self.tg_level_spin = self._dspin(lim.tg_level_min_dBm, lim.tg_level_max_dBm, 1, "  dBm", 1.0)
-        self.tg_points_spin = QtWidgets.QSpinBox()
-        self.tg_points_spin.setRange(lim.tg_points_min, lim.tg_points_max)
-        self.tg_points_spin.setSuffix("  pts")
-        b = QtWidgets.QPushButton("Set")
-        b.clicked.connect(self._apply_tg)
-        row.addWidget(self.tg_level_spin, 3); row.addWidget(self.tg_points_spin, 3); row.addWidget(b)
-        glay.addLayout(row)
-        col.addWidget(gcard)
-
         # acquisition
         acard, alay = _card("Acquire (scan-safe trace)")
         self.cont_chk = QtWidgets.QCheckBox("Continuous sweep")
@@ -399,21 +377,16 @@ class MainWindow(QtWidgets.QMainWindow):
         alay.addWidget(self.sample_label)
         col.addWidget(acard)
 
-        # reference (the thru)
-        rcard, rlay = _card("Thru reference")
-        row = QtWidgets.QHBoxLayout()
-        self.ref_btn = QtWidgets.QPushButton("Take thru")
-        self.ref_btn.setToolTip("Tracking generator on, device replaced by a thru: acquire and "
-                                "keep the result as the reference for transmission.")
-        self.ref_btn.clicked.connect(lambda: self._call(self.ctrl.take_reference))
-        self.clear_ref_btn = QtWidgets.QPushButton("Clear")
-        self.clear_ref_btn.clicked.connect(lambda: self._call(self.ctrl.clear_reference))
-        row.addWidget(self.ref_btn, 1); row.addWidget(self.clear_ref_btn)
-        rlay.addLayout(row)
-        self.ref_label = QtWidgets.QLabel("none"); self.ref_label.setObjectName("hint")
-        self.ref_label.setWordWrap(True)
-        rlay.addWidget(self.ref_label)
-        col.addWidget(rcard)
+        # tracking generator: SHOWN, not driven -- shsg (CW) and shsna (TG
+        # sweeps) drive it through this service (Lukas, 2026-09-28)
+        gcard, glay = _card("Tracking generator")
+        self.tg_label = QtWidgets.QLabel("--"); self.tg_label.setObjectName("hint")
+        self.tg_label.setWordWrap(True)
+        self.tg_label.setToolTip("Driven by the shsg (signal generator) and shsna (scalar "
+                                 "network analyser) modules; this panel only shows it.")
+        glay.addWidget(self.tg_label)
+        col.addWidget(gcard)
+
         col.addStretch(1)
         return panel
 
@@ -455,12 +428,6 @@ class MainWindow(QtWidgets.QMainWindow):
         tcard, tlay = _card("Trace")
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(QtWidgets.QLabel("Show"))
-        self.view_combo = QtWidgets.QComboBox()
-        self.view_combo.addItems(list(VIEWS))
-        self.view_combo.setToolTip("Transmission uses the analyser's thru reference "
-                                   "(THRU REFERENCE card): trace - thru, in dB")
-        self.view_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
-        bar.addWidget(self.view_combo)
         self.which_combo = QtWidgets.QComboBox()
         self.which_combo.addItems(["Latest sweep", "Last acquisition"])
         self.which_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
@@ -478,6 +445,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ax = self.plot.getAxis(axis); ax.setPen(pen); ax.setTextPen(pen)
             ax.enableAutoSIPrefix(False)
         self.plot.setLabel("bottom", "frequency", units="GHz")
+        self.plot.setLabel("left", "power", units="dBm")
         self.plot.showGrid(x=True, y=True, alpha=0.15)
         self.curve = self.plot.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.4))
         self.peak_line = pg.InfiniteLine(angle=90, movable=False,
@@ -528,13 +496,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not math.isclose(self.span_spin.value() * 1e6, self.ctrl.status().span_Hz, abs_tol=1.0):
             self._call(self.ctrl.set_span, self.span_spin.value() * 1e6)
 
-    def _apply_tg(self):
-        s = self.ctrl.status()
-        if not math.isclose(self.tg_level_spin.value(), s.tg_level_dBm, abs_tol=1e-9):
-            self._call(self.ctrl.set_tg_level, self.tg_level_spin.value())
-        if self.tg_points_spin.value() != s.tg_points:
-            self._call(self.ctrl.set_tg_points, self.tg_points_spin.value())
-
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
         SettingsDialog(self.ctrl, self.cfg, lambda: self._sync_inputs(force=True), self).exec()
@@ -555,19 +516,17 @@ class MainWindow(QtWidgets.QMainWindow):
         s = self.ctrl.status()
         for spin, val in ((self.center_spin, s.center_Hz / 1e9), (self.span_spin, s.span_Hz / 1e6),
                           (self.ref_spin, s.ref_level_dBm), (self.rbw_spin, s.rbw_Hz / 1e3),
-                          (self.vbw_spin, s.vbw_Hz / 1e3), (self.tg_level_spin, s.tg_level_dBm)):
+                          (self.vbw_spin, s.vbw_Hz / 1e3)):
             if math.isfinite(val) and (force or not spin.hasFocus()):
                 spin.setValue(val)
-        for spin, val in ((self.avg_spin, s.averages), (self.tg_points_spin, s.tg_points)):
-            if force or not spin.hasFocus():
-                spin.setValue(int(val))
+        if force or not self.avg_spin.hasFocus():
+            self.avg_spin.setValue(int(s.averages))
         if force or not self.det_combo.view().isVisible():
             i = self.det_combo.findText(s.detector)
             if i >= 0:
                 self.det_combo.setCurrentIndex(i)
         # programmatic setChecked with signals blocked: no echo back (gotcha #13)
-        for chk, val in ((self.cont_chk, s.continuous), (self.reject_chk, s.reject),
-                         (self.tg_chk, s.tg_on)):
+        for chk, val in ((self.cont_chk, s.continuous), (self.reject_chk, s.reject)):
             chk.blockSignals(True)
             chk.setChecked(bool(val))
             chk.blockSignals(False)
@@ -604,55 +563,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self.conn_dot.setText("●  offline")
             self.conn_dot.setStyleSheet(f"color:{COLORS['danger']}; font-weight:700;")
 
-        if getattr(s, "configured", True):
+        paused = getattr(s, "spectrum_paused", "")
+        if paused:
+            self.sweep_time_label.setText("paused: " + paused)
+        elif getattr(s, "configured", True):
             self.sweep_time_label.setText(
                 f"{s.points} bins of {_hz(s.bin_Hz)}, sweep {_fmt(s.sweep_time_s, '.3g')} s")
         else:
             # start-up rule: nothing has been sent to the analyser yet
             self.sweep_time_label.setText("not configured yet: Continuous or Acquire sweeps")
-        self.tg_state.setText(("attached" if s.tg_attached else "not attached"))
-        self.tg_chk.setEnabled(bool(s.tg_attached))
+        self.tg_label.setText(tg_line(s))
         self._sync_inputs()
 
         # acquisition
         self.acq_bar.setValue(int(100 * s.acq_progress) if s.acquiring else 0)
         self.acq_btn.setEnabled(bool(s.connected) and not s.acquiring)
-        self.ref_btn.setEnabled(bool(s.connected) and not s.acquiring and bool(s.tg_on))
         self.abort_btn.setEnabled(bool(s.acquiring))
         smp = s.sample
         if smp and smp.get("acq_id") != self._last_acq:
             self._last_acq = smp.get("acq_id")
-            what = "thru reference" if smp.get("reference") else "acquisition"
             if smp.get("aborted"):
-                self.sample_label.setText(f"#{smp.get('acq_id')}: {what} aborted")
+                self.sample_label.setText(f"#{smp.get('acq_id')}: acquisition aborted")
             else:
-                tx = smp.get("tx_center_dB", math.nan)
                 self.sample_label.setText(
-                    f"#{smp.get('acq_id')} {what}: peak {_hz(smp.get('peak_Hz', math.nan))} at "
+                    f"#{smp.get('acq_id')}: peak {_hz(smp.get('peak_Hz', math.nan))} at "
                     f"{_fmt(smp.get('peak_dBm'), '.2f')} dBm, floor {_fmt(smp.get('floor_dBm'), '.1f')} "
                     f"dBm, {smp.get('averages')} avg"
-                    + (f", T(centre) {tx:.2f} dB" if isinstance(tx, float) and math.isfinite(tx) else "")
                     + ("  OVERLOAD" if smp.get("overload") else ""))
             if self.which_combo.currentIndex() == 1:
-                self._force_fetch()
-
-        # reference
-        ref = s.reference or {}
-        if s.acquiring and getattr(s, "acq_is_reference", False):
-            self.ref_label.setText(f"taking thru #{s.acq_id} ...")
-        elif ref.get("present"):
-            self.ref_label.setText(
-                f"#{ref.get('acq_id')}: {_hz(ref.get('start_Hz', math.nan))} - "
-                f"{_hz(ref.get('stop_Hz', math.nan))}, {ref.get('points')} pts, TG "
-                f"{_fmt(ref.get('tg_level_dBm'), 'g')} dBm, {_age(ref.get('age_s'))}")
-        elif not s.tg_on:
-            self.ref_label.setText("none (turn the tracking generator on to take one)")
-        else:
-            self.ref_label.setText("none")
-        ref_id = ref.get("acq_id") if ref.get("present") else None
-        if ref_id != self._ref_id:
-            self._ref_id = ref_id
-            if self.view_combo.currentIndex() != 0:
                 self._force_fetch()
 
         # trace: fetch only when there is a new one, and not more than ~7 per second
@@ -667,36 +605,18 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass                     # nothing measured yet
 
-        mode = "TG" if s.tg_on else "SA"
+        tg_mode = getattr(s, "tg_mode", "unknown")
+        cw = s.tg_cw_freq_hz if tg_mode == "cw" else math.nan
+        mode = {"cw": "SA + TG CW", "sweep": "TG SWEEP (SNA)"}.get(tg_mode, "SA")
         self.indicator.set_state(
             getattr(s, "device_model", ""), s.tg_attached, s.start_Hz, s.stop_Hz,
-            s.ref_level_dBm, s.sweep_progress, s.sweeping, s.tg_on, s.overload,
+            s.ref_level_dBm, s.sweep_progress, s.sweeping, cw, s.overload,
             f"{mode}  10 dB/div  RBW {_hz(s.rbw_Hz)}")
 
     def _fetch(self, which: str) -> dict:
-        """The trace for the current view. If transmission is refused (no thru,
-        or it does not match), show the spectrum and say why instead of an
-        empty plot."""
-        self._tx_error = ""
         raw = self.ctrl.get_trace(which, "trace")
-        # the screen indicator always shows the raw trace, like the real screen
         self.indicator.set_trace(raw["freqs_Hz"], raw["trace"])
-        if self.view_combo.currentIndex() == 0:
-            return raw
-        try:
-            return self.ctrl.get_trace(which, "transmission")
-        except Exception as exc:
-            self._tx_error = str(exc)
-            return raw
-
-    def _set_plot_mode(self, mode: str):
-        if mode == self._plot_mode:
-            return
-        self._plot_mode = mode
-        if mode == "tx":
-            self.plot.setLabel("left", "transmission", units="dB")
-        else:
-            self.plot.setLabel("left", "power", units="dBm")
+        return raw
 
     def _redraw(self):
         t = self._trace
@@ -705,19 +625,8 @@ class MainWindow(QtWidgets.QMainWindow):
         fx = t["freqs_Hz"] / 1e9
         label = (f"{t['points']} bins, RBW {_hz(t['rbw_Hz'])}, VBW {_hz(t['vbw_Hz'])}, "
                  f"{t['detector']}")
-        if t.get("tg_on"):
-            label += f", TG {t['tg_level_dBm']:g} dBm"
-        if "transmission" in t:
-            self._set_plot_mode("tx")
-            self.curve.setData(fx, t["transmission"])
-            self.ref_line.setPos(0.0)
-            label += f"  -  vs thru #{t.get('reference_acq_id')}"
-        else:
-            self._set_plot_mode("raw")
-            self.curve.setData(fx, t["trace"])
-            self.ref_line.setPos(t["ref_level_dBm"])
-            if self.view_combo.currentIndex() != 0:
-                label += "  -  SPECTRUM: " + (self._tx_error or "no thru reference")
+        self.curve.setData(fx, t["trace"])
+        self.ref_line.setPos(t["ref_level_dBm"])
         self.trace_label.setText(label)
         self.trace_label.setToolTip(label)
         pk = t.get("peak_Hz", math.nan)

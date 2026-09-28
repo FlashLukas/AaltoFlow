@@ -68,3 +68,18 @@ class SpectrumBackend(Protocol):
 
     def abort_sweep(self) -> None:
         """Forget a started sweep without reading it. Safe with none pending."""
+
+    # ---- the tracking generator as a CW source (for the shsg module) ----------
+    # TG SWEEPS need no method of their own: they are a `configure` with
+    # settings.tg_on True, then start_sweep / finish_sweep as usual. A TG
+    # sweep returns dB relative to the TG's calibrated output, not dBm.
+    # There is NO "TG off" (measured 2026-09-28): the brain PARKS the TG with
+    # set_tg_cw at hardware.tg_park_hz / tg_park_dbm instead.
+
+    def set_tg_cw(self, freq_hz: float, level_dbm: float) -> None:
+        """Make the TG emit a CW tone. Does not reconfigure the analyser."""
+
+    def idle(self) -> None:
+        """Stop whatever is initiated (saAbort on the real one) -- a TG sweep
+        must be stopped before saSetTg is allowed. Does NOT silence the TG.
+        Leaves the analyser unconfigured: the brain reconfigures next sweep."""

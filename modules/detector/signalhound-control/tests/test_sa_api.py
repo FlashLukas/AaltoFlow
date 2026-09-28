@@ -64,11 +64,10 @@ def test_configure_follows_the_manual_order_and_reports_the_grid():
 
 def test_tg_mode_initiates_a_tg_sweep_with_the_level():
     b, dll, cfg = _open()
-    cfg.tracking.on = True
-    cfg.tracking.points = 301
-    cfg.tracking.level_dBm = -15.0
+    # a TG sweep is what the shsna module asks the owner for (2026-09-28)
+    s = SweepSettings.for_tg_sweep(cfg, 0.9e9, 1.1e9, -15.0, 100e3, 301)
     dll.calls.clear()
-    g = b.configure(SweepSettings.from_config(cfg))
+    g = b.configure(s)
     assert "saConfigTgSweep" in dll.names() and dll.mode == 4          # SA_TG_SWEEP
     assert dll.tg_level == -15.0 and g.points == 301
     # saSetTg is only allowed while the TG is idle (sa_api.h), so it must come
@@ -103,9 +102,8 @@ def test_real_backend_is_not_kept_waiting_for_the_sweep_time():
 
 def test_tg_mode_refused_without_a_tg():
     b, dll, cfg = _open(tg=False)
-    cfg.tracking.on = True
     with pytest.raises(SaApiError, match="no tracking generator"):
-        b.configure(SweepSettings.from_config(cfg))
+        b.configure(SweepSettings.for_tg_sweep(cfg, 0.9e9, 1.1e9, -20.0, 100e3, 401))
 
 
 def test_sweep_reads_the_right_array_and_flags_compression():
@@ -182,11 +180,10 @@ def test_open_issues_no_state_changing_calls():
 
 def test_brain_start_adopts_the_analyser_and_writes_nothing():
     """The whole start: service-style (sweep thread running), saved config
-    asking for continuous sweeps and the TG on. The analyser is an SA124B
-    (non-default model) left with the TG at -12 dBm by a previous program."""
+    asking for continuous sweeps. The analyser is an SA124B (non-default
+    model) left with the TG at -12 dBm by a previous program."""
     cfg = Config()
     cfg.acquisition.continuous = True                      # the saved default
-    cfg.tracking.on = True
     dll = FakeSaApi(device_type=4, readonly=True)
     dll.tg_level = -12.0                                   # pre-existing TG state
     v = SpectrumAnalyzer(SaApiAnalyzer(cfg, dll=dll), cfg)
@@ -199,11 +196,12 @@ def test_brain_start_adopts_the_analyser_and_writes_nothing():
         assert st.device_model == "SA124B" and st.tg_attached is True
         assert st.freq_max_Hz == pytest.approx(12.4e9)      # the ADOPTED model's envelope
         assert st.configured is False and st.points == 0 and st.sweeps == 0
-        assert st.continuous is False and st.tg_on is False
+        assert st.continuous is False and st.tg_mode == "unknown"   # not guessed "off"
     finally:
         dll.readonly = False                               # shutdown's abort + close is allowed
         v.shutdown()
-    assert dll.names()[-2:] == ["saAbort", "saCloseDevice"]
+    # shutdown PARKS the TG (it has no off), then aborts and closes
+    assert dll.names()[-3:] == ["saSetTg", "saAbort", "saCloseDevice"]
 
 
 def test_the_first_deliberate_request_configures():

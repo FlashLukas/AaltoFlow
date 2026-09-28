@@ -5,27 +5,27 @@ Contract: INSTRUMENT_MODULE_GUIDE.md section 6b. Nothing here restates a value
 that lives somewhere else; every bound is read from the brain when the
 manifest is built.
 
-Its main detectors are ARRAYS with a hardware-swept dimension, `freq`:
+Its main detector is an ARRAY with a hardware-swept dimension, `freq`:
   * `trace`        -- power per bin in dBm (a real array: dtype "float").
-  * `transmission` -- trace minus the thru reference, in dB (tracking mode).
   * `dims` names the dimension; its coordinate comes from `get_frequencies`
-    (in GHz), read ONCE per scan. Both detectors declare the SAME dim, so the
-    engine gives them one shared coordinate.
+    (in GHz), read ONCE per scan.
   * `read` says how to fetch the value: a COMMAND (`get_trace`), because a
     trace is too big for the status stream.
   * `acquire` makes the scan trigger fresh sweeps and wait for THAT
     acquisition (acq_id) before reading (gotcha #17) -- a cold read would
     return the previous point's trace and nothing would raise.
 Scalar detectors in the same acquire group (peak frequency and level, noise
-floor, transmission at the centre, overload) cost no extra sweep.
+floor, overload) cost no extra sweep.
 
-ACTIONS WITH A `wait` BLOCK. `take_reference` (the thru) can run in a scan
-routine; its `wait` block is how the caller knows it finished -- the same
-id-then-flag rule as an acquisition. `clear_reference` is immediate.
+THE TRACKING GENERATOR appears here only as INDICATORS (what it is doing:
+unknown, parked -- it has no off --, a CW for shsg, or a TG sweep for shsna). Its verbs -- tg_cw,
+tg_sweep_acquire, get_tg_trace, tg_abort -- are a contract with the two
+CLIENT MODULES, not scan controls: a scan drives the TG through shsg / shsna,
+whose describe offers the scannable controls and detectors.
 
-What is dynamic: the frequency envelope follows the connected MODEL and the
-tracking generator; centre bounds span and vice versa; RBW's maximum follows
-the model and bounds VBW; the `freq` dimension's length is the analyser's grid.
+What is dynamic: the frequency envelope follows the connected MODEL; centre
+bounds span and vice versa; RBW's maximum follows the model and bounds VBW;
+the `freq` dimension's length is the analyser's grid.
 Any change moves `revision`, and every status frame carries it as
 `describe_rev`. The simulated-scene group is present only when the backend IS
 the simulator.
@@ -111,7 +111,7 @@ def build_manifest(signalhound) -> dict:
                   "flag_key": "acquiring", "invert": True},
         "timeout_s": cfg.acquisition.timeout_s,
     }
-    # The frequency axis of both trace detectors: one declaration, shared by name.
+    # The frequency axis of the trace detector: one declaration, shared by name.
     freq_dim = [{"name": "freq", "label": "Frequency", "unit": "GHz",
                  "length": int(st.points),
                  "coord_verb": "get_frequencies", "coord_key": "values_GHz"}]
@@ -173,27 +173,11 @@ def build_manifest(signalhound) -> dict:
         flag("continuous", "Continuous sweep", "continuous", "set_continuous", "Sweep", 80,
              "Sweep on its own between acquisitions, like a front panel."),
         _p("points", "Bins", "indicator", "int", group="Sweep", order=90,
-           read_path=["points"], help="Chosen by the analyser from span and RBW (or "
-                                      "the TG point count)."),
+           read_path=["points"], help="Chosen by the analyser from span and RBW."),
         _p("bin_width", "Bin width", "indicator", "float", unit="kHz", group="Sweep",
            order=91, decimals=4, scale=1e3, read_path=["bin_Hz"]),
         _p("sweep_time", "Sweep time", "indicator", "float", unit="s", group="Sweep",
            order=92, decimals=3, read_path=["sweep_time_s"]),
-
-        # -- tracking generator ------------------------------------------------------------
-        flag("tg_on", "Tracking generator", "tg_on", "set_tg", "Tracking generator", 10,
-             "On: the TG44A tracks the sweep and the trace is the transmission of "
-             "whatever is between TG and analyser (10 Hz - 4.4 GHz). Refused with no "
-             "TG attached."),
-        ctrl("tg_level", "TG level", "dBm", "tg_level_dBm", "set_tg_level", "tg_level_dBm", 20,
-             lim.tg_level_min_dBm, lim.tg_level_max_dBm, group="Tracking generator",
-             decimals=1, step=1.0, help="TG output level (-30 ... -10 dBm)."),
-        ctrl("tg_points", "TG points", "", "tg_points", "set_tg_points", "points", 30,
-             lim.tg_points_min, lim.tg_points_max, group="Tracking generator", type="int",
-             step=1, tol=0.5, help="Requested bins per TG sweep; the analyser may choose "
-                                   "up to a factor 2 differently (see Bins)."),
-        _p("tg_attached", "TG attached", "indicator", "bool", group="Tracking generator",
-           order=40, read_path=["tg_attached"]),
 
         # -- measurement: the scan detectors (one acquisition feeds all of them) ------------
         _p("trace", "Spectrum trace", "indicator", "array", unit="dBm", group="Measurement",
@@ -201,13 +185,6 @@ def build_manifest(signalhound) -> dict:
            read={"verb": "get_trace", "key": "trace",
                  "args": {"which": "sample", "quantity": "trace"}},
            help="Power per bin, averaged in power over the acquisition's sweeps."),
-        _p("transmission", "Transmission (vs thru)", "indicator", "array", unit="dB",
-           group="Measurement", order=11, acquire=acquire, dtype="float", shape=["freq"],
-           dims=freq_dim,
-           read={"verb": "get_trace", "key": "transmission",
-                 "args": {"which": "sample", "quantity": "transmission"}},
-           help="Tracking-generator trace minus the thru reference. Refused (the scan "
-                "stops) with no reference or one on another grid or TG level."),
         _p("peak_freq", "Peak frequency", "indicator", "float", unit="GHz",
            group="Measurement", order=20, decimals=9, scale=1e9,
            read_path=["sample", "peak_Hz"], acquire=acquire),
@@ -217,10 +194,6 @@ def build_manifest(signalhound) -> dict:
         _p("noise_floor", "Noise floor (median)", "indicator", "float", unit="dBm",
            group="Measurement", order=22, decimals=2,
            read_path=["sample", "floor_dBm"], acquire=acquire),
-        _p("tx_center", "Transmission at centre", "indicator", "float", unit="dB",
-           group="Measurement", order=23, decimals=3,
-           read_path=["sample", "tx_center_dB"], acquire=acquire,
-           help="Tracking mode with a matching thru; empty otherwise."),
         _p("overloaded", "Overloaded", "indicator", "bool", group="Measurement", order=24,
            read_path=["sample", "overload"], acquire=acquire,
            help="The input compressed during the acquisition: the levels are wrong."),
@@ -232,21 +205,33 @@ def build_manifest(signalhound) -> dict:
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
            order=4, read_path=["acq_id"]),
 
-        # -- reference (the thru) --------------------------------------------------------------
-        _p("take_reference", "Take thru reference", "action", "action", group="Reference",
-           order=1,
-           wait={"target_key": "acq_id",
-                 "ready": {"policy": "adopt_then_flag", "setpoint_key": "acq_id",
-                           "flag_key": "acquiring", "invert": True},
-                 "timeout_s": cfg.acquisition.timeout_s},
-           help="Tracking generator on, device under test replaced by a thru: acquire "
-                "like `acquire` and keep the result as the reference for transmission."),
-        _p("clear_reference", "Clear reference", "action", "action", group="Reference",
-           order=2, wait={"ready": {"policy": "immediate"}}),
-        _p("reference_present", "Reference present", "indicator", "bool",
-           group="Reference", order=10, read_path=["reference", "present"]),
-        _p("reference_tg_level", "Reference TG level", "indicator", "float", unit="dBm",
-           group="Reference", order=11, decimals=1, read_path=["reference", "tg_level_dBm"]),
+        # -- the tracking generator: what it is doing (indicators only) --------------
+        # No controls here on purpose: shsg (CW) and shsna (TG sweeps) drive
+        # it through the TG contract and offer the scan controls themselves.
+        _p("tg_attached", "TG attached", "indicator", "bool", group="Tracking generator",
+           order=1, read_path=["tg_attached"]),
+        _p("tg_mode", "TG mode", "indicator", "string", group="Tracking generator", order=2,
+           read_path=["tg_mode"],
+           help="unknown (not readable at start; it may be emitting what another program "
+                "left on), parked (the TG44A has no off: parked at the park frequency and "
+                "level), cw (a CW source for shsg) or sweep (a TG sweep for shsna -- "
+                "spectrum sweeping pauses)."),
+        _p("tg_cw_on", "TG CW on", "indicator", "bool", group="Tracking generator", order=3,
+           read_path=["tg_cw_on"]),
+        _p("tg_cw_freq", "TG CW frequency", "indicator", "float", unit="GHz",
+           group="Tracking generator", order=4, decimals=9, scale=1e9,
+           read_path=["tg_cw_freq_hz"]),
+        _p("tg_cw_level", "TG CW level", "indicator", "float", unit="dBm",
+           group="Tracking generator", order=5, decimals=1, read_path=["tg_cw_level_dbm"]),
+        _p("tg_park", "TG park frequency", "indicator", "float", unit="GHz",
+           group="Tracking generator", order=5.5, decimals=9, scale=1e9,
+           read_path=["tg_park_hz"], help="Where 'off' parks the TG (it has no off)."),
+        _p("tg_acquiring", "TG sweep running", "indicator", "bool",
+           group="Tracking generator", order=6, read_path=["tg_acquiring"]),
+        _p("spectrum_paused", "Spectrum paused", "indicator", "string",
+           group="Tracking generator", order=7, read_path=["spectrum_paused"],
+           help="Why spectrum sweeping is on hold (a TG sweep, or a CW this analyser "
+                "cannot sweep with); empty when it is not."),
 
         # -- live --------------------------------------------------------------------------------
         _p("live_peak_freq", "Peak frequency (live)", "indicator", "float", unit="GHz",
@@ -303,7 +288,7 @@ def build_manifest(signalhound) -> dict:
             scene("danl_dBm_per_Hz", "DANL", "dBm/Hz", 14, decimals=1,
                   help="Displayed average noise level at a low reference level."),
             scene_flag("dut_inserted", "Filter inserted", 20,
-                       "Off = a thru: what the reference is taken with."),
+                       "Off = a thru: what shsna takes its reference with."),
             scene("dut_center_Hz", "Filter centre", "GHz", 21, scale=1e9, decimals=6),
             scene("dut_bandwidth_Hz", "Filter bandwidth", "MHz", 22, scale=1e6, decimals=3),
             scene("dut_order", "Filter order", "", 23, type="int", decimals=0),

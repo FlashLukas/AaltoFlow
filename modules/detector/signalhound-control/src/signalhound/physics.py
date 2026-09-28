@@ -18,10 +18,15 @@ Spectrum mode, per frequency bin:
     trace but does NOT lower the mean floor.
   * compression: signals above ~ref + 5 dB are squashed and flagged OVERLOAD.
 
-Tracking mode: TG level + the TG's own (not flat) output + cable loss
-(rising as sqrt f) + the band-pass filter if inserted, on a floor set by the
-narrow bandwidth the TG sweep uses. Dividing by a thru taken with the filter
-removed leaves the filter alone -- the whole point of the reference.
+Tracking-generator sweep (run for the shsna module): like the real TG44A it
+returns dB relative to the TG's calibrated output, not dBm: the TG's own (not
+flat) output + cable loss (rising as sqrt f) + the band-pass filter if
+inserted, on a floor set by the narrow bandwidth the TG sweep uses. Dividing
+by a thru taken with the filter removed leaves the filter alone -- the whole
+point of shsna's reference.
+
+TG CW (run for the shsg module): the TG's tone travels the same path (cable,
+filter) into the analyser, so it appears on the spectrum like any signal.
 """
 
 from __future__ import annotations
@@ -79,6 +84,17 @@ def butterworth_bandpass_dB(f_Hz, center_Hz, bandwidth_Hz, order):
     return -10.0 * np.log10(1.0 + x ** (2 * int(max(1, order))))
 
 
+def tg_path_dB(f_Hz, scene):
+    """What the path from the TG output to the analyser input does to a signal
+    at f, in dB: cable loss (rising as sqrt f) and, when inserted, the filter."""
+    f = np.asarray(f_Hz, dtype=float)
+    loss = -scene.cable_loss_dB_at_1GHz * np.sqrt(np.clip(f, 0, None) / 1e9)
+    if scene.dut_inserted:
+        loss = loss - scene.dut_loss_dB + butterworth_bandpass_dB(
+            f, scene.dut_center_Hz, scene.dut_bandwidth_Hz, scene.dut_order)
+    return loss
+
+
 def _fluctuate(mean_mw, k, rng, peak: bool):
     """Noise-like power: Gamma(k) around the mean (k = number of independent
     samples averaged). The peak detector keeps the largest of three, which is
@@ -88,13 +104,15 @@ def _fluctuate(mean_mw, k, rng, peak: bool):
     return np.asarray(mean_mw) * (draw.max(axis=0) if peak else draw[0])
 
 
-def spectrum_dBm(freqs_Hz, bin_Hz, s: SweepSettings, scene, model: str, rng):
-    """One simulated spectrum sweep. Returns (trace in dBm, overload flag)."""
+def spectrum_dBm(freqs_Hz, bin_Hz, s: SweepSettings, scene, model: str, rng,
+                 extra_signals=()):
+    """One simulated spectrum sweep. Returns (trace in dBm, overload flag).
+    `extra_signals`: more (frequency, dBm at the input) pairs -- the TG's CW."""
     f = np.asarray(freqs_Hz, dtype=float)
     peak = s.detector == "peak"
     fmin, fmax, _ = model_range(model)
     sig = np.zeros_like(f)
-    for fs, ps in signals(scene):
+    for fs, ps in list(signals(scene)) + list(extra_signals):
         if not (fmin <= fs <= fmax):
             continue
         df = np.abs(f - fs)
@@ -120,22 +138,26 @@ def spectrum_dBm(freqs_Hz, bin_Hz, s: SweepSettings, scene, model: str, rng):
     return db, bool(over.any())
 
 
-def tracking_dBm(freqs_Hz, s: SweepSettings, scene, rng):
-    """One simulated tracking-generator sweep. Returns (trace in dBm, overload)."""
+def tracking_dB(freqs_Hz, s: SweepSettings, scene, rng):
+    """One simulated tracking-generator sweep, as the real TG44A returns it
+    (measured 2026-09-28): TRANSMISSION in dB relative to the TG's calibrated
+    output -- a 20 dB pad reads ~-20 dB -- whatever level was set (the TG
+    sweep ignores saSetTg's level). Returns (trace in dB, overload flag).
+
+    The TG's own output is still not perfectly flat (the ripple), which is
+    why shsna divides by a thru of its own."""
     f = np.asarray(freqs_Hz, dtype=float)
-    level = (s.tg_level_dBm
-             + scene.tg_ripple_dB * np.sin(2 * np.pi * f / 370e6)       # TG flatness
-             - scene.cable_loss_dB_at_1GHz * np.sqrt(np.clip(f, 0, None) / 1e9))
-    if scene.dut_inserted:
-        level = level - scene.dut_loss_dB + butterworth_bandpass_dB(
-            f, scene.dut_center_Hz, scene.dut_bandwidth_Hz, scene.dut_order)
-    # the TG sweep measures in a narrow bandwidth: ~1 kHz with high dynamic range
+    rel = (scene.tg_ripple_dB * np.sin(2 * np.pi * f / 370e6)          # TG flatness
+           + tg_path_dB(f, scene))                                      # cable + filter
+    # the floor of the TG sweep's narrow bandwidth: ~1 kHz with high dynamic
+    # range, expressed relative to the TG output like the rest of the trace
     bw = 1e3 if s.tg_high_dynamic_range else 10e3
-    floor = scene.danl_dBm_per_Hz + 10 * math.log10(bw) + max(0.0, s.ref_level_dBm + 30.0)
-    total = dbm_to_mw(level) + _fluctuate(np.full_like(f, dbm_to_mw(floor)), 20.0, rng, False)
+    floor = scene.danl_dBm_per_Hz + 10 * math.log10(bw) + 30.0
+    total = dbm_to_mw(rel) + _fluctuate(np.full_like(f, dbm_to_mw(floor)), 20.0, rng, False)
     # a little measurement jitter on the tone itself (0.02 dB rms)
     total = total * 10 ** (rng.normal(0.0, 0.02, size=f.size) / 10)
     db = mw_to_dbm(total)
     lo, hi = TG_RANGE_HZ
     db = np.where((f < lo) | (f > hi), floor, db)
-    return db, bool((db > s.ref_level_dBm + 5.0).any())
+    # an amplifying device beyond +5 dB would compress the input
+    return db, bool((db > 5.0).any())

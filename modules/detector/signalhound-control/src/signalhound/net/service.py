@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..instruments import TG_RANGE_HZ
 from ..spectrum import SpectrumAnalyzer
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -112,7 +113,7 @@ class SignalhoundService:
     def describe_rev(self, max_age_s: float = 0.5) -> int:
         """Current manifest revision, recomputed at most once per `max_age_s`.
         It changes with centre/span (each bounds the other), the grid's point
-        count, the RBW (VBW's maximum) and the tracking generator (TG range)."""
+        count and the RBW (VBW's maximum)."""
         now = time.monotonic()
         if now - self._rev_at >= max_age_s:
             self._rev = build_manifest(self.signalhound)["revision"]
@@ -180,29 +181,57 @@ class SignalhoundService:
                 v.set_averages(int(round(float(msg["averages"]))))
             elif cmd == "set_continuous":
                 v.set_continuous(_bool(msg["on"]))
-            elif cmd == "set_tg":
-                v.set_tg(_bool(msg["on"]))
-            elif cmd == "set_tg_level":
-                v.set_tg_level(float(msg["tg_level_dBm"]))
-            elif cmd == "set_tg_points":
-                v.set_tg_points(int(round(float(msg["points"]))))
             elif cmd == "set_scene":
                 v.set_scene(str(msg["name"]), msg["value"])
             elif cmd == "acquire":
                 return {"ok": True, "acq_id": v.acquire()}
-            elif cmd == "take_reference":
-                return {"ok": True, "acq_id": v.take_reference()}
-            elif cmd == "clear_reference":
-                v.clear_reference()
             elif cmd == "abort":
                 v.abort()
+            # ---- the TG contract, for the client modules shsg / shsna --------
+            # (README "For client modules: the TG contract"). A refusal (no
+            # TG, out of range, busy) is not a malformed request: its reason
+            # goes back as the error, without a "bad request" prefix.
+            elif cmd in ("tg_cw", "tg_sweep_acquire", "get_tg_trace"):
+                on = _bool(msg["on"]) if cmd == "tg_cw" else None
+                try:
+                    if cmd == "tg_cw":
+                        out = v.tg_cw(on, _opt(msg, "freq_hz"), _opt(msg, "level_dbm"))
+                        # deferred True: accepted while a TG sweep holds the
+                        # TG; applied (and echoed in status) when it ends
+                        deferred = bool(out.pop("deferred", False))
+                        return {"ok": True, "tg_cw": json_safe(out), "deferred": deferred}
+                    if cmd == "tg_sweep_acquire":
+                        n = v.tg_sweep_acquire(
+                            float(msg["start_hz"]), float(msg["stop_hz"]),
+                            _opt(msg, "level_dbm"), _opt(msg, "rbw_hz"),
+                            _opt(msg, "averages"), _opt(msg, "points"))
+                        # + what was accepted: points (clamped to 1001) and
+                        # level_applied False (the TG sweep ignores the level)
+                        info = v.tg_request(n)
+                        return {"ok": True, "tg_acq_id": n,
+                                **{k: x for k, x in info.items() if k != "id"}}
+                    t = v.get_tg_trace(None if msg.get("id") is None else int(msg["id"]))
+                    return {"ok": True, **json_safe(t)}
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
+            elif cmd == "tg_abort":
+                # optional id: abort only that one (ok either way; "aborted" says)
+                n = msg.get("id")
+                return {"ok": True, "aborted": v.tg_abort(None if n is None else int(n))}
+            elif cmd == "tg_grid":
+                try:
+                    return {"ok": True, **json_safe(v.tg_grid(
+                        float(msg["start_hz"]), float(msg["stop_hz"]),
+                        _opt(msg, "points"), _opt(msg, "rbw_hz")))}
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
             elif cmd == "get_trace":
                 try:
                     t = v.get_trace(str(msg.get("which", "sample")),
                                     str(msg.get("quantity", "trace")))
                 except ValueError as exc:
-                    # "no reference", "aborted", "does not match": not a malformed
-                    # request, so no "bad request" prefix -- the reason is the message
+                    # "nothing yet", "aborted": not a malformed request, so no
+                    # "bad request" prefix -- the reason is the message
                     return {"ok": False, "error": str(exc)}
                 return {"ok": True, **trace_to_wire(t)}
             elif cmd == "get_frequencies":
@@ -244,8 +273,19 @@ class SignalhoundService:
             "freq_min_Hz": lo, "freq_max_Hz": hi,
             "rbw_min_Hz": lim.rbw_min_Hz, "rbw_max_Hz": v.rbw_max(),
             "ref_min_dBm": lim.ref_min_dBm, "ref_max_dBm": lim.ref_max_dBm,
-            "tg_level_min_dBm": lim.tg_level_min_dBm, "tg_level_max_dBm": lim.tg_level_max_dBm,
+            # the TG envelope, for the client modules (shsg / shsna)
+            "tg_freq_min_Hz": TG_RANGE_HZ[0], "tg_freq_max_Hz": TG_RANGE_HZ[1],
+            "tg_sweep_min_Hz": v.tg_sweep_range()[0], "tg_sweep_max_Hz": v.tg_sweep_range()[1],
+            "tg_level_min_dBm": v.tg_level_range()[0], "tg_level_max_dBm": v.tg_level_range()[1],
+            "tg_points_min": lim.tg_points_min, "tg_points_max": lim.tg_points_max,
+            "tg_cw_during_sweep": bool(v.cfg.hardware.tg_cw_during_sweep),
         }
+
+
+def _opt(msg: dict, key: str):
+    """An optional numeric argument: missing or null -> None, else float."""
+    x = msg.get(key)
+    return None if x is None else float(x)
 
 
 def _bool(x) -> bool:

@@ -44,7 +44,7 @@ def _fresh(win):
     win._refresh()
 
 
-def test_window_builds_sweeps_and_uses_the_brains_thru(app):
+def test_window_builds_sweeps_and_shows_the_tg(app):
     from signalhound.apps.gui import MainWindow
     cfg = Config()
     cfg.sweep.span_Hz = 20e6
@@ -57,34 +57,24 @@ def test_window_builds_sweeps_and_uses_the_brains_thru(app):
         assert win._trace is not None and win.curve.getData()[0].size == 401
         assert win.kind_label.text() == "SIMULATED SA44B"
         assert win.big["level"].text().startswith("-35")
-        assert not win.ref_btn.isEnabled()                 # no thru without the TG
 
-        # the TG checkbox (a user click) drives the brain
-        win.tg_chk.click()
-        assert sa.status().tg_on is True and sim.tg_output_on is False  # until it sweeps
-        sa.set_scene("dut_inserted", False)
+        # the TG is SHOWN, not driven: no TG or thru controls on this panel
+        for gone in ("tg_chk", "tg_level_spin", "tg_points_spin", "ref_btn",
+                     "clear_ref_btn", "view_combo"):
+            assert not hasattr(win, gone), gone
+        assert win.tg_label.text().startswith("unknown")
+        sa.tg_cw(True, 1.005e9, -20.0)             # what shsg would ask for
         win._refresh()
-        assert win.ref_btn.isEnabled()
-        win.ref_btn.click()
-        while sa.status().acquiring:
+        assert win.tg_label.text().startswith("CW 1.005 GHz at -20 dBm")
+        assert win.indicator._tg_cw == 1.005e9
+        sa.tg_sweep_acquire(0.9e9, 1.1e9)          # what shsna would ask for
+        win._refresh()
+        assert "SNA" in win.tg_label.text() and "paused" in win.sweep_time_label.text()
+        while sa.status().tg_acquiring:
             sa.step()
+        sa.tg_cw(False)
         win._refresh()
-        assert sa.status().reference["present"]
-        assert win.ref_label.text().startswith("#1:")
-
-        sa.set_scene("dut_inserted", True)
-        sa.step()
-        win.view_combo.setCurrentIndex(1)                  # transmission vs thru
-        _fresh(win)
-        x, y = win.curve.getData()
-        assert "vs thru #1" in win.trace_label.text()
-        tx = sa.get_trace("last", "transmission")["transmission"]
-        assert np.allclose(y, tx)
-
-        win.clear_ref_btn.click()                          # no thru: spectrum, and it says why
-        sa.step()
-        _fresh(win)
-        assert "SPECTRUM" in win.trace_label.text()
+        assert win.tg_label.text().startswith("parked")
 
         # the detector selector applies at once
         win.det_combo.setCurrentIndex(win.det_combo.findText("peak"))
@@ -103,13 +93,13 @@ def test_window_builds_sweeps_and_uses_the_brains_thru(app):
         while sa.status().acquiring:
             sa.step()
         win._refresh()
-        assert "#2" in win.sample_label.text()
+        assert "#1" in win.sample_label.text()
 
         win.indicator._tick()
         win.indicator.grab()                               # runs paintEvent
     finally:
         win.close()
-    assert sim.tg_output_on is False                       # closing the window shut it down
+    assert sim.tg_cw == (10e3, -30.0)                      # closing the window PARKED it
 
 
 def test_settings_dialog_parses_and_applies(app):

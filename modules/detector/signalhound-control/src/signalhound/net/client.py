@@ -4,8 +4,10 @@ A GUI or script can hold a SignalhoundClient exactly where it would hold the bra
 same method names, same status() attributes, same get_config()/apply_config()
 and `_on_event` hook. Only the address changes.
 
-It adds `acquire_blocking()` and `take_reference_blocking()` for scripts:
-trigger, wait for THIS acquisition, return its trace.
+It adds `acquire_blocking()` for scripts: trigger, wait for THIS acquisition,
+return its trace. The tracking-generator verbs (tg_cw, tg_sweep_acquire,
+get_tg_trace, tg_abort, and tg_sweep_blocking) are here for tests and scripts;
+the client modules shsg / shsna speak them with their own raw pyzmq clients.
 """
 
 from __future__ import annotations
@@ -19,7 +21,8 @@ import zmq
 
 from ..config import Config
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
-                       TOPIC_EVENT, config_to_dict, apply_config_dict, trace_from_wire)
+                       TOPIC_EVENT, config_to_dict, apply_config_dict, trace_from_wire,
+                       tg_trace_from_wire)
 
 _NAN = float("nan")
 
@@ -32,26 +35,26 @@ class RemoteStatus:
                  "averages": 1, "continuous": False, "configured": False, "sweeping": False,
                  "sweep_progress": 0.0, "sweeps": 0, "trace_id": 0,
                  "acq_id": 0, "acquiring": False, "acq_progress": 0.0,
-                 "simulated": True, "acq_is_reference": False, "device_model": "",
-                 "tg_attached": False, "tg_on": False, "tg_points": 0,
-                 "reject": True, "detector": "average", "overload": False}
+                 "simulated": True, "device_model": "", "spectrum_paused": "",
+                 "reject": True, "detector": "average", "overload": False,
+                 "tg_attached": False, "tg_mode": "unknown", "tg_cw_on": False,
+                 "tg_acq_id": 0, "tg_acquiring": False, "tg_progress": 0.0,
+                 "tg_sample_id": 0, "tg_error": ""}
 
     def __init__(self, d: dict):
         for k, default in self._DEFAULTS.items():
             setattr(self, k, d.get(k, default))
         for k, v in d.items():
-            if k not in self._DEFAULTS and k not in ("sample", "reference", "scene"):
+            if k not in self._DEFAULTS and k not in ("sample", "scene"):
                 setattr(self, k, _NAN if v is None else v)
         self.sample = {k: (_NAN if v is None else v) for k, v in (d.get("sample") or {}).items()}
-        self.reference = {k: (_NAN if v is None else v)
-                          for k, v in (d.get("reference") or {"present": False}).items()}
         self.scene = dict(d.get("scene") or {})
         self.describe_rev = d.get("describe_rev")
 
     def __getattr__(self, name):
         # A float field the service has not sent yet (first frame) reads as NaN
         # rather than crashing the GUI's first refresh.
-        if name.endswith(("_Hz", "_dB", "_dBm", "_s")):
+        if name.endswith(("_Hz", "_dB", "_dBm", "_s", "_hz", "_dbm")):
             return _NAN
         raise AttributeError(name)
 
@@ -112,10 +115,6 @@ class SignalhoundClient:
     def set_detector(self, det):      return self._checked({"cmd": "set_detector", "detector": str(det)})
     def set_averages(self, n):        return self._cmd({"cmd": "set_averages", "averages": int(n)})
     def set_continuous(self, on):     return self._cmd({"cmd": "set_continuous", "on": bool(on)})
-    def set_tg(self, on):             return self._checked({"cmd": "set_tg", "on": bool(on)})
-    def set_tg_level(self, dbm):      return self._cmd({"cmd": "set_tg_level", "tg_level_dBm": float(dbm)})
-    def set_tg_points(self, n):       return self._cmd({"cmd": "set_tg_points", "points": int(n)})
-    def clear_reference(self):        return self._cmd({"cmd": "clear_reference"})
 
     def set_start_stop(self, start_hz, stop_hz):
         return self._checked({"cmd": "set_start_stop", "start_Hz": float(start_hz),
@@ -128,11 +127,6 @@ class SignalhoundClient:
         """Start an acquisition; returns its id (or raises if refused)."""
         return int(self._checked({"cmd": "acquire"})["acq_id"])
 
-    def take_reference(self) -> int:
-        """Start a thru-reference acquisition; returns its id (or raises if refused,
-        e.g. with the tracking generator off)."""
-        return int(self._checked({"cmd": "take_reference"})["acq_id"])
-
     def abort(self):
         return self._cmd({"cmd": "abort"})
 
@@ -140,9 +134,8 @@ class SignalhoundClient:
         return self._cmd({"cmd": "get_sample"}).get("sample", {})
 
     def get_trace(self, which: str = "sample", quantity: str = "trace") -> dict:
-        """The trace as numpy: `trace` (dBm) or `transmission` (dB), freqs_Hz,
-        and its conditions. Raises ValueError when the service has none (or it
-        was aborted, or transmission has no matching thru -- the message says)."""
+        """The trace as numpy: `trace` (dBm), freqs_Hz, and its conditions.
+        Raises ValueError when the service has none (or it was aborted)."""
         return trace_from_wire(self._checked({"cmd": "get_trace", "which": which,
                                               "quantity": quantity}))
 
@@ -158,10 +151,64 @@ class SignalhoundClient:
         """
         return self._wait_for(self.acquire(), timeout_s, poll_s)
 
-    def take_reference_blocking(self, timeout_s: float | None = None, poll_s: float = 0.02) -> dict:
-        """Take a reference and wait for it; returns the reference trace."""
-        self._wait_for(self.take_reference(), timeout_s, poll_s)
-        return self.get_trace("reference")
+    # ---- the tracking generator (the owner-side contract) --------------------
+
+    def tg_cw(self, on: bool, freq_hz=None, level_dbm=None) -> dict:
+        """TG CW on / off (= park); returns {on, freq_hz, level_dbm, deferred}
+        -- deferred True while a TG sweep holds the TG. Raises ValueError when
+        refused (no TG, out of range)."""
+        d = {"cmd": "tg_cw", "on": bool(on)}
+        if freq_hz is not None:
+            d["freq_hz"] = float(freq_hz)
+        if level_dbm is not None:
+            d["level_dbm"] = float(level_dbm)
+        r = self._checked(d)
+        return {**r["tg_cw"], "deferred": bool(r.get("deferred", False))}
+
+    def tg_sweep_acquire(self, start_hz, stop_hz, level_dbm=None, rbw_hz=None, averages=None,
+                         points=None) -> int:
+        d = {"cmd": "tg_sweep_acquire", "start_hz": float(start_hz),
+             "stop_hz": float(stop_hz)}
+        for k, x in (("level_dbm", level_dbm), ("rbw_hz", rbw_hz), ("averages", averages),
+                     ("points", points)):
+            if x is not None:
+                d[k] = x
+        return int(self._checked(d)["tg_acq_id"])
+
+    def get_tg_trace(self, id: int | None = None) -> dict:
+        d = {"cmd": "get_tg_trace"}
+        if id is not None:
+            d["id"] = int(id)
+        return tg_trace_from_wire(self._checked(d))
+
+    def tg_abort(self, id: int | None = None) -> bool:
+        d = {"cmd": "tg_abort"}
+        if id is not None:
+            d["id"] = int(id)
+        return bool(self._cmd(d).get("aborted", False))
+
+    def tg_grid(self, start_hz, stop_hz, points=None, rbw_hz=None) -> dict:
+        d = {"cmd": "tg_grid", "start_hz": float(start_hz), "stop_hz": float(stop_hz)}
+        if points is not None:
+            d["points"] = int(points)
+        if rbw_hz is not None:
+            d["rbw_hz"] = float(rbw_hz)
+        r = self._checked(d)
+        r.pop("ok", None)
+        return r
+
+    def tg_sweep_blocking(self, start_hz, stop_hz, level_dbm=None, timeout_s: float = 60.0,
+                          poll_s: float = 0.02, **kw) -> dict:
+        """Trigger a TG sweep, wait for THAT one (id first, then the flag --
+        gotcha #17), return its trace."""
+        n = self.tg_sweep_acquire(start_hz, stop_hz, level_dbm, **kw)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            st = self._status_dict()
+            if st.get("tg_acq_id") == n and not st.get("tg_acquiring", True):
+                return self.get_tg_trace(n)
+            time.sleep(poll_s)
+        raise TimeoutError(f"TG sweep {n} did not finish within {timeout_s:g} s")
 
     def _wait_for(self, n: int, timeout_s, poll_s) -> dict:
         limit = timeout_s if timeout_s is not None else self.cfg.acquisition.timeout_s

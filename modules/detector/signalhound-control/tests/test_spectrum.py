@@ -1,5 +1,6 @@
-"""The brain: clamps, the model envelope, lifecycle and safety, acquisitions,
-the thru reference, and the threading rules -- all on the simulator, offline."""
+"""The brain: clamps, the model envelope, lifecycle and safety, acquisitions
+and the threading rules -- all on the simulator, offline. The tracking
+generator (the owner-side contract with shsg / shsna) is in test_tg_owner.py."""
 
 import threading
 import time
@@ -67,10 +68,6 @@ def test_rbw_snaps_vbw_follows_and_cannot_exceed(sa):
 def test_levels_and_counts_clamp(sa):
     sa.set_ref_level(50)
     assert sa.status().ref_level_dBm == 20.0
-    sa.set_tg_level(0.0)
-    assert sa.status().tg_level_dBm == -10.0              # the TG44A tops out at -10 dBm
-    sa.set_tg_level(-99)
-    assert sa.status().tg_level_dBm == -30.0
     sa.set_averages(0)
     assert sa.status().averages == 1
     with pytest.raises(ValueError):
@@ -93,50 +90,7 @@ def test_sa124b_model_widens_the_envelope():
         v.shutdown()
 
 
-def test_tg_on_pulls_the_window_into_its_range():
-    cfg = Config()
-    cfg.hardware.model = "SA124B"
-    cfg.acquisition.continuous = False
-    v, _ = build_sim_system(cfg, realtime=False)
-    v.start(run=False)
-    try:
-        v.set_center(8e9)
-        v.set_tg(True)
-        st = v.status()
-        assert st.tg_on and st.freq_max_Hz == 4.4e9 and st.stop_Hz <= 4.4e9 + 1e-3
-    finally:
-        v.shutdown()
-
-
 # ---- lifecycle and safety -------------------------------------------------------
-
-def test_tg_is_off_at_start_whatever_the_config_said():
-    cfg = Config()
-    cfg.tracking.on = True
-    cfg.acquisition.continuous = False
-    v, sim = build_sim_system(cfg, realtime=False)
-    v.start(run=False)
-    assert v.status().tg_on is False and sim.tg_output_on is False
-    v.set_tg(True)
-    v.step()
-    assert sim.tg_output_on is True
-    v.shutdown()
-    assert sim.tg_output_on is False                      # shutdown stops the TG output
-
-
-def test_tg_refused_without_a_tracking_generator():
-    cfg = Config()
-    cfg.scene.tg_attached = False
-    cfg.acquisition.continuous = False
-    v, _ = build_sim_system(cfg, realtime=False)
-    v.start(run=False)
-    try:
-        assert v.status().tg_attached is False
-        with pytest.raises(ValueError, match="no tracking generator"):
-            v.set_tg(True)
-    finally:
-        v.shutdown()
-
 
 def test_shutdown_is_safe_twice_and_status_never_touches_hardware(sa):
     calls = []
@@ -229,59 +183,6 @@ def test_idle_thread_keeps_the_grid_honest(sa):
     assert sa.status().points == int(1e6 / (sa.cfg.sweep.rbw_Hz / 2)) + 1
 
 
-# ---- the thru reference and transmission -----------------------------------------
-
-def test_take_reference_needs_the_tg(sa):
-    with pytest.raises(ValueError, match="tracking generator"):
-        sa.take_reference()
-
-
-def test_transmission_against_a_thru(sa):
-    sa.set_tg(True)
-    sa.set_scene("dut_inserted", False)
-    r = sa.take_reference()
-    _done(sa)
-    ref = sa.status().reference
-    assert ref["present"] and ref["acq_id"] == r and ref["tg_level_dBm"] == -20.0
-    sa.set_scene("dut_inserted", True)
-    sa.acquire()
-    _done(sa)
-    t = sa.get_trace("sample", "transmission")
-    assert "trace" not in t and t["reference_acq_id"] == r
-    i = np.argmin(np.abs(t["freqs_Hz"] - 1e9))
-    assert t["transmission"][i] == pytest.approx(-1.5, abs=0.2)
-    assert sa.status().sample["tx_center_dB"] == pytest.approx(-1.5, abs=0.2)
-
-
-def test_transmission_refused_on_mismatch(sa):
-    with pytest.raises(ValueError, match="no sweep"):
-        sa.get_trace("last", "transmission")
-    sa.set_tg(True)
-    sa.take_reference(); _done(sa)
-    sa.set_tg_level(-25.0)
-    sa.acquire(); _done(sa)
-    with pytest.raises(ValueError, match="TG level -25 dBm vs reference -20 dBm"):
-        sa.get_trace("sample", "transmission")
-    sa.set_tg_level(-20.0)
-    sa.set_tg_points(201)
-    sa.acquire(); _done(sa)
-    with pytest.raises(ValueError, match="201 points vs reference 401"):
-        sa.get_trace("sample", "transmission")
-    sa.set_tg(False)
-    sa.acquire(); _done(sa)
-    with pytest.raises(ValueError, match="spectrum, not a tracking-generator sweep"):
-        sa.get_trace("sample", "transmission")
-
-
-def test_aborting_a_reference_clears_the_old_one(sa):
-    sa.set_tg(True)
-    sa.take_reference(); _done(sa)
-    assert sa.status().reference["present"]
-    sa.take_reference()
-    sa.abort()
-    assert sa.status().reference["present"] is False
-
-
 def test_scene_is_simulation_only_and_clamped(sa):
     sa.set_scene("dut_bandwidth_Hz", -5)
     assert sa.cfg.scene.dut_bandwidth_Hz == 1e3
@@ -347,7 +248,7 @@ def test_start_leaves_a_busy_analyser_as_it_found_it():
     assert st.configured is False and st.continuous is False and st.sweeps == 0
     assert st.device_model == "SA124B" and st.freq_max_Hz == pytest.approx(12.4e9)
     v.shutdown()
-    assert sim.tg_output_on is False                      # shutdown behaviour unchanged
+    assert sim.tg_cw == (10e3, -30.0)                     # shutdown PARKS it (no off)
 
 
 def test_sweep_on_start_restores_the_old_behaviour():

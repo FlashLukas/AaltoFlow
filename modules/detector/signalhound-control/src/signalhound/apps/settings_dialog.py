@@ -18,7 +18,7 @@ from PySide6 import QtWidgets
 
 from ..config import Config, _cast
 
-_TABS = [("sweep", "Sweep"), ("tracking", "Tracking gen."), ("acquisition", "Acquisition"),
+_TABS = [("sweep", "Sweep"), ("acquisition", "Acquisition"),
          ("scene", "Scene"), ("hardware", "Hardware"), ("limits", "Limits"),
          ("ui", "Appearance")]
 
@@ -26,16 +26,15 @@ _HINTS = {
     "sweep": "Applied at the next sweep. A change during an acquisition restarts it. "
              "RBW: continuous to 100 kHz, then 250 kHz (6 MHz on the SA124B); VBW <= RBW. "
              "detector: average or peak.",
-    "tracking": "The USB-TG44A. level_dBm: -30 ... -10. points: a request; the analyser "
-                "may choose up to 2x differently. Both flags True = most dynamic range; "
-                "passive_device False when the device under test amplifies.",
     "acquisition": "An acquisition averages sweep.averages sweeps (in power) that all "
                    "started after the trigger. continuous = sweep on its own in between.",
-    "scene": "SIMULATOR only. A generator with harmonics (spectrum mode); in tracking "
-             "mode TG -> cable -> band-pass filter. dut_inserted off = a thru.",
-    "hardware": "REAL analyser only (--real), read when it opens: restart the service "
-                "after a change. model: auto, SA44B or SA124B. serial: 0 = the first found. "
-                "dll_path: empty = sa_api.dll on the PATH. atten / gain: -1 = automatic.",
+    "scene": "SIMULATOR only. A generator with harmonics (spectrum mode); behind the "
+             "tracking generator TG -> cable -> band-pass filter. dut_inserted off = a thru.",
+    "hardware": "model / serial / dll_path are read when the analyser opens: restart the "
+                "service after a change. model: auto, SA44B or SA124B. serial: 0 = the first "
+                "found. dll_path: empty = sa_api.dll on the PATH. atten / gain: -1 = automatic. "
+                "tg_*: the tracking generator, driven by the shsg / shsna modules; it has no "
+                "off, so 'off' parks it at tg_park_hz / tg_park_dbm. tg_sweep_points <= 1001.",
     "limits": "The envelope every setpoint is clamped to (the connected model narrows the "
               "frequency range further).",
     "ui": "theme: dark or light. Applies the next time the GUI starts.",

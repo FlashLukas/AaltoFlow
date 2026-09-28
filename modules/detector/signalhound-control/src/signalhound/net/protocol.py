@@ -26,10 +26,9 @@ DEFAULT_PUB_PORT = 5588
 TOPIC_STATUS = b"status"
 TOPIC_EVENT = b"event"
 
-#: the array quantities a trace can carry: "trace" = power per bin in dBm,
-#: "transmission" = trace minus the thru reference, in dB. A get_trace reply
-#: carries the ONE that was asked for.
-TRACE_ARRAYS = ("trace", "transmission")
+#: the array a spectrum trace carries: "trace" = power per bin in dBm. (The
+#: thru-referenced "transmission" moved to the shsna module on 2026-09-28.)
+TRACE_ARRAYS = ("trace",)
 
 
 def status_to_dict(status) -> dict:
@@ -68,6 +67,16 @@ def trace_from_wire(d: dict) -> dict:
             out[k] = np.array([math.nan if v is None else v for v in d[k]], dtype=float)
     out.pop("ok", None)
     out["freqs_Hz"] = Grid(out["start_Hz"], out["bin_Hz"], int(out["points"])).freqs()
+    return out
+
+
+def tg_trace_from_wire(d: dict) -> dict:
+    """A get_tg_trace reply -> `db` as numpy (null -> NaN) plus its frequency
+    axis `freqs_hz` (bin i at start_hz + i * bin_hz, like a spectrum trace).
+    level_dbm stays None: the TG sweep does not apply a level."""
+    out = {k: v for k, v in d.items() if k not in ("db", "ok")}
+    out["db"] = np.array([math.nan if v is None else v for v in d["db"]], dtype=float)
+    out["freqs_hz"] = Grid(out["start_hz"], out["bin_hz"], int(out["points"])).freqs()
     return out
 
 

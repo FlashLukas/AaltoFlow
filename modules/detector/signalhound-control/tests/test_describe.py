@@ -37,11 +37,8 @@ def test_manifest_is_json_and_ids_are_unique(signalhound):
 
 
 def test_every_read_path_resolves_in_status(signalhound):
-    # an acquisition and a reference too, so the sample / reference paths exist
-    signalhound.set_tg(True)
-    signalhound.take_reference()
-    while signalhound.status().acquiring:
-        signalhound.step()
+    # an acquisition and a CW too, so the sample / TG paths hold values
+    signalhound.tg_cw(True, 1e9, -20.0)
     signalhound.acquire()
     while signalhound.status().acquiring:
         signalhound.step()
@@ -51,45 +48,42 @@ def test_every_read_path_resolves_in_status(signalhound):
             assert read_path(st, p["read_path"]) is not None, p["id"]
 
 
-def test_trace_and_transmission_are_real_array_detectors(signalhound):
-    params = _params(signalhound)
-    tr, tx = params["trace"], params["transmission"]
-    for d in (tr, tx):
-        assert d["type"] == "array" and d["dtype"] == "float" and d["shape"] == ["freq"]
-        dim = d["dims"][0]
-        assert dim["coord_verb"] == "get_frequencies" and dim["coord_key"] == "values_GHz"
-        assert dim["length"] == signalhound.status().points
-        assert d["acquire"]["target_key"] == "acq_id"
-    assert tr["dims"] == tx["dims"]                 # one shared frequency coordinate
+def test_trace_is_a_real_array_detector(signalhound):
+    tr = _params(signalhound)["trace"]
+    assert tr["type"] == "array" and tr["dtype"] == "float" and tr["shape"] == ["freq"]
+    dim = tr["dims"][0]
+    assert dim["coord_verb"] == "get_frequencies" and dim["coord_key"] == "values_GHz"
+    assert dim["length"] == signalhound.status().points
+    assert tr["acquire"]["target_key"] == "acq_id"
     assert tr["read"] == {"verb": "get_trace", "key": "trace",
                           "args": {"which": "sample", "quantity": "trace"}}
-    assert tx["read"]["key"] == "transmission" and tx["unit"] == "dB"
 
 
 def test_scalar_detectors_share_the_one_acquisition(signalhound):
     params = _params(signalhound)
-    ids = ("trace", "transmission", "peak_freq", "peak_level", "noise_floor", "tx_center",
-           "overloaded")
+    ids = ("trace", "peak_freq", "peak_level", "noise_floor", "overloaded")
     assert {params[k]["acquire"]["group"] for k in ids} == {"sweep"}
-
-
-def test_reference_actions_carry_the_exact_wait_blocks(signalhound):
-    params = _params(signalhound)
-    take, clear = params["take_reference"], params["clear_reference"]
-    assert take["wait"] == {
-        "target_key": "acq_id",
-        "ready": {"policy": "adopt_then_flag", "setpoint_key": "acq_id",
-                  "flag_key": "acquiring", "invert": True},
-        "timeout_s": signalhound.cfg.acquisition.timeout_s,
-    }
-    assert clear["wait"] == {"ready": {"policy": "immediate"}}
     assert "wait" not in params["acquire"] and "wait" not in params["abort"]
+
+
+def test_the_tg_is_shown_but_not_driven_here(signalhound):
+    """Lukas 2026-09-28: the TG's verbs are for the client modules (shsg,
+    shsna), which offer the scan controls; this panel only SHOWS the TG."""
+    params = _params(signalhound)
+    tg = {k: p for k, p in params.items() if p.get("group") == "Tracking generator"}
+    assert {"tg_mode", "tg_cw_on", "tg_cw_freq", "tg_cw_level", "tg_attached"} <= set(tg)
+    assert all(p["kind"] == "indicator" for p in tg.values())
+    for p in params.values():
+        assert not str((p.get("set") or {}).get("verb", "")).startswith("tg_"), p["id"]
+        assert not p["id"].startswith(("tg_cw_set", "tg_sweep")), p["id"]
+    gone = {"transmission", "tx_center", "take_reference", "clear_reference", "tg_on",
+            "tg_level", "tg_points", "reference_present"}
+    assert not gone & set(params)
 
 
 def test_action_verbs_exist(signalhound):
     from signalhound.net.service import SignalhoundService
     svc = SignalhoundService(signalhound)           # not started: only _dispatch is used
-    signalhound.set_tg(True)                        # take_reference needs the TG
     for p in build_manifest(signalhound)["parameters"]:
         if p["kind"] == "action":
             reply = svc._dispatch({"cmd": p["id"]})
@@ -137,22 +131,13 @@ def test_revision_ignores_values_but_follows_limits(signalhound):
     assert build_manifest(signalhound)["revision"] != r1
 
 
-def test_turning_the_tg_on_changes_the_envelope(signalhound):
-    signalhound.set_center(3e9)
-    before = _params(signalhound)["center"]["max"]
-    signalhound.set_tg(True)
-    signalhound.step()
-    after = _params(signalhound)["center"]["max"]
-    assert before == pytest.approx(4.4, abs=1e-3) and after <= 4.4
-
-
 def test_the_simulated_scene_is_absent_on_a_real_analyser():
     cfg = Config()
     real = SpectrumAnalyzer(SaApiAnalyzer(cfg, dll=FakeSaApi(device_type=4)), cfg)
     real.start(run=False)
     try:
         params = _params(real)
-        assert {"trace", "take_reference", "tg_on"} <= set(params)
+        assert {"trace", "tg_mode", "tg_cw_on"} <= set(params)
         assert not set(params) & {"tone_on", "dut_inserted", "tone_Hz"}
         assert build_manifest(real)["label"] == "Signal Hound SA124B"
         assert params["center"]["max"] > 12.0           # the SA124B's range

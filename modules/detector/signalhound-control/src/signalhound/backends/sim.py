@@ -1,6 +1,13 @@
 """The simulated Signal Hound: an SA44B (or SA124B) with a USB-TG44A, looking
 at the scene in `cfg.scene` (a generator with harmonics, or a filter behind the
-tracking generator).
+tracking generator). The TG can sweep (a TG sweep, for shsna) or emit a CW
+tone (for shsg); the CW reaches the analyser through the scene's cable and
+filter, so it is visible on the spectrum.
+
+Like the real TG44A (measured 2026-09-28) the simulated TG has NO off: an
+abort (`idle`), closing the device, a TG sweep ending -- none of them silences
+it. After a TG sweep it sits at the last swept frequency. Only a new CW
+setting (the brain's PARK, for "off") moves it.
 
 The physics is in `signalhound.physics`; this file adds what makes it an
 INSTRUMENT -- it is configured before it sweeps, it chooses its own bin grid,
@@ -24,14 +31,15 @@ class SimulatedAnalyzer:
     simulated = True
 
     def __init__(self, cfg: Config, seed: int | None = None, time_scale: float = 1.0,
-                 tg_output_on: bool = False):
+                 tg_output_on: bool = False, tg_cw: tuple[float, float] | None = None):
         """`time_scale` multiplies every sweep time: 1.0 behaves like the real
         analyser (the GUI, the service), 0.0 makes tests instant.
 
         `tg_output_on` is the state the TG was LEFT in by whatever used the
         analyser before us (the real TG44A may keep emitting CW, VERIFY 5b in
         the module notes). open() does not change it -- the start-up rule --
-        so a test can start from a non-default state and see it untouched."""
+        so a test can start from a non-default state and see it untouched.
+        `tg_cw` = (Hz, dBm) of such a left-over CW (with tg_output_on True)."""
         self.cfg = cfg
         self.time_scale = float(time_scale)
         self._rng = np.random.default_rng(seed)
@@ -40,9 +48,16 @@ class SimulatedAnalyzer:
         self._grid: Grid | None = None
         self._pending = None
         self.tg_output_on = bool(tg_output_on)   # for the safety tests: is the TG emitting?
+        # (Hz, dBm) of the CW the TG emits (None = no CW)
+        self.tg_cw: tuple[float, float] | None = tuple(tg_cw) if tg_cw and tg_output_on else None
         # Every configure() is a WRITE to the analyser (settings + initiate);
         # tests count them to prove that start-up writes nothing.
         self.configure_calls = 0
+        # Every state-changing call, in order ("configure:spectrum",
+        # "configure:tg", "set_tg_cw", "idle", "close"): tests check the
+        # ORDER of the owner's restore after a TG sweep, and that start-up and
+        # a refused command send nothing.
+        self.log: list[str] = []
 
     # ---- lifecycle ---------------------------------------------------------
     def _model(self) -> str:
@@ -55,9 +70,10 @@ class SimulatedAnalyzer:
         self._open = True
 
     def close(self) -> None:
+        self.log.append("close")
         self._open = False
         self._pending = None
-        self.tg_output_on = False
+        # the TG is NOT silenced: closing the real device leaves it emitting
 
     def idn(self) -> str:
         return f"AaltoFlow simulated Signal Hound {self._model()} (not a real instrument)"
@@ -75,10 +91,14 @@ class SimulatedAnalyzer:
         if settings.tg_on and not self.tg_attached():
             raise RuntimeError("no tracking generator attached")
         self.configure_calls += 1
+        self.log.append("configure:tg" if settings.tg_on else "configure:spectrum")
         self._settings = settings
         self._grid = sim_grid(settings, self.cfg.limits.max_bins)
         self._pending = None
-        self.tg_output_on = settings.tg_on
+        if settings.tg_on:
+            self.tg_output_on = True      # the TG sweep takes the TG over
+        # a spectrum configure leaves a CW as it was (the simulated hardware
+        # CAN keep a CW while it sweeps; hardware.tg_cw_during_sweep = True)
         return self._grid
 
     def sweep_time_s(self, settings: SweepSettings, points: int) -> float:
@@ -88,7 +108,8 @@ class SimulatedAnalyzer:
         if self._settings is None:
             raise RuntimeError("start_sweep before configure")
         self._pending = {"settings": self._settings, "grid": self._grid,
-                         "scene": copy.copy(self.cfg.scene), "model": self._model()}
+                         "scene": copy.copy(self.cfg.scene), "model": self._model(),
+                         "cw": self.tg_cw}
 
     def finish_sweep(self) -> tuple[np.ndarray, dict]:
         p, self._pending = self._pending, None
@@ -96,11 +117,38 @@ class SimulatedAnalyzer:
             raise RuntimeError("finish_sweep without start_sweep")
         s, g = p["settings"], p["grid"]
         if s.tg_on:
-            db, over = physics.tracking_dBm(g.freqs(), s, p["scene"], self._rng)
+            db, over = physics.tracking_dB(g.freqs(), s, p["scene"], self._rng)
+            # and afterwards the TG sits at the last swept frequency (measured)
+            self.tg_cw = (g.stop_Hz, s.tg_level_dBm)
         else:
+            extra = []
+            if p["cw"] is not None:
+                # the TG's CW travels cable + filter into the analyser input
+                f_cw, l_cw = p["cw"]
+                extra.append((f_cw, l_cw + float(physics.tg_path_dB([f_cw], p["scene"])[0])))
             db, over = physics.spectrum_dBm(g.freqs(), g.bin_Hz, s, p["scene"], p["model"],
-                                            self._rng)
+                                            self._rng, extra)
         return db, {"overload": over}
 
     def abort_sweep(self) -> None:
+        self._pending = None
+
+    # ---- the tracking generator as a CW source ------------------------------
+    def set_tg_cw(self, freq_hz: float, level_dbm: float) -> None:
+        """Emit a CW tone. Leaves the spectrum configuration alone, as saSetTg
+        does on the real one (measured 2026-09-28: spectrum sweeps go on)."""
+        if not self._open:
+            raise RuntimeError("simulated analyser is not open")
+        if not self.tg_attached():
+            raise RuntimeError("no tracking generator attached")
+        self.log.append("set_tg_cw")
+        self.tg_cw = (float(freq_hz), float(level_dbm))
+        self.tg_output_on = True
+
+    def idle(self) -> None:
+        """Stop whatever is configured (saAbort on the real one). Does NOT
+        silence the TG; the brain reconfigures before the next sweep."""
+        self.log.append("idle")
+        self._settings = None
+        self._grid = None
         self._pending = None

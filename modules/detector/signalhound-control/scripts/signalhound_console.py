@@ -9,9 +9,6 @@ imports -- so this one file can be copied to any machine with pyzmq.
 
 Commands
     acquire                 trigger fresh sweeps, wait for them, print the peak
-    ref                     take the thru reference (tracking generator on), wait for it
-    clearref                forget the reference
-    tx                      acquire and print the transmission against the thru
     abort                   cancel a running acquisition
     center <GHz>            centre frequency
     span <MHz>              span
@@ -23,9 +20,12 @@ Commands
     reject on|off           software image rejection
     avg <n>                 sweeps averaged per acquisition (in power)
     cont on|off             continuous sweeping
-    tg on|off               the tracking generator (transmission sweep)
-    tglevel <dBm>           TG output level (-30 ... -10)
-    tgpoints <n>            requested points per TG sweep
+  the tracking generator -- normally driven by the shsg / shsna modules; here
+  to test the owner side of their contract:
+    tgcw on [GHz] [dBm]     TG CW on (missing values are kept)
+    tgcw off                "off" = PARK (the TG44A has no off)
+    tgsweep <GHz> <GHz> [n] one TG sweep start..stop, n averages; prints dB
+    tgabort                 abort a TG sweep
     scene <name> <value>    simulator only, e.g. scene dut_inserted off,
                             scene tone_dBm -20, scene dut_bandwidth_Hz 20e6
     status                  print one status snapshot
@@ -95,11 +95,8 @@ class Console:
             "reject": lambda: self.cmd(cmd="set_reject", on=_onoff(args[0])),
             "avg": lambda: self.cmd(cmd="set_averages", averages=int(num())),
             "cont": lambda: self.cmd(cmd="set_continuous", on=_onoff(args[0])),
-            "tg": lambda: self.cmd(cmd="set_tg", on=_onoff(args[0])),
-            "tglevel": lambda: self.cmd(cmd="set_tg_level", tg_level_dBm=num()),
-            "tgpoints": lambda: self.cmd(cmd="set_tg_points", points=int(num())),
             "abort": lambda: self.cmd(cmd="abort"),
-            "clearref": lambda: self.cmd(cmd="clear_reference"),
+            "tgabort": lambda: self.cmd(cmd="tg_abort"),
         }
         try:
             if w in ("quit", "exit"):
@@ -119,10 +116,15 @@ class Console:
                 print(json.dumps(self.cmd(cmd="status").get("status"), indent=1))
             elif w == "acquire":
                 self.acquire()
-            elif w == "ref":
-                self.acquire(verb="take_reference")
-            elif w == "tx":
-                self.acquire(quantity="transmission")
+            elif w == "tgcw":
+                msg = {"cmd": "tg_cw", "on": _onoff(args[0])}
+                if len(args) > 1:
+                    msg["freq_hz"] = num(1) * 1e9
+                if len(args) > 2:
+                    msg["level_dbm"] = num(2)
+                print(self.cmd(**msg))
+            elif w == "tgsweep":
+                self.tg_sweep(num(0) * 1e9, num(1) * 1e9, int(num(2)) if len(args) > 2 else 1)
             elif w == "watch":
                 self.watch(float(args[0]) if args else 5.0)
             else:
@@ -130,6 +132,29 @@ class Console:
         except (IndexError, ValueError):
             print(f"bad arguments for {w!r}; try help")
         return True
+
+    def tg_sweep(self, start, stop, averages):
+        r = self.cmd(cmd="tg_sweep_acquire", start_hz=start, stop_hz=stop, averages=averages)
+        if not r.get("ok"):
+            print(r)
+            return
+        n = r["tg_acq_id"]
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            st = self.cmd(cmd="status").get("status") or {}
+            # the id first, then the flag (suite gotcha #17)
+            if st.get("tg_acq_id") == n and not st.get("tg_acquiring"):
+                t = self.cmd(cmd="get_tg_trace", id=n)
+                if not t.get("ok"):
+                    print(t)
+                    return
+                y = [v for v in t["db"] if v is not None]
+                print(f"TG sweep #{n}: {t['points']} points {_f(t['start_hz'], 1e9, '.6f')}-"
+                      f"{_f(t['stop_hz'], 1e9, '.6f')} GHz, {min(y):.2f} ... {max(y):.2f} dB "
+                      f"(relative to the TG output)" + ("  OVERLOAD" if t.get("overload") else ""))
+                return
+            time.sleep(0.05)
+        print(f"TG sweep {n} did not finish")
 
     def acquire(self, verb="acquire", quantity="trace"):
         r = self.cmd(cmd=verb)
@@ -147,19 +172,14 @@ class Console:
                 if not t.get("ok"):
                     print(t)
                     return
-                head = (f"#{n}{' (thru reference)' if verb != 'acquire' else ''}: "
+                head = (f"#{n}: "
                         f"{t['points']} bins {_f(t['start_Hz'], 1e9, '.6f')}-"
                         f"{_f(t['stop_Hz'], 1e9, '.6f')} GHz, RBW {_f(t['rbw_Hz'], 1e3, 'g')} kHz, "
                         f"{t['averages']} avg")
-                if quantity == "transmission":
-                    y = [v for v in t["transmission"] if v is not None]
-                    print(head + f", transmission {min(y):.2f} ... {max(y):.2f} dB, "
-                                 f"at centre {_f(t.get('tx_center_dB'), 1, '.2f')} dB")
-                else:
-                    print(head + f", peak {_f(t['peak_Hz'], 1e9, '.6f')} GHz at "
-                                 f"{_f(t['peak_dBm'], 1, '.2f')} dBm, floor "
-                                 f"{_f(t['floor_dBm'], 1, '.1f')} dBm"
-                          + ("  OVERLOAD" if t.get("overload") else ""))
+                print(head + f", peak {_f(t['peak_Hz'], 1e9, '.6f')} GHz at "
+                             f"{_f(t['peak_dBm'], 1, '.2f')} dBm, floor "
+                             f"{_f(t['floor_dBm'], 1, '.1f')} dBm"
+                      + ("  OVERLOAD" if t.get("overload") else ""))
                 return
             time.sleep(0.05)
         print(f"acquisition {n} did not finish")
@@ -181,7 +201,7 @@ class Console:
                         print(f"  peak {_f(d.get('peak_Hz'), 1e9, '.6f')} GHz "
                               f"{_f(d.get('peak_dBm'), 1, '7.2f')} dBm  floor "
                               f"{_f(d.get('floor_dBm'), 1, '7.2f')} dBm  "
-                              f"{'TG ' if d.get('tg_on') else ''}sweeps {d.get('sweeps')}")
+                              f"TG {d.get('tg_mode')}  sweeps {d.get('sweeps')}")
         finally:
             sub.close(0)
 
