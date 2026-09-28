@@ -554,7 +554,8 @@ class MainWindow(QWidget):
             else:   # "same": one number again for this axis
                 self._do(lambda a=a, v=fwd.value(): self.ctrl.set_calibration(a, v, 0))
         # a remote GUI edits the SERVICE's config, so pull it back to stay in step
-        self._do(self.ctrl.get_config)
+        # (this used to call get_config and throw the reply away)
+        self._pull_config()
         self._sync_step_size_boxes()
 
     def _build_calibration_card(self) -> QFrame:
@@ -805,7 +806,26 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------ #
     # settings
     # ------------------------------------------------------------------ #
+    def _pull_config(self) -> None:
+        """Remote GUI: refresh the local config MIRROR from the service.
+
+        The mirror is filled once at launch. Settings edits it and pushes ALL
+        of it back with set_config, so anything changed on the service since
+        -- the display zero, step sizes typed on the STEP SIZE card, a leash or
+        voltage set by a script or scan -- was quietly put back to its
+        launch-time value (gotcha #5, from our own GUI; fixed 2026-09-28).
+        A local GUI shares the brain's Config object, so there is nothing to do.
+        """
+        if not self.remote:
+            return
+        from ..net.protocol import apply_config_dict
+        try:
+            apply_config_dict(self.cfg, self.ctrl.get_config())
+        except Exception as exc:
+            self._on_event("warn", f"could not refresh the config from the service: {exc}")
+
     def _open_settings(self) -> None:
+        self._pull_config()           # edit what the service has NOW, not at launch
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             self._push_config()
@@ -945,11 +965,13 @@ class MainWindow(QWidget):
         The leash range is stored as a single step count shared by X and Y, so
         the µm view of the XY box uses X's calibration as the representative one
         (X and Y are normally calibrated alike); Z uses its own.
+
+        The step size IN FORCE (status, mean of both directions), like the jog
+        and the hint line under this card: converting with cfg's datasheet
+        number while the camera calibration rules armed a different box than
+        the um typed (fixed 2026-09-28).
         """
-        c = self.cfg.calibration
-        xy = c.um_per_step_x if c.um_per_step_x > 0 else 0.02
-        z = c.um_per_step_z if c.um_per_step_z > 0 else 0.02
-        return xy, z
+        return self._axis_cal(0), self._axis_cal(2)
 
     def _sync_leash_units(self) -> None:
         """Relabel + rescale the leash boxes for the current unit, showing the
@@ -1051,9 +1073,17 @@ class MainWindow(QWidget):
     def _refresh(self) -> None:
         st = self.ctrl.status()
         # what the service converts µm with, so this GUI converts the same way
+        old_live = getattr(self, "_cal_live", None)
         self._cal_live = (list(getattr(st, "um_per_step_fwd", st.um_per_step)),
                           list(getattr(st, "um_per_step_bwd", st.um_per_step)),
                           list(st.um_per_step))
+        # The leash boxes in µm were converted with the step size of the moment;
+        # when it changes (first status, a calibration loaded, a new voltage)
+        # re-show them, or Apply would convert back with a different number and
+        # quietly resize the box. Not while the user is typing in one.
+        if (old_live is None or old_live[2] != self._cal_live[2]) and not (
+                self._leash_xy.hasFocus() or self._leash_z.hasFocus()):
+            self._sync_leash_units()
         self._update_cal_hint(st)
         src = list(getattr(st, "um_per_step_src", ["config"] * 3))
         if src != getattr(self, "_cal_src", None):    # only on a real change

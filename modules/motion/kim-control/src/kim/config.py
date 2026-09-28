@@ -335,6 +335,11 @@ def set_axis_um_per_step(cfg: Config, axis: int, value: float, direction: int = 
     separate backward value), +1 forward only, -1 backward only."""
     fwd = ("um_per_step_x", "um_per_step_y", "um_per_step_z")[axis]
     bwd = ("um_per_step_x_bwd", "um_per_step_y_bwd", "um_per_step_z_bwd")[axis]
+    if direction > 0 and getattr(cfg.calibration, bwd) <= 0:
+        # Backward was "same as forward" (0). Setting forward ONLY must not drag
+        # the backward step along with it, so pin backward to the value it had
+        # until now -- the old forward number -- before forward changes.
+        setattr(cfg.calibration, bwd, getattr(cfg.calibration, fwd))
     if direction >= 0:
         setattr(cfg.calibration, fwd, value)
     if direction < 0:

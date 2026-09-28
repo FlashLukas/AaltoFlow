@@ -333,10 +333,14 @@ class Kim:
         next_t = time.monotonic()
         while not self._stream_stop.is_set():
             try:
-                # the stamp is taken between the reads, so it sits in the
-                # middle of the three axes' sample times
+                # The three reads are one USB round trip each, one after the
+                # other. The row gets ONE time stamp, so use the MIDDLE of the
+                # read window: stamping after the last read (as before
+                # 2026-09-28) filed X -- read first -- 2.5 round trips late,
+                # i.e. a moving stage a little ahead of where it was read.
+                t_first = time.time()
                 steps = [self.backend.read_position(a) for a in range(3)]
-                t = time.time()
+                t = 0.5 * (t_first + time.time())
                 self.stream.append(t, [self.steps_to_um(a, steps[a]) for a in range(3)])
             except Exception:
                 pass                      # a failed read is a gap, not a crash
@@ -408,6 +412,14 @@ class Kim:
             self._emit("warn", f"{AXES[axis]} target {value} clamped to {hi} steps ({why})")
             return hi
         return value
+
+    def _clamp_steps_quiet(self, axis: int, value: int) -> int:
+        """Where `_clamp_steps` would send `value`, without the warn event."""
+        value = int(round(value))
+        if not self.cfg.limits.enforce:
+            return value
+        lo, hi = axis_effective_limits(self.cfg, axis)
+        return min(max(value, lo), hi)
 
     def _clamp_range(self, value: float, lo: float, hi: float, what: str) -> float:
         value = float(value)
@@ -566,8 +578,15 @@ class Kim:
         self._guard_calibration("change the drive voltage")
         v = self._clamp_range(volts, self.cfg.limits.min_voltage, self.cfg.limits.max_voltage,
                              f"{AXES[axis]} voltage")
-        set_axis_voltage(self.cfg, axis, v)
         self.backend.set_voltage(axis, v)
+        # Keep what the controller ACCEPTED, not what we asked for: the KIM101
+        # takes whole volts, and cfg's voltage picks the row of the camera
+        # px/step table -- um must be converted at the voltage the stage runs at.
+        try:
+            v = float(self.backend.read_voltage(axis))
+        except Exception:
+            pass                          # no read-back: the requested value
+        set_axis_voltage(self.cfg, axis, v)
         self._emit("info", f"{AXES[axis]} drive voltage = {v:.4g} V (re-check calibration)")
         return v
 
@@ -808,11 +827,23 @@ class Kim:
         if not p.used:
             self._emit("warn", f"slot {slot} is empty")
             return []
-        targets = [
-            self.move_to_step(0, int(p.x)),
-            self.move_to_step(1, int(p.y)),
-            self.move_to_step(2, int(p.z)),
-        ]
+        self._guard_calibration("move")
+        # An axis already AT its stored count and at rest is left alone. Not
+        # just tidiness: the KIM101 drives one channel PAIR at a time, (1,2) =
+        # X,Y or (3,4) = Z (backends/kinesis_kim.py), so a zero-length Z move
+        # sent right after the X and Y moves enabled Z's pair and STOPPED X and
+        # Y a few steps into their moves. (If Z really has to move as well, it
+        # still cuts X/Y off -- see "deep cleaning 2026-09-28" in the notes.)
+        targets = []
+        for axis, value in enumerate((p.x, p.y, p.z)):
+            want = int(value)
+            try:
+                here = (int(self.backend.read_position(axis)) == self._clamp_steps_quiet(axis, want)
+                        and not self.backend.is_moving(axis))
+            except Exception:
+                here = False              # cannot tell: send the move as before
+            targets.append(self._clamp_steps_quiet(axis, want) if here
+                           else self.move_to_step(axis, want))
         self._emit("info", f"go to slot {slot} '{p.name}'")
         return targets
 

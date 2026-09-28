@@ -262,10 +262,13 @@ class KinesisKim:
     # setup_drive(max_voltage=None, velocity=None, acceleration=None, channel=None):
     # a None argument keeps the controller's current value. Each write is read
     # back, so the cache holds what the controller ACCEPTED, not what we asked.
+    # The controller takes whole numbers: ROUND (int() truncated, so 99.7 V
+    # became 99 V -- 2026-09-28). The clamps keep the input inside the
+    # controller's window, and rounding a value inside it stays inside.
     def set_step_rate(self, axis: int, steps_per_sec: float) -> None:
         # velocity == step rate for a KIM piezo motor.
         with self._lock:
-            self._call("setup_drive", velocity=int(steps_per_sec), channel=self._ch(axis))
+            self._call("setup_drive", velocity=int(round(steps_per_sec)), channel=self._ch(axis))
             self._refresh_drive(axis)
 
     def read_step_rate(self, axis: int) -> float:
@@ -273,7 +276,7 @@ class KinesisKim:
 
     def set_acceleration(self, axis: int, steps_per_sec2: float) -> None:
         with self._lock:
-            self._call("setup_drive", acceleration=int(steps_per_sec2), channel=self._ch(axis))
+            self._call("setup_drive", acceleration=int(round(steps_per_sec2)), channel=self._ch(axis))
             self._refresh_drive(axis)
 
     def read_acceleration(self, axis: int) -> float:
@@ -281,7 +284,7 @@ class KinesisKim:
 
     def set_voltage(self, axis: int, volts: float) -> None:
         with self._lock:
-            self._call("setup_drive", max_voltage=int(volts), channel=self._ch(axis))
+            self._call("setup_drive", max_voltage=int(round(volts)), channel=self._ch(axis))
             self._refresh_drive(axis)
 
     def read_voltage(self, axis: int) -> float:
