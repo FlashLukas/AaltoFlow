@@ -31,6 +31,9 @@ class FakeOwner:
         self.requests: list[dict] = []   # every command received, in order
         self._lock = threading.Lock()
         self.supports_grid = True      # False = an owner older than tg_grid
+        #: added to the first bin of every sweep: an analyser whose grid does
+        #: NOT land where it was asked (a windowed sweep must then fall back)
+        self.grid_shift_hz = 0.0
         self._st = {"tg_attached": tg_attached, "tg_mode": "parked", "tg_acq_id": 0,
                     "tg_acquiring": False, "tg_sample_id": 0, "tg_error": ""}
         self._shown = dict(self._st)     # what status reports (lags by adopt_delay_s)
@@ -160,7 +163,7 @@ class FakeOwner:
 
     def _grid(self, req: dict) -> tuple:
         n = min(1001, int(req.get("points", self.points)))
-        start = float(np.ceil(req["start_hz"] / 1e3) * 1e3)
+        start = float(np.ceil(req["start_hz"] / 1e3) * 1e3) + float(self.grid_shift_hz)
         return start, (float(req["stop_hz"]) - start) / (n - 1), n
 
     def _make_trace(self, r: dict) -> dict:

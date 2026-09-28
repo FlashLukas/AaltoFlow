@@ -90,6 +90,60 @@ class Sim:
     dut_loss_dB: float = 1.5          # insertion loss in the pass band
     tg_attached: bool = True          # does the simulated TG44A exist?
 
+    # ---- the optional magnetic FILM on the line (added 2026-09-28) ----------
+    # Why: FMR in field with the SA + TG. scan-core predicts the resonance from
+    # the field and the film's parameters and asks for a WINDOW of bins around
+    # it; to test that whole chain with no hardware, the simulated DUT can carry
+    # a magnetic film. With `fmr_on` the DUT is no longer the band-pass filter
+    # but a broadband WAVEGUIDE (insertion loss `dut_loss_dB`) with the film on
+    # it, which absorbs a Lorentzian dip at the Kittel frequency of the field it
+    # sits in (see physics.py). The field comes from the `field` group (a magnet
+    # service, or a manual value). `dut_inserted` False is still the thru: no
+    # line, no film -- what the reference is taken with.
+    fmr_on: bool = False              # False = the band-pass DUT, exactly as before
+    fmr_geometry: str = "inplane"     # "inplane" (field in the film plane) or "outofplane"
+    fmr_meff_mT: float = 175.0        # effective magnetisation mu0*Meff (YIG ~175 mT)
+    fmr_g: float = 2.0                # Lande g factor: gamma/2pi = g * 13.996 GHz/T
+    fmr_hk_mT: float = 0.0            # in-plane UNIAXIAL anisotropy field mu0*Hk (in-plane only)
+    fmr_easy_axis_deg: float = 0.0    # its easy axis, in the magnet's field-angle convention
+    fmr_alpha: float = 0.003          # Gilbert damping; sets the linewidth unless ...
+    fmr_linewidth_Hz: float = 0.0     # ... this is > 0: a FIXED frequency FWHM instead
+    fmr_depth_dB: float = 3.0         # depth of the absorption dip at resonance
+
+
+@dataclass
+class Field:
+    """Where the SIMULATED film's field is READ from (simulator only; used only
+    when `sim.fmr_on`). Same choices and keys as vna-control's field source.
+
+    source = "mag2d"    -- the 2-axis vector magnet's status stream: field =
+                           hypot(Bx, By), angle = atan2(By, Bx). Default: the
+                           magnet of the FMR setups.
+    source = "mag2dcal" -- the parallel 2-axis module; identical status keys.
+    source = "clMag"    -- the 1-axis magnet: its signed measured field, angle 0.
+    source = "ppms"     -- the DynaCool: its signed measured field, angle 0.
+    source = "manual"   -- manual_mT at manual_angle_deg (tests, demos).
+
+    A remote magnet that has not been heard (or went quiet for stale_s) leaves
+    the film in the last field heard, or the manual one, and status says so
+    (`sim_field_ok` False). When the launcher starts this service,
+    AALTOFLOW_ENDPOINTS overrides the hosts and ports below. Nothing here ever
+    commands a magnet: the simulator only listens.
+    """
+
+    source: str = "mag2d"
+    manual_mT: float = 50.0
+    manual_angle_deg: float = 0.0
+    mag2d_host: str = "127.0.0.1"
+    mag2d_pub_port: int = 5576        # the vector magnet's STATUS stream
+    mag2dcal_host: str = "127.0.0.1"
+    mag2dcal_pub_port: int = 5578
+    clMag_host: str = "127.0.0.1"
+    clMag_pub_port: int = 5556
+    ppms_host: str = "127.0.0.1"
+    ppms_pub_port: int = 5580
+    stale_s: float = 2.0
+
 
 @dataclass
 class Hardware:
@@ -148,6 +202,7 @@ class Config:
     sweep: Sweep = None
     acquisition: Acquisition = None
     sim: Sim = None
+    field: Field = None
     hardware: Hardware = None
     limits: Limits = None
     ui: UI = None
@@ -157,6 +212,7 @@ class Config:
         self.sweep = self.sweep or Sweep()
         self.acquisition = self.acquisition or Acquisition()
         self.sim = self.sim or Sim()
+        self.field = self.field or Field()
         self.hardware = self.hardware or Hardware()
         self.limits = self.limits or Limits()
         self.ui = self.ui or UI()
@@ -167,6 +223,7 @@ class Config:
         "sweep": Sweep,
         "acquisition": Acquisition,
         "sim": Sim,
+        "field": Field,
         "hardware": Hardware,
         "limits": Limits,
         "ui": UI,

@@ -176,9 +176,12 @@ class ShsnaService:
             elif cmd == "set_sim":
                 v.set_sim(str(msg["name"]), msg["value"])
             elif cmd == "acquire":
-                return {"ok": True, "acq_id": v.acquire()}
+                # optional window [i0, i1]: bins of the full grid to sweep (the
+                # contract scan-core relies on; describe's `window` block)
+                return {"ok": True, "acq_id": v.acquire(window=msg.get("window"))}
             elif cmd == "take_reference":
-                return {"ok": True, "acq_id": v.take_reference()}
+                # a reference is always the whole band: a window is ignored
+                return {"ok": True, "acq_id": v.take_reference(window=msg.get("window"))}
             elif cmd == "clear_reference":
                 v.clear_reference()
             elif cmd == "abort":

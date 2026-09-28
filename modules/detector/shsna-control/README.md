@@ -57,6 +57,45 @@ Detectors (one acquisition feeds all of them): `transmission` and `raw`
 The frequency coordinate is the analyser's grid, known after a reference (or
 one acquisition) of the band -- take the reference before the scan.
 
+### Windowed acquisition (2026-09-28)
+
+FMR in field with the SA + TG is slow if every field point sweeps the whole
+band. So `acquire` takes an optional `window: [i0, i1]` -- INCLUSIVE bin
+indices of the full grid (`get_frequencies`) -- and sweeps only f[i0]..f[i1]
+in i1 - i0 + 1 points, so every measured bin lands exactly on the full grid
+and on the thru reference. scan-core predicts the resonance from the field and
+the film and asks for a window around it; describe announces it on the
+`transmission` and `raw` detectors as
+`"window": {"arg": "window", "unit": "bin", "min_bins": 11}`.
+
+- Clamped to the grid; narrower than 11 bins is widened symmetrically; the
+  whole grid (or no window) is a full sweep; a malformed window is refused.
+- `get_trace` still returns FULL-LENGTH arrays, null outside the window, with
+  `window: [i0, i1]` (a full sweep: `[0, n-1]`). `get_result` computes its
+  scalars on the measured bins only (a -3 dB width that runs into the edge of
+  the window is empty, as at the edge of a full sweep).
+- Transmission = the raw window minus the reference's own bins i0..i1. The
+  reference is always a full-band thru (`take_reference` ignores a window).
+- If the analyser does not put the bins where asked (checked to 1e-6
+  relative), the acquisition sweeps the WHOLE band instead and says so in the
+  sample's `window_fallback` -- values are never interpolated.
+
+## The simulated FMR film (2026-09-28)
+
+To test the whole windowed FMR scan without hardware, the simulator's DUT can
+carry a magnetic film: Settings > Simulation `fmr_on` (off by default, then
+nothing changes). The DUT becomes a broadband waveguide with a film that
+absorbs a Lorentzian dip (`fmr_depth_dB`) at its Kittel frequency:
+in-plane with a uniaxial anisotropy (`fmr_hk_mT`, `fmr_easy_axis_deg`; the
+magnetisation's equilibrium angle is solved), or out-of-plane
+f = gamma'(B - mu0 Meff) above saturation and no line below. Linewidth from
+`fmr_alpha`, or fixed by `fmr_linewidth_Hz`. The field comes from a magnet
+service's status stream (Settings > Sim field: mag2d default, mag2dcal, clMag,
+ppms; ports from the launcher) or a manual value -- the simulator only
+listens. Status shows what the film sees: `sim_field_mT`, `sim_angle_deg`,
+`sim_fres_Hz`, `sim_field_source`, `sim_field_ok`. `set_sim` takes the film
+knobs and `field_source` / `manual_field_mT` / `manual_angle_deg`.
+
 ## Running
 
 ```powershell
@@ -73,4 +112,7 @@ uv run scripts/smoke_test.py
 
 The simulator models the bench: TG ripple, cable loss rising as sqrt(f), a
 20 dB pad, and a Butterworth band-pass DUT that can be removed (`set_sim
-dut_inserted false`) to take the thru.
+dut_inserted false`) to take the thru -- or, with `fmr_on`, a waveguide with a
+magnetic film (above). The in-process GUI (`run_gui.py` with no flags) takes a
+thru reference and then one windowed acquisition around the filter, so the
+window shading shows at once.

@@ -21,6 +21,15 @@ hardware-swept dimension, `freq`:
     (target_key acq_id) before reading -- a cold read would return the
     previous point's trace and nothing would raise.
 
+  * `window` (2026-09-28) says the detector can be acquired over a WINDOW of
+    its own dimension: `{"arg": "window", "unit": "bin", "min_bins": 11}`
+    means the `acquire` trigger takes `window: [i0, i1]`, INCLUSIVE bin
+    indices of the freq coordinate, and only those bins are swept. The value
+    read afterwards is still FULL-LENGTH, null outside the window (the reply
+    also carries `window`). scan-core uses it for FMR in field: it predicts
+    the line from the field and sweeps a window around it, filling the rest
+    itself and saving a measured-mask.
+
 SCALAR DETECTORS (peak transmission, where it is, band-averaged transmission,
 -3 dB bandwidth, raw peak) share the same acquire group -- one trigger, one
 wait, several reads -- and are FETCHED too (`get_result`), not read from
@@ -47,6 +56,8 @@ from __future__ import annotations
 import json
 import math
 import zlib
+
+from ..analyzer import WINDOW_MIN_BINS
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -128,6 +139,9 @@ def build_manifest(shsna) -> dict:
         dim["length"] = int(n)
     freq_dim = [dim]
 
+    # the windowed-acquisition contract (see the module docstring)
+    window = {"arg": "window", "unit": "bin", "min_bins": WINDOW_MIN_BINS}
+
     def sweep_ctrl(id, label, unit, key, verb, arg, order, lo, hi, *, scale=None,
                    decimals=None, step=None, type="float", tol=1e-6, help=""):
         return _p(id, label, "control", type, unit=unit, group="Sweep", order=order,
@@ -171,14 +185,14 @@ def build_manifest(shsna) -> dict:
         # -- measurement: the scan detectors (one acquisition feeds all of them) ------
         _p("transmission", "Transmission |S21|", "indicator", "array", unit="dB",
            group="Measurement", order=10, acquire=acquire, dtype="float",
-           shape=["freq"], dims=freq_dim,
+           shape=["freq"], dims=freq_dim, window=window,
            read={"verb": "get_trace", "key": "transmission",
                  "args": {"which": "transmission", "source": "sample"}},
            help="Measured minus the thru reference, per frequency. Refused "
                 "(the scan stops) with no reference or one taken on another grid."),
         _p("raw", "Measured (rel. TG output)", "indicator", "array", unit="dB",
            group="Measurement", order=11, acquire=acquire, dtype="float",
-           shape=["freq"], dims=freq_dim,
+           shape=["freq"], dims=freq_dim, window=window,
            read={"verb": "get_trace", "key": "raw", "args": {"which": "raw", "source": "sample"}},
            help="What the analyser measured, in dB relative to the TG output, "
                 "before the reference (TG ripple, cables and the pad included)."),
@@ -265,7 +279,43 @@ def build_manifest(shsna) -> dict:
                set={"verb": "set_sim", "arg": "value", "extra": {"name": "pad_dB"}},
                settle={"policy": "echoes", "key": "sim_pad_dB", "tol": 1e-9},
                help="The fixed pad between TG and analyser (20 dB on the bench)."),
+            _p("fmr_on", "Magnetic film (FMR)", "control", "bool", group="Simulation",
+               order=20, read_path=["sim_fmr_on"],
+               set={"verb": "set_sim", "arg": "value", "extra": {"name": "fmr_on"}},
+               settle={"policy": "echoes", "key": "sim_fmr_on"},
+               help="The DUT becomes a waveguide with a magnetic film that absorbs "
+                    "at the Kittel frequency of the field it sits in."),
         ]
+        if cfg.sim.fmr_on:
+            # Present only while the film is on (the manifest's SHAPE follows
+            # the mode, like hf2's reference; describe_rev moves with it).
+            params += [
+                _p("sim_field", "Film field (manual)", "control", "float", unit="mT",
+                   group="Simulation", order=21, min=-5000.0, max=5000.0, decimals=3,
+                   read_path=["sim_manual_field_mT"],
+                   set={"verb": "set_sim", "arg": "value", "extra": {"name": "manual_field_mT"}},
+                   settle={"policy": "echoes", "key": "sim_manual_field_mT", "tol": 1e-9},
+                   help="Used when the field source is 'manual' (and as the fallback "
+                        "before a magnet is heard)."),
+                _p("sim_angle", "Film field angle (manual)", "control", "float", unit="deg",
+                   group="Simulation", order=22, min=-360.0, max=360.0, decimals=2,
+                   read_path=["sim_manual_angle_deg"],
+                   set={"verb": "set_sim", "arg": "value", "extra": {"name": "manual_angle_deg"}},
+                   settle={"policy": "echoes", "key": "sim_manual_angle_deg", "tol": 1e-9}),
+                _p("sim_field_in_use", "Film field (in use)", "indicator", "float", unit="mT",
+                   group="Simulation", order=23, decimals=3, plottable=True,
+                   read_path=["sim_field_mT"]),
+                _p("sim_angle_in_use", "Film field angle (in use)", "indicator", "float",
+                   unit="deg", group="Simulation", order=24, decimals=2,
+                   read_path=["sim_angle_deg"]),
+                _p("sim_fres", "Kittel frequency (sim)", "indicator", "float", unit="MHz",
+                   group="Simulation", order=25, scale=1e6, decimals=3, plottable=True,
+                   read_path=["sim_fres_Hz"],
+                   help="Where the simulated film absorbs now; empty when there is no "
+                        "line (out-of-plane below saturation)."),
+                _p("sim_field_source", "Film field from", "indicator", "string",
+                   group="Simulation", order=26, read_path=["sim_field_source"]),
+            ]
 
     # Bounds that are not known must not appear as NaN.
     for d in params:

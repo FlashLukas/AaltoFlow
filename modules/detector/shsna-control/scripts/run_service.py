@@ -67,13 +67,27 @@ def apply_launcher_endpoints(cfg: Config) -> None:
         print("shsna service: AALTOFLOW_ENDPOINTS is not valid JSON, ignored")
         return
     ep = eps.get(OWNER_KEY)
-    if not ep or len(ep) != 3:
-        return
-    host, cmd, pub = ep
-    hw = cfg.hardware
-    hw.owner_host = "127.0.0.1" if host == "localhost" else str(host)
-    hw.owner_cmd_port, hw.owner_pub_port = int(cmd), int(pub)
-    print(f"shsna service: signalhound at {host}:{cmd}/{pub} (from the launcher)")
+    if ep and len(ep) == 3:
+        host, cmd, pub = ep
+        hw = cfg.hardware
+        hw.owner_host = "127.0.0.1" if host == "localhost" else str(host)
+        hw.owner_cmd_port, hw.owner_pub_port = int(cmd), int(pub)
+        print(f"shsna service: signalhound at {host}:{cmd}/{pub} (from the launcher)")
+    # The simulated film's field source (config `field`, 2026-09-28): every
+    # magnet the launcher runs, whichever source is selected -- the source can
+    # be switched at run time and should then find the right port.
+    for key, host_attr, port_attr in (("mag2d", "mag2d_host", "mag2d_pub_port"),
+                                      ("mag2dcal", "mag2dcal_host", "mag2dcal_pub_port"),
+                                      ("clMag", "clMag_host", "clMag_pub_port"),
+                                      ("ppms", "ppms_host", "ppms_pub_port")):
+        ep = eps.get(key)
+        if not ep or len(ep) != 3:
+            continue
+        host, _cmd, pub = ep
+        setattr(cfg.field, host_attr, "127.0.0.1" if host == "localhost" else str(host))
+        setattr(cfg.field, port_attr, int(pub))
+        print(f"shsna service: {key} status at {host}:{pub} (from the launcher, for the "
+              f"simulated film)")
 
 
 def build_analyzer(cfg: Config, real: bool):

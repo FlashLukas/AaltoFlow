@@ -21,6 +21,11 @@ scan all mean the same reference):
   bottom  what the analyser measured and the reference itself, both in dB
           relative to the TG output (the TG44A's unit), so a bad reference (a
           cable left out) is seen at a glance
+
+A WINDOWED acquisition (2026-09-28: `acquire` with window [i0, i1], what a
+scan does for FMR in field) swept only some bins: the measured region is
+shaded on both plots, and the bins outside it -- NaN, not measured -- are not
+drawn at all (a line to them would suggest data that does not exist).
 """
 
 from __future__ import annotations
@@ -296,6 +301,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dut_chk = QtWidgets.QCheckBox("DUT inserted (off = thru)")
         self.dut_chk.clicked.connect(lambda on: self._call(self.ctrl.set_sim, "dut_inserted", on))
         sim_lay.addWidget(self.dut_chk)
+        # the optional magnetic film (Settings > Simulation / Sim field)
+        self.film_label = QtWidgets.QLabel("film: off"); self.film_label.setObjectName("hint")
+        self.film_label.setWordWrap(True)
+        sim_lay.addWidget(self.film_label)
         col.addWidget(self.sim_card)
         col.addStretch(1)
         return panel
@@ -357,6 +366,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.peak_line = pg.InfiniteLine(angle=90, movable=False,
                                          pen=pg.mkPen(COLORS["accent_hi"], width=1))
         self.tx_plot.addItem(self.peak_line)
+        # the measured region of a windowed acquisition, shaded on both plots
+        self.win_regions = []
+        for plot in (self.tx_plot, self.pw_plot):
+            c = QtGui.QColor(COLORS["accent"]); c.setAlpha(38)
+            edge = QtGui.QColor(COLORS["accent"]); edge.setAlpha(110)
+            reg = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(c),
+                                      pen=pg.mkPen(edge, width=1))
+            reg.setZValue(-10)                   # behind the traces
+            reg.setVisible(False)
+            plot.addItem(reg)
+            self.win_regions.append(reg)
         tlay.addWidget(self.tx_plot, 3)
         tlay.addWidget(self.pw_plot, 2)
         colw.addWidget(tcard, 1)
@@ -381,7 +401,9 @@ class MainWindow(QtWidgets.QMainWindow):
         w.setLabel("left", name, units=unit)
         w.setLabel("bottom", "frequency", units="MHz")
         w.showGrid(x=True, y=True, alpha=0.15)
-        curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
+        # connect="finite": a NaN bin (outside a window) breaks the line
+        # instead of being bridged
+        curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6), connect="finite")
         return w, curve
 
     # ---- actions ---------------------------------------------------------
@@ -486,6 +508,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                  getattr(s, "sim_dut_inserted", True) if self._simulated else True,
                                  getattr(s, "acq_is_reference", False))
         self._sync_inputs()
+        if self._simulated:
+            self.film_label.setText(_film_text(s))
 
         # acquisition
         self.acq_bar.setValue(int(100 * s.acq_progress) if s.acquiring else 0)
@@ -555,13 +579,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _redraw(self):
         raw, tx, ref = self._raw, self._tx, self._ref
+        win = _window_of(raw)
         if raw is not None:
-            self.raw_curve.setData(raw["freqs_Hz"] / 1e6, raw["raw"])
+            self.raw_curve.setData(raw["freqs_Hz"] / 1e6, raw["raw"], connect="finite")
             label = (f"{raw['points']} points, "
                      f"RBW {'auto' if not raw.get('rbw_Hz') else format(raw['rbw_Hz'] / 1e3, 'g') + ' kHz'}")
+            if win is not None:
+                label += f", window bins {win[0]}-{win[1]} ({win[1] - win[0] + 1} measured)"
+            if raw.get("window_fallback"):
+                label += ", window NOT on the grid: whole band measured"
         else:
             self.raw_curve.setData([], [])
             label = self._tx_error or "no trace yet"
+        # shade the measured region; half a bin beyond the outer bins, so a
+        # window of a few bins is still visible as a band
+        for reg in self.win_regions:
+            reg.setVisible(win is not None)
+            if win is not None:
+                f, half = raw["freqs_Hz"], 0.5 * float(raw["bin_Hz"])
+                reg.setRegion(((f[win[0]] - half) / 1e6, (f[win[1]] + half) / 1e6))
         if ref is not None:
             self.ref_curve.setData(ref["freqs_Hz"] / 1e6, ref["reference"])
         else:
@@ -569,8 +605,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if tx is not None:
             f = tx["freqs_Hz"]
             t = tx["transmission"]
-            self.tx_curve.setData(f / 1e6, t)
-            r = physics.summarise_transmission(f, t)
+            self.tx_curve.setData(f / 1e6, t, connect="finite")
+            # the scalars of the MEASURED bins only, as get_result does
+            tw = _window_of(tx) or (0, len(t) - 1)
+            r = physics.summarise_transmission(f[tw[0]:tw[1] + 1], t[tw[0]:tw[1] + 1])
             label += f"  -  against reference #{tx.get('reference_acq_id')}"
             self.big["peak"].setText(_fmt(r["peak_transmission_db"], ".2f"))
             self.big["freq"].setText(_fmt(r["peak_freq_hz"] / 1e6, ".2f"))
@@ -594,6 +632,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.stop()
         self.ctrl.shutdown()
         super().closeEvent(ev)
+
+
+def _film_text(s) -> str:
+    """One line on the simulated film: the field it sits in and its line."""
+    if not getattr(s, "sim_fmr_on", False):
+        return "film: off (Settings > Simulation > fmr on)"
+    b, a = _num(getattr(s, "sim_field_mT", None)), _num(getattr(s, "sim_angle_deg", None))
+    fr = _num(getattr(s, "sim_fres_Hz", None))
+    src = getattr(s, "sim_field_source", "") or "?"
+    line = f"{fr / 1e6:.1f} MHz" if math.isfinite(fr) else "no line"
+    return f"film: {_fmt(b, '.2f')} mT at {_fmt(a, '.1f')} deg ({src}) -> {line}"
+
+
+def _window_of(trace) -> tuple[int, int] | None:
+    """(i0, i1) if `trace` came from a WINDOWED acquisition, None if it covers
+    the whole band (or there is no trace)."""
+    if trace is None:
+        return None
+    w = trace.get("window")
+    n = int(trace.get("points", 0) or 0)
+    if not isinstance(w, (list, tuple)) or len(w) != 2 or n <= 0:
+        return None
+    i0, i1 = int(w[0]), int(w[1])
+    return None if (i0 <= 0 and i1 >= n - 1) else (i0, i1)
 
 
 def _num(v) -> float:
@@ -624,17 +686,20 @@ def run_app(ctrl, cfg, remote: bool = False) -> int:
 def main(theme: str | None = None) -> int:
     """Run against the built-in simulator, in-process.
 
-    Continuous sweeping is switched ON here, and a thru reference is taken
-    before the DUT goes in: there is no real analyser to disturb, and an empty
-    screen explains nothing. (The service keeps the rule: nothing sweeps at
-    start.)"""
+    A short demo runs on its own, because an empty screen explains nothing:
+    a thru reference over the whole band, then the DUT goes in and ONE
+    WINDOWED acquisition sweeps only the bins around the filter -- what a scan
+    does for FMR in field -- so the window shading is visible at once.
+    Continuous sweeping stays off (it would replace the windowed trace with a
+    full one a moment later); tick it in the sidebar for a live display. (The
+    service keeps the rule: nothing sweeps at start.)"""
     from ..config import Config
     from ..sim_system import build_sim_system
     cfg = Config()
     if theme:
         cfg.ui.theme = theme
     cfg.sweep.start_Hz, cfg.sweep.stop_Hz = 700e6, 1300e6
-    cfg.acquisition.continuous = True
+    cfg.acquisition.continuous = False
     cfg.sim.dut_inserted = False
     sna, _ = build_sim_system(cfg)
     _demo_reference_then_dut(sna)
@@ -643,8 +708,17 @@ def main(theme: str | None = None) -> int:
 
 def _demo_reference_then_dut(sna) -> None:
     """For the standalone simulator: once the thread runs, take the thru
-    reference, then insert the DUT -- what an operator does first."""
+    reference, insert the DUT -- what an operator does first -- and make one
+    windowed acquisition around the filter (the middle sixth of the band)."""
     import threading
+
+    def wait(n):
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            st = sna.status()
+            if st.acq_id == n and not st.acquiring:
+                return
+            time.sleep(0.05)
 
     def work():
         for _ in range(100):                      # wait for start() (the window calls it)
@@ -652,14 +726,10 @@ def _demo_reference_then_dut(sna) -> None:
                 break
             time.sleep(0.05)
         try:
-            n = sna.take_reference()
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                st = sna.status()
-                if st.acq_id == n and not st.acquiring:
-                    break
-                time.sleep(0.05)
+            wait(sna.take_reference())
             sna.set_sim("dut_inserted", True)
+            n = sna.status().points
+            wait(sna.acquire(window=[int(n * 5 / 12), int(n * 7 / 12)]))
         except Exception:
             pass
     threading.Thread(target=work, name="sim-demo", daemon=True).start()

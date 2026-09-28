@@ -32,7 +32,9 @@ class RemoteStatus:
                  "continuous": False, "sweeping": False, "sweep_progress": 0.0,
                  "sweeps": 0, "trace_id": 0, "acq_id": 0, "acquiring": False,
                  "acq_progress": 0.0, "simulated": True, "acq_is_reference": False,
-                 "acq_error": "", "sim_dut_inserted": False, "sim_tg_attached": False}
+                 "acq_error": "", "sim_dut_inserted": False, "sim_tg_attached": False,
+                 "acq_window": [], "sim_fmr_on": False, "sim_field_source": "",
+                 "sim_field_ok": False}
 
     def __init__(self, d: dict):
         for k, default in self._DEFAULTS.items():
@@ -50,7 +52,7 @@ class RemoteStatus:
     def __getattr__(self, name):
         # A float field the service has not sent yet (first frame) reads as NaN
         # rather than crashing the GUI's first refresh.
-        if name.endswith(("_Hz", "_dB", "_db", "_s")):
+        if name.endswith(("_Hz", "_dB", "_db", "_s", "_mT", "_deg")):
             return _NAN
         raise AttributeError(name)
 
@@ -113,9 +115,13 @@ class ShsnaClient:
     def set_sim(self, name: str, value):
         return self._checked({"cmd": "set_sim", "name": str(name), "value": value})
 
-    def acquire(self) -> int:
-        """Start an acquisition; returns its id (or raises if refused)."""
-        return int(self._checked({"cmd": "acquire"})["acq_id"])
+    def acquire(self, window=None) -> int:
+        """Start an acquisition; returns its id (or raises if refused).
+        `window` = [i0, i1]: sweep only those bins of the full grid."""
+        req = {"cmd": "acquire"}
+        if window is not None:
+            req["window"] = [int(window[0]), int(window[1])]
+        return int(self._checked(req)["acq_id"])
 
     def take_reference(self) -> int:
         """Start a thru-reference acquisition; returns its id (or raises if refused)."""
@@ -142,7 +148,7 @@ class ShsnaClient:
         return np.asarray(self._checked({"cmd": "get_frequencies"})["values"], dtype=float)
 
     def acquire_blocking(self, timeout_s: float | None = None, poll_s: float = 0.02,
-                         which: str = "raw") -> dict:
+                         which: str = "raw", window=None) -> dict:
         """Trigger, wait for THIS acquisition to finish, return its trace.
 
         The wait checks the id before the flag: right after the trigger the
@@ -150,7 +156,7 @@ class ShsnaClient:
         acquiring", and trusting that would return the previous trace. A failed
         acquisition raises RuntimeError with its reason.
         """
-        return self._wait_for(self.acquire(), timeout_s, poll_s, which)
+        return self._wait_for(self.acquire(window), timeout_s, poll_s, which)
 
     def take_reference_blocking(self, timeout_s: float | None = None, poll_s: float = 0.02) -> dict:
         """Take a thru reference and wait for it; returns the reference trace."""

@@ -158,3 +158,78 @@ def test_settings_dialog_parses_and_applies(app):
     dlg.w[("sweep", "points")][0].setText("many")
     dlg._apply_and_close()
     assert cfg.sweep.points == 801                 # nothing half-applied
+
+
+def test_a_windowed_acquisition_is_shaded_and_its_outside_not_drawn(app):
+    """2026-09-28: the measured region of a windowed acquisition is shaded on
+    both plots; the NaN bins outside are not drawn (connect='finite')."""
+    from shsna.apps.gui import MainWindow
+    cfg = Config()
+    cfg.sweep.start_Hz, cfg.sweep.stop_Hz, cfg.sweep.points = 700e6, 1300e6, 601
+    sna, _ = build_sim_system(cfg, realtime=False, seed=3)
+    win = MainWindow(_NoThread(sna), cfg)
+    try:
+        sna.set_sim("dut_inserted", False)
+        sna.take_reference()
+        _finish(sna)
+        sna.set_sim("dut_inserted", True)
+        win.which_combo.setCurrentIndex(1)           # last acquisition
+        sna.acquire()
+        _finish(sna)
+        _fresh(win)
+        assert not any(r.isVisible() for r in win.win_regions)     # a full sweep: no shading
+
+        sna.acquire(window=[250, 350])
+        _finish(sna)
+        win._force_fetch()
+        _fresh(win)
+        for reg in win.win_regions:
+            assert reg.isVisible()
+            lo, hi = reg.getRegion()
+            assert lo == pytest.approx(949.5) and hi == pytest.approx(1050.5)   # +-half a bin
+        x, y = win.tx_curve.getData()
+        assert x.size == 601 and np.isnan(y[:250]).all() and np.isfinite(y[250:351]).all()
+        assert win.tx_curve.opts["connect"] == "finite"
+        assert "window bins 250-350 (101 measured)" in win.trace_label.text()
+        # the big numbers come from the measured bins: the filter's width is found
+        assert float(win.big["bw3"].text()) == pytest.approx(60, abs=3)
+        # the film line in the simulation card
+        assert win.film_label.text().startswith("film: off")
+        sna.cfg.field.source = "manual"
+        sna.set_sim("fmr_on", True)
+        win._refresh()
+        assert "manual" in win.film_label.text() and "MHz" in win.film_label.text()
+    finally:
+        win.close()
+
+
+def test_fixed_choice_settings_are_drop_downs(app):
+    """A text setting with a fixed set of values is a QComboBox, not a free text
+    box (a typo in "dark" silently fell back to the default)."""
+    from PySide6 import QtWidgets
+    from shsna.apps.settings_dialog import SettingsDialog
+    cfg = Config()
+    cfg.field.source = "manual"
+    sna, _ = build_sim_system(cfg, realtime=False)
+    dlg = SettingsDialog(sna, cfg, lambda: None)
+    theme = dlg.w[("ui", "theme")][0]
+    geo = dlg.w[("sim", "fmr_geometry")][0]
+    src = dlg.w[("field", "source")][0]
+    for w in (theme, geo, src):
+        assert isinstance(w, QtWidgets.QComboBox)
+    assert [theme.itemText(i) for i in range(theme.count())] == ["dark", "light"]
+    assert [src.itemText(i) for i in range(src.count())] == [
+        "mag2d", "mag2dcal", "clMag", "ppms", "manual"]
+    assert src.currentText() == "manual"
+    theme.setCurrentText("light")
+    geo.setCurrentText("outofplane")
+    dlg._apply_and_close()
+    assert cfg.ui.theme == "light" and cfg.sim.fmr_geometry == "outofplane"
+    # a value not in the list (a hand-edited .ini) is kept, not replaced
+    cfg.ui.theme = "solarized"
+    dlg = SettingsDialog(sna, cfg, lambda: None)
+    assert dlg.w[("ui", "theme")][0].currentText() == "solarized"
+    dlg._apply_and_close()
+    assert cfg.ui.theme == "solarized"
+    # free text stays free text
+    assert isinstance(dlg.w[("hardware", "owner_host")][0], QtWidgets.QLineEdit)

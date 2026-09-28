@@ -50,6 +50,27 @@ one:
 THE GRID is the analyser's, not ours: every trace is filed on the start + bin
 * i the backend reports, and the reference comparison is on that grid.
 
+WINDOWED ACQUISITIONS (2026-09-28, Lukas: FMR in field is slow when every
+field point sweeps the whole band). `acquire(window=[i0, i1])` sweeps only
+bins i0..i1 of the FULL grid (the one `frequencies()` returns): start f[i0],
+stop f[i1], i1 - i0 + 1 points, so the measured bins sit exactly on the full
+grid and on the thru reference. scan-core predicts the line from the field and
+asks for a window around it. The contract:
+  * clamped to the grid, widened symmetrically to WINDOW_MIN_BINS, a window
+    covering the whole grid = a full sweep; malformed = refused at the trigger;
+  * the sample is FULL-LENGTH -- NaN (null on the wire) outside the window --
+    and carries `window: [i0, i1]` ([0, n-1] for a full sweep), plus
+    `window_requested` and `window_fallback`;
+  * transmission = raw window - the reference's own bins i0..i1; the reference
+    is always a full-band thru (take_reference ignores a window);
+  * the scalars (peak, mean, -3 dB width) come from the measured bins only;
+  * the analyser's returned grid is CHECKED against f[i0..i1] (1e-6 relative).
+    If it does not line up, the acquisition sweeps the WHOLE band instead and
+    says so in `window_fallback` -- never interpolated: that would invent
+    values between the points really measured.
+Averaging, failure latching, abort and gotcha #28 are exactly as for a full
+sweep; the time estimate follows the window's points.
+
 Threads and locks (the pm16/hf2/vna rules):
   * ONE sweep thread talks to the backend. `status()` only copies what it
     stored and never touches the hardware (gotcha #1).
@@ -68,6 +89,7 @@ import numpy as np
 from . import physics
 from .backends.base import SweepFailed
 from .config import Config
+from .field import FIELD_SOURCES
 
 _NAN = float("nan")
 
@@ -82,10 +104,72 @@ SIM_LIMITS = {
     "dut_bandwidth_Hz": (1e3, 4.4e9),
     "dut_order": (1, 10),
     "dut_loss_dB": (0.0, 60.0),
+    # the optional magnetic film (sim.fmr_on, 2026-09-28)
+    "fmr_meff_mT": (-2000.0, 3000.0),     # negative = perpendicular anisotropy wins
+    "fmr_g": (1.0, 3.0),
+    "fmr_hk_mT": (0.0, 1000.0),
+    "fmr_easy_axis_deg": (-360.0, 360.0),
+    "fmr_alpha": (1e-5, 0.5),
+    "fmr_linewidth_Hz": (0.0, 1e9),       # 0 = from alpha
+    "fmr_depth_dB": (0.0, 60.0),
 }
-SIM_SWITCHES = ("dut_inserted", "tg_attached")
+SIM_SWITCHES = ("dut_inserted", "tg_attached", "fmr_on")
+#: text-valued sim knobs, name -> the allowed values
+SIM_CHOICES = {"fmr_geometry": ("inplane", "outofplane")}
+#: set_sim names that live in the `field` config group (the film's field),
+#: name -> (config attribute, limits or allowed values)
+SIM_FIELD = {"field_source": ("source", FIELD_SOURCES),
+             "manual_field_mT": ("manual_mT", (-5000.0, 5000.0)),
+             "manual_angle_deg": ("manual_angle_deg", (-360.0, 360.0))}
 QUANTITIES = ("raw", "transmission", "reference")
 SOURCES = ("sample", "last")
+
+#: The smallest window an acquisition sweeps (scan-core reads it from describe).
+#: Why a floor at all: the SA API sweeps at least a handful of points, the
+#: config's points_min is 11, and a window of 2-3 bins would give a line with no
+#: baseline beside it to see it against.
+WINDOW_MIN_BINS = 11
+
+
+def resolve_window(window, n: int, min_bins: int = WINDOW_MIN_BINS) -> tuple[int, int] | None:
+    """A requested window [i0, i1] (INCLUSIVE bin indices of the full grid of
+    `n` bins) -> the window that will really be swept, or None for "the whole
+    band".
+
+    Clamped to the grid; narrower than `min_bins` is widened SYMMETRICALLY
+    (and shifted back inside when that runs over an edge). A window that
+    covers the whole grid is the whole band (None). Refused (ValueError):
+    anything that is not two whole numbers with i0 <= i1 -- a malformed
+    window is a bug in the caller, and guessing what it meant could file a
+    line in the wrong bins."""
+    if window is None:
+        return None
+    try:
+        a, b = window
+        a, b = float(a), float(b)
+    except (TypeError, ValueError):
+        raise ValueError(f"window must be [i0, i1] (two bin indices), got {window!r}") from None
+    if not (math.isfinite(a) and math.isfinite(b) and a == int(a) and b == int(b)):
+        raise ValueError(f"window bins must be whole numbers, got {window!r}")
+    i0, i1 = int(a), int(b)
+    if i0 > i1:
+        raise ValueError(f"window [{i0}, {i1}]: the first bin is after the last")
+    n = int(n)
+    if n <= min_bins:
+        return None
+    i0 = min(max(i0, 0), n - 1)
+    i1 = min(max(i1, 0), n - 1)
+    need = min_bins - (i1 - i0 + 1)
+    if need > 0:
+        i0 -= need // 2
+        i1 += need - need // 2
+        if i0 < 0:
+            i1, i0 = i1 - i0, 0
+        if i1 > n - 1:
+            i0, i1 = max(0, i0 - (i1 - (n - 1))), n - 1
+    if i0 == 0 and i1 == n - 1:
+        return None
+    return i0, i1
 
 
 def _no_reference() -> dict:
@@ -132,12 +216,23 @@ class Status:
     acq_progress: float = 0.0
     acq_is_reference: bool = False
     acq_error: str = ""                # "" = the last acquisition is a measurement
+    acq_window: list = field(default_factory=list)   # [i0, i1] being swept; [] = whole band / idle
     sample: dict = field(default_factory=dict)
     reference: dict = field(default_factory=_no_reference)
     # the simulated chain (NaN / False on the real backend)
     sim_dut_inserted: bool = False
     sim_tg_attached: bool = False
     sim_pad_dB: float = _NAN
+    # the simulated film and the field it sits in (NaN / "" while sim.fmr_on is off)
+    sim_fmr_on: bool = False
+    sim_field_mT: float = _NAN         # |B| (or signed, from a 1-axis magnet) the film sees
+    sim_angle_deg: float = _NAN        # its in-plane angle
+    sim_fres_Hz: float = _NAN          # the Kittel frequency there (NaN = no line)
+    sim_fwhm_Hz: float = _NAN          # the line's frequency FWHM
+    sim_field_source: str = ""         # where it comes from, with its health
+    sim_field_ok: bool = False         # False = not the live field of a magnet
+    sim_manual_field_mT: float = _NAN  # the manual value (source "manual", and the fallback)
+    sim_manual_angle_deg: float = _NAN
 
 
 def _clamp(value, lo, hi):
@@ -158,6 +253,21 @@ def _finite(value, what: str) -> float:
 
 def _freqs(t: dict) -> np.ndarray:
     return t["start_Hz"] + t["bin_Hz"] * np.arange(int(t["points"]))
+
+
+def _window(t: dict) -> tuple[int, int]:
+    """The bins of trace `t` that were measured (inclusive); the whole trace
+    unless it came from a windowed acquisition."""
+    w = t.get("window")
+    if w:
+        return int(w[0]), int(w[1])
+    return 0, int(t["points"]) - 1
+
+
+def _measured(t: dict, values) -> tuple[np.ndarray, np.ndarray]:
+    """(frequencies, values) of the measured bins only."""
+    i0, i1 = _window(t)
+    return _freqs(t)[i0:i1 + 1], np.asarray(values, dtype=float)[i0:i1 + 1]
 
 
 def _same(a, b, rel=1e-9) -> bool:
@@ -316,15 +426,41 @@ class Analyzer:
         other."""
         if not self.simulated:
             raise ValueError("set_sim changes the SIMULATED chain; this is the real analyser")
+        if name in SIM_CHOICES:
+            v = str(value).strip().lower().replace("-", "").replace("_", "")
+            if v not in SIM_CHOICES[name]:
+                raise ValueError(f"sim {name} must be one of {SIM_CHOICES[name]}, got {value!r}")
+            setattr(self.cfg.sim, name, v)
+            self._emit("info", f"sim {name} = {v}")
+            return
+        if name in SIM_FIELD:
+            attr, allowed = SIM_FIELD[name]
+            if name == "field_source":
+                v = str(value)
+                if v not in allowed:
+                    raise ValueError(f"field source must be one of {allowed}, got {value!r}")
+                setattr(self.cfg.field, attr, v)
+                self._sync_sim_field()
+                self._emit("info", f"film field from {v}")
+                return
+            # A new manual field does NOT restart an acquisition, like the DUT
+            # switch: it is the physical world changing (the magnet ramping).
+            v, clamped = _clamp(_finite(value, name), *allowed)
+            setattr(self.cfg.field, attr, v)
+            self._emit("warn" if clamped else "info",
+                       f"sim {name} = {v:g}" + (" (clamped)" if clamped else ""))
+            return
         if name in SIM_SWITCHES:
             v = value if isinstance(value, bool) else str(value).strip().lower() in (
                 "1", "true", "yes", "on")
             setattr(self.cfg.sim, name, bool(v))
+            if name == "fmr_on":
+                self._sync_sim_field()
             self._emit("info", f"sim {name} = {bool(v)}")
             return
         if name not in SIM_LIMITS:
             raise ValueError(f"unknown sim parameter {name!r}; one of "
-                             f"{', '.join(list(SIM_LIMITS) + list(SIM_SWITCHES))}")
+                             f"{', '.join(list(SIM_LIMITS) + list(SIM_SWITCHES) + list(SIM_CHOICES) + list(SIM_FIELD))}")
         v, clamped = _clamp(_finite(value, name), *SIM_LIMITS[name])
         if name == "dut_order":
             v = int(round(v))
@@ -334,14 +470,34 @@ class Analyzer:
 
     # ---- the scan-safe read ------------------------------------------------------------
 
-    def acquire(self) -> int:
+    def acquire(self, window=None) -> int:
         """Start an acquisition; returns its id immediately. The clock starts
-        NOW: call it after everything the measurement depends on has been set."""
-        return self._trigger(reference=False)
+        NOW: call it after everything the measurement depends on has been set.
 
-    def take_reference(self) -> int:
+        `window` = [i0, i1], INCLUSIVE bin indices of the FULL grid (the one
+        `frequencies()` returns for the band set now), sweeps only those bins
+        (2026-09-28, for FMR in field: scan-core predicts where the line is and
+        a sweep of 60 bins instead of 1001 is ~5x faster). The sample is still
+        FULL-LENGTH, NaN (null on the wire) outside the window, and carries
+        `window`. Clamped to the grid and widened to WINDOW_MIN_BINS; refused
+        when malformed or when the full grid is not known yet (take a reference
+        first -- a transmission window needs one anyway). None = the whole band."""
+        if window is not None:
+            # validate NOW, so a bad request is refused at the trigger with its
+            # reason rather than failing later in the sweep thread
+            resolve_window(window, self._full_grid()[2])
+            window = [int(float(window[0])), int(float(window[1]))]
+        return self._trigger(reference=False, window=window)
+
+    def take_reference(self, window=None) -> int:
         """Start an acquisition that becomes THE thru reference when it
-        completes. Returns its id; wait for it exactly as for `acquire`."""
+        completes. Returns its id; wait for it exactly as for `acquire`.
+
+        A reference is ALWAYS the whole band: every later window is cut out of
+        it, so a `window` is ignored here (and said so)."""
+        if window is not None:
+            self._emit("info", "take_reference ignores the window: a reference is always "
+                               "the whole band")
         return self._trigger(reference=True)
 
     def clear_reference(self) -> None:
@@ -430,13 +586,16 @@ class Analyzer:
         with self._lock:
             ref = self._reference
             t = self._pick(source)
-        f = _freqs(t)
-        out = {"acq_id": t.get("acq_id", 0), "trace_id": t.get("trace_id", 0)}
+        out = {"acq_id": t.get("acq_id", 0), "trace_id": t.get("trace_id", 0),
+               "window": list(_window(t))}
+        # Only the MEASURED bins: outside a window there is no data, and the
+        # -3 dB width must come out "not measured" (NaN) when it reaches the
+        # window's edge, exactly as it does at the edge of a full sweep.
         if quantity == "transmission":
-            out.update(physics.summarise_transmission(f, self._transmission(t, ref)))
+            out.update(physics.summarise_transmission(*_measured(t, self._transmission(t, ref))))
             out["reference_acq_id"] = ref["acq_id"]
         else:
-            s = physics.summarise_transmission(f, t["db"])
+            s = physics.summarise_transmission(*_measured(t, t["db"]))
             out.update({"peak_db": s["peak_transmission_db"], "peak_freq_hz": s["peak_freq_hz"],
                         "mean_db": s["mean_transmission_db"]})
         return out
@@ -463,7 +622,14 @@ class Analyzer:
              count set now;
           3. the backend's prediction (the simulator knows its grid; the
              owner only if it publishes its TG point count).
-        Else refuse: the scan would otherwise file N points on a guess."""
+        Else refuse: the scan would otherwise file N points on a guess.
+
+        This FULL grid is also what a window's bin indices refer to."""
+        start, bin_Hz, n = self._full_grid()
+        return start + bin_Hz * np.arange(int(n))
+
+    def _full_grid(self) -> tuple[float, float, int]:
+        """(start_Hz, bin_Hz, points) of the full grid; see frequencies()."""
         sw = self.cfg.sweep
         with self._lock:
             candidates = [self._reference, self._sample_trace, self._last]
@@ -471,13 +637,13 @@ class Analyzer:
             if (t is not None and _same(t.get("req_start_Hz", _NAN), sw.start_Hz)
                     and _same(t.get("req_stop_Hz", _NAN), sw.stop_Hz)
                     and int(t.get("req_points", -1)) == int(sw.points)):
-                return _freqs(t)
+                return float(t["start_Hz"]), float(t["bin_Hz"]), int(t["points"])
         g = self.backend.predicted_grid(sw.start_Hz, sw.stop_Hz, sw.points)
         if g is None:
             raise ValueError("the analyser's frequency grid for this band is not known yet: "
                              "take a reference (or acquire once) before the scan")
         start, bin_Hz, n = g
-        return start + bin_Hz * np.arange(int(n))
+        return float(start), float(bin_Hz), int(n)
 
     def grid_points(self) -> int | None:
         """How many bins the transmission trace will have, or None if unknown."""
@@ -516,12 +682,35 @@ class Analyzer:
                 acq_progress=progress if (a is not None and self._sweeping) else 0.0,
                 acq_is_reference=bool(a is not None and a["reference"]),
                 acq_error=self._acq_error,
+                acq_window=list(a["window"]) if (a is not None and a.get("window")) else [],
                 sample=dict(self._sample),
                 reference=self._reference_status_locked(),
                 sim_dut_inserted=bool(c.sim.dut_inserted) if self.simulated else False,
                 sim_tg_attached=bool(c.sim.tg_attached) if self.simulated else False,
                 sim_pad_dB=float(c.sim.pad_dB) if self.simulated else _NAN,
+                **self._sim_field_status(),
             )
+
+    def _sim_field_status(self) -> dict:
+        """The film and its field, for status. The backend's reading is a cached
+        copy (never a wait), so status() still never blocks."""
+        if not self.simulated:
+            return {}
+        c = self.cfg
+        out = {"sim_fmr_on": bool(c.sim.fmr_on),
+               "sim_manual_field_mT": float(c.field.manual_mT),
+               "sim_manual_angle_deg": float(c.field.manual_angle_deg)}
+        getter = getattr(self.backend, "sim_field", None)
+        if getter is not None:
+            try:
+                r = getter()
+            except Exception:
+                r = None
+            if r:
+                out.update(sim_field_mT=r["field_mT"], sim_angle_deg=r["angle_deg"],
+                           sim_fres_Hz=r["fres_Hz"], sim_fwhm_Hz=r["fwhm_Hz"],
+                           sim_field_source=r["source"], sim_field_ok=bool(r["ok"]))
+        return out
 
     def _reference_status_locked(self) -> dict:
         r = self._reference
@@ -536,9 +725,21 @@ class Analyzer:
     def get_config(self) -> Config:
         return self.cfg
 
+    def _sync_sim_field(self) -> None:
+        """Bring the simulated film's field source in line with the config NOW
+        (the sweep thread would do it within 0.1 s; a status read right after
+        the setter should already be right)."""
+        sync = getattr(self.backend, "sync_field", None)
+        if sync is not None:
+            try:
+                sync()
+            except Exception as exc:
+                self._emit("warn", f"film field source: {type(exc).__name__}: {exc}")
+
     def apply_config(self) -> None:
         """Re-clamp cfg (possibly edited in place over the wire)."""
         self._sanitise_config()
+        self._sync_sim_field()
         self._changed("settings applied", False)
 
     # ---- the sweep thread -------------------------------------------------------------------
@@ -572,11 +773,35 @@ class Analyzer:
         points, rbw, avg = int(sw.points), float(sw.rbw_Hz), int(sw.averages)
         with self._lock:
             rev0, a0 = self._rev, self._acq
+
+        # A WINDOWED acquisition sweeps only bins i0..i1 of the full grid: start
+        # at f[i0], stop at f[i1], i1 - i0 + 1 points -- so, on an analyser that
+        # puts its bins where it is asked to, every measured bin lands exactly
+        # on a bin of the full grid (and of the thru reference). Resolved here,
+        # at the start of the sweep, against the grid as it is NOW.
+        win, grid = None, None
+        if a0 is not None and a0.get("window_req") is not None and not a0.get("force_full"):
+            try:
+                grid = self._full_grid()
+            except ValueError as exc:
+                self._sweep_failed(a0, rev0, SweepFailed(str(exc)))
+                return False
+            win = resolve_window(a0["window_req"], grid[2])
+            with self._lock:
+                if self._acq is a0:
+                    a0["window"] = list(win) if win else None
+        sw_start, sw_stop, sw_points = start, stop, points
+        if win is not None:
+            g0, gbin, _n = grid
+            sw_start, sw_stop = g0 + gbin * win[0], g0 + gbin * win[1]
+            sw_points = win[1] - win[0] + 1
+
         t0 = self._clock()
         try:
             with self._hw:
-                self.backend.start_sweep(start, stop, points, rbw, avg)
-                dt = self.backend.estimate_time_s(points, avg)
+                self.backend.start_sweep(sw_start, sw_stop, sw_points, rbw, avg)
+                # the estimate follows the points really swept
+                dt = self.backend.estimate_time_s(sw_points, avg)
         except Exception as exc:
             self._sweep_failed(a0, rev0, exc)
             return False
@@ -610,15 +835,50 @@ class Analyzer:
             self._sweep_failed(a0, rev0, exc)
             return False
 
-        trace = {"start_Hz": float(res["start_Hz"]), "bin_Hz": float(res["bin_Hz"]),
-                 "points": int(res["points"]),
-                 "stop_Hz": float(res["start_Hz"]) + float(res["bin_Hz"]) * (int(res["points"]) - 1),
+        db = np.asarray(res["db"], dtype=float)
+        g_start, g_bin, g_n = float(res["start_Hz"]), float(res["bin_Hz"]), int(res["points"])
+        window, fallback = None, str(a0.get("fallback", "")) if a0 is not None else ""
+        if win is not None:
+            # Did the analyser put its bins where we asked? Checked, never
+            # assumed: the real SA chooses its own grid. If they are off by
+            # more than 1e-6 relative, do NOT interpolate (that would invent
+            # data between measured points) -- run the WHOLE band instead and
+            # say so in the sample.
+            want = grid[0] + grid[1] * np.arange(win[0], win[1] + 1)
+            got = g_start + g_bin * np.arange(g_n)
+            if g_n != want.size or not np.allclose(got, want, rtol=1e-6, atol=1e-3):
+                why = (f"the analyser swept the window on another grid ({g_n} bins from "
+                       f"{g_start:.9g} Hz, step {g_bin:.9g} Hz; asked {want.size} from "
+                       f"{want[0]:.9g} Hz, step {grid[1]:.9g} Hz): measured the whole band")
+                abandoned = False
+                with self._lock:
+                    self._sweeping = False
+                    if self._acq is a0 and self._rev == rev0:
+                        a0["force_full"], a0["fallback"] = True, why
+                    else:
+                        abandoned = True
+                if not abandoned:
+                    self._emit("warn", f"acquisition #{a0['id']}: window [{win[0]}, {win[1]}] "
+                                       f"not on the full grid -- {why}")
+                return False                  # the next step sweeps the whole band
+            # expand onto the FULL grid: NaN where nothing was measured
+            full = np.full(grid[2], _NAN)
+            full[win[0]:win[1] + 1] = db
+            db, window = full, [int(win[0]), int(win[1])]
+            g_start, g_bin, g_n = grid
+        trace = {"start_Hz": g_start, "bin_Hz": g_bin, "points": g_n,
+                 "stop_Hz": g_start + g_bin * (g_n - 1),
                  "rbw_Hz": float(res.get("rbw_Hz", rbw) or rbw),
                  "averages": int(res.get("averages") or avg),
                  "overload": bool(res.get("overload", False)),
+                 # the BAND setting (not the window): frequencies() matches on it
                  "req_start_Hz": start, "req_stop_Hz": stop, "req_points": points,
-                 "time": time.time(), "db": np.asarray(res["db"], dtype=float)}
-        pk = physics.summarise_transmission(_freqs(trace), trace["db"])
+                 "window": window or [0, g_n - 1],
+                 "window_requested": (list(a0["window_req"]) if a0 is not None
+                                      and a0.get("window_req") is not None else []),
+                 "window_fallback": fallback,
+                 "time": time.time(), "db": db}
+        pk = physics.summarise_transmission(*_measured(trace, trace["db"]))
         summary = {"peak_db": pk["peak_transmission_db"], "peak_Hz": pk["peak_freq_hz"]}
 
         latched = None
@@ -654,8 +914,8 @@ class Analyzer:
     def _latch_locked(self, a: dict, trace: dict) -> None:
         """Publish a finished trace as THE sample (and as the reference, if that
         is what it was for). Called with _lock held."""
-        f = _freqs(trace)
-        raw = physics.summarise_transmission(f, trace["db"])
+        # scalars on the MEASURED bins only (a window's outside is NaN)
+        raw = physics.summarise_transmission(*_measured(trace, trace["db"]))
         sample = {k: v for k, v in trace.items() if k != "db"}
         sample.update({"acq_id": a["id"], "is_reference": bool(a["reference"]), "failed": False,
                        "error": "", "peak_db": raw["peak_transmission_db"],
@@ -669,7 +929,8 @@ class Analyzer:
         if ref is not None and not _reference_mismatch(trace_s, ref):
             # the scalars in status too, for a GUI or a quick look; a scan reads
             # them with get_result, which refuses honestly when they are missing
-            sample.update(physics.summarise_transmission(f, trace["db"] - ref["db"]))
+            sample.update(physics.summarise_transmission(
+                *_measured(trace, trace["db"] - ref["db"])))
             trace_s.update(sample)
         self._sample = sample
         self._sample_trace = trace_s
@@ -714,7 +975,7 @@ class Analyzer:
 
     # ---- internals ----------------------------------------------------------------------------
 
-    def _trigger(self, reference: bool) -> int:
+    def _trigger(self, reference: bool, window=None) -> int:
         if not self._connected:
             raise ValueError("not connected")
         cleared = False
@@ -728,7 +989,10 @@ class Analyzer:
             # id and "acquiring" change TOGETHER, under the lock, so no status
             # snapshot can ever show the new id with a stale "not acquiring".
             self._acq_id += 1
-            self._acq = {"id": self._acq_id, "reference": bool(reference)}
+            # window_req = what was ASKED (bins of the full grid); it is resolved
+            # against the grid again when the sweep starts
+            self._acq = {"id": self._acq_id, "reference": bool(reference),
+                         "window_req": None if reference else window}
             # a fresh attempt: the last failure no longer describes the present
             self._sweep_error = ""
             n = self._acq_id
@@ -749,6 +1013,10 @@ class Analyzer:
                 # a NEW dict with the same id: the sweep thread compares by
                 # identity, so the sweep in flight is abandoned
                 self._acq = dict(self._acq)
+                # the new settings get a fresh try at the window: a grid that
+                # did not line up before may line up now
+                for k in ("force_full", "fallback", "window"):
+                    self._acq.pop(k, None)
         self._emit("warn" if clamped else "info", msg + (" (clamped)" if clamped else ""))
         if restarted is not None:
             self._emit("warn", f"acquisition #{restarted} restarted: settings changed")
@@ -779,6 +1047,15 @@ class Analyzer:
         for name, (lo, hi) in SIM_LIMITS.items():
             v = _clamp(float(getattr(self.cfg.sim, name)), lo, hi)[0]
             setattr(self.cfg.sim, name, int(round(v)) if name == "dut_order" else v)
+        # text knobs that arrived over the wire or from an .ini: an unknown value
+        # falls back to the default rather than being passed on
+        geo = str(self.cfg.sim.fmr_geometry).strip().lower().replace("-", "").replace("_", "")
+        self.cfg.sim.fmr_geometry = geo if geo in SIM_CHOICES["fmr_geometry"] else "inplane"
+        if self.cfg.field.source not in FIELD_SOURCES:
+            self.cfg.field.source = "manual"
+        for name, (attr, allowed) in SIM_FIELD.items():
+            if name != "field_source":
+                setattr(self.cfg.field, attr, _clamp(float(getattr(self.cfg.field, attr)), *allowed)[0])
 
     def _emit(self, level: str, msg: str) -> None:
         self._on_event(level, msg)
