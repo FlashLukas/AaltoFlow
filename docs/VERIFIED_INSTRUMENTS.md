@@ -22,9 +22,11 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 |---|---|---|---|
 | [`pm16`](../modules/detector/pm16-control) | Thorlabs PM16-121 USB power meter | **verified**, incl. a scan-core scan | 2026-09-15 |
 | [`kim`](../modules/motion/kim-control) | Thorlabs KIM101 + 3x PIA25 inertia stage | **verified** (moves, datum, camera calibration, rasters) | 2026-09-25 |
-| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, save; stabiliser not yet) | 2026-09-25 |
-| [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **partly verified** (spectrum mode; TG measured through the raw API) | 2026-09-28 |
-| scan-core | -- | real scans with pm16, kim + pm16 raster | 2026-09-25 |
+| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save; autofocus not yet) | 2026-09-28 |
+| [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **verified** (spectrum mode, TG CW + TG sweep via shsg / shsna) | 2026-09-28 |
+| [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
+| [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
+| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates) | 2026-09-28 |
 | all others | -- | simulation only | -- |
 
 ## pm16 -- Thorlabs PM16-121 power meter (first module on real hardware)
@@ -169,9 +171,27 @@ before/after routines.
 - A second service on the same analyser (serial 0 = "first found") cannot even open
   it: it stops with "Device not found (-8)" (now with the hint above) before the
   hardware lock is reached. With a serial configured, the lock answers first.
-- Not yet checked: `saStoreTgThru`, the TG's -10 dBm top end, the three-module
-  split (spectrum analyser / signal generator / scalar network analyser) on the
-  hardware.
+- **The three-module chain on the hardware (2026-09-28)** -- signalhound `--real`,
+  shsg `--real`, shsna `--real`, each its own process, TG -> 20 dB -> SA:
+  - shsg CW seen by the SA: 900 MHz at -30 / -20 / -10 dBm read -50.09 / -40.07 /
+    -30.15 dBm (the -10 dBm top end works), 2.5 GHz -30 read -51.23; frequency
+    within a 1 kHz-RBW bin; each setting ~0.02 s.
+  - RF off = park: the 2.5 GHz tone disappears, a -49.5 dBm tone appears at
+    10.04 kHz (i.e. -30 dBm), shsg reports `parked`. Harmless on the pad + SA.
+  - shsna 800 -- 1200 MHz, 201 points: `tg_grid`'s PREDICTED grid (800 MHz,
+    2 MHz bins, 201 points) equals the real TG sweep's grid. Reference 1.43 s,
+    measurement 1.22 s; transmission after the thru reference: mean +0.017 dB,
+    peak +0.087 dB. The raw TG-sweep trace read ~-22 dB through the pad at the
+    100 Hz RBW shsna used (-19.4 dB at 100 kHz RBW through the raw API).
+  - shsg's CW comes back after the exclusive TG sweep (900 MHz -50.07 dBm).
+  - Caveat: a CW change sent while the SA is inside a long sweep (a 7.5 s,
+    1 kHz-RBW, 1 GHz sweep) FAILS at the client after 1.5 s ("signalhound service
+    did not answer tg_cw within 1500 ms") -- but is applied once the sweep ends
+    (shsg then reports the new frequency). The client sees an error for a change
+    that happened.
+  - Clean `shutdown` of all three.
+- Not yet checked: `saStoreTgThru` (VERIFY 6), a real DUT in the SNA path, and
+  two SAs on one PC.
 
 ## scan-core -- scans with real instruments
 
@@ -204,6 +224,6 @@ before/after routines.
 
 agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, dssg, elliptec,
 gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms,
-shsg, shsna, smaract, smb, sr7230, sr830, stage, superk, tc200, usb6001, vna,
+smaract, smb, sr7230, sr830, stage, superk, tc200, usb6001, vna,
 windfreak, zpiezo. The per-module hardware checklists are in
 [`DEVELOPER_NOTES.md`](DEVELOPER_NOTES.md) section 11 and each module's README.
