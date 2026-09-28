@@ -22,7 +22,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 |---|---|---|---|
 | [`pm16`](../modules/detector/pm16-control) | Thorlabs PM16-121 USB power meter | **verified**, incl. a scan-core scan | 2026-09-15 |
 | [`kim`](../modules/motion/kim-control) | Thorlabs KIM101 + 3x PIA25 inertia stage | **verified** (moves, datum, camera calibration, rasters) | 2026-09-25 |
-| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save; autofocus not yet) | 2026-09-28 |
+| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma) | 2026-09-28 |
 | [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **verified** (spectrum mode, TG CW + TG sweep via shsg / shsna) | 2026-09-28 |
 | [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
 | [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
@@ -125,8 +125,43 @@ before/after routines.
   over the array with pm16), and laser placement (`set_laser_target`: 2 um in
   1.16 s, 0.06 um off; row placement in the camera-coordinate fly scans, 0.01 --
   0.15 um from the target, short on the side it comes from).
-- Not yet checked on the rig: the autofocus routines on the real (hysteretic) Z,
-  the lost-pattern fault of 2026-09-28.
+- Spot size without a fixed threshold (c6f60be), 2026-09-28 at 63x on plain film,
+  exposure lowered to 65 us so the spot does not saturate (peak ~200 of 255;
+  at the lab's 1.4 ms, 748 pixels were at 255). Z sweeps through focus, 3 repeats:
+  - D4sigma is continuous and monotonic on both sides of focus (29.5 px at
+    focus, ~120 px 3 focal depths out), with no step where the dark centre of the
+    coherent spot appears (~3 um below and ~3.4 um above focus). The fixed
+    threshold (at half the peak) loses the spot 0.4 um above focus.
+  - sigma^2 is near a parabola close to focus (R^2 0.98 -- 0.997 up to 3x its
+    minimum) but not over the whole range (R^2 0.97 -- 0.99): the far wings read
+    up to 50 % LOW -- the 8-bit flattening (far out the peak is 11 -- 16 grey
+    levels). The spot is astigmatic: the x and y minima are ~0.7 um apart.
+  - On the same recorded frames: detect_px 1/2/3 and smooth_px 0/2 change sigma^2
+    by < 2 %; clip_mode pixel reads ~15 % lower with the same fit quality.
+    Relative area at 0.135 is monotonic but scatters up to 18 % between repeats;
+    at 0.5 it is flat near focus, not monotonic, and its minimum is ~1 um off.
+- Autofocus on the real (open-loop, hysteretic) KIM Z, 5 runs per start
+  (2 focal depths below / above / far below; focal depth ~1.2 um), judged by
+  D4sigma at the park against its minimum (the Z counter is not a ruler here):
+  - one_way + spot_d4sigma (park_tolerance 0.04): 14 of 15 parked at 29.7 --
+    30.5 px (~0.2 focal depths), parked D4sigma scatter < 1 %.
+  - one_way + spot_relative (0.10): 15 of 15 parked, all at 32.6 -- 34.7 px
+    (~0.5 focal depths): the tolerance is loose for a metric that is flat near
+    focus.
+  - one_way + spot_area on an UNSATURATED spot: 0 of 15 -- 14 parked
+    consistently at ~46 px (1.2 focal depths). The metric is minimised, which
+    assumes a saturated spot; unsaturated, the thresholded area is LARGEST at
+    focus, so the routine goes to where the spot fades. Not tested at the lab's
+    saturating exposure.
+  - sweep routine: parks 0.2 -- 1.0 focal depths off, worse run by run: the
+    final down/up approach to the park does not land where the sweep was.
+  - A run that never gets back within park_tolerance parks by the step
+    counter -- up to 3.7 focal depths off on this Z -- and still reports `OK`
+    (the warning goes out as an event only). Seen 5 times in ~90 one_way runs.
+  - During the test the Z counter at focus climbed from -1.5 to +344 um: kim's
+    Z steps UP are now much smaller than steps DOWN (one step size in the
+    config). Only a routine that parks by the image works on this axis.
+- Not yet checked on the rig: the lost-pattern fault of 2026-09-28.
 
 ## signalhound -- Signal Hound SA44B + USB-TG44A
 
