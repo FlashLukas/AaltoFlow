@@ -23,6 +23,11 @@ from stage.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from stage.net.service import StageService  # noqa: E402
 from stage.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="3D coarse stage service")
@@ -53,7 +58,7 @@ def main() -> int:
         # connected, so no stop command is sent to motors we do not own.  One
         # readable line for the launcher log, no traceback, non-zero exit.
         print(f"stage: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except (ImportError, OSError, ValueError, RuntimeError) as exc:
         # pylablib missing, controller not found, empty serial ...: the same
         # one-line treatment instead of a traceback wall.

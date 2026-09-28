@@ -39,7 +39,7 @@ from kepco.hwlock import HardwareBusy
 # Exit code when the BOP is already driven by another service (clMag, or a
 # second kepco). Distinct from 2 (bad arguments) so a launcher can tell them
 # apart -- the same code clMag uses.
-EXIT_HARDWARE_BUSY = 3
+EXIT_HARDWARE_BUSY = 4
 
 
 def main() -> int:

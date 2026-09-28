@@ -34,6 +34,11 @@ from sr7230.net.service import Sr7230Service
 from sr7230.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from sr7230.hwlock import HardwareBusy
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 #: this PC's settings (the instrument's IP address above all); gitignored,
 #: and kept by the installer across upgrades
 _DEFAULT_INI = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sr7230.ini"))
@@ -86,7 +91,7 @@ def main() -> int:
         # existed, so no stop()/shutdown() ran either. One line, no traceback,
         # non-zero exit so the launcher shows the start as failed.
         print(f"cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

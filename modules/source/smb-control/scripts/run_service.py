@@ -31,6 +31,11 @@ from smb.net.service import SmbService
 from smb.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from smb.hwlock import HardwareBusy
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SMB100A RF generator control service")
@@ -69,7 +74,7 @@ def main() -> int:
         # that somebody else owns (and Generator.shutdown only sends it when
         # the backend really opened).
         print(f"smb service: not started: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except Exception as exc:
         # Opening the generator happens in serve_forever -> start. Say plainly
         # what went wrong instead of a traceback in the launcher log. The

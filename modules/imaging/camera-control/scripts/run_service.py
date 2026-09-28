@@ -28,6 +28,11 @@ from camera.hwlock import HardwareBusy         # noqa: E402
 from camera.net import protocol as P           # noqa: E402
 from camera.net.service import CameraService   # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 #: camera.ini field prefix for each module the camera talks to
 _PEERS = {"kim": "kim", "piezo": "piezo", "zpiezo": "z"}
@@ -103,7 +108,7 @@ def main() -> int:
         # this process opened itself. One line in the launcher log, not a
         # traceback, and a non-zero exit so the launcher shows the card as down.
         print(f"camera service: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # SDK missing, no camera found, ... -- also one readable line.
         print(f"camera service: cannot start: {type(exc).__name__}: {exc}", file=sys.stderr)

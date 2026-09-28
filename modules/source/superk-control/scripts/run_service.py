@@ -33,6 +33,11 @@ from superk.sim_system import build_sim_system
 from superk.net.service import SuperkService
 from superk.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 # superk.ini next to the project is loaded automatically if it exists, so the
 # lab PC keeps its port / filter table without passing --config every time.
 _DEFAULT_INI = os.path.join(os.path.dirname(__file__), "..", "superk.ini")
@@ -76,7 +81,7 @@ def main() -> int:
         # serve_forever runs on the way out sends nothing to it (the brain is
         # not connected, the backend has no open port). One line, no traceback.
         print(f"superk: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # NKTError (DLL missing, openPorts failed) is a RuntimeError: one
         # readable line in the launcher log instead of a traceback.

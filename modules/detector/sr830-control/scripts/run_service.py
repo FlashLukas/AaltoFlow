@@ -33,6 +33,11 @@ from sr830.sim_system import build_sim_system
 from sr830.net.service import Sr830Service
 from sr830.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SR830 lock-in control service")
@@ -74,7 +79,7 @@ def main() -> int:
         # service and we must not touch its SINE OUT or AUX OUTs.
         # (The message is ASCII: gotcha #14.)
         print(f"sr830: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

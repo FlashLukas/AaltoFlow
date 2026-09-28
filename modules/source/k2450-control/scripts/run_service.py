@@ -31,6 +31,11 @@ from k2450.net.service import K2450Service
 from k2450.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from k2450.hwlock import HardwareBusy
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Keithley 2450 SourceMeter control service")
@@ -67,7 +72,7 @@ def main() -> int:
         # nothing to switch off or close: serve_forever only reaches its
         # shutdown (output OFF) AFTER a successful start. One line, and exit.
         print(f"k2450: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # pyvisa missing, wrong command set (*LANG), resource not found ...:
         # one readable line in the launcher log instead of a traceback.

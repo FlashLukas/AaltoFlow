@@ -208,7 +208,7 @@ def test_run_service_busy_is_one_clean_line(tmp_path, monkeypatch):
         )
     finally:
         lock.release()
-    assert p.returncode == 3, (p.stdout, p.stderr)
+    assert p.returncode == 4, (p.stdout, p.stderr)
     assert "Traceback" not in p.stderr
     err = [ln for ln in p.stderr.splitlines() if ln.strip()]
     assert len(err) == 1, p.stderr

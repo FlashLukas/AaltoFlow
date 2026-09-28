@@ -18,6 +18,11 @@ from zpiezo.hwlock import HardwareBusy              # noqa: E402
 from zpiezo.net import protocol as P                # noqa: E402
 from zpiezo.net.service import ZPiezoService        # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Z-piezo service")
@@ -51,7 +56,7 @@ def main() -> int:
         # KCube's serial) already drives it.  We never opened the KCube, so
         # there is nothing to park or close: one line naming the holder, exit.
         print(f"zpiezo: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # pylablib missing, no KCube found, USB open failed: one readable
         # line in the launcher log instead of a traceback wall.

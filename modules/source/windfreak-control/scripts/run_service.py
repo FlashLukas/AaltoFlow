@@ -32,6 +32,11 @@ from windfreak.sim_system import build_sim_system
 from windfreak.net.service import WindfreakService
 from windfreak.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Windfreak SynthHD PRO v2 control service")
@@ -73,7 +78,7 @@ def main() -> int:
         # the SynthHD belongs to the other service and we must not touch its
         # outputs. ASCII only (gotcha #14).
         print(f"windfreak: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

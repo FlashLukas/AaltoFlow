@@ -348,7 +348,7 @@ def test_run_service_busy_camera_is_one_clean_line(fake_ids, monkeypatch, capsys
         calls.clear()
         rc = mod.main()
         err = capsys.readouterr().err
-        assert rc == 3
+        assert rc == 4
         assert "already in use by othercam" in err
         assert "Traceback" not in err and len(err.strip().splitlines()) == 1
         # it never opened the camera, so it sent the camera nothing on the way out

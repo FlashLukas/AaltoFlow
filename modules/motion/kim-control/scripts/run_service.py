@@ -23,6 +23,11 @@ from kim.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from kim.net.service import KimService  # noqa: E402
 from kim.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="3D piezo-inertia stage service (KIM101/PIA25)")
@@ -54,7 +59,7 @@ def main() -> int:
         # the USB link is opened, and brain.start() failed before it marked
         # itself connected, so its shutdown (stop every axis) never runs.
         print(f"kim: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

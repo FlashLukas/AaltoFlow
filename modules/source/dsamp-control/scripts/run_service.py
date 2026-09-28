@@ -35,6 +35,11 @@ from dsamp.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from dsamp.net.service import DsampService
 from dsamp.sim_system import build_sim_system
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="DS Instruments RF amplifier control service")
@@ -71,7 +76,7 @@ def main() -> int:
         # port) already holds the amplifier. We never opened it, so there is
         # nothing to switch off: say who holds it, in one line, and exit.
         print(f"dsamp: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except OSError as exc:
         # pyserial's SerialException is an OSError: wrong COM port, cable out,
         # port held by a non-AaltoFlow program. One readable line, no traceback.

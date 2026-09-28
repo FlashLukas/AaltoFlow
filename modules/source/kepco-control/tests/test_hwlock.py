@@ -177,7 +177,7 @@ def test_hwlock_is_the_master_copy():
 
 def test_service_exits_cleanly_when_the_bop_is_busy(visa, tmp_path):
     """run_service.py --real against a claimed address: one line on stderr
-    naming address + holder, exit code 3, no traceback. The address is held
+    naming address + holder, exit code 4, no traceback. The address is held
     by THIS process; the child finds it busy through the lock file. pyvisa is
     never reached (the claim comes first), so no VISA is needed."""
     holder = VisaBOP("GPIB0::6::INSTR")
@@ -189,7 +189,7 @@ def test_service_exits_cleanly_when_the_bop_is_busy(visa, tmp_path):
                         "--cmd-port", "17018", "--pub-port", "17019"],
                        capture_output=True, text=True, timeout=60, env=env)
     holder.close()
-    assert r.returncode == 3, r.stderr
+    assert r.returncode == 4, r.stderr
     assert "Traceback" not in r.stderr
     err = r.stderr.strip().splitlines()
     assert len(err) == 1

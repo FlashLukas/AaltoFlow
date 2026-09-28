@@ -32,6 +32,11 @@ from ls455.sim_system import build_sim_system
 from ls455.net.service import Ls455Service
 from ls455.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Lake Shore 455 gaussmeter control service")
@@ -74,7 +79,7 @@ def main() -> int:
         # sent to the meter: we never opened it, and the brain's start()
         # failed before the poll thread or the ZeroMQ sockets existed.
         print(f"ls455: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

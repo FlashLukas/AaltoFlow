@@ -34,6 +34,11 @@ from tc200.sim_system import build_sim_system
 from tc200.net.service import Tc200Service
 from tc200.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Thorlabs TC200 heater control service")
@@ -75,7 +80,7 @@ def main() -> int:
         # port. We never opened the instrument, so there is nothing to switch
         # off or close: one clean line on stderr and a non-zero exit.
         print(f"tc200 service: could not start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # most often: wrong COM port, or the `real` extra not installed
         print(f"could not start: {exc}")

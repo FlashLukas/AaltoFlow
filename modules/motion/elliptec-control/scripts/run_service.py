@@ -24,6 +24,11 @@ from elliptec.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E4
 from elliptec.net.service import ElliptecService  # noqa: E402
 from elliptec.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Elliptec rotation mount service")
@@ -61,7 +66,7 @@ def main() -> int:
         # byte went to the mounts; the brain never became "connected", so its
         # shutdown sends no stop commands to a bus that is not ours.
         print(f"elliptec service: could not start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

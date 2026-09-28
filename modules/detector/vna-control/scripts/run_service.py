@@ -52,6 +52,11 @@ from vna.hwlock import HardwareBusy
 from vna.net.service import VnaService
 from vna.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def apply_launcher_endpoints(cfg: Config) -> None:
     """Point the field subscriptions at the magnets the launcher is actually running.
@@ -198,7 +203,7 @@ def main() -> int:
             vna.shutdown()
         except Exception:
             pass
-        return 3
+        return EXIT_HARDWARE_BUSY
     except Exception as exc:
         # Opening the analyser happens in serve_forever -> start. Say plainly
         # what went wrong (VISA alias not found, pyvisa missing, instrument

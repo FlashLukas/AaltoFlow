@@ -166,7 +166,7 @@ def test_run_service_ends_with_one_clean_line_when_busy(lock_dir):
             capture_output=True, text=True, timeout=60, env=env, cwd=_ROOT)
     finally:
         holder.release()
-    assert p.returncode == 3
+    assert p.returncode == 4
     err = p.stderr.strip()
     assert "Traceback" not in err and len(err.splitlines()) == 1, err
     assert "TCPIP::10.0.0.99" in err and "kepco" in err

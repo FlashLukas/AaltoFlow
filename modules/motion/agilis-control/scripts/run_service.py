@@ -23,6 +23,11 @@ from agilis.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from agilis.net.service import AgilisService  # noqa: E402
 from agilis.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Newport Agilis stage service (AG-UC2, 2 axes)")
@@ -57,7 +62,7 @@ def main() -> int:
         # the other service and we must not send it ST/ML (and brain.shutdown
         # is a no-op, since start() never connected). ASCII only: gotcha #14.
         print(f"agilis: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

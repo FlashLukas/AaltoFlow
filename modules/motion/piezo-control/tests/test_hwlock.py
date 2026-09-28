@@ -149,7 +149,7 @@ def test_busy_brain_start_sends_nothing_and_shutdown_is_silent(stub_serial):
 
 def test_run_service_reports_busy_in_one_line(tmp_path, monkeypatch):
     """--real against a port another process holds: one ASCII line on stderr
-    naming the holder, exit code 3, no traceback."""
+    naming the holder, exit code 4, no traceback."""
     lockdir = tmp_path / "hwlocks"
     monkeypatch.setenv("AALTOFLOW_LOCK_DIR", str(lockdir))
     lock = hwlock.claim("COM3", "otherkey")      # Config() default port is COM3
@@ -165,7 +165,7 @@ def test_run_service_reports_busy_in_one_line(tmp_path, monkeypatch):
         r = subprocess.run([sys.executable, str(script), "--real",
                             "--cmd-port", "15694", "--pub-port", "15695"],
                            capture_output=True, text=True, env=env, timeout=60)
-        assert r.returncode == 3, r.stderr
+        assert r.returncode == 4, r.stderr
         err = r.stderr.strip()
         assert "Traceback" not in err
         assert err.startswith("piezo: cannot start:") and "otherkey" in err

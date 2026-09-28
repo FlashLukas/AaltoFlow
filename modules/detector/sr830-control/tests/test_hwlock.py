@@ -177,7 +177,7 @@ def test_the_simulator_claims_nothing():
 def test_run_service_reports_busy_in_one_line(tmp_path):
     # The whole script, as the launcher starts it, with a fake pyvisa on the
     # path and the address held by "another-module": one ASCII line on stderr
-    # naming the address and the holder, exit code 3, no traceback.
+    # naming the address and the holder, exit code 4, no traceback.
     fake = tmp_path / "fake"
     fake.mkdir()
     (fake / "pyvisa.py").write_text(
@@ -196,7 +196,7 @@ def test_run_service_reports_busy_in_one_line(tmp_path):
                            env=env, capture_output=True, text=True, timeout=60)
     finally:
         holder.release()
-    assert r.returncode == 3, r.stderr
+    assert r.returncode == 4, r.stderr
     err = r.stderr.strip()
     assert "Traceback" not in err
     assert len(err.splitlines()) == 1

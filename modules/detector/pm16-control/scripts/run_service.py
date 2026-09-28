@@ -31,6 +31,11 @@ from pm16.sim_system import build_sim_system
 from pm16.net.service import Pm16Service
 from pm16.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Thorlabs PM16 power meter control service")
@@ -67,7 +72,7 @@ def main() -> int:
         # already holds its USB address. We never opened the meter, so there
         # is nothing to close: say who holds it, in one line, and exit.
         print(f"pm16: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # TLPMXError (DLL missing, no meter, I/O error) is a RuntimeError:
         # one readable line in the launcher log instead of a traceback.

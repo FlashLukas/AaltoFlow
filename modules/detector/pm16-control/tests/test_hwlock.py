@@ -193,7 +193,7 @@ def test_meter_start_failure_after_open_releases(locks, monkeypatch):
 
 def test_run_service_busy_is_one_line(locks, tmp_path):
     """The real service with a busy meter: one ASCII line on stderr naming the
-    holder, exit 3, no traceback. Another process claims the meter first; a
+    holder, exit 4, no traceback. Another process claims the meter first; a
     tiny wrapper swaps the DLL for FakeDll and then runs run_service.py."""
     root = Path(tlpmx.__file__).resolve().parents[3]
     wrapper = tmp_path / "wrap.py"
@@ -214,7 +214,7 @@ def test_run_service_busy_is_one_line(locks, tmp_path):
     finally:
         p.stdin.close()
         p.wait(timeout=10)
-    assert r.returncode == 3
+    assert r.returncode == 4
     assert "Traceback" not in r.stderr
     line = r.stderr.strip()
     assert "\n" not in line and "clMag" in line and line.isascii()

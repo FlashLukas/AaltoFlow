@@ -23,6 +23,11 @@ from ddr25.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from ddr25.net.service import Ddr25Service  # noqa: E402
 from ddr25.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="DDR25 rotation-stage service")
@@ -55,7 +60,7 @@ def main() -> int:
         # brain never connected and its shutdown sends no stop command to a
         # stage that belongs to the other service. (ASCII: gotcha #14.)
         print(f"ddr25: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

@@ -31,6 +31,11 @@ from chopper.sim_system import build_sim_system
 from chopper.net.service import ChopperService
 from chopper.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Thorlabs MC2000B optical chopper service")
@@ -68,7 +73,7 @@ def main() -> int:
         # so there is nothing to put in standby or close here -- the brain's
         # shutdown() is not called and no command reaches the other's unit.
         print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

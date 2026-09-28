@@ -146,8 +146,12 @@ class VisaScpiBackend:
   device (a USB meter with no address set) claims each candidate before
   opening it and moves on to the next one when it is busy.
 - **Let the refusal reach the user.** The service prints the one-line message
-  and exits; Mission Control recognises "is already in use by" and shows the
-  card as *address busy: GPIB0::6 held by clMag* instead of a generic crash.
+  and exits with **code 4** (`EXIT_HARDWARE_BUSY = 4` in `scripts/run_service.py`
+  -- the same number in every module, so "busy" can be told apart from any other
+  start failure by the number alone; 2 stays "could not start", and mag2d's 3
+  "no cooling water"). Mission Control recognises "is already in use by" and
+  shows the card as *address busy: GPIB0::6 held by clMag* instead of a generic
+  crash.
 - **Keep the copy identical.** Every module carries its own `src/<pkg>/hwlock.py`
   (a module installs without suite-common, the same convention as `theme.py`).
   Edit only the master `suite-common/src/suite_common/hwlock.py`, then copy it

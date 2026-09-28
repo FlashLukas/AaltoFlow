@@ -35,6 +35,11 @@ from ppms.net.service import PpmsService
 from ppms.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from ppms.hwlock import HardwareBusy
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Quantum Design DynaCool control service")
@@ -81,7 +86,7 @@ def main() -> int:
         # ours to close or make safe: one clear line and a non-zero exit code
         # (the launcher shows it in its log), no traceback.
         print(f"ppms service NOT started: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # most often: MultiVu not running, or the `real` extra not installed
         print(f"could not start: {exc}")

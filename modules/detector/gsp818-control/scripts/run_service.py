@@ -36,6 +36,11 @@ from gsp818.hwlock import HardwareBusy
 from gsp818.net.service import Gsp818Service
 from gsp818.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def build_analyzer(cfg: Config, real: bool):
     """The brain on the chosen backend. Imports stay inside, so the simulator
@@ -91,7 +96,7 @@ def main() -> int:
         # backend's close() sends nothing when it holds no session -- so the
         # "TG off" of a normal stop does NOT go to a box somebody else owns.
         print(f"gsp818 service: not started: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except Exception as exc:
         # Opening the analyser happens in serve_forever -> start. Say plainly
         # what went wrong rather than dying with a traceback in the launcher log.

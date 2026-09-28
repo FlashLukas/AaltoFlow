@@ -23,6 +23,11 @@ from smaract.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E40
 from smaract.net.service import SmaractService  # noqa: E402
 from smaract.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def _ascii(text: str) -> str:
     """Printed text stays ASCII (gotcha #14): an error text from Windows can be
@@ -58,7 +63,7 @@ def main() -> int:
         # nothing to stop or close: say who holds it, in ONE line, and exit.
         # (serve_forever's cleanup is not reached: start() raised first.)
         print(_ascii(f"smaract: cannot start: {exc}"), file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     except RuntimeError as exc:
         # ScuError (no DLL, no SCU, no sensor, wrong sensor type): one
         # readable line in the launcher log instead of a traceback wall.

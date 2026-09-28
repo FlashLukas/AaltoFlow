@@ -29,6 +29,11 @@ from hf2.sim_system import build_sim_system
 from hf2.net.service import Hf2Service
 from hf2.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="HF2LI lock-in control service")
@@ -67,7 +72,7 @@ def main() -> int:
         # it, in one ASCII line (the launcher shows stderr in its log), and exit
         # non-zero so the launcher marks the start as failed.
         print(f"hf2: cannot start -- {e}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

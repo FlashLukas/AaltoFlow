@@ -30,6 +30,11 @@ from cs260.sim_system import build_sim_system
 from cs260.net.service import Cs260Service
 from cs260.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 #: Loaded automatically when present, so a lab PC keeps its grating / accessory
 #: description without a command-line flag.
 DEFAULT_INI = os.path.join(os.path.dirname(__file__), "..", "cs260.ini")
@@ -81,7 +86,7 @@ def main() -> int:
         # shutter would close THEIRS. (serve_forever() only calls stop() once
         # start() has succeeded.) ASCII message: gotcha #14.
         print(f"cs260: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

@@ -119,7 +119,7 @@ def _load_run_service():
 
 
 def test_service_exits_cleanly_on_busy_hardware(monkeypatch, capsys):
-    """HardwareBusy at start -> one ASCII line on stderr, exit 3, no traceback,
+    """HardwareBusy at start -> one ASCII line on stderr, exit 4, no traceback,
     and no shutdown ("ramp to zero + OUTP OFF") sent to a box we never owned."""
     rs = _load_run_service()
     shut = []

@@ -201,7 +201,7 @@ def test_sim_claims_nothing():
 
 def test_run_service_busy_is_one_line(tmp_path):
     """The real service with a busy SCU: one ASCII line on stderr naming the
-    holder, exit 3, no traceback. A tiny wrapper swaps the DLL for the fake
+    holder, exit 4, no traceback. A tiny wrapper swaps the DLL for the fake
     and runs scripts/run_service.py on scratch ports."""
     root = Path(scu_mod.__file__).resolve().parents[3]
     wrapper = tmp_path / "wrap.py"
@@ -221,7 +221,7 @@ def test_run_service_busy_is_one_line(tmp_path):
     finally:
         p.stdin.close()
         p.wait(timeout=10)
-    assert r.returncode == 3, r.stderr
+    assert r.returncode == 4, r.stderr
     assert "Traceback" not in r.stderr
     line = r.stderr.strip()
     assert "\n" not in line and "clMag" in line and "SMARACT-SCU::4711" in line

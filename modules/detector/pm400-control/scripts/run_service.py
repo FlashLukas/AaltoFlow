@@ -31,6 +31,11 @@ from pm400.net.service import Pm400Service
 from pm400.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from pm400.hwlock import HardwareBusy
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Thorlabs PM400 power/energy meter control service")
@@ -69,7 +74,7 @@ def main() -> int:
         # never opened (the claim comes before TLPMX_init), so there is nothing
         # to close and nothing is sent to a console that is not ours.
         print(f"pm400: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

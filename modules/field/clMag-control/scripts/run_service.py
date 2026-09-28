@@ -28,7 +28,7 @@ from clMag.hwlock import HardwareBusy
 
 # Exit code when an instrument is already driven by another service. Distinct
 # from 2 (bad arguments / --real not available) so a launcher can tell them apart.
-EXIT_HARDWARE_BUSY = 3
+EXIT_HARDWARE_BUSY = 4
 
 
 def main() -> int:

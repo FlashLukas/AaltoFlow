@@ -158,7 +158,7 @@ def test_brain_start_refused_sends_nothing_on_shutdown():
 
 
 def test_service_script_exits_with_one_clean_line(tmp_path):
-    """run_service.py --real on a held serial: exit 3, one ASCII line, no traceback."""
+    """run_service.py --real on a held serial: exit 4, one ASCII line, no traceback."""
     script = Path(__file__).resolve().parents[1] / "scripts" / "run_service.py"
     ini = tmp_path / "kim.ini"
     cfg = Config()
@@ -188,7 +188,7 @@ def test_service_script_exits_with_one_clean_line(tmp_path):
             capture_output=True, text=True, timeout=60, env=env)
     finally:
         holder.release()
-    assert r.returncode == 3, r.stderr
+    assert r.returncode == 4, r.stderr
     err = r.stderr.strip()
     assert "Traceback" not in err
     assert err.startswith("kim: cannot start:")

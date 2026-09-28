@@ -36,6 +36,11 @@ from dssg.sim_system import build_sim_system, build_real_backend
 from dssg.net.service import DssgService
 from dssg.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="DS Instruments SG12000L control service")
@@ -78,7 +83,7 @@ def main() -> int:
         # port / IP) already holds the unit. We never opened it, so there is
         # nothing to switch off or close: say who holds it, in one line, exit.
         print(f"dssg: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

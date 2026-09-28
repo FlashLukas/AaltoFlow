@@ -30,6 +30,11 @@ from dsphase.sim_system import build_sim_system
 from dsphase.net.service import DsphaseService
 from dsphase.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 DEFAULT_INI = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dsphase.ini"))
 
 
@@ -81,7 +86,7 @@ def main() -> int:
         # (start() raised before its try), so no RF-off goes to a box that
         # belongs to the other service.
         print(f"dsphase: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

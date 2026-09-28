@@ -23,6 +23,11 @@ from piezo.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from piezo.net.service import PiezoService  # noqa: E402
 from piezo.sim_system import build_real_system, build_sim_system  # noqa: E402
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="2D piezo stage service")
@@ -55,7 +60,7 @@ def main() -> int:
         # once because the brain never connected -- no "safe state" is sent
         # to an instrument we do not own.
         print(f"piezo: cannot start: {exc}", file=sys.stderr)
-        return 3
+        return EXIT_HARDWARE_BUSY
     return 0
 
 

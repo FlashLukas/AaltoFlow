@@ -165,7 +165,7 @@ def test_sim_backend_claims_nothing():
 
 
 def test_run_service_reports_busy_in_one_line(lockdir):
-    """The service script: one readable stderr line naming the holder, exit 3,
+    """The service script: one readable stderr line naming the holder, exit 4,
     no traceback. The address is held by THIS process; the child sees it."""
     held = hwlock.claim("COM97", "dssg")
     script = os.path.join(os.path.dirname(__file__), "..", "scripts", "run_service.py")
@@ -176,6 +176,6 @@ def test_run_service_reports_busy_in_one_line(lockdir):
                            capture_output=True, text=True, timeout=60, env=env)
     finally:
         held.release()
-    assert r.returncode == 3, r.stderr
+    assert r.returncode == 4, r.stderr
     assert "Traceback" not in r.stderr
     assert "COM97 is already in use by dssg" in r.stderr

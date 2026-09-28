@@ -57,8 +57,12 @@ from mag2dcal.sim_system import build_sim_system
 from mag2dcal.net.service import Mag2dcalService
 from mag2dcal.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
+# Exit code 4 = "this instrument is already in use by another service"
+# (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
+# script can tell this case apart from other start failures by the number alone.
+EXIT_HARDWARE_BUSY = 4
+
 EXIT_WATER = 3
-EXIT_BUSY = 4     # the DAQ card is claimed by another service (hwlock.py)
 
 
 def main() -> int:
@@ -128,7 +132,7 @@ def main() -> int:
         # state" to a magnet that the OTHER service is driving. One line, no
         # traceback, a non-zero exit the launcher shows as a failed start.
         print(f"mag2dcal: NOT STARTED -- {exc}", file=sys.stderr)
-        return EXIT_BUSY
+        return EXIT_HARDWARE_BUSY
     except ImportError as exc:
         # nidaqmx is imported lazily inside open(), so a missing NI-DAQmx
         # surfaces HERE, not at construction. The backend has already released
