@@ -130,9 +130,15 @@ class AcquireSpec:
         self._trigger = trigger_fn
         self._wait = wait_fn
 
-    def trigger(self):
+    def trigger(self, args: dict | None = None):
+        """Start the acquisition. `args` = extra trigger arguments, only ever
+        passed when there are some (the resonance WINDOW, window.py: the bins
+        to sweep) -- so every trigger_fn written before them keeps working."""
         if self._trigger:
-            self._trigger()
+            if args:
+                self._trigger(**args)
+            else:
+                self._trigger()
 
     def wait(self):
         if self._wait:
@@ -224,7 +230,7 @@ class Gettable(Parameter):
     """
 
     def __init__(self, id, label, unit, get_fn, axes=None, dtype="float",
-                 acquire=None):
+                 acquire=None, window=None):
         super().__init__(id, label, unit, "gettable")
         self._get = get_fn
         self.axes = list(axes or [])          # [AxisSpec, ...]; empty = scalar
@@ -232,6 +238,11 @@ class Gettable(Parameter):
         #: AcquireSpec for detectors that must be triggered and waited on.
         #: None = a plain read is already fresh (an NI sample, a status field).
         self.acquire = acquire
+        #: RESONANCE WINDOW support (window.py), or None: {"arg": "window",
+        #: "unit": "bin", "min_bins": n} = this array detector's acquisition
+        #: accepts `arg: [i0, i1]` (inclusive bin indices of its full grid)
+        #: and then sweeps only those bins, returning NaN elsewhere.
+        self.window = dict(window) if window else None
 
     @property
     def is_array(self) -> bool:
@@ -385,6 +396,23 @@ class SimState:
         self.lockin_tc_s = 0.01
         self._move_gen = 0
         self._move_lock = threading.Lock()
+        # A SLOW swept detector for the RESONANCE WINDOW (window.py): a
+        # spectrum analyser + tracking generator measuring the transmission of
+        # a film on a waveguide, in dB, over 2..20 GHz. The in-plane field
+        # angle only matters to it (the old toy physics ignores it).
+        self.field_angle_deg = 0.0
+        self.fmr_freqs_MHz = np.linspace(2000.0, 20000.0, 721)     # 25 MHz bins
+        #: the sample's TRUE parameters -- deliberately NOT the ones a demo
+        #: recipe assumes (meff 1750), so the window's tracking has to find them
+        self.fmr_true = {"g": 2.0, "meff_mT": 1650.0, "hk_mT": 5.0,
+                         "easy_axis_deg": 0.0}
+        self.fmr_model = "inplane"
+        #: seconds per swept bin: the sweep's cost grows with the bins asked
+        #: for, as on a real analyser -- that is what a window saves. 0 = free.
+        self.fmr_s_per_bin = 0.0
+        self.fmr_noise_dB = 0.03
+        self.fmr_buffer = None
+        self.fmr_windows = []          # every window asked for (tests)
 
     def move(self, attr: str, target: float) -> None:
         """Set a position, and at a finite stage speed TRAVEL there (blocking).
@@ -554,6 +582,51 @@ class SimState:
                          + 1j * self._rng.standard_normal(f.size))
         return (s21 + noise).astype(np.complex128)
 
+    def fmr_trace(self) -> np.ndarray:
+        """|S21| in dB of a film on a waveguide at the present field + angle.
+
+        A gently sloping, rippling background (cables, the TG's flatness) with
+        an absorption dip at the Kittel frequency of the TRUE parameters:
+        Lorentzian, 3 dB deep, HWHM growing with frequency like a Gilbert line
+        (alpha ~ 0.006 plus 15 MHz inhomogeneous). No line when the model says
+        there is none (below saturation).
+        """
+        from .resonance import kittel_hz
+        f = self.fmr_freqs_MHz * 1e6
+        base = -2.0 - 0.15 * (f / 1e9) + 0.25 * np.sin(f / 0.9e9)
+        f0 = kittel_hz(self.fmr_model, self.field_mT, self.field_angle_deg,
+                       self.fmr_true)
+        y = base.copy()
+        if np.isfinite(f0):
+            hw = 15e6 + 0.006 * f0
+            y -= 3.0 / (1.0 + ((f - f0) / hw) ** 2)
+        return y + self.fmr_noise_dB * self._rng.standard_normal(f.size)
+
+    def trigger_fmr(self, window=None):
+        """One sweep, of the bins [i0, i1] only when a window is given.
+
+        Mirrors the module contract of the window (INSTRUMENT_MODULE_GUIDE
+        6b): the trace stays FULL LENGTH and the bins not swept are NaN (JSON
+        null on the wire). The cost is per bin swept.
+        """
+        full = self.fmr_trace()
+        n = full.size
+        if window is None:
+            i0, i1 = 0, n - 1
+        else:
+            i0, i1 = max(0, int(window[0])), min(n - 1, int(window[1]))
+        self.fmr_windows.append(None if window is None else (i0, i1))
+        if self.fmr_s_per_bin > 0:
+            time.sleep(self.fmr_s_per_bin * (i1 - i0 + 1))
+        out = np.full(n, np.nan)
+        out[i0:i1 + 1] = full[i0:i1 + 1]
+        self.fmr_buffer = out
+
+    def read_fmr(self):
+        if self.fmr_buffer is None:
+            self.trigger_fmr()
+        return self.fmr_buffer
+
     def lockin(self):
         width = self._linewidth_MHz()                  # MHz linewidth
         detune = (self.rf_freq_MHz - self._f_res()) / width
@@ -595,6 +668,8 @@ def build_sim_registry() -> Registry:
     settable("pos_z",     "Position Z",     "um",  (-50, 50),   "z_um")
     settable("stage_speed", "Stage speed (0 = instant)", "um/s", (0, 500),
              "stage_speed_um_s")
+    settable("field_angle", "Field angle (in plane)", "deg", (-360, 360),
+             "field_angle_deg")
 
     reg.add(Gettable("lockin_r",   "Lock-in R",   "V",   lambda: s.lockin()["R"]))
     reg.add(Gettable("lockin_x",   "Lock-in X",   "V",   lambda: s.lockin()["x"]))
@@ -619,6 +694,17 @@ def build_sim_registry() -> Registry:
                      axes=[freq_axis], dtype="complex", acquire=vna_sweep))
     reg.add(Gettable("ln_ratio", "ln(S21 / ref)", "", s.read_vna_ln,
                      axes=[freq_axis], dtype="complex", acquire=vna_sweep))
+
+    # A SLOW SWEPT detector that supports the RESONANCE WINDOW (window.py):
+    # the spectrum-analyser-with-tracking-generator case. `window` in the
+    # Gettable is what a module's describe declares; the trigger then takes
+    # `window=[i0, i1]` and sweeps only those bins.
+    fmr_axis = AxisSpec("fmr_freq", "Frequency", "MHz",
+                        values_fn=lambda: s.fmr_freqs_MHz)
+    reg.add(Gettable("fmr", "FMR transmission |S21|", "dB", s.read_fmr,
+                     axes=[fmr_axis],
+                     acquire=AcquireSpec("fmr", trigger_fn=s.trigger_fmr),
+                     window={"arg": "window", "unit": "bin", "min_bins": 5}))
 
     # An ACTION, so the before/after-scan routines can be tried without a lab:
     # "go to a far-off field, take a reference, then sweep" runs end to end here.

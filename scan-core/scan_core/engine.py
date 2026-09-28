@@ -115,6 +115,13 @@ def _used_ids(recipe, compiled, registry) -> set:
             aid = find_autofocus(registry)
             if aid:
                 ids.add(aid)
+    w = getattr(recipe, "window", None)
+    if isinstance(w, dict):
+        # the resonance window READS the field (and angle) at every point: a
+        # faulted magnet would put the window in the wrong place
+        for key in ("field", "angle"):
+            if isinstance(w.get(key), str):
+                ids.add(w[key])
     return ids
 
 
@@ -143,7 +150,7 @@ def _zigzag(idx: tuple[int, ...], shape: tuple[int, ...]) -> tuple[int, ...]:
 def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
-        pause_poll_s: float = PAUSE_POLL_S) -> xr.Dataset:
+        pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_progress(done, total, eta_s) : optional callback for a GUI/CLI.
@@ -165,6 +172,10 @@ def run(recipe, registry, on_progress=None, should_abort=None,
                                       is aborted. Without it a fault STOPS the
                                       scan with ScanFault (a script has nobody
                                       to pause for).
+    on_window(state)                : RESONANCE WINDOW only (recipe.window):
+                                      after every point, a dict with the
+                                      predicted and fitted f_res, the window,
+                                      the Meff in use -- for a live readout.
     fault_check(ids) -> [Fault]     : default `registry.fault_check` (set by
                                       build_lab_registry; the simulator has
                                       none, so nothing is checked).
@@ -271,6 +282,15 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         if spec is not None and spec.group not in seen_groups:
             seen_groups.add(spec.group)
             acquire_groups.append(spec)
+
+    # The RESONANCE WINDOW (opt-in, window.py): its runner keeps the model
+    # state between points; its extra variables (mask + per-point record) are
+    # allocated next to the detectors so every path that builds a dataset --
+    # the live snapshot, an abort, a fault, the end -- carries them.
+    if getattr(recipe, "window", None):
+        _setup_window(recipe, registry, dets, det_axes, det_coords, data,
+                      shape, ctx)
+        ctx["on_window"] = on_window
 
     prev = [None] * len(dims)
     ctx["shape"] = shape
@@ -386,6 +406,15 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             redo = True
         for det, value in values.items():
             data[det][idx] = value
+        pending = ctx.pop("window_pending", None)
+        if pending is not None:
+            # only now, with the point kept, does the window learn from it
+            # (Meff, baseline, counters) -- a paused and redone point must not
+            # teach it twice
+            runner = ctx["window"]
+            runner.commit(pending)
+            if ctx.get("on_window"):
+                ctx["on_window"](runner.state())
         run_hooks(compiled.hooks, "after_point", ctx)
 
         done = flat + 1
@@ -459,11 +488,27 @@ def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
     # Without this a VNA hands back whatever is still in its buffer: the
     # PREVIOUS sweep, taken at the previous point. Nothing raises; the map
     # is simply one step behind and looks clean.
+    runner = ctx.get("window")
+    plan = runner.plan(current) if runner is not None else None
+    wspec = ctx.get("window_spec")
     for spec in acquire_groups:
-        spec.trigger()
+        args = plan.args(runner.arg) if (plan is not None and spec is wspec) else None
+        if args:
+            spec.trigger(args)
+        else:
+            spec.trigger()
     for spec in acquire_groups:
         spec.wait()
 
+    out = _checked_read(registry, dets, det_axes, data, shape, idx, guard)
+    if runner is not None:
+        out = _window_point(runner, plan, wspec, out, registry, det_axes, data,
+                            shape, idx, guard, current, ctx)
+    return out
+
+
+def _checked_read(registry, dets, det_axes, data, shape, idx, guard) -> dict:
+    """Fault check, read `dets`, fault check again. {det: value}."""
     # CHECK 1: everything is set and acquired -- is anyone faulted before we
     # read? (A camera that lost its pattern, a meter whose read failed.)
     faults = guard.faults()
@@ -495,6 +540,92 @@ def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
     faults = guard.faults()
     if faults:
         raise _Redo(faults)
+    return out
+
+
+# ─────────────────────────── the resonance window ────────────────────────────
+
+def _setup_window(recipe, registry, dets, det_axes, det_coords, data, shape, ctx):
+    """Build the WindowRunner and allocate the window's own variables."""
+    from .window import RECORD_VARS, WindowRunner, var_names
+    block = recipe.window
+    det = block["detector"]
+    g = registry.get(det)
+    axis = det_axes[det][0]
+    wspec = g.acquire
+    # Every ARRAY detector off the same acquisition and the same frequency
+    # axis is windowed with it (a module's "raw" trace next to its
+    # "transmission"): same bins measured, each filled from its OWN baseline.
+    group = [det] + [d for d in dets if d != det
+                     and getattr(registry.get(d), "acquire", None) is not None
+                     and registry.get(d).acquire.group == wspec.group
+                     and [a.name for a in det_axes[d]] == [axis.name]]
+    decl = g.window or {}
+    runner = WindowRunner(block, registry, det_coords[axis.name], axis.unit, group,
+                          min_bins=decl.get("min_bins", 3),
+                          arg=decl.get("arg", "window"))
+    ctx["window"] = runner
+    ctx["window_spec"] = wspec
+    names = var_names(det)
+    inner = data[det].shape[len(shape):]
+    # bool mask: True = this bin was MEASURED at this point, False = filled
+    # from the baseline (or not measured yet, in a partial file)
+    data[names["mask"]] = np.zeros(tuple(shape) + tuple(inner), dtype=bool)
+    det_axes[names["mask"]] = det_axes[det]
+    attrs = {names["mask"]: {
+        "long_name": f"bins of {det} actually measured (0 = baseline fill)",
+        "window_mask_of": ",".join(group)}}
+    for key, (dtype, unit, text) in RECORD_VARS.items():
+        name = names[key]
+        data[name] = (np.zeros(shape, dtype=bool) if dtype is bool
+                      else np.full(shape, np.nan))
+        det_axes[name] = []
+        attrs[name] = {"units": unit, "long_name": text}
+    for d in group:
+        # a complex detector is stored as <d>_real / <d>_imag (see _to_dataset)
+        split = getattr(registry.get(d), "dtype", "float") == "complex"
+        for name in ((f"{d}_real", f"{d}_imag") if split else (d,)):
+            attrs[name] = {"window_mask": names["mask"]}
+    ctx["var_attrs"] = {**(ctx.get("var_attrs") or {}), **attrs}
+
+
+def _window_point(runner, plan, wspec, out, registry, det_axes, data, shape,
+                  idx, guard, current, ctx) -> dict:
+    """Look for the line in what the window measured; WIDEN and measure this
+    point again while it is not there; then return `out` with the windowed
+    traces replaced by the FILLED ones plus the window's own variables.
+
+    Nothing is committed here (see _sweep): a fault or an abort half way
+    leaves the runner exactly as it was, and the redone point plans again.
+    """
+    from .window import var_names
+    group = runner.group_dets
+    while True:
+        outcome = runner.assess(plan, out)
+        if not outcome.retry:
+            break
+        if guard.should_abort and guard.should_abort():
+            raise ScanAborted("aborted while widening the resonance window")
+        nxt = runner.plan(current, attempt=plan.attempt + 1)
+        ctx["log_fn"](
+            f"window: no line in {runner.f[plan.i0] / 1e9:.4f}-"
+            f"{runner.f[plan.i1] / 1e9:.4f} GHz at point {idx}; "
+            + ("sweeping the full band" if nxt.full else
+               f"widening to +-{nxt.margin_hz / 1e6:.0f} MHz"))
+        plan = nxt
+        args = plan.args(runner.arg)
+        if args:
+            wspec.trigger(args)
+        else:
+            wspec.trigger()
+        wspec.wait()
+        out.update(_checked_read(registry, group, det_axes, data, shape, idx, guard))
+    names = var_names(runner.det)
+    out.update(outcome.filled)
+    out[names["mask"]] = outcome.mask
+    for key, value in runner.record(outcome).items():
+        out[names[key]] = value
+    ctx["window_pending"] = outcome
     return out
 
 
@@ -579,6 +710,13 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             target[2].update(extra)
 
     ds = xr.Dataset(data_vars=data_vars, coords=coords)
+    w = getattr(recipe, "window", None)
+    if w:
+        # the window's settings in plain sight (they are in recipe_json too):
+        # a file with baseline-filled bins must SAY so in its header
+        import json as _json
+        ds.attrs["window_json"] = _json.dumps(w)
+        ds.attrs["window_detector"] = str(w.get("detector", ""))
     ds.attrs.update(
         name=recipe.name,
         comment=recipe.comment,

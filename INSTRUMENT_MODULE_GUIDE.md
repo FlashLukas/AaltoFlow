@@ -502,6 +502,41 @@ REQ socket and fails the scan. If a driver leaves you no choice, pass
 reports readiness in `status` is the suite's contract, and it keeps the command
 thread free.
 
+### Resonance window — sweeping only part of the band (optional, 2026-09-28)
+
+A slow SWEPT array detector (a spectrum analyser with tracking generator, a
+VNA) spends most of an FMR field sweep measuring the empty baseline. scan-core
+can ask it to sweep only a window of bins around the line it predicts from the
+field (recipe `window` block, `scan_core/window.py`). A detector opts in by
+adding one key to its array descriptor:
+
+```python
+"window": {"arg": "window", "unit": "bin", "min_bins": 5},
+```
+
+Meaning, and the whole contract the module must keep:
+
+- The descriptor must be a 1-D array detector (one `dims` entry: the frequency
+  axis) **with an `acquire` block**; the window travels with the trigger.
+- The acquire trigger verb accepts an extra argument named by `arg`:
+  `window: [i0, i1]` = **inclusive bin indices of the module's FULL frequency
+  grid** (the grid `coord_verb` returns). The module then sweeps only those
+  bins. No argument (or a window covering every bin) = the usual full sweep.
+  An out-of-range pair is clamped, never refused.
+- The fetched trace (`read` verb) stays **FULL LENGTH**: the measured values at
+  i0..i1 and `null` everywhere else. The reply may also carry
+  `"window": [i0, i1]` (what was actually swept).
+- Bins, never Hz: the measured bins then land exactly on the dataset's regular
+  frequency axis, with no interpolation, ever. `min_bins` = the fewest bins the
+  module will sweep (scan-core never asks for fewer).
+- Detectors off the same acquisition (same `group`, same axis) are windowed
+  together; scalar results computed by the module from the trace (peak, mean)
+  describe the swept bins only.
+
+scan-core fills the unswept bins from the last full sweep (its own resonance
+region bridged by a straight line) and writes a `<det>_measured` mask plus the
+predicted / fitted resonance, the window and the Meff used, per point.
+
 ### Streams — recording continuously, for a fly scan
 
 A **fly scan** (scan-core, `type: fly` axis) does not stop at points: it moves

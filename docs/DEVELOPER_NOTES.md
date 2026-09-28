@@ -193,6 +193,18 @@ still assumes piezo/zpiezo.
   keeping the points so far. A service whose status has not arrived for 2 s and
   that does not answer `status` either is a fault too -- its last frame is
   never served forever.
+- **Resonance window (optional, 2026-09-28) -- for SLOW swept detectors.** An
+  array detector whose descriptor carries `"window": {"arg": "window", "unit":
+  "bin", "min_bins": n}` accepts `window: [i0, i1]` (inclusive BIN indices of its
+  full grid) on its acquire trigger, sweeps only those bins and returns the trace
+  FULL LENGTH with `null` outside. A recipe's `window` block (scan-core
+  `window.py`, `resonance.py`) then sweeps only +- margin around the FMR line a
+  Kittel model (in-plane with uniaxial Hk, or out-of-plane) predicts from the
+  field (and angle) at each point, corrects mu0 Meff from every clean measured
+  line, widens and re-measures a point whose line is not in its window, sweeps
+  the full band at the first point and every `full_every`-th, and fills the rest
+  from that baseline -- with a `<det>_measured` mask in the file. Stepped scans
+  only. Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Resonance window".
 - **Target echo (motion settle, 2026-09-28).** A module whose move ends with a
   `moving` flag also publishes the TARGET it is moving to (kim/stage/piezo:
   `target_um`, per axis) and declares

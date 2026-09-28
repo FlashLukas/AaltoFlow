@@ -18,6 +18,8 @@ axes:      [Axis, ...]      # OUTER→INNER. axes[0] is the slowest (outermost) 
 detectors: [param_id, ...]  # gettables recorded at every point
 hooks:     [Hook, ...]       # optional actions bound to a level/cadence
 zigzag:    bool              # serpentine order (off by default)
+window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
+                             # array detector only around the predicted FMR line
 
 A ROUTINE is a hook with action `call` (see hooks.py):
   {when: before_scan, action: call,
@@ -134,16 +136,27 @@ class Recipe:
     #: 40 % direction asymmetry, or any axis with backlash or hysteresis (the
     #: magnet), reaches a slightly different place coming the other way.
     zigzag: bool = False
+    #: RESONANCE WINDOW (window.py, 2026-09-28), or None = off. A slow array
+    #: detector sweeps only a band around the predicted FMR line; the rest of
+    #: each trace is filled from the last full sweep's baseline and marked in a
+    #: `<det>_measured` mask. Opt-in: a recipe without it runs exactly as before.
+    window: dict | None = None
 
     # ---- (de)serialization ------------------------------------------------
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
-                                   "hooks", "output", "settle", "zigzag") if f in d}
+                                   "hooks", "output", "settle", "zigzag", "window")
+                 if f in d}
         return cls(**known)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # No window = no key at all: a recipe that does not use the window is
+        # written (and stored in every .nc as recipe_json) exactly as before.
+        if not d.get("window"):
+            d.pop("window", None)
+        return d
 
     @classmethod
     def load(cls, path: str | Path) -> "Recipe":
@@ -220,6 +233,8 @@ class Recipe:
         errs += self._validate_hooks(registry)
         from .flyscan import validate_fly
         errs += validate_fly(self, registry)
+        from .window import validate as validate_window
+        errs += validate_window(self, registry)
         # range check against each settable's limits
         try:
             for dim in self.compile(registry).dims:

@@ -1354,6 +1354,8 @@ class ScanWorker(QtCore.QThread):
     #: resumed / was aborted from the pause ([]). Emitted from the scan
     #: thread; Qt queues it to the GUI thread.
     paused = QtCore.Signal(object)
+    #: RESONANCE WINDOW readout after every point (dict, see WindowRunner.state)
+    window = QtCore.Signal(object)
 
     #: Seconds between live redraws. Building the snapshot costs something, and
     #: a 400-point scan of settling points does not need 60 fps.
@@ -1443,7 +1445,8 @@ class ScanWorker(QtCore.QThread):
                      data_path=self.save_path,
                      # a fault PAUSES the scan and waits for the operator
                      # (Lukas, 2026-09-28) instead of ending it
-                     on_fault=lambda faults: self.paused.emit(list(faults)))
+                     on_fault=lambda faults: self.paused.emit(list(faults)),
+                     on_window=lambda st: self.window.emit(dict(st)))
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
@@ -1655,6 +1658,297 @@ class QueueDialog(QtWidgets.QDialog):
 
 # ──────────────────────────────── main window ─────────────────────────────────
 
+class WindowCard(QtWidgets.QFrame):
+    """RESONANCE WINDOW: sweep a slow detector only near the predicted FMR line.
+
+    Lukas, 2026-09-28: "some devices are terribly slow ... I scan most of the
+    time in the dark". Shown only when a ticked detector DECLARES window
+    support (its describe has a `window` key): for any other detector the
+    choice does not exist, and an always-visible card would only be noise.
+
+    Everything here becomes the recipe's `window` block (scan_core/window.py),
+    so it travels in the saved .yaml and inside every .nc the scan writes. The
+    bottom line is the live readout while a scan runs: where the model put
+    the line, where it was found, the window swept and the Meff in use.
+    """
+
+    changed = QtCore.Signal()
+
+    MODELS = (("in-plane", "inplane"), ("out-of-plane", "outofplane"))
+    DIPS = (("dip (minimum)", "min"), ("peak (maximum)", "max"))
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("card")
+        self.registry = None
+        self._candidates: list[str] = []
+        self._extra_ids: set = set()          # loaded ids the registry lacks
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
+        head = QtWidgets.QHBoxLayout()
+        tag = QtWidgets.QLabel("RESONANCE WINDOW  ·  sweep only near the FMR line")
+        tag.setObjectName("tag")
+        head.addWidget(tag); head.addStretch(1)
+        self.enable = QtWidgets.QCheckBox("on")
+        self.enable.setToolTip(
+            "Sweep the detector only within +- margin of the resonance the model\n"
+            "predicts from the field (and angle) at each point. Outside it the\n"
+            "trace is FILLED with the baseline of the last full sweep, and the\n"
+            "file gets a '<detector>_measured' mask saying which bins were\n"
+            "measured. The first point, and every N-th, sweep the full band;\n"
+            "a line not found in its window widens it and measures again.")
+        self.enable.toggled.connect(self._on_toggle)
+        head.addWidget(self.enable)
+        v.addLayout(head)
+
+        self.body = QtWidgets.QWidget()
+        g = QtWidgets.QGridLayout(self.body)
+        g.setContentsMargins(0, 0, 0, 0); g.setHorizontalSpacing(8); g.setVerticalSpacing(4)
+
+        def lbl(text, tip=""):
+            w = QtWidgets.QLabel(text)
+            w.setStyleSheet(f"color:{C['muted']};")
+            if tip:
+                w.setToolTip(tip)
+            return w
+
+        def spin(lo, hi, dec, val, suffix="", width=96):
+            s = QtWidgets.QDoubleSpinBox()
+            s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
+            if suffix:
+                s.setSuffix(suffix)
+            s.setFixedWidth(width)
+            s.valueChanged.connect(lambda *_: self.changed.emit())
+            return s
+
+        self.det_box = QtWidgets.QComboBox()
+        self.field_box = QtWidgets.QComboBox()
+        self.field_box.setToolTip("The parameter whose value at each point IS the field:\n"
+                                  "an axis or a condition (its setpoint is used), or any\n"
+                                  "field readout (read at the point).")
+        self.angle_box = QtWidgets.QComboBox()
+        self.angle_box.setToolTip("In-plane field angle: a parameter (an axis, a condition\n"
+                                  "or a readout), or a fixed number.")
+        self.angle_fixed = spin(-360, 360, 1, 0.0, " deg", 90)
+        for box in (self.det_box, self.field_box, self.angle_box):
+            box.currentIndexChanged.connect(lambda *_: self._sync_enabled())
+            box.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        g.addWidget(lbl("detector"), 0, 0); g.addWidget(self.det_box, 0, 1)
+        g.addWidget(lbl("field"), 0, 2); g.addWidget(self.field_box, 0, 3)
+        g.addWidget(lbl("angle"), 0, 4); g.addWidget(self.angle_box, 0, 5)
+        g.addWidget(self.angle_fixed, 0, 6)
+
+        self.model_box = QtWidgets.QComboBox()
+        for text, key in self.MODELS:
+            self.model_box.addItem(text, key)
+        self.model_box.setToolTip(
+            "in-plane: field in the film plane, Kittel with the in-plane uniaxial\n"
+            "anisotropy (equilibrium angle solved); out-of-plane: field along the\n"
+            "normal, f = gamma'(B - mu0 Meff), no line below mu0 Meff.")
+        self.model_box.currentIndexChanged.connect(lambda *_: self._sync_enabled())
+        self.model_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        self.g_spin = spin(0.5, 10, 4, 2.0, "", 80)
+        self.meff_spin = spin(-5000, 5000, 1, 1750.0, " mT")
+        self.meff_spin.setToolTip("mu0 Meff ASSUMED at the start; with 'track' on the\n"
+                                  "scan corrects it from every clean line it measures.")
+        self.hk_spin = spin(-1000, 1000, 2, 0.0, " mT")
+        self.easy_spin = spin(-360, 360, 1, 0.0, " deg", 90)
+        g.addWidget(lbl("model"), 1, 0); g.addWidget(self.model_box, 1, 1)
+        g.addWidget(lbl("g"), 1, 2); g.addWidget(self.g_spin, 1, 3)
+        g.addWidget(lbl("μ0Meff"), 1, 4); g.addWidget(self.meff_spin, 1, 5)
+        g.addWidget(lbl("Hk / easy"), 2, 4)
+        hk = QtWidgets.QHBoxLayout(); hk.setSpacing(4)
+        hk.addWidget(self.hk_spin); hk.addWidget(self.easy_spin)
+        g.addLayout(hk, 2, 5, 1, 2)
+
+        self.margin_spin = spin(1, 1e5, 0, 300.0, " MHz")
+        self.margin_spin.setToolTip("Half width of the window around the predicted line.\n"
+                                    "Make it several linewidths: outside it the line's\n"
+                                    "tail is replaced by the baseline.")
+        self.dip_box = QtWidgets.QComboBox()
+        for text, key in self.DIPS:
+            self.dip_box.addItem(text, key)
+        self.dip_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        self.track_box = QtWidgets.QCheckBox("track Meff")
+        self.track_box.setChecked(True)
+        self.track_box.toggled.connect(lambda *_: self.changed.emit())
+        self.full_spin = QtWidgets.QSpinBox()
+        self.full_spin.setRange(0, 100000); self.full_spin.setValue(20)
+        self.full_spin.setFixedWidth(80)
+        self.full_spin.setToolTip("A full-band sweep every N points (and always at the\n"
+                                  "first) refreshes the baseline. 0 = only the first.")
+        self.full_spin.valueChanged.connect(lambda *_: self.changed.emit())
+        g.addWidget(lbl("margin ±"), 2, 0); g.addWidget(self.margin_spin, 2, 1)
+        g.addWidget(lbl("line is a"), 2, 2); g.addWidget(self.dip_box, 2, 3)
+        g.addWidget(self.track_box, 3, 1)
+        g.addWidget(lbl("full sweep every"), 3, 2); g.addWidget(self.full_spin, 3, 3)
+        g.setColumnStretch(7, 1)
+        v.addWidget(self.body)
+
+        self.live = QtWidgets.QLabel("")
+        self.live.setStyleSheet(f"color:{C['accent']}; font-size:11px;")
+        self.live.setWordWrap(True)
+        v.addWidget(self.live)
+        self._sync_enabled()
+        self.hide()
+
+    # ---- contents -----------------------------------------------------------
+    def set_registry(self, registry) -> None:
+        """Refill the field/angle choices from `registry` (units decide)."""
+        from scan_core.window import ANGLE_UNITS, FIELD_UNITS
+        self.registry = registry
+        params = list(registry.settables()) + list(registry.gettables())
+
+        def fill(box, units, first=None):
+            keep = box.currentData()
+            box.blockSignals(True)
+            box.clear()
+            if first:
+                box.addItem(*first)
+            for p in params:
+                if (p.unit or "").strip().lower() in units and (p.unit or "").strip():
+                    box.addItem(f"{p.label}  ·  {p.id}", p.id)
+            i = box.findData(keep)
+            box.setCurrentIndex(i if i >= 0 else 0)
+            box.blockSignals(False)
+
+        fill(self.field_box, FIELD_UNITS)
+        fill(self.angle_box, ANGLE_UNITS, first=("fixed:", ""))
+        self._extra_ids = set()
+        self._sync_enabled()
+
+    def set_detectors(self, ids: list[str]) -> None:
+        """The ticked detectors that support a window. The card shows itself
+        only when there is one (or a loaded window is switched on)."""
+        self._candidates = list(ids)
+        keep = self.det_box.currentData()
+        self.det_box.blockSignals(True)
+        self.det_box.clear()
+        for pid in ids:
+            p = self.registry.get(pid) if self.registry is not None else None
+            self.det_box.addItem(f"{getattr(p, 'label', pid)}  ·  {pid}", pid)
+        if keep and keep not in ids and self.enable.isChecked():
+            # a loaded detector that is no longer ticked: keep it visible, so
+            # the recipe (and its validation error) say what is wrong
+            self.det_box.addItem(f"(not ticked)  ·  {keep}", keep)
+        i = self.det_box.findData(keep)
+        self.det_box.setCurrentIndex(i if i >= 0 else 0)
+        self.det_box.blockSignals(False)
+        self.setVisible(bool(ids) or self.enable.isChecked())
+
+    def _on_toggle(self, *_):
+        self._sync_enabled()
+        self.changed.emit()
+
+    def _sync_enabled(self):
+        on = self.enable.isChecked()
+        self.body.setEnabled(on)
+        self.angle_fixed.setEnabled(on and not self.angle_box.currentData())
+        inplane = self.model_box.currentData() == "inplane"
+        for w in (self.hk_spin, self.easy_spin):
+            w.setEnabled(on and inplane)
+        if not on:
+            self.live.setText("")
+
+    # ---- recipe round trip ------------------------------------------------------
+    def to_block(self) -> dict | None:
+        if not self.enable.isChecked() or self.det_box.currentData() is None:
+            return None
+        angle = self.angle_box.currentData()
+        return {
+            "detector": self.det_box.currentData(),
+            "field": self.field_box.currentData(),
+            "angle": angle if angle else float(self.angle_fixed.value()),
+            "model": self.model_box.currentData(),
+            "params": {"g": float(self.g_spin.value()),
+                       "meff_mT": float(self.meff_spin.value()),
+                       "hk_mT": float(self.hk_spin.value()),
+                       "easy_axis_deg": float(self.easy_spin.value())},
+            "margin_MHz": float(self.margin_spin.value()),
+            "dip": self.dip_box.currentData(),
+            "track": bool(self.track_box.isChecked()),
+            "full_every": int(self.full_spin.value()),
+        }
+
+    def load_block(self, block) -> list[str]:
+        """Fill the card from a recipe's `window` block (None = switch it off).
+        Returns the ids this registry does not have."""
+        from scan_core.window import normalize
+        missing = []
+        widgets = (self.enable, self.det_box, self.field_box, self.angle_box,
+                   self.model_box, self.dip_box, self.track_box, self.full_spin,
+                   self.g_spin, self.meff_spin, self.hk_spin, self.easy_spin,
+                   self.margin_spin, self.angle_fixed)
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            if not block:
+                self.enable.setChecked(False)
+                return []
+            w = normalize(block)
+
+            def pick(box, pid):
+                if pid is None:
+                    return
+                i = box.findData(pid)
+                if i < 0:
+                    if self.registry is None or self.registry.get(pid) is None:
+                        missing.append(pid)
+                    box.addItem(f"(missing)  ·  {pid}", pid)
+                    i = box.findData(pid)
+                box.setCurrentIndex(i)
+
+            pick(self.det_box, w.get("detector"))
+            pick(self.field_box, w.get("field"))
+            ang = w.get("angle")
+            if isinstance(ang, str):
+                pick(self.angle_box, ang)
+            else:
+                self.angle_box.setCurrentIndex(max(0, self.angle_box.findData("")))
+                self.angle_fixed.setValue(float(ang or 0.0))
+            self.model_box.setCurrentIndex(max(0, self.model_box.findData(w["model"])))
+            self.dip_box.setCurrentIndex(max(0, self.dip_box.findData(w["dip"])))
+            p = w["params"]
+            self.g_spin.setValue(p["g"]); self.meff_spin.setValue(p["meff_mT"])
+            self.hk_spin.setValue(p["hk_mT"]); self.easy_spin.setValue(p["easy_axis_deg"])
+            self.margin_spin.setValue(float(w["margin_MHz"]))
+            self.track_box.setChecked(bool(w["track"]))
+            self.full_spin.setValue(int(w["full_every"]))
+            self.enable.setChecked(True)
+        finally:
+            for x in widgets:
+                x.blockSignals(False)
+            self._sync_enabled()
+            self.setVisible(bool(self._candidates) or self.enable.isChecked())
+        return missing
+
+    def describe(self) -> str:
+        """One clause for the scan summary."""
+        b = self.to_block()
+        if not b:
+            return ""
+        model = dict((k, t) for t, k in self.MODELS).get(b["model"], b["model"])
+        return (f"window ±{b['margin_MHz']:g} MHz on {b['detector']} ({model}, "
+                f"μ0Meff {b['params']['meff_mT']:g} mT"
+                + (", tracked" if b["track"] else "") + ")")
+
+    # ---- live readout -----------------------------------------------------------
+    def show_state(self, st: dict) -> None:
+        """What the last KEPT point did (engine on_window, via ScanWorker)."""
+        def ghz(x):
+            return "--" if x is None or not math.isfinite(x) else f"{x / 1e9:.4f}"
+        if not st or "window_lo_Hz" not in st:
+            self.live.setText("")
+            return
+        kind = "FULL sweep" + (f" ({st.get('reason')})" if st.get("reason") else "") \
+            if st.get("full_sweep") else "window"
+        self.live.setText(
+            f"point {st['points']}: {kind} {ghz(st['window_lo_Hz'])}-{ghz(st['window_hi_Hz'])} GHz"
+            f"   ·   f_res predicted {ghz(st['fres_pred_Hz'])} GHz, found {ghz(st['fres_fit_Hz'])} GHz"
+            f"   ·   μ0Meff {st['meff_mT']:.1f} mT"
+            f"   ·   {100 * st.get('fraction_measured', float('nan')):.0f} % of the bins measured")
+
+
 class ScanBuilder(QtWidgets.QMainWindow):
     """Define a scan, and (standalone) run it.
 
@@ -1771,6 +2065,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.remove_throughout(section)
         self._hook_template = []
         self._reload_palette()
+        if hasattr(self, "window_card"):
+            self.window_card.load_block(None)
+            self.window_card.set_registry(registry)
         self._rebuild_summary()
 
     # ---- panels ----------------------------------------------------------
@@ -1975,6 +2272,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         v.addWidget(self._build_stack(), 1)
         v.addWidget(self._build_conditions(), 0)
         v.addWidget(self._build_routines(), 0)
+        # RESONANCE WINDOW: hidden until a ticked detector supports one
+        self.window_card = WindowCard()
+        self.window_card.set_registry(self.registry)
+        self.window_card.changed.connect(self._rebuild_summary)
+        v.addWidget(self.window_card, 0)
         return page
 
     def _build_routines(self) -> QtWidgets.QWidget:
@@ -2435,7 +2737,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       axes=[r.to_axis() for r in self.rows],
                       detectors=dets,
                       hooks=self._compose_hooks(),
-                      zigzag=self.zigzag_box.isChecked())
+                      zigzag=self.zigzag_box.isChecked(),
+                      window=(self.window_card.to_block()
+                              if hasattr(self, "window_card") else None))
 
     def _compose_hooks(self) -> list[dict]:
         """The loaded hooks in their original order, with the card's routines
@@ -2614,6 +2918,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         for it in self._det_items():
             it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole) in want
                              else QtCore.Qt.Unchecked)
+        if hasattr(self, "window_card"):
+            self._sync_window_card()
+            missing += [m for m in self.window_card.load_block(getattr(recipe, "window", None))
+                        if m not in missing]
         self._rebuild_summary()
         return missing
 
@@ -2645,6 +2953,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if hasattr(self, "routines_card"):
             self.routines_card.arrange()      # a new step may no longer fit side by side
         parked = self._sync_fly_detectors()
+        self._sync_window_card()
         recipe = self.build_recipe()
         errs = recipe.validate(self.registry)
         conditions = ("   ·   " + ", ".join(
@@ -2659,6 +2968,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 conditions += f"   ·   {when.replace('_', ' ')}: {text}"
             if when == "before_scan":        # in the order things happen
                 conditions += self._throughout_summary(recipe)
+        if hasattr(self, "window_card") and self.window_card.describe():
+            conditions += "   ·   " + self.window_card.describe()
         if parked:
             conditions += (f"   ·   {parked} detector(s) set aside while flying "
                            f"(they cannot be recorded continuously)")
@@ -2691,6 +3002,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
                             f"{how}"
                             + ("   ·   zig-zag" if self.zigzag_box.isChecked() else "")
                             + conditions)
+
+    def _sync_window_card(self) -> None:
+        """Offer the resonance window for the TICKED detectors that support it."""
+        if not hasattr(self, "window_card"):
+            return
+        ids = [it.data(0, QtCore.Qt.UserRole) for it in self._det_items()
+               if it.checkState(0) == QtCore.Qt.Checked]
+        ok = [pid for pid in ids
+              if getattr(self.registry.get(pid), "window", None)]
+        self.window_card.set_detectors(ok)
 
     def _throughout_summary(self, recipe) -> str:
         """One clause per THROUGHOUT routine, with how often it fires -- the
@@ -2759,7 +3080,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_log = []
         if block:                                   # synchronous path (tests/render)
             try:
-                ds = run(recipe, self.registry, created_iso="live", on_log=self._on_log)
+                ds = run(recipe, self.registry, created_iso="live", on_log=self._on_log,
+                         on_window=self.window_card.show_state)
             except RoutineError as exc:
                 if exc.dataset is not None:
                     self._on_done(exc.dataset)
@@ -2790,6 +3112,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.worker.save_failed.connect(self._on_save_failed)
         self.worker.log.connect(self._on_log)
         self.worker.paused.connect(self._on_paused)
+        self.worker.window.connect(self.window_card.show_state)
         self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.save_lbl.setText(f"saving to {path}" if path else
                               "not saving automatically (no data directory set)")

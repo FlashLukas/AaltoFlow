@@ -259,7 +259,8 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             text = dtype in ("enum", "string") and not d.get("dtype")
             param = reg.add(Gettable(pid, label, unit, getter, axes=axes,
                                      dtype="text" if text else d.get("dtype", "float"),
-                                     acquire=_acquire_from(d, inst, module, on_warn)))
+                                     acquire=_acquire_from(d, inst, module, on_warn),
+                                     window=_window_from(d, axes, on_warn)))
             _attach_stream(param, d, inst, module, streams, on_warn)
             added.append(pid)
 
@@ -417,8 +418,11 @@ def _acquire_from(d: dict, inst: Instrument, module: str, on_warn):
 
     trigger_fn = None
     if verb:
-        def trigger_fn(_v=verb, _i=inst, _key=target_key, _last=last, _g=group):
-            reply = _i.command(_v)
+        def trigger_fn(_v=verb, _i=inst, _key=target_key, _last=last, _g=group,
+                       **extra):
+            # `extra` = the resonance window's bins ({"window": [i0, i1]}),
+            # present only on a windowed point of a windowed scan
+            reply = _i.command(_v, **extra)
             if _key is not None:
                 if _key not in reply:
                     raise InstrumentError(
@@ -434,6 +438,36 @@ def _acquire_from(d: dict, inst: Instrument, module: str, on_warn):
                                  what=f"acquisition '{_g}' to finish"))
 
     return AcquireSpec(group, trigger_fn=trigger_fn, wait_fn=wait_fn)
+
+
+def _window_from(d: dict, axes, on_warn):
+    """The descriptor's `window` block (resonance window support), or None.
+
+        "window": {"arg": "window", "unit": "bin", "min_bins": 5}
+
+    = the acquire trigger accepts `window: [i0, i1]`, inclusive BIN INDICES of
+    the detector's full frequency grid, sweeps only those bins, and the fetched
+    trace comes back FULL LENGTH with null outside [i0, i1]. Bins, never Hz:
+    the measured bins then sit exactly on the dataset's frequency axis.
+    Only meaningful on a 1-D array detector with an acquire step.
+    """
+    w = d.get("window")
+    if not w:
+        return None
+    if not isinstance(w, dict) or (w.get("unit") or "bin") != "bin":
+        if on_warn:
+            on_warn(f"{d.get('id')}: `window` must be {{\"unit\": \"bin\", ...}}; ignoring it")
+        return None
+    if len(axes or []) != 1 or not d.get("acquire"):
+        if on_warn:
+            on_warn(f"{d.get('id')}: `window` needs a 1-D array detector with an "
+                    f"`acquire` block; ignoring it")
+        return None
+    try:
+        min_bins = max(1, int(w.get("min_bins", 3)))
+    except (TypeError, ValueError):
+        min_bins = 3
+    return {"arg": str(w.get("arg") or "window"), "unit": "bin", "min_bins": min_bins}
 
 
 def _attach_stream(param, d: dict, inst: Instrument, module: str,

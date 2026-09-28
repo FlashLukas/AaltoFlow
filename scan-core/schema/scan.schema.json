@@ -34,7 +34,8 @@
       "properties": {"default_timeout_s": {"type": "number"}}
     },
     "zigzag": {"type": "boolean",
-               "description": "serpentine order: reverse inner axes on every other pass"}
+               "description": "serpentine order: reverse inner axes on every other pass"},
+    "window": {"$ref": "#/$defs/window"}
   },
   "required": ["axes", "detectors"],
   "$defs": {
@@ -182,6 +183,30 @@
         }
       },
       "not": {"anyOf": [{"required": ["steps", "set"]}, {"required": ["steps", "action"]}]},
+      "additionalProperties": false
+    },
+    "window": {
+      "title": "RESONANCE WINDOW: sweep a slow array detector only around the predicted FMR line (optional; stepped scans only)",
+      "type": "object",
+      "properties": {
+        "detector": {"type": "string", "description": "a 1-D array detector (trace over frequency) whose describe declares `window`"},
+        "field": {"type": "string", "description": "parameter id whose value at the point is the field B (mT, T, G or Oe)"},
+        "angle": {"type": ["string", "number", "null"], "description": "in-plane field angle: a parameter id, or a fixed number in deg (default 0)"},
+        "model": {"enum": ["inplane", "outofplane"]},
+        "params": {
+          "type": "object",
+          "properties": {"g": {"type": "number"}, "meff_mT": {"type": "number"},
+                         "hk_mT": {"type": "number"}, "easy_axis_deg": {"type": "number"}},
+          "additionalProperties": false
+        },
+        "margin_MHz": {"type": "number", "exclusiveMinimum": 0,
+                       "description": "half width of the window around the predicted resonance"},
+        "dip": {"enum": ["min", "max"], "description": "the line is a minimum (transmission dip) or a maximum"},
+        "track": {"type": "boolean", "description": "correct Meff from every clean measured line"},
+        "full_every": {"type": "integer", "minimum": 0,
+                       "description": "a full-band sweep every N points (and always at the first); 0 = only the first"}
+      },
+      "required": ["detector", "field"],
       "additionalProperties": false
     },
     "call_step": {
