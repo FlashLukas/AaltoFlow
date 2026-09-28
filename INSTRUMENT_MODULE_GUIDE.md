@@ -586,6 +586,39 @@ scan-core now refuses a list-valued key with no index rather than hanging.
 after a set, the service still reports the **previous** point, done-flag and all.
 Watching the flag alone returns instantly at the old value and measures a whole
 grid one step behind — data that looks perfectly clean and is wrong.
+`adopt_then_flag` also takes `tol` (default 1e-6): how far the echoed setpoint
+may be from the requested one.
+
+**A stage settles on a TARGET ECHO, not on `moving` alone (2026-09-28).** Publish
+the target each axis is moving to (`target_um`, a per-axis list) and declare
+
+    "settle": {"policy": "adopt_then_flag", "setpoint_key": "target_um",
+               "flag_key": "moving", "invert": true, "index": 0, "tol": 0.01}
+
+(`index` applies to both keys.) Two ordering rules make it honest: the setter
+issues the hardware move FIRST and only then stores the echo target; the status
+worker reads the echo target BEFORE it reads `moving` from the hardware. A STOP
+sets the echo to where the axis stopped; a clamped move echoes the clamped
+target; a target rounded to whole steps needs `tol`. Why: developer notes,
+gotcha #40.
+
+### Status keys that say "do not trust me" — `hw_error`, `fault`
+
+Every module should publish these two strings in its status (both `""` when all
+is well; a missing key counts as fine):
+
+| key | meaning | set it when | clear it |
+|---|---|---|---|
+| `hw_error` | the last hardware read FAILED; this frame's values are not the instrument's | a read raises (timeout, I/O error, device gone) | on the next good read |
+| `fault` | measuring now would give wrong data; a person may be needed | the module detects it (the camera lost its pattern, water lost) | by itself when the cause goes, or — if the module LATCHES it — by the `clear_fault` action |
+
+A module that latches its fault declares an action `clear_fault` in `describe`
+(it may refuse while the cause is still there). scan-core never settles on a
+frame carrying either key, checks them for every instrument a scan uses before
+and after each point is read, and PAUSES the scan until they are gone (the
+measurement suite shows a "Clear fault on <module>" button for a latched one),
+then measures the point again. So: **never publish a stale value as if it were
+fresh** — say `hw_error` instead.
 
 ### Actions a scan can run (routines)
 

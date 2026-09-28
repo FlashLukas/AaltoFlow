@@ -34,8 +34,9 @@ from __future__ import annotations
 
 from suite_common import discover
 
+from .errors import Fault
 from .instrument import (Instrument, InstrumentError, adopt_then_flag, echoes,
-                         flag_only, immediate)
+                         flag_only, immediate, status_problem)
 from .manifest import describe_or_none, register_manifest
 from .registry import Gettable, Registry, Settable
 
@@ -107,6 +108,66 @@ class Lab:
         """
         for inst in self.instruments.values():
             inst.should_abort = should_abort
+
+    # ---- faults: can the readings be trusted right now? -------------------
+
+    def faults(self, names=None) -> list:
+        """[Fault(name, message)] for every instrument that cannot be trusted now.
+
+        `names` limits the check to those connections (the ones a scan uses);
+        None = all of them. An instrument is reported when
+
+          * its service is dead or silent -- `status()` raises once the PUB
+            cache is older than `stale_after_s` and a direct request fails too;
+          * its status carries a non-empty `hw_error` (the last hardware read
+            failed: the published values are not the instrument's);
+          * its status carries a non-empty `fault` (the module says measuring
+            now gives wrong data and a person may be needed -- the camera lost
+            its pattern). Such a module may LATCH it until `clear_fault`.
+
+        Never raises: the whole point is to be asked at every scan point, and
+        a check that can itself blow up would turn a paused scan into a
+        crashed one. An empty list means "go ahead".
+        """
+        out = []
+        for name, inst in list(self.instruments.items()):
+            if names is not None and name not in names:
+                continue
+            label = module_prefix(inst)
+            try:
+                st = inst.status()
+            except Exception as exc:
+                out.append(Fault(label, f"not answering ({exc})"))
+                continue
+            problem = status_problem(st)
+            if problem:
+                out.append(Fault(label, problem))
+        return out
+
+    def _by_label(self, label: str):
+        for name, inst in self.instruments.items():
+            if label in (name, module_prefix(inst)):
+                return inst
+        return None
+
+    def can_clear_fault(self, label: str) -> bool:
+        """True when this module's `describe` offers an action `clear_fault`.
+
+        A module that LATCHES its fault (the camera, until someone has looked
+        at the sample) offers it; one whose fault clears by itself does not.
+        """
+        inst = self._by_label(label)
+        manifest = getattr(inst, "manifest", None) or {}
+        return any(d.get("kind") == "action" and d.get("id") == "clear_fault"
+                   for d in manifest.get("parameters", []))
+
+    def clear_fault(self, label: str) -> dict:
+        """Send `clear_fault` to that module. Raises InstrumentError if refused
+        (a module refuses while the cause is still there -- mag2d without water)."""
+        inst = self._by_label(label)
+        if inst is None:
+            raise InstrumentError(f"{label}: not connected")
+        return inst.command("clear_fault")
 
     def close(self) -> None:
         for inst in self.instruments.values():
@@ -290,46 +351,73 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
     ports = ports or {}
     endpoints = endpoints or {}
     warn = on_warn or (lambda m: None)
+    # Which connection owns each parameter/action id, so a scan's fault check
+    # asks only about the instruments that scan USES: a module that happens to
+    # be connected but plays no part must not pause somebody's measurement.
+    owner: dict[str, str] = {}
+
+    def _known_ids():
+        return ({p.id for p in reg.settables()} | {p.id for p in reg.gettables()}
+                | {a.id for a in reg.actions()})
+
+    def fault_check(ids=None):
+        if ids is None:
+            return lab.faults()
+        names = {owner[i] for i in ids if i in owner}
+        return lab.faults(names) if names else []
+
+    reg.fault_check = fault_check
+    reg.owner = owner
     try:
         for name in include:
-            if name in endpoints:
-                ep_host, cmd, pub = endpoints[name]
-                inst = lab.connect(name, host=ep_host, cmd_port=int(cmd),
-                                   pub_port=int(pub), timeout_ms=timeout_ms,
-                                   alias=name)
-            else:
-                # lab.connect looks the ports up in discovery when not given,
-                # and refuses a name nothing is known about
-                inst = lab.connect(name, host=host, cmd_port=ports.get(name),
-                                   timeout_ms=timeout_ms)
-
-            # PREFER the module's own self-description. Everything a Parameter
-            # needs -- limits, verb, status key, settle rule -- already lives in
-            # the module that owns the hardware, so asking is always better than
-            # keeping a second copy here that can disagree with it.
-            manifest = None if force_builtin else describe_or_none(inst)
-            if manifest is not None:
-                inst.manifest = manifest
-                register_manifest(reg, inst, manifest, prefix=prefix,
-                                  on_warn=warn, module_name=inst.alias)
-                continue
-
-            # Fall back to the hand-written declaration for modules that have
-            # not been taught `describe` yet. Without this the coordinator would
-            # be useless mid-rollout.
-            builder = _BUILDERS.get(name)
-            if builder is None:
-                raise InstrumentError(
-                    f"{name}: does not answer `describe` and scan-core has no "
-                    f"built-in declaration for it. Teach the module to describe "
-                    f"itself (see clMag's net/describe.py).")
-            warn(f"{name}: no `describe` verb; using scan-core's built-in "
-                 f"declaration, which may not match the running service")
-            builder(reg, inst, aux_ai_channels=aux_ai_channels)
+            before = _known_ids()
+            _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
+                         force_builtin, prefix, warn, aux_ai_channels)
+            for i in _known_ids() - before:
+                owner[i] = name
     except Exception:
         lab.close()          # never leave half-open sockets behind
         raise
     return reg, lab
+
+
+def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
+                 force_builtin, prefix, warn, aux_ai_channels):
+    """Connect one service and register its parameters (build_lab_registry)."""
+    if name in endpoints:
+        ep_host, cmd, pub = endpoints[name]
+        inst = lab.connect(name, host=ep_host, cmd_port=int(cmd),
+                           pub_port=int(pub), timeout_ms=timeout_ms,
+                           alias=name)
+    else:
+        # lab.connect looks the ports up in discovery when not given,
+        # and refuses a name nothing is known about
+        inst = lab.connect(name, host=host, cmd_port=ports.get(name),
+                           timeout_ms=timeout_ms)
+
+    # PREFER the module's own self-description. Everything a Parameter
+    # needs -- limits, verb, status key, settle rule -- already lives in
+    # the module that owns the hardware, so asking is always better than
+    # keeping a second copy here that can disagree with it.
+    manifest = None if force_builtin else describe_or_none(inst)
+    if manifest is not None:
+        inst.manifest = manifest
+        register_manifest(reg, inst, manifest, prefix=prefix,
+                          on_warn=warn, module_name=inst.alias)
+        return
+
+    # Fall back to the hand-written declaration for modules that have
+    # not been taught `describe` yet. Without this the coordinator would
+    # be useless mid-rollout.
+    builder = _BUILDERS.get(name)
+    if builder is None:
+        raise InstrumentError(
+            f"{name}: does not answer `describe` and scan-core has no "
+            f"built-in declaration for it. Teach the module to describe "
+            f"itself (see clMag's net/describe.py).")
+    warn(f"{name}: no `describe` verb; using scan-core's built-in "
+         f"declaration, which may not match the running service")
+    builder(reg, inst, aux_ai_channels=aux_ai_channels)
 
 
 def _build_clMag(reg: Registry, inst: Instrument, aux_ai_channels=(), **_):

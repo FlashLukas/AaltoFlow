@@ -19,8 +19,103 @@ import time
 import numpy as np
 import xarray as xr
 
-from .errors import RoutineError, ScanAborted
-from .hooks import run_hooks
+from .errors import RoutineError, ScanAborted, ScanFault, format_faults
+from .hooks import find_autofocus, routine_steps, run_hooks
+
+
+# ─────────────────────────── faults and the PAUSE ────────────────────────────
+#
+# Lukas, 2026-09-28: a failed hardware read must be loud (A), and when the
+# camera loses its pattern the measurement must stop or pause for the operator
+# (B). So before the detectors of a point are read, and again after, the engine
+# asks the registry's `fault_check` whether every instrument the scan uses can
+# be trusted. If not:
+#   * with a pause handler (`on_fault`, the GUI's): PAUSED -- report the faults,
+#     wait until they are gone (or Abort), then measure the point AGAIN, from
+#     setting its parameters on. The reading taken during the fault is thrown
+#     away: it is exactly the kind of number that looks fine and is wrong.
+#   * without one (a script): raise ScanFault, with the points measured so far.
+
+#: Seconds between fault checks while PAUSED.
+PAUSE_POLL_S = 0.5
+
+
+class _Guard:
+    """The engine's fault check and pause, one object for _sweep and fly_sweep."""
+
+    def __init__(self, check, ids, on_fault, should_abort, log, poll_s):
+        self._check, self._ids = check, ids
+        self.on_fault, self.should_abort = on_fault, should_abort
+        self.log, self.poll_s = log, poll_s
+        self.pauses = 0
+
+    def faults(self) -> list:
+        if self._check is None:
+            return []
+        try:
+            return list(self._check(self._ids) or [])
+        except Exception as exc:          # a broken check is itself a fault
+            return [("scan", f"fault check failed ({exc})")]
+
+    def hold(self, faults, where: str, cause=None):
+        """PAUSE until `faults` are gone, or raise (no handler / Abort).
+
+        Returns normally when the faults have cleared -- the caller then
+        measures the point again. Raises ScanAborted when Abort is pressed
+        while paused (the ordinary abort path: after-scan routine, partial
+        data kept), ScanFault when there is nobody to pause for.
+        """
+        text = format_faults(faults)
+        if cause is not None and str(cause) not in text:
+            text += f" [{cause}]"
+        if self.on_fault is None:
+            raise ScanFault(f"scan stopped at {where}: {text}", faults)
+        self.pauses += 1
+        self.log(f"PAUSED at {where}: {text}")
+        last = list(faults)
+        self.on_fault(last)
+        try:
+            while True:
+                if self.should_abort and self.should_abort():
+                    raise ScanAborted(f"aborted while paused ({text})")
+                time.sleep(self.poll_s)
+                now = self.faults()
+                if not now:
+                    self.log(f"faults cleared -- resuming; measuring {where} again")
+                    return
+                if now != last:
+                    last = now
+                    self.on_fault(now)
+        finally:
+            self.on_fault([])             # the banner goes, whatever happened
+
+
+def _used_ids(recipe, compiled, registry) -> set:
+    """Every parameter / action id this scan touches, for the fault check.
+
+    Only the instruments a scan USES are asked about: a module that is merely
+    connected must not pause somebody else's measurement.
+    """
+    ids = set(recipe.fixed or {}) | set(compiled.detectors)
+    for d in compiled.dims:
+        ids |= {pid for pid, _ in d.params}
+    for ax in recipe.axes or []:
+        if isinstance(ax, dict):
+            for key in ("readback", "move", "speed_param"):
+                if ax.get(key):
+                    ids.add(ax[key])
+    for h in recipe.hooks or []:
+        if h.get("action") == "call":
+            try:
+                for step in routine_steps(h.get("args") or {}):
+                    ids.add(step[1])
+            except ValueError:
+                pass
+        elif h.get("action") == "autofocus":
+            aid = find_autofocus(registry)
+            if aid:
+                ids.add(aid)
+    return ids
 
 
 def _unravel(flat: int, shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -47,7 +142,8 @@ def _zigzag(idx: tuple[int, ...], shape: tuple[int, ...]) -> tuple[int, ...]:
 
 def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
-        on_log=None, data_path=None) -> xr.Dataset:
+        on_log=None, data_path=None, on_fault=None, fault_check=None,
+        pause_poll_s: float = PAUSE_POLL_S) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_progress(done, total, eta_s) : optional callback for a GUI/CLI.
@@ -62,12 +158,28 @@ def run(recipe, registry, on_progress=None, should_abort=None,
                                       pay for one per point. A long scan is
                                       unwatchable if its data only appears at
                                       the end.
+    on_fault(faults)               : the PAUSE handler. Called with the list
+                                      of Fault(name, message) when the scan
+                                      pauses (and again when that list
+                                      changes), and with [] when it resumes or
+                                      is aborted. Without it a fault STOPS the
+                                      scan with ScanFault (a script has nobody
+                                      to pause for).
+    fault_check(ids) -> [Fault]     : default `registry.fault_check` (set by
+                                      build_lab_registry; the simulator has
+                                      none, so nothing is checked).
     on_log(message)                 : what the ROUTINES are doing ("before_scan:
                                       set field = 150 mT ... done"). A routine
                                       can take minutes (a magnet ramp and a
                                       reference sweep) before the first point,
                                       and a progress bar sitting at 0 % says
                                       nothing about why.
+
+    Faults (2026-09-28): before the detectors of a point are read, and again
+    after, every instrument the scan uses is checked (dead/silent service,
+    `hw_error`, `fault`); on a fault the scan pauses and the point is measured
+    AGAIN once it clears (see _Guard). A fly row is checked when it is done
+    and flown again.
 
     Routines: hooks at `before_scan` fire after the conditions are applied and
     before the first point; hooks at `after_scan` fire after the last point --
@@ -92,6 +204,9 @@ def run(recipe, registry, on_progress=None, should_abort=None,
            "data_path": str(data_path) if data_path else None}
 
     compiled = recipe.compile(registry)
+    check = fault_check if fault_check is not None else getattr(registry, "fault_check", None)
+    ctx["guard"] = _Guard(check, _used_ids(recipe, compiled, registry), on_fault,
+                          should_abort, ctx["log_fn"], pause_poll_s)
 
     def after_scan(aborted: bool):
         ctx["aborted"] = aborted
@@ -183,6 +298,20 @@ def run(recipe, registry, on_progress=None, should_abort=None,
                             dets, det_axes, det_coords, data, acquire_groups,
                             prev, ctx, t0, on_progress, should_abort, on_point,
                             created_iso)
+    except ScanFault as exc:
+        # A fault with nobody to pause for. It is an ERROR, so -- as for any
+        # other error -- the after-scan routine does NOT run (an instrument is
+        # in a state nobody has looked at). The points measured before it are
+        # handed over, exactly as an Abort's are.
+        if sweeping and exc.dataset is None:
+            try:
+                exc.dataset = _to_dataset(recipe, compiled, registry, data,
+                                          created_iso, time.monotonic() - t_start,
+                                          det_axes, det_coords,
+                                          var_attrs=ctx.get("var_attrs"))
+            except Exception as build_exc:
+                ctx["log_fn"](f"could not keep the measured points: {build_exc}")
+        raise
     except ScanAborted as exc:
         after_abort()
         if sweeping:
@@ -217,6 +346,8 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
            should_abort, on_point, created_iso) -> bool:
     """The odometer itself. Returns True if it stopped on an Abort."""
     current = ctx["current"]
+    guard = ctx.get("guard") or _Guard(None, (), None, should_abort,
+                                       lambda m: None, PAUSE_POLL_S)
     for flat in range(total):
         if should_abort and should_abort():
             return True
@@ -226,50 +357,35 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         ctx["flat"] = flat
         ctx["index"] = idx
 
-        # set params for every dim whose index changed (outer→inner)
-        for k, d in enumerate(dims):
-            if idx[k] != prev[k]:
-                if prev[k] is not None:
-                    run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
-                for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[idx[k]]))
-                run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
-        prev = list(idx)
-
-        run_hooks(compiled.hooks, "before_point", ctx)
-
-        # Slow detectors must be TRIGGERED and WAITED ON before they are read.
-        # Trigger every group first and only then wait for them, so several
-        # instruments acquire concurrently instead of one after another -- and
-        # so detectors sharing a group (s11/s21/s12/s22 off one sweep) cost one
-        # acquisition, not four.
-        #
-        # Without this a VNA hands back whatever is still in its buffer: the
-        # PREVIOUS sweep, taken at the previous point. Nothing raises; the map
-        # is simply one step behind and looks clean.
-        for spec in acquire_groups:
-            spec.trigger()
-        for spec in acquire_groups:
-            spec.wait()
-
-        for det in dets:
-            value = registry.get(det).get()
-            if det_axes[det]:
-                arr = np.asarray(value)
-                expected = data[det].shape[len(shape):]
-                if arr.shape != expected:
-                    # Ragged data has nowhere sensible to go, and padding it
-                    # would hand back a file that looks fine and is wrong. Stop
-                    # instead, and say exactly where.
-                    raise ValueError(
-                        f"detector '{det}' returned shape {arr.shape} at grid "
-                        f"index {idx}, but the scan was allocated for "
-                        f"{expected}. The instrument's sweep changed mid-scan "
-                        f"(a span or point-count change will do it). Re-run "
-                        f"without reconfiguring it, or scan it as its own axis.")
-                data[det][idx] = arr
-            else:
-                data[det][idx] = value
+        redo = False
+        while True:
+            try:
+                values = _measure_point(registry, compiled, dims, shape, dets,
+                                        det_axes, data, acquire_groups, prev,
+                                        ctx, idx, current, guard, redo)
+                break
+            except _Redo as r:
+                guard.hold(r.faults, f"point {flat + 1} {idx}")
+            except (ScanAborted, ScanFault):
+                raise
+            except Exception as exc:
+                # A settle timeout, a refused command, a dead service ... If an
+                # instrument the scan uses is ALSO reporting a fault, that fault
+                # is the likely cause (a camera that lost its pattern never
+                # settles its point): pause for it. Otherwise it is an ordinary
+                # error and ends the scan exactly as before.
+                faults = guard.faults()
+                if not faults and getattr(exc, "is_fault", False):
+                    # an InstrumentFault from a settle wait: the status said
+                    # hw_error/fault for over a second, even if it has just
+                    # cleared -- the point was never measured cleanly
+                    faults = [(getattr(exc, "instrument", "") or "instrument", str(exc))]
+                if not faults:
+                    raise
+                guard.hold(faults, f"point {flat + 1} {idx}", cause=exc)
+            redo = True
+        for det, value in values.items():
+            data[det][idx] = value
         run_hooks(compiled.hooks, "after_point", ctx)
 
         done = flat + 1
@@ -290,6 +406,96 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                                          created_iso, time.monotonic() - t0,
                                          det_axes, det_coords))
     return False
+
+
+class _Redo(Exception):
+    """Internal: the fault check failed inside a point -- pause, then redo it."""
+
+    def __init__(self, faults):
+        super().__init__(format_faults(faults))
+        self.faults = faults
+
+
+def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
+                   acquire_groups, prev, ctx, idx, current, guard, redo):
+    """Set one point's parameters, acquire, read. Returns {det: value}.
+
+    Nothing is written into `data` here: a reading taken while an instrument
+    reports a fault must never land in the file, so the caller commits the
+    values only once both fault checks have passed.
+
+    `redo` = this point is being measured AGAIN after a pause: every dim's
+    parameters are set, not only the ones whose index changed -- whatever
+    went wrong may have moved them (a camera that lost its pattern and was
+    re-aimed by hand) -- but without re-firing the axis hooks, because no axis
+    has moved on to a new value. The before_point hooks DO run again (an
+    each_sweep autofocus at the start of a row is exactly what you want after
+    the sample was re-found).
+    """
+    # `prev` is the caller's list and is updated IN PLACE, dim by dim, as each
+    # dim's hooks run: if this attempt fails half-way (a settle that raises),
+    # the next attempt must neither fire an axis hook twice nor skip one.
+    for k, d in enumerate(dims):
+        changed = idx[k] != prev[k]
+        if not (changed or redo):
+            continue
+        if changed and prev[k] is not None:
+            run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
+            prev[k] = None                    # fired; not again on a retry
+        for pid, values in d.params:
+            current[pid] = registry.get(pid).set(float(values[idx[k]]))
+        if changed:
+            run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
+        prev[k] = idx[k]
+
+    run_hooks(compiled.hooks, "before_point", ctx)
+
+    # Slow detectors must be TRIGGERED and WAITED ON before they are read.
+    # Trigger every group first and only then wait for them, so several
+    # instruments acquire concurrently instead of one after another -- and
+    # so detectors sharing a group (s11/s21/s12/s22 off one sweep) cost one
+    # acquisition, not four.
+    #
+    # Without this a VNA hands back whatever is still in its buffer: the
+    # PREVIOUS sweep, taken at the previous point. Nothing raises; the map
+    # is simply one step behind and looks clean.
+    for spec in acquire_groups:
+        spec.trigger()
+    for spec in acquire_groups:
+        spec.wait()
+
+    # CHECK 1: everything is set and acquired -- is anyone faulted before we
+    # read? (A camera that lost its pattern, a meter whose read failed.)
+    faults = guard.faults()
+    if faults:
+        raise _Redo(faults)
+
+    out = {}
+    for det in dets:
+        value = registry.get(det).get()
+        if det_axes[det]:
+            arr = np.asarray(value)
+            expected = data[det].shape[len(shape):]
+            if arr.shape != expected:
+                # Ragged data has nowhere sensible to go, and padding it
+                # would hand back a file that looks fine and is wrong. Stop
+                # instead, and say exactly where.
+                raise ValueError(
+                    f"detector '{det}' returned shape {arr.shape} at grid "
+                    f"index {idx}, but the scan was allocated for "
+                    f"{expected}. The instrument's sweep changed mid-scan "
+                    f"(a span or point-count change will do it). Re-run "
+                    f"without reconfiguring it, or scan it as its own axis.")
+            out[det] = arr
+        else:
+            out[det] = value
+
+    # CHECK 2: did something fail WHILE we read? The values are only committed
+    # when this passes too.
+    faults = guard.faults()
+    if faults:
+        raise _Redo(faults)
+    return out
 
 
 def _units(registry, pid: str) -> str:

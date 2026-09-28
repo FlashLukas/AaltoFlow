@@ -174,6 +174,35 @@ still assumes piezo/zpiezo.
   camera's, the stage only moves; rows end when the camera sees the far edge. Values travel in WIRE units; the descriptor's `scale` applies.
   Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
   checks the verbs wherever a stream is declared.
+- **Can the readings be trusted? `hw_error` and `fault` (2026-09-28).** Two
+  optional status keys, both strings, both `""` when all is well (a missing key
+  also means "fine", so older modules need no change):
+  - `hw_error`: the LAST HARDWARE READ FAILED; the values in this frame are not
+    the instrument's. Set it when a read raises, clear it on the next good one.
+  - `fault`: the module says a measurement NOW would give wrong data and a
+    person may be needed (the camera lost its pattern; mag2d lost its water). A
+    module may LATCH it until someone clears it; such a module offers an action
+    **`clear_fault`** in `describe` (it may refuse while the cause is still
+    there).
+  scan-core (Lukas's decisions A and B): a settle wait never accepts a frame
+  that carries either (it raises after ~1 s instead of timing out on it); the
+  engine checks every instrument a scan uses before the detectors of a point are
+  read and again after, and on a fault it PAUSES (the measurement suite shows
+  the faults and a "Clear fault on <module>" button, resumes by itself when they
+  are gone and measures the point again) or, headless, stops with `ScanFault`
+  keeping the points so far. A service whose status has not arrived for 2 s and
+  that does not answer `status` either is a fault too -- its last frame is
+  never served forever.
+- **Target echo (motion settle, 2026-09-28).** A module whose move ends with a
+  `moving` flag also publishes the TARGET it is moving to (kim/stage/piezo:
+  `target_um`, per axis) and declares
+  `{"policy": "adopt_then_flag", "setpoint_key": "target_um", "flag_key":
+  "moving", "invert": true, "index": i}` -- `index` applies to BOTH keys; add
+  `"tol"` when the echoed target may differ from the request (a stepper rounds
+  um to whole steps; a clamped move echoes the clamp). A newer set of the same
+  knob ends an older set's wait at once in scan-core (a "stop here" must not
+  leave the move's wait waiting for an echo that will never come). Why, and the
+  ordering rule the module must follow: gotcha #40.
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the
   table below mirrors them) and can be overridden per PC in the launcher; every
@@ -622,6 +651,31 @@ zpiezo has no GUI.
     something. `tools/check_modules.py --live` tests both on every module:
     "exits non-zero when its port is taken" and "malformed request answered,
     port survives".
+
+40. **Settling on the frame from BEFORE the move** (2026-09-28; gotcha #2 in
+    its motion-stage form). kim, stage and piezo declared their position settle
+    as `flag_only(moving, invert)`: "settled when not moving". Commands are
+    fire-and-forget, so for a few status frames after `move_to` is accepted the
+    service still publishes the state from BEFORE the command -- and that state
+    says "not moving". The blocking set returns at once, the scan reads its
+    detectors at the OLD position, and the grid comes out one step behind with
+    nothing raised. (It bit the fly scans first, gotcha #35: an approach that
+    "arrived" before the stage had left.) **The fix is the target echo:** the
+    module publishes the target it is moving to (`target_um`), and the settle is
+    `adopt_then_flag(target_um, moving, invert, index)` -- a frame is only
+    believed once it shows OUR target, and only THEN is its `moving` trusted.
+    **The ordering rule that makes the echo honest:** (1) the setter issues the
+    hardware move FIRST and only THEN stores the echo target -- storing it
+    first would let a frame show the new target together with a `moving` read
+    before the move began ("not moving": settled at the old place again); (2)
+    the status worker reads the echo target BEFORE it reads `moving` from the
+    hardware -- so any frame that shows the new target carries a `moving` read
+    AFTER the command. A STOP sets the echo to where the axis stopped, a clamped
+    move echoes the clamped target, and a target rounded to whole steps needs a
+    `tol` in the settle block, or the echo never matches and the point waits out
+    its timeout. In scan-core a newer set of the same knob ends an older set's
+    wait (the fly row's "stop here" supersedes its move), so an echo that will
+    never come cannot hold a row for its whole timeout.
 
 ---
 

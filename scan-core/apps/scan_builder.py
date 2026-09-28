@@ -34,7 +34,7 @@ import pyqtgraph as pg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # find scan_core
 from scan_core import Recipe, build_sim_registry, run
-from scan_core.errors import RoutineError, ScanAborted
+from scan_core.errors import RoutineError, ScanAborted, ScanFault
 from scan_core.preview import preview_axis, step_summary
 from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
 from scan_core import scan_queue
@@ -1350,6 +1350,10 @@ class ScanWorker(QtCore.QThread):
     #: Run free to start a second engine on the same hardware (2026-09-28).
     save_failed = QtCore.Signal(str)
     log = QtCore.Signal(str)                 # what the routines are doing
+    #: The engine PAUSED on a fault (list of Fault(name, message)), or
+    #: resumed / was aborted from the pause ([]). Emitted from the scan
+    #: thread; Qt queues it to the GUI thread.
+    paused = QtCore.Signal(object)
 
     #: Seconds between live redraws. Building the snapshot costs something, and
     #: a 400-point scan of settling points does not need 60 fps.
@@ -1436,7 +1440,10 @@ class ScanWorker(QtCore.QThread):
                      # attribute. It said "live" until 2026-09-28, so the time
                      # was only in the file NAME and a renamed copy had none.
                      created_iso=datetime.now().isoformat(timespec="seconds"),
-                     data_path=self.save_path)
+                     data_path=self.save_path,
+                     # a fault PAUSES the scan and waits for the operator
+                     # (Lukas, 2026-09-28) instead of ending it
+                     on_fault=lambda faults: self.paused.emit(list(faults)))
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
@@ -1467,6 +1474,17 @@ class ScanWorker(QtCore.QThread):
                 self._write(ds, n, n)
                 self.done.emit(ds)
             self.failed.emit(f"aborted ({exc})")
+        except ScanFault as exc:
+            # Only when nobody could be paused for (it should not happen
+            # here: the worker always passes a pause handler). Keep the
+            # measured points, as for any stop.
+            ds = getattr(exc, "dataset", None)
+            if ds is not None:
+                n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
+                self._write(ds, n, n)
+                self.done.emit(ds)
+            self.outcome, self.error = "error", str(exc)
+            self.failed.emit(str(exc))
         except Exception as exc:                 # surface validation/compile errors
             self.outcome, self.error = "error", str(exc)
             self.failed.emit(str(exc))
@@ -1668,6 +1686,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: snapshot from connect time, and a sweep can be defined past what the
         #: instrument will now accept (the service then clamps, silently).
         self.limits_refresher = None
+        #: Set by the suite to its Lab: offers the "Clear fault on <module>"
+        #: buttons of the PAUSED banner (`can_clear_fault(name)`,
+        #: `clear_fault(name)`). None = no buttons (simulator, standalone).
+        self.fault_lab = None
+        #: The faults the running scan is paused on ([] = not paused).
+        self.paused_faults: list = []
         #: Where finished (and part-finished) scans are written without being
         #: asked. Set by the suite from its data directory; None = no autosave,
         #: which is what the standalone builder and the tests want.
@@ -2185,6 +2209,36 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.stop_queue_btn.hide()
         row.addWidget(self.run_btn); row.addWidget(self.abort_btn); row.addWidget(self.stop_queue_btn)
         v.addLayout(row)
+
+        # The PAUSED banner: a fault (a camera that lost its pattern, a failed
+        # hardware read, a service that went silent) stops the scan BEFORE a
+        # wrong number is recorded, and this says why and what to do. The scan
+        # resumes by itself once every fault is gone, and measures the point
+        # again; Abort (above) still ends it.
+        self.pause_box = QtWidgets.QFrame(); self.pause_box.setObjectName("card")
+        self.pause_box.setStyleSheet(
+            f"QFrame#card {{ border: 2px solid {C['danger']}; border-radius: 6px; }}")
+        pb = QtWidgets.QVBoxLayout(self.pause_box)
+        pb.setContentsMargins(10, 8, 10, 8)
+        self.pause_title = QtWidgets.QLabel("PAUSED -- the scan is waiting")
+        self.pause_title.setStyleSheet(f"color:{C['danger']}; font-weight:800; font-size:14px;")
+        pb.addWidget(self.pause_title)
+        self.pause_lbl = QtWidgets.QLabel("")
+        self.pause_lbl.setWordWrap(True)
+        self.pause_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        pb.addWidget(self.pause_lbl)
+        self.pause_hint = QtWidgets.QLabel(
+            "Fix the cause; the scan resumes by itself and measures this point "
+            "again. Abort ends the scan (the points so far are kept).")
+        self.pause_hint.setWordWrap(True)
+        self.pause_hint.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
+        pb.addWidget(self.pause_hint)
+        self.pause_btns = QtWidgets.QHBoxLayout()
+        self.pause_btns.addStretch(1)            # buttons go in before it
+        pb.addLayout(self.pause_btns)
+        self.clear_fault_btns: dict = {}         # module name -> its button
+        self.pause_box.hide()
+        v.addWidget(self.pause_box)
 
         # "Scan 2 of 5 · name" while a QUEUE runs; its summary when it ends.
         self.queue_lbl = QtWidgets.QLabel("")
@@ -2735,6 +2789,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.worker.saved.connect(self._on_saved)
         self.worker.save_failed.connect(self._on_save_failed)
         self.worker.log.connect(self._on_log)
+        self.worker.paused.connect(self._on_paused)
         self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.save_lbl.setText(f"saving to {path}" if path else
                               "not saving automatically (no data directory set)")
@@ -2969,6 +3024,54 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if self.on_log is not None:
             self.on_log(message)
 
+    def _on_paused(self, faults):
+        """Show (faults) or hide ([]) the PAUSED banner."""
+        self.paused_faults = list(faults or [])
+        # the old buttons go; the modules at fault now get theirs
+        for b in self.clear_fault_btns.values():
+            self.pause_btns.removeWidget(b)
+            b.setParent(None)
+        self.clear_fault_btns = {}
+        if not self.paused_faults:
+            self.pause_box.hide()
+            self.progress.setFormat("%p%")
+            return
+        self.pause_lbl.setText("\n".join(f"{name}: {msg}" for name, msg in self.paused_faults))
+        self.progress.setFormat("PAUSED -- %p%")
+        lab = self.fault_lab
+        for name, _ in self.paused_faults:
+            if name in self.clear_fault_btns or lab is None:
+                continue
+            try:
+                ok = lab.can_clear_fault(name)
+            except Exception:
+                ok = False
+            if not ok:
+                continue
+            b = QtWidgets.QPushButton(f"Clear fault on {name}")
+            b.setToolTip(f"Send `clear_fault` to {name}. Do it once the cause is\n"
+                         f"fixed (the sample found again, the pattern re-taught):\n"
+                         f"the module latches its fault until someone has looked.")
+            b.clicked.connect(lambda _=False, n=name: self.clear_fault(n))
+            self.pause_btns.insertWidget(self.pause_btns.count() - 1, b)
+            self.clear_fault_btns[name] = b
+        self.pause_box.show()
+
+    def clear_fault(self, name: str) -> bool:
+        """Send `clear_fault` to one module (the banner's button)."""
+        msg = f"clear_fault sent to {name}"
+        ok = True
+        try:
+            self.fault_lab.clear_fault(name)
+        except Exception as exc:
+            # a module refuses while the cause is still there -- say so
+            msg, ok = f"clear_fault on {name} refused: {exc}", False
+        self.run_log.append(msg)
+        self.pause_hint.setText(msg + ". The scan resumes when every fault is gone.")
+        if self.on_log is not None:
+            self.on_log(msg)
+        return ok
+
     def _on_progress(self, done, total, eta):
         self.progress.setFormat("%p%")      # the points have started
         self.progress.setMaximum(total); self.progress.setValue(done)
@@ -3044,6 +3147,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._run_finished()
 
     def _run_finished(self):
+        self._on_paused([])                 # a finished run is never paused
         self.progress.setFormat("%p%")
         # Between two scans of a queue Run stays off: the queue is still going.
         self.run_btn.setEnabled(not self.queue_running())

@@ -805,8 +805,19 @@ class ControlPanel(QtWidgets.QWidget):
     def _refresh_remote(self):
         for name, inst in self.lab.instruments.items():
             try:
-                status = inst.status()
+                # The FRESH cache only, never a request: this runs on the GUI
+                # thread, and since 2026-09-28 `status()` asks a silent service
+                # directly -- a dead one would freeze the window for the whole
+                # REQ timeout at every poll. A stale cache means no update.
+                # (Right after connecting no frame has arrived YET; the service
+                # has just answered `info`, so asking once is quick.)
+                latest = getattr(inst, "latest", None)
+                status = latest() if latest is not None else inst.status()
+                if status is None and inst.status_age() is None:
+                    status = inst.status()
             except Exception:
+                status = None
+            if status is None:
                 continue          # one dropped service must not stop the rest
                                   # of the panel from updating
             manifest = getattr(inst, "manifest", None) or {}

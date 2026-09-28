@@ -18,6 +18,8 @@ a blocking `set` still blocks correctly -- the module states its own rule for
 
 from __future__ import annotations
 
+import threading
+
 from .instrument import (Instrument, InstrumentError, adopt_then_flag, echoes,
                          flag_only, immediate)
 from .registry import (AcquireSpec, Action, AxisSpec, Gettable, Registry,
@@ -36,12 +38,17 @@ def _k(c: dict, name: str):
     {"key": "moving", "index": 0} -> ["moving", 0].
     """
     key = c[name]
-    return [key, int(c["index"])] if "index" in c else key
+    # (`index` may be None in a hand-written block: no index then)
+    return [key, int(c["index"])] if c.get("index") is not None else key
 
 
 _POLICIES = {
+    # `index` applies to BOTH keys (per-axis target_um AND per-axis moving --
+    # the motion modules' target echo, gotcha #40). `tol`: how far the echoed
+    # target may sit from the request (a stepper rounds um to whole steps).
     "adopt_then_flag": lambda c: adopt_then_flag(
-        _k(c, "setpoint_key"), _k(c, "flag_key"), c.get("invert", False)),
+        _k(c, "setpoint_key"), _k(c, "flag_key"), c.get("invert", False),
+        float(c.get("tol", 1e-6))),
     "echoes": lambda c: echoes(_k(c, "key"), c.get("tol", 1e-6)),
     "flag_only": lambda c: flag_only(_k(c, "key"), c.get("invert", False)),
     "immediate": lambda c: immediate(),
@@ -188,10 +195,20 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 hi = float("inf") if hi is None else hi
             settle = resolve_settle(d.get("settle"), on_warn)
             timeout = float(d.get("timeout_s", 60.0))
+            # SUPERSEDING. Every set of this knob takes a new number; a wait
+            # still running for an OLDER number ends at once. Why: with a
+            # target-echo settle (the motion modules since 2026-09-28, gotcha
+            # #40) a set waits until the service echoes ITS target -- and a
+            # later command ("stop here", a new move) replaces that target, so
+            # the echo never comes. A fly row ends its move exactly like that,
+            # and the move's own wait (in its helper thread) used to sit out
+            # its whole timeout. A newer command on the same knob answers the
+            # older wait: the knob is now the newer command's business.
+            gen = [0, threading.Lock()]
 
             def setter(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
                        _id=pid, _u=unit, _bool=(dtype == "bool"), _scale=scale,
-                       _int=(dtype == "int"), timeout_s=None):
+                       _int=(dtype == "int"), timeout_s=None, _gen=gen):
                 extra = dict(_s.get("extra") or {})
                 scale = _scale
                 # Send a bool as a bool. Settable hands us 0.0/1.0 after its
@@ -207,13 +224,17 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 wire = bool(value) if _bool else value * scale
                 if _int and not _bool:
                     wire = int(round(wire))
+                with _gen[1]:
+                    _gen[0] += 1
+                    mine = _gen[0]
                 _inst.command(_s["verb"], **{_s["arg"]: wire}, **extra)
                 shown = wire if _bool else f"{value:g} {_u}".strip()
                 # timeout_s: a fly scan's row is ONE long move, far slower
                 # than the ordinary step this timeout was declared for
                 _inst.wait_until(_settle(wire),
                                  timeout_s=_t if timeout_s is None else timeout_s,
-                                 what=f"{_id} = {shown}")
+                                 what=f"{_id} = {shown}",
+                                 cancel=lambda: _gen[0] != mine)
 
             param = reg.add(Settable(pid, label, unit, (lo, hi),
                                      set_fn=setter, get_fn=getter))

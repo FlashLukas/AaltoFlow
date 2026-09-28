@@ -75,7 +75,7 @@ import time
 
 import numpy as np
 
-from .errors import ScanAborted
+from .errors import ScanAborted, ScanFault
 from .hooks import run_hooks
 
 #: Moments that cannot fire in a fly scan (there are no per-pixel stops).
@@ -314,7 +314,12 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     from one continuous move. Adds `<det>_n` (samples per pixel) and
     `<det>_std` (their spread) next to every detector.
     """
-    from .engine import _to_dataset, _unravel, _zigzag
+    from .engine import PAUSE_POLL_S, _Guard, _to_dataset, _unravel, _zigzag
+
+    # the engine's fault check / pause (engine._Guard): checked after every
+    # row, and a faulted row is flown again once the fault is gone
+    guard = ctx.get("guard") or _Guard(None, (), None, should_abort,
+                                       lambda m: None, PAUSE_POLL_S)
 
     ax = fly_axis(recipe)
     fly = dims[-1]
@@ -400,95 +405,151 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                            created_iso, time.monotonic() - t0,
                            det_axes, det_coords, var_attrs=ctx.get("var_attrs"))
 
+    def fly_row(row, redo):
+        """Fly ONE row (approach, outer dims, the move, binning).
+
+        Returns (aborted, oidx, backwards). `redo` = this row is flown AGAIN
+        after a fault: the outer dims are set again even though their
+        index did not change (the fault may have moved them -- a camera
+        placement that lost its pattern), without re-firing axis hooks.
+        """
+        raw = _unravel(row, outer_shape) if outer_shape else ()
+        oidx = _zigzag(raw, outer_shape) if (recipe.zigzag and outer_shape) else raw
+        backwards = bool(recipe.zigzag) and sum(raw) % 2 == 1
+
+        # -- back to the ORDINARY speed, and to this row's run-in, FIRST.
+        # Before the outer axes move, not after: (1) anything that moves
+        # the stage between rows must not crawl at the fly speed; (2) when
+        # the outer axis is a PLACEMENT that keeps the other coordinate
+        # (camera.laser_y keeps the camera's x target), it would otherwise
+        # keep the PREVIOUS row's start and drag the laser back across the
+        # whole row -- seen on the rig, 2026-09-27: slow returns, and with
+        # zig-zag a pointless trip to the far side before every backward row.
+        a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
+        a, b = min(max(a, lo), hi), min(max(b, lo), hi)
+        # Already there? With zig-zag a row starts where the last one
+        # ended: switching to the approach speed, "approaching" and
+        # switching back cost ~0.9 s a row on the rig for nothing.
+        # Judged on where the last row's STREAM saw the stage stop, not on
+        # rb.get(): a status cache (kim: 8 Hz) can still show the stage a
+        # tenth of a second back along the row -- 0.25 um at 2 um/s, just
+        # outside half a pixel, so the round-trip came back (rig, 2026-09-28).
+        end = state.get("rb_end")
+        at_runin = (move_p is None and state["fly_speed"] and end is not None
+                    and abs(end - a) <= 0.5 * width)
+        if not at_runin:
+            if state["fly_speed"]:
+                use_speed(orig_speed)
+            current[pos_p.id] = approach(a)       # blocking: AT the run-in, at rest
+        else:
+            current[pos_p.id] = a
+
+        # -- the outer (stepped) dims, exactly as the odometer does them
+        first_idx = tuple(oidx) + ((npix - 1) if backwards else 0,)
+        ctx["flat"] = row * npix
+        ctx["index"] = first_idx
+        outer_moved = False
+        for k, d in enumerate(outer):
+            changed = oidx[k] != prev[k]
+            if changed or redo:
+                outer_moved = True
+                if changed and prev[k] is not None:
+                    run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
+                    prev[k] = None            # fired; not again if this row is redone
+                for pid, values in d.params:
+                    current[pid] = registry.get(pid).set(float(values[oidx[k]]))
+                if changed:
+                    run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
+                prev[k] = oidx[k]
+
+        # each_sweep routines at the START of a sweep fire here (validation
+        # has refused every per-point one)
+        run_hooks(compiled.hooks, "before_point", ctx)
+
+        # (an outer axis in stage coordinates is another axis: it leaves the
+        # run-in where it was, so "already there" still holds)
+        if outer_moved and not at_runin:
+            # an outer axis that moves the same stage may have moved the
+            # run-in too: make sure (a no-op if it did not)
+            if state["fly_speed"]:
+                use_speed(orig_speed)
+            current[pos_p.id] = approach(a)
+        if not state["fly_speed"]:
+            use_speed(speed)
+
+        while True:
+            aborted, chunks, again = _fly_one_row(
+                pos_p, b, row_timeout, groups, should_abort, row, npix, total,
+                t0, on_progress, rb, params, edges, lag, data, oidx, snapshot,
+                on_point, log, a=a, move_p=move_p, drive=drive, speed=speed)
+            if not again:
+                break
+            # the first guess of the direction was wrong: back to the start
+            # of the row (at the approach speed) and fly it again
+            if state["fly_speed"]:
+                use_speed(orig_speed)
+            current[pos_p.id] = approach(a)
+            use_speed(speed)
+        current[pos_p.id] = b
+        state["rb_end"] = _last_value(chunks, rb)   # where the stream saw it stop
+        _bin_into(chunks, rb, params, edges, lag, data, oidx)
+        if not warned["lag"]:
+            warned["lag"] = True
+            _warn_quality(chunks, rb, params, data, oidx, speed, width, log)
+        if any(c.get("overflow") for cs in chunks.values() for c in cs):
+            log("fly: a stream buffer overflowed -- samples were lost on this "
+                "row (slow the stream or shorten the row)")
+        return aborted, oidx, backwards
+
+    def blank_row(oidx):
+        # a row flown while something was faulted must not stay in the
+        # data (or on the live plot while paused): NaN it, the redo refills it
+        for name, arr in data.items():
+            if arr.ndim >= len(shape):
+                arr[tuple(oidx)] = np.nan
+
+    def stop_streams():
+        for spec in groups.values():
+            try:
+                spec.stop()
+            except Exception:
+                pass
+
     try:
         for row in range(n_rows):
             if should_abort and should_abort():
                 return True
-            raw = _unravel(row, outer_shape) if outer_shape else ()
-            oidx = _zigzag(raw, outer_shape) if (recipe.zigzag and outer_shape) else raw
-            backwards = bool(recipe.zigzag) and sum(raw) % 2 == 1
-
-            # -- back to the ORDINARY speed, and to this row's run-in, FIRST.
-            # Before the outer axes move, not after: (1) anything that moves
-            # the stage between rows must not crawl at the fly speed; (2) when
-            # the outer axis is a PLACEMENT that keeps the other coordinate
-            # (camera.laser_y keeps the camera's x target), it would otherwise
-            # keep the PREVIOUS row's start and drag the laser back across the
-            # whole row -- seen on the rig, 2026-09-27: slow returns, and with
-            # zig-zag a pointless trip to the far side before every backward row.
-            a, b = (edges[-1], edges[0]) if backwards else (edges[0], edges[-1])
-            a, b = min(max(a, lo), hi), min(max(b, lo), hi)
-            # Already there? With zig-zag a row starts where the last one
-            # ended: switching to the approach speed, "approaching" and
-            # switching back cost ~0.9 s a row on the rig for nothing.
-            # Judged on where the last row's STREAM saw the stage stop, not on
-            # rb.get(): a status cache (kim: 8 Hz) can still show the stage a
-            # tenth of a second back along the row -- 0.25 um at 2 um/s, just
-            # outside half a pixel, so the round-trip came back (rig, 2026-09-28).
-            end = state.get("rb_end")
-            at_runin = (move_p is None and state["fly_speed"] and end is not None
-                        and abs(end - a) <= 0.5 * width)
-            if not at_runin:
-                if state["fly_speed"]:
-                    use_speed(orig_speed)
-                current[pos_p.id] = approach(a)       # blocking: AT the run-in, at rest
-            else:
-                current[pos_p.id] = a
-
-            # -- the outer (stepped) dims, exactly as the odometer does them
-            first_idx = tuple(oidx) + ((npix - 1) if backwards else 0,)
-            ctx["flat"] = row * npix
-            ctx["index"] = first_idx
-            outer_moved = False
-            for k, d in enumerate(outer):
-                if oidx[k] != prev[k]:
-                    outer_moved = True
-                    if prev[k] is not None:
-                        run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
-                    for pid, values in d.params:
-                        current[pid] = registry.get(pid).set(float(values[oidx[k]]))
-                    run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
-            prev[:len(outer)] = list(oidx)
-
-            # each_sweep routines at the START of a sweep fire here (validation
-            # has refused every per-point one)
-            run_hooks(compiled.hooks, "before_point", ctx)
-
-            # (an outer axis in stage coordinates is another axis: it leaves the
-            # run-in where it was, so "already there" still holds)
-            if outer_moved and not at_runin:
-                # an outer axis that moves the same stage may have moved the
-                # run-in too: make sure (a no-op if it did not)
-                if state["fly_speed"]:
-                    use_speed(orig_speed)
-                current[pos_p.id] = approach(a)
-            if not state["fly_speed"]:
-                use_speed(speed)
-
+            redo = False
             while True:
-                aborted, chunks, again = _fly_one_row(
-                    pos_p, b, row_timeout, groups, should_abort, row, npix, total,
-                    t0, on_progress, rb, params, edges, lag, data, oidx, snapshot,
-                    on_point, log, a=a, move_p=move_p, drive=drive, speed=speed)
-                if not again:
+                where = f"row {row + 1} of {n_rows}"
+                raw = _unravel(row, outer_shape) if outer_shape else ()
+                oidx = _zigzag(raw, outer_shape) if (recipe.zigzag and outer_shape) else raw
+                try:
+                    aborted, oidx, backwards = fly_row(row, redo)
+                except (ScanAborted, ScanFault):
+                    raise
+                except Exception as exc:
+                    # as in the stepped odometer: an error while something the
+                    # scan uses reports a fault is that fault -- pause for it
+                    faults = guard.faults()
+                    if not faults and getattr(exc, "is_fault", False):
+                        faults = [(getattr(exc, "instrument", "") or "instrument", str(exc))]
+                    if not faults:
+                        raise
+                    stop_streams()
+                    blank_row(oidx)
+                    guard.hold(faults, where, cause=exc)
+                    redo = True
+                    continue
+                if aborted:
+                    return True
+                # the row is binned: was everything trustworthy while it flew?
+                faults = guard.faults()
+                if not faults:
                     break
-                # the first guess of the direction was wrong: back to the start
-                # of the row (at the approach speed) and fly it again
-                if state["fly_speed"]:
-                    use_speed(orig_speed)
-                current[pos_p.id] = approach(a)
-                use_speed(speed)
-            current[pos_p.id] = b
-            state["rb_end"] = _last_value(chunks, rb)   # where the stream saw it stop
-            _bin_into(chunks, rb, params, edges, lag, data, oidx)
-            if not warned["lag"]:
-                warned["lag"] = True
-                _warn_quality(chunks, rb, params, data, oidx, speed, width, log)
-            if any(c.get("overflow") for cs in chunks.values() for c in cs):
-                log("fly: a stream buffer overflowed -- samples were lost on this "
-                    "row (slow the stream or shorten the row)")
-            if aborted:
-                return True
+                blank_row(oidx)
+                guard.hold(faults, where)
+                redo = True
 
             done = (row + 1) * npix
             if on_progress:

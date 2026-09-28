@@ -285,6 +285,12 @@ class Registry:
         # validation and the engine use to find a settable or a detector, and an
         # action must never come back from it as if it were one.
         self._actions: dict[str, Action] = {}
+        #: `fault_check(ids=None) -> [Fault(name, message)]`: can the readings
+        #: of the instruments behind these parameter/action ids be trusted
+        #: right now? None = nothing to check (the simulator). build_lab_registry
+        #: sets it to the Lab's check, so the ENGINE -- which knows the ids a
+        #: scan uses but nothing about sockets -- can ask before every reading.
+        self.fault_check = None
 
     def add(self, p: Parameter) -> Parameter:
         self._params[p.id] = p

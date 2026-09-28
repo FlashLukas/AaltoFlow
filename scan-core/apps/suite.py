@@ -577,6 +577,8 @@ class Suite(QtWidgets.QMainWindow):
         # ... and the Scan tab's ranges must follow the instruments, not stay
         # as they were when we connected.
         self.builder.limits_refresher = self._refresh_limits
+        # the PAUSED banner's "Clear fault on <module>" buttons
+        self.builder.fault_lab = self.lab
         self.builder.autosave_dir = self.out_dir
         self.control.set_source(registry=self.registry, lab=self.lab, prefix=True)
         self.navigator.set_source(registry=self.registry, lab=self.lab)
