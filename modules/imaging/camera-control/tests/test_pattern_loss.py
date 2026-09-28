@@ -272,3 +272,45 @@ def test_describe_and_service_know_fault():
     assert svc._dispatch({"cmd": "clear_fault"})["ok"]
     st = svc._dispatch({"cmd": "status"})["status"]
     assert st["fault"] == "" and st["hw_error"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Lukas 2026-09-28 (follow-up): continuous focus stops during a fault, and the
+# autofocus recovery is rate-limited
+# --------------------------------------------------------------------------- #
+def test_continuous_focus_holds_z_while_faulted():
+    brain, cam, xy, z, _ = _system()
+    brain.set_continuous_focus(True)
+    cam_z = 30.0
+    z.set_z(cam_z)                             # lose the pattern by defocus
+    s = _ticks(brain, brain.cfg.pattern.lost_frames + 1)
+    assert s.fault
+    held = z.read_z()
+    _ticks(brain, 30)
+    assert z.read_z() == pytest.approx(held), "continuous focus moved Z during a fault"
+
+
+def test_a_second_loss_soon_after_a_recovery_does_not_autofocus_again():
+    """A pattern that flickers in and out must not trigger an autofocus every
+    few seconds: within recovery_min_interval_s of the last recovery a new loss
+    latches straight away."""
+    brain, cam, xy, z, events = _system(autofocus_on_loss=True)
+    af0 = brain.status().af_id
+    n = brain.cfg.pattern.lost_frames
+    z.set_z(30.0)
+    _ticks(brain, n)
+    _tick(brain)                               # the recovery autofocus
+    s = _ticks(brain, n + 2)
+    assert s.fault == "" and s.af_id == af0 + 1
+    z.set_z(30.0)                              # lost again, right away
+    s = _ticks(brain, n + 5)
+    assert s.af_id == af0 + 1, "a second recovery autofocus ran"
+    assert s.fault and "again" in s.fault, s.fault
+    # after the interval, a new loss may try again
+    brain._last_recovery_t -= brain.cfg.pattern.recovery_min_interval_s + 1
+    z.set_z(7.6)
+    s = _ticks(brain, 5)
+    brain.clear_fault()
+    z.set_z(30.0)
+    s = _ticks(brain, n)
+    assert s.af_id == af0 + 2

@@ -249,6 +249,9 @@ class Camera:
         self._fault = ""
         self._lost_count = 0          # frames in a row without the pattern
         self._recovery: dict | None = None   # a running autofocus_on_loss attempt
+        # when the last recovery autofocus started (engine thread only);
+        # -inf = never, so the first loss may always try
+        self._last_recovery_t = float("-inf")
         self._avg_buf: deque = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal: deque = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
         self._cf_dir = 1.0            # continuous-focus dither direction
@@ -545,7 +548,11 @@ class Camera:
             self._acc_log.append((dux, duy))
 
         # -- continuous focus ------------------------------------------- #
-        if st.continuous_focus_on and self.cfg.hardware.use_z and not af_pending:
+        # Not while FAULTED (Lukas 2026-09-28): the metric is then read off a
+        # scene nobody has checked, and a Z that walks away makes the user's
+        # correction harder. It resumes by itself once the fault is cleared.
+        if (st.continuous_focus_on and self.cfg.hardware.use_z and not af_pending
+                and not faulted):
             self._continuous_focus_step(gray, st)
 
         # -- motion / z read-back --------------------------------------- #
@@ -825,6 +832,16 @@ class Camera:
                 return
         kind, why = self._loss_cause(frame_hw)
         if (pat.autofocus_on_loss and kind == "focus" and self.cfg.hardware.use_z):
+            # Rate limit (Lukas 2026-09-28): a pattern that keeps flickering
+            # out must not start an autofocus every few seconds -- a second
+            # loss soon after a recovery is itself a sign something is wrong.
+            since = time.monotonic() - self._last_recovery_t
+            if since < float(pat.recovery_min_interval_s):
+                self._latch(f"{why}; lost again {since:.0f} s after the last "
+                            f"autofocus recovery (no new attempt within "
+                            f"{float(pat.recovery_min_interval_s):.0f} s)")
+                return
+            self._last_recovery_t = time.monotonic()
             with self._lock:
                 self._recovery = {"phase": "af", "why": why, "frames": 0}
                 self._fault = f"{why}; autofocus recovery running"

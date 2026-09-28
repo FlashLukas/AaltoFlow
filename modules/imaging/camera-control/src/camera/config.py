@@ -164,6 +164,10 @@ class Pattern:
     # for the pattern again at its last place. Found -> fault cleared (a warning
     # is logged); not found -> the fault latches. Off by default.
     autofocus_on_loss: bool = False
+    # ... but at most one recovery autofocus per this many seconds: a pattern
+    # lost AGAIN sooner latches the fault at once (a flickering pattern must
+    # not keep the Z walking).
+    recovery_min_interval_s: float = 300.0
 
 
 @dataclass
