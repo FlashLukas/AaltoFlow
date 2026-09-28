@@ -40,9 +40,19 @@ Live checks (--live), per module with a .venv:
   * if any parameter declares a `stream` (for fly scans), the service answers
     stream_start / stream_read / stream_stop, and the reply carries every
     declared channel with as many values as time stamps
+  * a MALFORMED request (bytes that are not JSON, then a JSON array instead of
+    an object) is ANSWERED with {"ok": false, ...}, and `describe` still
+    answers afterwards on a fresh socket. A REP socket that received a request
+    and sent nothing back refuses everything after it: one bad message would
+    take the whole command port down (docs/DEVELOPER_NOTES.md gotcha #39)
   * it answers `shutdown` and EXITS BY ITSELF within 15 s (the launcher asks
     for this before it kills a service; a killed service cannot close its
     hardware -- docs/DEVELOPER_NOTES.md gotcha #25)
+  * PORT TAKEN: with the scratch command port already occupied by another
+    socket, the service must EXIT with a non-zero code within 20 s. One that
+    keeps running is deaf (nothing can reach it) but may hold the instrument
+    and its hwlock claim -- the sockets must be bound before the instrument is
+    opened (gotcha #39)
 Exit code 0 when nothing failed (warnings do not count).
 """
 
@@ -51,6 +61,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -114,6 +125,39 @@ try:
     s.send_json({"cmd": "shutdown"}); print(json.dumps(s.recv_json()))
 except zmq.Again:
     print("null")
+"""
+
+# A malformed request, twice: raw bytes that are not JSON, then valid JSON that
+# is not an object. Each must be ANSWERED (a REP socket that received and did
+# not reply is stuck for good), with ok false. Then a FRESH socket asks
+# `describe`, to prove the command port still works. Prints one JSON line.
+_MALFORMED = r"""
+import json, sys, zmq
+ctx = zmq.Context.instance()
+def req():
+    s = ctx.socket(zmq.REQ)
+    s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 3000)
+    s.connect(f"tcp://127.0.0.1:{sys.argv[1]}")
+    return s
+out = {"replies": [], "describe_after": False}
+for payload in (b"this is not JSON {", b"[1, 2, 3]"):
+    s = req()
+    try:
+        s.send(payload); raw = s.recv()
+        try:
+            r = json.loads(raw.decode("utf-8"))
+        except Exception:
+            r = {"_unparsable": raw[:60].decode("latin-1")}
+    except zmq.Again:
+        r = None
+    out["replies"].append(r)
+    s.close(0)
+s = req()
+try:
+    s.send_json({"cmd": "describe"}); out["describe_after"] = bool(s.recv_json().get("ok"))
+except zmq.Again:
+    pass
+print(json.dumps(out))
 """
 
 
@@ -199,13 +243,16 @@ def help_text(py: Path, d: Path, script: str) -> str:
 
 
 def free_port_pair() -> tuple[int, int]:
-    """Two free ports next to each other, picked by the OS."""
+    """Two free ports next to each other, OUTSIDE the OS's ephemeral range.
+
+    Port 0 would let the OS pick -- but from the ephemeral range (49152-65535
+    on Windows), which is exactly where every outgoing connection (the checker's
+    own REQ probes, the test runs next door) takes its local port. Such a port
+    could be grabbed between our check and the service's bind; a service that
+    binds before it opens anything (gotcha #39) then rightly refuses to start,
+    and the check would blame the module. 20000-40000 is outside that range."""
     while True:
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            cmd = s.getsockname()[1]
-        if cmd >= 65535:
-            continue
+        cmd = random.randrange(20000, 40000)
         with socket.socket() as a, socket.socket() as b:
             try:
                 a.bind(("127.0.0.1", cmd)); b.bind(("127.0.0.1", cmd + 1))
@@ -248,6 +295,64 @@ def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
             else f"{len(channels)} channel(s), {len(chunks[0]['t'])} samples in 0.3 s")
 
 
+def malformed_check(rep: Report, m, py: Path, cmd: int) -> bool:
+    """A malformed request is answered, and the port keeps working.
+
+    Returns False when the command port is dead afterwards, so the caller can
+    skip the `shutdown` check instead of blaming it for this failure."""
+    r = subprocess.run([str(py), "-c", _MALFORMED, str(cmd)], capture_output=True,
+                       text=True, timeout=30)
+    try:
+        res = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        res = {"replies": [], "describe_after": False}
+    problems = []
+    for what, reply in zip(("non-JSON bytes", "a JSON array"), res.get("replies", [])):
+        if reply is None:
+            problems.append(f"{what}: no reply within 3 s")
+        elif not isinstance(reply, dict) or reply.get("ok") is not False:
+            problems.append(f"{what}: reply is not ok:false ({str(reply)[:60]})")
+    if not res.get("describe_after"):
+        problems.append("describe no longer answered afterwards")
+    rep.add(m.key, "live: malformed request answered, port survives",
+            "FAIL" if problems else "PASS", "; ".join(problems))
+    return bool(res.get("describe_after"))
+
+
+def port_taken_check(rep: Report, m, py: Path):
+    """With its command port already taken, the service must EXIT non-zero.
+
+    The blocker is a plain listening TCP socket. On Windows it needs
+    SO_EXCLUSIVEADDRUSE: without it, Windows lets the service's bind on
+    0.0.0.0 share a port that is taken on 127.0.0.1, and nothing would clash.
+    Loopback only, so no firewall prompt."""
+    cmd, pub = free_port_pair()
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    blocker.bind(("127.0.0.1", cmd))
+    blocker.listen(1)
+    proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
+                            cwd=m.dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        try:
+            out, err = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            rep.add(m.key, "live: exits non-zero when its port is taken", "FAIL",
+                    f"still running 20 s with port {cmd} taken: a deaf service")
+            return
+        # the reason is on stderr (one line, if the module does it right)
+        last = (err or "").strip().splitlines()[-1:] or (out or "").strip().splitlines()[-1:] or [""]
+        rep.add(m.key, "live: exits non-zero when its port is taken",
+                "PASS" if proc.returncode != 0 else "FAIL",
+                f"exit {proc.returncode}: {last[0][:100]}")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(10)
+        blocker.close()
+
+
 def live_check(rep: Report, m, py: Path):
     cmd, pub = free_port_pair()
     proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
@@ -279,6 +384,10 @@ def live_check(rep: Report, m, py: Path):
         n = len(manifest.get("parameters", []))
         rep.add(m.key, "live: describe has parameters", "PASS" if n else "FAIL", f"{n}")
         stream_check(rep, m, py, cmd, manifest)
+        if not malformed_check(rep, m, py, cmd):
+            rep.add(m.key, "live: stops cleanly on `shutdown`", "SKIP",
+                    "command port dead after the malformed request")
+            return
 
         r = subprocess.run([str(py), "-c", _SHUTDOWN, str(cmd)], capture_output=True,
                            text=True, timeout=30)
@@ -385,6 +494,7 @@ def main(argv=None) -> int:
                     "FAIL" if miss else "PASS", "missing " + ", ".join(miss) if miss else "")
         if args.live:
             live_check(rep, m, py)
+            port_taken_check(rep, m, py)
 
     rep.print()
     n_fail = len(rep.failed)

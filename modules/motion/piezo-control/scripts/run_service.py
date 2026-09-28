@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from piezo.config import Config, load_config  # noqa: E402
 from piezo.hwlock import HardwareBusy  # noqa: E402
 from piezo.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
-from piezo.net.service import PiezoService  # noqa: E402
+from piezo.net.service import PiezoService, PortInUse  # noqa: E402
 from piezo.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -51,6 +51,13 @@ def main() -> int:
     print("Ctrl-C to stop.")
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"piezo service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (a second piezo, or any module pointed at the same
         # COM port) already holds the d-Drive.  We never opened the port, so

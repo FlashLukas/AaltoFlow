@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ddr25.config import Config, load_config  # noqa: E402
 from ddr25.hwlock import HardwareBusy  # noqa: E402
 from ddr25.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
-from ddr25.net.service import Ddr25Service  # noqa: E402
+from ddr25.net.service import Ddr25Service, PortInUse  # noqa: E402
 from ddr25.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -52,6 +52,13 @@ def main() -> int:
     print("Ctrl-C to stop.")
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"ddr25 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives this K-Cube (same Kinesis serial,
         # hwlock.py). Say so in ONE line -- the launcher shows it in its

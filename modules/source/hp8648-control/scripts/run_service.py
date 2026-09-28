@@ -29,7 +29,7 @@ from hp8648.config import Config
 from hp8648.hwlock import HardwareBusy
 from hp8648.source import SignalSource
 from hp8648.sim_system import build_sim_system
-from hp8648.net.service import Hp8648Service
+from hp8648.net.service import Hp8648Service, PortInUse
 from hp8648.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -65,6 +65,13 @@ def main() -> int:
     service = Hp8648Service(src, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"hp8648 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (a second hp8648, or any module pointed at this GPIB
         # address) already drives the generator. We never opened it, so there

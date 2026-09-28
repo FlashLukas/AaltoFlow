@@ -32,7 +32,7 @@ if os.path.isdir(_SRC):
 from kepco.config import Config
 from kepco.supply import BipolarSupply
 from kepco.sim_system import build_sim_system
-from kepco.net.service import KepcoService
+from kepco.net.service import KepcoService, PortInUse
 from kepco.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from kepco.hwlock import HardwareBusy
 
@@ -83,6 +83,13 @@ def main() -> int:
     # switching its output off would wreck that service's run.
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"kepco service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as e:
         print(f"kepco: cannot start: {e}", file=sys.stderr)
         return EXIT_HARDWARE_BUSY

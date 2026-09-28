@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from elliptec.config import Config, load_config  # noqa: E402
 from elliptec.hwlock import HardwareBusy  # noqa: E402
 from elliptec.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
-from elliptec.net.service import ElliptecService  # noqa: E402
+from elliptec.net.service import ElliptecService, PortInUse  # noqa: E402
 from elliptec.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -58,6 +58,13 @@ def main() -> int:
     print(f"mounts on bus addresses: {cfg.axes.addresses}.  Ctrl-C to stop.")
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"elliptec service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (this module or any other pointed at the same
         # ELL14K board) already holds the COM port. One plain line, no

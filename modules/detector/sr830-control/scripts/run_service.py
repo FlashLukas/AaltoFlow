@@ -30,7 +30,7 @@ from sr830.config import Config
 from sr830.hwlock import HardwareBusy
 from sr830.lockin import DspLockIn
 from sr830.sim_system import build_sim_system
-from sr830.net.service import Sr830Service
+from sr830.net.service import Sr830Service, PortInUse
 from sr830.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -71,6 +71,13 @@ def main() -> int:
     try:
         Sr830Service(lockin, host=args.host, cmd_port=args.cmd_port,
                      pub_port=args.pub_port).serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"sr830 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives this GPIB address (hwlock). Say so in
         # ONE line -- the launcher shows it in its log -- and exit non-zero.

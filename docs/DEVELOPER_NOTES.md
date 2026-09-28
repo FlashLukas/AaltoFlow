@@ -601,6 +601,28 @@ zpiezo has no GUI.
     `px_calibration.json` and clMag `Calibrations\` byte-identical afterwards,
     old `.venv`s removed, 35 modules discovered, no problems.
 
+39. **A service must bind its ports before it opens the instrument, and must
+    answer EVERY request** (2026-09-28, deep cleaning; fixed in all 35 modules).
+    Two bugs copied from the templates into the modules' `net/service.py`:
+    (a) *Port taken -> deaf service* (33 of 35 modules). The PUB and REP
+    sockets were bound inside the two daemon threads. When a port was already in use (a second copy, an
+    orphan -- gotcha #7) only that THREAD died, with a traceback nobody reads;
+    the process lived on, holding the instrument and its hwlock claim (#37) and
+    answering nothing. (b) *One malformed request kills the command port*
+    (the 9 modules built from the camera/kim template). Their REP loop did
+    `try: recv_json() except: continue`. A REP socket that has received MUST send before it can receive
+    again, so skipping without a reply left it stuck: one non-JSON message and
+    the service never answered anyone again. **Rules:** `start()` binds BOTH
+    sockets in the calling thread first and raises `PortInUse` (a
+    RuntimeError) before the brain is started -- `run_service.py` prints one
+    line on stderr and exits 2; if the brain then fails to start, close both
+    sockets before re-raising. The commander `recv()`s raw bytes, parses and
+    dispatches inside one try, serialises the reply BEFORE sending (an
+    unencodable reply gets an error reply instead), and always sends
+    something. `tools/check_modules.py --live` tests both on every module:
+    "exits non-zero when its port is taken" and "malformed request answered,
+    port survives".
+
 ---
 
 ## 9. Verifying work (you can now run everything locally)

@@ -141,15 +141,31 @@ class ZPiezoService:
             while not self._stop.is_set():
                 if dict(poller.poll(200)):
                     try:
-                        req = sock.recv_json()
+                        raw = sock.recv()
                     except Exception:
                         continue
+                    # A REP socket that has received MUST send before it can
+                    # receive again. A request that was not JSON used to be
+                    # skipped with `continue` and no reply: the socket then
+                    # refused every later recv, and this loop never answered
+                    # anyone again -- one bad message took the whole command
+                    # port down (gotcha #39). Now it gets an error reply like
+                    # any other failed command.
                     try:
-                        reply = self._dispatch(req)
+                        req = _json_mod.loads(raw.decode("utf-8"))
+                        reply = self._dispatch(req) if isinstance(req, dict) else \
+                            {"ok": False, "error": "request must be a JSON object"}
                     except Exception as exc:
                         reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    # Serialise BEFORE sending, for the same reason: a reply
+                    # json cannot encode (a numpy number, say) must still be
+                    # answered, or the socket is stuck again.
                     try:
-                        sock.send_json(reply)
+                        data = _json(reply)
+                    except Exception as exc:
+                        data = _json({"ok": False, "error": f"reply not JSON-encodable: {exc}"})
+                    try:
+                        sock.send(data)
                     except Exception:
                         pass
         finally:

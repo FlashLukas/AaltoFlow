@@ -28,7 +28,7 @@ from pm16.config import Config
 from pm16.hwlock import HardwareBusy
 from pm16.meter import PowerMeter
 from pm16.sim_system import build_sim_system
-from pm16.net.service import Pm16Service
+from pm16.net.service import Pm16Service, PortInUse
 from pm16.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -67,6 +67,13 @@ def main() -> int:
                           pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"pm16 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (another pm16, or any module pointed at this meter)
         # already holds its USB address. We never opened the meter, so there

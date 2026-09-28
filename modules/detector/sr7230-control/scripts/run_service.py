@@ -30,7 +30,7 @@ if os.path.isdir(_SRC):
 from sr7230.config import Config
 from sr7230.lockin import LockIn
 from sr7230.sim_system import build_sim_system
-from sr7230.net.service import Sr7230Service
+from sr7230.net.service import Sr7230Service, PortInUse
 from sr7230.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from sr7230.hwlock import HardwareBusy
 
@@ -83,6 +83,13 @@ def main() -> int:
     try:
         Sr7230Service(lockin, host=args.host, cmd_port=args.cmd_port,
                       pub_port=args.pub_port).serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"sr7230 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives this 7230 (same IP address). The
         # backend refused BEFORE connecting, so there is nothing to close or

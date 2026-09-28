@@ -14,6 +14,7 @@ raised on the command thread reach the publisher thread cleanly.
 
 from __future__ import annotations
 
+import json as _json_mod
 import queue
 import threading
 import time
@@ -24,6 +25,13 @@ from ..config import WRAP_POLICIES
 from ..rotator import Rotator
 from .describe import build_manifest
 from . import protocol as P
+
+
+class PortInUse(RuntimeError):
+    """A command or status port is already taken (a second copy of this
+    service, or an orphan still holding it -- gotcha #7). Raised by start()
+    BEFORE the instrument is opened, so there is nothing to close; the
+    run_service script turns it into one line on stderr and exit code 2."""
 
 
 class Ddr25Service:
@@ -50,11 +58,39 @@ class Ddr25Service:
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
+        # Bind BOTH sockets here, in the caller's thread, and BEFORE the
+        # instrument is opened (gotcha #39). They used to be bound inside the
+        # two daemon threads: a port already in use then killed only that
+        # thread, with a traceback nobody reads, while the process lived on --
+        # deaf, but holding the instrument and its hwlock claim. Now a taken
+        # port raises PortInUse out of start(), before anything was opened or
+        # claimed. (Handing a socket to the thread that will use it is allowed
+        # in ZeroMQ; Thread.start() is the memory barrier it asks for.)
+        cmd_addr = f"tcp://{self.host}:{self.cmd_port}"
+        pub_addr = f"tcp://{self.host}:{self.pub_port}"
+        self._pub_sock = self._ctx.socket(zmq.PUB)
+        self._rep_sock = self._ctx.socket(zmq.REP)
+        try:
+            self._pub_sock.bind(pub_addr)
+            self._rep_sock.bind(cmd_addr)
+        except zmq.ZMQError as exc:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise PortInUse(
+                f"cannot listen on {cmd_addr} / {pub_addr} ({exc}); "
+                f"is another service already using these ports?") from exc
         # Route brain events into our queue (they get PUBlished as b"event").
         self.brain._on_event = lambda level, msg: self._events.put(
             {"level": level, "msg": msg}
         )
-        self.brain.start()
+        try:
+            self.brain.start()
+        except BaseException:
+            # the instrument did not start (busy, unplugged, ...):
+            # give the ports back before the exception leaves
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
 
         self._stop.clear()
         self._threads = [
@@ -113,8 +149,7 @@ class Ddr25Service:
         return self._rev
 
     def _publisher(self) -> None:
-        sock = self._ctx.socket(zmq.PUB)
-        sock.bind(f"tcp://{self.host}:{self.pub_port}")
+        sock = self._pub_sock                # bound in start()
         period = 1.0 / self.status_hz
         next_status = time.monotonic()
         try:
@@ -145,23 +180,38 @@ class Ddr25Service:
     # commander thread
     # ------------------------------------------------------------------ #
     def _commander(self) -> None:
-        sock = self._ctx.socket(zmq.REP)
-        sock.bind(f"tcp://{self.host}:{self.cmd_port}")
+        sock = self._rep_sock                # bound in start()
         poller = zmq.Poller()
         poller.register(sock, zmq.POLLIN)
         try:
             while not self._stop.is_set():
                 if dict(poller.poll(200)):
                     try:
-                        req = sock.recv_json()
+                        raw = sock.recv()
                     except Exception:
                         continue
+                    # A REP socket that has received MUST send before it can
+                    # receive again. A request that was not JSON used to be
+                    # skipped with `continue` and no reply: the socket then
+                    # refused every later recv, and this loop never answered
+                    # anyone again -- one bad message took the whole command
+                    # port down (gotcha #39). Now it gets an error reply like
+                    # any other failed command.
                     try:
-                        reply = self._dispatch(req)
+                        req = _json_mod.loads(raw.decode("utf-8"))
+                        reply = self._dispatch(req) if isinstance(req, dict) else \
+                            {"ok": False, "error": "request must be a JSON object"}
                     except Exception as exc:  # never die on a bad command
                         reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    # Serialise BEFORE sending, for the same reason: a reply
+                    # json cannot encode (a numpy number, say) must still be
+                    # answered, or the socket is stuck again.
                     try:
-                        sock.send_json(reply)
+                        data = _json(reply)
+                    except Exception as exc:
+                        data = _json({"ok": False, "error": f"reply not JSON-encodable: {exc}"})
+                    try:
+                        sock.send(data)
                     except Exception:
                         pass
         finally:

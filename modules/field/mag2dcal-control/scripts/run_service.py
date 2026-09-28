@@ -31,8 +31,9 @@ before touching it. If another service (mag2d-control, or a second mag2dcal)
 already holds it, it prints who and exits with code 4, having sent nothing.
 
 WATER CHECK AT START: if the cooling water is off and the interlock is not
-bypassed, the service prints why and exits with code 3 -- before it opens a
-socket, so nothing can command a magnet that must not run.
+bypassed, the service prints why and exits with code 3 -- its sockets are
+closed again before it answers anything, so nothing can command a magnet that
+must not run.
 
 Stop it with Ctrl+C, the launcher, or the `shutdown` command: all three ramp the
 output to 0 V at the slew rate and release the enable line. A hard kill cannot
@@ -54,7 +55,7 @@ from mag2dcal.config import Config
 from mag2dcal.controller import Controller, WaterInterlockError
 from mag2dcal.hwlock import HardwareBusy
 from mag2dcal.sim_system import build_sim_system
-from mag2dcal.net.service import Mag2dcalService
+from mag2dcal.net.service import Mag2dcalService, PortInUse
 from mag2dcal.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -124,11 +125,18 @@ def main() -> int:
         print("mag2dcal: NOT STARTED -- cooling water interlock.")
         print(f"  {exc}")
         return EXIT_WATER
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"mag2dcal service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (typically mag2d-control, which drives the SAME coils
         # through the same card) already holds the DAQ device. The backend
         # raised before creating any DAQmx task, the controller never marked
-        # itself open, and no socket was bound -- so nothing sends a "safe
+        # itself open, and the sockets were closed again -- so nothing sends a "safe
         # state" to a magnet that the OTHER service is driving. One line, no
         # traceback, a non-zero exit the launcher shows as a failed start.
         print(f"mag2dcal: NOT STARTED -- {exc}", file=sys.stderr)

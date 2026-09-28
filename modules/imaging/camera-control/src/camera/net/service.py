@@ -27,6 +27,13 @@ from ..camera import Camera, status_to_dict
 from . import protocol as P
 
 
+class PortInUse(RuntimeError):
+    """A command or status port is already taken (a second copy of this
+    service, or an orphan still holding it -- gotcha #7). Raised by start()
+    BEFORE the instrument is opened, so there is nothing to close; the
+    run_service script turns it into one line on stderr and exit code 2."""
+
+
 class CameraService:
     def __init__(
         self,
@@ -51,10 +58,38 @@ class CameraService:
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
+        # Bind BOTH sockets here, in the caller's thread, and BEFORE the
+        # instrument is opened (gotcha #39). They used to be bound inside the
+        # two daemon threads: a port already in use then killed only that
+        # thread, with a traceback nobody reads, while the process lived on --
+        # deaf, but holding the instrument and its hwlock claim. Now a taken
+        # port raises PortInUse out of start(), before anything was opened or
+        # claimed. (Handing a socket to the thread that will use it is allowed
+        # in ZeroMQ; Thread.start() is the memory barrier it asks for.)
+        cmd_addr = f"tcp://{self.host}:{self.cmd_port}"
+        pub_addr = f"tcp://{self.host}:{self.pub_port}"
+        self._pub_sock = self._ctx.socket(zmq.PUB)
+        self._rep_sock = self._ctx.socket(zmq.REP)
+        try:
+            self._pub_sock.bind(pub_addr)
+            self._rep_sock.bind(cmd_addr)
+        except zmq.ZMQError as exc:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise PortInUse(
+                f"cannot listen on {cmd_addr} / {pub_addr} ({exc}); "
+                f"is another service already using these ports?") from exc
         self.brain._on_event = lambda level, msg: self._events.put(
             {"level": level, "msg": msg}
         )
-        self.brain.start()
+        try:
+            self.brain.start()
+        except BaseException:
+            # the instrument did not start (busy, unplugged, ...):
+            # give the ports back before the exception leaves
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
         self._stop.clear()
         self._threads = [
             threading.Thread(target=self._publisher, name="camera-pub", daemon=True),
@@ -109,8 +144,7 @@ class CameraService:
         return self._rev
 
     def _publisher(self) -> None:
-        sock = self._ctx.socket(zmq.PUB)
-        sock.bind(f"tcp://{self.host}:{self.pub_port}")
+        sock = self._pub_sock                # bound in start()
         period = 1.0 / self.status_hz
         next_status = time.monotonic()
         try:
@@ -135,8 +169,7 @@ class CameraService:
 
     # ------------------------------------------------------------------ #
     def _commander(self) -> None:
-        sock = self._ctx.socket(zmq.REP)
-        sock.bind(f"tcp://{self.host}:{self.cmd_port}")
+        sock = self._rep_sock                # bound in start()
         poller = zmq.Poller()
         poller.register(sock, zmq.POLLIN)
         try:

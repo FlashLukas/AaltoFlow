@@ -27,7 +27,7 @@ if os.path.isdir(_SRC):
 from k2450.config import Config
 from k2450.smu import SourceMeter
 from k2450.sim_system import build_sim_system
-from k2450.net.service import K2450Service
+from k2450.net.service import K2450Service, PortInUse
 from k2450.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from k2450.hwlock import HardwareBusy
 
@@ -66,6 +66,13 @@ def main() -> int:
     service = K2450Service(smu, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"k2450 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (another k2450, or any module pointed at this VISA
         # address) already drives this 2450. We never opened it, so there is

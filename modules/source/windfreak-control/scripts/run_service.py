@@ -29,7 +29,7 @@ from windfreak.config import Config
 from windfreak.hwlock import HardwareBusy
 from windfreak.synthesizer import Synthesizer
 from windfreak.sim_system import build_sim_system
-from windfreak.net.service import WindfreakService
+from windfreak.net.service import WindfreakService, PortInUse
 from windfreak.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -70,6 +70,13 @@ def main() -> int:
                                pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"windfreak service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives this COM port (hwlock). Say so in ONE
         # line -- the launcher shows it in its log -- and exit non-zero.

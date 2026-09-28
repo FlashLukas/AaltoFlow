@@ -29,6 +29,13 @@ from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        apply_config_dict)
 
 
+class PortInUse(RuntimeError):
+    """A command or status port is already taken (a second copy of this
+    service, or an orphan still holding it -- gotcha #7). Raised by start()
+    BEFORE the instrument is opened, so there is nothing to close; the
+    run_service script turns it into one line on stderr and exit code 2."""
+
+
 class DsampService:
     def __init__(self, amp: Amplifier,
                  host: str = "0.0.0.0",
@@ -48,9 +55,35 @@ class DsampService:
     # -------------------------------------------------------------- lifecycle
 
     def start(self) -> None:
+        # Bind BOTH sockets here, in the caller's thread, and BEFORE the
+        # instrument is opened (gotcha #39). They used to be bound inside the
+        # two daemon threads: a port already in use then killed only that
+        # thread, with a traceback nobody reads, while the process lived on --
+        # deaf, but holding the instrument and its hwlock claim. Now a taken
+        # port raises PortInUse out of start(), before anything was opened or
+        # claimed. (Handing a socket to the thread that will use it is allowed
+        # in ZeroMQ; Thread.start() is the memory barrier it asks for.)
+        self._pub_sock = self._ctx.socket(zmq.PUB)
+        self._rep_sock = self._ctx.socket(zmq.REP)
+        try:
+            self._pub_sock.bind(self.pub_addr)
+            self._rep_sock.bind(self.cmd_addr)
+        except zmq.ZMQError as exc:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise PortInUse(
+                f"cannot listen on {self.cmd_addr} / {self.pub_addr} ({exc}); "
+                f"is another service already using these ports?") from exc
         # route brain events into the publisher queue
         self.amp._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
-        self.amp.start()
+        try:
+            self.amp.start()
+        except BaseException:
+            # the instrument did not start (busy, unplugged, ...):
+            # give the ports back before the exception leaves
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
         self._pub_t = threading.Thread(target=self._publisher, name="svc-pub", daemon=True)
         self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
         self._pub_t.start()
@@ -99,8 +132,7 @@ class DsampService:
         return self._rev
 
     def _publisher(self) -> None:
-        pub = self._ctx.socket(zmq.PUB)
-        pub.bind(self.pub_addr)
+        pub = self._pub_sock                 # bound in start()
         last = 0.0
         pub_err = ""
         while not self._stop.is_set():
@@ -132,8 +164,7 @@ class DsampService:
         pub.close(0)
 
     def _commander(self) -> None:
-        rep = self._ctx.socket(zmq.REP)
-        rep.bind(self.cmd_addr)
+        rep = self._rep_sock                 # bound in start()
         poller = zmq.Poller()
         poller.register(rep, zmq.POLLIN)
         while not self._stop.is_set():

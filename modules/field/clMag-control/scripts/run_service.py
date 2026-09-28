@@ -22,7 +22,7 @@ if os.path.isdir(_SRC):
 
 from clMag.config import Config
 from clMag.sim_system import build_sim_system
-from clMag.net.service import ClMagService
+from clMag.net.service import ClMagService, PortInUse
 from clMag.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from clMag.hwlock import HardwareBusy
 
@@ -65,6 +65,13 @@ def main() -> int:
         ctrl, *_ = build_sim_system(cfg)
         service = ClMagService(ctrl, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"clMag service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as e:
         print(f"clMag: cannot start: {e}", file=sys.stderr)
         return EXIT_HARDWARE_BUSY

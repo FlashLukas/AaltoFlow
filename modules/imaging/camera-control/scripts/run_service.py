@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from camera.config import Config, load_config  # noqa: E402
 from camera.hwlock import HardwareBusy         # noqa: E402
 from camera.net import protocol as P           # noqa: E402
-from camera.net.service import CameraService   # noqa: E402
+from camera.net.service import CameraService, PortInUse   # noqa: E402
 
 # Exit code 4 = "this instrument is already in use by another service"
 # (hwlock.py). The SAME number in every AaltoFlow module, so the launcher or a
@@ -101,6 +101,13 @@ def main() -> int:
     print("  Ctrl-C to stop.")
     try:
         svc.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"camera service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (another camera service, or zpiezo on the same KCube)
         # already holds the camera or the KCube. We never opened it, so there

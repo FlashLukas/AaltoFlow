@@ -62,3 +62,7 @@ CLAUDE.local.md
 # and the report tools/deploy_lab.ps1 writes after a deploy.
 /dist/
 /deploy_report.txt
+
+# Slide decks: kept in OneDrive for now, not in git (Lukas, 2026-09-28).
+# Delete this line to start tracking them.
+/docs/presentations/

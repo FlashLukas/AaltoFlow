@@ -33,7 +33,7 @@ from pathlib import Path
 
 from ccs200.config import Config
 from ccs200.hwlock import HardwareBusy
-from ccs200.net.service import Ccs200Service
+from ccs200.net.service import Ccs200Service, PortInUse
 from ccs200.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -87,6 +87,13 @@ def main() -> int:
     try:
         Ccs200Service(spec, host=args.host, cmd_port=args.cmd_port,
                       pub_port=args.pub_port).serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"ccs200 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (this module or any other pointed at the same
         # spectrometer) already holds it. One plain line, no traceback: the

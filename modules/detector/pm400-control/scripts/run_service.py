@@ -27,7 +27,7 @@ if os.path.isdir(_SRC):
 from pm400.config import Config
 from pm400.meter import Pm400Meter
 from pm400.sim_system import build_sim_system
-from pm400.net.service import Pm400Service
+from pm400.net.service import Pm400Service, PortInUse
 from pm400.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from pm400.hwlock import HardwareBusy
 
@@ -67,6 +67,13 @@ def main() -> int:
     try:
         Pm400Service(meter, host=args.host, cmd_port=args.cmd_port,
                     pub_port=args.pub_port).serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"pm400 service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another AaltoFlow service already drives this console (suite rule:
         # one physical instrument, one service). This is an expected situation,

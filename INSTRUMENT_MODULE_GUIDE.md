@@ -252,12 +252,22 @@ remember the launcher can override both per PC.
 ### Service structure (`service.py`)
 
 `<Inst>Service(brain, host, cmd_port, pub_port, status_hz)`. On `start()` it
-routes `brain._on_event` into an event queue, calls `brain.start()`, and spawns
-two daemon threads: **publisher** (owns the PUB socket — one socket per thread —
-sends status every `1/status_hz` and drains the event queue) and **commander**
-(owns the REP socket, `poller.poll(200)`, `recv_json` → `_dispatch` → `send_json`;
-wrap in try/except so the loop never dies). `_dispatch` is a big `if cmd == ...`
-that calls brain methods and returns `{"ok":true}`.
+**first binds both sockets** (PUB and REP, in the calling thread) and raises
+`PortInUse` (a `RuntimeError`) if a port is taken -- BEFORE the instrument is
+opened, so a clash never leaves a deaf process holding the hardware;
+`run_service.py` turns it into one line on stderr and exit code 2. Then it
+routes `brain._on_event` into an event queue, calls `brain.start()` (closing
+both sockets again if that raises), and spawns two daemon threads, each handed
+its already-bound socket: **publisher** (owns the PUB socket — one socket per
+thread — sends status every `1/status_hz` and drains the event queue) and
+**commander** (owns the REP socket, `poller.poll(200)`, `recv` → parse JSON →
+`_dispatch` → serialise → `send`). **Every request received gets a reply**, also
+one that is not JSON or not an object (`{"ok": false, "error": ...}`), and the
+reply is serialised before sending so an unencodable one is answered with an
+error too: a REP socket that received and did not answer refuses everything
+after. `_dispatch` is a big `if cmd == ...` that calls brain methods and returns
+`{"ok":true}`. Both rules are docs/DEVELOPER_NOTES.md gotcha #39, and
+`tools/check_modules.py --live` tests them on every module.
 
 ### Client facade (`client.py`)
 

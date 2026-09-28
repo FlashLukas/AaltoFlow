@@ -13,8 +13,9 @@ ADOPT AT START: the service reads the magnet (enable line, drive, field) and
 takes it over as it is -- it does not switch the output on or off by itself.
 
 WATER CHECK AT START: if the cooling water is off and the interlock is not
-bypassed, the service prints why and exits with code 3 -- before it opens a
-socket, so nothing can command a magnet that must not run.
+bypassed, the service prints why and exits with code 3 -- its sockets are
+closed again before it answers anything, so nothing can command a magnet that
+must not run.
 
 ONE CARD, ONE SERVICE: with --real the service claims the DAQ device (Dev1)
 before it opens anything. If mag2d or mag2dcal already holds it, the service
@@ -38,7 +39,7 @@ if os.path.isdir(_SRC):
 from mag2d.config import Config
 from mag2d.controller import Controller, WaterInterlockError
 from mag2d.sim_system import build_sim_system
-from mag2d.net.service import Mag2dService
+from mag2d.net.service import Mag2dService, PortInUse
 from mag2d.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from mag2d.hwlock import HardwareBusy
 
@@ -87,6 +88,13 @@ def main() -> int:
         print("mag2d: NOT STARTED -- cooling water interlock.")
         print(f"  {exc}")
         return EXIT_WATER
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"mag2d service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # ONE line on stderr, no traceback: the reader needs the address and
         # the holder, e.g. "DEV1 is already in use by mag2dcal (pid 1234) ...".

@@ -28,7 +28,7 @@ from chopper.config import Config
 from chopper.hwlock import HardwareBusy
 from chopper.chopper import Chopper
 from chopper.sim_system import build_sim_system
-from chopper.net.service import ChopperService
+from chopper.net.service import ChopperService, PortInUse
 from chopper.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -67,6 +67,13 @@ def main() -> int:
     service = ChopperService(ch, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"chopper service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives this chopper (same COM port). One
         # clear line, no traceback, non-zero exit. We never opened the port,

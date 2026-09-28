@@ -32,7 +32,7 @@ from dsamp.amplifier import Amplifier
 from dsamp.config import Config
 from dsamp.hwlock import HardwareBusy
 from dsamp.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
-from dsamp.net.service import DsampService
+from dsamp.net.service import DsampService, PortInUse
 from dsamp.sim_system import build_sim_system
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -71,6 +71,13 @@ def main() -> int:
     service = DsampService(amp, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"dsamp service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (another dsamp, or any module pointed at this COM
         # port) already holds the amplifier. We never opened it, so there is

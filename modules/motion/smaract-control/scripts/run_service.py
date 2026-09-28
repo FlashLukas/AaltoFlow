@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from smaract.config import Config, load_config  # noqa: E402
 from smaract.hwlock import HardwareBusy  # noqa: E402
 from smaract.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
-from smaract.net.service import SmaractService  # noqa: E402
+from smaract.net.service import SmaractService, PortInUse  # noqa: E402
 from smaract.sim_system import build_real_system, build_sim_system  # noqa: E402
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -57,6 +57,13 @@ def main() -> int:
     print("Ctrl-C to stop.")
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"smaract service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service (a second smaract, or anything else pointed at this
         # SCU) already holds it. We never got the controller, so there is

@@ -31,7 +31,7 @@ if os.path.isdir(_SRC):
 from ppms.config import Config
 from ppms.cryostat import Cryostat
 from ppms.sim_system import build_sim_system
-from ppms.net.service import PpmsService
+from ppms.net.service import PpmsService, PortInUse
 from ppms.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 from ppms.hwlock import HardwareBusy
 
@@ -80,6 +80,13 @@ def main() -> int:
     service = PpmsService(cryo, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:
         service.serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"ppms service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives this DynaCool (hwlock.py). The claim
         # is taken before anything is sent to MultiVu, so there is nothing of

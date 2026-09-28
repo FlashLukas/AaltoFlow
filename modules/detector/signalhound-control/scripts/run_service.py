@@ -42,7 +42,7 @@ if os.path.isdir(_SRC):
 from pathlib import Path
 
 from signalhound.config import Config
-from signalhound.net.service import SignalhoundService
+from signalhound.net.service import SignalhoundService, PortInUse
 from signalhound.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 
 # Exit code 4 = "this instrument is already in use by another service"
@@ -105,6 +105,13 @@ def main() -> int:
     try:
         SignalhoundService(signalhound, host=args.host, cmd_port=args.cmd_port,
                            pub_port=args.pub_port).serve_forever()
+    except PortInUse as exc:
+        # The command or status port is taken (a second copy, or an orphan --
+        # gotcha #7). Nothing was opened: the sockets are bound BEFORE the
+        # instrument. One line in the launcher log and a non-zero exit, instead
+        # of a deaf service that holds the instrument (gotcha #39).
+        print(f"signalhound service: cannot start: {exc}", file=sys.stderr)
+        return 2
     except HardwareBusy as exc:
         # Another service already drives THIS analyser (same serial number).
         # One clean line naming the holder, no traceback. Nothing to shut
