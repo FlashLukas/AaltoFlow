@@ -31,6 +31,7 @@ def build_sim_system(cfg: Config | None = None):
                     pixel_size_x_um=cfg.image.pixel_size_x_um,
                     pixel_size_y_um=cfg.image.pixel_size_y_um,
                     spot_model="coherent" if coherent else "gaussian",
+                    bit_depth=int(cfg.camera.sim_bit_depth),
                     **({"noise": 1.5} if coherent else {}))
     brain = Camera(cam, xy, z, cfg)
     return brain, cam, xy, z

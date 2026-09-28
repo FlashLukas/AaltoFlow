@@ -356,6 +356,36 @@ def build_manifest(brain) -> dict:
                 "there. Tracking and the stabiliser pause while it runs."),
         _p("af_id", "Autofocus #", "indicator", "int", group="Focus", order=23,
            read_path=["af_id"]),
+        _p("af_hint", "Autofocus warning", "indicator", "string", group="Focus", order=24,
+           read_path=["af_hint"],
+           help="Empty when fine. Set when spot_area is the metric and the spot is NOT "
+                "saturated: its thresholded area is then largest at focus -- use "
+                "spot_d4sigma."),
+        # Z STEP CALIBRATION (2026-09-28): the camera measures how far the
+        # open-loop Z really moves up vs down per counter step, and writes the
+        # two step sizes into the Z stage (kim). Numbered and waitable like
+        # the autofocus; a refused run (poor fit, minimum not bracketed)
+        # raises in a scan routine through the check.
+        _p("calibrate_z_steps", "Calibrate Z steps", "action", "action", group="Focus",
+           order=102,
+           wait={"target_key": "zcal_id",
+                 "ready": {"policy": "adopt_then_flag", "setpoint_key": "zcal_id",
+                           "flag_key": "zcal_running", "invert": True},
+                 "check": {"key": "zcal_state", "equals": "OK"},
+                 "timeout_s": float(brain.cfg.autofocus.scan_timeout_s)},
+           help="Needs a calibrated spot, roughly in focus, and the kim Z. Walks Z up "
+                "and down through focus measuring sigma^2 (D4sigma); the ratio of the "
+                "two parabolas' curvatures is (step up / step down)^2. Writes both "
+                "step sizes to kim (geometric mean kept). Refuses rather than guess."),
+        _p("zcal_ratio", "Z step ratio up/down", "indicator", "float", group="Focus",
+           order=25, decimals=4, read_path=["zcal_ratio"],
+           help="Result of the last Z step calibration (NaN before one / when refused)."),
+        _p("zcal_state", "Z calibration state", "indicator", "string", group="Focus",
+           order=26, read_path=["zcal_state"]),
+        _p("spot_bit_depth", "Spot size bit depth", "indicator", "int", group="Spot",
+           order=68, read_path=["spot_bit_depth"],
+           help="8, or the camera's full depth (e.g. 12) when it delivers one: the "
+                "spot sizes are then measured on that frame (far wings not rounded away)."),
         _p("kill_af", "Kill autofocus", "action", "action", group="Focus",
            order=101, danger=True),
         # Saved NEXT TO the measurement when run as a scan routine: scan-core

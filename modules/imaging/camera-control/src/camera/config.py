@@ -56,6 +56,8 @@ SIZE_METHODS = ("threshold", "relative", "d4sigma")
 CLIP_MODES = ("local", "pixel")
 # The simulator's laser spot (Camera.sim_spot_model).
 SIM_SPOTS = ("gaussian", "coherent")
+# Pixel depths the simulated camera can deliver (Camera.sim_bit_depth).
+SIM_BIT_DEPTHS = (8, 10, 12, 16)
 # XY position / jog unit on a stage that counts steps (Hardware.xy_unit).
 XY_UNITS = ("steps", "um")
 
@@ -83,6 +85,10 @@ class Camera:
     # and a central hole through focus, power conserved (backends/sim.py
     # CoherentSpot) -- to try the threshold-free spot sizes without the rig.
     sim_spot_model: str = "gaussian"
+    # SIMULATOR only: 8 = the old 8-bit frames; 12 = the simulated camera also
+    # delivers a 12-bit copy of every frame (like the lab camera in Mono12),
+    # which the spot SIZE metrics then use -- see backends/sim.py.
+    sim_bit_depth: int = 8
 
 
 @dataclass
@@ -222,7 +228,11 @@ class Pattern:
 class Autofocus:
     """Focus sweep + continuous focus (LabVIEW 'AutoFocus settings')."""
 
-    mechanism: str = "spot_area"       # spot_area | edges | fft
+    # spot_area | edges | fft | spot_d4sigma | spot_relative. NB spot_area is
+    # MINIMISED, which assumes a SATURATED spot (its thresholded area only
+    # grows with defocus); an unsaturated spot's area is largest at focus --
+    # the brain warns (af_hint), use spot_d4sigma for such a spot.
+    mechanism: str = "spot_area"
     focus_from_safety_area: bool = False  # score the safety box, not full frame
     drive_amplitude_v: float = 6.0     # peak-to-peak Z sweep, volts
     steps: int = 21                    # focus levels per sweep
@@ -259,10 +269,44 @@ class Autofocus:
     max_travel_v: float = 40.0         # coarse search: max distance from the start
     rise_fraction: float = 0.10        # "worse" = worse than the best by this fraction
     rise_levels: int = 2               # ...for this many levels in a row -> stop
-    park_tolerance: float = 0.10       # park where metric is within this of the best
+    # Park where the metric is within this FRACTION of the fine walk's best.
+    # One number does not suit every metric (rig test 2026-09-28): an area or
+    # an edge score changes ~linearly near focus, but sigma^2 is a PARABOLA --
+    # flat at the bottom -- so 10 % of sigma^2 is already |dz| ~0.3 Rayleigh
+    # ranges from focus, and the park stopped that early on the approach side.
+    # So: park_tolerance is the value for spot_area / edges / fft (and the
+    # fallback); the two threshold-free sizes have their own, 0.04 from the
+    # rig (14/15 parks within ~0.2 focal depth, std < 1 %). Set one of them to
+    # 0 to use park_tolerance for it again. Camera.park_tolerance() picks.
+    park_tolerance: float = 0.10
+    park_tolerance_d4sigma: float = 0.04
+    park_tolerance_relative: float = 0.04
     # How long a SCAN waits for one autofocus before calling it failed (s).
     # Generous: an open-loop Z walks slowly and a far-off start takes many levels.
     scan_timeout_s: float = 600.0
+    # --- Z STEP CALIBRATION by the camera (2026-09-28, Camera.calibrate_z_steps)
+    # A slip-stick Z steps UP and DOWN by different amounts, so its counter is
+    # a poor ruler. The routine walks Z up through focus, then down through it,
+    # in equal COUNTER steps, measuring sigma^2 (D4sigma) at every level, and
+    # fits a parabola per direction: the ratio of the two curvatures is
+    # (step up / step down)^2. Distances in the Z unit (um on kim), BY THE
+    # COUNTER (the routine does not trust them -- that is the point).
+    zcal_step_v: float = 0.25          # counter distance between two levels
+    zcal_start_offset_v: float = 3.0   # the up walk starts this far below the current Z
+    zcal_max_travel_v: float = 30.0    # give up if one walk goes further than this
+    zcal_averages: int = 3             # frames averaged per level
+    # fit only the levels with sigma^2 <= this x the smallest one (and the
+    # walks end there): far out the faint wings drop below the camera's grey
+    # levels and sigma^2 reads LOW (rig: R^2 0.98-0.997 within 3x, the wings up
+    # to 50 % low beyond; simulator, 8 bit: already 15 % low at 3x on one side)
+    # -- 2 is the sweep's window too. With 12-bit frames 3 is worth a try.
+    zcal_fit_window: float = 2.0
+    zcal_min_r2: float = 0.97          # refuse (write nothing) below this, per walk
+    zcal_min_side_levels: int = 3      # fitted levels needed on EACH side of the minimum
+    # The absolute scale is not measurable this way (only the ratio). 0 = keep
+    # the geometric mean of the two step sizes at the stage's current Z step;
+    # > 0 = a known step (um) to use as that mean instead.
+    zcal_step_um: float = 0.0
 
 
 @dataclass
@@ -479,6 +523,8 @@ def load_config(path: str) -> Config:
         cfg.spot.clip_mode = "local"
     if cfg.camera.sim_spot_model not in SIM_SPOTS:
         cfg.camera.sim_spot_model = "gaussian"
+    if cfg.camera.sim_bit_depth not in SIM_BIT_DEPTHS:
+        cfg.camera.sim_bit_depth = 8
     if cfg.hardware.xy_unit not in XY_UNITS:
         cfg.hardware.xy_unit = "steps"
     return cfg

@@ -152,6 +152,13 @@ class CameraClient:
     def kill_af(self) -> None:
         self._rpc(cmd="kill_af")
 
+    def calibrate_z_steps(self) -> int:
+        """Queue a Z step calibration; returns its number (status ``zcal_id``)."""
+        return self._rpc(cmd="calibrate_z_steps")["zcal_id"]
+
+    def get_zcal_curve(self) -> dict:
+        return self._rpc(cmd="get_zcal_curve").get("curve", {})
+
     def set_continuous_focus(self, on: bool) -> bool:
         return self._rpc(cmd="set_continuous_focus", on=bool(on))["on"]
 

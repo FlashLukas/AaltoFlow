@@ -334,7 +334,10 @@ def spot_center_of_mass(image, thr_lower=200, thr_upper=255, bright_spot=True):
 #     is small, which inflates sigma^2 (we FLAG saturation, we cannot undo it);
 #   * dynamic range: out of focus the wings sit at ~1 % of the peak. On an
 #     8-bit camera that is below one grey level, and sigma^2 comes out too
-#     small there -- a 10/12-bit pixel format helps (camera "PixelFormat").
+#     small there (rig 2026-09-28: up to 50 % low, peak 11-16 grey levels).
+#     So the brain hands these functions the camera's FULL-DEPTH frame when
+#     the camera delivers one (Mono10/12: backends grab once, deliver both,
+#     never change the camera's PixelFormat) -- see Camera._spot_source.
 # Optional smoothing (smooth_px) adds exactly smooth_px^2 to sigma^2, which is
 # subtracted again, so it cannot move the vertex.
 
@@ -452,23 +455,39 @@ def _ring_stats(img: np.ndarray, box: tuple, width: int) -> tuple[float, float]:
     return _robust_level(img[sl][m])
 
 
-def _saturated(crop: np.ndarray, bright: bool) -> bool:
+def _full_scale(crop: np.ndarray, max_value=None):
+    """The camera's maximum count for this frame, or None if unknown.
+
+    ``max_value`` is the TRUE full scale when the caller knows it: a 12-bit
+    camera frame arrives in a uint16 container, whose own maximum (65535) is
+    never reached -- saturation there is 4095 (2026-09-28, 12-bit frames).
+    Without it: the dtype's maximum for integer frames, unknown for float.
+    """
+    if max_value is not None:
+        return float(max_value)
     if np.issubdtype(crop.dtype, np.integer):
-        top = np.iinfo(crop.dtype).max
-        return bool((crop >= top).any() if bright else (crop <= 0).any())
-    return False
+        return float(np.iinfo(crop.dtype).max)
+    return None
 
 
-def _signal(crop: np.ndarray, bright: bool) -> np.ndarray:
+def _saturated(crop: np.ndarray, bright: bool, max_value=None) -> bool:
+    top = _full_scale(crop, max_value)
+    if top is None:
+        return False
+    return bool((crop >= top).any() if bright else (crop <= 0).any())
+
+
+def _signal(crop: np.ndarray, bright: bool, max_value=None) -> np.ndarray:
     """The crop as float, bright = signal (a dark spot is inverted)."""
     a = crop.astype(np.float64)
     if not bright:
-        top = float(np.iinfo(crop.dtype).max) if np.issubdtype(crop.dtype, np.integer) else a.max()
-        a = top - a
+        top = _full_scale(crop, max_value)
+        a = (a.max() if top is None else top) - a
     return a
 
 
-def _work_area(gray: np.ndarray, lim: tuple, bright: bool, smooth: float, detect: float = 0.0):
+def _work_area(gray: np.ndarray, lim: tuple, bright: bool, smooth: float, detect: float = 0.0,
+               max_value=None):
     """The search region plus a margin for the background ring and the blurs,
     as float signal (bright = signal), value-smoothed when asked.
     Returns (array, (x0, y0) of the array in the frame)."""
@@ -478,7 +497,7 @@ def _work_area(gray: np.ndarray, lim: tuple, bright: bool, smooth: float, detect
     X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad)
     # float32: the blurs run twice as fast, and 7 digits are plenty for
     # 8..16-bit pixels (the moment sums themselves are done in float64)
-    a = _signal(gray[Y0:Y1, X0:X1], bright).astype(np.float32)
+    a = _signal(gray[Y0:Y1, X0:X1], bright, max_value).astype(np.float32)
     if smooth > 0.0:
         a = cv2.GaussianBlur(a, (0, 0), smooth, borderType=cv2.BORDER_REFLECT)
     return a, (X0, Y0)
@@ -533,8 +552,15 @@ def _filter_clumps(keep: np.ndarray, strength: np.ndarray, thr: float,
     return good[lab]
 
 
-def spot_second_moment(frame: np.ndarray, guess_xy, cfg=None) -> SpotMoments:
+def spot_second_moment(frame: np.ndarray, guess_xy, cfg=None, max_value=None) -> SpotMoments:
     """Second-moment (D4sigma) size of the spot near ``guess_xy`` (ISO 11146 style).
+
+    ``frame`` may be the 8-bit frame or the camera's full-depth one (uint16
+    holding 10/12-bit counts, or a float average of them); ``max_value`` is
+    then the camera's full scale (4095 for 12 bit), used only to flag
+    saturation. Every other number here is relative to the background noise
+    or to the spot itself, so the result does not depend on the depth -- except
+    that the faint wings are no longer rounded away (see "dynamic range" above).
 
     ``cfg`` is the Spot config (or anything with the same attribute names, or
     a dict); missing values take the defaults in brackets:
@@ -599,7 +625,7 @@ def spot_second_moment(frame: np.ndarray, guess_xy, cfg=None) -> SpotMoments:
     symmetric = bool(_cfg(cfg, "reject_asymmetric", True)) and guess_xy is not None
     lim = _limit_box(gray.shape, guess_xy, cfg)
     LX0, LY0, LX1, LY1 = lim
-    work, (WX0, WY0) = _work_area(gray, lim, bright, smooth, detect)
+    work, (WX0, WY0) = _work_area(gray, lim, bright, smooth, detect, max_value)
     rx0, ry0, rx1, ry1 = LX0 - WX0, LY0 - WY0, LX1 - WX0, LY1 - WY0   # region in `work`
     if textbook:
         det_work = work
@@ -634,7 +660,7 @@ def spot_second_moment(frame: np.ndarray, guess_xy, cfg=None) -> SpotMoments:
         peak = float(reg[sl].max())
         m0 = float(sig.sum())
         out.n_iter, out.background, out.noise, out.peak = it, bg, noise, peak
-        out.saturated = _saturated(gray[y0:y1, x0:x1], bright)
+        out.saturated = _saturated(gray[y0:y1, x0:x1], bright, max_value)
         out.box = box
         if m0 <= 0.0 or not keep[sl].any() or peak <= clip_k * noise:
             out.ok, out.why = False, "no spot above the noise"
@@ -682,8 +708,12 @@ def spot_second_moment(frame: np.ndarray, guess_xy, cfg=None) -> SpotMoments:
     return out
 
 
-def spot_relative_area(frame: np.ndarray, guess_xy, cfg=None) -> SpotRelArea:
+def spot_relative_area(frame: np.ndarray, guess_xy, cfg=None, max_value=None) -> SpotRelArea:
     """Area of the pixels brighter than ``rel_level`` x the spot's own peak.
+
+    Works on the 8-bit or the full-depth frame alike (``max_value`` = the
+    camera's full scale, for the saturation flag): the level is a FRACTION of
+    the spot's own peak, so it means the same at any bit depth.
 
     ``rel_level`` (cfg, default 0.135 = 1/e^2) is a fraction of the peak ABOVE
     the background, so the threshold follows the spot as defocus dims it --
@@ -714,12 +744,12 @@ def spot_relative_area(frame: np.ndarray, guess_xy, cfg=None) -> SpotRelArea:
         out.why = "empty search region"
         return out
     ring = min(12, max(4, min(x1 - x0, y1 - y0) // 8))
-    bg, noise = _ring_stats(gray if bright else _signal(gray, False), box, ring)
-    sig = _signal(crop, bright)
+    bg, noise = _ring_stats(gray if bright else _signal(gray, False, max_value), box, ring)
+    sig = _signal(crop, bright, max_value)
     if smooth > 0.0:
         sig = cv2.GaussianBlur(sig, (0, 0), smooth)
     out.background, out.noise = bg, noise
-    out.saturated = _saturated(crop, bright)
+    out.saturated = _saturated(crop, bright, max_value)
     # which clumps are the spot at all: significantly above the background and,
     # with reject_asymmetric, with a twin opposite the calibrated centre -- so
     # a brighter neighbour can neither set the peak nor add to the area

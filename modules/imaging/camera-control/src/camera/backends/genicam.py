@@ -31,6 +31,8 @@ class GenICamCamera:
         self._h = None      # Harvester
         self._ia = None     # ImageAcquirer
         self._hwlock = None # our claim on this camera's serial (hwlock)
+        self.pixel_format = ""  # READ at open (never written): sets the bit depth
+        self._deep = None       # (uint16 frame, bits) of the last grab
 
     def open(self) -> None:
         # Lazy import: keeps the package importable without the SDK installed.
@@ -63,6 +65,10 @@ class GenICamCamera:
             info = self._resolve(selector)
             self._hwlock = hwclaim.claim(hwclaim.camera_address(_serial_of(info)))
             self._ia = self._h.create(selector)
+            try:                              # read only (adopt rule)
+                self.pixel_format = str(self._ia.remote_device.node_map.PixelFormat.value)
+            except Exception:
+                self.pixel_format = ""
             self._ia.start()
         except BaseException:
             self.close()
@@ -101,11 +107,34 @@ class GenICamCamera:
     def idn(self) -> str:
         return f"GenICam camera {self.device!r}"
 
-    def grab(self) -> np.ndarray:  # pragma: no cover - only on a real PC
+    def grab(self) -> np.ndarray:
+        """One frame as 8-bit; a deeper frame is also kept for last_deep().
+
+        A 10/12/16-bit mono camera hands Harvester 16-bit data. Until
+        2026-09-28 that went to the brain as it was, and ``vision.to_gray``
+        STRETCHED every frame to its own min..max -- the brightness of the
+        image then depended on what was in it. Now it is scaled by the bit
+        depth (the top 8 bits), the same for every frame, and the 16-bit
+        data is kept for the spot-size metrics, like the IDS backend does.
+        VERIFY on a real GenICam camera: that the data are unpacked (a packed
+        Mono12p arrives as bytes, not uint16 -- then no deep frame) and
+        LSB-aligned; the pixel format is READ at open, never set.
+        """
+        self._deep = None
         with self._ia.fetch() as buffer:
             comp = buffer.payload.components[0]
-            img = comp.data.reshape(comp.height, comp.width)
-            return np.array(img, copy=True)
+            img = np.array(comp.data.reshape(comp.height, comp.width), copy=True)
+        if img.dtype == np.uint16:
+            bits = _mono_bits(getattr(self, "pixel_format", ""))
+            if bits <= 8:
+                bits = 16 if int(img.max()) > 4095 else 12   # unread format: a guess
+            self._deep = (img, bits)
+            return (img >> (bits - 8)).clip(0, 255).astype(np.uint8)
+        return img
+
+    def last_deep(self):
+        """(full-depth frame, bits) of the last grab(), or None (8-bit camera)."""
+        return getattr(self, "_deep", None)
 
     # -- feature model (best-effort over the Harvester node map) ----------- #
     def features(self) -> list:  # pragma: no cover - only on a real PC
@@ -132,6 +161,12 @@ class GenICamCamera:
 
     def set_feature(self, name: str, value) -> None:  # pragma: no cover - real PC
         getattr(self._ia.remote_device.node_map, name).value = value
+
+
+def _mono_bits(pixel_format: str) -> int:
+    """Bits of a mono pixel-format name ("Mono12" -> 12); 8 if unknown."""
+    from .ids import bit_depth           # one parser for both backends (no SDK import)
+    return bit_depth(pixel_format)
 
 
 def _serial_of(info) -> str:

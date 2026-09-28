@@ -41,6 +41,8 @@ import time
 
 import zmq
 
+from .base import DirectionalCounter
+
 AXES = ("X", "Y", "Z")
 
 
@@ -353,6 +355,57 @@ class KimZFocus:
         self.settle_timeout_s = settle_timeout_s
         self.poll_s = poll_s
         self._target_steps: int | None = None
+        self._dc = DirectionalCounter()
+
+    # -- per-direction step sizes (the camera's Z step calibration) ---------- #
+    # WHY THE CAMERA CONVERTS HERE, NOT kim (2026-09-28): kim stores a forward
+    # and a backward Z step (set_calibration axis Z direction +1 / -1) but uses
+    # them only for its RELATIVE um moves. An absolute move_to_um -- what set_z
+    # sent -- and kim's position_um both use ONE mean step, so up 2 um and back
+    # down 2 um did not bring the sample back on the asymmetric PIA25. So with
+    # two different sizes in kim's status, the camera turns its um into a STEP
+    # target itself, by the size of the direction the move goes, and keeps its
+    # Z coordinate move by move (DirectionalCounter). With one size (the
+    # default) nothing changes: move_to_um and position_um as before. The
+    # camera's Z then differs from kim's own um readout (which uses the mean)
+    # -- the camera's is the one that tracks the sample.
+    @staticmethod
+    def _sizes(st: dict) -> tuple:
+        """(up, down, mean) um per Z step from kim's status."""
+        mean = float((st.get("um_per_step") or [0.02] * 3)[2])
+        up = float((st.get("um_per_step_fwd") or [mean] * 3)[2]) or mean
+        down = float((st.get("um_per_step_bwd") or [mean] * 3)[2]) or mean
+        return up, down, mean
+
+    @staticmethod
+    def _directional(sizes: tuple) -> bool:
+        up, down, _mean = sizes
+        return abs(up - down) > 1e-9 * max(abs(up), abs(down), 1e-12)
+
+    def step_sizes(self) -> tuple:
+        """(up, down) um per Z step as kim holds them (forward, backward)."""
+        up, down, _mean = self._sizes(self.link.status())
+        return (up, down)
+
+    def set_step_sizes(self, up: float, down: float) -> None:
+        """Write the measured Z step sizes into kim (forward = up, backward = down).
+
+        kim keeps them in memory only: its service has no save verb, so they
+        are gone after a kim restart (camera CLAUDE.local.md, open point).
+        """
+        self.link.rpc(cmd="set_calibration", axis="Z", value=float(up), direction=1)
+        self.link.rpc(cmd="set_calibration", axis="Z", value=float(down), direction=-1)
+        self._dc.reset()
+        self.link.fresh_status()          # read_z must see the new sizes at once
+
+    def counter_steps(self) -> int:
+        """kim's raw Z step counter."""
+        return int(_position(self.link.status(), "position_steps")[2])
+
+    def move_counter(self, steps: float) -> None:
+        """Move Z to an absolute COUNTER value (no um conversion at all)."""
+        reply = self.link.rpc(cmd="move_to_step", axis="Z", position=int(round(steps)))
+        self._target_steps = int(reply["target"])
 
     def open(self) -> None:
         self.link.open()
@@ -370,10 +423,23 @@ class KimZFocus:
         return "um"
 
     def read_z(self) -> float:
-        return float(_position(self.link.status(), "position_um")[2])
+        st = self.link.status()
+        sizes = self._sizes(st)
+        if not self._directional(sizes):
+            return float(_position(st, "position_um")[2])
+        return self._dc.position(int(_position(st, "position_steps")[2]), *sizes)
 
     def set_z(self, um: float) -> None:
-        reply = self.link.rpc(cmd="move_to_um", axis="Z", position=float(um))
+        st = self.link.status()
+        sizes = self._sizes(st)
+        if not self._directional(sizes):
+            reply = self.link.rpc(cmd="move_to_um", axis="Z", position=float(um))
+        else:
+            # the step target from the size of the direction this move goes;
+            # a FRESH counter (a cached frame can be a move behind, gotcha #2)
+            now = int(_position(self.link.fresh_status(), "position_steps")[2])
+            target = self._dc.plan(now, float(um), *sizes)
+            reply = self.link.rpc(cmd="move_to_step", axis="Z", position=int(round(target)))
         # kim replies with the step target it ACCEPTED (after its own clamp), so
         # waiting for exactly that count can never hang on a clamped target.
         self._target_steps = int(reply["target"])
@@ -389,7 +455,10 @@ class KimZFocus:
         the request by up to half a step. describe's settle tolerance for "z"
         is built from this (see net/describe.py).
         """
-        return float((self.link.status().get("um_per_step") or [0.02] * 3)[2])
+        # With per-direction sizes: the LARGER one -- a move lands within half
+        # of THAT step (describe's echo tolerance must not be tighter).
+        up, down, mean = self._sizes(self.link.status())
+        return max(up, down) if self._directional((up, down, mean)) else mean
 
     def wait_settled(self, tick=None) -> None:
         """Block until Z has reached the last set_z target and stopped.

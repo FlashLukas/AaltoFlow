@@ -23,7 +23,10 @@ exposure, gain, gamma, frame rate, pixel format, ROI, etc. with no camera-specif
 code.
 
 Grab returns a 2-D **Mono8** uint8 array (colour models are converted to mono via
-IDS peak IPL), which is what the vision engine wants.
+IDS peak IPL), which is what the vision engine wants. When the camera runs in a
+deeper mono format (Mono10/12, packed or not), the SAME buffer is also converted
+to 16-bit and kept for ``last_deep()`` -- the spot-size metrics use it
+(2026-09-28). The PixelFormat itself is only ever read.
 
 To finish at the microscope (a short hardware pass):
   1. Install "IDS peak" (includes the driver + Python wheels), then
@@ -40,6 +43,7 @@ AcquisitionStart -> WaitForFinishedBuffer.
 
 from __future__ import annotations
 
+import re
 import threading
 
 import numpy as np
@@ -70,6 +74,8 @@ class IDSCamera:
         self._ext = None                # ids_peak_ipl_extension module
         self._lock = threading.Lock()   # serialise node-map access vs. grab
         self._hwlock = None             # our claim on this camera's serial (hwlock)
+        self._deep = None               # (uint16 frame, bits) of the last grab
+        self._deep_warned = False
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
@@ -180,7 +186,7 @@ class IDSCamera:
         except Exception:
             return "IDS uEye+ camera"
 
-    def grab(self) -> np.ndarray:  # pragma: no cover - only on a real PC
+    def grab(self) -> np.ndarray:
         buffer = self._stream.WaitForFinishedBuffer(2000)
         # The buffer goes back to the camera WHATEVER happens below. It used to
         # be re-queued only after a successful conversion: every frame that
@@ -188,6 +194,7 @@ class IDSCamera:
         # conversion refuses) kept one of the few announced buffers, and after
         # that many failures the camera had nowhere to put a frame -- no image
         # until the service was restarted (deep cleaning 2026-09-28).
+        self._deep = None
         try:
             img = self._ext.BufferToImage(buffer)
             # Convert to Mono8 so the vision engine gets a 2-D grayscale array.
@@ -196,11 +203,62 @@ class IDSCamera:
             # VERIFY: ConvertTo(Mono8) from Mono10p/Mono12p on the U3-386xCP-M.
             mono = img.ConvertTo(self._ipl.PixelFormatName_Mono8)
             arr = mono.get_numpy_2D().copy()
+            # ... and, from the SAME buffer, the full-depth frame for the spot
+            # size (2026-09-28): at 8 bit the far-defocused spot's wings are
+            # below one grey level and sigma^2 read up to 50 % low on the rig.
+            # Only when the camera already runs deeper than 8 bit: we READ its
+            # PixelFormat (open), never set it (adopt rule).
+            self._deep = self._convert_deep(img)
         finally:
             # VERIFY: re-queueing a buffer whose conversion failed (IDS peak docs:
             # a buffer is reusable once handed back, whatever its content).
             self._stream.QueueBuffer(buffer)
         return arr
+
+    def _convert_deep(self, img):
+        """(uint16 frame in 0 .. 2^bits - 1, bits) of this image, or None.
+
+        None for a Mono8 camera, and when the conversion fails -- the 8-bit
+        frame is then used for everything, as before; a deep frame is a bonus,
+        never a reason to lose a frame.
+        """
+        bits = bit_depth(self.pixel_format)
+        if bits <= 8:
+            return None
+        # Unpacked target of the same depth: IDS peak IPL names Mono10 /
+        # Mono12 / Mono16 (2 bytes per pixel).
+        # VERIFY on the U3-386xCP-M: (1) ConvertTo(Mono12) from Mono12g24IDS /
+        # Mono12p / Mono12 and ConvertTo(Mono10) from Mono10g40IDS / Mono10p;
+        # (2) that get_numpy_2D() of the result is (h, w) uint16; (3) whether
+        # the value is LSB-aligned (0..4095) or MSB-aligned (x16) -- both are
+        # handled below, by looking at the data.
+        name = {10: "PixelFormatName_Mono10", 12: "PixelFormatName_Mono12"}.get(
+            bits, "PixelFormatName_Mono16")
+        try:
+            target = getattr(self._ipl, name)
+            deep = np.asarray(img.ConvertTo(target).get_numpy_2D())
+            if deep.ndim != 2:
+                return None
+            deep = deep.astype(np.uint16, copy=True)
+            top = (1 << bits) - 1
+            low = (1 << (16 - bits)) - 1
+            if bits < 16 and (int(deep.max()) > top
+                              or (deep.any() and not (deep & low).any())):
+                # MSB-aligned (the value in the TOP bits of the 16, so either
+                # above the depth's maximum or with the low bits always 0 --
+                # noise makes real LSB data odd somewhere): shift down
+                deep >>= (16 - bits)
+            return deep, bits
+        except Exception as exc:
+            if not self._deep_warned:
+                self._deep_warned = True
+                print(f"camera: no {bits}-bit frame from {self.pixel_format} "
+                      f"({type(exc).__name__}: {exc}); spot sizes use 8 bit")
+            return None
+
+    def last_deep(self):
+        """(full-depth frame, bits) of the last grab() -- the SAME buffer -- or None."""
+        return self._deep
 
     # ------------------------------------------------------------------ #
     # feature model over the GenICam node map
@@ -282,6 +340,10 @@ class IDSCamera:
                 node.WaitUntilDone()
             elif t == peak.NodeType_Enumeration:
                 node.SetCurrentEntry(str(value))
+                if name == "PixelFormat":
+                    # the user changed it (live panel): the deep frame follows
+                    self.pixel_format = str(value)
+                    self._deep_warned = False
             elif t == peak.NodeType_Boolean:
                 node.SetValue(bool(value))
             elif t == peak.NodeType_Integer:
@@ -293,6 +355,20 @@ class IDSCamera:
 
 
 # -- small helpers (module level; no hardware) ----------------------------- #
+def bit_depth(pixel_format: str) -> int:
+    """Bits per pixel of a MONO pixel-format name; 8 for anything else.
+
+    "Mono12g24IDS" (IDS's packed 12 bit, what the lab camera was left in),
+    "Mono12p", "Mono12" -> 12; "Mono10..." -> 10; "Mono16" -> 16; "Mono8",
+    "" (unread) or a colour format -> 8 (no deep frame).
+    """
+    m = re.match(r"Mono(\d+)", str(pixel_format or ""))
+    if not m:
+        return 8
+    bits = int(m.group(1))
+    return bits if bits in (10, 12, 14, 16) else 8
+
+
 def _visset(peak):  # pragma: no cover - only on a real PC
     out = set()
     for v in _VISIBILITIES:

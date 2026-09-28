@@ -586,10 +586,83 @@ class MainWindow(QMainWindow):
         self.af_plot = MiniPlot(xlabel="Z (V)", ylabel="metric")
         self.af_plot.setMinimumHeight(170)
         l.addWidget(self.af_plot)
+        row = QHBoxLayout()
         b = QPushButton("Show last sweep"); b.clicked.connect(self._update_af_plot)
-        l.addWidget(b)
+        row.addWidget(b)
+        b = QPushButton("Show Z calibration"); b.clicked.connect(self._update_zcal_plot)
+        row.addWidget(b)
+        row.addStretch(1)
+        l.addLayout(row)
+        v.addWidget(f)
+        # Z STEP CALIBRATION (2026-09-28): on the open-loop kim Z a step up is
+        # not a step down, so "go back to the best Z" by the counter misses.
+        # The camera measures the two step sizes from the spot's sigma^2.
+        f, l = _card("Z step calibration (open-loop Z)")
+        note = QLabel("With the spot calibrated and roughly in focus: walks Z up through "
+                      "focus, then down, measuring σ² (D4σ) at equal counter steps. The two "
+                      "parabolas' curvatures give the step ratio up/down; both step sizes go "
+                      "to kim (their geometric mean kept). Refuses rather than guess. The "
+                      "sweep routine relies on it on this Z. Kill AF stops it. Settings: "
+                      "zcal_* above.")
+        note.setObjectName("muted"); note.setWordWrap(True)
+        l.addWidget(note)
+        row = QHBoxLayout()
+        self.b_zcal = QPushButton("Calibrate Z steps"); self.b_zcal.setObjectName("primary")
+        self.b_zcal.clicked.connect(self._calibrate_z_steps)
+        row.addWidget(self.b_zcal); row.addStretch(1)
+        l.addLayout(row)
+        self.lab_zcal = QLabel("not run yet"); self.lab_zcal.setWordWrap(True)
+        self.lab_zcal.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l.addWidget(self.lab_zcal)
         v.addWidget(f)
         return w
+
+    def _calibrate_z_steps(self):
+        try:
+            self.ctrl.calibrate_z_steps()
+        except Exception as exc:
+            self._log_event("error", f"Z step calibration: {exc}")
+
+    def _refresh_zcal(self, s) -> None:
+        lab = getattr(self, "lab_zcal", None)
+        if lab is None:
+            return
+        running = bool(getattr(s, "zcal_running", False))
+        self.b_zcal.setEnabled(not running and not s.af_running)
+        state = getattr(s, "zcal_state", "OK")
+        if running:
+            lab.setText(f"#{s.zcal_id}: {state} ...")
+            return
+        if not getattr(s, "zcal_id", 0):
+            lab.setText("not run yet")
+            return
+        q = getattr(s, "zcal_ratio", float("nan"))
+        if state == "OK" and math.isfinite(q):
+            lab.setText(f"#{s.zcal_id}: step up / down = <b>{q:.3f}</b> ± "
+                        f"{s.zcal_ratio_err:.3f} &nbsp; R² {s.zcal_r2_up:.4f} / "
+                        f"{s.zcal_r2_down:.4f} &nbsp; up {s.zcal_up_um:.5g}, down "
+                        f"{s.zcal_down_um:.5g} {self._z_unit}/step")
+        else:
+            lab.setText(f"#{s.zcal_id}: <span style='color:{T.COLORS['danger']}'>"
+                        f"{state}</span>")
+
+    def _update_zcal_plot(self):
+        """The last Z step calibration's two walks: sigma^2 against the counter."""
+        try:
+            c = self.ctrl.get_zcal_curve()
+        except Exception:
+            return
+        series = []
+        for key, color, name in (("up", T.ACCENT_HI, "walk up"), ("down", T.OK, "walk down")):
+            pts = [(z, m) for z, m in zip(c.get(key, {}).get("z", []),
+                                          c.get(key, {}).get("metric", []))
+                   if m is not None and math.isfinite(m)]
+            if pts:
+                series.append(([p[0] for p in pts], [p[1] for p in pts], color, name))
+        if series:
+            self.af_plot._xlabel = f"Z counter ({c.get('unit', self._z_unit)})"
+            self.af_plot._ylabel = "σ² (px²)"
+            self.af_plot.set_series(series)
 
     # -- stage availability -------------------------------------------------
     # The stage (kim) is its own service and can be off or restarting. The
@@ -1274,9 +1347,16 @@ class MainWindow(QMainWindow):
                  + num(s.spot_sigma2_px2, ".1f") + " px²)")]
         txt = " · ".join((f"<b>{name}: {val}</b>" if key == mech else f"{name}: {val}")
                          for key, name, val in rows)
+        bits = int(getattr(s, "spot_bit_depth", 8) or 8)
+        if bits > 8:
+            txt += f" &nbsp;<i>({bits}-bit frame)</i>"
         if s.spot_saturated:
             txt += (f"<br><span style='color:{T.COLORS['danger']}'>the spot is SATURATED: "
                     f"its size is wrong (σ² too big) -- lower the exposure</span>")
+        hint = getattr(s, "af_hint", "")
+        if hint:
+            # spot_area on an unsaturated spot: said here, not silently "fixed"
+            txt += f"<br><span style='color:{T.COLORS['danger']}'>{hint}</span>"
         lab.setText(txt)
 
     def _update_af_plot(self):
@@ -1293,6 +1373,7 @@ class MainWindow(QMainWindow):
 
         self.af_plot._xlabel = f"Z ({self._z_unit})"
         label = AF_METRIC_LABELS.get(self.cfg.autofocus.mechanism, "focus")
+        self.af_plot._ylabel = "metric"        # (the Z calibration view relabels it)
         phases = c.get("phases")
         if phases:
             # one-way routine: coarse search, fine walk, park walk -- each its own
@@ -1384,7 +1465,8 @@ class MainWindow(QMainWindow):
             self.chk_stab.blockSignals(False)
         self._refresh_laser(s)
         _set_led(self.led_af, not s.af_running and s.af_error == "OK", T.OK)
-        self.lab_af.setText("run" if s.af_running else s.af_error)
+        zcal_on = bool(getattr(s, "zcal_running", False))
+        self.lab_af.setText("run" if s.af_running else ("Z cal" if zcal_on else s.af_error))
         # Z follows the Z device: volts on the piezo rig, um on the KIM rig,
         # whose range (kim's leash) can change while we run.
         if s.z_unit != self._z_unit:
@@ -1397,6 +1479,7 @@ class MainWindow(QMainWindow):
             self.z_spin.setRange(s.z_min, s.z_max)
         self.lab_best.setText(f"{s.best_focus_v:.2f} {s.z_unit}")
         self._refresh_af_sizes(s)
+        self._refresh_zcal(s)
         self._refresh_xy(s)
         self._sync_stage(s)                 # after _refresh_xy: it may re-enable Datum
         self._sync_fault(s)

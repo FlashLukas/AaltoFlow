@@ -52,6 +52,21 @@ class _AutofocusKilled(Exception):
     """Raised inside a sweep when Kill AF is pressed (or the engine stops)."""
 
 
+class AutofocusFailed(RuntimeError):
+    """A run that must not be trusted, with a SHORT reason for af_error.
+
+    Any exception fails a run (af_error = its type name, the old behaviour,
+    which scan waits and tests rely on). This one carries a readable state
+    instead -- e.g. "park failed: never within park_tolerance" -- because
+    "RuntimeError" alone does not tell an operator reading the scan log what
+    went wrong. The full detail goes into the error event.
+    """
+
+    def __init__(self, state: str, detail: str = ""):
+        super().__init__(f"{state}: {detail}" if detail else state)
+        self.state = state
+
+
 # --------------------------------------------------------------------------- #
 # Status snapshot (a plain dataclass; asdict -> the wire/GUI)
 # --------------------------------------------------------------------------- #
@@ -91,6 +106,11 @@ class CameraStatus:
     spot_centroid_y: float = float("nan")
     spot_peak: float = 0.0                # brightest pixel above background, counts
     spot_saturated: bool = False          # a pixel of the spot at the camera's maximum
+    # Bit depth of the frame the sizes above were measured on (2026-09-28): 8,
+    # or 10/12 when the camera delivers its full depth (then spot_peak is in
+    # those counts, 0..4095 for 12 bit). The display, the template matching
+    # and the fixed-threshold spot_area stay 8-bit whatever this says.
+    spot_bit_depth: int = 8
 
     pattern_loaded: bool = False
     match_found: bool = False
@@ -169,6 +189,23 @@ class CameraStatus:
     # "not af_running" can be read off a frame from before the request
     # (gotchas #2 and #17).
     af_id: int = 0
+    # A warning about the chosen focus metric, "" when there is none. Today:
+    # spot_area on a spot that is NOT saturated (its thresholded area is then
+    # LARGEST at focus, but spot_area is minimised -- rig 2026-09-28).
+    af_hint: str = ""
+    # Z STEP CALIBRATION by the camera (calibrate_z_steps), numbered like the
+    # autofocus: a scan waits for zcal_id == its number and not zcal_running,
+    # then requires zcal_state "OK". The result: step-size ratio up/down, the
+    # two fits' R^2, and the two sizes written to the Z stage (Z unit/step).
+    zcal_id: int = 0
+    zcal_running: bool = False
+    zcal_state: str = "OK"
+    zcal_ratio: float = float("nan")
+    zcal_ratio_err: float = float("nan")
+    zcal_r2_up: float = float("nan")
+    zcal_r2_down: float = float("nan")
+    zcal_up_um: float = float("nan")
+    zcal_down_um: float = float("nan")
     best_focus_v: float = 0.0
     z_unit: str = "V"
     z_min: float = 0.0
@@ -266,6 +303,7 @@ class Camera:
         self._last_recovery_t = float("-inf")
         self._avg_buf: deque = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal: deque = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
+        self._temporal_deep: deque = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
         self._cf_dir = 1.0            # continuous-focus dither direction
         self._cf_last_metric: float | None = None
         # Autofocus state lives HERE, not in the status snapshot: the engine
@@ -276,6 +314,21 @@ class Camera:
         self._af_busy = False         # a run is queued or running
         self._af_state = "OK"         # OK | queued | running | killed | no Z | <error>
         self._af_best = 0.0
+        # spot_area needs a SATURATED spot (see _note_area_saturation): the hint
+        # text, and per run [levels scored, levels with a saturated spot]
+        self._af_hint = ""
+        self._af_area_sat = [0, 0]
+        # Z step calibration (calibrate_z_steps): same pattern as the autofocus
+        # state above -- brain attributes, copied into every frame (gotcha #1)
+        self._zcal_id = 0
+        self._zcal_busy = False
+        self._zcal_state = "OK"
+        self._zcal_request: dict | None = None
+        self._zcal_result: dict = {}
+        self._zcal_curve: dict = {}
+        # The full-depth copy of the frame _grab_gray returned last, as
+        # (that 8-bit frame, deep frame, bits), or None. Engine thread only.
+        self._deep: tuple | None = None
         # Last autofocus sweep (for the GUI's focus-vs-Z plot).
         self._af_curve = {"z": [], "metric": [], "best": 0.0, "maximise": True}
         # Alignment-accuracy log: residual (dx_um, dy_um) per frame when enabled.
@@ -372,6 +425,9 @@ class Camera:
             # A queued autofocus sweep takes over the camera for its duration.
             with self._lock:
                 req, self._af_request = self._af_request, None
+                if req is None:
+                    # a Z step calibration takes the camera and Z the same way
+                    req, self._zcal_request = self._zcal_request, None
                 if req is not None:
                     # Arm Kill AF for THIS run here, in the same critical
                     # section that takes the request (kill_af sets the event
@@ -380,7 +436,9 @@ class Camera:
                     # out and the run went ahead (deep cleaning 2026-09-28).
                     # A Kill pressed while nothing was queued is dropped here.
                     self._af_kill.clear()
-            if req is not None:
+            if req is not None and req.get("kind") == "zcal":
+                self._do_zcal(req)
+            elif req is not None:
                 self._do_autofocus(req)
             else:
                 try:
@@ -392,12 +450,47 @@ class Camera:
             time.sleep(max(0.0, period - dt) + extra)
 
     def _grab_gray(self) -> np.ndarray:
+        """Grab one frame; return it as the processed 8-bit image.
+
+        A camera that runs deeper than 8 bit (backend ``last_deep()``, the
+        SAME buffer) also leaves its full-depth copy in ``self._deep``, put
+        through the same clip / rotation / mirror so its pixels line up with
+        the 8-bit ones. Only the spot SIZE metrics use it (_spot_source); the
+        display, template matching and the fixed threshold keep the 8-bit
+        frame, exactly as before (2026-09-28, 12-bit frames).
+        """
         raw = self.backend.grab()
+        deep = None
+        get_deep = getattr(self.backend, "last_deep", None)
+        if callable(get_deep):
+            try:
+                deep = get_deep()
+            except Exception:
+                deep = None
         img = self.cfg.image
         clip = None
         if img.clip_enabled:
             clip = (img.clip_left, img.clip_top, img.clip_right, img.clip_bottom)
-        return V.preprocess(V.to_gray(raw), img.rotation_deg, img.symmetry, clip)
+        gray = V.preprocess(V.to_gray(raw), img.rotation_deg, img.symmetry, clip)
+        self._deep = None
+        if deep is not None:
+            arr, bits = deep
+            if getattr(arr, "ndim", 0) == 2 and arr.shape == raw.shape[:2]:
+                self._deep = (gray, V.preprocess(arr, img.rotation_deg, img.symmetry, clip),
+                              int(bits))
+        return gray
+
+    def _spot_source(self, gray) -> tuple:
+        """(frame, full scale, bits) the spot SIZE is measured on for ``gray``.
+
+        The full-depth copy of that very frame when there is one -- matched by
+        IDENTITY, so a frame averaged or grabbed elsewhere never gets another
+        frame's deep data -- otherwise ``gray`` itself (8 bit, full scale 255).
+        """
+        d = self._deep
+        if d is not None and d[0] is gray:
+            return d[1], float((1 << d[2]) - 1), d[2]
+        return gray, 255.0, 8
 
     def _process(self) -> None:
         try:
@@ -423,10 +516,21 @@ class Camera:
         # is exposed and read out; the exposure is ~1 ms here, so "now" is it.
         t_frame = time.time()
 
-        # Temporal (running) average across frames.
+        # Temporal (running) average across frames. The full-depth copy is
+        # averaged alongside (as float: the average IS finer than a count), and
+        # dropped as soon as one frame in the window lacks it.
+        deep = self._deep if (self._deep is not None and self._deep[0] is gray) else None
         self._temporal.append(gray.astype(np.float32))
+        if deep is not None:
+            self._temporal_deep.append(deep[1].astype(np.float32))
+        else:
+            self._temporal_deep.clear()
         if len(self._temporal) > 1:
             gray = np.mean(self._temporal, axis=0).astype(np.uint8)
+            if deep is not None and len(self._temporal_deep) == len(self._temporal):
+                self._deep = (gray, np.mean(self._temporal_deep, axis=0), deep[2])
+            else:
+                self._deep = None
 
         st = CameraStatus()
         st.connected = True
@@ -510,12 +614,13 @@ class Camera:
         # walking when Z starts, and a point_settled from this frame would let
         # a scan go on before focus has even begun. Both also stand down while
         # a fly scan records the camera: the stage is being flown on purpose.
-        af_pending = self._af_busy
+        # (a Z step calibration moves Z just the same: both loops stand down)
+        af_pending = self._af_busy or self._zcal_busy
         # A lost pattern: count it, and after lost_frames raise the fault (and
         # maybe start the autofocus recovery). Done BEFORE the loops below, so
         # the frame that declares the loss already holds the stage.
         self._update_loss(st, gray.shape[:2], af_pending)
-        af_pending = self._af_busy           # the recovery may just have queued one
+        af_pending = self._af_busy or self._zcal_busy   # the recovery may just have queued one
         with self._lock:
             faulted = bool(self._fault)
         streaming = self.stream.running
@@ -606,7 +711,13 @@ class Camera:
             st.af_error = self._af_state
             st.af_running = self._af_busy
             st.af_id = self._af_id
-            if self._af_busy:              # a request that arrived mid-frame
+            # spot_area's hint only while spot_area is the metric in use
+            st.af_hint = self._af_hint if self.cfg.autofocus.mechanism == "spot_area" else ""
+            st.zcal_id, st.zcal_running = self._zcal_id, self._zcal_busy
+            st.zcal_state = self._zcal_state
+            for k, v in self._zcal_result.items():
+                setattr(st, k, v)
+            if self._af_busy or self._zcal_busy:   # a request that arrived mid-frame
                 st.point_settled = False
                 st.stable = False
             # the fault as it is NOW (clear_fault may have run mid-frame); a
@@ -1158,9 +1269,13 @@ class Camera:
         st.spot_size_method = sp.size_method
         if guess is None:
             return
+        # the camera's full-depth frame when it delivers one (12 bit: the far
+        # wings are no longer rounded away), else this 8-bit frame
+        src, top, bits = self._spot_source(gray)
+        st.spot_bit_depth = bits
         try:
-            mom = V.spot_second_moment(gray, guess, sp)
-            rel = V.spot_relative_area(gray, guess, sp)
+            mom = V.spot_second_moment(src, guess, sp, max_value=top)
+            rel = V.spot_relative_area(src, guess, sp, max_value=top)
         except Exception as exc:                 # never let a size kill the frame
             self._warn_limited("size", f"spot size: {type(exc).__name__}: {exc}", 30.0)
             return
@@ -1238,6 +1353,11 @@ class Camera:
                 self._af_busy = False
                 self._af_state = "killed"
                 self._publish_af_locked()
+            if self._zcal_request is not None:   # the same for a Z step calibration
+                self._zcal_request = None
+                self._zcal_busy = False
+                self._zcal_state = "killed"
+                self._publish_zcal_locked()
 
     def _publish_af_locked(self) -> None:
         """Copy the AF state into the current snapshot (caller holds the lock),
@@ -1293,6 +1413,7 @@ class Camera:
     def _pause_image_loops(self) -> None:
         self._avg_buf.clear()
         self._temporal.clear()
+        self._temporal_deep.clear()
         self._settled_for = None
         self._cf_last_metric = None
         with self._lock:
@@ -1332,6 +1453,7 @@ class Camera:
         # (the kill event was re-armed when the engine took this request: see _run)
         self._af_curve = {"z": [], "metric": [], "best": 0.0,
                           "maximise": V.focus_is_maximised(af.mechanism)}
+        self._af_area_sat = [0, 0]        # spot_area: levels scored / saturated
 
         # The sweep owns the engine thread, so nothing else publishes frames
         # while it runs: the view used to freeze for the whole sweep. live()
@@ -1388,6 +1510,7 @@ class Camera:
                 self._af_finish("OK", best, target)
                 self._emit("info", f"autofocus (one way, from {af.approach_from}) -> best "
                                    f"{best:.3f} {unit}, parked {target:.3f} {unit}; {note}")
+                self._check_area_saturation()
                 return
             self._wait_xy_still(live)
             z0 = self.z.read_z()
@@ -1430,6 +1553,7 @@ class Camera:
             self._af_finish("OK", best, target)
             self._emit("info", f"autofocus -> best {best:.3f} {unit} "
                                f"(parked {target:.3f} {unit})")
+            self._check_area_saturation()
         except _AutofocusKilled:
             self._af_finish("killed")
             self._emit("warn", "autofocus killed: Z left where it was")
@@ -1443,9 +1567,12 @@ class Camera:
                 except Exception as exc2:            # incl. a kill during the return
                     back = f"; could NOT return Z to {z_start:.3f} {unit}: {exc2!r}"
             # Finished only once Z is back: a scan waiting on this run must not
-            # measure while Z is still walking home.
-            self._af_finish(f"{type(exc).__name__}")
+            # measure while Z is still walking home. af_error = the exception's
+            # type, or -- for a run that knows WHY it failed -- that reason.
+            state = exc.state if isinstance(exc, AutofocusFailed) else type(exc).__name__
+            self._af_finish(state)
             self._emit("error", f"autofocus failed: {exc}{back}")
+            self._check_area_saturation()
 
     # ------------------------------------------------------------------ #
     # autofocus routine "one_way"  (for a hysteretic, open-loop Z)
@@ -1662,6 +1789,8 @@ class Camera:
         # ---- 3. PARK: by the image ------------------------------------------
         note = ""
         parked = None
+        tol = self.park_tolerance()          # per mechanism (see config)
+        closest = None                       # the best park level seen, for the report
         for attempt in range(1, 4):
             back = clampz(best - d * margin * attempt)
             go(back); pos["z"] = back
@@ -1670,7 +1799,9 @@ class Camera:
             walk_limit = margin * attempt + 2 * bracket + af.max_travel_v / 4
             while True:
                 mp = measure(z, "park")
-                if np.isfinite(mp) and not worse(mp, m_goal, af.park_tolerance):
+                if np.isfinite(mp) and (closest is None or score(mp) < score(closest)):
+                    closest = mp
+                if np.isfinite(mp) and not worse(mp, m_goal, tol):
                     parked = z
                     break
                 if np.isfinite(mp) and (best_p is None or score(mp) < score(best_p)):
@@ -1684,15 +1815,25 @@ class Camera:
                     break
                 z = zn
             if parked is not None:
-                note = (f"parked by the image (attempt {attempt}), "
-                        f"{parked - best:+.3f} from the fine walk's best by the counter")
+                note = (f"parked by the image (attempt {attempt}, tolerance "
+                        f"{100 * tol:.0f} %), {parked - best:+.3f} from the fine walk's best "
+                        f"by the counter")
                 break
         if parked is None:
-            parked = clampz(best)
-            go(clampz(parked - d * margin)); go(parked)
-            note = "WARNING: never back within park_tolerance -- parked by the step counter"
-            self._emit("warn", "autofocus: the image never got back within park_tolerance "
-                               "of the best focus; parked by the step counter")
+            # A FAILED run (rig test 2026-09-28, Lukas). Until then this parked
+            # by the step counter at the fine walk's best and reported "OK",
+            # with only an event saying so -- on the rig up to 3.7 focal depths
+            # off (5 times in ~90 runs) while a waiting scan measured on. The
+            # counter is exactly what this routine exists NOT to trust. As a
+            # failure, af_error says so, describe's wait.check makes a scan
+            # routine raise (its on_error decides), and _run_autofocus puts Z
+            # back where the run started -- the failed-run rule.
+            got = ("nothing measurable" if closest is None else
+                   f"closest {100 * (score(closest) - score(m_goal)) / max(abs(m_goal), 1e-12):+.0f} %")
+            raise AutofocusFailed(
+                "park failed: never within park_tolerance",
+                f"after 3 park walks the image never got back within {100 * tol:.0f} % of the "
+                f"fine walk's best ({got}); not parked by the step counter")
         pos["z"] = parked
         # a requested offset from focus is a deliberate move away: by the counter
         if af.offset_from_found_v:
@@ -1703,6 +1844,376 @@ class Camera:
             parked = target
         publish(best)
         return float(best), float(parked), note
+
+    # ------------------------------------------------------------------ #
+    # Z STEP CALIBRATION by the camera (2026-09-28)
+    # ------------------------------------------------------------------ #
+    # WHY. The kim Z (PIA25, slip-stick) steps UP much smaller than DOWN: in
+    # the D4sigma rig test the step counter at focus climbed from -1.5 to +344
+    # um while the image stayed in focus. Every routine that goes "back to a
+    # Z" by the counter -- the sweep's park, a failed run's return -- then
+    # lands elsewhere. Lukas chose to MEASURE the two step sizes with the
+    # camera (2026-09-28).
+    #
+    # HOW. sigma^2 of the spot (the D4sigma metric) is exactly a parabola in
+    # the TRUE Z: sigma^2 = s0 + K (z - z0)^2. Walk Z up through focus in equal
+    # COUNTER steps: the true Z advances s_up per counter unit, so in counter
+    # units the parabola's curvature is K s_up^2. Walk down through focus the
+    # same way: K s_down^2. Their ratio is (s_up / s_down)^2 -- K (the optics)
+    # and z0 (where focus is on the counter, which drifts) drop out. What does
+    # NOT come out is the absolute scale (a stage twice as coarse both ways
+    # gives the same ratio), so the geometric mean of the two sizes is kept at
+    # the stage's current step (or autofocus.zcal_step_um when that is known).
+    #
+    # Each walk is approached from beyond its start (so every counted level is
+    # reached moving in the walk's direction -- the first steps after a
+    # reversal are the unreliable ones) and ends by the IMAGE: once sigma^2 has
+    # passed its minimum and climbed back to zcal_fit_window x that minimum.
+    # Only levels within that window are fitted: far out the faint wings sink
+    # below the camera's grey levels and sigma^2 reads low (rig: up to 50 % in
+    # 8 bit). A poor fit (R^2), a minimum not bracketed, or no spot: REFUSED,
+    # nothing written, Z back where it started -- no guess.
+    def calibrate_z_steps(self) -> int:
+        """Queue a Z step calibration; runs on the engine thread. Returns its NUMBER.
+
+        Finished when status shows ``zcal_id`` == that number and not
+        ``zcal_running``; ``zcal_state`` then says how it went ("OK").
+        Needs a calibrated spot, roughly in focus, and an open-loop Z with a
+        step counter (kim). Kill AF stops it (Z stays where it is).
+        """
+        with self._lock:
+            self._zcal_id += 1
+            self._zcal_request = {"kind": "zcal", "id": self._zcal_id}
+            self._zcal_busy = True
+            self._zcal_state = "queued"
+            self._publish_zcal_locked()
+            self._status.point_settled = False
+            self._status.stable = False
+            return self._zcal_id
+
+    def _publish_zcal_locked(self) -> None:
+        self._status.zcal_id = self._zcal_id
+        self._status.zcal_running = self._zcal_busy
+        self._status.zcal_state = self._zcal_state
+        for k, v in self._zcal_result.items():
+            setattr(self._status, k, v)
+
+    def _zcal_finish(self, state: str) -> None:
+        """End a run: state + not busy in ONE critical section (gotcha #28)."""
+        with self._lock:
+            self._zcal_busy = self._zcal_request is not None
+            self._zcal_state = "queued" if self._zcal_busy else state
+            self._publish_zcal_locked()
+        self._z_target = None           # Z moved: a focus step starts from where it IS
+
+    def get_zcal_curve(self) -> dict:
+        """The last Z step calibration's two walks, for a plot: sigma^2 against
+        the COUNTER (in the Z unit), and each fit's vertex."""
+        return dict(self._zcal_curve)
+
+    def _do_zcal(self, req) -> None:
+        """Run one Z step calibration with the image loops PAUSED (as for AF)."""
+        self._pause_image_loops()
+        try:
+            self._run_zcal(req)
+        finally:
+            if self._zcal_state == "running":     # left early (shutdown)
+                self._zcal_finish("stopped")
+            self._pause_image_loops()
+            self._stab_move_t = time.monotonic()
+
+    def _live_frame(self) -> np.ndarray:
+        """Grab and publish a frame while a routine owns the engine (the view
+        keeps moving); raises _AutofocusKilled on Kill AF or shutdown."""
+        if self._af_kill.is_set() or self._stop.is_set():
+            raise _AutofocusKilled()
+        g = self._grab_gray()
+        try:
+            zr = float(self.z.read_z())
+        except Exception:
+            zr = self._status.z_voltage
+        with self._lock:
+            self._last_frame = g
+            self._status.frame_number += 1
+            self._status.z_voltage = zr
+        return g
+
+    def _zcal_metric(self, gray) -> float:
+        """sigma^2 (px^2) of the spot at its calibrated position, measured on
+        the full-depth frame when the camera delivers one; NaN = not measurable."""
+        sp = self.cfg.spot
+        src, top, _bits = self._spot_source(gray)
+        m = V.spot_second_moment(src, (sp.ref_x, sp.ref_y), sp, max_value=top)
+        return float(m.sigma2) if m.ok else float("nan")
+
+    def _run_zcal(self, req) -> None:
+        af = self.cfg.autofocus
+        z = self.z
+        unit = self.z_unit()
+        nan = float("nan")
+        with self._lock:
+            self._zcal_state = "running"
+            self._zcal_result = {k: nan for k in ("zcal_ratio", "zcal_ratio_err", "zcal_r2_up",
+                                                  "zcal_r2_down", "zcal_up_um", "zcal_down_um")}
+            self._publish_zcal_locked()
+        self._zcal_curve = {}
+        need = ("counter_steps", "move_counter", "step_sizes", "set_step_sizes")
+        why = None
+        if not self.cfg.hardware.use_z:
+            why = "failed: no Z"
+        elif not all(callable(getattr(z, n, None)) for n in need):
+            why = ("failed: needs an open-loop Z with a step counter (kim); "
+                   "a closed-loop Z has nothing to calibrate")
+        elif not self.cfg.spot.ref_set:
+            why = "failed: needs a calibrated spot (Spot tab -> Calibrate spot)"
+        if why:
+            self._zcal_finish(why)
+            self._emit("error", f"Z step calibration: {why}")
+            return
+
+        up0, down0 = (float(v) for v in z.step_sizes())
+        per_step = 0.5 * (up0 + down0)             # the stage's own reading per step
+        step = max(1e-9, abs(float(af.zcal_step_v)) / per_step)       # counter steps
+        margin = max(2.0 * step, abs(float(af.approach_margin)) / per_step)
+        max_n = abs(float(af.zcal_max_travel_v)) / per_step
+        window = max(1.2, float(af.zcal_fit_window))
+        n_side = max(2, int(af.zcal_min_side_levels))
+        n_avg = max(1, int(af.zcal_averages))
+        wait = getattr(z, "wait_settled", None)
+        try:
+            wait_takes_tick = wait is not None and "tick" in inspect.signature(wait).parameters
+        except (TypeError, ValueError):
+            wait_takes_tick = False
+        settle_s = self.cfg.hardware.z_step_time_ms / 1000.0
+        walks = {"up": ([], []), "down": ([], [])}
+
+        def publish(fits=None):
+            self._zcal_curve = {
+                "unit": unit, "per_step": per_step,
+                "up": {"z": [n * per_step for n in walks["up"][0]], "metric": list(walks["up"][1])},
+                "down": {"z": [n * per_step for n in walks["down"][0]],
+                         "metric": list(walks["down"][1])},
+                "fits": fits or {}}
+
+        def go(n: float) -> None:
+            z.move_counter(float(n))
+            if wait is not None:
+                if wait_takes_tick:
+                    wait(tick=self._live_frame)
+                else:
+                    wait()
+            t_end = time.monotonic() + settle_s
+            self._live_frame()
+            while time.monotonic() < t_end:
+                time.sleep(min(0.05, max(0.0, t_end - time.monotonic())))
+
+        def measure() -> float:
+            vals = [self._zcal_metric(self._live_frame()) for _ in range(n_avg)]
+            vals = [v for v in vals if np.isfinite(v)]
+            return float(np.mean(vals)) if vals else float("nan")
+
+        def walk(d: float, start: float, name: str):
+            """Levels from ``start`` in direction d until the image says the
+            minimum is behind us (sigma^2 back up to window x its minimum)."""
+            go(start - d * margin)                 # approach the first level moving in d
+            go(start)
+            ns, ms = walks[name]
+            n = start
+            while True:
+                ns.append(n); ms.append(measure())
+                publish()
+                fin = [i for i, v in enumerate(ms) if np.isfinite(v)]
+                if fin:
+                    i_min = min(fin, key=lambda i: ms[i])
+                    after = [i for i in fin if i > i_min]
+                    if (len(after) >= n_side and fin[-1] == len(ms) - 1
+                            and ms[-1] >= window * ms[i_min]):
+                        return np.asarray(ns, float), np.asarray(ms, float)
+                n += d * step
+                if abs(n - start) > max_n:
+                    raise AutofocusFailed(
+                        f"failed: minimum not bracketed ({name} walk)",
+                        f"sigma^2 did not pass a minimum and climb back to {window:g} x it "
+                        f"within zcal_max_travel_v = {af.zcal_max_travel_v:g} {unit}: start "
+                        f"closer to focus (below it) or widen the travel")
+                go(n)
+
+        def fit(ns, ms, name):
+            """Parabola in COUNTER steps over the levels within the window."""
+            ok = np.isfinite(ms)
+            if ok.sum() < 2 * n_side + 1:
+                raise AutofocusFailed(f"failed: too few measurable levels ({name} walk)")
+            i_min = int(np.nanargmin(np.where(ok, ms, np.nan)))
+            # the CONTIGUOUS run of levels around the minimum that stay within
+            # the window: far out on the side where the light sits in a faint
+            # outer ring, 8-bit sigma^2 reads low and can dip back INTO the
+            # window (simulator: 2 Rayleigh ranges below focus) -- those levels
+            # are not on the parabola and must not be fitted
+            inside = ok & (ms <= window * ms[i_min])
+            sel = np.zeros_like(ok)
+            for rng in (range(i_min, -1, -1), range(i_min, len(ms))):
+                for i in rng:
+                    if not inside[i]:
+                        break
+                    sel[i] = True
+            x = ns - ns[i_min]                      # centred: well-conditioned
+            below, above = int((sel & (x < 0)).sum()), int((sel & (x > 0)).sum())
+            if min(below, above) < n_side:
+                raise AutofocusFailed(
+                    f"failed: minimum not bracketed ({name} walk)",
+                    f"only {below} level(s) before and {above} after the smallest sigma^2 "
+                    f"within {window:g} x it (need {n_side} each side): start further below "
+                    f"focus, or smaller zcal_step_v")
+            p, cov = np.polyfit(x[sel], ms[sel], 2, cov=True)
+            res = ms[sel] - np.polyval(p, x[sel])
+            ss = float(((ms[sel] - ms[sel].mean()) ** 2).sum())
+            r2 = 1.0 - float((res ** 2).sum()) / ss if ss > 0 else 0.0
+            if p[0] <= 0:
+                raise AutofocusFailed(f"failed: no parabola ({name} walk opens downwards)")
+            if r2 < float(af.zcal_min_r2):
+                raise AutofocusFailed(
+                    f"failed: poor fit ({name} walk R^2 {r2:.3f} < {af.zcal_min_r2:g})",
+                    "noise, a moving sample, or light other than the spot in the search region")
+            vert = float(ns[i_min] - p[1] / (2.0 * p[0]))
+            vmin = float(np.polyval(p, -p[1] / (2.0 * p[0])))
+            return {"a": float(p[0]), "var_a": float(cov[0, 0]), "r2": r2,
+                    "vertex": vert, "min": vmin, "n": int(sel.sum())}
+
+        n_start = float(z.counter_steps())
+        try:
+            self._wait_xy_still(lambda: self._live_frame())
+            # 1. UP through focus (from below), 2. DOWN through it (from above)
+            ns_u, ms_u = walk(+1.0, n_start - abs(float(af.zcal_start_offset_v)) / per_step, "up")
+            f_up = fit(ns_u, ms_u, "up")
+            ns_d, ms_d = walk(-1.0, float(ns_u[-1]), "down")
+            f_dn = fit(ns_d, ms_d, "down")
+            # 3. the ratio, and the two sizes around the kept geometric mean
+            q = math.sqrt(f_up["a"] / f_dn["a"])
+            q_err = 0.5 * q * math.sqrt(f_up["var_a"] / f_up["a"] ** 2
+                                        + f_dn["var_a"] / f_dn["a"] ** 2)
+            g = float(af.zcal_step_um) if af.zcal_step_um > 0 else math.sqrt(up0 * down0)
+            up, down = g * math.sqrt(q), g / math.sqrt(q)
+            z.set_step_sizes(up, down)
+            publish({"up": f_up, "down": f_dn})
+            with self._lock:
+                self._zcal_result = {"zcal_ratio": q, "zcal_ratio_err": q_err,
+                                     "zcal_r2_up": f_up["r2"], "zcal_r2_down": f_dn["r2"],
+                                     "zcal_up_um": up, "zcal_down_um": down}
+            spread = abs(f_up["min"] - f_dn["min"]) / max(1e-12, min(f_up["min"], f_dn["min"]))
+            if spread > 0.25:
+                # the in-focus sigma^2 is a property of the beam, not of the
+                # direction: very different minima = something moved meanwhile
+                self._emit("warn", f"Z step calibration: the two walks' smallest sigma^2 "
+                                   f"differ by {100 * spread:.0f} % ({f_up['min']:.1f} vs "
+                                   f"{f_dn['min']:.1f} px2) -- check the result")
+            # 4. back to focus BY THE IMAGE. The down walk ended below focus; its
+            # vertex is where focus was on the counter moving DOWN. Going UP the
+            # steps are q x bigger, so focus is 1/q of that counter distance
+            # away. Approach it from below and stop on the image.
+            n_end = float(ns_d[-1])
+            n_focus = n_end + (f_dn["vertex"] - n_end) / q
+            note = self._zcal_park(go, measure, n_end, n_focus, step,
+                                   min(f_up["min"], f_dn["min"]))
+            self._zcal_finish("OK")
+            self._emit("info", (
+                f"Z step calibration: ratio up/down {q:.3f} +- {q_err:.3f} (R^2 up "
+                f"{f_up['r2']:.4f}, down {f_dn['r2']:.4f}; {f_up['n']}/{f_dn['n']} levels); "
+                f"steps written: up {up:.5g}, down {down:.5g} {unit}/step (geometric mean "
+                f"{g:.5g}{', given' if af.zcal_step_um > 0 else ', kept'}); {note}"))
+        except _AutofocusKilled:
+            self._zcal_finish("killed")
+            self._emit("warn", "Z step calibration killed: nothing written, Z left where it was")
+        except Exception as exc:
+            # the failed-run rule: Z back where it started, by the counter
+            # (nothing else is known -- the calibration is what was missing)
+            back = ""
+            if not self._stop.is_set():
+                try:
+                    here = float(z.counter_steps())
+                    if n_start < here:
+                        go(n_start - margin)           # from below, like every park
+                    go(n_start)
+                    back = f"; Z back to the start (counter {n_start * per_step:.3f} {unit})"
+                except Exception as exc2:
+                    back = f"; could NOT return Z: {exc2!r}"
+            state = exc.state if isinstance(exc, AutofocusFailed) else f"failed: {type(exc).__name__}"
+            self._zcal_finish(state)
+            self._emit("error", f"Z step calibration: {exc}{back}")
+
+    def _zcal_park(self, go, measure, n_now, n_focus, step, goal) -> str:
+        """Go UP to the focus the calibration predicts, and CHECK it on the image
+        (sigma^2 within the d4sigma park tolerance of ``goal``). If the image
+        disagrees, walk on up in half levels until it agrees; say how it ended.
+
+        Why the prediction first: a walk that stops at the first level within
+        tolerance stops EARLY on its approach side (sigma^2 is flat at the
+        bottom: 4 % is ~0.27 Rayleigh ranges in the simulator); the predicted
+        counter value is the parabola's vertex itself.
+        """
+        tol = self.cfg.autofocus.park_tolerance_d4sigma or self.cfg.autofocus.park_tolerance
+        if n_focus > n_now:                        # below it, as planned: straight up
+            go(n_focus)
+            m = measure()
+            if np.isfinite(m) and m <= (1.0 + tol) * goal:
+                return (f"Z parked at the predicted focus, confirmed by the image "
+                        f"(sigma^2 within {100 * tol:.0f} %)")
+        n = max(n_now, n_focus) + 0.5 * step
+        best, n_worse = None, 0
+        limit = n_focus + 4.0 * step
+        while n <= limit:
+            go(n)
+            m = measure()
+            if np.isfinite(m) and m <= (1.0 + tol) * goal:
+                return f"Z parked in focus by the image (sigma^2 within {100 * tol:.0f} %)"
+            if np.isfinite(m) and (best is None or m < best):
+                best, n_worse = m, 0
+            elif best is not None:
+                n_worse += 1
+                if n_worse >= max(1, int(self.cfg.autofocus.rise_levels)):
+                    break
+            n += 0.5 * step
+        self._emit("warn", "Z step calibration: the image never got back within the park "
+                           "tolerance -- Z left near focus by the counter; run an autofocus")
+        return "Z left NEAR focus by the counter (run an autofocus)"
+
+    def park_tolerance(self) -> float:
+        """The park tolerance for the focus metric in use (a fraction).
+
+        The threshold-free sizes have their own (autofocus.park_tolerance_d4sigma
+        / _relative, 0.04 from the rig test): sigma^2 is a parabola, flat at
+        the bottom, so the generic 10 % parks ~0.3 Rayleigh ranges early. 0 in
+        one of them = use the generic autofocus.park_tolerance.
+        """
+        af = self.cfg.autofocus
+        own = {"spot_d4sigma": af.park_tolerance_d4sigma,
+               "spot_relative": af.park_tolerance_relative}.get(af.mechanism, 0.0)
+        return float(own) if own and own > 0 else float(af.park_tolerance)
+
+    # spot_area needs a SATURATED spot. The routine MINIMISES the fixed-threshold
+    # area, which is right only while the spot is clipped at the camera's
+    # maximum: then defocus only spreads the clipped plateau. An unsaturated
+    # spot is the other way round -- defocus DIMS it below the threshold, so its
+    # thresholded area is LARGEST at focus (rig test 2026-09-28: 0/15 good runs,
+    # 14 parked 1.2 focal depths off). The direction is NOT flipped silently (a
+    # spot can saturate at focus only, and on a camera nobody watches a flip
+    # would be a surprise); the operator is told, with the metric to use.
+    def _check_area_saturation(self) -> None:
+        """After an autofocus run on spot_area: was the spot ever saturated?"""
+        if self.cfg.autofocus.mechanism == "spot_area":
+            seen, sat = self._af_area_sat
+            self._note_area_saturation(seen, sat, "during the autofocus")
+
+    def _note_area_saturation(self, seen: int, saturated: int, where: str) -> None:
+        if seen <= 0:
+            return
+        if saturated > 0:
+            self._af_hint = ""
+            return
+        self._af_hint = ("spot_area expects a SATURATED spot (its area is smallest at focus "
+                         f"only then); this spot never saturated {where}, so its thresholded "
+                         "area is LARGEST at focus -- use spot_d4sigma")
+        if self.cfg.autofocus.mechanism == "spot_area":
+            self._emit("warn", f"autofocus: {self._af_hint}")
 
     def _fit_rel_window(self) -> float | None:
         """For sigma^2 the parabola is the true curve, so the fit may use every
@@ -1747,14 +2258,15 @@ class Camera:
             if not sp.ref_set:
                 raise RuntimeError(f"the {af.mechanism} focus metric needs a calibrated spot "
                                    f"(Spot tab -> Calibrate spot)")
+            src, top, _bits = self._spot_source(gray)      # 12 bit when there is one
             if af.mechanism == "spot_d4sigma":
-                m = V.spot_second_moment(gray, (sp.ref_x, sp.ref_y), sp)
+                m = V.spot_second_moment(src, (sp.ref_x, sp.ref_y), sp, max_value=top)
                 if m.ok and m.saturated:
                     self._warn_limited("af_saturated", "autofocus: the spot is saturated at "
                                                        "this Z -- sigma^2 is too big there",
                                        30.0)
                 return float(m.sigma2) if m.ok else float("nan")
-            r = V.spot_relative_area(gray, (sp.ref_x, sp.ref_y), sp)
+            r = V.spot_relative_area(src, (sp.ref_x, sp.ref_y), sp, max_value=top)
             return float(r.area) if r.ok else float("nan")
         if af.mechanism == "spot_area":
             if not sp.ref_set:
@@ -1764,6 +2276,15 @@ class Camera:
                               sp.lookup_region_px, (sp.ref_x, sp.ref_y), sp.min_area_px,
                               sp.max_area_px, sp.reject_border, sp.search_shape,
                               sp.lookup_region_y_px, symmetric=bool(sp.symmetric))
+            if det.found:
+                # was this level's spot SATURATED? (spot_area only makes sense
+                # for a saturated spot -- see _note_area_saturation)
+                x, y, w, h = det.bbox
+                box = gray[max(0, y):y + h, max(0, x):x + w]
+                if box.size:
+                    self._af_area_sat[0] += 1
+                    self._af_area_sat[1] += int(box.max() >= 255 if sp.bright_spot
+                                                else box.min() <= 0)
             return float(det.area) if det.found else float("nan")
         roi = self._safety_roi(self._status) if af.focus_from_safety_area else None
         return float(V.focus_metric(gray, af.mechanism, roi,
@@ -2479,10 +3000,11 @@ class Camera:
         # last analysed snapshot. The loop below then took that one stale
         # centroid N times and stored it as a perfect calibration (jitter 0),
         # with the whole-frame search never done (deep cleaning 2026-09-28).
-        if self._af_busy:
-            raise RuntimeError("autofocus is running: calibrate the spot once it has finished")
+        if self._af_busy or self._zcal_busy:
+            raise RuntimeError("autofocus / Z calibration is running: calibrate the spot "
+                               "once it has finished")
         self._measuring_spot = True     # whole-frame search: the beam may have moved
-        xs, ys, areas, d4s, rels = [], [], [], [], []
+        xs, ys, areas, d4s, rels, sats = [], [], [], [], [], []
         try:
             # the frame in flight when the flag went up still used the old
             # search box, so only frames numbered start+2 onwards count
@@ -2499,6 +3021,7 @@ class Camera:
                         xs.append(s.spot_live_x); ys.append(s.spot_live_y)
                         areas.append(s.spot_area)
                         d4s.append(s.spot_d4sigma_px); rels.append(s.spot_rel_area)
+                        sats.append(bool(s.spot_saturated))
                 time.sleep(0.005)
         finally:
             self._measuring_spot = False
@@ -2516,6 +3039,9 @@ class Camera:
         sp.ref_d4sigma_px = float(np.mean(d4s)) if d4s else 0.0
         sp.ref_rel_area = float(np.mean(rels)) if rels else 0.0
         sp.ref_set = True
+        # calibrated IN FOCUS: an unsaturated spot here makes spot_area the
+        # wrong focus metric (see _note_area_saturation)
+        self._note_area_saturation(len(sats), sum(sats), "at the spot calibration")
         self._emit("info", f"spot calibrated: ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px "
                            f"+/- {sp.ref_jitter_px:.2f} px, area {sp.ref_area:.0f} px2, "
                            f"D4sigma {sp.ref_d4sigma_px:.1f} px, "
@@ -2591,6 +3117,7 @@ class Camera:
         self._apply_objective(self.cfg.image.objective_name, quiet=True)
         self._avg_buf = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
+        self._temporal_deep = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
         self._apply_exposure_if_changed()
 
     def _apply_exposure_if_changed(self) -> None:

@@ -246,6 +246,10 @@ class CameraService:
         if cmd == "kill_af":
             b.kill_af()
             return {"ok": True}
+        if cmd == "calibrate_z_steps":
+            return {"ok": True, "result": "queued", "zcal_id": b.calibrate_z_steps()}
+        if cmd == "get_zcal_curve":
+            return {"ok": True, "curve": b.get_zcal_curve()}
         if cmd == "set_continuous_focus":
             return {"ok": True, "on": b.set_continuous_focus(bool(req["on"]))}
         if cmd == "set_z":

@@ -29,6 +29,8 @@ import threading
 import cv2
 import numpy as np
 
+from .base import DirectionalCounter
+
 
 def _F(display, ftype, value=None, vmin=None, vmax=None, inc=None, unit="",
        options=None, writable=True, cat=""):
@@ -121,17 +123,57 @@ class SimSlipStickZ(SimZFocus):
     open_loop = True
 
     def __init__(self, z0: float = 0.0, z_focus: float = 7.6, vmin: float = -100.0,
-                 vmax: float = 100.0, up_gain: float = 1.0, down_gain: float = 0.7):
+                 vmax: float = 100.0, up_gain: float = 1.0, down_gain: float = 0.7,
+                 nominal_step: float = 1.0):
         super().__init__(z0=z0, z_focus=z_focus, vmin=vmin, vmax=vmax)
         self._true = float(z0)
         self.up_gain = float(up_gain)
         self.down_gain = float(down_gain)
+        # Like kim: the counter is in STEPS, and the reading is steps x one
+        # nominal step size (here 1 Z unit per "step", fractional steps
+        # allowed). After a Z step calibration (set_step_sizes) read_z / set_z
+        # use the two measured sizes instead -- see DirectionalCounter.
+        self.nominal_step = float(nominal_step)
+        self._sizes: tuple | None = None
+        self._dc = DirectionalCounter()
 
-    def set_z(self, volts: float) -> None:
-        new = float(np.clip(volts, self._vmin, self._vmax))
+    def _move_raw(self, counter_units: float) -> None:
+        """Move the counter to this reading (steps x nominal); the SAMPLE moves
+        up_gain or down_gain times as far -- the slip-stick asymmetry."""
+        new = float(np.clip(counter_units, self._vmin, self._vmax))
         delta = new - self._v
         self._true += delta * (self.up_gain if delta > 0 else self.down_gain)
         self._v = new
+
+    def read_z(self) -> float:
+        if self._sizes is None:
+            return self._v
+        up, down = self._sizes
+        return self._dc.position(self.counter_steps(), up, down, self.nominal_step)
+
+    def set_z(self, volts: float) -> None:
+        if self._sizes is None:
+            self._move_raw(volts)
+            return
+        up, down = self._sizes
+        steps = self._dc.plan(self.counter_steps(), volts, up, down, self.nominal_step)
+        self._move_raw(steps * self.nominal_step)
+
+    # -- the step counter, raw (what the Z step calibration walks with) -------
+    def counter_steps(self) -> float:
+        return self._v / self.nominal_step
+
+    def move_counter(self, steps: float) -> None:
+        self._move_raw(float(steps) * self.nominal_step)
+
+    def step_sizes(self) -> tuple:
+        """(up, down) Z units per step as the stage believes them (nominal until set)."""
+        return self._sizes if self._sizes is not None else (self.nominal_step,
+                                                            self.nominal_step)
+
+    def set_step_sizes(self, up: float, down: float) -> None:
+        self._sizes = (float(up), float(down))
+        self._dc.reset()
 
     def true_z(self) -> float:
         return self._true
@@ -289,6 +331,11 @@ class SimCamera:
         coherent_mix: float = 1.0,
         coherent_phase: float = 0.75 * math.pi,
         coherent_peak: float = 220.0,
+        # 8 = only 8-bit frames (as always). 10/12/16 = every grab ALSO leaves
+        # a full-depth copy of the same frame for last_deep(), like the lab
+        # camera running in Mono12 -- quantised from the same noisy scene, so
+        # the two differ only by the rounding to 8 bit.
+        bit_depth: int = 8,
     ):
         self.stage = stage
         self.zfocus = zfocus
@@ -312,6 +359,8 @@ class SimCamera:
         self.coherent = CoherentSpot(coherent_w0_px, coherent_zr, coherent_mix,
                                      coherent_phase, coherent_peak)
         self._rng = np.random.default_rng(seed)
+        self.bit_depth = int(bit_depth) if int(bit_depth) in (10, 12, 16) else 8
+        self._deep = None                 # (uint16 frame, bits) of the last grab
         # Stage position at which the template sits at its home pixel.
         self._stage_ref = stage.read_xy()
         self._open = False
@@ -328,7 +377,8 @@ class SimCamera:
             "GainAuto": _F("Gain Auto", "enum", "Off", options=["Off", "Continuous"], cat="Analog"),
             "Gamma": _F("Gamma", "float", 1.0, 0.3, 3.0, 0.05, "", cat="Analog"),
             "BlackLevel": _F("Black Level", "int", 0, 0, 64, 1, "", cat="Analog"),
-            "PixelFormat": _F("Pixel Format", "enum", "Mono8", options=["Mono8"], cat="ImageFormat"),
+            "PixelFormat": _F("Pixel Format", "enum", f"Mono{self.bit_depth}",
+                              options=[f"Mono{self.bit_depth}"], cat="ImageFormat"),
             "DeviceModelName": _F("Model", "string", "SimCamera", writable=False, cat="Device"),
         }
 
@@ -433,6 +483,7 @@ class SimCamera:
         if blur_sigma > 0.05:
             frame = cv2.GaussianBlur(frame, (0, 0), blur_sigma)
 
+        self._deep = None
         if coherent:
             # light ADDS to the background (the moments rely on it), the power
             # is conserved (a defocused spot really gets dimmer), then the
@@ -440,6 +491,8 @@ class SimCamera:
             f = frame.astype(np.float64)
             self.coherent.add_to(f, self.spot_px, z_now - self.z_focus)
             f += self._rng.normal(0.0, self.noise, f.shape)
+            if self.bit_depth > 8:
+                return self._quantise_both(f)
             frame = np.clip(np.rint(f), 0, 255).astype(np.uint8)
         else:
             # The laser spot: fixed position, sigma grows with defocus (area metric).
@@ -459,4 +512,27 @@ class SimCamera:
         if gamma != 1.0:
             lut = (np.clip((np.arange(256) / 255.0) ** (1.0 / gamma), 0, 1) * 255).astype(np.uint8)
             frame = lut[frame]
+        if self.bit_depth > 8:
+            # the toy Gaussian spot has no depth to give: its deep frame is the
+            # 8-bit one scaled up (enough for the pipeline to run in N bit)
+            self._deep = (frame.astype(np.uint16) << (self.bit_depth - 8), self.bit_depth)
         return frame
+
+    def _quantise_both(self, f: np.ndarray) -> np.ndarray:
+        """One noisy scene ``f`` (in 8-bit grey levels) -> the 8-bit frame AND
+        the full-depth one, both from the same photons, as one camera buffer
+        converted twice. The camera parameters act on the light before the
+        digitiser here (no double rounding in the deep copy)."""
+        expo, gain, gamma, black = self._photometrics()
+        if expo != 1.0 or gain != 1.0 or black != 0:
+            f = f * (expo * gain) + black
+        if gamma != 1.0:
+            f = 255.0 * np.clip(f / 255.0, 0.0, 1.0) ** (1.0 / gamma)
+        scale = float(1 << (self.bit_depth - 8))
+        top = (1 << self.bit_depth) - 1
+        self._deep = (np.clip(np.rint(f * scale), 0, top).astype(np.uint16), self.bit_depth)
+        return np.clip(np.rint(f), 0, 255).astype(np.uint8)
+
+    def last_deep(self):
+        """(full-depth frame, bits) of the last grab, or None in 8-bit mode."""
+        return self._deep

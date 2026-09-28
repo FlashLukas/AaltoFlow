@@ -38,6 +38,11 @@ class FakeKimService:
         self.image_moves: list[dict] = []
         self.px_calibrated = True
         self.hw_error = ""          # kim's "my last read of the KIM101 failed"
+        # step size per axis and direction (kim status um_per_step_fwd/bwd);
+        # `set_calibration` changes them like kim's verb does
+        self.fwd = [UPS * asym] * 3
+        self.bwd = [UPS / asym] * 3
+        self.calibrations: list[tuple] = []
         self._lock = threading.Lock()
         self._t = time.monotonic()
         self._stop = threading.Event()
@@ -73,8 +78,8 @@ class FakeKimService:
                 # kim publishes the step size of each DIRECTION (measured by the
                 # camera calibration, or typed in); `asym` makes them differ so a
                 # jog that converts with the mean is visibly wrong.
-                "um_per_step_fwd": [UPS * self.asym] * 3,
-                "um_per_step_bwd": [UPS / self.asym] * 3,
+                "um_per_step_fwd": list(self.fwd),
+                "um_per_step_bwd": list(self.bwd),
                 "um_per_step_src": ["camera"] * 3,
                 "hw_error": self.hw_error,
             }
@@ -115,6 +120,16 @@ class FakeKimService:
                     self.pos[a] -= shift
                     self.target[a] -= shift
                 self._rep.send_json({"ok": True})
+            elif cmd == "set_calibration":
+                # kim: set_calibration{axis, value, direction +1 fwd / -1 bwd / 0 both}
+                a = "XYZ".index(req["axis"])
+                v, d = float(req["value"]), int(req.get("direction", 0))
+                if d >= 0:
+                    self.fwd[a] = v
+                if d <= 0:
+                    self.bwd[a] = v
+                self.calibrations.append((req["axis"], v, d))
+                self._rep.send_json({"ok": True, "value": v})
             elif cmd == "move_image_px":
                 if not self.px_calibrated:
                     self._rep.send_json({"ok": False, "error": "RuntimeError: no camera "
@@ -288,6 +303,60 @@ def test_um_jog_uses_the_step_size_of_the_direction_it_travels():
     finally:
         brain.shutdown()
         xy.close(); z.close(); svc.close()
+
+
+def test_z_with_per_direction_step_sizes_moves_by_the_direction_it_travels():
+    """After the camera's Z step calibration kim holds a FORWARD and a BACKWARD
+    Z step. kim applies them only to its RELATIVE um moves; an absolute
+    move_to_um (what set_z used) converts with the mean, so +2 um and back to
+    0 um did not bring the sample back. KimZFocus now converts itself, per
+    direction, and keeps its Z in those units (0.04 up, 0.01 down here)."""
+    svc = FakeKimService()
+    svc.fwd[2], svc.bwd[2] = 0.04, 0.01
+    link = KimLink("127.0.0.1", svc.cmd_port, svc.pub_port, timeout_ms=1000)
+    z = KimZFocus(link, settle_timeout_s=5.0)
+    z.open()
+    try:
+        assert _wait(lambda: link._cache is not None)
+        assert z.step_sizes() == pytest.approx((0.04, 0.01))
+        z.set_z(2.0)                               # up: 2 / 0.04 = 50 steps
+        z.wait_settled()
+        assert svc.moves[-1] == ("Z", 50)
+        assert _wait(lambda: z.read_z() == pytest.approx(2.0))
+        z.set_z(0.0)                               # down 2 um: 2 / 0.01 = 200 steps
+        z.wait_settled()
+        assert svc.moves[-1] == ("Z", -150)
+        assert _wait(lambda: z.read_z() == pytest.approx(0.0))
+        # the counter interface the calibration walks with, and the write-back
+        assert z.counter_steps() == -150
+        z.move_counter(-100)
+        z.wait_settled()
+        assert svc.moves[-1] == ("Z", -100)
+        z.set_step_sizes(0.03, 0.015)
+        assert svc.calibrations == [("Z", 0.03, 1), ("Z", 0.015, -1)]
+        assert _wait(lambda: z.step_sizes() == pytest.approx((0.03, 0.015)))
+        # the one-step resolution is the LARGER step (describe's echo tolerance)
+        assert z.resolution() == pytest.approx(0.03)
+    finally:
+        z.close()
+        svc.close()
+
+
+def test_z_with_one_step_size_is_unchanged():
+    svc = FakeKimService()
+    link = KimLink("127.0.0.1", svc.cmd_port, svc.pub_port, timeout_ms=1000)
+    z = KimZFocus(link, settle_timeout_s=5.0)
+    z.open()
+    try:
+        z.set_z(2.0)
+        z.wait_settled()
+        z.set_z(0.0)
+        z.wait_settled()
+        # absolute um moves, exactly as before the per-direction code
+        assert svc.moves == [("Z", 100), ("Z", 0)]
+    finally:
+        z.close()
+        svc.close()
 
 
 def test_camera_keeps_imaging_when_kim_is_down():
