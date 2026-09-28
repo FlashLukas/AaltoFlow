@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- NI USB-6001: a small DAQ box with its USB plug, analog bars (in) and
+       digital LEDs. Colours: #ff9e2c accent, #ffb454 accent_hi, #e8eaed text,
+       #5a626e metal; the launcher swaps the first three for the active theme. -->
+  <rect x="17" y="1.5" width="6" height="5" rx="1" fill="none" stroke="#5a626e" stroke-width="2"/>
+  <rect x="5" y="7" width="30" height="27" rx="5" fill="none" stroke="#5a626e" stroke-width="2.4"/>
+  <line x1="11" y1="23" x2="11" y2="15" stroke="#ff9e2c" stroke-width="2.6" stroke-linecap="round"/>
+  <line x1="16" y1="23" x2="16" y2="12" stroke="#ff9e2c" stroke-width="2.6" stroke-linecap="round"/>
+  <line x1="21" y1="23" x2="21" y2="18" stroke="#ff9e2c" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M26 20 L31 14" stroke="#ffb454" stroke-width="2.2" stroke-linecap="round"/>
+  <circle cx="26" cy="20" r="1.6" fill="#e8eaed"/>
+  <circle cx="11" cy="29" r="1.7" fill="#ffb454"/>
+  <circle cx="16.5" cy="29" r="1.7" fill="none" stroke="#e8eaed" stroke-width="1.2"/>
+  <circle cx="22" cy="29" r="1.7" fill="#ffb454"/>
+  <circle cx="27.5" cy="29" r="1.7" fill="none" stroke="#e8eaed" stroke-width="1.2"/>
+</svg>

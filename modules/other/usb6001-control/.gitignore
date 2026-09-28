@@ -1,0 +1,17 @@
+# virtual environments (kept OFF OneDrive on the lab PC -- see README)
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# uv
+.uv/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# this PC's wiring (directions, names, scales): saved by Settings > Apply
+usb6001.ini

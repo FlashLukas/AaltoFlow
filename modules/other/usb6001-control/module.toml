@@ -1,0 +1,20 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "usb6001"
+name = "General DAQ (NI USB-6001)"
+description = "NI USB-6001: analog inputs, two analog outputs, digital lines as inputs or outputs (set in the config, applied at start)"
+category = "other"
+tags = ["DAQ", "NI", "analog", "digital"]
+icon = "icon.svg"
+order = 380
+
+[ports]
+cmd = 5629
+pub = 5630
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []
