@@ -764,3 +764,51 @@ def test_the_contract_over_the_wire(wire):
     assert math.isclose(tr["freqs_hz"][0], tr["start_hz"])
     s = cli.status()
     assert s.tg_cw_on is True and s.tg_mode == "cw"                            # CW restored
+
+
+# --------------------------------------------------------------------------- #
+# Found on the lab PC (2026-09-28): a tg_cw during a LONG spectrum sweep waited
+# for the hardware lock, the client timed out after 1.5 s -- and the change was
+# applied anyway. A CW change must answer at once (queued) and be applied as
+# soon as the sweep lets go of the hardware.
+# --------------------------------------------------------------------------- #
+def _hold_hw(sa, release):
+    """Hold the hardware lock from another thread, like saGetSweep on a 7.5 s
+    sweep does, until `release` is set."""
+    got = threading.Event()
+
+    def holder():
+        with sa._hw:
+            got.set()
+            release.wait(5.0)
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert got.wait(1.0)
+    return t
+
+
+def test_a_cw_change_during_a_long_sweep_answers_at_once_and_applies_after(sa):
+    sa.tg_cw(True, 1e9, -20.0)
+    release = threading.Event()
+    t = _hold_hw(sa, release)
+    t0 = time.monotonic()
+    r = sa.tg_cw(None, freq_hz=950e6)
+    assert time.monotonic() - t0 < 1.0, "tg_cw waited for the sweep"
+    assert r["deferred"] is True and r["freq_hz"] == 950e6
+    assert sa.status().tg_cw_freq_hz == 1e9       # the echo moves only when applied
+    release.set(); t.join(2.0)
+    sa.step()                                     # the sweep thread's next pass
+    st = sa.status()
+    assert st.tg_cw_freq_hz == 950e6 and sa.sim.tg_cw == (950e6, -20.0)
+
+
+def test_a_newer_cw_command_wins_over_an_older_queued_one(sa):
+    sa.tg_cw(True, 1e9, -20.0)
+    release = threading.Event()
+    t = _hold_hw(sa, release)
+    sa.tg_cw(None, freq_hz=950e6)                 # queued
+    sa.tg_cw(None, level_dbm=-25.0)               # queued too: builds on the queued one
+    release.set(); t.join(2.0)
+    sa.tg_cw(None, freq_hz=900e6)                 # applied directly, newest
+    sa.step()
+    assert sa.sim.tg_cw == (900e6, -25.0) and sa.status().tg_cw_freq_hz == 900e6

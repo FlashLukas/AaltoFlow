@@ -99,7 +99,7 @@ def main() -> int:
     if args.real:
         which = f"serial {hw.serial}" if hw.serial else "the first one found"
         print(f"REAL Signal Hound ({hw.model}, {which}) via "
-              f"{hw.dll_path or 'sa_api.dll on the PATH'}")
+              f"{hw.dll_path or 'sa_api.dll (PATH, then the Spike folder)'}")
     else:
         print("SIMULATED Signal Hound " + (hw.model if hw.model != "auto" else "SA44B")
               + " with a tracking generator")

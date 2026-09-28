@@ -275,6 +275,11 @@ class SpectrumAnalyzer:
         self._tg_cw = {"on": False, "freq_hz": _NAN, "level_dbm": _NAN}
         self._tg_known = False              # False = nothing set it since start: "unknown"
         self._tg_req: dict | None = None    # the queued / running TG acquisition
+        # A CW change that could not get the hardware at once (a long spectrum
+        # sweep holds it inside saGetSweep): applied by the sweep thread's next
+        # pass. Found on the lab PC 2026-09-28 -- waiting made the client time
+        # out for a change that was then applied anyway.
+        self._cw_pending: dict | None = None
         self._tg_acq_id = 0
         self._tg_sample_id = 0
         self._tg_error = ""
@@ -613,7 +618,9 @@ class SpectrumAnalyzer:
         hw = self.cfg.hardware
         with self._lock:
             req = self._tg_req
-            if req is not None and req.get("cw_after"):
+            if self._cw_pending is not None:          # newest intent first
+                cur = dict(self._cw_pending)
+            elif req is not None and req.get("cw_after"):
                 cur = dict(req["cw_after"])
             else:
                 cur = dict(self._tg_cw)
@@ -629,19 +636,46 @@ class SpectrumAnalyzer:
         self._check_tg_freq(f)
         self._check_tg_level(lvl)
         target = {"on": on, "freq_hz": f, "level_dbm": lvl}
-        with self._hw:
+        # Never wait long for the hardware: the reply means ACCEPTED (suite
+        # rule), the status echo says APPLIED. If a sweep holds the hardware,
+        # queue the change for the sweep thread and answer now.
+        if not self._hw.acquire(timeout=0.2):
+            with self._lock:
+                self._cw_pending = dict(target)
+            self._emit("info", "TG CW change queued until the running sweep ends")
+            return {**target, "deferred": True}
+        try:
             # _hw is held by the sweep thread through a TG sweep's restore AND
             # its latch, so a request is either still there (defer) or fully
             # gone (apply now) -- never "restored already but not latched".
             with self._lock:
                 req = self._tg_req
+                self._cw_pending = None               # this newer command wins
                 if req is not None:
                     req["cw_after"] = dict(target)
             if req is not None:
                 self._emit("info", f"TG CW request deferred until TG sweep #{req['id']} ends")
                 return {**target, "deferred": True}
             out = self._apply_cw_hw(target)
+        finally:
+            self._hw.release()
         return {**out, "deferred": False}
+
+    def _apply_pending_cw(self) -> None:
+        """Sweep thread: apply a CW change queued while a sweep held the
+        hardware. During a TG sweep it becomes that sweep's restore target."""
+        with self._hw:
+            with self._lock:
+                target, self._cw_pending = self._cw_pending, None
+                req = self._tg_req
+                if target is not None and req is not None:
+                    req["cw_after"] = dict(target)
+                    return
+            if target is not None:
+                try:
+                    self._apply_cw_hw(target)
+                except ValueError:
+                    pass                              # _apply_cw_hw reported it
 
     def _apply_cw_hw(self, target: dict) -> dict:
         """Set the TG to `target` (CW or park) and store the echo. Called with
@@ -944,6 +978,10 @@ class SpectrumAnalyzer:
         exclusive), else one spectrum sweep if there is a reason to sweep.
         Returns True if a sweep (of either kind) finished. Public so tests can
         drive the analyser without the thread."""
+        with self._lock:
+            pending = self._cw_pending is not None
+        if pending:
+            self._apply_pending_cw()
         with self._lock:
             req = self._tg_req
             paused = self._pause_reason_locked()
