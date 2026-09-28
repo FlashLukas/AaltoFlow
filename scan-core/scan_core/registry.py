@@ -59,7 +59,14 @@ class Settable(Parameter):
         than the module's default wait for an ordinary step.
         """
         lo, hi = self.limits
-        value = max(lo, min(hi, float(value)))   # clamp: the safety envelope lives here
+        value = float(value)
+        if not np.isfinite(value):
+            # REFUSE, do not clamp: max(lo, min(hi, nan)) is `hi`, so a NaN --
+            # a position read that failed, say -- used to drive the knob to its
+            # UPPER LIMIT (the fly scan's "stop where you are" on Abort would
+            # have sent the stage to the end of its travel). 2026-09-28.
+            raise ValueError(f"{self.id}: refusing to set a non-finite value ({value})")
+        value = max(lo, min(hi, value))          # clamp: the safety envelope lives here
         if timeout_s is not None and self._takes_timeout:
             self._set(value, timeout_s=timeout_s)
         else:

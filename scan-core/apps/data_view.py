@@ -246,6 +246,15 @@ class DataView(QtWidgets.QWidget):
                 if d not in (self.x_combo.currentText(), self.y_combo.currentText())]
         if ([r.dim for r in self._rows] == want
                 and all(r.n == da.sizes[r.dim] for r in self._rows)):
+            # Same rows -- but a new scan (or file) of the same SHAPE can have
+            # other coordinate VALUES: refresh the labels, keep the operator's
+            # index / range. Without this the map showed the 6 GHz slice under
+            # a row still saying "1 GHz" (found in AaltoView, 2026-09-28).
+            for r in self._rows:
+                coords, unit = self._coords(r.dim, da)
+                if (unit != r.unit or len(coords) != len(r.coords)
+                        or not np.array_equal(coords, r.coords)):
+                    r.set_axis(coords, unit)
             return
         keep_rows = {r.dim: r.state() for r in self._rows}
         for r in self._rows:
@@ -258,15 +267,20 @@ class DataView(QtWidgets.QWidget):
             r.deleteLater()
         self._rows = []
         for d in want:
-            coords = (np.asarray(self.ds[d].values) if d in self.ds.coords
-                      else np.arange(da.sizes[d]))
-            unit = self.ds[d].attrs.get("units", "") if d in self.ds.coords else ""
+            coords, unit = self._coords(d, da)
             row = DimRow(d, coords, unit)
             if d in keep_rows:
                 row.restore(keep_rows[d])
             row.changed.connect(self.refresh)
             self.rows_box.addWidget(row)
             self._rows.append(row)
+
+    def _coords(self, d, da):
+        """(coordinate values, unit) of dimension `d`; indices if it has none."""
+        if d in self.ds.coords:
+            return (np.asarray(self.ds[d].values),
+                    self.ds[d].attrs.get("units", ""))
+        return np.arange(da.sizes[d]), ""
 
     def _det_changed(self):
         # a fixed range belongs to the detector it was set on -- a lock-in

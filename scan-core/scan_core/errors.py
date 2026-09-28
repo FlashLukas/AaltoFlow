@@ -15,7 +15,16 @@ class ScanAborted(RuntimeError):
 
     Its own class, not a TimeoutError: nothing went wrong with the instrument,
     so the run should end quietly rather than be reported as a failure.
+
+    `dataset` (set by the engine, deep cleaning 2026-09-28): the points
+    measured BEFORE the Abort, unmeasured ones NaN -- or None when the scan
+    was aborted before its first point. A real scan spends most of its time in
+    settle waits, so this is where an Abort usually lands; without it every
+    point measured so far was thrown away, while an Abort that happened to land
+    between two points kept them.
     """
+
+    dataset = None
 
 
 class RoutineError(RuntimeError):

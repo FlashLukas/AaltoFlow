@@ -390,7 +390,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         """
         value = pos_p.set(target)
         if move_p is None:
-            _await_position(rb, value, 0.5 * width, row_timeout, log)
+            _await_position(rb, value, 0.5 * width, row_timeout, log,
+                            should_abort=should_abort)
         return value
 
     def snapshot():
@@ -747,17 +748,26 @@ def _stop_mover(move_p, drive, speed, log, quiet=False):
             log(f"fly: could not stop {move_p.id} ({exc})")
 
 
-def _await_position(rb, target, tol, timeout, log, rest_s=0.2, poll_s=0.05):
+def _await_position(rb, target, tol, timeout, log, rest_s=0.2, poll_s=0.05,
+                    should_abort=None):
     """Block until the readback `rb` is within `tol` of `target` AND at rest.
 
     At rest = has not changed by more than a quarter of `tol` for `rest_s`
     (a step counter is exactly still; a sensor jitters a little). A stage
     that has not started yet is simply waited for -- it will: the command
     was accepted. Raises TimeoutError after `timeout` s, naming both numbers.
+
+    `should_abort` is checked on every poll and raises ScanAborted, like every
+    other wait in a scan: this one can last the whole row timeout (a slow
+    stage crawling back across the sample), and until 2026-09-28 Abort did
+    nothing for that long.
     """
     deadline = time.monotonic() + timeout
     last, since, v = None, time.monotonic(), float("nan")
     while True:
+        if should_abort is not None and should_abort():
+            raise ScanAborted(f"fly: aborted while {rb.id} was on its way to "
+                              f"the run-in {target:g}")
         try:
             v = float(rb.get())
         except Exception:

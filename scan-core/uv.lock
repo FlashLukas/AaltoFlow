@@ -16,7 +16,7 @@ resolution-markers = [
 [[package]]
 name = "aaltoview"
 version = "0.1.0"
-source = { git = "https://github.com/FlashLukas/AaltoView?branch=main#dba8682fa68acf629de018f68ca0c0f823490e77" }
+source = { git = "https://github.com/FlashLukas/AaltoView?branch=main#e111417893d3c2b305f27c9ef0b81cb83a51bddd" }
 dependencies = [
     { name = "h5netcdf" },
     { name = "h5py" },
@@ -1221,7 +1221,7 @@ wheels = [
 
 [[package]]
 name = "suite-common"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "../suite-common" }
 
 [package.metadata]

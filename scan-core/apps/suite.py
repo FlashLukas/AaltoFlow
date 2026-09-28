@@ -376,6 +376,8 @@ class Suite(QtWidgets.QMainWindow):
     def _simulator_clicked(self):
         # Choosing the simulator by hand means: stop following the launcher,
         # or the next availability check would connect straight back.
+        if self._refuse_while_scanning():
+            return
         if self.follow_box.isChecked():
             self.follow_box.setChecked(False)
             self.log("following the launcher switched off (simulator chosen)")
@@ -499,6 +501,8 @@ class Suite(QtWidgets.QMainWindow):
         `names` may be discovery ids ("hf2@lab2:5569"), slugs ("hf2_lab2") or
         plain module keys ("hf2").
         """
+        if self._refuse_while_scanning():
+            return
         found = self.found or discover(self.root)
         specs = []
         for n in names:
@@ -538,7 +542,23 @@ class Suite(QtWidgets.QMainWindow):
         self.log(f"connected: {len(reg.settables())} settables, "
                  f"{len(reg.gettables())} detectors")
 
+    def _refuse_while_scanning(self) -> bool:
+        """True (and says so) while a scan or a queue is running.
+
+        Switching modules CLOSES the Lab: the sockets the running scan is
+        using, closed from this (GUI) thread while the scan thread may be
+        inside a request on them -- a ZeroMQ socket must never be used from two
+        threads -- and it drops the scan's axis stack. Following the launcher
+        already waited for the scan; the buttons did not (2026-09-28).
+        """
+        if self.scan_running():
+            self.log("a scan is running -- stop it (Abort) before switching modules")
+            return True
+        return False
+
     def use_simulator(self) -> None:
+        if self._refuse_while_scanning():
+            return
         if self.lab is not None:
             self.lab.close()
             self.lab = None
@@ -571,6 +591,11 @@ class Suite(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._avail_stop.set()
+        # A running scan is ABORTED and waited for BEFORE the connections are
+        # closed: its thread must not be left using sockets closed under it,
+        # and the after-scan routine must get to run (2026-09-28).
+        if not self.builder.stop_for_close():
+            self.log("the scan did not stop within 30 s; closing anyway")
         if self.lab is not None:
             self.lab.close()
         super().closeEvent(event)

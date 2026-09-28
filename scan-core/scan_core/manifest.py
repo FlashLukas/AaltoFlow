@@ -170,7 +170,9 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 if on_warn:
                     on_warn(f"{pid}: {dtype} controls are not scannable; "
                             f"registered as an indicator")
-                reg.add(Gettable(pid, label, unit, getter))
+                # dtype "text": recipe.validate refuses it as a detector (the
+                # data arrays hold numbers; "internal" crashed the first point)
+                reg.add(Gettable(pid, label, unit, getter, dtype="text"))
                 added.append(pid)
                 continue
 
@@ -231,8 +233,11 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             axes = _axes_from(d, inst, prefix, module, on_warn)
             if d.get("read"):
                 getter = _command_reader(d, inst)
+            # A string/enum indicator (a state name) is TEXT: offered in the
+            # palette, refused as a detector by recipe.validate.
+            text = dtype in ("enum", "string") and not d.get("dtype")
             param = reg.add(Gettable(pid, label, unit, getter, axes=axes,
-                                     dtype=d.get("dtype", "float"),
+                                     dtype="text" if text else d.get("dtype", "float"),
                                      acquire=_acquire_from(d, inst, module, on_warn)))
             _attach_stream(param, d, inst, module, streams, on_warn)
             added.append(pid)
@@ -260,12 +265,23 @@ def _command_reader(d: dict, inst: Instrument):
     verb, key = spec["verb"], spec.get("key", "value")
     args = dict(spec.get("args") or {})
     complex_ = d.get("dtype") == "complex"
+    # The descriptor's `scale` (wire = display x scale) applies here exactly as
+    # it does to the status reader: one descriptor must give ONE number however
+    # the module serves it. (Missing until 2026-09-28; no module combined
+    # `read` with `scale` yet, so nothing measured was affected.)
+    scale = float(d.get("scale", 1.0) or 1.0)
 
     def getter():
         reply = inst.command(verb, **args)
         if key not in reply:
             raise InstrumentError(f"{d.get('id')}: the {verb!r} reply has no {key!r}")
-        return decode_wire_value(reply[key], complex_)
+        value = decode_wire_value(reply[key], complex_)
+        if scale != 1.0 and not isinstance(value, bool):
+            if isinstance(value, (int, float)):
+                return value / scale
+            if hasattr(value, "dtype") and value.dtype.kind in "fc":
+                return value / scale
+        return value
     return getter
 
 

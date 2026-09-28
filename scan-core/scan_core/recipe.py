@@ -186,7 +186,14 @@ class Recipe:
                 # measurement spent almost none of its time at.
                 errs.append(f"'{pid}' is both a condition and an axis; "
                             f"it cannot be held and swept at the same time")
-            if not np.isfinite(float(value)):
+            try:
+                finite = np.isfinite(float(value))
+            except (TypeError, ValueError):
+                # a hand-edited definition ("10 mT"): report it like every
+                # other problem instead of raising out of validate()
+                errs.append(f"condition '{pid}' = {value!r} is not a number")
+                continue
+            if not finite:
                 errs.append(f"condition '{pid}' is not a finite number")
                 continue
             lo, hi = getattr(p, "limits", (None, None))
@@ -203,6 +210,13 @@ class Recipe:
                 # sweep field). What disqualifies a parameter is having no way
                 # to read it at all -- a write-only control, or an action.
                 errs.append(f"detector '{det}' cannot be read")
+            elif getattr(p, "dtype", "float") == "text":
+                # A state name or an enum setting ("IDLE", "internal"): the data
+                # arrays are numbers, and the first point would crash the scan
+                # -- after the before-scan routine had already moved things.
+                errs.append(f"detector '{det}' is text, not a number; it cannot "
+                            f"be recorded in the data")
+        errs += self._validate_names(registry)
         errs += self._validate_hooks(registry)
         from .flyscan import validate_fly
         errs += validate_fly(self, registry)
@@ -230,6 +244,47 @@ class Recipe:
                                     f"exceeds limits [{lo:g},{hi:g}]")
         except Exception as exc:                       # compile problems surface here
             errs.append(f"compile error: {exc}")
+        return errs
+
+    def _validate_names(self, registry) -> list[str]:
+        """Every dimension and coordinate of the data file needs its OWN name.
+
+        Two axes called the same (the same parameter swept twice, or a `name`
+        typed twice) run the WHOLE scan and then fail to become a dataset --
+        the measured points are lost and the after-scan routine never runs
+        (found 2026-09-28). The same goes for a zip member or a detector's own
+        axis (a VNA's frequency) that shares a name with a scan dimension.
+        """
+        try:
+            dims = self.compile(registry).dims
+        except Exception:
+            return []                          # the compile check reports it
+        errs, seen = [], set()
+        dim_names = [d.name for d in dims]
+        for name in dim_names:
+            if name in seen:
+                errs.append(f"two axes are both called '{name}' in the data: "
+                            f"sweep a parameter on one axis only, or give one "
+                            f"of them a different name")
+            seen.add(name)
+        params = [pid for d in dims for pid, _ in d.params]
+        for pid in sorted({p for p in params if params.count(p) > 1}):
+            if pid not in dim_names:          # (else already reported above)
+                errs.append(f"'{pid}' is swept by two axes; the outer one's "
+                            f"coordinates would not be where it was measured")
+        for d in dims:
+            for pid, _ in d.params[1:]:       # zip members ride along as coords
+                if pid in seen:
+                    errs.append(f"zip member '{pid}' has the same name as a scan "
+                                f"dimension; name the zip axis differently")
+                seen.add(pid)
+        det_axes = set()
+        for det in self.detectors:
+            for ax in getattr(registry.get(det), "axes", None) or []:
+                det_axes.add(ax.name)
+        for name in sorted(det_axes & seen):
+            errs.append(f"a detector's own axis '{name}' has the same name as a "
+                        f"scan dimension; name the scan axis differently")
         return errs
 
     def _validate_hooks(self, registry) -> list[str]:

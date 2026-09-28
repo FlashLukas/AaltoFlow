@@ -161,6 +161,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     ctx["shape"] = shape
     ctx["dim_names"] = [d.name for d in dims]     # each_sweep hooks find their axis here
 
+    sweeping = False          # True once the points have started
     try:
         if should_abort and should_abort():
             aborted = True                # pressed before anything started
@@ -170,6 +171,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
             # magnet ramp and reference sweep would otherwise be spread over
             # the points as if every one of them were that slow.
             t0 = time.monotonic()
+            sweeping = True
             # A FLY axis (innermost, flyscan.py) is one continuous move per row
             # instead of a point-by-point odometer. Every other scan takes
             # _sweep, unchanged.
@@ -181,8 +183,21 @@ def run(recipe, registry, on_progress=None, should_abort=None,
                             dets, det_axes, det_coords, data, acquire_groups,
                             prev, ctx, t0, on_progress, should_abort, on_point,
                             created_iso)
-    except ScanAborted:
+    except ScanAborted as exc:
         after_abort()
+        if sweeping:
+            # Abort pressed while an instrument was SETTLING -- which is where a
+            # real scan spends most of its time, so this is the usual abort.
+            # Hand the points measured so far to the caller (unmeasured ones are
+            # NaN), exactly as an abort between two points does; before
+            # 2026-09-28 they were silently thrown away here.
+            try:
+                exc.dataset = _to_dataset(recipe, compiled, registry, data,
+                                          created_iso, time.monotonic() - t_start,
+                                          det_axes, det_coords,
+                                          var_attrs=ctx.get("var_attrs"))
+            except Exception as build_exc:     # say it, but do not hide the abort
+                ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         raise
 
     ds = _to_dataset(recipe, compiled, registry, data, created_iso,

@@ -1343,6 +1343,12 @@ class ScanWorker(QtCore.QThread):
     failed = QtCore.Signal(str)
 
     saved = QtCore.Signal(str, int, int)     # path, done, total (done == total: final)
+    #: The FILE could not be written; the scan itself carries on. Its own signal,
+    #: not `failed`: the builder treats `failed` as "the run is over" (Run back
+    #: on, Abort off, worker dropped), and a full disk mid-scan used to hand the
+    #: buttons back while the scan kept driving the instruments -- no Abort, and
+    #: Run free to start a second engine on the same hardware (2026-09-28).
+    save_failed = QtCore.Signal(str)
     log = QtCore.Signal(str)                 # what the routines are doing
 
     #: Seconds between live redraws. Building the snapshot costs something, and
@@ -1360,6 +1366,7 @@ class ScanWorker(QtCore.QThread):
         self._abort = False
         self._last_live = 0.0
         self._checkpoint_every = 0          # set once the total is known
+        self._next_checkpoint = 0           # the point count that triggers the next one
         #: How the run ended, for a QUEUE deciding what comes next:
         #: "done", "aborted" (go on with the next scan) or "error" (stop).
         self.outcome: str | None = None
@@ -1381,7 +1388,7 @@ class ScanWorker(QtCore.QThread):
             os.replace(tmp, self.save_path)
             self.saved.emit(str(self.save_path), done, total)
         except Exception as exc:            # a full disk must not kill the scan
-            self.failed.emit(f"could not save to {self.save_path}: {exc}")
+            self.save_failed.emit(f"could not save to {self.save_path}: {exc}")
 
     def abort(self):
         self._abort = True
@@ -1396,9 +1403,18 @@ class ScanWorker(QtCore.QThread):
         if not self._checkpoint_every:
             # every 1/10 of a LONG scan; a short one is only saved at the end
             self._checkpoint_every = max(1, total // 10) if total > self.CHECKPOINT_ABOVE else 0
+            self._next_checkpoint = self._checkpoint_every
         now = time.monotonic()
+        # "PASSED the next tenth", not "landed exactly on a multiple of it": a
+        # fly scan reports its progress a row (or part of a row) at a time, and
+        # 81-pixel rows almost never land on a multiple of 121 -- a fly scan
+        # was hardly ever checkpointed. A stepped scan counts 1, 2, 3 ... and
+        # checkpoints at exactly the same points as before.
         due_save = (self._checkpoint_every and done < total
-                    and done % self._checkpoint_every == 0)
+                    and done >= self._next_checkpoint)
+        if due_save:
+            every = self._checkpoint_every
+            self._next_checkpoint = (done // every + 1) * every
         due_draw = done >= total or now - self._last_live >= self.LIVE_EVERY_S
         if not (due_save or due_draw):
             return
@@ -1416,7 +1432,10 @@ class ScanWorker(QtCore.QThread):
                      should_abort=lambda: self._abort,
                      on_point=self._live,
                      on_log=self.log.emit,
-                     created_iso="live",
+                     # WHEN the run started, into the file's `created`
+                     # attribute. It said "live" until 2026-09-28, so the time
+                     # was only in the file NAME and a renamed copy had none.
+                     created_iso=datetime.now().isoformat(timespec="seconds"),
                      data_path=self.save_path)
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
@@ -1439,6 +1458,14 @@ class ScanWorker(QtCore.QThread):
             # Abort pressed while an instrument was still settling: a normal
             # stop, not a failure -- nothing went wrong with the hardware.
             self.outcome = "aborted"
+            # The points measured before it: save and show them, as an abort
+            # between two points does (the engine attaches them; None when
+            # nothing had been measured yet).
+            ds = getattr(exc, "dataset", None)
+            if ds is not None:
+                n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
+                self._write(ds, n, n)
+                self.done.emit(ds)
             self.failed.emit(f"aborted ({exc})")
         except Exception as exc:                 # surface validation/compile errors
             self.outcome, self.error = "error", str(exc)
@@ -1827,7 +1854,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # pm16.power) -- the first in the list was pm16.range, a setting.
         default = next((p.id for p in gettables if p.id == "lockin_r"), None) \
             or next((p.id for p in gettables if getattr(p, "acquire", None)), None) \
-            or (gettables[0].id if gettables else None)
+            or next((p.id for p in gettables if getattr(p, "dtype", "") != "text"), None)
         for module, params in group_by_module(gettables).items():
             group = self._group_item(self.det_tree, module, len(params))
             for p in params:
@@ -2706,6 +2733,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.worker.done.connect(self._on_done)
         self.worker.failed.connect(self._on_failed)
         self.worker.saved.connect(self._on_saved)
+        self.worker.save_failed.connect(self._on_save_failed)
         self.worker.log.connect(self._on_log)
         self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.save_lbl.setText(f"saving to {path}" if path else
@@ -2931,6 +2959,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.save_lbl.setText(f"saved {done}/{total} points to {path}" if done < total
                               else f"saved to {path}")
 
+    def _on_save_failed(self, message: str):
+        """The FILE could not be written (full disk, share gone). The scan goes
+        on -- so this must NOT end the run in the UI the way `failed` does:
+        say it in red where the file name is shown, and in the log."""
+        self.save_lbl.setText(message)
+        self.save_lbl.setStyleSheet(f"color:{C['danger']}; font-size:11px;")
+        self.run_log.append(message)
+        if self.on_log is not None:
+            self.on_log(message)
+
     def _on_progress(self, done, total, eta):
         self.progress.setFormat("%p%")      # the points have started
         self.progress.setMaximum(total); self.progress.setValue(done)
@@ -2949,6 +2987,30 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _abort(self):
         if self.worker:
             self.worker.abort()
+
+    def stop_for_close(self, timeout_s: float = 30.0) -> bool:
+        """The window is closing: ABORT a running scan (and its queue) and wait
+        for it to end. Returns True if nothing is left running.
+
+        Why wait: closing used to tear the instrument connections down under
+        the running scan -- a ZeroMQ socket closed from the GUI thread while
+        the scan thread was inside a request on it -- and let the process exit
+        with the scan thread still going, so the after-scan routine ("field ->
+        0") never ran. An Abort reaches every settle wait at once, and the
+        after-scan routine after an Abort sends its commands without waiting
+        for them, so this normally takes well under a second.
+        """
+        if self.queue_running():
+            self._queue_stop = "the window was closed"
+        w = self.worker
+        if w is None or not w.isRunning():
+            return True
+        w.abort()
+        return bool(w.wait(int(timeout_s * 1000)))
+
+    def closeEvent(self, ev):
+        self.stop_for_close()
+        super().closeEvent(ev)
 
     def is_aborting(self) -> bool:
         """True once Abort was pressed, until the run ends.
