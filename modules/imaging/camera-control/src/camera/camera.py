@@ -229,6 +229,9 @@ class Camera:
         self._last_template_xy: tuple | None = None   # MAIN template position (anchor)
         self._driver = 0                               # which pattern drives (0 = main)
         self._driver_xy: tuple | None = None           # where the driver is in view
+        # Bumped (under _lock) by every setter that resets the tracking; a frame
+        # that was matching meanwhile must not write its stale anchor back.
+        self._anchor_gen = 0
         self._avg_buf: deque = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal: deque = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
         self._cf_dir = 1.0            # continuous-focus dither direction
@@ -337,6 +340,14 @@ class Camera:
             # A queued autofocus sweep takes over the camera for its duration.
             with self._lock:
                 req, self._af_request = self._af_request, None
+                if req is not None:
+                    # Arm Kill AF for THIS run here, in the same critical
+                    # section that takes the request (kill_af sets the event
+                    # under this lock too). It used to be cleared later, at the
+                    # start of the run -- a Kill pressed in between was wiped
+                    # out and the run went ahead (deep cleaning 2026-09-28).
+                    # A Kill pressed while nothing was queued is dropped here.
+                    self._af_kill.clear()
             if req is not None:
                 self._do_autofocus(req)
             else:
@@ -405,7 +416,11 @@ class Camera:
         st.objective_name = self.cfg.image.objective_name
 
         # -- flags (from the authoritative attributes, race-free) ------- #
-        st.tracking_on = self._tracking_on
+        with self._lock:
+            # read together: a tracking reset (set_tracking, a new or loaded
+            # pattern) bumps _anchor_gen under this lock -- see _track_patterns
+            st.tracking_on = self._tracking_on
+            anchor_gen = self._anchor_gen
         st.stabilize_on = self._stabilize_on
         st.continuous_focus_on = self._cf_on
         st.selected_index_x = self.cfg.scanning.selected_index_x
@@ -416,7 +431,7 @@ class Camera:
         geo = None
         st.backups_n = 0 if self.reference is None else len(self.reference.backups)
         if self.reference is not None and st.tracking_on:
-            anchor = self._track_patterns(gray, st)
+            anchor = self._track_patterns(gray, st, anchor_gen)
             if anchor is not None:
                 offs = V.scanning_array_pixel_offsets(
                     self.cfg.scanning.points_x, self.cfg.scanning.points_y,
@@ -537,7 +552,7 @@ class Camera:
     # ------------------------------------------------------------------ #
     # pattern tracking: the main template + backups
     # ------------------------------------------------------------------ #
-    def _track_patterns(self, gray, st) -> tuple | None:
+    def _track_patterns(self, gray, st, gen: int | None = None) -> tuple | None:
         """Match the main template and every backup; pick the DRIVER; return the
         main template's position (the ANCHOR the scan array hangs off), or None.
 
@@ -564,11 +579,13 @@ class Camera:
         pats = [(ref.template, (0.0, 0.0))] + [(b.template, tuple(b.offset_px))
                                                for b in ref.backups]
         n = len(pats)
-        if self._driver >= n:
-            self._driver = 0
+        # The driver is worked on as a LOCAL and written back only at the end,
+        # together with the anchor, and only if no setter reset the tracking
+        # meanwhile (see _commit_tracking).
+        driver = self._driver if self._driver < n else 0
         anchor = self._last_template_xy
         reports: list = [None] * n
-        order = [self._driver] + [k for k in range(n) if k != self._driver]
+        order = [driver] + [k for k in range(n) if k != driver]
         for k in order:
             tpl, off = pats[k]
             th, tw = tpl.shape[:2]
@@ -593,16 +610,16 @@ class Camera:
 
         found = [k for k in range(n) if reports[k] is not None and reports[k].found]
         margin = float(pat.edge_margin_px)
-        if found and not (self._driver in found and room(self._driver) >= margin):
+        if found and not (driver in found and room(driver) >= margin):
             best = max(found, key=lambda k: (room(k) >= margin, room(k)))
-            if best != self._driver:
-                why = "near the edge" if self._driver in found else "lost"
+            if best != driver:
+                why = "near the edge" if driver in found else "lost"
                 self._emit("info", f"pattern {self._pattern_name(best)} now drives "
-                                   f"({self._pattern_name(self._driver)} {why})")
-                self._driver = best
+                                   f"({self._pattern_name(driver)} {why})")
+                driver = best
 
-        st.pattern_driver = self._driver
-        st.template_h, st.template_w = pats[self._driver][0].shape[:2]
+        st.pattern_driver = driver
+        st.template_h, st.template_w = pats[driver][0].shape[:2]
         boxes = []
         for k in range(n):
             m = reports[k]
@@ -614,25 +631,27 @@ class Camera:
                               int(tw), int(th), False, 0.0])
         st.pattern_boxes = boxes
 
-        drv = reports[self._driver]
+        drv = reports[driver]
         if drv is None or not drv.found:
+            self._commit_tracking(gen, driver)
             st.match_found = False
             return None
         # published as "the template": the one actually in view, so another
         # module (kim's camera calibration) can track the same drawn feature
         st.match_found = True
         st.template_x, st.template_y, st.match_score = drv.x, drv.y, drv.score
-        doff = pats[self._driver][1]
+        doff = pats[driver][1]
         anchor = (drv.x - doff[0], drv.y - doff[1])
-        self._last_template_xy = anchor
-        self._driver_xy = (drv.x, drv.y)
+        if not self._commit_tracking(gen, driver, anchor, (drv.x, drv.y)):
+            st.match_found = False
+            return None
         st.anchor_x, st.anchor_y = anchor
 
         # refine the other visible backups' offsets against the driver
         rate = float(pat.offset_learn_rate)
-        if rate > 0 and room(self._driver) >= 0:
+        if rate > 0 and room(driver) >= 0:
             for k in found:
-                if k == self._driver or k == 0 or room(k) < 0:
+                if k == driver or k == 0 or room(k) < 0:
                     continue
                 b = ref.backups[k - 1]
                 meas = (reports[k].x - anchor[0], reports[k].y - anchor[1])
@@ -640,21 +659,48 @@ class Camera:
                 if err > pat.offset_warn_px:
                     self._warn_limited(f"backup{k}", f"pattern {self._pattern_name(k)} is "
                                        f"{err:.0f} px from where pattern "
-                                       f"{self._pattern_name(self._driver)} puts it "
+                                       f"{self._pattern_name(driver)} puts it "
                                        f"-- a bad match? offset not updated")
                     continue
                 b.offset_px = (b.offset_px[0] + rate * (meas[0] - b.offset_px[0]),
                                b.offset_px[1] + rate * (meas[1] - b.offset_px[1]))
-            if self._driver != 0 and 0 in found and room(0) >= 0:
+            if driver != 0 and 0 in found and room(0) >= 0:
                 # the MAIN template is in view while a backup drives: the backup's
                 # offset is measured directly
-                b = ref.backups[self._driver - 1]
+                b = ref.backups[driver - 1]
                 meas = (drv.x - reports[0].x, drv.y - reports[0].y)
                 if float(np.hypot(meas[0] - b.offset_px[0],
                                   meas[1] - b.offset_px[1])) <= pat.offset_warn_px:
                     b.offset_px = (b.offset_px[0] + rate * (meas[0] - b.offset_px[0]),
                                    b.offset_px[1] + rate * (meas[1] - b.offset_px[1]))
         return anchor
+
+    def _commit_tracking(self, gen, driver, anchor=None, driver_xy=None) -> bool:
+        """Store this frame's tracking result -- unless it went stale meanwhile.
+
+        Matching takes a good part of a frame. If set_tracking / capture_reference
+        / load_pattern / clear_backups reset the tracking while this frame was
+        matching, the frame's anchor belongs to the OLD state: writing it back
+        would undo the reset, and the next frames would search only a small box
+        around that stale position -- a new pattern elsewhere, or a sample moved
+        while tracking was off, then never relocks (deep cleaning 2026-09-28;
+        gotcha #1 in another shape). Returns False when the result was dropped.
+        """
+        with self._lock:
+            if gen is not None and gen != self._anchor_gen:
+                return False
+            self._driver = driver
+            if anchor is not None:
+                self._last_template_xy = anchor
+                self._driver_xy = driver_xy
+            return True
+
+    def _reset_tracking(self, anchor=None, driver_xy=None) -> None:
+        """Forget where the pattern was (setters); stale in-flight frames lose."""
+        with self._lock:
+            self._anchor_gen += 1
+            self._last_template_xy = anchor
+            self._driver, self._driver_xy = 0, driver_xy
 
     @staticmethod
     def _pattern_name(k: int) -> str:
@@ -692,7 +738,7 @@ class Camera:
     def clear_backups(self) -> None:
         if self.reference is not None:
             self.reference.backups.clear()
-        self._driver = 0
+        self._reset_tracking(self._last_template_xy, self._driver_xy)   # drive with main again
         self._emit("info", "backup patterns cleared")
 
     def list_backups(self) -> list:
@@ -911,8 +957,11 @@ class Camera:
             return self._af_id
 
     def kill_af(self) -> None:
-        self._af_kill.set()          # a sweep in progress stops at its next check
         with self._lock:
+            # under the lock: the engine takes a request and re-arms the kill
+            # event in one critical section, so this can land neither between
+            # the two nor be wiped out afterwards
+            self._af_kill.set()      # a sweep in progress stops at its next check
             if self._af_request is not None:     # queued, never started: cancel it
                 self._af_request = None
                 self._af_busy = False
@@ -941,6 +990,9 @@ class Camera:
             self._af_busy = self._af_request is not None
             self._af_state = "queued" if self._af_busy else state
             self._publish_af_locked()
+        # the run moved Z itself: a focus step must start from where Z IS, not
+        # from a set_z target of before the run (see step_z)
+        self._z_target = None
 
     def _do_autofocus(self, req) -> None:
         """Run one autofocus with the image loops PAUSED.
@@ -1004,7 +1056,7 @@ class Camera:
         wait = getattr(self.z, "wait_settled", None)
         settle_s = self.cfg.hardware.z_step_time_ms / 1000.0
         unit = self.z_unit()
-        self._af_kill.clear()
+        # (the kill event was re-armed when the engine took this request: see _run)
         self._af_curve = {"z": [], "metric": [], "best": 0.0,
                           "maximise": V.focus_is_maximised(af.mechanism)}
 
@@ -1428,8 +1480,7 @@ class Camera:
         offset = (array_center_px[0] - tpl_center[0], array_center_px[1] - tpl_center[1])
         self.reference = Reference(template=tpl, array_center_offset_px=offset,
                                    meta=self._reference_meta())
-        self._last_template_xy = tpl_center
-        self._driver, self._driver_xy = 0, tpl_center   # a new main template: no backups
+        self._reset_tracking(tpl_center, tpl_center)    # a new main template: no backups
         self._emit("info", f"reference captured: {self.reference.describe()}")
         return self.reference.describe()
 
@@ -1459,8 +1510,7 @@ class Camera:
     def load_pattern(self, path: str, load_arrays: bool = True) -> str:
         ref = load_template(path)
         self.reference = ref
-        self._last_template_xy = None
-        self._driver, self._driver_xy = 0, None
+        self._reset_tracking()               # found afresh, wherever it is in the frame
         if load_arrays and ref.meta:
             m, sc, im = ref.meta, self.cfg.scanning, self.cfg.image
             saved = dict(m.get("scanning") or {})
@@ -1578,10 +1628,12 @@ class Camera:
     # immediate control verbs (safe from the command thread)
     # ------------------------------------------------------------------ #
     def set_tracking(self, on: bool) -> bool:
-        self._tracking_on = bool(on)
+        with self._lock:
+            self._tracking_on = bool(on)
         if not on:
-            self._last_template_xy = None
-            self._driver_xy = None
+            # forget the position: switched on again, the pattern is searched in
+            # the WHOLE frame (the sample may have been moved meanwhile)
+            self._reset_tracking()
         return bool(on)
 
     def set_stabilize(self, on: bool) -> bool:
@@ -1676,6 +1728,10 @@ class Camera:
 
     def move_xy(self, x_um: float, y_um: float) -> list:
         x, y = self._clamp_xy(float(x_um), float(y_um))
+        # An absolute move makes the last JOG target meaningless: a jog within
+        # Z_STEP_FRESH_S would otherwise start from it and undo this move
+        # (deep cleaning 2026-09-28). step_xy sets its own target again after.
+        self._xy_target = None
         self.xy.move_xy(x, y)
         return [x, y]
 
@@ -1842,6 +1898,7 @@ class Camera:
         """Move the stage so the tracked template sits at pixel (x, y)."""
         if self._last_template_xy is None:
             raise RuntimeError("no template tracked yet")
+        self._xy_target = None              # not a jog: see move_xy
         dx_px = x - self._last_template_xy[0]
         dy_px = y - self._last_template_xy[1]
         if hasattr(self.xy, "move_image_px"):       # KIM rig: move the image directly
@@ -1857,6 +1914,7 @@ class Camera:
         spot = self.spot_position()
         if spot is None:
             raise RuntimeError("no spot to go to: calibrate the spot position first (Spot tab)")
+        self._xy_target = None              # not a jog: see move_xy
         if hasattr(self.xy, "move_image_px"):       # KIM rig: move the image directly
             return self.xy.move_image_px(spot[0] - px, spot[1] - py,
                                          context=self.image_context())
@@ -2032,6 +2090,18 @@ class Camera:
                 return None
         return (self.cfg.limits.z_min_v, self.cfg.limits.z_max_v)
 
+    def z_resolution(self) -> float | None:
+        """The Z device's smallest step in the Z unit (kim: one step in um), or
+        None when it has no fixed quantum (a piezo voltage) or cannot say now."""
+        fn = getattr(self.z, "resolution", None)
+        if not callable(fn):
+            return None
+        try:
+            r = float(fn())
+        except Exception:
+            return None
+        return r if math.isfinite(r) and r > 0 else None
+
     def z_unit(self) -> str:
         """The unit Z is driven in: "V" (piezo rig) or "um" (KIM rig)."""
         fn = getattr(self.z, "z_unit", None)
@@ -2082,6 +2152,13 @@ class Camera:
         ``timeout_s``, which must stay below the client's REQ timeout).
         """
         frames = max(2, int(frames))
+        # Not during an autofocus: it owns the engine, so no frame is ANALYSED
+        # while it runs -- but its live view still advances frame_number on the
+        # last analysed snapshot. The loop below then took that one stale
+        # centroid N times and stored it as a perfect calibration (jitter 0),
+        # with the whole-frame search never done (deep cleaning 2026-09-28).
+        if self._af_busy:
+            raise RuntimeError("autofocus is running: calibrate the spot once it has finished")
         self._measuring_spot = True     # whole-frame search: the beam may have moved
         xs, ys, areas = [], [], []
         try:
@@ -2093,6 +2170,9 @@ class Camera:
                 s = self._status
                 if s.frame_number != last:
                     last = s.frame_number
+                    if self._af_busy:       # an autofocus started meanwhile: stale frames
+                        raise RuntimeError("autofocus started during the spot calibration; "
+                                           "calibrate again once it has finished")
                     if s.frame_number >= start + 2 and s.spot_found:
                         xs.append(s.spot_live_x); ys.append(s.spot_live_y)
                         areas.append(s.spot_area)

@@ -461,7 +461,13 @@ def test_status_and_reconnect_follow_the_stage(kim):
     brain = Camera(cam, KimXYStage(link), KimZFocus(link), Config())
     brain.start()
     try:
-        assert _wait(lambda: brain.status().stage_ok), "stage should be seen"
+        # Wait until kim has REALLY been heard. `stage_ok` alone is not enough: a
+        # CameraStatus starts with stage_ok=True, so the old wait could return
+        # before the first frame -- the service was then stopped before the
+        # camera ever heard it, and the error read "has not answered yet"
+        # instead of "silent" (the known flake, fixed 2026-09-28).
+        assert _wait(lambda: link.available()[0] and brain.status().frame_number > 0
+                     and brain.status().stage_ok), "stage should be seen"
         svc._stop.set()                            # the stage service goes quiet
         assert _wait(lambda: not brain.status().stage_ok, timeout=3.0)
         assert "silent" in brain.status().stage_error

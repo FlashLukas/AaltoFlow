@@ -57,11 +57,18 @@ class RemoteZFocus:
                 self._make_req()
             try:
                 self._req.send_json(req)
-                return self._req.recv_json()
+                reply = self._req.recv_json()
             except zmq.Again:
                 self._req.close(0)
                 self._make_req()
                 raise TimeoutError(f"zpiezo service did not answer {req.get('cmd')!r}")
+        # A refusal ({"ok": false}) must RAISE, like a timeout. It used to be
+        # returned as if it were a reply: a refused move looked done (autofocus
+        # scored the same Z at every "level"), and a failed status read became
+        # position 0 (deep cleaning 2026-09-28).
+        if not reply.get("ok", False):
+            raise RuntimeError(f"zpiezo {req.get('cmd')}: {reply.get('error', 'failed')}")
+        return reply
 
     # -- ZFocus Protocol --------------------------------------------------- #
     def set_z(self, volts: float) -> None:

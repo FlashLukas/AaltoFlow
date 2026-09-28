@@ -125,6 +125,10 @@ class MainWindow(QMainWindow):
         self._getters: dict[str, dict] = {}   # group -> {field: getter}
         self._form_widgets: dict[str, dict] = {}   # group -> {field: widget}
         self._forms: dict[str, QFormLayout] = {}   # group -> its form
+        # group -> {field: the value the form last SHOWED (built or synced)}.
+        # "Apply settings" sends only fields whose widget differs from this,
+        # i.e. what the user actually edited -- see _apply_settings.
+        self._form_shown: dict[str, dict] = {}
         self.setWindowTitle("Camera - spot tracking, stabilisation & autofocus"
                             + (" [remote]" if remote else ""))
         self.resize(1280, 820)
@@ -855,6 +859,7 @@ class MainWindow(QMainWindow):
                     form.addRow(fld.name, widget)
                 getters[fld.name] = getter
                 self._form_widgets.setdefault(gname.lower(), {})[fld.name] = widget
+                self._form_shown.setdefault(gname.lower(), {})[fld.name] = getter()
                 if fld.name == "pixel_size_x_um":
                     self._pxx_widget = widget
                 elif fld.name == "pixel_size_y_um":
@@ -1020,14 +1025,27 @@ class MainWindow(QMainWindow):
 
     # -- actions ----------------------------------------------------------- #
     def _apply_settings(self, groups):
+        # Only the fields the user EDITED since the form last showed them. The
+        # whole form used to be sent, and fields that change elsewhere -- the
+        # exposure set in the live parameter panel, the scan point picked with
+        # Index X/Y or by a scan -- were silently put back to the form's old
+        # numbers by an unrelated Apply (deep cleaning 2026-09-28).
         payload = {}
         for gname, _obj in groups:
             key = gname.lower()
-            payload[key] = {n: get() for n, get in self._getters.get(key, {}).items()}
+            shown = self._form_shown.get(key, {})
+            edited = {}
+            for n, get in self._getters.get(key, {}).items():
+                v = get()
+                if n not in shown or v != shown[n]:
+                    edited[n] = v
+            payload[key] = edited
         if "scanning" in payload:
             self._keep_scan_size(payload["scanning"])
         try:
             self.ctrl.set_config(payload)
+            for key, vals in payload.items():     # applied: now that is what is shown
+                self._form_shown.setdefault(key, {}).update(vals)
             # keep our local cfg mirror in step (used to draw overlays)
             self.ctrl_get_config_into_cfg()
             self._sync_size_fields()          # pitch/points edits update size too
@@ -1081,6 +1099,9 @@ class MainWindow(QMainWindow):
                     w.setText(str(val))
             finally:
                 w.blockSignals(False)
+            get = self._getters.get(group, {}).get(name)
+            if get is not None:                  # what the form shows now
+                self._form_shown.setdefault(group, {})[name] = get()
 
     def ctrl_get_config_into_cfg(self):
         try:

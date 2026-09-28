@@ -100,8 +100,17 @@ class CameraClient:
         try:
             while not self._stop.is_set():
                 if dict(poller.poll(200)):
-                    topic, raw = sub.recv_multipart()
-                    payload = json.loads(raw.decode("utf-8"))
+                    # One malformed frame (not two parts, not JSON, not a dict)
+                    # must not end this thread: it used to raise out of the
+                    # loop, the daemon thread died silently and the GUI showed
+                    # the last status forever (deep cleaning 2026-09-28).
+                    try:
+                        topic, raw = sub.recv_multipart()
+                        payload = json.loads(raw.decode("utf-8"))
+                        if not isinstance(payload, dict):
+                            continue
+                    except Exception:
+                        continue
                     if topic == P.TOPIC_STATUS:
                         self._status = _status_from_dict(payload)
                     elif topic == P.TOPIC_EVENT:

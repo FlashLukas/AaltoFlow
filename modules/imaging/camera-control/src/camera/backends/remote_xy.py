@@ -50,12 +50,19 @@ class RemoteXYStage:
                 self._make_req()
             try:
                 self._req.send_json(req)
-                return self._req.recv_json()
+                reply = self._req.recv_json()
             except zmq.Again:
                 # Broken REQ state after a timeout -> rebuild (lazy pirate).
                 self._req.close(0)
                 self._make_req()
                 raise TimeoutError(f"piezo service did not answer {req.get('cmd')!r}")
+        # A refusal ({"ok": false}) must RAISE, like a timeout. It used to be
+        # returned as if it were a reply: a refused move looked done (autofocus
+        # scored the same Z at every "level"), and a failed status read became
+        # position 0 (deep cleaning 2026-09-28).
+        if not reply.get("ok", False):
+            raise RuntimeError(f"piezo {req.get('cmd')}: {reply.get('error', 'failed')}")
+        return reply
 
     # -- XYStage Protocol -------------------------------------------------- #
     def move_xy(self, x_um: float, y_um: float) -> None:
@@ -70,7 +77,7 @@ class RemoteXYStage:
     def moving(self) -> bool:
         try:
             reply = self._rpc(cmd="status")
-        except TimeoutError:
+        except (TimeoutError, RuntimeError):   # unreachable or refused: as before
             return False
         st = reply.get("status", {})
         mv = st.get("moving", [False, False])

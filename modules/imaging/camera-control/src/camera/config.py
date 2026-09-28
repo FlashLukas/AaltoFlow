@@ -360,7 +360,11 @@ def _cast(raw: str, type_name: str):
 
 def save_config(cfg: Config, path: str) -> None:
     """Write the config to ``path`` as INI (one section per group)."""
-    cp = configparser.ConfigParser()
+    # interpolation=None: a value is stored exactly as typed. The default
+    # parser treats "%" as a template marker, so a save folder or camera name
+    # containing "%" made Save fail ("invalid interpolation syntax") and a
+    # hand-edited file with one failed to load (deep cleaning 2026-09-28).
+    cp = configparser.ConfigParser(interpolation=None)
     for section, obj in _sections(cfg).items():
         cp[section] = {key: str(val) for key, val in asdict(obj).items()}
     with open(path, "w", encoding="utf-8") as fh:
@@ -373,7 +377,7 @@ def load_config(path: str) -> Config:
     Unknown/missing keys are ignored so an older file still loads after a new
     field is added (that field just keeps its default).
     """
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(interpolation=None)     # see save_config
     cp.read(path, encoding="utf-8")
     cfg = Config()
     for section, obj in _sections(cfg).items():

@@ -114,6 +114,14 @@ def build_manifest(brain) -> dict:
     ly = round(float(h_px) * float(brain.cfg.image.pixel_size_y_um), 3)
     z_unit = brain.z_unit()
     zlim = brain.z_limits() or (None, None)
+    # Settle tolerance of "z". On the KIM rig Z moves in whole STEPS: kim rounds
+    # a um target to steps and reads back steps x um_per_step, up to HALF a step
+    # away from what was asked. With the fixed 0.01 um tolerance and kim's
+    # 0.02 um step, a scan level such as 0.25 um (12.5 steps -> 12 -> 0.24)
+    # never "echoed" and every such point waited out its timeout (deep
+    # cleaning 2026-09-28). So: at least 0.6 step, never below the old 0.01.
+    z_res = brain.z_resolution() if callable(getattr(brain, "z_resolution", None)) else None
+    z_tol = round(max(1e-2, 0.6 * z_res), 6) if z_res else 1e-2
     xylim = brain.xy_limits() or ((None, None), (None, None))
     if z_unit == "V":
         z_help = ("Drive voltage of the Z piezo, sent to zpiezo-control (or an "
@@ -129,7 +137,7 @@ def build_manifest(brain) -> dict:
            order=10, min=zlim[0], max=zlim[1], step=0.25, decimals=3,
            plottable=True, read_path=["z_voltage"],
            set={"verb": "set_z", "arg": "volts"},
-           settle={"policy": "echoes", "key": "z_voltage", "tol": 1e-2},
+           settle={"policy": "echoes", "key": "z_voltage", "tol": z_tol},
            help=z_help),
 
         _p("continuous_focus", "Continuous focus", "control", "bool",

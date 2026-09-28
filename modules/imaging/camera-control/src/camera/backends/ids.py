@@ -182,14 +182,24 @@ class IDSCamera:
 
     def grab(self) -> np.ndarray:  # pragma: no cover - only on a real PC
         buffer = self._stream.WaitForFinishedBuffer(2000)
-        img = self._ext.BufferToImage(buffer)
-        # Convert to Mono8 so the vision engine gets a 2-D grayscale array.
-        # Since open() no longer forces Mono8, this conversion also has to cope
-        # with whatever format the camera was left in (Mono10/12, packed).
-        # VERIFY: ConvertTo(Mono8) from Mono10p/Mono12p on the U3-386xCP-M.
-        mono = img.ConvertTo(self._ipl.PixelFormatName_Mono8)
-        arr = mono.get_numpy_2D().copy()
-        self._stream.QueueBuffer(buffer)
+        # The buffer goes back to the camera WHATEVER happens below. It used to
+        # be re-queued only after a successful conversion: every frame that
+        # failed to convert (a corrupt/incomplete buffer, a pixel format the
+        # conversion refuses) kept one of the few announced buffers, and after
+        # that many failures the camera had nowhere to put a frame -- no image
+        # until the service was restarted (deep cleaning 2026-09-28).
+        try:
+            img = self._ext.BufferToImage(buffer)
+            # Convert to Mono8 so the vision engine gets a 2-D grayscale array.
+            # Since open() no longer forces Mono8, this conversion also has to cope
+            # with whatever format the camera was left in (Mono10/12, packed).
+            # VERIFY: ConvertTo(Mono8) from Mono10p/Mono12p on the U3-386xCP-M.
+            mono = img.ConvertTo(self._ipl.PixelFormatName_Mono8)
+            arr = mono.get_numpy_2D().copy()
+        finally:
+            # VERIFY: re-queueing a buffer whose conversion failed (IDS peak docs:
+            # a buffer is reusable once handed back, whatever its content).
+            self._stream.QueueBuffer(buffer)
         return arr
 
     # ------------------------------------------------------------------ #

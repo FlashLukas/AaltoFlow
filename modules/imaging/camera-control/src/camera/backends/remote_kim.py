@@ -368,6 +368,16 @@ class KimZFocus:
     def z_range(self) -> tuple:
         return _axis_range_um(self.link.status(), 2)
 
+    def resolution(self) -> float:
+        """The smallest Z change there is: one step, in um (kim's mean step size).
+
+        kim turns a um target into a WHOLE number of steps and reports the
+        position back as steps x um_per_step, so a Z read-back can differ from
+        the request by up to half a step. describe's settle tolerance for "z"
+        is built from this (see net/describe.py).
+        """
+        return float((self.link.status().get("um_per_step") or [0.02] * 3)[2])
+
     def wait_settled(self, tick=None) -> None:
         """Block until Z has reached the last set_z target and stopped.
 
