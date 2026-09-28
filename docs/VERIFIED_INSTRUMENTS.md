@@ -192,9 +192,14 @@ before/after routines.
     tone there (950 MHz, -50.17 dBm).
   - shsna windowed acquisition (4faa7b6) over the thru: `window_fallback` stays
     empty and the sub-band's bins land on the full grid (a window of bins 95 --
-    105 of 201 measures exactly those 11), transmission ~0 dB inside. It saves
-    little time on this kit: 11 bins in 1.26 -- 1.36 s vs 201 bins in 1.77 s -- the
-    per-acquisition overhead (~1.2 s) dominates.
+    105 of 201 measures exactly those 11), transmission ~0 dB inside. After
+    d40ba9d (result released before the spectrum restore), back to back: 11 bins
+    1.03 -- 1.14 s at the client (owner 0.85 -- 0.95 s) vs 201 bins 1.48 -- 1.57 s
+    (owner 1.35 -- 1.38 s). Owner breakdown: queued 0.11 -- 0.19, configure
+    0.15 -- 0.19, sweep 0.50 s (11 bins) / 0.97 s (201 bins), restore 0.07 s --
+    the SA44B's TG sweep itself has a fixed cost of ~0.45 s + ~2.6 ms per bin.
+    The SG's CW set right after the TG sweep survives the later spectrum
+    reconfigure (-50.05 dBm before, -50.06 dBm after, 900 MHz).
   - A thru reference taken at another RBW is refused with a clear message
     (7652982, re-checked).
   - Clean `shutdown` of all three.
