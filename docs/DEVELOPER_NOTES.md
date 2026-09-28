@@ -576,6 +576,25 @@ zpiezo has no GUI.
       addresses differently would each think they hold a different instrument.
       `tools/check_modules.py` fails a differing copy.
 
+38. **Two installer traps found by the first upgrade test** (2026-09-28).
+    (a) *Inno Setup reads any line starting with `[` as a new section* -- even
+    inside a Pascal comment in `[Code]`. A comment line beginning "[Files]
+    entries ..." made the whole script fail to compile ("Invalid section tag").
+    Nothing but a real build shows this: never start a comment line in the
+    code section with a square bracket.
+    (b) *Never make a test install by copying a real one.* The copy carries the
+    real install's `unins000.dat`, Setup APPENDS to it, and that record holds
+    the real install's absolute paths -- running the test copy's uninstaller
+    could delete files of the REAL install. For an upgrade test, copy the
+    folders but not `unins000.*`, or install the old version fresh into the
+    test folder; clean up by hand if in doubt (the uninstall registry entry,
+    the Start-menu group). Also: every install runs `[InstallDelete]`, which
+    removes the old "TRMOKE" Start-menu group and desktop link -- back them up
+    before a test on a PC that has a real install. The upgrade migration itself
+    was verified this way: 13 flat folders moved, tuned `camera.ini`,
+    `px_calibration.json` and clMag `Calibrations\` byte-identical afterwards,
+    old `.venv`s removed, 35 modules discovered, no problems.
+
 ---
 
 ## 9. Verifying work (you can now run everything locally)

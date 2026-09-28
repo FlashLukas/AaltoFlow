@@ -293,8 +293,10 @@ end;
   Calibrations\ and px_calibration.json -- beside a NEW folder holding the
   factory defaults, and the launcher would use the new one. So before any file
   is copied, every old module folder is MOVED to its new place, whole. The
-  [Files] entries for lab data are "onlyifdoesntexist", so they then leave the
-  moved files alone, and the rig keeps its settings.
+  lab-data entries of the Files section are "onlyifdoesntexist", so they then
+  leave the moved files alone, and the rig keeps its settings.
+  (No comment line in this Code section may START with a square bracket: Inno
+  reads such a line as a new section header even inside a comment.)
   The moved .venv is deleted: it holds the absolute path of the old src folder
   (an editable install) and would import code that is no longer there. The
   environment build that follows Setup makes a new one.
