@@ -1,0 +1,22 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "shsg"
+name = "Signal generator (Signal Hound TG)"
+description = "USB-TG44A tracking generator as a CW source, driven through the Signal Hound analyser service"
+category = "source"
+tags = ["signal generator", "RF", "Signal Hound"]
+icon = "icon.svg"
+order = 360
+
+[ports]
+cmd = 5625
+pub = 5626
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+# The TG is driven THROUGH the signalhound service (it owns the USB devices),
+# so the launcher starts that one first.
+start_after = ["signalhound"]
