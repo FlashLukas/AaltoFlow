@@ -181,14 +181,22 @@ before/after routines.
   - shsna 800 -- 1200 MHz, 201 points: `tg_grid`'s PREDICTED grid (800 MHz,
     2 MHz bins, 201 points) equals the real TG sweep's grid. Reference 1.43 s,
     measurement 1.22 s; transmission after the thru reference: mean +0.017 dB,
-    peak +0.087 dB. The raw TG-sweep trace read ~-22 dB through the pad at the
-    100 Hz RBW shsna used (-19.4 dB at 100 kHz RBW through the raw API).
+    peak +0.087 dB. The raw TG-sweep trace read ~-22 dB through the pad, the
+    same at 1 kHz and 100 kHz RBW; the -19.4 dB of the earlier raw-API test came
+    from something else in that configuration, not from the RBW.
   - shsg's CW comes back after the exclusive TG sweep (900 MHz -50.07 dBm).
-  - Caveat: a CW change sent while the SA is inside a long sweep (a 7.5 s,
-    1 kHz-RBW, 1 GHz sweep) FAILS at the client after 1.5 s ("signalhound service
-    did not answer tg_cw within 1500 ms") -- but is applied once the sweep ends
-    (shsg then reports the new frequency). The client sees an error for a change
-    that happened.
+  - A CW change sent while the SA is inside a long sweep (7.5 s, 1 kHz RBW,
+    1 GHz) first failed at the client after 1.5 s although it was applied later;
+    fixed in 0bce28a and re-checked the same day: `ok` in 0.21 s, shsg keeps the
+    old frequency until the sweep ends, then shows the new one, and the SA sees the
+    tone there (950 MHz, -50.17 dBm).
+  - shsna windowed acquisition (4faa7b6) over the thru: `window_fallback` stays
+    empty and the sub-band's bins land on the full grid (a window of bins 95 --
+    105 of 201 measures exactly those 11), transmission ~0 dB inside. It saves
+    little time on this kit: 11 bins in 1.26 -- 1.36 s vs 201 bins in 1.77 s -- the
+    per-acquisition overhead (~1.2 s) dominates.
+  - A thru reference taken at another RBW is refused with a clear message
+    (7652982, re-checked).
   - Clean `shutdown` of all three.
 - Not yet checked: `saStoreTgThru` (VERIFY 6), a real DUT in the SNA path, and
   two SAs on one PC.
