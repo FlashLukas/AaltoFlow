@@ -464,7 +464,11 @@ def test_tg_abort_with_an_id_aborts_only_that_one(sa):
 
 # ---- the SA is restored afterwards ---------------------------------------------------
 
-def test_spectrum_config_and_cw_are_restored_in_that_order(sa):
+def test_the_cw_comes_back_first_and_the_spectrum_after_the_result(sa):
+    """2026-09-28 (lab PC: ~1.2 s overhead per windowed acquisition): the TG
+    result is released once the TG is back (CW or park); the spectrum is
+    reconfigured on the sweep thread's NEXT pass -- off the SNA's critical
+    path, and not at all between back-to-back TG sweeps."""
     sa.set_span(20e6)
     sa.set_continuous(True)
     sa.step()
@@ -473,11 +477,24 @@ def test_spectrum_config_and_cw_are_restored_in_that_order(sa):
     sa.sim.log.clear()
     sa.tg_sweep_acquire(0.9e9, 1.1e9, points=201)
     _tg_done(sa)
-    log = sa.sim.log
-    assert log == ["configure:tg", "configure:spectrum", "set_tg_cw"]
+    assert sa.sim.log == ["configure:tg", "idle", "set_tg_cw"]
     st = sa.status()
     assert st.tg_cw_on is True and st.tg_mode == "cw" and sa.sim.tg_cw == (1.5e9, -12.0)
+    t = sa.get_tg_trace()
+    assert set(t["timing_s"]) == {"queued", "configure", "sweep", "restore", "total"}
     assert sa.step() is True and sa.status().points == grid0   # sweeping as before
+    assert sa.sim.log[3] == "configure:spectrum"
+
+
+def test_back_to_back_tg_sweeps_do_not_reconfigure_the_spectrum(sa):
+    sa.set_continuous(True)
+    sa.step()
+    sa.sim.log.clear()
+    sa.tg_sweep_acquire(0.9e9, 1.1e9, points=101)
+    _tg_done(sa)
+    sa.tg_sweep_acquire(0.95e9, 1.05e9, points=51)       # queued before the next pass
+    _tg_done(sa)
+    assert "configure:spectrum" not in sa.sim.log
     assert sa.status().spectrum_paused == ""
 
 
@@ -489,7 +506,7 @@ def test_without_a_cw_the_tg_is_parked_after_the_sweep(sa):
     sa.sim.log.clear()
     sa.tg_sweep_acquire(0.9e9, 1.1e9)
     _tg_done(sa)
-    assert sa.sim.log == ["configure:tg", "configure:spectrum", "set_tg_cw"]
+    assert sa.sim.log == ["configure:tg", "idle", "set_tg_cw"]
     assert sa.sim.tg_cw == PARK
 
 
@@ -640,8 +657,12 @@ def test_real_backend_tg_calls_and_restore_order():
         names = dll.names()
         assert "saConfigTgSweep" in names and names.count("saGetSweep_32f") == 1
         after = names[names.index("saGetSweep_32f") + 1:]
-        # the spectrum is restored (abort + configure + initiate), THEN the CW
-        assert after.index("saInitiate") < after.index("saSetTg")
+        # the TG sweep is stopped (abort), the CW set, and the spectrum is
+        # reconfigured only on the next pass (after the result is out)
+        assert after.index("saAbort") < after.index("saSetTg")
+        assert "saInitiate" not in after
+        v.step()
+        assert "saInitiate" in dll.names()[len(names):]
         assert dll.mode == 0 and dll.tg_level == -12.0
         t = v.get_tg_trace()
         assert t["points"] == 201 and len(t["db"]) == 201

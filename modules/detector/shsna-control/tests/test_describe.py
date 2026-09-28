@@ -200,6 +200,9 @@ def test_the_grid_length_is_left_out_while_unknown():
     from shsna.analyzer import Analyzer
     from shsna.backends.remote_sa import RemoteSa
     cfg = Config()
+    # scratch ports (suite rule): a signalhound service on the default 5587 --
+    # the lab PC runs one -- must not be able to answer this test
+    cfg.hardware.owner_cmd_port, cfg.hardware.owner_pub_port = 18098, 18099
     real = Analyzer(RemoteSa(cfg), cfg)               # never opened: describe needs no owner
     params = {p["id"]: p for p in build_manifest(real)["parameters"]}
     assert "length" not in params["transmission"]["dims"][0]

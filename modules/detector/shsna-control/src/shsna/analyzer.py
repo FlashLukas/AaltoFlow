@@ -871,6 +871,7 @@ class Analyzer:
                  "rbw_Hz": float(res.get("rbw_Hz", rbw) or rbw),
                  "averages": int(res.get("averages") or avg),
                  "overload": bool(res.get("overload", False)),
+                 "owner_timing_s": dict(res.get("owner_timing_s") or {}),
                  # the BAND setting (not the window): frequencies() matches on it
                  "req_start_Hz": start, "req_stop_Hz": stop, "req_points": points,
                  "window": window or [0, g_n - 1],

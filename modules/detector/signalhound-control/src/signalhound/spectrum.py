@@ -732,7 +732,9 @@ class SpectrumAnalyzer:
             n = self._tg_acq_id
             self._tg_req = {"id": n, "settings": settings, "averages": n_avg,
                             "points": int(n_pts), "running": False, "aborted": False,
-                            "n": 0, "t0": 0.0, "dt": 0.0}
+                            "n": 0, "t0": 0.0, "dt": 0.0,
+                            # wall-clock marks for the trace's timing breakdown
+                            "t_queued": time.monotonic()}
             self._tg_error = ""
         if n_pts != want_pts:
             self._emit("warn", f"TG sweep #{n}: {want_pts} points clamped to {n_pts} "
@@ -1141,10 +1143,12 @@ class SpectrumAnalyzer:
                 self._configured = None
                 self._gen += 1
             s = req["settings"]
+            req["t_start"] = time.monotonic()
             try:
                 grid = self.backend.configure(s)
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
+        req["t_configured"] = time.monotonic()
         if not err:
             try:
                 trace = self._tg_collect(req, s, grid)
@@ -1160,7 +1164,18 @@ class SpectrumAnalyzer:
                     # a CW request that came in DURING the sweep wins over the
                     # CW remembered at its start
                     after = dict(req["cw_after"]) if req.get("cw_after") else cw
+                req["t_swept"] = time.monotonic()
                 self._tg_restore(spectrum_was, after)
+            if trace is not None:
+                t_end = time.monotonic()
+                # where the time of one TG acquisition goes (the lab PC measured
+                # ~1.2 s of overhead around an 11-bin sweep: this says where)
+                trace["timing_s"] = {
+                    "queued": round(req["t_start"] - req["t_queued"], 4),
+                    "configure": round(req["t_configured"] - req["t_start"], 4),
+                    "sweep": round(req.get("t_swept", t_end) - req["t_configured"], 4),
+                    "restore": round(t_end - req.get("t_swept", t_end), 4),
+                    "total": round(t_end - req["t_queued"], 4)}
             # ONE critical section: the result appears and tg_acquiring clears
             # together (gotcha #28) -- and only after the restore, so a client
             # that sees "done" finds the TG and the SA back as they were.
@@ -1235,20 +1250,24 @@ class SpectrumAnalyzer:
                 "db": physics.mw_to_dbm(total / n), "time": time.time()}
 
     def _tg_restore(self, spectrum_was: bool, cw: dict) -> None:
-        """Give the analyser back as it was before the TG sweep: FIRST the
-        spectrum configuration (with the settings in force NOW), THEN the CW
-        -- or, with no CW, the PARK: after a TG sweep the TG sits at the last
-        swept frequency (measured), so it is always set to something.
-        A spectrum that was never configured stays unconfigured (start-up
-        rule): the TG sweep is only stopped (idle). So is it when a CW that
-        this hardware cannot sweep with is coming back."""
+        """Give the TG back as it was before the TG sweep: stop the TG sweep
+        (idle), then the CW -- or, with no CW, the PARK: after a TG sweep the
+        TG sits at the last swept frequency (measured), so it is always set to
+        something.
+
+        The SPECTRUM configuration is NOT restored here any more (2026-09-28,
+        lab PC: ~1.2 s overhead per windowed acquisition, a spectrum configure
+        is 0.15-0.45 s of it). It stays None; the sweep thread reconfigures it
+        on its next idle pass or when a spectrum sweep is wanted -- AFTER the
+        TG result is out, and not at all between back-to-back TG sweeps (a
+        queued TG request is served first). A spectrum that was never
+        configured stays unconfigured (start-up rule), as before.
+        # VERIFY on the SA44B: a CW set right after saAbort (before the
+        # spectrum's configure + initiate) survives that re-initiate -- the
+        # lab measured that a CW survives aborts and spectrum sweeps."""
         try:
             with self._hw:
-                cw_pauses = cw["on"] and not self.cfg.hardware.tg_cw_during_sweep
-                if spectrum_was and not cw_pauses:
-                    self._ensure_configured()          # _configured is None: reconfigures
-                else:
-                    self._idle_hw()
+                self._idle_hw()
                 if cw["on"]:
                     self.backend.set_tg_cw(cw["freq_hz"], cw["level_dbm"])
                 else:

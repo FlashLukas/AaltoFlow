@@ -244,6 +244,8 @@ class RemoteSa:
         if (g and _same(g["req_start"], start_Hz) and _same(g["req_stop"], stop_Hz)
                 and g["req_points"] == int(points)):
             return g["start"], g["bin"], g["points"]
+        if self.link._sub_thread is None:
+            return None                     # never opened: no network (describe at build time)
         try:
             r = self.link.rpc(cmd="tg_grid", start_hz=float(start_Hz),
                               stop_hz=float(stop_Hz), points=int(points))
@@ -310,7 +312,10 @@ class RemoteSa:
         return {"start_Hz": grid["start"], "bin_Hz": grid["bin"], "points": points,
                 "rbw_Hz": float(r.get("rbw_hz", 0.0) or 0.0),
                 "averages": int(r.get("averages", 0) or 0),
-                "db": db, "overload": bool(r.get("overload", False))}
+                "db": db, "overload": bool(r.get("overload", False)),
+                # the owner's breakdown of this acquisition (queued / configure /
+                # sweep / restore / total, s) -- for finding the overhead
+                "owner_timing_s": dict(r.get("timing_s") or {})}
 
     def abort(self) -> None:
         """Abort OUR acquisition only. `tg_abort` takes no id, so we send it
