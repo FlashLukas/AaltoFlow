@@ -1,0 +1,32 @@
+[project]
+name = "shsna-control"
+version = "0.2.0"
+license = "MIT"
+description = "Scalar network analyser: Signal Hound USB-TG44A sweeps through a DUT, thru-normalised |S21| in dB (via the signalhound service, or simulated)"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client, AND the real backend (a client of signalhound)
+    "numpy>=1.26",  # traces, power averaging, and the simulator's chain
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui       the GUI (the headless core installs light)
+#
+# There is no `real` extra and no vendor library: --real talks to the
+# signalhound service over ZeroMQ, which is already a base dependency. The
+# Signal Hound DLL lives in THAT module (one process per analyser).
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the trace plots
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
