@@ -169,7 +169,14 @@ class SettingsDialog(QtWidgets.QDialog):
         self._add(form, "limits", "stable_time_s", "Stable dwell", _dspin(lim.stable_time_s, 0, 10, 2, 0.1, "s"))
 
         _section(form, "Stabilizer")
-        self._add(form, "stabilizer", "gain_A_per_mT", "Gain", _dspin(st.gain_A_per_mT, 0, 1, 4, 0.0001, "A/mT"))
+        # integrating trim (2026-09-28); see config.Stabilizer for the why
+        self._add(form, "stabilizer", "fraction", "Error removed per correction", _dspin(st.fraction, 0.05, 1.5, 2, 0.05))
+        self._add(form, "stabilizer", "period_s", "Averaging period", _dspin(st.period_s, 0.1, 600, 1, 0.5, "s"))
+        self._add(form, "stabilizer", "settle_s", "Settle after a move", _dspin(st.settle_s, 0, 60, 2, 0.1, "s"))
+        self._add(form, "stabilizer", "max_step_A", "Max per correction", _dspin(st.max_step_A, 0, 1, 4, 0.001, "A"))
+        self._add(form, "stabilizer", "max_trim_A", "Max total trim", _dspin(st.max_trim_A, 0, 3, 3, 0.01, "A"))
+        self._add(form, "stabilizer", "backlash_A", "Back-step (hysteresis)", _dspin(st.backlash_A, 0, 0.5, 4, 0.001, "A"))
+        self._add(form, "stabilizer", "gain_A_per_mT", "Gain without calibration", _dspin(st.gain_A_per_mT, 0, 1, 4, 0.0001, "A/mT"))
 
         _section(form, "Acquisition")
         self._add(form, "acquisition", "precise_samples", "Precise samples", _ispin(ac.precise_samples, 1, 1000000))

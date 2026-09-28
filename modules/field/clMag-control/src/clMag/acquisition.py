@@ -65,6 +65,11 @@ class AcquisitionThread(threading.Thread):
         self.ring = deque(maxlen=ring_size)   # (t, field) for plotting/logging
         self.errors = 0          # failed probe reads since start
         self.last_error = ""     # text of the most recent one
+        # The suite's `hw_error` convention: the text of the failure while the
+        # probe is FAILING, "" again after the next good read. `latest` keeps
+        # the last GOOD field meanwhile, so without this flag a dead DAQ
+        # looked exactly like a perfectly steady magnet.
+        self.hw_error = ""
 
     def set_profile(self, name: str) -> None:
         assert name in ("fast", "precise")
@@ -91,12 +96,14 @@ class AcquisitionThread(threading.Thread):
                 # the count into an error event), wait a moment, try again.
                 self.errors += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
+                self.hw_error = self.last_error
                 self._stop.wait(0.1)
                 continue
             field = self._hall.volts_to_field(volts)
             t = time.monotonic()
             self.latest.set(t, field, samples)
             self.ring.append((t, field))
+            self.hw_error = ""       # a good read: the probe works again
 
     def stop(self) -> None:
         self._stop.set()

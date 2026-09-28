@@ -109,11 +109,11 @@ def build_manifest(ctrl) -> dict:
 
         _p("stabilizer", "Long-term stabilizer", "control", "bool",
            group="Field", order=40,
-           # Deliberately no read_path: the service does not publish this in
-           # status, so a client must not pretend to show its state.
+           read_path=["stabilizer"],
            set={"verb": "set_stabilizer", "arg": "enabled"},
-           settle={"policy": "immediate"},
-           help="Slow drift correction; only acts in IDLE/HOLD."),
+           settle={"policy": "echoes", "key": "stabilizer"},
+           help="Slow INTEGRATING drift correction of a reached field; only "
+                "acts in STABLE/HOLD, outside tolerance/2."),
 
         # ---- indicators ----------------------------------------------------
         _p("state", "State", "indicator", "string", group="Status", order=1,
@@ -127,6 +127,19 @@ def build_manifest(ctrl) -> dict:
            read_path=["measured_field_mT"]),
         _p("field_stable", "Field stable", "indicator", "bool",
            group="Status", order=4, read_path=["field_stable"]),
+        _p("hw_error", "Hardware error", "indicator", "string",
+           group="Status", order=6, read_path=["hw_error"],
+           help="Empty when the Hall probe and the supply answer. Otherwise "
+                "the failure; the readings are then the last good ones."),
+        _p("loop_error", "Control loop error", "indicator", "string",
+           group="Status", order=7, read_path=["loop_error"],
+           help="The last internal error of the control loop (current held, "
+                "IDLE). Cleared by the next command."),
+        _p("stabilizer_trim", "Stabilizer trim", "indicator", "float",
+           unit="A", group="Status", order=8, decimals=4, plottable=True,
+           read_path=["stabilizer_trim_A"],
+           help="Current the long-term stabilizer has added since the field "
+                "was reached."),
         _p("output_on", "Supply output", "indicator", "bool",
            group="Status", order=5, read_path=["output_on"],
            help="The Kepco's output switch as read back. The service adopts "

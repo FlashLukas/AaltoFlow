@@ -107,6 +107,28 @@ class SimulatedHallProbe:
         # When True, read_voltage blocks for samples/rate seconds, like a real
         # DAQ acquisition. Tests/calibration set this False so they run instantly.
         self.emulate_timing = emulate_timing
+        # Slow DRIFT (2026-09-28), for testing the long-term stabilizer: an
+        # extra field that grows linearly at `rate` mT/s from the moment
+        # set_drift() is called, and stops growing at `total` mT. Physically
+        # it stands for anything slow the calibration does not know about --
+        # a warming coil or pole piece, a Hall offset creeping with the room
+        # temperature. Default: no drift, so nothing else changes.
+        self._drift_rate = 0.0
+        self._drift_total = 0.0
+        self._drift_t0 = 0.0
+
+    def set_drift(self, rate_mT_per_s: float, total_mT: float) -> None:
+        """Start a drift of `rate` mT/s that stops after `total` mT (the sign
+        of `total` gives the direction). set_drift(0, 0) removes it; a huge
+        rate makes it a step."""
+        self._drift_rate = abs(float(rate_mT_per_s))
+        self._drift_total = float(total_mT)
+        self._drift_t0 = time.monotonic()
+
+    def drift_mT(self) -> float:
+        """The drift field right now (mT)."""
+        grown = self._drift_rate * (time.monotonic() - self._drift_t0)
+        return math.copysign(min(grown, abs(self._drift_total)), self._drift_total)
 
     def open(self) -> None:
         self._open = True
@@ -117,7 +139,7 @@ class SimulatedHallProbe:
     def _true_field_mT(self) -> float:
         I = self._kepco.read_current()
         anhysteretic = self._B_sat * math.tanh(I / self._I_scale)
-        return anhysteretic + self._hyst * self._kepco.direction
+        return anhysteretic + self._hyst * self._kepco.direction + self.drift_mT()
 
     def read_voltage(self, samples: int, rate_Hz: float) -> float:
         """Return the mean of `samples` noisy readings, in volts. Averaging more

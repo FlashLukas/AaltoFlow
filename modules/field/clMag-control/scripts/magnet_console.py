@@ -84,6 +84,11 @@ class Console:
         print(f"  state={s.get('state','?'):9}  field={s.get('measured_field_mT',0):8.3f} mT"
               f"  current={s.get('current_A',0):7.3f} A  setpoint={sp_txt}"
               f"  stable={s.get('field_stable')}  locked={s.get('locked')}")
+        # hardware / loop failures (2026-09-28); the values above are then
+        # the last good ones
+        for key in ("hw_error", "loop_error"):
+            if s.get(key):
+                print(f"  {key.upper()}: {s[key]}")
 
     # ---- watch the live PUB stream --------------------------------------
 

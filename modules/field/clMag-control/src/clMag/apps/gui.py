@@ -243,6 +243,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setpoint_value.setStyleSheet(f"color:{COLORS['muted']};")
         rlay.addWidget(self.current_value)
         rlay.addWidget(self.setpoint_value)
+        # status hw_error / loop_error, in red; hidden while both are empty
+        self.error_label = QtWidgets.QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet(f"color:{COLORS['danger']}; font-weight:600;")
+        self.error_label.setVisible(False)
+        rlay.addWidget(self.error_label)
         col.addWidget(rcard)
 
         # --- magnet energized indicator
@@ -445,10 +451,29 @@ class MainWindow(QtWidgets.QMainWindow):
             f"QLabel#stateBadge {{ color:{color}; border-color:{color}; "
             f"background:{COLORS['panel_hi']}; border-radius:10px; padding:4px 12px; "
             f"font-weight:700; letter-spacing:1px; }}")
-        if s.field_stable:
+        hw_error = getattr(s, "hw_error", "") or ""
+        loop_error = getattr(s, "loop_error", "") or ""
+        err_text = "\n".join(t for t in (hw_error, loop_error) if t)
+        self.error_label.setText(err_text)
+        self.error_label.setVisible(bool(err_text))
+        if hw_error:
+            # A failing Hall probe or supply: the numbers above are the LAST
+            # GOOD ones, so say so in red instead of showing a calm "STABLE".
+            self.stable_dot.setText("●  HARDWARE ERROR")
+            self.stable_dot.setToolTip(hw_error)
+            self.stable_dot.setStyleSheet(f"color:{COLORS['danger']}; font-weight:700;")
+        elif s.field_stable:
             self.stable_dot.setText("●  STABLE")
+            self.stable_dot.setToolTip("")
             self.stable_dot.setStyleSheet(f"color:{COLORS['ok']}; font-weight:700;")
+        elif s.state == "STABLE":
+            # reached before, drifted out of tolerance since (field_stable
+            # dropped); the stabilizer is working on it
+            self.stable_dot.setText("●  out of tolerance")
+            self.stable_dot.setToolTip("")
+            self.stable_dot.setStyleSheet(f"color:{COLORS['accent']}; font-weight:700;")
         else:
+            self.stable_dot.setToolTip("")
             self.stable_dot.setText("●  seeking")
             self.stable_dot.setStyleSheet(f"color:{COLORS['muted']}; font-weight:600;")
 

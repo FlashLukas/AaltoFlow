@@ -32,6 +32,10 @@ def status_to_dict(status) -> dict:
         "locked": status.locked,
         "output_on": status.output_on,
         "cmd_done": status.cmd_done,
+        "hw_error": status.hw_error,
+        "loop_error": status.loop_error,
+        "stabilizer": status.stabilizer,
+        "stabilizer_trim_A": status.stabilizer_trim_A,
         "aux": status.aux,
     }
 

@@ -20,9 +20,13 @@ SEEK      : PI is actively closing the last couple of mT to a field setpoint,
             approaching from one side and never overshooting. When the error
             enters tolerance/2 the PI freezes and we start the stability dwell;
             once the field holds within full tolerance for `stable_time`, -> STABLE.
-STABLE    : field reached and verified; the "stable" indicator is on; the slow
-            long-term stabilizer trims drift. (PI does NOT re-engage on drift.)
-HOLD      : holding a field set by calibration only (no PI verification).
+STABLE    : field reached and verified; the slow long-term stabilizer trims
+            drift (PI does NOT re-engage on drift). field_stable is True while
+            the field stays within tolerance and DROPS if it drifts out for
+            stable_time (Lukas, 2026-09-28) -- the state stays STABLE, the
+            flag says whether a measurement may trust the field right now.
+HOLD      : holding a field set by calibration only (no PI verification);
+            the stabilizer trims here too, field_stable stays False.
 DEMAG     : walking exponentially decaying +/- current steps down to zero.
 CALIBRATE : sweeping current, dwelling, measuring, building a fresh B(I) curve.
 
@@ -74,6 +78,18 @@ class Status:
     # frame already reflects its command -- the state or the setpoint alone
     # can look identical before and after (gotcha #2).
     cmd_done: int = 0
+    # The suite convention (2026-09-28): the text of a hardware failure that
+    # is happening NOW -- the Hall probe cannot be read, or the supply does
+    # not take the current -- and "" when everything answers. While it is
+    # set, measured_field_mT / current_A are the LAST GOOD values, not live
+    # ones; scan-core pauses a scan on it.
+    hw_error: str = ""
+    # The last internal control-loop error (the loop then HOLDS the current
+    # and goes IDLE, see _on_loop_error). Sticky until the next command, so a
+    # one-off failure is still visible after the loop has recovered.
+    loop_error: str = ""
+    stabilizer: bool = True           # long-term stabilizer switched on
+    stabilizer_trim_A: float = 0.0    # current it has added since STABLE/HOLD
 
 
 def _finite(name: str, value) -> float:
@@ -145,6 +161,31 @@ class Controller:
         self._freeze_current = 0.0
         self.stabilizer_enabled = True
         self.locked = False
+
+        # field_stable drop filter (STABLE only): when the field first went
+        # out of tolerance, and how many distinct readings were out since.
+        self._out_since: Optional[float] = None
+        self._out_readings = 0
+        self._out_last_t: Optional[float] = None
+
+        # Long-term stabilizer (integrating; see config.Stabilizer and
+        # _tick_stabilizer). Plain attributes, copied into status (gotcha #1).
+        self._stab_base = 0.0          # current when STABLE/HOLD was entered
+        self._stab_trim = 0.0          # accumulated correction on top of it
+        self._stab_dir = 1             # approach direction = hysteresis branch
+        self._stab_window_t = 0.0      # collect readings from this time on
+        self._stab_samples: List[float] = []
+        self._stab_last_t: Optional[float] = None
+        self._stab_pending: Optional[float] = None   # target after a back-step
+        self._stab_at_limit = False
+
+        # Direction of the last change of the commanded current (+1 / -1).
+        # The iron's hysteresis branch follows it, so the stabilizer needs it.
+        self._drive_dir = 0
+
+        # error reporting (see Status.hw_error / loop_error)
+        self._supply_error = ""
+        self._loop_error = ""
 
         # ADOPT-ON-START. `_driving` stays False until a command that moves the
         # current begins; until then the loop sends NOTHING to the supply, so
@@ -291,7 +332,20 @@ class Controller:
             aux=self.aux_snapshot(),
             output_on=self._output_on,
             cmd_done=cmd_done,
+            hw_error=self._hw_error_text(),
+            loop_error=self._loop_error,
+            stabilizer=bool(self.stabilizer_enabled),
+            stabilizer_trim_A=self._stab_trim,
         )
+
+    def _hw_error_text(self) -> str:
+        parts = []
+        acq_err = getattr(self.acq, "hw_error", "")
+        if acq_err:
+            parts.append(f"Hall probe: {acq_err}")
+        if self._supply_error:
+            parts.append(f"supply: {self._supply_error}")
+        return "; ".join(parts)
 
     # ---- AUX I/O (general-purpose DAQ, independent of the field loop) -----
 
@@ -384,6 +438,9 @@ class Controller:
             except queue.Empty:
                 return
             seq, cmd = cmd[0], cmd[1:]
+            # a new command starts with a clean slate: the last loop error
+            # stays visible in status until the operator does something else.
+            self._loop_error = ""
             try:
                 self._do_command(cmd, now)
             finally:
@@ -551,16 +608,47 @@ class Controller:
         if not self._driving:
             pass
         elif self._output_frozen:
-            self.kepco.set_current(self._freeze_current)
+            self._write_supply(self._freeze_current)
         else:
+            prev = self.ramper.setpoint
             self.ramper.step()
-            self.kepco.set_current(self.ramper.setpoint)
+            try:
+                self._write_supply(self.ramper.setpoint)
+            except Exception:
+                # The step did NOT reach the supply, so take it back: the
+                # ramper must describe what the magnet really has, or the
+                # "hold where we are" of _on_loop_error would hold one ramp
+                # step (0.05 A) further than the magnet ever went -- and the
+                # next good write would then move the magnet there AFTER
+                # the error. (Found 2026-09-28.)
+                self.ramper.sync_to(prev)
+                raise
+            if self.ramper.setpoint != prev:
+                self._drive_dir = 1 if self.ramper.setpoint > prev else -1
         self._log(now, field)
+
+    def _write_supply(self, amps: float) -> None:
+        """Send the current to the supply; a failure is a HARDWARE error
+        (status hw_error) until the next write goes through."""
+        try:
+            self.kepco.set_current(amps)
+        except Exception as exc:                          # noqa: BLE001
+            self._supply_error = f"{type(exc).__name__}: {exc}"
+            raise
+        self._supply_error = ""
 
     def _on_loop_error(self, exc: Exception, now: float) -> None:
         """One control tick raised. Stop WHERE WE ARE (no further ramping, no
         seek, not stable), report it, and keep the loop alive so the next
-        command -- and the shutdown ramp to zero -- still work."""
+        command -- and the shutdown ramp to zero -- still work.
+
+        Why HOLD and not ramp to zero (Lukas, 2026-09-28): the error may be a
+        one-off (a GPIB timeout), and dropping the field would destroy the
+        sample's magnetic state for nothing; ramping down through a supply
+        that just failed to answer is not safer either. The current stays
+        where it last got to, the state goes IDLE (a scan waiting on
+        field_stable waits), and the error is published as `loop_error` (and
+        as `hw_error` while the supply keeps failing) plus a red event."""
         self._state = State.IDLE
         self._setpoint_field = None
         self._field_stable = False
@@ -570,6 +658,7 @@ class Controller:
         # A dead instrument fails EVERY tick: report the first failure and then
         # at most every 2 s, or the event log becomes a 100-lines/s flood.
         msg = f"control loop error: {type(exc).__name__}: {exc}"
+        self._loop_error = msg + " -- current held, IDLE"
         last_msg, last_t = self._last_err
         if msg != last_msg or now - last_t >= 2.0:
             self._last_err = (msg, now)
@@ -594,7 +683,7 @@ class Controller:
         elif st == State.SEEK:
             self._tick_seek(now, dt, field)
         elif st in (State.STABLE, State.HOLD):
-            self._tick_hold(field)
+            self._tick_hold(now, field)
         elif st == State.DEMAG:
             self._tick_demag()
         elif st == State.CALIBRATE:
@@ -610,6 +699,7 @@ class Controller:
             self._event("info", "jump complete -> PI seek")
         elif nxt == State.HOLD:
             self._hold_current = self.ramper.setpoint
+            self._stab_reset(now, self._drive_dir or self._approach_sign or 1)
             self._state = State.HOLD
             self._event("info", "field set (calibration only), holding")
         else:
@@ -670,20 +760,156 @@ class Controller:
         # long-term stabilizer (deadbanded) can make slow trims from here.
         self.ramper.sync_to(self._freeze_current)
         self._output_frozen = False
+        self._out_since = None
+        self._out_readings = 0
+        # the seek only ever pushed in the approach direction, so that is the
+        # branch the iron sits on now
+        self._stab_reset(time.monotonic(), self._approach_sign or self._drive_dir or 1)
         self._state = State.STABLE
         self.acq.set_profile("precise")
         self._event("info", f"field stable at {self._setpoint_field:.3f} mT")
 
-    def _tick_hold(self, field: float) -> None:
-        # long-term stabilizer: a slow proportional trim against drift, only
-        # while idle-holding (never during an active seek). Deadband inside the
-        # tolerance so we do NOT dither the current (and flip hysteresis) while
-        # the field is already good enough.
+    def _tick_hold(self, now: float, field: float) -> None:
+        if self._state == State.STABLE and self._setpoint_field is not None:
+            self._track_stable_flag(now, field)
         if self.stabilizer_enabled and self._setpoint_field is not None:
-            error = self._setpoint_field - field
-            if abs(error) > self.cfg.limits.field_tolerance_mT:
-                trim = error * self.cfg.stabilizer.gain_A_per_mT
-                self.ramper.go_to(self._clamp_current(self._hold_current + trim))
+            self._tick_stabilizer(now)
+
+    def _track_stable_flag(self, now: float, field: float) -> None:
+        """Keep field_stable honest while STABLE (Lukas, 2026-09-28).
+
+        It used to stay True however far the field drifted, so a scan went on
+        measuring at a field that was no longer there. Same tolerance and same
+        stable_time as on the way in, used both ways: the flag drops once the
+        field has been OUT of tolerance for stable_time AND over at least two
+        separate readings (a single noisy precise reading lasts ~100 ms and
+        must not flicker it), and comes back once it has been within
+        tolerance for stable_time again."""
+        tol = self.cfg.limits.field_tolerance_mT
+        hold_s = self.cfg.limits.stable_time_s
+        t_read, _ = self.acq.latest.get()
+        if abs(self._setpoint_field - field) > tol:
+            self._stable_since = None
+            if self._out_since is None:
+                self._out_since = now
+                self._out_readings = 0
+                self._out_last_t = None
+            if t_read is not None and t_read != self._out_last_t:
+                self._out_last_t = t_read
+                self._out_readings += 1
+            if (self._field_stable and now - self._out_since >= hold_s
+                    and self._out_readings >= 2):
+                self._field_stable = False
+                self._event("warn", f"field drifted out of tolerance: "
+                                    f"{field:.3f} mT for setpoint "
+                                    f"{self._setpoint_field:.3f} mT -- not stable")
+        else:
+            self._out_since = None
+            if not self._field_stable:
+                if self._stable_since is None:
+                    self._stable_since = now
+                elif now - self._stable_since >= hold_s:
+                    self._field_stable = True
+                    self._event("info", f"field back within tolerance at "
+                                        f"{self._setpoint_field:.3f} mT")
+
+    # ---- the long-term stabilizer ------------------------------------------
+
+    def _stab_reset(self, now: float, branch_dir: int) -> None:
+        """Start a fresh stabilizer on entering STABLE / HOLD: no trim yet,
+        the present current is the base, and `branch_dir` is the direction
+        the field was approached from (the hysteresis branch it sits on)."""
+        self._stab_base = self.ramper.setpoint
+        self._stab_trim = 0.0
+        self._stab_dir = 1 if branch_dir >= 0 else -1
+        self._stab_window_t = now + self.cfg.stabilizer.settle_s
+        self._stab_samples = []
+        self._stab_last_t = None
+        self._stab_pending = None
+        self._stab_at_limit = False
+
+    def _local_slope(self) -> Optional[float]:
+        """dB/dI (mT/A) of the calibration at the present current, or None."""
+        cal = self.calibration
+        if cal is None or not getattr(cal, "currents_A", None):
+            return None
+        I, d = self.ramper.setpoint, 0.05
+        slope = (cal.field_for_current(I + d) - cal.field_for_current(I - d)) / (2 * d)
+        return slope if abs(slope) > 1e-6 else None
+
+    def _tick_stabilizer(self, now: float) -> None:
+        """An integrating, average-then-correct, one-sided trim.
+
+        Why each piece is there (the hard freeze of gotcha #11 solved a limit
+        cycle; this must not bring it back):
+          * INTEGRATING: each correction is ADDED to `_stab_trim`, so a drift is
+            followed until it is gone -- no standing error. (The old trim was
+            gain * error on a fixed base: 0.001 A/mT left a 0.5 mT drift
+            almost entirely in place.)
+          * AVERAGE, THEN CORRECT, THEN WAIT: the error is the mean of every
+            reading over `period_s`, taken only after `settle_s` has passed
+            since the last move, and one correction follows. Correcting on
+            every noisy reading while the field is still responding is exactly
+            what made the camera stabiliser limit-cycle.
+          * DEADBAND tolerance/2: the seek freezes within tol/2, so a freshly
+            reached field never triggers it; below it the current is not
+            touched at all (between corrections the output is as still as the
+            freeze).
+          * ONE-SIDED ENDING: a correction against the approach direction
+            steps `backlash_A` further back and then comes forward, so the iron
+            always ends on the branch it was approached on and the field
+            moves smoothly with the trim instead of jumping by 2h.
+          * CAPS: `max_step_A` per correction, `max_trim_A` in total (the
+            integrator stops there: anti-windup)."""
+        sc = self.cfg.stabilizer
+        # finish a back-step: once the ramp has reached it, come forward
+        if self._stab_pending is not None:
+            if self.ramper.done:
+                self.ramper.go_to(self._stab_pending)
+                self._stab_pending = None
+                self._stab_window_t = now + sc.settle_s
+                self._stab_samples = []
+            return
+        if not self.ramper.done or now < self._stab_window_t:
+            return
+        t_read, f_read = self.acq.latest.get()
+        if (t_read is not None and t_read != self._stab_last_t
+                and t_read >= self._stab_window_t):
+            self._stab_last_t = t_read
+            self._stab_samples.append(f_read)
+        if now - self._stab_window_t < sc.period_s or len(self._stab_samples) < 3:
+            return
+        error = self._setpoint_field - sum(self._stab_samples) / len(self._stab_samples)
+        self._stab_samples = []
+        self._stab_window_t = now          # next window; no move -> no settle
+        if abs(error) <= self.cfg.limits.field_tolerance_mT / 2:
+            return
+
+        slope = self._local_slope()
+        if slope is not None:
+            d_I = sc.fraction * error / slope
+        else:
+            d_I = sc.fraction * error * sc.gain_A_per_mT
+        d_I = max(-sc.max_step_A, min(sc.max_step_A, d_I))
+        new_trim = max(-sc.max_trim_A, min(sc.max_trim_A, self._stab_trim + d_I))
+        at_limit = abs(new_trim) >= sc.max_trim_A - 1e-12
+        if at_limit and not self._stab_at_limit:
+            self._event("warn", f"stabilizer at its authority limit "
+                                f"({new_trim:+.3f} A): the drift is larger than "
+                                f"it may correct")
+        self._stab_at_limit = at_limit
+        d_I = new_trim - self._stab_trim
+        if abs(d_I) < 1e-9:
+            return                           # pinned at the limit: nothing to do
+        self._stab_trim = new_trim
+        target = self._clamp_current(self._stab_base + new_trim)
+        if d_I * self._stab_dir < 0 and sc.backlash_A > 0:
+            # against the branch: overshoot backwards, the return comes next
+            self.ramper.go_to(self._clamp_current(target - self._stab_dir * sc.backlash_A))
+            self._stab_pending = target
+        else:
+            self.ramper.go_to(target)
+        self._stab_window_t = now + sc.settle_s
 
     def _tick_demag(self) -> None:
         if not self.ramper.done:
@@ -712,6 +938,13 @@ class Controller:
                     return
                 self.ramper.go_to(self._seq[self._seq_i])
                 self._phase = "ramp"
+        elif self._phase == "zero":
+            # the sweep ends at -I_max; IDLE only once the current is back at
+            # zero, so a scan whose settle rule is "state IDLE" (describe)
+            # cannot start its next step with the magnet at full current.
+            if self.ramper.done:
+                self._state = State.IDLE
+                self._event("info", "calibration: current back at zero")
 
     def _finish_calibrate(self) -> None:
         hall = self.cfg.hall
@@ -722,7 +955,11 @@ class Controller:
                             f"{lo:.1f}..{hi:.1f} mT")
         if self._cal_after:
             self._cal_after(cal)
-        self._state = State.IDLE
+        # Lukas, 2026-09-28: do not leave the magnet at -I_max after a
+        # calibration. Ramp to zero (normal ramp rate); the state stays
+        # CALIBRATE until the "zero" phase has arrived.
+        self.ramper.go_to(0.0)
+        self._phase = "zero"
 
     # ------------------------------------------------------------- shutdown ramp
 

@@ -72,7 +72,12 @@ class PID:
 @dataclass
 class Limits:
     """Hard safety envelope. Setpoints outside these are clamped silently and
-    the event is reported in red on the status bar."""
+    the event is reported in red on the status bar.
+
+    `field_tolerance_mT` and `stable_time_s` work both ways: field_stable is
+    raised after the field has been within tolerance for stable_time, and
+    dropped again (in STABLE) after it has been OUTSIDE for stable_time -- the
+    time filter keeps one noisy reading from flickering the flag."""
 
     current_max_A: float = 3.0
     field_tolerance_mT: float = 0.1   # full tolerance band for "on target"
@@ -82,10 +87,43 @@ class Limits:
 
 @dataclass
 class Stabilizer:
-    """Long-term watchdog: while IDLE, nudges current by
-    (B_set - B_measured) * gain to fight slow drift."""
+    """Long-term watchdog for a field that has been reached (STABLE or HOLD).
 
-    gain_A_per_mT: float = 0.001
+    It INTEGRATES (Lukas, 2026-09-28): every `period_s` it averages the field
+    measured since its last move, and if that average is off by more than
+    tolerance/2 it adds a correction to a running current trim. The trim is
+    kept, so a slow drift is removed completely instead of leaving the standing
+    error a proportional nudge leaves. How big a correction is:
+
+        dI = fraction * error / (dB/dI)
+
+    with dB/dI the calibration's local slope -- i.e. `fraction` of the error is
+    removed per correction, whatever the operating point on the saturating
+    B(I) curve (0.7: converges in 2-3 corrections, cannot overshoot unless the
+    true slope is less than a third of the calibrated one). `gain_A_per_mT` is
+    used instead of 1/(dB/dI) only when there is no calibration to take a
+    slope from.
+
+    Limits: at most `max_step_A` per correction, at most `max_trim_A` in total
+    (the anti-windup: at the limit the trim stops accumulating and a warning
+    says the drift is bigger than the stabilizer may fix).
+
+    Hysteresis (gotcha #11): a correction AGAINST the direction the field was
+    approached from would flip the iron onto the other branch (a 2h jump the
+    trim knows nothing about -> the next correction reverses again -> limit
+    cycle). So such a correction steps back `backlash_A` FURTHER and then comes
+    forward: every correction ends moving in the approach direction, the way
+    the seek approaches from one side. `settle_s` is how long after a move the
+    readings are ignored (eddy currents, the coil's L/R -- # VERIFY on the real
+    magnet: a few time constants)."""
+
+    gain_A_per_mT: float = 0.001    # fallback 1/(dB/dI) when no calibration
+    period_s: float = 1.0           # averaging window between corrections
+    settle_s: float = 0.3           # readings ignored after a move
+    fraction: float = 0.7           # share of the averaged error removed per step
+    max_step_A: float = 0.01        # cap per correction (~0.4 mT near 0 A)
+    max_trim_A: float = 0.1         # total authority (~4 mT near 0 A)
+    backlash_A: float = 0.005       # extra back-step for a correction against the branch
 
 
 @dataclass

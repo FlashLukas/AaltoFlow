@@ -45,6 +45,10 @@ class RemoteStatus:
         self.aux = d.get("aux") or {}
         self.describe_rev = d.get("describe_rev")   # None from an older service
         self.cmd_done = d.get("cmd_done")           # None from an older service
+        self.hw_error = d.get("hw_error", "")
+        self.loop_error = d.get("loop_error", "")
+        self.stabilizer = d.get("stabilizer")        # None from an older service
+        self.stabilizer_trim_A = d.get("stabilizer_trim_A", 0.0)
 
 
 def _taken_up(st, seq) -> bool:
