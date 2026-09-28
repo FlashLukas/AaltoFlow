@@ -112,6 +112,19 @@ def test_transmission_is_refused_on_another_grid(sna):
     assert sna.status().sample["peak_transmission_db"] != sna.status().sample["peak_transmission_db"]  # NaN
 
 
+def test_transmission_is_refused_with_another_rbw(sna):
+    """Measured on the real TG44A (lab PC, 2026-09-28): the TG-sweep level moves
+    ~2.5 dB between RBW 100 Hz and 100 kHz. A thru taken at one RBW is then off
+    by that much for a trace at another -- refuse it, like another grid."""
+    sna.set_rbw(100e3)
+    _thru_then_dut(sna)
+    sna.get_trace("transmission")                  # same RBW: fine
+    sna.set_rbw(1e3)
+    _finish(sna, sna.acquire())
+    with pytest.raises(ValueError, match="RBW .* Take a new reference"):
+        sna.get_trace("transmission")
+
+
 def test_a_failed_acquisition_is_latched_with_its_reason(sna):
     _finish(sna, sna.acquire())
     sna.sim.fail_next = "USB hiccup"

@@ -1065,13 +1065,19 @@ def _reference_mismatch(trace: dict, ref: dict) -> list[str]:
     """What makes `ref` unusable for `trace`, in words; [] if it matches.
 
     Only what changes the MEANING of the subtraction counts: another grid
-    subtracts bin i at a different frequency. RBW and averaging change the
-    noise, not the meaning. (No TG level: the TG44A has none in sweep mode.)"""
+    subtracts bin i at a different frequency, and another RBW shifts the TG
+    sweep's LEVEL (measured on the real TG44A, 2026-09-28: ~2.5 dB between
+    100 Hz and 100 kHz), so a thru at one RBW is off by that at another.
+    Averaging changes only the noise. (No TG level: the TG44A has none in
+    sweep mode.)"""
     out = []
     for key, label in (("start_Hz", "first bin"), ("bin_Hz", "bin width")):
         a, b = float(trace.get(key, _NAN)), float(ref.get(key, _NAN))
         if not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-3):
             out.append(f"{label} {a:.9g} Hz vs reference {b:.9g} Hz")
+    a, b = float(trace.get("rbw_Hz", 0.0) or 0.0), float(ref.get("rbw_Hz", 0.0) or 0.0)
+    if not math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-6):
+        out.append(f"RBW {a:g} Hz vs reference {b:g} Hz")
     if int(trace.get("points", -1)) != int(ref.get("points", -2)):
         out.append(f"{trace.get('points')} points vs reference {ref.get('points')}")
     return out
