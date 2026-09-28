@@ -49,8 +49,10 @@ detectors (the reading follows the responsivity).
   context -- trying to open is the only honest test (gotcha #23).
 - A hard kill during a USB read leaves the meter answering "I/O error" until it is
   unplugged -- always stop services with the `shutdown` verb (gotcha #25).
-- Not re-checked on the meter since: the hwlock claim (2026-09-27) and the
-  fly-scan stream (2026-09-27).
+- The fly-scan stream ran on the meter on 2026-09-28 (every fly scan under
+  scan-core below; ~17 readings/s, so 2 -- 8 samples per pixel at 1 -- 2 um/s).
+- Not re-checked on the meter since: the hwlock claim (2026-09-27; the service
+  on the new code started and read normally, but no second service was tried).
 
 ## kim -- Thorlabs KIM101 + 3x PIA25 piezo inertia stage
 
@@ -83,8 +85,10 @@ against a fake camera with a rotated, asymmetric, voltage-dependent stage),
   525-point raster. Absolute kim coordinates are not reproducible across a long
   scan; approach from one direction, or let the camera close the loop.
 - Not yet checked on the rig: the target-echo settle of 2026-09-28 (the KIM101 must
-  report "moving" on the first query after a move -- `# VERIFY` in the backend),
-  and the fly-scan stream.
+  report "moving" on the first query after a move -- `# VERIFY` in the backend).
+- The fly-scan stream (position readback) ran on 2026-09-28: flown rows of
+  +-5 um at 2 um/s and 20 um at 1 um/s, speed restored after every row (see
+  scan-core below).
 
 ## camera -- IDS U3-38xCP camera, vision brain, KIM stage as XY/Z
 
@@ -114,9 +118,13 @@ before/after routines.
 - The stage axes are rotated 90 degrees against the image on the rig; the kim
   px/step calibration absorbs it. kim's table must match the objective in use,
   otherwise kim refuses image moves.
-- Not yet checked on the rig: the stabiliser and laser placement at 63x, the
-  autofocus routines on the real (hysteretic) Z, the lost-pattern fault of
-  2026-09-28.
+- Checked on the rig at 63x (2026-09-25 .. 09-28): the array stabiliser (array
+  points brought under the laser from the suite's Control tab, and a 3 x 22 scan
+  over the array with pm16), and laser placement (`set_laser_target`: 2 um in
+  1.16 s, 0.06 um off; row placement in the camera-coordinate fly scans, 0.01 --
+  0.15 um from the target, short on the side it comes from).
+- Not yet checked on the rig: the autofocus routines on the real (hysteretic) Z,
+  the lost-pattern fault of 2026-09-28.
 
 ## signalhound -- Signal Hound SA44B + USB-TG44A
 
@@ -142,17 +150,25 @@ before/after routines.
 - The API never reports a compression warning on this unit; overload is judged
   from the trace against the reference level.
 - A 150 kHz RBW is accepted silently and gives the 100 kHz grid.
-- Sweep time is ~0.05 s + span / 135 MHz/s; the first estimate was off by up to
-  1000x.
+- Sweep time is ~0.05 s + span / 135 MHz/s + 10 us per output bin (the bins
+  carry the cost of a narrow RBW); within ~2x of every measured sweep, e.g. 50 MHz
+  -- 4.35 GHz in 32 s, RBW 10 Hz over 100 kHz in 0.68 s. The first estimate was off
+  by up to 1000x.
 - **The TG44A has no "off".** It keeps emitting its last frequency and level after
   an abort, a close and even the program exiting; only a new setting or unplugging
-  changes it. The suite "switches it off" by PARKING it at 10 kHz, -30 dBm.
+  changes it. The suite's plan is to "switch it off" by PARKING it at 10 kHz,
+  -30 dBm -- designed, not yet tried on the hardware.
 - Reading back the TG's frequency/level only echoes what the same program set --
   its state at start is unknown.
 - A CW from the TG coexists with spectrum sweeps (level honoured: -30 dBm read
   -50.04 dBm after the 20.0 dB pad).
 - In a TG sweep the level setting is IGNORED and the trace is transmission in dB
-  relative to the TG output, not dBm; at most 1001 points, ~0.2 s + 1.3 ms/point.
+  relative to the TG output, not dBm (-19.4 dB flat, 900 -- 1100 MHz, through the
+  20 dB pad); at most 1001 points (more are cut to 1001 silently), ~0.2 s + 1.3 ms
+  per point.
+- A second service on the same analyser (serial 0 = "first found") cannot even open
+  it: it stops with "Device not found (-8)" (now with the hint above) before the
+  hardware lock is reached. With a serial configured, the lock answers first.
 - Not yet checked: `saStoreTgThru`, the TG's -10 dBm top end, the three-module
   split (spectrum analyser / signal generator / scalar network analyser) on the
   hardware.
@@ -162,8 +178,27 @@ before/after routines.
 - 2026-09-15: wavelength scan with acquired pm16 detectors (see pm16).
 - 2026-09-25: a 21 x 25 reflectivity map with kim moving and pm16 measuring; it
   showed the open-loop drift described under kim.
-- Not yet on hardware: fly scans (first real try planned: kim + hf2, slowly), the
-  pause-on-fault of 2026-09-28.
+- 2026-09-28: **fly scans on the rig** (kim + pm16, and camera + kim + pm16):
+  - in kim coordinates (X flown +-5 um, 2 rows, 2 um/s, zig-zag): found and fixed a
+    skipped approach to the first row and a speed round trip between zig-zag rows
+    ([fc73ad1](https://github.com/FlashLukas/AaltoFlow/commit/fc73ad1),
+    [a5a59a6](https://github.com/FlashLukas/AaltoFlow/commit/a5a59a6),
+    [9cdbf79](https://github.com/FlashLukas/AaltoFlow/commit/9cdbf79)); afterwards
+    every pixel filled (3 -- 8 samples), row gap 0.48 s;
+  - in camera coordinates (laser x flown -10 .. 10 um, 100 px, 1 um/s; 5 rows placed
+    by the camera): 5 x 100 px in 140 s, no empty pixel, rows straight to ~0.035 um
+    (sd of the measured laser y); zig-zag halves the gap between rows (2.7 -- 3.8 s
+    vs 4.8 -- 6.2 s); forward/backward rows agree to 0.085 um at 1 um/s and 0.005 um
+    at 0.5 um/s (inside the row-placement scatter: no measurable lag); flying Y
+    works, the direction is learned by itself.
+  Tests: [`test_flyscan.py`](../scan-core/tests/test_flyscan.py),
+  [`test_fly_wire.py`](../scan-core/tests/test_fly_wire.py) (incl. the lagging
+  position read found on the rig), [`test_fly_camera.py`](../scan-core/tests/test_fly_camera.py).
+  Caveats: rows are placed ~0.04 -- 0.08 um short of the target on the side they
+  come from (even with "stable within" 0.05 um); kim's step counter drifts ~2.7 um
+  per row against the sample, which flying in camera coordinates absorbs; with
+  0.1 um pixels at 1 um/s only 1 -- 3 pm16 samples fall into a pixel.
+- Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28.
 
 ## Simulation only (no hardware pass yet)
 
