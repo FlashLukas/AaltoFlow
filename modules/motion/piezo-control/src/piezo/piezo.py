@@ -45,7 +45,8 @@ from .positions import PositionList
 AXES = ("X", "Y")
 
 # How close (um) the measured position must be to the target to count as
-# "settled" for a hardware/off-mode move (software moves track the ramp flag).
+# "settled" for a CLOSED-LOOP hardware/off-mode move (software moves track the
+# ramp flag; open-loop moves use the expected slew time, see status()).
 SETTLE_TOL = 0.1
 
 
@@ -87,6 +88,18 @@ class Piezo:
         self._ramp_to = [0.0, 0.0]
         self._ramp_t0 = [0.0, 0.0]
         self._ramp_vel = [axis_velocity(cfg, a) for a in range(2)]
+        # The setpoint the brain last WROTE to the controller, per axis (also
+        # guarded by _ramp_lock).  Why we need it (deep cleaning 2026-09-28):
+        # in OPEN loop the read-out is off the drive by the piezo's hysteresis
+        # (1-2 %), so "where is the drive?" can only be answered by what we
+        # commanded, not by what we read.  Starting a ramp, freezing on STOP
+        # and re-anchoring on a velocity change all start from here.
+        self._cmd = [0.0, 0.0]
+        # Open-loop "moving" (deep cleaning 2026-09-28): with no sensor to
+        # compare against, an OL hardware/off move is "moving" until the time
+        # the controller's slew limiter needs for the distance has passed.
+        # Monotonic time per axis at which the current direct move is done.
+        self._hw_eta = [0.0, 0.0]
         self._stop = threading.Event()
         self._ramp_thread: threading.Thread | None = None
 
@@ -152,6 +165,7 @@ class Piezo:
                 self._emit("warn", f"{name}: position not readable at start; target shown as 0")
                 target = 0.0
             self._target[axis] = target
+            self._cmd[axis] = target
             # An adopted target outside this mode's travel is REPORTED, not
             # corrected: correcting it would be a move at start.
             lo = self.cfg.limits.travel_min
@@ -237,14 +251,25 @@ class Piezo:
         with self._ramp_lock:
             ramping = list(self._ramp_active)
             vel = list(self._ramp_vel)
+            eta = list(self._hw_eta)
         target = list(self._target)
+        now = time.monotonic()
         moving = []
         for a in range(2):
-            if self.cfg.motion.ramp_mode == "software":
+            if ramping[a] or self.cfg.motion.ramp_mode == "software":
+                # The software ramp is walking the setpoint (a ramp still
+                # running after a switch to hardware/off counts too).
                 moving.append(ramping[a])
-            else:
+            elif self._closed[a]:
+                # Closed loop: the sensor reads the true position, so "there"
+                # means read-out == target.
                 p = pos[a]
                 moving.append(False if p != p else abs(p - target[a]) > SETTLE_TOL)
+            else:
+                # Open loop: the read-out is off the target by the hysteresis
+                # for good, so comparing them said "moving" FOREVER (and a
+                # scan waiting on it stalled).  Use the slew time instead.
+                moving.append(now < eta[a])
         rel_origin = [axis_rel_origin(self.cfg, a) for a in range(2)]
         relative = [pos[a] - rel_origin[a] for a in range(2)]
         return PiezoStatus(
@@ -297,9 +322,24 @@ class Piezo:
         axis is ever marked active, so this loop just idles.
         """
         while not self._stop.is_set():
-            hz = max(1.0, float(self.cfg.motion.ramp_hz))
+            # ramp_hz arrives through set_config exactly as the client sent it
+            # (no type cast), so a bad value must not raise here: an exception
+            # would end this thread silently and every later software move
+            # would report `moving` forever (deep cleaning 2026-09-28).
+            try:
+                hz = max(1.0, float(self.cfg.motion.ramp_hz))
+            except (TypeError, ValueError):
+                hz = 50.0
             period = 1.0 / hz
             for axis in range(2):
+                failed = None
+                # The WRITE happens inside the lock too (deep cleaning
+                # 2026-09-28).  Before, the setpoint was computed under the
+                # lock and written after releasing it; a stop or a direct move
+                # in that gap was then overwritten by this stale ramp value,
+                # leaving the stage at the old ramp point while `target` showed
+                # the new one.  Holding the lock over one short serial write
+                # makes "cancel the ramp + write" in the other verbs atomic.
                 with self._ramp_lock:
                     if not self._ramp_active[axis]:
                         continue
@@ -318,29 +358,35 @@ class Piezo:
                     else:
                         direction = 1.0 if distance >= 0 else -1.0
                         setpoint = frm + direction * travelled
-                try:
-                    self.backend.set_setpoint(axis, setpoint)
-                except Exception as exc:
-                    self._emit("error", f"{AXES[axis]} ramp write failed: {exc}")
-                    with self._ramp_lock:
+                    try:
+                        self.backend.set_setpoint(axis, setpoint)
+                        self._cmd[axis] = setpoint
+                    except Exception as exc:
                         self._ramp_active[axis] = False
+                        failed = exc
+                if failed is not None:
+                    # Emitted outside the lock: a listener must never run
+                    # while we hold it.
+                    self._emit("error", f"{AXES[axis]} ramp write failed: {failed}")
             self._stop.wait(period)
 
     def _begin_software_ramp(self, axis: int, target: float) -> None:
-        try:
-            current = self.backend.read_position(axis)
-        except Exception:
-            current = self._target[axis]
-        if current != current:  # NaN guard
-            current = self._target[axis]
+        # Start from the setpoint we last WROTE, not from the read-out.  In
+        # software mode the controller's own slew is 0, so the drive sits
+        # exactly at that setpoint (also mid-ramp: it is the last ramp step).
+        # The read-out is not the drive in open loop (hysteresis): starting
+        # there first stepped the drive by the OL error -- on the sim's Y axis
+        # 1.35 um BACKWARDS at the start of a forward move.
         with self._ramp_lock:
+            current = self._cmd[axis]
             self._ramp_from[axis] = current
             self._ramp_to[axis] = target
             self._ramp_t0[axis] = time.monotonic()
             self._ramp_active[axis] = abs(target - current) > 1e-9
-        if not self._ramp_active[axis]:
-            # Already there -> write once so the backend setpoint matches.
-            self.backend.set_setpoint(axis, target)
+            if not self._ramp_active[axis]:
+                # Already there -> write once so the backend setpoint matches.
+                self.backend.set_setpoint(axis, target)
+                self._cmd[axis] = target
 
     # ------------------------------------------------------------------ #
     # motion verbs
@@ -361,10 +407,12 @@ class Piezo:
         if self.cfg.motion.ramp_mode == "software":
             self._begin_software_ramp(axis, target)
         else:
-            # Cancel any leftover software ramp, then command directly.
+            # Cancel any leftover software ramp, then command directly -- in
+            # ONE locked section, so a ramp step cannot land after our write.
             with self._ramp_lock:
                 self._ramp_active[axis] = False
-            self.backend.set_setpoint(axis, target)
+                self.backend.set_setpoint(axis, target)
+                self._direct_write(axis, target)
         self._emit("info", f"move {AXES[axis]} -> {target:.4g} um")
         return target
 
@@ -382,20 +430,59 @@ class Piezo:
         self._emit("info", f"move {AXES[axis]} -> {value:.4g} um (relative)")
         return self.move_axis(axis, device_target)
 
+    def _direct_write(self, axis: int, target: float) -> None:
+        """Book-keeping after a direct (non-ramped) setpoint write.
+
+        Call with _ramp_lock held, right after ``backend.set_setpoint``.
+        Records the command and when an open-loop move should be done: the
+        controller slews at the velocity in "hardware" mode and jumps in
+        "off" mode.  If a previous move is still slewing, its remaining
+        distance is added, so the estimate errs on the long side.
+        """
+        now = time.monotonic()
+        rate = self._ramp_vel[axis] if self.cfg.motion.ramp_mode == "hardware" else 0.0
+        if rate > 0.0:
+            left_um = max(0.0, self._hw_eta[axis] - now) * rate
+            dist = abs(target - self._cmd[axis]) + left_um
+            self._hw_eta[axis] = now + dist / rate
+        else:
+            self._hw_eta[axis] = now
+        self._cmd[axis] = target
+
     def stop(self, axis: int) -> None:
-        """Freeze an axis at its current measured position."""
-        try:
-            current = self.backend.read_position(axis)
-        except Exception:
-            current = self._target[axis]
+        """Freeze an axis where the drive is now.
+
+        Where IS the drive?  (deep cleaning 2026-09-28 -- this used to write
+        the READ-OUT back as the setpoint, which in open loop is off the drive
+        by the hysteresis: STOP on a resting OL axis moved it ~1.7 um.)
+          * no hardware slew (software / off mode), or at rest: the drive is
+            at the last setpoint we wrote -> hold that, nothing moves;
+          * mid-move in "hardware" mode: the controller's slew limiter is
+            somewhere between; the read-out is the best estimate (exact in
+            closed loop, off by the hysteresis in open loop).
+        """
+        with self._ramp_lock:
+            ramping = self._ramp_active[axis]
+            self._ramp_active[axis] = False
+            hold = self._cmd[axis]
+        if (not ramping and self.cfg.motion.ramp_mode == "hardware"
+                and self.status().moving[axis]):
+            try:
+                p = float(self.backend.read_position(axis))
+                if p == p:
+                    hold = p
+            except Exception:
+                pass
+        self._target[axis] = hold
         with self._ramp_lock:
             self._ramp_active[axis] = False
-        self._target[axis] = current
-        try:
-            self.backend.set_setpoint(axis, current)
-        except Exception:
-            pass
-        self._emit("warn", f"stop {AXES[axis]} at {current:.4g} um")
+            try:
+                self.backend.set_setpoint(axis, hold)
+                self._cmd[axis] = hold
+            except Exception:
+                pass
+            self._hw_eta[axis] = time.monotonic()
+        self._emit("warn", f"stop {AXES[axis]} at {hold:.4g} um")
 
     def stop_all(self) -> None:
         for axis in range(2):
@@ -439,6 +526,20 @@ class Piezo:
         v = self._clamp_velocity(velocity)
         set_axis_velocity(self.cfg, axis, v)
         with self._ramp_lock:
+            now = time.monotonic()
+            if self._ramp_active[axis]:
+                # Re-anchor a running ramp at the point it has reached (deep
+                # cleaning 2026-09-28).  The ramp computes from + v*(now - t0);
+                # changing v without moving the anchor made the setpoint JUMP
+                # to where the new speed "would have been" (10 -> 20 um/s
+                # after 1 s: a 10 um step in one tick).
+                self._ramp_from[axis] = self._cmd[axis]
+                self._ramp_t0[axis] = now
+            # A direct move still slewing: keep its expected end honest.
+            old = self._ramp_vel[axis]
+            if old > 0.0 and self._hw_eta[axis] > now:
+                left_um = (self._hw_eta[axis] - now) * old
+                self._hw_eta[axis] = now + (left_um / v if v > 0.0 else 0.0)
             self._ramp_vel[axis] = v
         # Only "hardware" mode uses the controller's native slew-rate limiter.
         # In "software" mode WE step the setpoint, so the hardware must follow

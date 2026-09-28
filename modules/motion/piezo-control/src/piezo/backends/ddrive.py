@@ -61,6 +61,10 @@ from ..hwlock import claim
 # --------------------------------------------------------------------------- #
 _CMD = {
     "set_closed_loop": "cl,{ch},{state}",   # state = 1 (closed) / 0 (open)
+    # VERIFY (open loop): the brain always sends um and clamps OL to
+    # travel_max_ol (200).  If the d-Drive takes the OL value in VOLTS (or %)
+    # and `mess` then answers in volts, OL needs a um<->V conversion here,
+    # or "200" would be read as 200 V.  Unconfirmed -- check with the manual.
     "set_setpoint":    "set,{ch},{value:.4f}",
     "query_position":  "mess,{ch}",
     "set_slew_rate":   "sr,{ch},{value:.4f}",

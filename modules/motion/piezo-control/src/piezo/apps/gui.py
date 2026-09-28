@@ -504,6 +504,19 @@ class MainWindow(QWidget):
     # settings
     # ------------------------------------------------------------------ #
     def _open_settings(self) -> None:
+        if self.remote:
+            # The dialog edits self.cfg and OK pushes ALL of it back.  In
+            # remote mode self.cfg is a local copy fetched at launch, so a loop
+            # mode toggled since (by this GUI's own button or by another
+            # client), a velocity or a "zero here" would be pushed back STALE
+            # and set_config would revert them -- switching an axis back to
+            # closed loop, which can move it (deep cleaning 2026-09-28,
+            # gotcha #5).  Refresh the copy in place first.
+            try:
+                from ..net.protocol import apply_config_dict
+                apply_config_dict(self.cfg, self.ctrl.get_config())
+            except Exception as exc:
+                self._on_event("warn", f"could not refresh the config: {exc}")
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             self._push_config()
@@ -536,7 +549,12 @@ class MainWindow(QWidget):
 
     def _jog(self, axis: int, sign: int) -> None:
         step = self._jog_step.value()
-        current = self.ctrl.status().position[axis]
+        # A jog is a step of the COMMAND, so it starts from the target, not
+        # the read-out: in open loop the read-out is off the drive by the
+        # hysteresis, and "+1 um" from it could even move the stage backwards
+        # (deep cleaning 2026-09-28).  Starting from the target also makes two
+        # quick jogs add up while the first is still moving.
+        current = self.ctrl.status().target[axis]
         if current != current:
             current = 0.0
         self._do(lambda: self.ctrl.move_axis(axis, current + sign * step))
