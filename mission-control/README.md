@@ -28,6 +28,11 @@ remembered after the service stops, marked "last seen".
   this way) follow. Clashes are refused.
 - Status dot: green = running and started here, amber = up but started
   elsewhere (or a reachable remote service), grey = down.
+- **Order**: the small up/down arrows on the left of a card move it, so the
+  modules you use most sit at the top. Right-click a card for *Move to top*,
+  *Move to bottom* and *Reset order*. The order is this PC's choice (saved in
+  `suite_local.json`) and only changes what you see: services still start in
+  the order they need (the camera after kim).
 
 ## Services on other PCs
 
@@ -40,7 +45,7 @@ card has a GUI button but no Start/Stop, since the service belongs to that PC.
 
 ## Where the choices are saved
 
-Ports, real/sim flags and remote services go in `../suite_local.json`, which is
+Ports, real/sim flags, the card order and remote services go in `../suite_local.json`, which is
 this PC's file (not in git). The measurement suite in scan-core reads the same
 file, which is how it follows the launcher. Profiles are in `profiles.json`
 next to this script.

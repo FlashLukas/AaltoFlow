@@ -91,6 +91,12 @@ QPushButton#primary:disabled, QPushButton#danger:disabled {{
     color:{c['muted']}; background:{c['panel']}; border:1px solid {c['border']}; }}
 QCheckBox {{ color:{c['text']}; }}
 QScrollArea {{ border:none; }}
+/* the move-up / move-down arrows on each module card: quiet until hovered,
+   and clearly dimmer when a card is already at the top or bottom */
+QToolButton#move {{ color:{c['muted']}; background:transparent; border:none;
+    border-radius:5px; font-size:13px; }}
+QToolButton#move:hover {{ color:{c['accent']}; background:{c['panel_hi']}; }}
+QToolButton#move:disabled {{ color:{c['border']}; }}
 """
 
 

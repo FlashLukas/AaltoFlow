@@ -74,6 +74,8 @@ ROOT = default_root()
 #: The last `describe` seen from each module, so the variables stay visible
 #: while a service is down. Local machine state, not committed.
 CACHE_DIR = ROOT / ".suite_cache"
+# suite_local.json settings key: this PC's display order of the module cards
+CARD_ORDER_SETTING = "card_order"
 
 # How we launch each project:
 #   * SERVICES run with the project's OWN venv python (.venv\Scripts\python.exe)
@@ -1209,6 +1211,24 @@ class ModuleCard(QtWidgets.QFrame):
         row = QtWidgets.QHBoxLayout(); row.setSpacing(12)
         outer.addLayout(row)
 
+        # Move the card up / down the list, so the modules used most sit at
+        # the top. The order is this PC's choice (suite_local.json, see
+        # MainWindow.move_card); right-click the card for top / bottom / reset.
+        # Only the DISPLAY order changes: services still start in dependency
+        # order (start_after), e.g. camera after kim.
+        arrows = QtWidgets.QVBoxLayout(); arrows.setSpacing(2)
+        self.btn_up = QtWidgets.QToolButton(); self.btn_up.setText("▲")
+        self.btn_down = QtWidgets.QToolButton(); self.btn_down.setText("▼")
+        self.btn_up.setToolTip("Move this module up (right-click the card: top / bottom / reset)")
+        self.btn_down.setToolTip("Move this module down (right-click the card: top / bottom / reset)")
+        for b, where in ((self.btn_up, "up"), (self.btn_down, "down")):
+            b.setObjectName("move")                 # styled in theme.build_stylesheet
+            b.setAutoRaise(True); b.setFixedSize(24, 22)
+            b.setCursor(QtCore.Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, w=where: self.win.move_card(self.spec.id, w))
+            arrows.addWidget(b)
+        row.addLayout(arrows)
+
         self.icon = QtWidgets.QLabel(); self.icon.setFixedWidth(44)
         row.addWidget(self.icon)
 
@@ -1284,6 +1304,27 @@ class ModuleCard(QtWidgets.QFrame):
         self.set_up(False)
 
     # ---- identity ---------------------------------------------------------
+
+    def contextMenuEvent(self, event):
+        """Right-click on a card: move it to the top / bottom, or forget the
+        custom order and go back to the modules' own order."""
+        menu = QtWidgets.QMenu(self)
+        top = menu.addAction("Move to top")
+        bottom = menu.addAction("Move to bottom")
+        menu.addSeparator()
+        reset = menu.addAction("Reset order (the modules' own order)")
+        reset.setEnabled(self.win.has_custom_order())
+        chosen = menu.exec(event.globalPos())
+        if chosen is top:
+            self.win.move_card(self.spec.id, "top")
+        elif chosen is bottom:
+            self.win.move_card(self.spec.id, "bottom")
+        elif chosen is reset:
+            self.win.reset_card_order()
+
+    def set_move_enabled(self, can_up: bool, can_down: bool):
+        self.btn_up.setEnabled(can_up)
+        self.btn_down.setEnabled(can_down)
 
     @property
     def owns_service(self) -> bool:
@@ -1806,7 +1847,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not first:
                     self.log(f"module gone: {mid}")
 
-        for i, spec in enumerate(self.found.modules):
+        for spec in self.found.modules:
             card = self.cards.get(spec.id)
             if card is None:
                 card = ModuleCard(spec, self)
@@ -1815,8 +1856,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.log(f"module found: {spec.id} ({spec.name})")
             else:
                 card.set_spec(spec)
-            self.vlist.removeWidget(card)
-            self.vlist.insertWidget(i, card)
+        self.layout_cards()
 
         self.prober.set_targets([(m.id, m.host, m.cmd) for m in self.found.modules])
         self.prober.probe_now()
@@ -1837,6 +1877,57 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(p, "warn")
         self.build_profile_bar()
         self.sync_all_box()
+
+    # ---- card order (Lukas: "the most commonly used modules up there") ------
+    #
+    # The order is a list of card ids kept in suite_local.json under
+    # settings.card_order -- a per-PC choice (the lab PC and the office PC can
+    # differ), carried along by Export / Import settings. Ids in the list come
+    # first, in that order; every other module (new, or never moved) follows
+    # in the modules' own order (module.toml `order`). An id whose module is
+    # gone is simply skipped, so an old list never breaks anything.
+
+    def custom_order(self) -> list[str]:
+        order = get_setting(CARD_ORDER_SETTING, [], ROOT)
+        return [x for x in order if isinstance(x, str)] if isinstance(order, list) else []
+
+    def has_custom_order(self) -> bool:
+        return bool(self.custom_order())
+
+    def ordered_modules(self) -> list:
+        rank = {mid: i for i, mid in enumerate(self.custom_order())}
+        own = {m.id: i for i, m in enumerate(self.found.modules)}
+        return sorted(self.found.modules,
+                      key=lambda m: (0, rank[m.id]) if m.id in rank else (1, own[m.id]))
+
+    def layout_cards(self):
+        """Put the cards in the list in display order and grey out the arrow
+        that would move a card past either end."""
+        shown = [m for m in self.ordered_modules() if m.id in self.cards]
+        for i, spec in enumerate(shown):
+            card = self.cards[spec.id]
+            self.vlist.removeWidget(card)
+            self.vlist.insertWidget(i, card)
+            card.set_move_enabled(i > 0, i < len(shown) - 1)
+
+    def move_card(self, mid: str, where: str):
+        """where: 'up', 'down', 'top' or 'bottom'. Saves the whole resulting
+        order, so the list means exactly what is on screen."""
+        ids = [m.id for m in self.ordered_modules()]
+        if mid not in ids:
+            return
+        i = ids.index(mid)
+        ids.pop(i)
+        j = {"up": max(i - 1, 0), "down": min(i + 1, len(ids)),
+             "top": 0, "bottom": len(ids)}[where]
+        ids.insert(j, mid)
+        set_setting(CARD_ORDER_SETTING, ids, ROOT)
+        self.layout_cards()
+
+    def reset_card_order(self):
+        set_setting(CARD_ORDER_SETTING, None, ROOT)
+        self.layout_cards()
+        self.log("card order reset to the modules' own order")
 
     def _on_probed(self, result: dict):
         for mid, up in result.items():

@@ -532,3 +532,63 @@ def test_a_service_refused_its_address_says_so_on_the_card(env, lockdir, monkeyp
         script.write_text("")
         card.busy = None
         card.show_hw()
+
+
+# ---- card order (move the most-used modules to the top) --------------------
+
+def _shown(mc, win):
+    """Card ids top-to-bottom as they sit in the list on screen."""
+    out = []
+    for i in range(win.vlist.count()):
+        w = win.vlist.itemAt(i).widget()
+        if isinstance(w, mc.ModuleCard):
+            out.append(w.spec.id)
+    return out
+
+
+def test_cards_can_be_moved_and_the_order_is_remembered(env):
+    mc, win, root, app = env
+    win.reset_card_order()
+    own = [m.id for m in win.found.modules]          # the modules' own order
+    assert _shown(mc, win) == own and len(own) >= 3
+    a, b, c = own[0], own[1], own[2]
+    # the top card cannot go further up, the bottom one not further down
+    assert not win.cards[own[0]].btn_up.isEnabled() and win.cards[own[0]].btn_down.isEnabled()
+    assert not win.cards[own[-1]].btn_down.isEnabled()
+
+    win.cards[c].btn_up.click()                      # third card one place up
+    assert _shown(mc, win)[:3] == [a, c, b]
+    win.move_card(b, "top")
+    assert _shown(mc, win)[:3] == [b, a, c]
+    win.move_card(b, "bottom")
+    assert _shown(mc, win)[-1] == b
+
+    # remembered on this PC (suite_local.json) and survives a fresh rescan
+    saved = json.loads((root / "suite_local.json").read_text("utf-8"))["settings"]["card_order"]
+    assert saved == _shown(mc, win)
+    win.rescan(force=True)
+    assert _shown(mc, win) == saved
+    # starting services does NOT follow the display order
+    assert [x.spec.id for x in win.local_cards()] == [m.id for m in win.found.modules
+                                                      if not m.remote]
+
+    win.reset_card_order()
+    assert _shown(mc, win) == own
+    assert "card_order" not in json.loads(
+        (root / "suite_local.json").read_text("utf-8")).get("settings", {})
+
+
+def test_a_stale_or_partial_order_never_breaks_the_list(env):
+    mc, win, root, app = env
+    # an id that no longer exists is skipped; modules missing from the saved
+    # list follow in their own order
+    mc.set_setting(mc.CARD_ORDER_SETTING, ["gone-module", "focus"], root)
+    win.layout_cards()
+    shown = _shown(mc, win)
+    own = [m.id for m in win.found.modules]
+    assert shown[0] == "focus" and "gone-module" not in shown
+    assert [x for x in shown if x != "focus"] == [x for x in own if x != "focus"]
+    mc.set_setting(mc.CARD_ORDER_SETTING, "not a list", root)
+    win.layout_cards()
+    assert sorted(_shown(mc, win)) == sorted(win.cards)
+    win.reset_card_order()
