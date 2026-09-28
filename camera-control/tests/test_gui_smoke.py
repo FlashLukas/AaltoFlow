@@ -375,3 +375,33 @@ def test_laser_on_sample_card_places_the_laser_and_follows_the_brain():
         win.close()
     finally:
         brain.shutdown()
+
+
+def test_laser_card_is_greyed_without_a_pattern_and_sits_by_the_stage_controls():
+    """Lukas, 2026-09-28: on the Camera tab the card pushed the bottom tabs down;
+    it now sits in "Control XY stage", and without a matched pattern there are
+    no sample coordinates, so it is greyed and says what is missing."""
+    from PySide6.QtWidgets import QApplication
+    from camera.apps.gui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    brain, *_ = build_sim_system(cfg)
+    brain.start()
+    try:
+        win = MainWindow(brain, cfg, remote=False)
+        for _ in range(5):
+            win._refresh(); app.processEvents(); time.sleep(0.02)
+        assert not win.b_laser_place.isEnabled() and not win.laser_tx.isEnabled()
+        assert "a matched pattern" in win.lab_laser_state.text()
+        # in the XY sub-tab, next to Go to / datum -- not in the Camera tab's column
+        page = win.b_move_abs.parentWidget()
+        while page is not None and page.parentWidget() is not win.b_laser_place.window():
+            if win.b_laser_place in page.findChildren(type(win.b_laser_place)):
+                break
+            page = page.parentWidget()
+        assert page is not None and win.b_datum in page.findChildren(type(win.b_datum))
+        win.close()
+    finally:
+        brain.shutdown()

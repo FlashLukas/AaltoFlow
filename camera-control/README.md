@@ -97,7 +97,7 @@ Every action is a ZeroMQ command (see `scripts/camera_console.py` for the verbs)
 
 ## The laser on the sample, and fly scans in camera coordinates
 
-On the Camera tab, the **Laser on sample** card shows it live (x / y in um), with
+In the **Control XY stage** tab (under the image), the **Laser on sample** card shows it live (x / y in um), with
 a target, **Here** (take the current position), **Place** and **Cancel**, a
 "Placed" lamp, and a cyan diamond at the target in the image. Placing uses the
 Stabiliser card's settings (correct %, average, settle, stable within): at

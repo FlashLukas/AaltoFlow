@@ -340,7 +340,6 @@ class MainWindow(QMainWindow):
         self.chk_points.toggled.connect(self.view.set_show_scan_points)
         l.addWidget(self.chk_points)
         cards.append(f)
-        laser_card = self._laser_card()
         right_w = QWidget(); grid = QGridLayout(right_w)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.addWidget(self._stage_bar(), 0, 0, 1, 2)
@@ -348,9 +347,7 @@ class MainWindow(QMainWindow):
         # column 2: what runs on it (stabiliser) and what is drawn (imaging).
         for (r, c), card in zip(((1, 0), (2, 0), (1, 1), (2, 1)), cards):
             grid.addWidget(card, r, c)
-        # under the Focus / Pattern column, which is the shorter one
-        grid.addWidget(laser_card, 3, 0)
-        grid.setRowStretch(4, 1)
+        grid.setRowStretch(3, 1)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         lay.addWidget(right_w, 5)
 
@@ -375,6 +372,7 @@ class MainWindow(QMainWindow):
         coordinates bins by.
         """
         f, l = _card("Laser on sample")
+        f.setFixedWidth(330)
         r = QHBoxLayout()
         self.lab_laser = QLabel("x -   y -  um")
         self.lab_laser.setStyleSheet("font-weight:700;")
@@ -447,14 +445,25 @@ class MainWindow(QMainWindow):
             text = (f"target x {tx:.3f}, y {s.laser_target_y_um:.3f} um -- "
                     f"not there (stopped or moved away)")
         self.lab_laser_state.setText(text)
-        # Place needs what the stabiliser needs; say so rather than fail silently
+        # Without a matched pattern there ARE no sample coordinates: the whole
+        # card is greyed, and the state line says what is missing (Cancel
+        # stays usable while a placement is still running).
         ready = bool(s.match_found and s.spot_calibrated and s.tracking_on)
-        self.b_laser_place.setEnabled(ready and bool(getattr(s, "stage_ok", True)))
+        stage = bool(getattr(s, "stage_ok", True))
+        if not ready:
+            missing = [what for ok, what in ((s.tracking_on, "tracking on"),
+                                             (s.match_found, "a matched pattern"),
+                                             (s.spot_calibrated, "a calibrated spot")) if not ok]
+            self.lab_laser_state.setText("needs " + ", ".join(missing))
+        for w_ in (self.laser_tx, self.laser_ty, self.lab_laser, self.b_laser_here):
+            w_.setEnabled(ready)
+        self.b_laser_here.setEnabled(ready and known)
+        self.b_laser_place.setEnabled(ready and stage)
+        self.b_laser_cancel.setEnabled(bool(getattr(s, "laser_goto", False)) or (ready and stage))
         self.b_laser_place.setToolTip(
             "move the sample until the laser is at the target (switches the "
             "stabiliser off)" if ready else
             "needs: pattern tracking on, the pattern matched, a calibrated spot")
-        self.b_laser_here.setEnabled(known)
 
     def _scanning_subtab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
@@ -575,7 +584,7 @@ class MainWindow(QMainWindow):
 
     def _stage_controls(self) -> list:
         names = ("z_spin", "b_setz", "z_step", "b_z_up", "b_z_dn", "b_af", "chk_cont",
-                 "chk_stab", "chk_click", "b_laser_cancel", "xy_step", "b_x_up", "b_x_dn", "b_y_up",
+                 "chk_stab", "chk_click", "xy_step", "b_x_up", "b_x_dn", "b_y_up",
                  "b_y_dn", "sp_x", "sp_y", "b_move_abs")
         return [getattr(self, n) for n in names if getattr(self, n, None) is not None]
 
@@ -681,6 +690,11 @@ class MainWindow(QMainWindow):
         l.addWidget(self.b_datum)
         l.addStretch(1)
         lay.addWidget(f, 0, Qt.AlignTop)
+
+        # -- the laser on the SAMPLE (template coordinates) -- next to the stage
+        #    controls it belongs with; on the Camera tab it pushed the bottom
+        #    tabs down again (Lukas, 2026-09-28)
+        lay.addWidget(self._laser_card(), 0, Qt.AlignTop)
 
         lay.addStretch(1)                       # spare width stays on the right
         return w
