@@ -212,6 +212,14 @@ before/after routines.
     offset warning over four 65 <-> 2480 us switches; calibrating "at the AF
     exposure" with autofocus.exposure_us = 0 warns and calibrates at the
     working exposure (+- 0.34 px); why-texts appear once.
+  - After 54c76de (GUI): with camera.ini's max_area_px 2000 and the spot 2 um
+    out of focus, status gives the reason ("the blob at the calibrated position
+    is 3047 px, larger than max area 2000 px -- set max area to 0 ..."). One
+    one_way + D4sigma run with zoom_on_af: the view zoomed to the spot region
+    with its label and a "Whole frame" button during the run, and went back to
+    the whole frame after it ("Zoom to spot region" button); parked at D4sigma
+    29.3 px. Not checked here (needs the mouse): wheel scrolling of the
+    four-column AutoFocus tab, double-click during a run, the zoom button.
 - Not yet checked on the rig: the lost-pattern fault of 2026-09-28, the Z step
   calibration, 12-bit spot frames.
 
