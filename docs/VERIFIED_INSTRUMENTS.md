@@ -231,6 +231,13 @@ before/after routines.
     day before -- and one_way at 30.1 px. The live spot size keeps updating
     during the walk; the zoomed view shows the spot (stretched display) during
     an autofocus.
+  - After d108b96 + b7885c6: a third calibration (ratio 0.691 +- 0.015, level
+    spread 8.8 %; the three runs 0.743 / 0.804 / 0.691) ends "saved by kim to
+    ...kim.ini" and parks Z in focus by the image (D4sigma 30.2 px). After a kim
+    restart the Z step sizes come from kim.ini (up 0.01663, down 0.02405 um/step)
+    and the controller's drive settings are untouched (85 V, 1500 steps/s,
+    20000 steps/s^2, counter kept). During an autofocus at the AF exposure the
+    view label reads "threshold check paused (autofocus exposure)".
 - Not yet checked on the rig: the lost-pattern fault of 2026-09-28, 12-bit spot
   frames.
 
