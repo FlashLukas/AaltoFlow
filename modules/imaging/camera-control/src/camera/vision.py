@@ -29,7 +29,11 @@ import numpy as np
 # spot_d4sigma (the spot's second moment sigma^2) and spot_relative (the area
 # above a fraction of the spot's own peak) are sizes too -> minimise.
 FOCUS_MAXIMISE = {"spot_area": False, "edges": True, "fft": True,
-                  "spot_d4sigma": False, "spot_relative": False}
+                  "spot_d4sigma": False, "spot_relative": False,
+                  # 2026-09-29: encircled-energy radius^2 and the Gaussian
+                  # fit's sigma^2 are sizes (minimise); the spot's PEAK
+                  # brightness is highest at focus (maximise)
+                  "spot_encircled": False, "spot_gauss": False, "spot_peak": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -382,6 +386,7 @@ class SpotRelArea:
     noise: float = 0.0
     level: float = 0.0           # the absolute grey level that was used
     saturated: bool = False
+    n_saturated: int = 0         # selected spot pixels AT the camera's full scale
 
 
 def _cfg(cfg, name, default):
@@ -780,7 +785,517 @@ def spot_relative_area(frame: np.ndarray, guess_xy, cfg=None, max_value=None) ->
     out.ok = True
     out.area = float(n)
     out.cx, out.cy = float(xs.mean() + x0), float(ys.mean() + y0)
+    top = _full_scale(crop, max_value)
+    if top is not None and bright:
+        out.n_saturated = int(np.count_nonzero(crop[mask] >= top))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# WHERE the spot is, apart from HOW BIG it is (2026-09-29)
+# --------------------------------------------------------------------------- #
+# Rig, Lukas's screenshot: the spot plainly visible ~100 px from its calibrated
+# position, at the edge of the search region, and every threshold-free size
+# said "no spot above the noise". Both measurements were centred on the
+# CALIBRATED position, and reject_asymmetric mirrors the light through that
+# centre -- a spot that is not exactly there has no twin and is thrown away,
+# all of it. So the CENTRE of the size measurement is now a choice (Spot.locate):
+#   "calibrated" -- as before (the default: the position is a user calibration,
+#                   done once in a while, never tracked frame by frame);
+#   "peak"       -- the brightest point of a lightly smoothed copy of the search
+#                   region, sub-pixel by a small centroid around it;
+#   "blob"       -- the connected blobs above background + locate_k x noise in
+#                   the search region, filtered like the threshold spot (min /
+#                   max area, frame border): the BRIGHTEST one (its smoothed
+#                   peak -- not its energy: a large dim feature of the sample
+#                   carries more light than a small bright spot).
+# The measurement box and the mirror test then use the LOCATED centre. The
+# calibrated position is still THE position for motion (stabiliser, click to go).
+
+@dataclass
+class SpotLocation:
+    """Where the spot is for the size measurement (full-frame px)."""
+
+    ok: bool = False
+    x: float = float("nan")
+    y: float = float("nan")
+    method: str = "calibrated"
+    why: str = ""                # when not ok: why nothing was located
+    peak: float = 0.0            # smoothed peak above the background (counts)
+    area: int = 0                # blob pixels (blob / calibration finders)
+    n_candidates: int = 0
+    # the runner-up, for the calibration's "several equally good" refusal
+    second_xy: tuple | None = None
+    second_peak: float = 0.0
+
+
+def _blobs(sm: np.ndarray, thr: float, offset, full_size, cfg) -> list:
+    """Connected blobs of ``sm >= thr`` (``sm`` = background-subtracted,
+    smoothed signal) that pass the spot filters (min / max area, frame border).
+
+    A list of dicts, brightest (smoothed peak) first: x, y = the centroid of
+    the signal above ``thr`` in full-frame px, peak, area, energy."""
+    mask = (sm >= thr).astype(np.uint8)
+    n, lab, stats, _c = cv2.connectedComponentsWithStats(mask, 8)
+    if n <= 1:
+        return []
+    ok = spot_candidates(stats, offset, full_size, int(_cfg(cfg, "min_area_px", 4)),
+                         int(_cfg(cfg, "max_area_px", 0) or 0),
+                         bool(_cfg(cfg, "reject_border", True)))
+    out = []
+    for i in np.nonzero(ok)[0] + 1:
+        ys, xs = np.nonzero(lab == i)
+        v = sm[ys, xs].astype(np.float64)
+        wgt = np.clip(v - thr, 0.0, None)
+        if wgt.sum() <= 0:
+            wgt = np.ones_like(wgt)
+        out.append({"x": float(xs @ wgt / wgt.sum()) + offset[0],
+                    "y": float(ys @ wgt / wgt.sum()) + offset[1],
+                    "peak": float(v.max()), "area": int(xs.size),
+                    "energy": float(np.clip(v, 0.0, None).sum())})
+    out.sort(key=lambda b: (-b["peak"], -b["energy"]))
+    return out
+
+
+def _peak_centroid(sig: np.ndarray, ix: int, iy: int, r: int = 3) -> tuple[float, float]:
+    """Sub-pixel position of a maximum: the centroid of the (positive) signal in
+    a (2r+1)^2 window around it."""
+    h, w = sig.shape
+    x0, x1 = max(0, ix - r), min(w, ix + r + 1)
+    y0, y1 = max(0, iy - r), min(h, iy + r + 1)
+    win = np.clip(sig[y0:y1, x0:x1].astype(np.float64), 0.0, None)
+    tot = win.sum()
+    if tot <= 0:
+        return float(ix), float(iy)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    return float((xx * win).sum() / tot), float((yy * win).sum() / tot)
+
+
+def _smooth_signal(gray: np.ndarray, box: tuple, cfg, max_value=None):
+    """(smoothed signal of ``box``, its background, the noise of the smoothed
+    copy). The box is MOSTLY background (a spot is small against the search
+    region or the frame), so the robust level of all its pixels is the
+    background; the smoothing (detect_px, >= 0.8 px) keeps one hot pixel from
+    being "the brightest point"."""
+    x0, y0, x1, y1 = box
+    bright = bool(_cfg(cfg, "bright_spot", True))
+    a = _signal(gray[y0:y1, x0:x1], bright, max_value).astype(np.float32)
+    if a.size == 0:
+        return a, 0.0, 0.0
+    sig = max(0.8, float(_cfg(cfg, "detect_px", 2.0) or 0.0))
+    sm = cv2.GaussianBlur(a, (0, 0), sig, borderType=cv2.BORDER_REFLECT)
+    sub = sm[::2, ::2] if sm.size > 40000 else sm       # plenty of pixels for a median
+    bg, noise = _robust_level(sub.ravel())
+    return sm - bg, bg, noise
+
+
+def locate_spot(frame: np.ndarray, calib_xy, cfg=None, mode: str = "calibrated",
+                max_value=None) -> SpotLocation:
+    """The centre the spot SIZE is measured around (see the block comment above).
+
+    ``calib_xy`` is the calibrated position (the search region is around it;
+    None = the whole frame). ``cfg`` = the Spot config (lookup_region_px /
+    _y_px / search_shape, detect_px, locate_k, min/max_area_px, reject_border,
+    bright_spot). Never raises: ``ok`` False + ``why`` instead.
+    """
+    mode = str(mode or "calibrated")
+    if mode == "calibrated":
+        if calib_xy is None:
+            return SpotLocation(False, method=mode, why="no calibrated spot position")
+        return SpotLocation(True, float(calib_xy[0]), float(calib_xy[1]), mode)
+    gray = to_gray(frame) if frame.ndim == 3 else frame
+    h, w = gray.shape[:2]
+    box = _limit_box(gray.shape, calib_xy, cfg)
+    sm, _bg, snoise = _smooth_signal(gray, box, cfg, max_value)
+    out = SpotLocation(method=mode)
+    if sm.size == 0:
+        out.why = "empty search region"
+        return out
+    k = max(1.0, float(_cfg(cfg, "locate_k", 5.0)))
+    if mode == "peak":
+        iy, ix = np.unravel_index(int(np.argmax(sm)), sm.shape)
+        out.peak = float(sm[iy, ix])
+        if out.peak <= k * snoise:
+            out.why = (f"no light above the noise in the search region (brightest "
+                       f"{out.peak:.1f} counts above the background, noise {snoise:.2f})")
+            return out
+        out.ok, out.n_candidates = True, 1
+        out.x, out.y = _refine_located(gray, cfg, max_value, ix + box[0], iy + box[1],
+                                       "peak", k)
+        return out
+    # "blob"
+    blobs = _blobs(sm, k * snoise, (box[0], box[1]), (w, h), cfg)
+    out.n_candidates = len(blobs)
+    if not blobs:
+        out.why = (f"no blob above background + {k:g} x noise in the search region "
+                   f"(that passes min / max area and the frame border)")
+        return out
+    b = blobs[0]
+    out.ok, out.peak, out.area = True, b["peak"], b["area"]
+    out.x, out.y = _refine_located(gray, cfg, max_value, b["x"], b["y"], "blob", k)
+    if len(blobs) > 1:
+        out.second_xy, out.second_peak = (blobs[1]["x"], blobs[1]["y"]), blobs[1]["peak"]
+    return out
+
+
+def _refine_located(gray, cfg, max_value, x: float, y: float, mode: str, k: float):
+    """The located centre, measured again in a box centred on it.
+
+    Why: the spot the locate is for sits at the EDGE of the search region (the
+    rig case), so the first pass sees only part of it -- a blob cut by the box
+    edge has its centroid pulled inwards (1.2 px in the simulator). A second
+    look, centred on the first answer and as wide as the search region, sees
+    all of it. Only the object found the first time counts: its blob (the one
+    under the first answer) or its peak window -- never a new brightest object
+    that the re-centred box may reach."""
+    h, w = gray.shape[:2]
+    half = max(8, int(_cfg(cfg, "lookup_region_px", 0) or 0) or 50)
+    box = (max(0, int(x) - half), max(0, int(y) - half),
+           min(w, int(x) + half + 1), min(h, int(y) + half + 1))
+    sm, _bg, snoise = _smooth_signal(gray, box, cfg, max_value)
+    if sm.size == 0:
+        return float(x), float(y)
+    ix, iy = int(round(x)) - box[0], int(round(y)) - box[1]
+    ix, iy = min(max(ix, 0), sm.shape[1] - 1), min(max(iy, 0), sm.shape[0] - 1)
+    if mode == "peak":
+        r = 4                                   # climb to the local maximum first
+        y0, y1 = max(0, iy - r), min(sm.shape[0], iy + r + 1)
+        x0, x1 = max(0, ix - r), min(sm.shape[1], ix + r + 1)
+        jy, jx = np.unravel_index(int(np.argmax(sm[y0:y1, x0:x1])), (y1 - y0, x1 - x0))
+        cx, cy = _peak_centroid(sm, x0 + int(jx), y0 + int(jy))
+        return cx + box[0], cy + box[1]
+    thr = k * snoise
+    mask = (sm >= thr).astype(np.uint8)
+    _n, lab, _st, _c = cv2.connectedComponentsWithStats(mask, 8)
+    j = lab[iy, ix]
+    if j == 0:
+        return float(x), float(y)
+    ys, xs = np.nonzero(lab == j)
+    wgt = np.clip(sm[ys, xs].astype(np.float64) - thr, 0.0, None)
+    if wgt.sum() <= 0:
+        return float(x), float(y)
+    return float(xs @ wgt / wgt.sum()) + box[0], float(ys @ wgt / wgt.sum()) + box[1]
+
+
+def brightest_light(frame: np.ndarray, bright: bool = True, max_value=None,
+                    smooth: float = 2.0) -> tuple[float, float, float]:
+    """(x, y, counts above the frame's background) of the brightest light in the
+    WHOLE frame, lightly smoothed (one hot pixel does not count). For the
+    "why was no spot measured" text: where the light IS, against where the
+    measurement looked."""
+    gray = to_gray(frame) if frame.ndim == 3 else frame
+    a = _signal(gray, bright, max_value).astype(np.float32)
+    sm = cv2.GaussianBlur(a, (0, 0), max(0.5, smooth))
+    iy, ix = np.unravel_index(int(np.argmax(sm)), sm.shape)
+    bg = float(np.median(sm[::4, ::4]))
+    return float(ix), float(iy), float(sm[iy, ix] - bg)
+
+
+# --------------------------------------------------------------------------- #
+# Calibration: find the spot ANYWHERE in the frame (2026-09-29)
+# --------------------------------------------------------------------------- #
+# The old calibration thresholded the whole frame and took the largest blob:
+# right for a SATURATED spot (a flat top well above the illuminated sample),
+# useless for an UNSATURATED one (a peaked spot with no flat top, dimmer than
+# the threshold). Lukas: a switch, and it must find the spot wherever it is --
+# the old calibration may be stale (rig: 100 px off).
+#   "saturated"   -- the fixed threshold (thr_lower..thr_upper), min / max area,
+#                    frame border: the largest blob, its centroid (as before),
+#                    now REFUSED when a second blob is nearly as large;
+#   "unsaturated" -- the brightest blob of a smoothed copy of the whole frame,
+#                    refined to the background-subtracted intensity centroid by
+#                    the second moment's iterated box; REFUSED when another
+#                    blob peaks nearly as bright.
+# "Nearly" = within AMBIGUOUS (80 %). Refusing is cheaper than calibrating on
+# the wrong object: the stabiliser would then steer the sample to it.
+AMBIGUOUS = 0.8
+
+
+def find_spot_for_calibration(frame: np.ndarray, cfg=None, mode: str = "saturated",
+                              max_value=None) -> SpotLocation:
+    """One frame's whole-frame spot position for Calibrate spot (see above)."""
+    gray = to_gray(frame) if frame.ndim == 3 else frame
+    h, w = gray.shape[:2]
+    bright = bool(_cfg(cfg, "bright_spot", True))
+    out = SpotLocation(method=mode)
+    if mode == "saturated":
+        g8 = gray if gray.dtype == np.uint8 else to_gray(gray)
+        lo, hi = int(_cfg(cfg, "thr_lower", 200)), int(_cfg(cfg, "thr_upper", 255))
+        if not bright:
+            g8 = cv2.bitwise_not(g8)
+            lo, hi = 255 - hi, 255 - lo
+        mask = cv2.inRange(g8, lo, hi)
+        n, lab, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+        if n <= 1:
+            out.why = (f"nothing above the threshold {lo} anywhere in the frame (frame max "
+                       f"{int(g8.max())}) -- lower the threshold, or calibrate as an "
+                       f"'unsaturated spot'")
+            return out
+        ok = spot_candidates(stats, (0, 0), (w, h), int(_cfg(cfg, "min_area_px", 4)),
+                             int(_cfg(cfg, "max_area_px", 0) or 0),
+                             bool(_cfg(cfg, "reject_border", True)))
+        idx = np.nonzero(ok)[0] + 1
+        out.n_candidates = int(idx.size)
+        if idx.size == 0:
+            out.why = ("blobs above the threshold, but none passes min / max area and the "
+                       "frame border -- check the area limits")
+            return out
+        areas = stats[idx, cv2.CC_STAT_AREA]
+        order = np.argsort(-areas)
+        j = idx[order[0]]
+        blob = (lab == j).astype(np.uint8)
+        m = cv2.moments(blob, binaryImage=True)
+        out.x, out.y = m["m10"] / m["m00"], m["m01"] / m["m00"]
+        out.area, out.peak = int(areas[order[0]]), float(g8[lab == j].max())
+        out.ok = True
+        if idx.size > 1:
+            k2 = idx[order[1]]
+            out.second_xy = (float(cents[k2][0]), float(cents[k2][1]))
+            out.second_peak = float(areas[order[1]])
+            if areas[order[1]] >= AMBIGUOUS * areas[order[0]]:
+                out.ok = False
+                out.why = (f"two blobs of nearly the same size above the threshold: "
+                           f"{int(areas[order[0]])} px at ({out.x:.0f}, {out.y:.0f}) and "
+                           f"{int(areas[order[1]])} px at ({out.second_xy[0]:.0f}, "
+                           f"{out.second_xy[1]:.0f}) -- raise the threshold or the min area")
+        return out
+    # "unsaturated": the brightest smoothed blob, then the moment centroid
+    sm, _bg, snoise = _smooth_signal(gray, (0, 0, w, h), cfg, max_value)
+    k = max(1.0, float(_cfg(cfg, "locate_k", 5.0)))
+    blobs = _blobs(sm, k * snoise, (0, 0), (w, h), cfg)
+    out.n_candidates = len(blobs)
+    if not blobs:
+        out.why = (f"no light above background + {k:g} x noise anywhere in the frame "
+                   f"(that passes min / max area and the frame border)")
+        return out
+    b = blobs[0]
+    out.peak, out.area = b["peak"], b["area"]
+    if len(blobs) > 1:
+        out.second_xy, out.second_peak = (blobs[1]["x"], blobs[1]["y"]), blobs[1]["peak"]
+        if blobs[1]["peak"] >= AMBIGUOUS * b["peak"]:
+            out.why = (f"two spots of nearly the same brightness: {b['peak']:.0f} at "
+                       f"({b['x']:.0f}, {b['y']:.0f}) and {blobs[1]['peak']:.0f} at "
+                       f"({blobs[1]['x']:.0f}, {blobs[1]['y']:.0f}) -- which one is the laser?")
+            return out
+    # refine: the second moment's iterated box around the brightest blob gives
+    # the background-subtracted intensity centroid (rings, a hole: all counted)
+    m = spot_second_moment(frame, (b["x"], b["y"]), cfg, max_value=max_value)
+    out.ok = True
+    out.x, out.y = (m.cx, m.cy) if m.ok else (b["x"], b["y"])
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# More sizes: encircled energy, a Gaussian fit, the peak (2026-09-29)
+# --------------------------------------------------------------------------- #
+@dataclass
+class SpotEncircled:
+    """Radius holding ``fraction`` of the spot's background-subtracted energy."""
+
+    ok: bool = False
+    why: str = ""
+    fraction: float = 0.86
+    r_px: float = float("nan")   # r86 for fraction 0.86
+    d_px: float = float("nan")   # D86 = 2 r86
+    cx: float = float("nan")     # about the intensity centroid
+    cy: float = float("nan")
+    saturated: bool = False
+
+
+def spot_encircled(frame: np.ndarray, guess_xy, cfg=None, max_value=None,
+                   moments: SpotMoments | None = None) -> SpotEncircled:
+    """Encircled energy: the radius about the intensity centroid that holds
+    ``encircled_fraction`` (cfg, default 0.86) of the light above background.
+
+    No threshold at all: rings and a central hole are simply energy at their
+    radius, and the radius grows monotonically with defocus. The centroid, the
+    background and the integration box are the second moment's (``moments``,
+    computed here when not given): the box is 3 x D4sigma wide, which holds all
+    but ~1e-8 of a Gaussian's energy. The total is the energy inside the
+    largest circle that fits the box. For a Gaussian I ~ exp(-r^2 / 2 s^2) the
+    enclosed fraction is 1 - exp(-r^2 / 2 s^2): r86 = s sqrt(-2 ln 0.14) = 1.98 s.
+    A saturated spot reads too LARGE (its clipped core holds less light than it
+    should) but still has its minimum near focus.
+    """
+    frac = min(max(float(_cfg(cfg, "encircled_fraction", 0.86)), 0.05), 0.995)
+    out = SpotEncircled(fraction=frac)
+    m = moments if moments is not None else spot_second_moment(frame, guess_xy, cfg, max_value)
+    out.saturated = bool(m.saturated)
+    if not m.ok:
+        out.why = m.why or "no spot"
+        return out
+    gray = to_gray(frame) if frame.ndim == 3 else frame
+    bright = bool(_cfg(cfg, "bright_spot", True))
+    x0, y0, x1, y1 = m.box
+    sig = _signal(gray[y0:y1, x0:x1], bright, max_value) - m.background
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    r = np.hypot(xx - m.cx, yy - m.cy).ravel()
+    big_r = min(m.cx - x0, x1 - 1 - m.cx, m.cy - y0, y1 - 1 - m.cy)
+    if big_r < 2:
+        out.why = "integration box too small"
+        return out
+    inside = r <= big_r
+    r, v = r[inside], sig.ravel()[inside].astype(np.float64)
+    # E(r) must be a SMOOTH function of r, or r86 snaps to the radii of the
+    # pixel rings (8 pixels at r = sqrt(145), ...): 1.2 % large on a sampled
+    # Gaussian. So a pixel counts partly while the circle's edge crosses it --
+    # linearly over one pixel width around its centre radius -- and the radius
+    # holding the fraction is found by bisection (E rises with r; the noise
+    # of negative pixels only wiggles it, the bisection still converges).
+    total = float(v.sum())
+    if total <= 0:
+        out.why = "no energy above the background"
+        return out
+    goal = frac * total
+
+    def enclosed(rad: float) -> float:
+        return float(v @ np.clip(rad - r + 0.5, 0.0, 1.0))
+
+    lo, hi = 0.0, float(big_r)
+    for _ in range(30):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if enclosed(mid) < goal else (lo, mid)
+    rr = 0.5 * (lo + hi)
+    out.ok, out.r_px, out.d_px, out.cx, out.cy = True, rr, 2.0 * rr, m.cx, m.cy
+    return out
+
+
+@dataclass
+class SpotGauss:
+    """2-D Gaussian fit B + A exp(-(x-x0)^2/2sx^2 - (y-y0)^2/2sy^2)."""
+
+    ok: bool = False
+    why: str = ""
+    x0: float = float("nan")
+    y0: float = float("nan")
+    sigma_x: float = float("nan")
+    sigma_y: float = float("nan")
+    sigma2: float = float("nan")     # (sx^2 + sy^2) / 2, px^2 -- like the moment's sigma^2
+    amplitude: float = float("nan")
+    offset: float = float("nan")
+    r2: float = float("nan")         # fit quality: 1 - SSres / SStot
+    saturated: bool = False          # clipped top: the fit is not usable then
+
+
+def spot_gauss_fit(frame: np.ndarray, guess_xy, cfg=None, max_value=None,
+                   moments: SpotMoments | None = None, max_half: int = 40,
+                   iterations: int = 30) -> SpotGauss:
+    """Fit an axis-aligned 2-D Gaussian to the spot (Levenberg-Marquardt, numpy).
+
+    Started from the second moment (centroid, widths, background, peak) inside
+    its integration box, capped at +-``max_half`` px around the centroid (the
+    cost). Near focus a laser spot is close to Gaussian, so the fitted sigma^2
+    is a size that the far tails and a noisy background barely move. Far out of
+    focus a coherent spot has rings and a hole: the fit then describes it badly
+    (``r2`` says so) and should not be trusted. A SATURATED spot has a flat top:
+    fitted anyway, but flagged -- the readout shows "-- (saturated)".
+    """
+    out = SpotGauss()
+    m = moments if moments is not None else spot_second_moment(frame, guess_xy, cfg, max_value)
+    out.saturated = bool(m.saturated)
+    if not m.ok:
+        out.why = m.why or "no spot"
+        return out
+    gray = to_gray(frame) if frame.ndim == 3 else frame
+    bright = bool(_cfg(cfg, "bright_spot", True))
+    h, w = gray.shape[:2]
+    bx0, by0, bx1, by1 = m.box
+    cxi, cyi = int(round(m.cx)), int(round(m.cy))
+    x0, x1 = max(bx0, cxi - max_half, 0), min(bx1, cxi + max_half + 1, w)
+    y0, y1 = max(by0, cyi - max_half, 0), min(by1, cyi + max_half + 1, h)
+    if x1 - x0 < 5 or y1 - y0 < 5:
+        out.why = "fit region too small"
+        return out
+    z = _signal(gray[y0:y1, x0:x1], bright, max_value).astype(np.float64).ravel()
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    xx, yy = xx.ravel().astype(np.float64), yy.ravel().astype(np.float64)
+    p = np.array([m.cx, m.cy, math.sqrt(max(m.sigma2_x, 0.25)),
+                  math.sqrt(max(m.sigma2_y, 0.25)), max(m.peak, 1.0), m.background])
+    lam = 1e-3
+
+    def model(q):
+        g = np.exp(-((xx - q[0]) ** 2 / (2 * q[2] ** 2) + (yy - q[1]) ** 2 / (2 * q[3] ** 2)))
+        return q[5] + q[4] * g, g
+
+    f, g = model(p)
+    cost = float(((z - f) ** 2).sum())
+    jac = np.empty((z.size, 6))
+    for _ in range(max(1, int(iterations))):
+        dx, dy = xx - p[0], yy - p[1]
+        ag = p[4] * g
+        jac[:, 0] = ag * dx / p[2] ** 2
+        jac[:, 1] = ag * dy / p[3] ** 2
+        jac[:, 2] = ag * dx * dx / p[2] ** 3
+        jac[:, 3] = ag * dy * dy / p[3] ** 3
+        jac[:, 4] = g
+        jac[:, 5] = 1.0
+        a = jac.T @ jac
+        b = jac.T @ (z - f)
+        try:
+            step = np.linalg.solve(a + lam * np.diag(np.diag(a) + 1e-12), b)
+        except np.linalg.LinAlgError:
+            break
+        q = p + step
+        q[2], q[3] = abs(q[2]) + 1e-6, abs(q[3]) + 1e-6
+        fq, gq = model(q)
+        cq = float(((z - fq) ** 2).sum())
+        if cq < cost:
+            p, f, g, cost, lam = q, fq, gq, cq, lam * 0.3
+            if np.abs(step[:4]).max() < 1e-4:
+                break
+        else:
+            lam *= 10.0
+            if lam > 1e8:
+                break
+    sst = float(((z - z.mean()) ** 2).sum())
+    out.x0, out.y0 = float(p[0]), float(p[1])
+    out.sigma_x, out.sigma_y = float(p[2]), float(p[3])
+    out.sigma2 = float(0.5 * (p[2] ** 2 + p[3] ** 2))
+    out.amplitude, out.offset = float(p[4]), float(p[5])
+    out.r2 = 1.0 - cost / sst if sst > 0 else float("nan")
+    if not (x0 <= p[0] < x1 and y0 <= p[1] < y1) or p[4] <= 0:
+        out.why = "the fit left the spot (no Gaussian here)"
+        return out
+    out.ok = True
+    return out
+
+
+def saturation_info(frame: np.ndarray, guess_xy, cfg=None, max_value=None,
+                    target: float = 0.8) -> tuple[float, float]:
+    """(fraction of the spot's pixels at full scale, exposure factor that would
+    bring its peak to ``target`` x full scale) -- the factor is an ESTIMATE.
+
+    The spot's pixels = those above rel_level of the way from the background
+    to full scale. A saturated peak is unknown, but for a Gaussian-like spot
+    the areas above two levels tell it: the area above a level L is
+    2 pi s^2 ln(P / L), so with A_top at full scale and A_half above half of it
+    (both counted from the background), 2 pi s^2 = (A_half - A_top) / ln 2 and
+    P = top exp(A_top ln 2 / (A_half - A_top)). Unsaturated: target x top /
+    peak. (NaN, NaN) when nothing is measurable.
+    """
+    gray = to_gray(frame) if frame.ndim == 3 else frame
+    top = _full_scale(gray, max_value)
+    if top is None:
+        return float("nan"), float("nan")
+    x0, y0, x1, y1 = _limit_box(gray.shape, guess_xy, cfg)
+    crop = gray[y0:y1, x0:x1].astype(np.float64)
+    if crop.size == 0:
+        return float("nan"), float("nan")
+    bg, _n = _robust_level(crop.ravel())
+    rel = min(max(float(_cfg(cfg, "rel_level", 0.135)), 0.001), 0.999)
+    n_spot = int(np.count_nonzero(crop >= bg + rel * (top - bg)))
+    a_top = int(np.count_nonzero(crop >= top))
+    if n_spot == 0:
+        return float("nan"), float("nan")
+    frac = a_top / n_spot
+    if a_top == 0:
+        peak = float(crop.max()) - bg
+        return 0.0, ((target * top - bg) / peak if peak > 0 else float("nan"))
+    a_half = int(np.count_nonzero(crop >= bg + 0.5 * (top - bg)))
+    if a_half <= a_top:
+        return frac, float("nan")
+    p_est = (top - bg) * math.exp(a_top * math.log(2.0) / (a_half - a_top))
+    return frac, (target * top - bg) / p_est
 
 
 # --------------------------------------------------------------------------- #
@@ -990,6 +1505,147 @@ def best_focus_from_sweep(
         return float(vertex)
     except Exception:
         return float(z[idx])
+
+
+# Metrics whose curve through focus IS a parabola in Z (not just near the
+# bottom): the second moment sigma^2 of any coherent beam, w^2(z) = w0^2 +
+# c (z - z0)^2 (ISO 11146). Only for these may the one_way park trust the
+# fitted curvature far enough to step from the edge of the park band to its
+# centre (Camera._af_one_way, park_centre).
+PARABOLIC_FOCUS = frozenset({"spot_d4sigma"})
+
+
+@dataclass
+class FocusTarget:
+    """What the one_way park aims for, from the fine walk (robust_focus_target).
+
+    value      -- the metric at best focus (fitted extremum / running mean / level)
+    z          -- where the fine walk put it (Z counter units)
+    noise      -- the level-to-level scatter of the metric (absolute, 0 = unknown)
+    curvature  -- |a| of the fitted parabola, metric per Z unit^2 (0 = no fit)
+    n          -- levels used; n_dropped -- outlying levels left out of the fit
+    method     -- "parabola" | "running mean" | "single level" | "none"
+    """
+
+    value: float
+    z: float
+    noise: float = 0.0
+    curvature: float = 0.0
+    n: int = 0
+    n_dropped: int = 0
+    method: str = "none"
+
+
+def robust_focus_target(z_levels, metrics, maximise: bool = False,
+                        rel_window: float | None = None, half_window: int = 3,
+                        repeat_noise: float = 0.0) -> FocusTarget:
+    """The fine walk's best focus metric, robust against ONE noisy level.
+
+    Why (rig, 2026-09-29): the one_way park used to aim at the single best
+    level of the fine walk. The lowest of ~10 noisy levels is biased low by
+    construction, and on the rig it was a dip -- 51.2 px^2 among neighbours
+    of 56.2 / 55.9 -- so "within 4 % of it" (<= 53.2) was below anything the
+    camera could read again at focus, and the park failed.
+
+    Here: a parabola fitted to the levels around the best one (every level
+    within ``rel_window`` x the minimum when that is wider, as the sweep's fit
+    does for sigma^2), ONE pass of outlier rejection (a level more than 3
+    robust sigmas off the curve is dropped and the fit repeated -- that is
+    exactly the rig's dip), and the FITTED extremum is the target. For sigma^2
+    the parabola is the physics, so this is the right number, not just a
+    smoother one. The scatter of the kept levels about the curve is the noise
+    per level (``repeat_noise``, the frame-to-frame error of one level mean,
+    is used when it is larger or when there is no fit).
+
+    No usable parabola (fewer than 5 levels, opens the wrong way, vertex far
+    outside the levels, or a vertex that dives below the levels it was fitted
+    to -- a kinked curve, not a parabola): the best 3-level RUNNING MEAN instead (a lone dip is
+    diluted 3x), noise from the second differences of the walk. One level:
+    that level. The metric's own sense is kept (``maximise``: the fitted
+    MAXIMUM of edges / fft).
+    """
+    z = np.asarray(z_levels, dtype=float).ravel()
+    m = np.asarray(metrics, dtype=float).ravel()
+    ok = np.isfinite(z) & np.isfinite(m)
+    z, m = z[ok], m[ok]
+    rep = float(repeat_noise) if np.isfinite(repeat_noise) and repeat_noise > 0 else 0.0
+    if z.size == 0:
+        return FocusTarget(float("nan"), float("nan"), method="none")
+    sgn = -1.0 if maximise else 1.0
+    s = sgn * m                       # "score": smaller is better, whatever the metric
+    idx = int(np.argmin(s))
+
+    # ---- parabola over the levels around the best ------------------------
+    lo, hi = max(0, idx - half_window), min(z.size, idx + half_window + 1)
+    if rel_window and not maximise and m[idx] > 0:
+        lo2, hi2 = idx, idx + 1       # the contiguous run within the window
+        while lo2 > 0 and m[lo2 - 1] <= rel_window * m[idx]:
+            lo2 -= 1
+        while hi2 < z.size and m[hi2] <= rel_window * m[idx]:
+            hi2 += 1
+        if hi2 - lo2 > hi - lo:
+            lo, hi = lo2, hi2
+    zz, ss = z[lo:hi], s[lo:hi]
+    keep = np.ones(zz.size, dtype=bool)
+
+    def fit(mask):
+        if mask.sum() < 5:            # 3 parameters + at least 2 to judge the noise
+            return None
+        try:
+            return np.polyfit(zz[mask], ss[mask], 2)
+        except Exception:
+            return None
+
+    coef = fit(keep)
+    if coef is not None and zz.size >= 6:
+        r = ss - np.polyval(coef, zz)
+        mad = 1.4826 * float(np.median(np.abs(r)))
+        out = np.abs(r) > 3.0 * mad if mad > 0 else np.zeros_like(keep)
+        # only a FEW levels may go: more "outliers" than that means the curve,
+        # not the levels, is wrong -- then keep them all and let the checks decide
+        if 0 < out.sum() <= max(1, zz.size // 4):
+            keep = ~out
+            coef = fit(keep)
+    if coef is not None:
+        a, b, c = (float(v) for v in coef)
+        step = float(np.median(np.abs(np.diff(zz)))) if zz.size > 1 else 0.0
+        if a > 1e-12:                 # convex in the score = a real extremum
+            zv = -b / (2 * a)
+            res = ss[keep] - np.polyval(coef, zz[keep])
+            noise = float(np.sqrt(np.sum(res ** 2) / max(1, keep.sum() - 3)))
+            vertex = c - b * b / (4 * a)
+            # IS it a parabola? A parabola forced onto a KINK (the relative
+            # area, a Gaussian fit's sigma^2 on the coherent spot: flat, then
+            # a jump where the ring takes over) fits badly and its vertex dives
+            # below every level -- sim: 190 against a best level of 228 -- so
+            # no park could reach it. The judge is the noise seen LOCALLY,
+            # from neighbouring levels (second differences, median: a kink or
+            # a dip is one outlier there): a real parabola leaves residuals of
+            # that size and a vertex within a few of them of its best level.
+            best_kept = float(ss[keep].min())
+            sk = ss[keep]
+            local = (1.4826 * float(np.median(np.abs(np.diff(sk, 2)))) / np.sqrt(6.0)
+                     if sk.size >= 5 else noise)
+            local = max(local, rep, 0.002 * abs(best_kept), 1e-12)
+            plausible = (noise <= 3.0 * local
+                         and vertex >= best_kept - max(3.0 * local, 0.01 * abs(best_kept)))
+            if zz.min() - step <= zv <= zz.max() + step and plausible:
+                return FocusTarget(float(sgn * vertex), float(zv), max(noise, rep), a,
+                                   int(keep.sum()), int((~keep).sum()), "parabola")
+
+    # ---- fallback: the best 3-level running mean -------------------------
+    if z.size >= 3:
+        run = np.convolve(s, np.ones(3) / 3.0, mode="valid")    # centred on 1..n-2
+        j = int(np.argmin(run))
+        noise = rep
+        if z.size >= 5:
+            # a smooth curve has small second differences; noise does not:
+            # var(m[i-1] - 2 m[i] + m[i+1]) = 6 sigma^2 (median: one dip ignored)
+            d2 = np.diff(m, 2)
+            noise = max(noise, 1.4826 * float(np.median(np.abs(d2))) / np.sqrt(6.0))
+        return FocusTarget(float(sgn * run[j]), float(z[j + 1]), noise, 0.0, 3, 0,
+                           "running mean")
+    return FocusTarget(float(m[idx]), float(z[idx]), rep, 0.0, 1, 0, "single level")
 
 
 # --------------------------------------------------------------------------- #

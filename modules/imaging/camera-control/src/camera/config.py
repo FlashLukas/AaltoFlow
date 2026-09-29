@@ -34,7 +34,11 @@ from dataclasses import asdict, dataclass, fields
 # area (fixed threshold); spot_d4sigma = the spot's second moment sigma^2 (no
 # threshold, a parabola in Z for a coherent beam); spot_relative = the area
 # above a fraction of the spot's own peak. See vision.py "Spot SIZE".
-FOCUS_MECHANISMS = ("spot_area", "edges", "fft", "spot_d4sigma", "spot_relative")
+FOCUS_MECHANISMS = ("spot_area", "edges", "fft", "spot_d4sigma", "spot_relative",
+                    # 2026-09-29 (Lukas: "other options ... not just the sigma
+                    # squared"): encircled-energy radius^2 (D86), a 2-D Gaussian
+                    # fit's sigma^2, the spot's peak brightness (maximised)
+                    "spot_encircled", "spot_gauss", "spot_peak")
 # Autofocus routines (Autofocus.routine): the symmetric sweep, or the one-way
 # walk made for a hysteretic (slip-stick) Z -- see Camera._af_one_way.
 AF_ROUTINES = ("sweep", "one_way")
@@ -49,9 +53,19 @@ THEMES = ("dark", "light")
 MOTIONS = ("kim", "piezo")
 # Spot search region shape (Spot.search_shape).
 SEARCH_SHAPES = ("rect", "circle")
-# How the spot SIZE is reported as "the" size (Spot.size_method): the fixed
-# threshold (as always), relative to the spot's own peak, or the second moment.
-SIZE_METHODS = ("threshold", "relative", "d4sigma")
+# Which size the LIVE readout and the Spot tab's trace show (Spot.size_method).
+# The two main ones (Lukas 2026-09-29): the fixed threshold's area, and the
+# area above a fraction of the spot's own peak ("relative", the default: it
+# "was working very well" to see whether the spot changes). The others are
+# display choices; the autofocus picks its own metric (Autofocus.mechanism).
+SIZE_METHODS = ("threshold", "relative", "d4sigma", "encircled", "gauss", "peak")
+# Where the size is measured around (Spot.locate), see vision.locate_spot.
+LOCATE_MODES = ("calibrated", "peak", "blob")
+# How Calibrate spot finds the spot in the whole frame (Spot.calib_mode), see
+# vision.find_spot_for_calibration.
+CALIB_MODES = ("saturated", "unsaturated")
+# The real camera backends (Camera.driver).
+DRIVERS = ("ids", "genicam")
 # Which pixels the second moment counts (Spot.clip_mode), see vision.spot_second_moment.
 CLIP_MODES = ("local", "pixel")
 # The simulator's laser spot (Camera.sim_spot_model).
@@ -89,6 +103,13 @@ class Camera:
     # delivers a 12-bit copy of every frame (like the lab camera in Mono12),
     # which the spot SIZE metrics then use -- see backends/sim.py.
     sim_bit_depth: int = 8
+    # "Auto exposure (once)" (2026-09-29, an explicit user action; the adopt
+    # rule is not touched): the camera's own ExposureAuto = Once when it has
+    # it, else a few software steps that bring the IMAGE -- the spot's search
+    # region left out -- to this fraction of full scale at this percentile.
+    auto_exposure_target: float = 0.70
+    auto_exposure_percentile: float = 99.0
+    auto_exposure_iterations: int = 8
 
 
 @dataclass
@@ -149,13 +170,37 @@ class Spot:
     # ... and the other two sizes at calibration time (0 = not measured)
     ref_d4sigma_px: float = 0.0        # D4sigma = 4 sqrt(sigma^2), px
     ref_rel_area: float = 0.0          # area above rel_level x peak, px^2
+    ref_d86_px: float = 0.0            # encircled-energy diameter, px (2026-09-29)
+    ref_gauss_sigma2: float = 0.0      # Gaussian fit sigma^2, px^2 (2026-09-29)
 
     # SPOT SIZE WITHOUT A FIXED THRESHOLD (2026-09-28, Lukas: a defocused
-    # coherent spot has rings and a hole; a fixed threshold loses it). All
-    # three sizes are measured every frame in the search region; size_method
-    # says which one the Spot tab plots as "the" size. The autofocus picks its
-    # own (autofocus.mechanism). "threshold" keeps everything as it was.
-    size_method: str = "threshold"     # threshold | relative | d4sigma
+    # coherent spot has rings and a hole; a fixed threshold loses it). Every
+    # size is measured every frame in the search region; size_method says which
+    # one the LIVE readout and the Spot tab's trace show. Since 2026-09-29 the
+    # default is "relative" (area above rel_level of the spot's own peak --
+    # Lukas: it "was working very well" to see whether the spot changes); the
+    # autofocus picks its own metric (autofocus.mechanism), independently.
+    size_method: str = "relative"      # threshold | relative | d4sigma | encircled | gauss | peak
+    # WHERE the size is measured (2026-09-29, rig: a spot 100 px off its
+    # calibration read "no spot"): "calibrated" = around the calibrated
+    # position, as before (the default -- the position is a calibration, not
+    # tracked); "peak" / "blob" = find the spot in the search region first
+    # (vision.locate_spot) and measure around THAT. The calibrated position
+    # stays the one for motion either way; a located spot further than
+    # offset_warn_px from it is warned about (moved laser / stale calibration).
+    locate: str = "calibrated"         # calibrated | peak | blob
+    locate_k: float = 5.0              # blob: above background + this x noise (smoothed)
+    offset_warn_px: float = 20.0
+    # encircled: the radius holding this fraction of the energy (0.86 -> D86)
+    encircled_fraction: float = 0.86
+    # CALIBRATE SPOT finds the spot anywhere in the frame (2026-09-29):
+    # "saturated" = the fixed threshold's largest blob (a flat top, as before);
+    # "unsaturated" = the brightest smoothed blob, then its intensity centroid.
+    # calib_at_af_exposure: calibrate at autofocus.exposure_us (switched and
+    # restored like an autofocus run) -- for a spot that saturates at the
+    # working exposure.
+    calib_mode: str = "saturated"      # saturated | unsaturated
+    calib_at_af_exposure: bool = False
     # relative: pixels above rel_level x (peak - background). 0.135 = 1/e^2.
     rel_level: float = 0.135
     # d4sigma (second moment, ISO 11146): background from a ring outside the
@@ -281,6 +326,31 @@ class Autofocus:
     park_tolerance: float = 0.10
     park_tolerance_d4sigma: float = 0.04
     park_tolerance_relative: float = 0.04
+    # The park aims at a ROBUST fine-walk minimum (rig 2026-09-29): a parabola
+    # fitted to the fine walk with one outlying level dropped (fallback: the
+    # best 3-level running mean) -- not the single best level, which on the rig
+    # was an 8-bit noise dip 9 % below its neighbours that no park could reach.
+    # And the tolerance is never tighter than the noise the fine walk measured:
+    # tolerance = max(park_tolerance_*, park_noise_k x noise per level), capped
+    # at rise_fraction. 0 = use the configured tolerance only.
+    park_noise_k: float = 2.0
+    # spot_d4sigma only (sigma^2 IS a parabola in Z): the first level inside the
+    # park band is on its approach-side EDGE, up to |dz| = sqrt(tol x min / a)
+    # before focus; the fitted curvature a says how far on the centre is, so
+    # step that far on (same direction, no reversal) and confirm on the image.
+    # False = stop at the first level inside the band, as before.
+    park_centre: bool = True
+    # A SEPARATE EXPOSURE FOR AUTOFOCUS (2026-09-29, Lukas: "if I lower the
+    # exposure I don't see the main image"). 0 = off (the working exposure).
+    # > 0: an autofocus run (and a Z step calibration) remembers the camera's
+    # ExposureTime, sets this one, throws away exposure_discard_frames frames
+    # (buffers already exposed with the old value -- # VERIFY the number on
+    # the IDS camera), runs, and ALWAYS puts the remembered exposure back
+    # (normal end, failure, kill, crash, shutdown), then throws away as many
+    # frames again so nothing measures the pattern on a short-exposure frame.
+    # The lab found 65 us unsaturated against a ~2454 us working exposure.
+    exposure_us: float = 0.0
+    exposure_discard_frames: int = 2
     # How long a SCAN waits for one autofocus before calling it failed (s).
     # Generous: an open-loop Z walks slowly and a far-off start takes many levels.
     scan_timeout_s: float = 600.0
@@ -518,7 +588,11 @@ def load_config(path: str) -> Config:
     if cfg.spot.search_shape not in SEARCH_SHAPES:
         cfg.spot.search_shape = "rect"
     if cfg.spot.size_method not in SIZE_METHODS:
-        cfg.spot.size_method = "threshold"
+        cfg.spot.size_method = "relative"
+    if cfg.spot.locate not in LOCATE_MODES:
+        cfg.spot.locate = "calibrated"
+    if cfg.spot.calib_mode not in CALIB_MODES:
+        cfg.spot.calib_mode = "saturated"
     if cfg.spot.clip_mode not in CLIP_MODES:
         cfg.spot.clip_mode = "local"
     if cfg.camera.sim_spot_model not in SIM_SPOTS:

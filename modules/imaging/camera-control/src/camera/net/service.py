@@ -373,6 +373,10 @@ class CameraService:
         # -- spot position + config file ---------------------------------- #
         if cmd == "calibrate_spot":
             return {"ok": True, "spot": b.calibrate_spot(int(req.get("frames", 20)))}
+        if cmd == "auto_exposure_once":
+            # an explicit user action (Camera settings): blocks ~1-2 s, below
+            # the client's REQ timeout
+            return {"ok": True, "exposure": b.auto_exposure_once()}
         if cmd == "set_spot_position":
             return {"ok": True, "spot": b.set_spot_position(req["x"], req["y"])}
         if cmd == "clear_spot_position":

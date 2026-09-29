@@ -32,6 +32,7 @@ import re
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 
 import cv2
@@ -39,13 +40,24 @@ import numpy as np
 
 from . import objectives as OBJ
 from . import vision as V
-from .config import Config
+from .config import CALIB_MODES, LOCATE_MODES, Config
 from .stream import StreamRecorder
 from .template_io import BackupPattern, Reference, load_template, save_template
 
 # Saved by save_config(), loaded by scripts/run_service.py when present, so a
 # measured spot position and tuned thresholds survive a restart.
 DEFAULT_CONFIG_NAME = "camera.ini"
+
+
+# The autofocus mechanisms measured on the spot around its centre (not the
+# whole image): the threshold-free sizes and the peak.
+SIZE_FOCUS = ("spot_d4sigma", "spot_relative", "spot_encircled", "spot_gauss", "spot_peak")
+
+
+@contextmanager
+def _nothing():
+    """An empty context (the "no exposure switch" branch of calibrate_spot)."""
+    yield False
 
 
 class _AutofocusKilled(Exception):
@@ -97,7 +109,7 @@ class CameraStatus:
     # The spot's SIZE without a fixed threshold (2026-09-28, vision.py "Spot
     # SIZE"), measured every frame in the search region. Information and
     # autofocus metrics only -- the position used for motion stays spot_x/y.
-    spot_size_method: str = "threshold"   # cfg.spot.size_method, echoed
+    spot_size_method: str = "relative"    # cfg.spot.size_method, echoed
     spot_size: float = float("nan")       # that method's number (px^2, or D4sigma px)
     spot_rel_area: float = float("nan")   # px^2 above rel_level x (peak - background)
     spot_d4sigma_px: float = float("nan") # 4 sqrt(sigma^2): ISO beam diameter, px
@@ -106,11 +118,42 @@ class CameraStatus:
     spot_centroid_y: float = float("nan")
     spot_peak: float = 0.0                # brightest pixel above background, counts
     spot_saturated: bool = False          # a pixel of the spot at the camera's maximum
+    # 2026-09-29: WHERE the size was measured (Spot.locate: the calibrated
+    # position, or the spot found in the search region) -- information only,
+    # motion keeps spot_x/y -- how far that is from the calibration, and in
+    # words why nothing was measured (e.g. "the brightest light is 95 px from
+    # the calibrated position ..."). "" = measured.
+    spot_found_x: float = float("nan")
+    spot_found_y: float = float("nan")
+    spot_offset_px: float = float("nan")
+    spot_size_why: str = ""
+    # the box the size was integrated over (x0, y0, x1, y1; the second
+    # moment's), for the overlay; (0, 0, 0, 0) = none
+    spot_size_box: tuple = (0, 0, 0, 0)
+    # ... and the new sizes: encircled-energy diameter (encircled_fraction,
+    # D86 by default), a 2-D Gaussian fit's sigma^2 and its R^2, the spot's
+    # 3x3-averaged peak above background (counts)
+    spot_d86_px: float = float("nan")
+    spot_gauss_sigma2_px2: float = float("nan")
+    spot_gauss_r2: float = float("nan")
+    spot_peak_avg: float = float("nan")
+    # saturation as INFORMATION (Lukas: a saturated spot is still a spot):
+    # the fraction of the spot's pixels at full scale, and the exposure factor
+    # that would bring its peak to ~80 % of full scale (an estimate; NaN when
+    # not saturated)
+    spot_sat_fraction: float = 0.0
+    spot_exposure_hint: float = float("nan")
+    # the autofocus exposure (autofocus.exposure_us) is on the camera NOW
+    af_exposure_active: bool = False
     # Bit depth of the frame the sizes above were measured on (2026-09-28): 8,
     # or 10/12 when the camera delivers its full depth (then spot_peak is in
     # those counts, 0..4095 for 12 bit). The display, the template matching
     # and the fixed-threshold spot_area stay 8-bit whatever this says.
     spot_bit_depth: int = 8
+    # Why the frame is 8 bit when the camera could give more (2026-09-29), from
+    # the backend's deep_note(): e.g. "the camera's PixelFormat is Mono8 ...".
+    # "" = a deep frame came, or the backend has nothing to say (simulator).
+    spot_bit_note: str = ""
 
     pattern_loaded: bool = False
     match_found: bool = False
@@ -317,6 +360,23 @@ class Camera:
         # spot_area needs a SATURATED spot (see _note_area_saturation): the hint
         # text, and per run [levels scored, levels with a saturated spot]
         self._af_hint = ""
+        # the backend's "why no deep frame" (deep_note), and the last one SAID:
+        # one info event per service start and per change, not one per frame
+        self._deep_note = ""
+        self._deep_note_said = ""
+        # saturation is SAID once per episode (a run of saturated frames),
+        # not per frame: Lukas saw the log repeat it (2026-09-29)
+        self._sat_episode = False
+        self._unsat_run = 0
+        # AUTOFOCUS EXPOSURE (autofocus.exposure_us): the working exposure to
+        # put back (None = nothing switched), and whether the AF one is on.
+        # _expo_hold: the engine keeps the image loops (pattern tracking,
+        # stabiliser, laser placement, continuous focus) standing down while
+        # the exposure is switched, and for this many frames after (frames
+        # already exposed with the wrong value -- see _exposure_for).
+        self._af_expo_saved: float | None = None
+        self._af_expo_active = False
+        self._expo_hold_frames = 0
         self._af_area_sat = [0, 0]
         # Z step calibration (calibrate_z_steps): same pattern as the autofocus
         # state above -- brain attributes, copied into every frame (gotcha #1)
@@ -406,6 +466,19 @@ class Camera:
         self._stop.set()
         if self._engine is not None:
             self._engine.join(timeout=2.0)
+        # A run interrupted by the shutdown restores the working exposure in
+        # its own finally; if the engine did not get that far (stuck in a
+        # grab), do it here, before the camera is closed -- the camera must end
+        # as it was found (adopt rule).
+        if self._af_expo_saved is not None:
+            try:
+                self.backend.set_feature("ExposureTime", self._af_expo_saved)
+                self._emit("info", f"exposure restored to {self._af_expo_saved:g} us "
+                                   f"at shutdown")
+            except Exception as exc:
+                self._emit("error", f"could not restore the exposure at shutdown: {exc}")
+            self._af_expo_saved = None
+            self._af_expo_active = False
         for dev, name in ((self.backend, "camera"), (self.xy, "xy"), (self.z, "z")):
             try:
                 dev.close()
@@ -436,10 +509,20 @@ class Camera:
                     # out and the run went ahead (deep cleaning 2026-09-28).
                     # A Kill pressed while nothing was queued is dropped here.
                     self._af_kill.clear()
-            if req is not None and req.get("kind") == "zcal":
-                self._do_zcal(req)
-            elif req is not None:
-                self._do_autofocus(req)
+            if req is not None:
+                # A routine that CRASHES (an exception its own handler did not
+                # expect) must not take the engine thread with it: no frame
+                # would ever be processed again. Its finally has restored the
+                # exposure and cleared "busy"; here it is logged, and the loop
+                # goes on (2026-09-29, found testing the AF exposure).
+                try:
+                    if req.get("kind") == "zcal":
+                        self._do_zcal(req)
+                    else:
+                        self._do_autofocus(req)
+                except Exception as exc:
+                    self._emit("error", f"engine: {req.get('kind', 'autofocus')} crashed: "
+                                        f"{type(exc).__name__}: {exc}")
             else:
                 try:
                     self._process()
@@ -473,12 +556,36 @@ class Camera:
             clip = (img.clip_left, img.clip_top, img.clip_right, img.clip_bottom)
         gray = V.preprocess(V.to_gray(raw), img.rotation_deg, img.symmetry, clip)
         self._deep = None
+        self._note_deep(deep)
         if deep is not None:
             arr, bits = deep
             if getattr(arr, "ndim", 0) == 2 and arr.shape == raw.shape[:2]:
                 self._deep = (gray, V.preprocess(arr, img.rotation_deg, img.symmetry, clip),
                               int(bits))
         return gray
+
+    def _note_deep(self, deep) -> None:
+        """Tell the operator ONCE why the spot metrics run on 8 bit.
+
+        The rig (2026-09-29) ran Mono8 and nothing said so: the deep-frame path
+        simply found nothing to convert. The backend knows why (deep_note);
+        this says it as one info event when it first appears and again only
+        when it CHANGES (another PixelFormat chosen in the live panel), and
+        keeps it in status for the GUI. Runs on the grabbing thread; status
+        copies the attribute (gotcha #1).
+        """
+        note = ""
+        if deep is None:
+            get_note = getattr(self.backend, "deep_note", None)
+            if callable(get_note):
+                try:
+                    note = str(get_note() or "")
+                except Exception:
+                    note = ""
+        self._deep_note = note
+        if note and note != self._deep_note_said:
+            self._emit("info", f"spot size: {note}")
+        self._deep_note_said = note
 
     def _spot_source(self, gray) -> tuple:
         """(frame, full scale, bits) the spot SIZE is measured on for ``gray``.
@@ -587,7 +694,8 @@ class Camera:
         # -- template match + scanning geometry ------------------------- #
         geo = None
         st.backups_n = 0 if self.reference is None else len(self.reference.backups)
-        if self.reference is not None and st.tracking_on:
+        expo_switched = self._af_expo_active or self._expo_hold_frames > 0
+        if self.reference is not None and st.tracking_on and not expo_switched:
             anchor = self._track_patterns(gray, st, anchor_gen)
             if anchor is not None:
                 offs = V.scanning_array_pixel_offsets(
@@ -616,11 +724,19 @@ class Camera:
         # a fly scan records the camera: the stage is being flown on purpose.
         # (a Z step calibration moves Z just the same: both loops stand down)
         af_pending = self._af_busy or self._zcal_busy
+        # The AF exposure is on (or just came off: frames in flight): the image
+        # is not the working one, so the loops stand down exactly as during an
+        # autofocus -- and a pattern not matched on a dark frame is not "lost".
+        if self._af_expo_active or self._expo_hold_frames > 0:
+            if not self._af_expo_active:
+                self._expo_hold_frames -= 1
+            af_pending = True
         # A lost pattern: count it, and after lost_frames raise the fault (and
         # maybe start the autofocus recovery). Done BEFORE the loops below, so
         # the frame that declares the loss already holds the stage.
         self._update_loss(st, gray.shape[:2], af_pending)
-        af_pending = self._af_busy or self._zcal_busy   # the recovery may just have queued one
+        af_pending = (self._af_busy or self._zcal_busy     # the recovery may just have queued one
+                      or self._af_expo_active or af_pending)
         with self._lock:
             faulted = bool(self._fault)
         streaming = self.stream.running
@@ -713,6 +829,8 @@ class Camera:
             st.af_id = self._af_id
             # spot_area's hint only while spot_area is the metric in use
             st.af_hint = self._af_hint if self.cfg.autofocus.mechanism == "spot_area" else ""
+            st.spot_bit_note = self._deep_note
+            st.af_exposure_active = self._af_expo_active
             st.zcal_id, st.zcal_running = self._zcal_id, self._zcal_busy
             st.zcal_state = self._zcal_state
             for k, v in self._zcal_result.items():
@@ -1257,25 +1375,44 @@ class Camera:
     def _measure_size(self, gray, guess, st) -> None:
         """Fill the threshold-free size fields of ``st`` for this frame.
 
-        Both measurements work only inside the search region around ``guess``
-        (a few hundred pixels square, not the 2-megapixel frame), which is why
-        they are cheap enough to run on every frame -- measured on a 1936 x
-        1096 frame in tests/test_spot_moments.py. A spot the camera clips at
-        its maximum is flagged: a clipped peak loses power where r is small,
-        so sigma^2 comes out too BIG (and the peak of the relative method too
-        small) -- lower the exposure until nothing saturates at focus.
+        ``guess`` is the calibrated position (or, before calibration, what the
+        threshold found). WHERE the size is measured is Spot.locate
+        (2026-09-29): around ``guess`` itself ("calibrated", the default), or
+        around the spot found in the search region ("peak" / "blob") -- the rig
+        had a spot 100 px off its calibration, and every size read "no spot".
+        Everything is computed around ONE centre, in the search region only (a
+        few hundred pixels square, not the 2-megapixel frame): the second
+        moment, the relative area, the encircled energy, the Gaussian fit.
+        A saturated spot is measured anyway and said ONCE per episode, with
+        which sizes it affects (Lukas: a saturated spot is still a spot).
         """
         sp = self.cfg.spot
         st.spot_size_method = sp.size_method
         if guess is None:
+            st.spot_size_why = "no spot position yet: calibrate the spot (Spot tab)"
             return
         # the camera's full-depth frame when it delivers one (12 bit: the far
         # wings are no longer rounded away), else this 8-bit frame
         src, top, bits = self._spot_source(gray)
         st.spot_bit_depth = bits
+        centre, loc = self._size_centre(src, top, guess)
+        if sp.ref_set and centre is not None:
+            st.spot_offset_px = float(np.hypot(centre[0] - sp.ref_x, centre[1] - sp.ref_y))
+            if (sp.locate != "calibrated" and st.spot_offset_px > float(sp.offset_warn_px)
+                    and float(sp.offset_warn_px) > 0):
+                self._warn_limited(
+                    "spot_offset", f"the spot is {st.spot_offset_px:.0f} px from its calibrated "
+                    f"position: the laser moved or the calibration is stale -- recalibrate "
+                    f"the spot (Spot tab); motion still uses the calibrated position", 60.0)
+        if centre is None:
+            st.spot_size_why = self._why_no_spot(src, top, guess, loc.why)
+            return
+        st.spot_found_x, st.spot_found_y = float(centre[0]), float(centre[1])
         try:
-            mom = V.spot_second_moment(src, guess, sp, max_value=top)
-            rel = V.spot_relative_area(src, guess, sp, max_value=top)
+            mom = V.spot_second_moment(src, centre, sp, max_value=top)
+            rel = V.spot_relative_area(src, centre, sp, max_value=top)
+            enc = V.spot_encircled(src, centre, sp, max_value=top, moments=mom)
+            gau = V.spot_gauss_fit(src, centre, sp, max_value=top, moments=mom)
         except Exception as exc:                 # never let a size kill the frame
             self._warn_limited("size", f"spot size: {type(exc).__name__}: {exc}", 30.0)
             return
@@ -1283,18 +1420,103 @@ class Camera:
             st.spot_d4sigma_px, st.spot_sigma2_px2 = mom.d4sigma, mom.sigma2
             st.spot_centroid_x, st.spot_centroid_y = mom.cx, mom.cy
             st.spot_peak = mom.peak
+            st.spot_size_box = tuple(int(v) for v in mom.box)
+        else:
+            st.spot_size_why = self._why_no_spot(src, top, centre, mom.why)
         if rel.ok:
             st.spot_rel_area = rel.area
+            st.spot_peak_avg = rel.peak
+        if enc.ok:
+            st.spot_d86_px = enc.d_px
+        if gau.ok:
+            st.spot_gauss_sigma2_px2, st.spot_gauss_r2 = gau.sigma2, gau.r2
         st.spot_saturated = bool(mom.saturated or rel.saturated)
+        if st.spot_saturated:
+            st.spot_sat_fraction, st.spot_exposure_hint = V.saturation_info(
+                src, centre, sp, max_value=top)
         st.spot_size = {"threshold": st.spot_area if st.spot_found else float("nan"),
                         "relative": st.spot_rel_area,
-                        "d4sigma": st.spot_d4sigma_px}.get(sp.size_method, float("nan"))
-        if st.spot_saturated and (sp.size_method != "threshold"
-                                  or self.cfg.autofocus.mechanism in ("spot_d4sigma",
-                                                                      "spot_relative")):
-            self._warn_limited("saturated", "the laser spot is SATURATED: its size is wrong "
-                                            "(sigma^2 too big) -- lower the exposure or gain",
-                               30.0)
+                        "d4sigma": st.spot_d4sigma_px,
+                        "encircled": st.spot_d86_px,
+                        "gauss": st.spot_gauss_sigma2_px2,
+                        "peak": st.spot_peak_avg}.get(sp.size_method, float("nan"))
+        self._note_saturation(st.spot_saturated, st.spot_sat_fraction, st.spot_exposure_hint)
+
+    def _size_centre(self, src, top, guess) -> tuple:
+        """(centre or None, SpotLocation or None): where the size is measured.
+
+        "calibrated" (or no calibration yet): ``guess`` itself, exactly as
+        before. "peak" / "blob": vision.locate_spot in the search region
+        around ``guess`` -- the measurement box AND the mirror test of
+        reject_asymmetric then use the LOCATED centre; mirroring a spot that is
+        not at the calibrated centre through that centre threw all of it away
+        on the rig."""
+        sp = self.cfg.spot
+        mode = sp.locate if sp.locate in LOCATE_MODES else "calibrated"
+        if mode == "calibrated" or guess is None:
+            return guess, None
+        loc = V.locate_spot(src, guess, sp, mode, max_value=top)
+        return ((loc.x, loc.y) if loc.ok else None), loc
+
+    def _why_no_spot(self, src, top, centre, why: str) -> str:
+        """In words: why no size was measured, and WHERE the light is instead.
+
+        The rig's screenshot said only "no spot above the noise" while the spot
+        sat, plainly visible, 100 px from the calibrated position: the useful
+        news is how far the brightest light is and what to do about it."""
+        sp = self.cfg.spot
+        why = why or "no spot"
+        try:
+            bx, by, val = V.brightest_light(src, sp.bright_spot, top)
+        except Exception:
+            return why
+        d = float(np.hypot(bx - centre[0], by - centre[1]))
+        half = int(sp.lookup_region_px or 0)
+        # a few spot radii away = somewhere else; closer = the spot itself is dim
+        near = max(10.0, 1.5 * float(sp.ref_d4sigma_px or 0.0))
+        if d <= near:
+            return why
+        where = ("calibrated position" if sp.locate == "calibrated" else "measured centre")
+        region = ""
+        if half > 0:
+            region = (f", outside the {half} px search region" if d > half
+                      else f", inside the {half} px search region")
+        return (f"{why}; the brightest light is {d:.0f} px from the {where} "
+                f"({bx:.0f}, {by:.0f}){region} -- pick locate = peak or blob, enlarge "
+                f"the search region, or recalibrate the spot")
+
+    def _note_saturation(self, saturated: bool, frac: float = float("nan"),
+                         factor: float = float("nan")) -> None:
+        """Say it ONCE per saturation episode, as information.
+
+        Lukas (2026-09-29): "I am fine with measuring a saturated spot as a
+        spot" -- nothing is refused because of it. What saturation does to each
+        size: locating it (peak / blob) and the fixed-threshold area are
+        unaffected; D4sigma and the encircled energy read too LARGE (the
+        clipped core holds too little of the light) but keep their minimum near
+        focus -- usable for autofocus, just shallower; the Gaussian fit and the
+        peak brightness are meaningless on a flat top. An episode ends after 15
+        unsaturated frames in a row (one frame dipping under full scale must
+        not start a new message)."""
+        if not saturated:
+            self._unsat_run += 1
+            if self._unsat_run >= 15:
+                self._sat_episode = False
+            return
+        self._unsat_run = 0
+        if self._sat_episode:
+            return
+        self._sat_episode = True
+        how = f" ({100 * frac:.0f} % of its pixels at full scale)" if np.isfinite(frac) else ""
+        msg = (f"the laser spot is SATURATED{how}. Unaffected: locating it (peak / blob) "
+               f"and the fixed-threshold area. D4sigma and encircled read too large "
+               f"(clipped core) but keep their minimum near focus -- usable for autofocus, "
+               f"shallower. The Gaussian fit and the peak are not usable while saturated.")
+        if np.isfinite(factor) and 0 < factor < 1:
+            msg += (f" Optional: exposure x{factor:.2f} would bring the peak to ~80 % of "
+                    f"full scale (estimate; or set autofocus.exposure_us for the autofocus "
+                    f"only).")
+        self._emit("info", msg)
 
     # ------------------------------------------------------------------ #
     # continuous focus  (dither hill-climb on Z)
@@ -1403,12 +1625,200 @@ class Camera:
         """
         self._pause_image_loops()
         try:
-            self._run_autofocus(req)
+            # the AF exposure (if set) is switched on here and ALWAYS back off
+            # before the loops resume below -- normal end, failure, kill, crash
+            with self._exposure_for("autofocus"):
+                self._run_autofocus(req)
+        except Exception as exc:
+            # crashed (not a handled failure): never "busy" forever, and say so
+            if self._af_state in ("queued", "running"):
+                self._af_finish(f"crashed: {type(exc).__name__}")
+            raise
         finally:
-            if self._af_state == "running":      # left early (shutdown): never "busy" forever
+            if self._af_state in ("queued", "running"):   # left early (shutdown)
                 self._af_finish("stopped")
             self._pause_image_loops()            # nothing measured during AF counts after it
             self._stab_move_t = time.monotonic()
+
+    @contextmanager
+    def _exposure_for(self, what: str, engine: bool = True):
+        """Run the block at autofocus.exposure_us, then restore the camera's own.
+
+        Why (Lukas 2026-09-29): "if I lower the exposure I don't see the main
+        image". The working exposure stays bright -- pattern tracking needs the
+        sample -- and the spot saturates; the autofocus (and the Z step
+        calibration, and optionally the spot calibration) may use a shorter
+        one. The camera's ExposureTime is READ first (not the config: that is
+        the truth), set, and put back in a finally -- a failed, killed or
+        crashed run ends at the working exposure too; shutdown() catches a run
+        interrupted before its finally. The adopt rule is kept: this is an
+        explicit action, and the camera ends as it was.
+
+        Frames in flight: buffers already exposed with the old value arrive
+        after the write. ``engine`` = this runs on the engine thread (AF, zcal):
+        it grabs and drops autofocus.exposure_discard_frames frames itself after
+        each switch. Otherwise (calibrate_spot, a request thread) the engine
+        keeps grabbing: it is told to hold the image loops for that many frames
+        after the restore, and the caller skips frames by number.
+        # VERIFY on the IDS camera: how many frames lag behind an ExposureTime
+        # write (NumBuffersAnnouncedMinRequired buffers are queued); the
+        # simulator applies it to the very next grab.
+        """
+        af = self.cfg.autofocus
+        want = float(af.exposure_us or 0.0)
+        n_drop = max(0, int(af.exposure_discard_frames))
+        if want <= 0:
+            yield False
+            return
+        try:
+            old = float(self.backend.get_feature("ExposureTime"))
+        except Exception as exc:
+            self._emit("warn", f"{what}: cannot read the exposure ({exc}); running at the "
+                               f"working exposure")
+            yield False
+            return
+        try:
+            self.backend.set_feature("ExposureTime", want)
+        except Exception as exc:
+            self._emit("warn", f"{what}: cannot set the autofocus exposure {want:g} us "
+                               f"({exc}); running at the working exposure")
+            yield False
+            return
+        self._af_expo_saved = old
+        with self._lock:
+            self._af_expo_active = True
+            self._status.af_exposure_active = True
+        self._emit("info", f"{what}: exposure {old:g} -> {want:g} us (autofocus.exposure_us)")
+        try:
+            if engine:
+                self._drop_frames(n_drop)
+            yield True
+        finally:
+            try:
+                self.backend.set_feature("ExposureTime", old)
+                self._emit("info", f"{what}: exposure restored to {old:g} us")
+            except Exception as exc:
+                self._emit("error", f"{what}: could NOT restore the exposure {old:g} us: "
+                                    f"{exc} -- set it by hand (Camera settings)")
+            self._af_expo_saved = None
+            # the loops stay down for the frames still exposed short
+            self._expo_hold_frames = n_drop + 1
+            with self._lock:
+                self._af_expo_active = False
+                self._status.af_exposure_active = False
+            if engine:
+                try:
+                    self._drop_frames(n_drop)
+                except Exception:
+                    pass
+
+    def _drop_frames(self, n: int) -> None:
+        """Grab and throw away ``n`` frames (engine thread only)."""
+        for _ in range(max(0, int(n))):
+            if self._stop.is_set():
+                return
+            try:
+                self.backend.grab()
+            except Exception:
+                return
+
+    def auto_exposure_once(self, timeout_s: float = 2.5) -> dict:
+        """Set ExposureTime ONCE so the image is well exposed (an explicit action).
+
+        Lukas 2026-09-29 ("Auto exposure (once)" in Camera settings). The
+        camera's own ExposureAuto = "Once" when it offers it (GenICam SFNC:
+        it adjusts, then returns to "Off" by itself -- # VERIFY both on the IDS
+        camera); otherwise a few software steps on the IMAGE: the
+        ``auto_exposure_percentile`` of the frame with the spot's search
+        region left out (the spot is meant to be bright; the sample is what
+        must be visible) brought to ``auto_exposure_target`` of full scale,
+        within the feature's min / max. Only ExposureTime changes; cfg and the
+        adopted exposure follow, so a later settings round trip does not undo it.
+        """
+        if self._af_busy or self._zcal_busy:
+            raise RuntimeError("autofocus / Z calibration is running: set the exposure "
+                               "once it has finished")
+        cam = self.cfg.camera
+        old = float(self.backend.get_feature("ExposureTime"))
+        feats = {}
+        try:
+            feats = {f.get("name"): f for f in (self.backend.features() or [])}
+        except Exception:
+            feats = {}
+        ea = feats.get("ExposureAuto")
+        t_end = time.monotonic() + max(0.5, float(timeout_s))
+        level = float("nan")
+        if ea is not None and "Once" in [str(o) for o in (ea.get("options") or [])] \
+                and ea.get("writable", True):
+            method = "camera ExposureAuto=Once"
+            self.backend.set_feature("ExposureAuto", "Once")
+            done = False
+            while time.monotonic() < t_end:
+                if str(self.backend.get_feature("ExposureAuto")) == "Off":
+                    done = True
+                    break
+                time.sleep(0.05)
+            if not done:
+                try:
+                    self.backend.set_feature("ExposureAuto", "Off")
+                except Exception:
+                    pass
+                raise RuntimeError("the camera's ExposureAuto=Once did not finish in time; "
+                                   "switched back to Off")
+            new = float(self.backend.get_feature("ExposureTime"))
+        else:
+            method = "software"
+            ft = feats.get("ExposureTime") or {}
+            lo = float(ft.get("min") or 1.0)
+            hi = float(ft.get("max") or 1e7)
+            goal = min(0.98, max(0.05, float(cam.auto_exposure_target))) * 255.0
+            pct = min(100.0, max(50.0, float(cam.auto_exposure_percentile)))
+            wait_n = max(0, int(self.cfg.autofocus.exposure_discard_frames)) + 2
+            cur = old
+            for _ in range(max(1, int(cam.auto_exposure_iterations))):
+                gray = self._frame_after(wait_n, t_end)
+                if gray is None:
+                    break
+                level = self._image_level(gray, pct)
+                if level >= 254.0:
+                    factor = 0.5                       # clipped: the level is unknown
+                else:
+                    factor = goal / max(level, 1.0)
+                factor = float(np.clip(factor, 0.25, 4.0))
+                if abs(factor - 1.0) < 0.03:
+                    break
+                want = float(np.clip(cur * factor, lo, hi))
+                if abs(want - cur) <= 1e-6 * max(1.0, cur):
+                    break                              # at a limit
+                self.backend.set_feature("ExposureTime", want)
+                cur = float(self.backend.get_feature("ExposureTime"))
+            new = cur
+        self.cfg.camera.exposure_us = new
+        self._exposure_known = new
+        self._emit("info", f"auto exposure (once, {method}): {old:g} -> {new:g} us"
+                   + (f" (image {pct:g}th percentile {level:.0f} of 255)"
+                      if method == "software" and np.isfinite(level) else ""))
+        return {"method": method, "old_us": old, "new_us": new, "level": level}
+
+    def _frame_after(self, n: int, t_end: float):
+        """The processed frame at least ``n`` frames from now (None on timeout)."""
+        start = self._status.frame_number
+        while time.monotonic() < t_end:
+            if self._status.frame_number >= start + n:
+                with self._lock:
+                    return self._last_frame
+            time.sleep(0.005)
+        return None
+
+    def _image_level(self, gray, pct: float) -> float:
+        """The ``pct`` percentile of the frame WITHOUT the spot's search region."""
+        sp = self.cfg.spot
+        mask = np.ones(gray.shape[:2], bool)
+        if sp.ref_set:
+            x0, y0, x1, y1 = V._limit_box(gray.shape, (sp.ref_x, sp.ref_y), sp)
+            mask[y0:y1, x0:x1] = False
+        vals = gray[mask] if mask.any() else gray.ravel()
+        return float(np.percentile(vals, pct))
 
     def _pause_image_loops(self) -> None:
         self._avg_buf.clear()
@@ -1632,13 +2042,16 @@ class Camera:
             return score(m) > score(ref) + frac * abs(ref)
 
         phases = {"coarse": ([], []), "fine": ([], []), "park": ([], [])}
+        fine_sem: list = []       # frame-to-frame error of each fine level's mean
+        park_info: dict = {}      # the park target + tolerance, for the plot / wire
 
         def publish(best=None):
             self._af_curve = {
                 "z": list(phases["fine"][0]), "metric": list(phases["fine"][1]),
                 "best": best, "maximise": bool(maximise),
                 "phases": {k: {"z": list(v[0]), "metric": list(v[1])}
-                           for k, v in phases.items()}}
+                           for k, v in phases.items()},
+                **park_info}
 
         pos = {"z": float(self.z.read_z())}     # the COMMANDED position (counter)
 
@@ -1651,6 +2064,8 @@ class Camera:
             vals = [self._focus_metric(live()) for _ in range(n)]
             vals = [v for v in vals if np.isfinite(v)]
             m = float(np.mean(vals)) if vals else float("nan")
+            if phase == "fine" and len(vals) > 1:
+                fine_sem.append(float(np.std(vals, ddof=1)) / np.sqrt(len(vals)))
             phases[phase][0].append(zv)
             phases[phase][1].append(m)
             publish()
@@ -1707,15 +2122,11 @@ class Camera:
                 # So the last two levels and the calibrated in-focus size tell
                 # how far focus still is.
                 r_ref = self._ref_size_root()
-                if (r_ref is not None and np.isfinite(m_prev)
-                        and m_prev > 0 and m_best > 0):
-                    r_prev, r_now = np.sqrt(m_prev), np.sqrt(m_best)
-                    k = (r_prev - r_now) / max(abs(z_best - z_prev), 1e-9)  # radius per unit Z
-                    if k > 0:
-                        remaining = max(0.0, r_now - r_ref) / k
-                        step = float(np.clip(0.7 * remaining, coarse, max_step))
-                    else:
-                        step = coarse
+                aimed = (self._coarse_step(m_prev, m_best, abs(z_best - z_prev), r_ref,
+                                           coarse, max_step, rise)
+                         if r_ref is not None else None)
+                if aimed is not None:
+                    step = aimed
                 elif np.isfinite(m_prev) and score(m_best) < score(m_prev) - 2 * rise * abs(m_prev):
                     step = min(step * 1.5, max_step)   # still improving fast: far away
                 else:
@@ -1756,7 +2167,7 @@ class Camera:
         fz, fm = phases["fine"]
         best_f = None
         for attempt in range(3):
-            fz.clear(); fm.clear()
+            fz.clear(); fm.clear(); fine_sem.clear()
             if (start - pos["z"]) * d < 0:             # a reverse move: overshoot it
                 go(clampz(start - d * margin)); pos["z"] = clampz(start - d * margin)
             best_f, i_best, n_worse = None, 0, 0
@@ -1783,13 +2194,36 @@ class Camera:
         ok = np.isfinite(ms)
         best = V.best_focus_from_sweep(zs[ok], ms[ok], maximise, af.fit_curve,
                                        rel_window=self._fit_rel_window())
-        m_goal = best_f[1]
+        # What the park aims for (rig 2026-09-29). It used to be the single
+        # best fine level, best_f[1] -- the lowest of ~10 noisy numbers, biased
+        # low by construction; on the rig a 9 % dip that no later frame could
+        # match, so every park walk "failed". Now the fitted extremum of the
+        # whole fine walk with an outlying level dropped (vision docstring).
+        tgt = V.robust_focus_target(zs[ok], ms[ok], maximise,
+                                    rel_window=self._fit_rel_window(),
+                                    repeat_noise=float(np.median(fine_sem)) if fine_sem else 0.0)
+        m_goal = tgt.value if np.isfinite(tgt.value) else best_f[1]
+        if af.fit_curve and tgt.method == "parabola":
+            best = tgt.z                     # the same fit, without the outlier
+        tol, tol_why = self.effective_park_tolerance(m_goal, tgt.noise)
+        park_info.update(park_target=float(m_goal), park_tolerance=float(tol),
+                         park_target_method=tgt.method)
         publish(best)
+        # Centring (park_centre, sigma^2 only): the band "within tol of the
+        # minimum" is |dz| <= w = sqrt(tol x min / a) wide on either side of
+        # focus, and the walk enters it at its APPROACH-SIDE EDGE -- for a 4 %
+        # band on the sim's spot that is ~0.8 units (a quarter of a Rayleigh
+        # range) before focus. The fitted curvature a (per counter unit^2 of a
+        # walk in the same direction as the park walk) turns the metric of the
+        # entry level into the distance still to go: dz = sqrt((m - min) / a).
+        centre = (bool(af.park_centre) and tgt.method == "parabola"
+                  and af.mechanism in V.PARABOLIC_FOCUS and tgt.curvature > 0)
+        w_band = (float(np.sqrt(tol * abs(m_goal) / tgt.curvature)) if centre else 0.0)
 
         # ---- 3. PARK: by the image ------------------------------------------
         note = ""
         parked = None
-        tol = self.park_tolerance()          # per mechanism (see config)
+        centred = 0.0
         closest = None                       # the best park level seen, for the report
         for attempt in range(1, 4):
             back = clampz(best - d * margin * attempt)
@@ -1802,7 +2236,23 @@ class Camera:
                 if np.isfinite(mp) and (closest is None or score(mp) < score(closest)):
                     closest = mp
                 if np.isfinite(mp) and not worse(mp, m_goal, tol):
-                    parked = z
+                    step_on = 0.0
+                    if centre:
+                        excess = max(0.0, score(mp) - score(m_goal))
+                        step_on = min(float(np.sqrt(excess / tgt.curvature)), w_band)
+                    if step_on < fine / 4:
+                        parked = z
+                        break
+                    # on towards the centre -- the same direction, so no
+                    # reversal -- and CONFIRM there on the image
+                    zc = clampz(z + d * step_on)
+                    mc = measure(zc, "park")
+                    if np.isfinite(mc) and not worse(mc, m_goal, tol):
+                        parked, centred = zc, zc - z
+                        break
+                    # passed the band (or a noisy read): the next walk parks
+                    # at the first level inside it, uncentred
+                    centre = False
                     break
                 if np.isfinite(mp) and (best_p is None or score(mp) < score(best_p)):
                     best_p, n_worse = mp, 0
@@ -1816,9 +2266,14 @@ class Camera:
                 z = zn
             if parked is not None:
                 note = (f"parked by the image (attempt {attempt}, tolerance "
-                        f"{100 * tol:.0f} %), {parked - best:+.3f} from the fine walk's best "
-                        f"by the counter")
+                        f"{100 * tol:.0f} %: {tol_why}), {parked - best:+.3f} from the fine "
+                        f"walk's best by the counter"
+                        + (f" (centred {centred:+.3f} by the fit)" if centred else ""))
                 break
+        target_txt = (f"target {m_goal:.4g} ({tgt.method} over {tgt.n} levels"
+                      + (f", {tgt.n_dropped} outlying dropped" if tgt.n_dropped else "")
+                      + f"; single best level {best_f[1]:.4g})")
+        note = f"{note}; {target_txt}" if note else target_txt
         if parked is None:
             # A FAILED run (rig test 2026-09-28, Lukas). Until then this parked
             # by the step counter at the fine walk's best and reported "OK",
@@ -1832,8 +2287,9 @@ class Camera:
                    f"closest {100 * (score(closest) - score(m_goal)) / max(abs(m_goal), 1e-12):+.0f} %")
             raise AutofocusFailed(
                 "park failed: never within park_tolerance",
-                f"after 3 park walks the image never got back within {100 * tol:.0f} % of the "
-                f"fine walk's best ({got}); not parked by the step counter")
+                f"after 3 park walks the image never got back within {100 * tol:.0f} % "
+                f"({tol_why}) of the fine walk's {target_txt} ({got}); not parked by the "
+                f"step counter")
         pos["z"] = parked
         # a requested offset from focus is a deliberate move away: by the counter
         if af.offset_from_found_v:
@@ -1844,6 +2300,35 @@ class Camera:
             parked = target
         publish(best)
         return float(best), float(parked), note
+
+    @staticmethod
+    def _coarse_step(m_prev: float, m_now: float, dz: float, r_ref: float | None,
+                     coarse: float, max_step: float, rise: float) -> float | None:
+        """one_way's AIMED coarse step for a size metric, or None (not aimable).
+
+        The square root of every size metric is ~linear in the defocus far
+        from focus (a radius; sigma = sqrt(sigma^2) is the hyperbola
+        sqrt(sigma0^2 + c dz^2)), so the last two levels and the calibrated
+        in-focus root r_ref tell how far focus still is. Aim at 0.7 of it.
+
+        ONLY while the last step improved the metric by more than
+        ``rise`` (rise_fraction): near the bottom the two levels read nearly
+        the same, the slope is ~0 and "distance / slope" explodes -- the
+        benchmark of 2026-09-29 caught it jumping the maximum AWAY from focus
+        and ending 8.6 units off. There the walk takes plain coarse steps.
+        """
+        if r_ref is None:
+            return None
+        if not (np.isfinite(m_prev) and np.isfinite(m_now) and m_prev > 0 and m_now > 0):
+            return None                        # nothing to aim with: the caller decides
+        if m_now >= m_prev * (1.0 - max(0.0, rise)):
+            return coarse                      # flat bottom (or noise): no aiming
+        r_prev, r_now = np.sqrt(m_prev), np.sqrt(m_now)
+        k = (r_prev - r_now) / max(abs(dz), 1e-9)      # radius per unit Z
+        if k <= 0:
+            return coarse
+        remaining = max(0.0, r_now - r_ref) / k
+        return float(np.clip(0.7 * remaining, coarse, max_step))
 
     # ------------------------------------------------------------------ #
     # Z STEP CALIBRATION by the camera (2026-09-28)
@@ -1915,7 +2400,8 @@ class Camera:
         """Run one Z step calibration with the image loops PAUSED (as for AF)."""
         self._pause_image_loops()
         try:
-            self._run_zcal(req)
+            with self._exposure_for("Z step calibration"):
+                self._run_zcal(req)
         finally:
             if self._zcal_state == "running":     # left early (shutdown)
                 self._zcal_finish("stopped")
@@ -1939,11 +2425,15 @@ class Camera:
         return g
 
     def _zcal_metric(self, gray) -> float:
-        """sigma^2 (px^2) of the spot at its calibrated position, measured on
-        the full-depth frame when the camera delivers one; NaN = not measurable."""
+        """sigma^2 (px^2) of the spot around the same centre as the live sizes
+        (Spot.locate), measured on the full-depth frame when the camera
+        delivers one; NaN = not measurable."""
         sp = self.cfg.spot
         src, top, _bits = self._spot_source(gray)
-        m = V.spot_second_moment(src, (sp.ref_x, sp.ref_y), sp, max_value=top)
+        centre, _loc = self._size_centre(src, top, (sp.ref_x, sp.ref_y))
+        if centre is None:
+            return float("nan")
+        m = V.spot_second_moment(src, centre, sp, max_value=top)
         return float(m.sigma2) if m.ok else float("nan")
 
     def _run_zcal(self, req) -> None:
@@ -2185,9 +2675,42 @@ class Camera:
         one of them = use the generic autofocus.park_tolerance.
         """
         af = self.cfg.autofocus
+        # the squared sizes (encircled r86^2, the Gaussian's sigma^2) are flat
+        # at the bottom like sigma^2: they share its tolerance (2026-09-29)
         own = {"spot_d4sigma": af.park_tolerance_d4sigma,
+               "spot_encircled": af.park_tolerance_d4sigma,
+               "spot_gauss": af.park_tolerance_d4sigma,
                "spot_relative": af.park_tolerance_relative}.get(af.mechanism, 0.0)
         return float(own) if own and own > 0 else float(af.park_tolerance)
+
+    def effective_park_tolerance(self, target: float, noise: float) -> tuple[float, str]:
+        """(tolerance as a fraction, why) for a park aiming at ``target``.
+
+        The configured tolerance (park_tolerance()), but never tighter than
+        ``park_noise_k`` x the fine walk's measured noise per level (rig
+        2026-09-29: 4 % against ~1-2 % frame noise AND a biased-low target was
+        unreachable). Capped at rise_fraction: the fine walk itself calls a
+        level "worse" only beyond that, so a noise estimate bigger than it
+        means the walk could not tell up from down either -- parking anywhere
+        in a band that wide would hide that, not fix it.
+        """
+        af = self.cfg.autofocus
+        base = self.park_tolerance()
+        k = max(0.0, float(af.park_noise_k))
+        frac = (abs(float(noise)) / abs(float(target))
+                if np.isfinite(noise) and np.isfinite(target) and target else 0.0)
+        tol, why = base, f"{100 * base:.0f} % configured"
+        if k > 0 and frac > 0:
+            why += f", noise {100 * frac:.1f} %/level"
+            if k * frac > base:
+                tol = k * frac
+                why = (f"{k:g} x noise {100 * frac:.1f} %/level "
+                       f"(configured {100 * base:.0f} %)")
+        cap = max(base, float(af.rise_fraction))
+        if tol > cap:
+            tol = cap
+            why += f", capped at rise_fraction {100 * cap:.0f} %"
+        return float(tol), why
 
     # spot_area needs a SATURATED spot. The routine MINIMISES the fixed-threshold
     # area, which is right only while the spot is clipped at the camera's
@@ -2237,6 +2760,10 @@ class Camera:
             return float(sp.ref_d4sigma_px) / 4.0 if sp.ref_d4sigma_px > 0 else 0.0
         if mech == "spot_relative":
             return float(np.sqrt(sp.ref_rel_area)) if sp.ref_rel_area > 0 else 0.0
+        if mech == "spot_encircled":        # metric = r86^2, D86 = 2 r86
+            return float(sp.ref_d86_px) / 2.0 if sp.ref_d86_px > 0 else 0.0
+        if mech == "spot_gauss":            # metric = the fitted sigma^2
+            return float(np.sqrt(sp.ref_gauss_sigma2)) if sp.ref_gauss_sigma2 > 0 else 0.0
         return None
 
     def _focus_metric(self, gray) -> float:
@@ -2250,24 +2777,38 @@ class Camera:
         885 px spot, so the sweep focused on the background (Lukáš noticed).
         """
         af, sp = self.cfg.autofocus, self.cfg.spot
-        if af.mechanism in ("spot_d4sigma", "spot_relative"):
-            # No threshold (2026-09-28): the second moment sigma^2 (px^2; for a
-            # coherent beam EXACTLY a parabola in Z, so the sweep's parabola
-            # fit is the right model) or the area above a fraction of the
-            # spot's own peak. Around the calibrated position, like spot_area.
+        if af.mechanism in SIZE_FOCUS:
+            # No threshold (2026-09-28/29): the second moment sigma^2 (px^2; for
+            # a coherent beam EXACTLY a parabola in Z, so the sweep's parabola
+            # fit is the right model), the area above a fraction of the spot's
+            # own peak, the encircled-energy radius^2, a Gaussian fit's sigma^2,
+            # or the spot's peak (maximised). Around the same centre as the
+            # live sizes (Spot.locate: calibrated, or located in the region).
             if not sp.ref_set:
                 raise RuntimeError(f"the {af.mechanism} focus metric needs a calibrated spot "
                                    f"(Spot tab -> Calibrate spot)")
             src, top, _bits = self._spot_source(gray)      # 12 bit when there is one
+            centre, _loc = self._size_centre(src, top, (sp.ref_x, sp.ref_y))
+            if centre is None:
+                return float("nan")
+            nan = float("nan")
+            if af.mechanism == "spot_relative":
+                r = V.spot_relative_area(src, centre, sp, max_value=top)
+                self._note_saturation(r.saturated)
+                return float(r.area) if r.ok else nan
+            if af.mechanism == "spot_peak":
+                r = V.spot_relative_area(src, centre, sp, max_value=top)
+                self._note_saturation(r.saturated)
+                return float(r.peak) if r.ok else nan
+            m = V.spot_second_moment(src, centre, sp, max_value=top)
+            self._note_saturation(m.saturated)
             if af.mechanism == "spot_d4sigma":
-                m = V.spot_second_moment(src, (sp.ref_x, sp.ref_y), sp, max_value=top)
-                if m.ok and m.saturated:
-                    self._warn_limited("af_saturated", "autofocus: the spot is saturated at "
-                                                       "this Z -- sigma^2 is too big there",
-                                       30.0)
-                return float(m.sigma2) if m.ok else float("nan")
-            r = V.spot_relative_area(src, (sp.ref_x, sp.ref_y), sp, max_value=top)
-            return float(r.area) if r.ok else float("nan")
+                return float(m.sigma2) if m.ok else nan
+            if af.mechanism == "spot_encircled":
+                e = V.spot_encircled(src, centre, sp, max_value=top, moments=m)
+                return float(e.r_px) ** 2 if e.ok else nan     # r86^2: a size, like sigma^2
+            g = V.spot_gauss_fit(src, centre, sp, max_value=top, moments=m)
+            return float(g.sigma2) if g.ok else nan
         if af.mechanism == "spot_area":
             if not sp.ref_set:
                 raise RuntimeError("the spot_area focus metric needs a calibrated spot "
@@ -2987,27 +3528,45 @@ class Camera:
         return (float(sp.ref_x), float(sp.ref_y)) if sp.ref_set else None
 
     def calibrate_spot(self, frames: int = 20, timeout_s: float = 2.5) -> dict:
-        """Find the spot with the current threshold, averaged over ``frames`` new
+        """Find the spot ANYWHERE in the frame, averaged over ``frames`` new
         frames, and store it as THE spot position used from now on.
 
+        Spot.calib_mode (2026-09-29, Lukas): "saturated" = the fixed
+        threshold's largest blob (a flat top -- the old method, now refused
+        when a second blob is nearly as large); "unsaturated" = the brightest
+        smoothed blob, refined to its intensity centroid (a peaked spot the
+        threshold cannot select). Searched in the whole frame, not near the old
+        calibration: that one may be stale (the rig: 100 px off). With
+        Spot.calib_at_af_exposure and autofocus.exposure_us set, the frames are
+        taken at the autofocus exposure (switched and restored like an
+        autofocus run) -- for a spot that saturates at the working exposure.
+
         The spread of the centroid (``jitter``) is stored with it: the noise
-        floor of this calibration. Blocks for about frames / fps (capped by
-        ``timeout_s``, which must stay below the client's REQ timeout).
+        floor of this calibration. The result says where the spot was found and
+        how far that is from the previous calibration. Blocks for about
+        frames / fps (capped by ``timeout_s``, which must stay below the
+        client's REQ timeout). Refuses with the reason (RuntimeError) when no
+        frame gave a clean single candidate.
         """
         frames = max(2, int(frames))
         # Not during an autofocus: it owns the engine, so no frame is ANALYSED
         # while it runs -- but its live view still advances frame_number on the
         # last analysed snapshot. The loop below then took that one stale
-        # centroid N times and stored it as a perfect calibration (jitter 0),
-        # with the whole-frame search never done (deep cleaning 2026-09-28).
+        # frame N times and stored it as a perfect calibration (jitter 0)
+        # (deep cleaning 2026-09-28).
         if self._af_busy or self._zcal_busy:
             raise RuntimeError("autofocus / Z calibration is running: calibrate the spot "
                                "once it has finished")
-        self._measuring_spot = True     # whole-frame search: the beam may have moved
-        xs, ys, areas, d4s, rels, sats = [], [], [], [], [], []
-        try:
-            # the frame in flight when the flag went up still used the old
-            # search box, so only frames numbered start+2 onwards count
+        sp = self.cfg.spot
+        mode = sp.calib_mode if sp.calib_mode in CALIB_MODES else "saturated"
+        at_af = bool(sp.calib_at_af_exposure) and float(self.cfg.autofocus.exposure_us or 0) > 0
+        before = (float(sp.ref_x), float(sp.ref_y)) if sp.ref_set else None
+        xs, ys, areas, whys, sizes, sats = [], [], [], [], [], []
+        skip = 2 + (max(0, int(self.cfg.autofocus.exposure_discard_frames)) if at_af else 0)
+        with self._exposure_for("spot calibration", engine=False) if at_af \
+                else _nothing():
+            # the frame in flight when the request came (and, at the AF
+            # exposure, the frames still exposed with the old value) do not count
             start = last = self._status.frame_number
             t_end = time.monotonic() + timeout_s
             while len(xs) < frames and time.monotonic() < t_end:
@@ -3017,38 +3576,79 @@ class Camera:
                     if self._af_busy:       # an autofocus started meanwhile: stale frames
                         raise RuntimeError("autofocus started during the spot calibration; "
                                            "calibrate again once it has finished")
-                    if s.frame_number >= start + 2 and s.spot_found:
-                        xs.append(s.spot_live_x); ys.append(s.spot_live_y)
-                        areas.append(s.spot_area)
-                        d4s.append(s.spot_d4sigma_px); rels.append(s.spot_rel_area)
-                        sats.append(bool(s.spot_saturated))
+                    if s.frame_number >= start + skip:
+                        with self._lock:
+                            gray = self._last_frame
+                        if gray is not None:
+                            self._calib_frame(gray, mode, xs, ys, areas, whys, sizes, sats)
                 time.sleep(0.005)
-        finally:
-            self._measuring_spot = False
         if len(xs) < 2:
-            raise RuntimeError("no spot detected while calibrating: adjust the threshold "
-                               "(Spot tab) so exactly the laser spot is selected")
-        sp = self.cfg.spot
+            why = max(set(whys), key=whys.count) if whys else "no new frames from the camera"
+            raise RuntimeError(f"spot calibration ({mode} spot) refused: {why}")
         sp.ref_x, sp.ref_y = float(np.mean(xs)), float(np.mean(ys))
         sp.ref_area = float(np.mean(areas))
         sp.ref_jitter_px = float(np.hypot(np.std(xs), np.std(ys)))
-        # the threshold-free sizes of the same frames (0 = not measurable):
-        # the one_way autofocus aims with them, the Spot tab compares with them
-        d4s = [v for v in d4s if np.isfinite(v)]
-        rels = [v for v in rels if np.isfinite(v)]
-        sp.ref_d4sigma_px = float(np.mean(d4s)) if d4s else 0.0
-        sp.ref_rel_area = float(np.mean(rels)) if rels else 0.0
+
+        # the threshold-free sizes of the same frames, at the found position
+        # (0 = not measurable): the one_way autofocus aims with them, the Spot
+        # tab's trace draws them as the reference line
+        def mean_of(k):
+            v = [d[k] for d in sizes if np.isfinite(d[k])]
+            return float(np.mean(v)) if v else 0.0
+        sp.ref_d4sigma_px = mean_of("d4")
+        sp.ref_rel_area = mean_of("rel")
+        sp.ref_d86_px = mean_of("d86")
+        sp.ref_gauss_sigma2 = mean_of("g2")
         sp.ref_set = True
+        # Wait until a frame STARTED after this has been published (at most
+        # 0.5 s): the snapshot otherwise still shows the old position for a
+        # frame or two, and a client acting on status right after the reply
+        # (capture the pattern, read spot_x) would see the old one.
+        f_now = self._status.frame_number
+        t_pub = time.monotonic() + 0.5
+        while self._status.frame_number < f_now + 2 and time.monotonic() < t_pub:
+            time.sleep(0.005)
+        moved = (float(np.hypot(sp.ref_x - before[0], sp.ref_y - before[1]))
+                 if before is not None else float("nan"))
         # calibrated IN FOCUS: an unsaturated spot here makes spot_area the
         # wrong focus metric (see _note_area_saturation)
         self._note_area_saturation(len(sats), sum(sats), "at the spot calibration")
-        self._emit("info", f"spot calibrated: ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px "
-                           f"+/- {sp.ref_jitter_px:.2f} px, area {sp.ref_area:.0f} px2, "
-                           f"D4sigma {sp.ref_d4sigma_px:.1f} px, "
+        self._emit("info", f"spot calibrated ({mode} spot"
+                           + (", at the autofocus exposure" if at_af else "")
+                           + f"): ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px "
+                           f"+/- {sp.ref_jitter_px:.2f} px, "
+                           + (f"{moved:.1f} px from the previous calibration, "
+                              if np.isfinite(moved) else "first calibration, ")
+                           + f"area {sp.ref_area:.0f} px2, D4sigma {sp.ref_d4sigma_px:.1f} px, "
                            f"relative area {sp.ref_rel_area:.0f} px2, {len(xs)} frames")
         return {"x": sp.ref_x, "y": sp.ref_y, "area": sp.ref_area,
                 "d4sigma_px": sp.ref_d4sigma_px, "rel_area": sp.ref_rel_area,
-                "jitter_px": sp.ref_jitter_px, "frames": len(xs)}
+                "d86_px": sp.ref_d86_px, "gauss_sigma2": sp.ref_gauss_sigma2,
+                "jitter_px": sp.ref_jitter_px, "frames": len(xs), "mode": mode,
+                "moved_px": moved, "previous": list(before) if before else None,
+                "at_af_exposure": at_af}
+
+    def _calib_frame(self, gray, mode, xs, ys, areas, whys, sizes, sats) -> None:
+        """One frame of calibrate_spot: find, then measure the sizes there."""
+        sp = self.cfg.spot
+        src, top, _bits = self._spot_source(gray)
+        # the saturated method thresholds the 8-bit frame (the threshold's
+        # meaning); the unsaturated one works on the full-depth frame if any
+        r = (V.find_spot_for_calibration(gray, sp, "saturated") if mode == "saturated"
+             else V.find_spot_for_calibration(src, sp, "unsaturated", max_value=top))
+        if not r.ok:
+            whys.append(r.why)
+            return
+        xs.append(r.x); ys.append(r.y)
+        nan = float("nan")
+        mom = V.spot_second_moment(src, (r.x, r.y), sp, max_value=top)
+        rel = V.spot_relative_area(src, (r.x, r.y), sp, max_value=top)
+        enc = V.spot_encircled(src, (r.x, r.y), sp, max_value=top, moments=mom)
+        gau = V.spot_gauss_fit(src, (r.x, r.y), sp, max_value=top, moments=mom)
+        areas.append(float(r.area) if mode == "saturated" else (rel.area if rel.ok else 0.0))
+        sizes.append({"d4": mom.d4sigma if mom.ok else nan, "rel": rel.area if rel.ok else nan,
+                      "d86": enc.d_px if enc.ok else nan, "g2": gau.sigma2 if gau.ok else nan})
+        sats.append(bool(mom.saturated or rel.saturated))
 
     def set_spot_position(self, x: float, y: float) -> dict:
         """Enter THE spot position by hand (px, processed-frame coordinates).
@@ -3066,6 +3666,7 @@ class Camera:
         sp.ref_x, sp.ref_y = x, y
         sp.ref_area, sp.ref_jitter_px, sp.ref_set = 0.0, 0.0, True
         sp.ref_d4sigma_px = sp.ref_rel_area = 0.0      # nothing measured
+        sp.ref_d86_px = sp.ref_gauss_sigma2 = 0.0
         self._emit("info", f"spot position entered by hand: ({x:.2f}, {y:.2f}) px")
         return {"x": x, "y": y, "area": 0.0, "d4sigma_px": 0.0, "rel_area": 0.0,
                 "jitter_px": 0.0, "frames": 0}

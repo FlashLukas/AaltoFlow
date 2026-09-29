@@ -34,6 +34,9 @@ Protocols stay as they are and existing backends need nothing):
   * CameraBackend ``last_deep()`` -> (uint16 frame, bit depth) or None: the
     full-depth copy of the frame the last grab() returned (same buffer), for
     the spot-size metrics; grab() itself stays 8-bit (2026-09-28).
+  * CameraBackend ``deep_note()`` -> str (optional, 2026-09-29): why the last
+    grab() left NO deep frame (e.g. "the camera's PixelFormat is Mono8 ..."),
+    "" when it did. The brain logs it once per start and per change.
 See backends/remote_kim.py for the one backend that has them all.
 """
 

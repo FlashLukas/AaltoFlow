@@ -76,6 +76,9 @@ class IDSCamera:
         self._hwlock = None             # our claim on this camera's serial (hwlock)
         self._deep = None               # (uint16 frame, bits) of the last grab
         self._deep_warned = False
+        # Why there is no deep frame ("" = there is one, or nothing grabbed
+        # yet). The brain logs it ONCE per start / per change (deep_note).
+        self._deep_note = ""
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
@@ -224,6 +227,14 @@ class IDSCamera:
         """
         bits = bit_depth(self.pixel_format)
         if bits <= 8:
+            # Nothing to convert -- but SAY so (rig 2026-09-29: the metrics ran
+            # on 8 bit and nothing told why). The PixelFormat is the operator's
+            # to change: this module only reads it (adopt rule).
+            self._deep_note = (
+                f"the camera's PixelFormat is {self.pixel_format or 'unknown'}, so the "
+                f"spot size metrics run on 8-bit frames; Mono10 / Mono12 would give "
+                f"10 / 12-bit metrics (this module never changes PixelFormat -- set "
+                f"it in IDS peak Cockpit, then restart the camera service)")
             return None
         # Unpacked target of the same depth: IDS peak IPL names Mono10 /
         # Mono12 / Mono16 (2 bytes per pixel).
@@ -248,17 +259,23 @@ class IDSCamera:
                 # above the depth's maximum or with the low bits always 0 --
                 # noise makes real LSB data odd somewhere): shift down
                 deep >>= (16 - bits)
+            self._deep_note = ""
             return deep, bits
         except Exception as exc:
+            self._deep_note = (f"no {bits}-bit frame from {self.pixel_format} "
+                               f"({type(exc).__name__}: {exc}); spot sizes use 8 bit")
             if not self._deep_warned:
                 self._deep_warned = True
-                print(f"camera: no {bits}-bit frame from {self.pixel_format} "
-                      f"({type(exc).__name__}: {exc}); spot sizes use 8 bit")
+                print(f"camera: {self._deep_note}")
             return None
 
     def last_deep(self):
         """(full-depth frame, bits) of the last grab() -- the SAME buffer -- or None."""
         return self._deep
+
+    def deep_note(self) -> str:
+        """Why the last grab() left no deep frame ("" when it did). ASCII."""
+        return self._deep_note
 
     # ------------------------------------------------------------------ #
     # feature model over the GenICam node map

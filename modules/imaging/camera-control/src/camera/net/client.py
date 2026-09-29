@@ -277,6 +277,9 @@ class CameraClient:
     def calibrate_spot(self, frames: int = 20) -> dict:
         return self._rpc(cmd="calibrate_spot", frames=frames)["spot"]
 
+    def auto_exposure_once(self) -> dict:
+        return self._rpc(cmd="auto_exposure_once")["exposure"]
+
     def set_spot_position(self, x: float, y: float) -> dict:
         return self._rpc(cmd="set_spot_position", x=x, y=y)["spot"]
 

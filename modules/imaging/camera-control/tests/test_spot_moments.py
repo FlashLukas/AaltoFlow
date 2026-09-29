@@ -333,7 +333,8 @@ def test_every_frame_carries_the_three_sizes(rig):
     assert s.spot_d4sigma_px == pytest.approx(4 * math.sqrt(s.spot_sigma2_px2))
     assert (s.spot_centroid_x, s.spot_centroid_y) == pytest.approx(cam.spot_px, abs=0.3)
     assert s.spot_rel_area > 0 and not s.spot_saturated and s.spot_peak > 100
-    assert s.spot_size_method == "threshold" and s.spot_size == s.spot_area
+    # the live readout's default since 2026-09-29: the area relative to the peak
+    assert s.spot_size_method == "relative" and s.spot_size == s.spot_rel_area
     brain.cfg.spot.size_method = "d4sigma"
     f0 = brain.status().frame_number
     assert _wait(lambda: brain.status().frame_number > f0 + 1)
@@ -357,6 +358,9 @@ def test_a_saturated_spot_is_flagged_and_warned_about():
     brain, cam, z = _rig(peak=700.0)
     events = []
     brain._on_event = lambda level, msg: events.append((level, msg))
+    # (since 2026-09-29 said ONCE per saturation episode, as information; the
+    # hook above came after the first frames, so start a fresh episode)
+    brain._sat_episode = False
     try:
         brain.cfg.spot.size_method = "d4sigma"
         assert _wait(lambda: brain.status().spot_saturated)
@@ -468,12 +472,15 @@ def test_the_new_settings_survive_ini_and_wire(tmp_path):
     save_config(cfg, str(path))
     back = load_config(str(path))
     assert (back.spot.size_method, back.spot.clip_mode,
-            back.camera.sim_spot_model) == ("threshold", "local", "gaussian")
+            back.camera.sim_spot_model) == ("relative", "local", "gaussian")
 
 
 def test_defaults_change_nothing_for_existing_setups():
     cfg = Config()
-    assert cfg.spot.size_method == "threshold"
+    # 2026-09-29, Lukas: the LIVE readout shows the area relative to the peak by
+    # default (it "was working very well"); a display choice only -- the
+    # autofocus metric (below) and the fixed-threshold spot check are unchanged
+    assert cfg.spot.size_method == "relative"
     assert cfg.autofocus.mechanism == "spot_area"
     assert cfg.camera.sim_spot_model == "gaussian"
 
@@ -547,11 +554,14 @@ def test_the_gui_shows_the_method_and_the_numbers():
         brain.calibrate_spot(8)
         win = MainWindow(brain, brain.cfg, remote=False)
         tab = win.spot_tab
-        # a COMBO with exactly the three methods, never a free text box
+        # a COMBO, never a free text box: the two main live sizes, a separator,
+        # then the other sizes (2026-09-29)
         assert isinstance(tab.cmb_size, QComboBox)
-        assert [tab.cmb_size.itemData(i) for i in range(tab.cmb_size.count())] == \
-            ["threshold", "relative", "d4sigma"]
-        tab.cmb_size.setCurrentIndex(2)
+        data = [tab.cmb_size.itemData(i) for i in range(tab.cmb_size.count())]
+        assert [d for d in data if d] == ["threshold", "relative", "d4sigma", "encircled",
+                                          "gauss", "peak"]
+        assert data[:2] == ["threshold", "relative"] and data[2] is None
+        tab.cmb_size.setCurrentIndex(tab.cmb_size.findData("d4sigma"))
         tab._push_threshold()
         assert brain.cfg.spot.size_method == "d4sigma"
         win.tabs.setCurrentWidget(win.spot_page)

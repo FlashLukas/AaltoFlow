@@ -493,7 +493,17 @@ class SimCamera:
             f += self._rng.normal(0.0, self.noise, f.shape)
             if self.bit_depth > 8:
                 return self._quantise_both(f)
-            frame = np.clip(np.rint(f), 0, 255).astype(np.uint8)
+            # The exposure acts on the LIGHT, before the digitiser clips it
+            # (2026-09-29): it used to scale the already-clipped 8-bit frame,
+            # so a shorter exposure turned a saturated spot into a dimmer
+            # FLAT TOP instead of an unsaturated spot -- the autofocus
+            # exposure could not be tried in the simulator.
+            expo, gain, gamma, black = self._photometrics()
+            if expo != 1.0 or gain != 1.0 or black != 0:
+                f = f * (expo * gain) + black
+            if gamma != 1.0:
+                f = 255.0 * np.clip(f / 255.0, 0.0, 1.0) ** (1.0 / gamma)
+            return np.clip(np.rint(f), 0, 255).astype(np.uint8)
         else:
             # The laser spot: fixed position, sigma grows with defocus (area metric).
             sigma = self.base_sigma * (1.0 + self.defocus_gain * dz)

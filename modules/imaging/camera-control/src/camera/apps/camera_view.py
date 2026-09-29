@@ -484,6 +484,26 @@ class CameraView(QWidget):
                     else:
                         p.drawRect(QRectF(c.x() - hx, c.y() - hy, 2 * hx, 2 * hy))
 
+        # -- where the SIZE is measured, when it is LOCATED (2026-09-29) ------ #
+        # Spot.locate = peak / blob: the found centre as a small amber SQUARE
+        # (not the calibrated green "+", the stabiliser's "x" or the laser
+        # target's diamond) and, dotted, the box the size was integrated over.
+        # Information only -- motion uses the "+".
+        fx, fy = getattr(s, "spot_found_x", float("nan")), getattr(s, "spot_found_y", float("nan"))
+        if (getattr(cfg.spot, "locate", "calibrated") != "calibrated"
+                and math.isfinite(fx) and math.isfinite(fy)):
+            c = self._img_to_widget(fx, fy)
+            d = 7.0
+            p.setBrush(Qt.NoBrush)
+            for _ in outlined_pen(p, T.COLORS["accent"], 2.0):
+                p.drawRect(QRectF(c.x() - d, c.y() - d, 2 * d, 2 * d))
+            box = tuple(getattr(s, "spot_size_box", (0, 0, 0, 0)) or (0, 0, 0, 0))
+            if len(box) == 4 and box[2] > box[0] and box[3] > box[1]:
+                a = self._img_to_widget(box[0] - 0.5, box[1] - 0.5)
+                b = self._img_to_widget(box[2] - 0.5, box[3] - 0.5)
+                for _ in outlined_pen(p, T.COLORS["accent"], 1.0, Qt.DotLine):
+                    p.drawRect(QRectF(a, b))
+
         # -- laser spot crosshair at the CALIBRATED position (drawn last) ------ #
         # The dotted box above is this frame's detection (size); the crosshair
         # is the calibrated position that click-to-go and the stabiliser use.

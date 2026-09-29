@@ -188,6 +188,7 @@ def test_spot_area_trace():
     app = QApplication.instance() or QApplication([])
     cfg = Config()
     cfg.spot.ref_set, cfg.spot.ref_area = True, 20.0
+    cfg.spot.size_method = "threshold"      # the fixed threshold's area (a live option)
     tab = SpotTab(ctrl=None, cfg=cfg, log=lambda *a: None, frame_source=lambda: None)
 
     def st(fn, found, area):

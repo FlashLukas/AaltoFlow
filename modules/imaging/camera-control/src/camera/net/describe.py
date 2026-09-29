@@ -386,8 +386,44 @@ def build_manifest(brain) -> dict:
            order=68, read_path=["spot_bit_depth"],
            help="8, or the camera's full depth (e.g. 12) when it delivers one: the "
                 "spot sizes are then measured on that frame (far wings not rounded away)."),
+        _p("spot_bit_note", "Why 8-bit spot sizes", "indicator", "string", group="Spot",
+           order=69, read_path=["spot_bit_note"],
+           help="Empty when fine. Otherwise why the spot sizes run on 8-bit frames, e.g. "
+                "the camera's PixelFormat is Mono8 (set Mono10/12 in IDS peak Cockpit; "
+                "this module never changes it)."),
         _p("kill_af", "Kill autofocus", "action", "action", group="Focus",
            order=101, danger=True),
+        # 2026-09-29: where the size was measured, the new sizes, saturation as
+        # information, and the autofocus exposure
+        _p("spot_offset_px", "Spot offset from calibration", "indicator", "float",
+           group="Spot", order=70, unit="px", decimals=1, read_path=["spot_offset_px"],
+           help="How far the located spot (Spot.locate = peak / blob) is from the "
+                "calibrated position. Large = the laser moved or the calibration is stale."),
+        _p("spot_size_why", "Why no spot size", "indicator", "string", group="Spot",
+           order=71, read_path=["spot_size_why"],
+           help="Empty when measured; otherwise why, and where the brightest light is."),
+        _p("spot_d86", "Spot D86 (encircled)", "indicator", "float", group="Spot",
+           order=72, unit="px", decimals=2, read_path=["spot_d86_px"],
+           help="Diameter holding encircled_fraction (0.86) of the spot's energy; no "
+                "threshold, rings and a hole counted where they are."),
+        _p("spot_gauss_sigma2", "Spot sigma^2 (Gaussian fit)", "indicator", "float",
+           group="Spot", order=73, unit="px^2", decimals=2,
+           read_path=["spot_gauss_sigma2_px2"],
+           help="A 2-D Gaussian fit's sigma^2. Not usable while saturated (flat top)."),
+        _p("spot_peak_avg", "Spot peak", "indicator", "float", group="Spot", order=74,
+           unit="counts", decimals=1, read_path=["spot_peak_avg"],
+           help="3x3-averaged peak above background. Not usable while saturated."),
+        _p("spot_sat_fraction", "Spot saturated fraction", "indicator", "float",
+           group="Spot", order=75, decimals=3, read_path=["spot_sat_fraction"]),
+        _p("af_exposure_active", "Autofocus exposure on", "indicator", "bool",
+           group="Focus", order=27, read_path=["af_exposure_active"],
+           help="autofocus.exposure_us is on the camera now (an autofocus / Z "
+                "calibration / spot calibration runs at it; restored after)."),
+        _p("auto_exposure_once", "Auto exposure (once)", "action", "action",
+           group="Camera", order=110,
+           help="Sets ExposureTime once so the image (the spot's region left out) is "
+                "well exposed: the camera's ExposureAuto=Once if it has it, else a few "
+                "software steps. Changes only ExposureTime."),
         # Saved NEXT TO the measurement when run as a scan routine: scan-core
         # fills {data_dir} / {data_stem} / {moment}. The save is done when the
         # command replies, so the wait is `immediate` -- the scan does not

@@ -263,3 +263,87 @@ def test_genicam_scales_a_sixteen_bit_buffer_instead_of_stretching_it():
     assert g8[0, 0] == 800 >> 4 and g8[10, 10] == 255      # scaled by the bit depth, not min-max
     deep, bits = cam.last_deep()
     assert bits == 12 and deep[10, 10] == 4095
+
+
+# --------------------------------------------------------------------------- #
+# 2026-09-29: SAY when the camera gives no deep frame (it used to be silent)
+# --------------------------------------------------------------------------- #
+# The notes promised a "no 12-bit frame from ..." line, but a Mono8 camera went
+# through _convert_deep's early "return None" without a word: on the rig the
+# spot metrics ran on 8 bit and nothing said why. Now the backend explains
+# (deep_note) and the brain says it ONCE per service start and per change.
+def test_ids_explains_why_there_is_no_deep_frame():
+    arr = np.full((48, 64), 1000, np.uint16)
+    cam, _q = _ids("Mono8", arr, [])
+    cam.grab()
+    note = cam.deep_note()
+    assert "Mono8" in note and "8-bit" in note
+    assert "Mono12" in note and "Cockpit" in note and "never changes" in note
+    note.encode("ascii")                                     # printed / logged text: ASCII
+    cam, _q = _ids("Mono12g24IDS", (np.arange(64 * 48, dtype=np.uint16)
+                                    .reshape(48, 64) % 4096), [])
+    cam.grab()
+    assert cam.deep_note() == ""                             # a deep frame came: nothing to say
+    cam, _q = _ids("Mono10", arr, [])                        # conversion fails in the fake
+    cam.grab()
+    assert "no 10-bit frame from Mono10" in cam.deep_note()
+
+
+class _NoteCam(SimCamera):
+    """The simulator with an IDS-like deep_note()."""
+    note = "the camera's PixelFormat is Mono8: spot metrics on 8-bit frames"
+
+    def deep_note(self):
+        return self.note
+
+
+def test_the_brain_says_it_once_and_again_on_a_change():
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    xy = SimXYStage()
+    z = SimZFocus(z0=ZF, z_focus=ZF, vmin=0.0, vmax=75.0)
+    cam = _NoteCam(xy, z, spot_model="coherent", noise=0.3)
+    brain = Camera(cam, xy, z, cfg)
+    events = []
+    brain._on_event = lambda level, msg: events.append((level, msg))
+    brain.start()
+    try:
+        assert _wait(lambda: brain.status().frame_number > 10)
+        said = [m for lvl, m in events if lvl == "info" and "PixelFormat" in m]
+        assert len(said) == 1, said                          # once, not per frame
+        assert brain.status().spot_bit_note == cam.note
+        cam.note = "the camera's PixelFormat is RGB8: spot metrics on 8-bit frames"
+        f0 = brain.status().frame_number
+        assert _wait(lambda: brain.status().frame_number > f0 + 10)
+        said = [m for lvl, m in events if lvl == "info" and "PixelFormat" in m]
+        assert len(said) == 2 and "RGB8" in said[-1]
+        cam.note = ""                                        # deep frames now: quiet
+        assert _wait(lambda: brain.status().spot_bit_note == "")
+    finally:
+        brain.shutdown()
+
+
+def test_the_autofocus_tab_shows_why_the_frame_is_eight_bit():
+    pytest.importorskip("PySide6")
+    import types as _t
+    from PySide6.QtWidgets import QApplication
+    from camera.apps.gui import MainWindow
+    from camera.sim_system import build_sim_system
+
+    app = QApplication.instance() or QApplication([])
+    brain, *_ = build_sim_system(Config())
+    win = MainWindow(brain, brain.cfg, remote=False)
+    try:
+        s = _t.SimpleNamespace(spot_area=100.0, spot_found=True, spot_rel_area=90.0,
+                               spot_d4sigma_px=30.0, spot_sigma2_px2=56.0,
+                               spot_bit_depth=8, spot_saturated=False, af_hint="",
+                               spot_bit_note="the camera's PixelFormat is Mono8 ...")
+        win._refresh_af_sizes(s)
+        assert "PixelFormat is Mono8" in win.lab_af_sizes.text()
+        s.spot_bit_depth, s.spot_bit_note = 12, ""
+        win._refresh_af_sizes(s)
+        assert "PixelFormat" not in win.lab_af_sizes.text()
+        assert "12-bit frame" in win.lab_af_sizes.text()
+    finally:
+        win.close()
+        app.processEvents()

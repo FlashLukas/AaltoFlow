@@ -21,6 +21,8 @@ through a Qt signal (they cross a thread boundary, so they MUST go via a signal)
 
 from __future__ import annotations
 
+import html
+
 import math
 from dataclasses import fields
 
@@ -36,9 +38,10 @@ from PySide6.QtWidgets import (
 from . import theme as T
 from .camera_view import CameraView
 from .plots import MiniPlot
-from .spot_tab import SpotTab
-from ..config import (AF_ROUTINES, AF_SIDES, CLIP_MODES, FOCUS_MECHANISMS, SIM_SPOTS,
-                      SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
+from .spot_tab import SpotTab, sizes_summary
+from ..config import (AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
+                      FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, SIM_SPOTS, SIZE_METHODS,
+                      SYMMETRIES, THEMES, XY_UNITS)
 
 # What a QSpinBox (a C++ int) can hold.
 _INT32_MIN, _INT32_MAX = -2**31, 2**31 - 1
@@ -54,13 +57,130 @@ _ENUMS = {
     "size_method": SIZE_METHODS,
     "clip_mode": CLIP_MODES,
     "sim_spot_model": SIM_SPOTS,
+    # 2026-09-29: never free text where the choices are fixed
+    "driver": DRIVERS,
+    "locate": LOCATE_MODES,
+    "calib_mode": CALIB_MODES,
+    "motion": MOTIONS,
 }
 
 # What the focus plot's y axis shows, per autofocus mechanism.
 AF_METRIC_LABELS = {"spot_area": "spot area (px²)",
                     "spot_d4sigma": "spot σ² (px²)",
                     "spot_relative": "relative area (px²)",
+                    "spot_encircled": "encircled r86² (px²)",
+                    "spot_gauss": "Gaussian fit σ² (px²)",
+                    "spot_peak": "spot peak (counts)",
                     "edges": "edge sharpness", "fft": "high-frequency share"}
+
+# --------------------------------------------------------------------------- #
+# THREE-COLUMN settings layouts (2026-09-29, Lukas's screenshots: one long
+# single-column form with full-width fields). Each tab = columns of compact
+# group boxes; each box = (title, [(config group, field), ...]). A field of the
+# tab's groups that no box names still appears, in a "More" box at the end --
+# a new config field is never silently hidden.
+# --------------------------------------------------------------------------- #
+# The spot knobs that belong to each autofocus METRIC: shown in the AutoFocus
+# tab only for the metric chosen there (one config source of truth: they are
+# the Spot group's fields, so the live sizes use the same values).
+_MOMENT_KNOBS = ["clip_mode", "clip_sigma", "detect_px", "min_blob_px", "mask_grow_px",
+                 "box_factor", "max_iter", "smooth_px", "reject_asymmetric"]
+MECH_KNOBS = {
+    "spot_area": ["thr_lower", "thr_upper", "min_area_px", "max_area_px", "symmetric"],
+    "spot_relative": ["rel_level", "clip_sigma", "smooth_px", "reject_asymmetric"],
+    "spot_d4sigma": _MOMENT_KNOBS,
+    "spot_encircled": ["encircled_fraction"] + _MOMENT_KNOBS,
+    "spot_gauss": _MOMENT_KNOBS,                 # the fit starts from the moments
+    "spot_peak": ["clip_sigma", "reject_asymmetric"],
+    "edges": [], "fft": [],
+}
+_SPOT_KNOBS = []
+for _v in MECH_KNOBS.values():
+    for _k in _v:
+        if _k not in _SPOT_KNOBS:
+            _SPOT_KNOBS.append(_k)
+
+_A = "autofocus"
+AF_LAYOUT = [
+    [("Metric", [(_A, "mechanism")] + [("spot", k) for k in _SPOT_KNOBS]
+      + [(_A, "focus_from_safety_area"), (_A, "averages_per_level")]),
+     ("Autofocus exposure", [(_A, "exposure_us"), (_A, "exposure_discard_frames")])],
+    [("Routine", [(_A, "routine"), (_A, "approach_from"), (_A, "approach_margin"),
+                  (_A, "fit_curve")]),
+     ("Sweep", [(_A, "drive_amplitude_v"), (_A, "steps")]),
+     ("One way", [(_A, "coarse_step_v"), (_A, "fine_step_v"), (_A, "max_travel_v"),
+                  (_A, "rise_fraction"), (_A, "rise_levels")])],
+    [("Park", [(_A, "park_tolerance"), (_A, "park_tolerance_d4sigma"),
+               (_A, "park_tolerance_relative"), (_A, "park_noise_k"), (_A, "park_centre"),
+               (_A, "offset_from_found_v")]),
+     ("Scan & continuous", [(_A, "scan_timeout_s"), (_A, "continuous_enabled"),
+                            (_A, "continuous_gain"), (_A, "continuous_target")]),
+     ("Z step calibration", [(_A, "zcal_step_v"), (_A, "zcal_start_offset_v"),
+                             (_A, "zcal_max_travel_v"), (_A, "zcal_averages"),
+                             (_A, "zcal_fit_window"), (_A, "zcal_min_r2"),
+                             (_A, "zcal_min_side_levels"), (_A, "zcal_step_um")])],
+]
+# which routine (or switch) uses which autofocus field; the rest of the tab is
+# used by both. Unused fields are GREYED (values kept), with a tooltip.
+SWEEP_ONLY = {"drive_amplitude_v", "steps"}
+ONE_WAY_ONLY = {"approach_from", "coarse_step_v", "fine_step_v", "max_travel_v",
+                "rise_fraction", "rise_levels", "park_tolerance", "park_tolerance_d4sigma",
+                "park_tolerance_relative", "park_noise_k", "park_centre"}
+CAMERA_LAYOUT = [
+    [("Objective & pixels", [("image", "objective_name"), ("image", "pixel_size_x_um"),
+                             ("image", "pixel_size_y_um"), ("image", "objectives_file")])],
+    [("Image geometry", [("image", "rotation_deg"), ("image", "symmetry"),
+                         ("image", "clip_enabled"), ("image", "clip_left"),
+                         ("image", "clip_top"), ("image", "clip_right"),
+                         ("image", "clip_bottom")])],
+    [("Camera", [("camera", "driver"), ("camera", "exposure_us"),
+                 ("camera", "frame_rate"), ("camera", "running_avg_frames"),
+                 ("camera", "extra_delay_ms"), ("camera", "video_mode"),
+                 ("camera", "camera_name"), ("image", "save_path")]),
+     ("Auto exposure (once)", [("camera", "auto_exposure_target"),
+                               ("camera", "auto_exposure_percentile"),
+                               ("camera", "auto_exposure_iterations")]),
+     ("Simulator", [("camera", "sim_spot_model"), ("camera", "sim_bit_depth")])],
+]
+_P = "pattern"
+PATTERN_LAYOUT = [
+    [("Matching", [(_P, "n_matches"), (_P, "min_match_score"), (_P, "angle_start"),
+                   (_P, "angle_end"), (_P, "angle_step"), (_P, "safety_area_px"),
+                   (_P, "full_image")])],
+    [("Backup patterns", [(_P, "edge_margin_px"), (_P, "offset_learn_rate"),
+                          (_P, "offset_warn_px")])],
+    [("Losing the pattern", [(_P, "lost_frames"), (_P, "loss_edge_margin_px"),
+                             (_P, "loss_spot_margin_px"), (_P, "autofocus_on_loss"),
+                             (_P, "recovery_min_interval_s")])],
+]
+_H = "hardware"
+POSITIONER_LAYOUT = [
+    [("Limits", [("limits", k) for k in ("motor_x_min", "motor_x_max", "motor_y_min",
+                                        "motor_y_max", "z_min_v", "z_max_v", "enforce")])],
+    [("Rig", [(_H, "motion"), (_H, "xy_unit"), (_H, "kim_host"), (_H, "kim_cmd_port"),
+              (_H, "kim_pub_port"), (_H, "use_z"), (_H, "z_step_v"), (_H, "z_step_time_ms"),
+              (_H, "cam_device")])],
+    [("Piezo / Z services", [(_H, "use_remote_xy"), (_H, "piezo_host"),
+                             (_H, "piezo_cmd_port"), (_H, "piezo_pub_port"),
+                             (_H, "use_remote_z"), (_H, "z_host"), (_H, "z_cmd_port"),
+                             (_H, "z_pub_port"), (_H, "kcube_serial")])],
+]
+# field widths: numbers are short, paths and hosts are not (no 1900-px boxes)
+_NUM_W = 110
+_TEXT_W = 170
+_PATH_W = 260
+
+
+def _size_widget(name: str, w) -> None:
+    """Size an editing widget to its content, not to the window."""
+    if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+        w.setMaximumWidth(_NUM_W)
+    elif isinstance(w, QLineEdit):
+        wide = any(k in name for k in ("path", "file", "dir"))
+        w.setMinimumWidth(_PATH_W if wide else 90)
+        w.setMaximumWidth(_PATH_W + 160 if wide else _TEXT_W)
+    elif isinstance(w, QComboBox):
+        w.setSizeAdjustPolicy(QComboBox.AdjustToContents)
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +231,12 @@ def _widget_for_field(name: str, value):
     return w, (lambda: w.text())
 
 
+def _sized_widget_for_field(name: str, value):
+    w, get = _widget_for_field(name, value)
+    _size_widget(name, w)
+    return w, get
+
+
 # --------------------------------------------------------------------------- #
 # main window
 # --------------------------------------------------------------------------- #
@@ -135,6 +261,9 @@ class MainWindow(QMainWindow):
         self._getters: dict[str, dict] = {}   # group -> {field: getter}
         self._form_widgets: dict[str, dict] = {}   # group -> {field: widget}
         self._forms: dict[str, QFormLayout] = {}   # group -> its form
+        # group -> {field: its QLabel} (the three-column layouts have no
+        # QFormLayout to ask), and the Apply payload's groups per tab
+        self._form_labels: dict[str, dict] = {}
         # group -> {field: the value the form last SHOWED (built or synced)}.
         # "Apply settings" sends only fields whose widget differs from this,
         # i.e. what the user actually edited -- see _apply_settings.
@@ -182,13 +311,19 @@ class MainWindow(QMainWindow):
         self.spot_tab = SpotTab(self.ctrl, self.cfg, self._log_event, self._frame)
         self.spot_page = _scrolled(self.spot_tab)
         tabs.addTab(self.spot_page, "Spot")
-        tabs.addTab(_scrolled(self._autofocus_tab()), "AutoFocus")
-        tabs.addTab(_scrolled(self._settings_tab([("Pattern", self.cfg.pattern)])), "Pattern")
+        self.af_page = _scrolled(self._autofocus_tab())
+        tabs.addTab(self.af_page, "AutoFocus")
+        tabs.addTab(_scrolled(self._settings_tab([("Pattern", self.cfg.pattern)],
+                                                 columns=PATTERN_LAYOUT)), "Pattern")
         tabs.addTab(self._camera_settings_tab(), "Camera settings")   # scrolls already
         tabs.addTab(_scrolled(self._settings_tab([("Limits", self.cfg.limits),
-                                                  ("Hardware", self.cfg.hardware)])), "Positioner")
+                                                  ("Hardware", self.cfg.hardware)],
+                                                 columns=POSITIONER_LAYOUT)), "Positioner")
         tabs.addTab(_scrolled(self._readouts_tab()), "Readouts")
         tabs.addTab(_scrolled(self._appearance_tab()), "Appearance")
+        # a tab shown again re-reads the config into its (unedited) form: the
+        # AutoFocus tab shows Spot fields the Spot tab may have changed
+        tabs.currentChanged.connect(self._on_tab_changed)
 
         central = QWidget(); root = QVBoxLayout(central)
         root.addWidget(tabs, 1)
@@ -568,13 +703,24 @@ class MainWindow(QMainWindow):
 
     def _autofocus_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
-        note = QLabel("The spot threshold (spot_area) and the threshold-free sizes "
-                      "(spot_relative, spot_d4sigma) are tuned on the Spot tab. spot_d4sigma = "
-                      "the spot's second moment σ²: no threshold, rings and a hole counted "
-                      "where they are, and a parabola in Z, so the sweep's fit is exact.")
+        note = QLabel("The autofocus METRIC is chosen here, with the knobs that belong to "
+                      "it (shown for the chosen metric only; they are the Spot settings, so "
+                      "the live sizes use the same values). spot_d4sigma = the spot's second "
+                      "moment σ²: no threshold, rings and a hole counted where they are, a "
+                      "parabola in Z. Settings the chosen routine does not use are greyed.")
         note.setObjectName("muted"); note.setWordWrap(True)
         v.addWidget(note)
-        v.addWidget(self._settings_tab([("Autofocus", self.cfg.autofocus)]))
+        v.addWidget(self._settings_tab([("Autofocus", self.cfg.autofocus),
+                                        ("Spot", self.cfg.spot)], columns=AF_LAYOUT,
+                                       partial=("spot",)))
+        self.lab_af_expo = QLabel("")
+        self.lab_af_expo.setVisible(False)
+        v.addWidget(self.lab_af_expo)
+        afw = self._form_widgets["autofocus"]
+        afw["routine"].currentTextChanged.connect(self._af_rules)
+        afw["mechanism"].currentTextChanged.connect(self._af_rules)
+        afw["continuous_enabled"].toggled.connect(self._af_rules)
+        self._af_rules()
         # the three spot sizes of the current frame, from status (no image work):
         # watch them while focusing by hand to see which one behaves
         f, l = _card("Spot size now")
@@ -616,6 +762,39 @@ class MainWindow(QMainWindow):
         l.addWidget(self.lab_zcal)
         v.addWidget(f)
         return w
+
+    def _af_rules(self, *_):
+        """Grey what the chosen routine does not use; show only the chosen
+        metric's knobs. Follows the COMBOS (before Apply), so what you see is
+        what the next Apply will run. Values are kept, never cleared."""
+        afw = self._form_widgets.get("autofocus", {})
+        afl = self._form_labels.get("autofocus", {})
+        if "routine" not in afw:
+            return
+        routine = afw["routine"].currentText()
+        cont = afw["continuous_enabled"].isChecked()
+        for name, wdg in afw.items():
+            why = ""
+            if routine == "sweep" and name in ONE_WAY_ONLY:
+                why = "not used by routine sweep"
+            elif routine == "one_way" and name in SWEEP_ONLY:
+                why = "not used by routine one_way"
+            elif name == "continuous_gain" and not cont:
+                why = "only with continuous_enabled"
+            elif name == "continuous_target":
+                why = "not used (see the config comment)"
+            for x in (wdg, afl.get(name)):
+                if x is not None:
+                    x.setEnabled(not why)
+                    x.setToolTip(why)
+        mech = afw["mechanism"].currentText()
+        knobs = set(MECH_KNOBS.get(mech, []))
+        spw = self._form_widgets.get("spot", {})
+        spl = self._form_labels.get("spot", {})
+        for name in _SPOT_KNOBS:
+            for x in (spw.get(name), spl.get(name)):
+                if x is not None:
+                    x.setVisible(name in knobs)
 
     def _calibrate_z_steps(self):
         try:
@@ -848,13 +1027,9 @@ class MainWindow(QMainWindow):
                       "max_travel_v": "max_travel"}
 
     def _label_z_fields(self, unit: str):
-        form = self._forms.get("autofocus")
-        widgets = self._form_widgets.get("autofocus", {})
-        if form is None:
-            return
+        labels = self._form_labels.get("autofocus", {})
         for name, text in self._Z_UNIT_FIELDS.items():
-            w = widgets.get(name)
-            lab = form.labelForField(w) if w is not None else None
+            lab = labels.get(name)
             if lab is not None:
                 lab.setText(f"{text} ({unit})")
 
@@ -912,7 +1087,10 @@ class MainWindow(QMainWindow):
         # Positioner tab: on a stage that owns its limits, cfg.limits is not used
         lim_rows = getattr(self, "_limit_rows", {})
         for name, row_widget in lim_rows.items():
-            self._forms["limits"].setRowVisible(row_widget, not s.limits_from_stage)
+            row_widget.setVisible(not s.limits_from_stage)
+            lab = self._form_labels.get("limits", {}).get(name)
+            if lab is not None:
+                lab.setVisible(not s.limits_from_stage)
         note = getattr(self, "lab_limits_note", None)
         if note is not None:
             note.setVisible(s.limits_from_stage)
@@ -954,74 +1132,161 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log_event("warn", f"datum: {exc}")
 
-    def _settings_tab(self, groups, compact=False) -> QWidget:
+    def _settings_tab(self, groups, compact=False, columns=None,
+                      extras=None, partial=()) -> QWidget:
+        """A settings form for ``groups`` [(name, dataclass)] with ONE Apply.
+
+        ``compact`` (the scan form under the live view): label/field pairs,
+        COMPACT_COLS per row, one card per group -- as before. Otherwise
+        (2026-09-29, Lukas: "one long single-column form with full-width
+        fields") THREE COLUMNS of compact group boxes: ``columns`` names them
+        (see AF_LAYOUT); without it each group is split over the three columns
+        in field order. Fields are sized to their content. ``extras`` =
+        {field: widget} placed right of that field (the Auto exposure button).
+        ``partial``: groups of which the tab shows only the fields its layout
+        names (the Spot knobs in the AutoFocus tab) -- no "More" box for them.
+        Apply sends only what was EDITED (see _apply_settings).
+        """
         w = QWidget(); outer = QVBoxLayout(w)
-        for gname, obj in groups:
-            f, l = _card(gname)
-            form = QFormLayout()
-            # compact: label/field pairs in COMPACT_COLS columns instead of one
-            # long list, so a form under the live view (Define scanning) fits
-            # without scrolling. Row-major in field order, which keeps the x/y
-            # pairs (points_x|points_y, dx_um|dy_um, ...) side by side.
-            grid = QGridLayout() if compact else None
-            if grid is not None:
+        objs = {gname.lower(): obj for gname, obj in groups}
+        extras = extras or {}
+        if compact:
+            for gname, obj in groups:
+                f, l = _card(gname)
+                grid = QGridLayout()
                 grid.setHorizontalSpacing(10)
                 for c in range(COMPACT_COLS):
                     grid.setColumnStretch(2 * c + 1, 1)
-            getters = {}
-            for i, fld in enumerate(fields(obj)):
-                if fld.name == "objective_name":
-                    widget = QComboBox()
-                    widget.addItems(self._objective_names)
-                    cur = str(getattr(obj, fld.name))
-                    idx = widget.findText(cur)
-                    widget.setCurrentIndex(idx if idx >= 0 else 0)
-                    # connect AFTER setting the index so setup doesn't fire it
-                    widget.currentTextChanged.connect(self._on_objective_changed)
-                    self._objective_combo = widget
-                    getter = widget.currentText
-                else:
-                    widget, getter = _widget_for_field(fld.name, getattr(obj, fld.name))
-                if fld.name == "xy_unit":
-                    # a display choice: takes effect at once, no Apply needed
-                    widget.currentTextChanged.connect(self._on_xy_unit_changed)
-                if grid is not None:
+                for i, fld in enumerate(fields(obj)):
+                    widget, lab = self._field_widget(gname.lower(), obj, fld.name)
                     r, c = divmod(i, COMPACT_COLS)
-                    grid.addWidget(QLabel(fld.name), r, 2 * c)
+                    grid.addWidget(lab, r, 2 * c)
                     grid.addWidget(widget, r, 2 * c + 1)
-                else:
-                    form.addRow(fld.name, widget)
-                getters[fld.name] = getter
-                self._form_widgets.setdefault(gname.lower(), {})[fld.name] = widget
-                self._form_shown.setdefault(gname.lower(), {})[fld.name] = getter()
-                if fld.name == "pixel_size_x_um":
-                    self._pxx_widget = widget
-                elif fld.name == "pixel_size_y_um":
-                    self._pxy_widget = widget
-            self._getters[gname.lower()] = getters
-            self._forms[gname.lower()] = form
-            if gname == "Limits":
-                # Shown instead of the envelope rows when the stage owns its
-                # limits (the KIM rig): 0..130 um / 0..75 V mean nothing there.
-                self.lab_limits_note = QLabel(""); self.lab_limits_note.setWordWrap(True)
-                self.lab_limits_note.setVisible(False)
-                l.addWidget(self.lab_limits_note)
-                self._limit_rows = {k: v for k, v in self._form_widgets["limits"].items()
-                                    if k != "enforce"}
-            l.addLayout(grid if grid is not None else form)
-            outer.addWidget(f)
+                l.addLayout(grid)
+                outer.addWidget(f)
+        else:
+            if columns is None:
+                columns = [[] for _ in range(3)]
+                for gname, obj in groups:
+                    names = [fl.name for fl in fields(obj)]
+                    per = max(1, -(-len(names) // 3))
+                    for c in range(3):
+                        part = names[c * per:(c + 1) * per]
+                        if part:
+                            title = gname if c == 0 else f"{gname} (cont.)"
+                            columns[c].append((title, [(gname.lower(), n) for n in part]))
+            placed = {(g, n) for col in columns for _t, items in col for g, n in items}
+            more = [(g, fl.name) for g, obj in objs.items() for fl in fields(obj)
+                    if (g, fl.name) not in placed and g not in partial]
+            if more:
+                columns = [list(c) for c in columns]
+                columns[-1].append(("More", more))
+            row = QHBoxLayout(); row.setSpacing(10)
+            self._boxes = getattr(self, "_boxes", {})
+            for col in columns:
+                cv = QVBoxLayout(); cv.setSpacing(8)
+                for title, items in col:
+                    items = [(g, n) for g, n in items if g in objs and hasattr(objs[g], n)]
+                    if not items:
+                        continue
+                    f, l = _card(title)
+                    grid = QGridLayout(); grid.setHorizontalSpacing(8)
+                    grid.setVerticalSpacing(4)
+                    for r, (g, n) in enumerate(items):
+                        widget, lab = self._field_widget(g, objs[g], n)
+                        grid.addWidget(lab, r, 0)
+                        if n in extras:
+                            holder = QWidget(); hl = QHBoxLayout(holder)
+                            hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(6)
+                            hl.addWidget(widget); hl.addWidget(extras[n]); hl.addStretch(1)
+                            grid.addWidget(holder, r, 1)
+                        else:
+                            grid.addWidget(widget, r, 1, Qt.AlignLeft)
+                    grid.setColumnStretch(2, 1)
+                    l.addLayout(grid)
+                    cv.addWidget(f)
+                    self._boxes[title] = f
+                cv.addStretch(1)
+                row.addLayout(cv)
+            row.addStretch(1)
+            outer.addLayout(row)
+        if "limits" in objs:
+            # Shown instead of the envelope rows when the stage owns its
+            # limits (the KIM rig): 0..130 um / 0..75 V mean nothing there.
+            self.lab_limits_note = QLabel(""); self.lab_limits_note.setWordWrap(True)
+            self.lab_limits_note.setVisible(False)
+            outer.addWidget(self.lab_limits_note)
+            self._limit_rows = {k: v for k, v in self._form_widgets["limits"].items()
+                                if k != "enforce"}
         b = QPushButton("Apply settings"); b.setObjectName("primary")
         b.clicked.connect(lambda _=False, gs=groups: self._apply_settings(gs))
-        outer.addWidget(b)
+        rowb = QHBoxLayout(); rowb.addWidget(b); rowb.addStretch(1)
+        outer.addLayout(rowb)
         outer.addStretch(1)
         return w
+
+    def _field_widget(self, key: str, obj, name: str):
+        """(editing widget, its label) for one config field, registered for
+        Apply / sync (group ``key``)."""
+        if name == "objective_name":
+            widget = QComboBox()
+            widget.addItems(self._objective_names)
+            cur = str(getattr(obj, name))
+            idx = widget.findText(cur)
+            widget.setCurrentIndex(idx if idx >= 0 else 0)
+            # connect AFTER setting the index so setup doesn't fire it
+            widget.currentTextChanged.connect(self._on_objective_changed)
+            self._objective_combo = widget
+            getter = widget.currentText
+            _size_widget(name, widget)
+        else:
+            widget, getter = _sized_widget_for_field(name, getattr(obj, name))
+        if name == "xy_unit":
+            # a display choice: takes effect at once, no Apply needed
+            widget.currentTextChanged.connect(self._on_xy_unit_changed)
+        lab = QLabel(name)
+        self._getters.setdefault(key, {})[name] = getter
+        self._form_widgets.setdefault(key, {})[name] = widget
+        self._form_labels.setdefault(key, {})[name] = lab
+        self._form_shown.setdefault(key, {})[name] = getter()
+        if name == "pixel_size_x_um":
+            self._pxx_widget = widget
+        elif name == "pixel_size_y_um":
+            self._pxy_widget = widget
+        return widget, lab
+
+    def _on_tab_changed(self, _i: int) -> None:
+        page = self.tabs.currentWidget()
+        if page is getattr(self, "af_page", None):
+            self._sync_form("spot")
+            self._sync_form("autofocus")
+            self._af_rules()
 
     def _camera_settings_tab(self) -> QWidget:
         outer = QWidget(); ov = QVBoxLayout(outer)
         # Order (Lukas, 2026-09-14): Image first (objective / pixel size, used all
         # the time), then Camera, then the long list of live camera parameters.
+        # Auto exposure (once), right next to the exposure it sets (Lukas
+        # 2026-09-29): an explicit action; it changes only ExposureTime
+        self.b_auto_expo = QPushButton("Auto exposure (once)")
+        self.b_auto_expo.setToolTip("The camera's ExposureAuto=Once if it has it, else a "
+                                    "few software steps that bring the IMAGE (the spot's "
+                                    "search region left out) to auto_exposure_target of "
+                                    "full scale. Changes only ExposureTime.")
+        self.b_auto_expo.clicked.connect(self._auto_exposure)
         ov.addWidget(self._settings_tab([("Image", self.cfg.image),
-                                         ("Camera", self.cfg.camera)]))
+                                         ("Camera", self.cfg.camera)],
+                                        columns=CAMERA_LAYOUT,
+                                        extras={"exposure_us": self.b_auto_expo}))
+        # the four clip edges mean nothing while clipping is off: greyed
+        clip = self._form_widgets.get("image", {}).get("clip_enabled")
+        if clip is not None:
+            clip.toggled.connect(self._clip_rules)
+            self._clip_rules()
+        # the simulator's own settings only when the camera IS the simulator
+        box = getattr(self, "_boxes", {}).get("Simulator")
+        if box is not None:
+            box.setVisible(self._camera_is_sim())
         # live camera parameters (built from the backend's feature list)
         f, l = _card("Camera parameters (live)")
         row = QHBoxLayout()
@@ -1032,12 +1297,40 @@ class MainWindow(QMainWindow):
         l.addLayout(row)
         self._cam_param_host = QWidget()
         self._cam_param_form = QFormLayout(self._cam_param_host)
+        self._cam_param_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
         l.addWidget(self._cam_param_host)
         ov.addWidget(f)
         ov.addStretch(1)
         self._build_cam_params()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(outer)
         return scroll
+
+    def _camera_is_sim(self) -> bool:
+        """Is the camera behind this GUI the simulator? (its model name says so)"""
+        try:
+            feats = self.ctrl.camera_features() or []
+        except Exception:
+            return False
+        return any(f.get("name") == "DeviceModelName"
+                   and str(f.get("value", "")).lower().startswith("sim") for f in feats)
+
+    def _clip_rules(self, *_):
+        on = self._form_widgets["image"]["clip_enabled"].isChecked()
+        for k in ("clip_left", "clip_top", "clip_right", "clip_bottom"):
+            for w in (self._form_widgets["image"].get(k), self._form_labels["image"].get(k)):
+                if w is not None:
+                    w.setEnabled(on)
+                    w.setToolTip("" if on else "clip_enabled is off: not used")
+
+    def _auto_exposure(self):
+        try:
+            res = self.ctrl.auto_exposure_once()
+        except Exception as exc:
+            self._log_event("error", f"auto exposure: {exc}")
+            return
+        self.cfg.camera.exposure_us = float(res.get("new_us", self.cfg.camera.exposure_us))
+        self._sync_form("camera")
+        self._build_cam_params()
 
     def _build_cam_params(self):
         self._clear_layout(self._cam_param_form)
@@ -1061,6 +1354,7 @@ class MainWindow(QMainWindow):
             if w is None:
                 continue
             unit = f"  ({ft['unit']})" if ft.get("unit") else ""
+            _size_widget(ft.get("name", ""), w)       # sized to content, not the window
             self._cam_param_form.addRow(label + unit, w)
 
     def _feature_widget(self, ft):
@@ -1340,19 +1634,16 @@ class MainWindow(QMainWindow):
                 return "-"
             return format(v, fmt) if math.isfinite(v) else "-"
 
-        rows = [("spot_area", "threshold area",
-                 (num(s.spot_area, ".0f") if s.spot_found else "-") + " px²"),
-                ("spot_relative", "relative area", num(s.spot_rel_area, ".0f") + " px²"),
-                ("spot_d4sigma", "D4σ", num(s.spot_d4sigma_px, ".1f") + " px  (σ² "
-                 + num(s.spot_sigma2_px2, ".1f") + " px²)")]
-        txt = " · ".join((f"<b>{name}: {val}</b>" if key == mech else f"{name}: {val}")
-                         for key, name, val in rows)
+        txt = sizes_summary(s, highlight=mech)
         bits = int(getattr(s, "spot_bit_depth", 8) or 8)
         if bits > 8:
             txt += f" &nbsp;<i>({bits}-bit frame)</i>"
-        if s.spot_saturated:
-            txt += (f"<br><span style='color:{T.COLORS['danger']}'>the spot is SATURATED: "
-                    f"its size is wrong (σ² too big) -- lower the exposure</span>")
+        else:
+            # why not deeper (2026-09-29): the camera's PixelFormat, said once
+            # in the log and kept here next to the sizes it limits
+            why = getattr(s, "spot_bit_note", "") or ""
+            if why:
+                txt += f"<br><i>8-bit frame: {html.escape(why)}</i>"
         hint = getattr(s, "af_hint", "")
         if hint:
             # spot_area on an unsaturated spot: said here, not silently "fixed"
@@ -1479,6 +1770,12 @@ class MainWindow(QMainWindow):
             self.z_spin.setRange(s.z_min, s.z_max)
         self.lab_best.setText(f"{s.best_focus_v:.2f} {s.z_unit}")
         self._refresh_af_sizes(s)
+        on = bool(getattr(s, "af_exposure_active", False))
+        self.lab_af_expo.setVisible(on)
+        if on:
+            self.lab_af_expo.setText(f"<b>autofocus exposure ON</b> "
+                                     f"({self.cfg.autofocus.exposure_us:g} us) -- the working "
+                                     f"exposure comes back when the run ends")
         self._refresh_zcal(s)
         self._refresh_xy(s)
         self._sync_stage(s)                 # after _refresh_xy: it may re-enable Datum
