@@ -592,3 +592,27 @@ def test_a_stale_or_partial_order_never_breaks_the_list(env):
     win.layout_cards()
     assert sorted(_shown(mc, win)) == sorted(win.cards)
     win.reset_card_order()
+
+
+def test_a_long_description_wraps_to_two_lines_and_ends_with_dots(env):
+    """Lukas 2026-09-29: long module descriptions pushed the card's buttons off
+    the window. The description wraps to at most TWO lines, then '...'; the full
+    text stays in the tooltip, and the label never asks for its full width."""
+    mc, win, root, app = env
+    card = win.cards["magnet"]
+    long = ("Signal Hound SA44B / SA124B spectrum analyser; owner of the USB-TG44A "
+            "tracking generator, which the shsg (CW) and shsna (TG sweeps) modules "
+            "use through it -- and a lot more text so it can never fit in two lines "
+            "of a narrow card whatever the font is on this computer, really")
+    card.desc.setText(long)
+    card.desc.resize(300, 80)
+    app.processEvents()
+    shown = card.desc.shown_text()
+    lines = shown.split("\n")
+    assert len(lines) <= 2 and lines[-1].endswith("…"), shown
+    assert card.desc.toolTip() == long
+    assert card.desc.minimumSizeHint().width() < 200       # never demands the full line
+    card.desc.setText("short")
+    card.desc.resize(300, 80)
+    app.processEvents()
+    assert card.desc.shown_text() == "short" and card.desc.toolTip() == ""

@@ -1191,6 +1191,66 @@ class AddModuleDialog(QtWidgets.QDialog):
 
 # ──────────────────────────────── module card ─────────────────────────────
 
+class ClampLabel(QtWidgets.QLabel):
+    """A label that wraps to at most `lines` lines and ends the last one with
+    "..." when the text still does not fit; the full text is its tooltip.
+
+    Why (Lukas, 2026-09-29): a plain QLabel asks for the width of its whole
+    text, so one long module description pushed the card's buttons out of the
+    window. This one never asks for more width than it is given (horizontal
+    policy Ignored, a small minimum), and re-wraps whenever it is resized.
+    """
+
+    def __init__(self, lines: int = 2, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self._lines = max(1, int(lines))
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+
+    def setText(self, text: str) -> None:            # noqa: N802 (Qt name)
+        self._full = text or ""
+        self._relayout()
+
+    def text(self) -> str:                             # the FULL text, as set
+        return self._full
+
+    def shown_text(self) -> str:
+        """What is on screen now (wrapped, maybe elided)."""
+        return super().text()
+
+    def minimumSizeHint(self) -> QtCore.QSize:         # noqa: N802
+        return QtCore.QSize(40, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event) -> None:              # noqa: N802
+        super().resizeEvent(event)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        fm = self.fontMetrics()
+        w = max(20, self.width())
+        lines, cur = [], ""
+        for word in self._full.split():
+            trial = word if not cur else cur + " " + word
+            if not cur or fm.horizontalAdvance(trial) <= w:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        if len(lines) > self._lines:
+            rest = " ".join(lines[self._lines - 1:])
+            lines = lines[:self._lines - 1] + [rest]
+        # a line still too wide (the last one after a cut, or one long word)
+        # ends in "..." -- elidedText adds the ellipsis character itself
+        lines = [fm.elidedText(l, QtCore.Qt.ElideRight, w) for l in lines]
+        shown = "\n".join(lines)
+        cut = shown.replace("\n", " ") != " ".join(self._full.split())
+        if shown != super().text():
+            super().setText(shown)
+        self.setToolTip(self._full if cut else "")
+
+
 class ModuleCard(QtWidgets.QFrame):
     """One module: identity, live status, actions, and its variables."""
 
@@ -1233,9 +1293,11 @@ class ModuleCard(QtWidgets.QFrame):
         row.addWidget(self.icon)
 
         namebox = QtWidgets.QVBoxLayout(); namebox.setSpacing(1)
-        self.name = QtWidgets.QLabel(); self.name.setObjectName("name")
-        self.desc = QtWidgets.QLabel(); self.desc.setObjectName("meta")
-        self.meta = QtWidgets.QLabel(); self.meta.setObjectName("meta")
+        # name and ports on one line, the description on at most two, each
+        # ending in "..." when the card is too narrow (full text as tooltip)
+        self.name = ClampLabel(1); self.name.setObjectName("name")
+        self.desc = ClampLabel(2); self.desc.setObjectName("meta")
+        self.meta = ClampLabel(1); self.meta.setObjectName("meta")
         # The physical address(es) this service holds ("holds GPIB0::6"), or,
         # in red, why it could not start ("address busy: ... held by clMag").
         self.hw = QtWidgets.QLabel(); self.hw.setObjectName("meta")
