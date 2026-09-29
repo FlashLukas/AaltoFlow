@@ -277,3 +277,27 @@ def bottom_position(shape: WalkShape, k: float = 1.3) -> float:
             if x.min() <= v <= x.max():
                 return float(v)
     return float(shape.n[shape.i_min])
+
+
+def distance_from_bottom(shape: WalkShape, m: float, side: int = 0) -> float:
+    """How far (in THIS walk's counter units) from its bottom the walk's
+    smoothed sigma^2 reached ``m`` -- the larger of the two sides, or only the
+    lower-counter side (``side`` -1) / the higher one (+1).
+
+    Used by the calibration's park (2026-09-29, rig: the park ended off focus):
+    a sigma^2 reading turns into "how far from focus am I" in the counter
+    units of a walk that went the SAME direction as the move being planned, so
+    the (position-dependent, direction-dependent) step size is already in it.
+    0 when ``m`` is at or below the minimum; when the walk never reached ``m``
+    on either side, its farthest level from the bottom (a lower bound).
+    """
+    if not (math.isfinite(m) and m > shape.m_min):
+        return 0.0
+    b = bottom_position(shape)
+    left, right = crossings(shape, m)
+    sides = {-1: (left,), 1: (right,)}.get(side, (left, right))
+    d = [abs(b - x) for x in sides if x is not None]
+    if d:
+        return float(max(d))
+    ends = {-1: (shape.n[0],), 1: (shape.n[-1],)}.get(side, (shape.n[0], shape.n[-1]))
+    return float(max(abs(e - b) for e in ends))

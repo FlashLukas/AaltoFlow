@@ -398,6 +398,24 @@ class KimZFocus:
         self._dc.reset()
         self.link.fresh_status()          # read_z must see the new sizes at once
 
+    def save_step_sizes(self) -> str | None:
+        """Ask kim to SAVE its calibration (the Z step sizes just written) to
+        kim.ini; returns the file kim wrote, or None when this kim is too old
+        to have the verb (the sizes are then live only, lost on a kim restart).
+
+        Why (2026-09-29): kim kept set_calibration in memory only, so every
+        kim restart silently undid a Z step calibration. kim's new verb
+        ``save_calibration`` persists its calibration group. Any other failure
+        raises (the caller says so; the live sizes stay in use).
+        """
+        try:
+            reply = self.link.rpc(cmd="save_calibration")
+        except RuntimeError as exc:
+            if "unknown" in str(exc).lower():
+                return None
+            raise
+        return str(reply.get("path", ""))
+
     def zero_counter(self) -> None:
         """Datum Z: kim's Z step counter set to 0 at the current position.
 

@@ -939,6 +939,12 @@ class SpotTab(QWidget):
         self._draw_area()
         sp = self.cfg.spot
         if not getattr(status, "spot_found", False):
+            if "paused" in getattr(status, "spot_found_why_short", ""):
+                # at the autofocus exposure the fixed threshold is not applied:
+                # say that, not "NOT seen" (rig 2026-09-29)
+                self.lab_live.setText(html.escape(status.spot_found_why_short)
+                                      + self._free_sizes(status))
+                return
             where = "around the calibrated position" if sp.ref_set else "in the frame"
             why = getattr(status, "spot_found_why", "")
             why = f" -- {html.escape(why)}" if why else ""

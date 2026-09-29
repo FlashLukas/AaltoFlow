@@ -968,11 +968,17 @@ class MainWindow(QMainWindow):
             evidence += (f"<br><span style='color:{T.COLORS['muted']}'>parabola fits "
                          f"(diagnostic): ratio {q_fit:.3f}, R² {s.zcal_r2_up:.4f} / "
                          f"{s.zcal_r2_down:.4f}</span>")
-        if state == "OK" and math.isfinite(q):
+        # "Z left off focus ..." = the ratio WAS measured and written, but the
+        # park could not bring Z back to focus by the image (rig 2026-09-29):
+        # show the result AND the warning, not one of them
+        off_focus = state.startswith("Z left off focus")
+        if (state == "OK" or off_focus) and math.isfinite(q):
+            warn = (f"<br><span style='color:{T.COLORS['danger']}'>{html.escape(state)}</span>"
+                    if off_focus else "")
             lab.setText(f"#{s.zcal_id}: step up / down = <b>{q:.3f}</b> ± "
                         f"{s.zcal_ratio_err:.3f} (width method) &nbsp; up "
                         f"{s.zcal_up_um:.5g}, down {s.zcal_down_um:.5g} "
-                        f"{self._z_unit}/step{evidence}")
+                        f"{self._z_unit}/step{warn}{evidence}")
         else:
             lab.setText(f"#{s.zcal_id}: <span style='color:{T.COLORS['danger']}'>"
                         f"{state}</span>{evidence}")
@@ -1202,10 +1208,63 @@ class MainWindow(QMainWindow):
 
     def _label_z_fields(self, unit: str):
         labels = self._form_labels.get("autofocus", {})
+        # values that come from the current objective (objectives.ini) carry
+        # its name, e.g. "coarse_step (um) [63x]" (Lukas 2026-09-29: the
+        # autofocus distances depend on the lens)
+        tags = getattr(self, "_af_obj_tags", (set(), ""))
         for name, text in self._Z_UNIT_FIELDS.items():
             lab = labels.get(name)
-            if lab is not None:
-                _set_label(lab, f"{text} ({unit})", _LABEL_W_AF)
+            if lab is None:
+                continue
+            tagged = name in tags[0]
+            _set_label(lab, f"{text} ({unit})" + (f" [{tags[1]}]" if tagged else ""),
+                       _LABEL_W_AF)
+            lab.setToolTip(f"from objective {tags[1]} (objectives.ini); edit + Apply to "
+                           f"change it for this session or store it for the objective"
+                           if tagged else "")
+
+    def _refresh_objective_af(self, s) -> None:
+        """Follow which autofocus values come from the objective. When that
+        changes (another objective selected, a value stored or edited), the
+        form's numbers and tags are re-read -- the brain changed the values."""
+        keys = {k for k in str(getattr(s, "af_objective_keys", "")).split(",") if k}
+        sig = (frozenset(keys), str(getattr(s, "objective_name", "")))
+        if sig == getattr(self, "_af_obj_sig", None):
+            return
+        first = getattr(self, "_af_obj_sig", None) is None
+        self._af_obj_sig = sig
+        self._af_obj_tags = (set(keys), sig[1])
+        if not first:
+            self.ctrl_get_config_into_cfg()
+            self._sync_form("autofocus")
+        self._label_z_fields(self._z_unit)
+
+    def _offer_store_for_objective(self, edited: dict, before: dict) -> None:
+        """After an Apply that changed per-objective autofocus distances: store
+        them for the current objective (objectives.ini) or keep them for this
+        session only. Asked, never assumed: objectives.ini is lab data."""
+        from ..objectives import AF_KEYS
+        keys = [k for k in edited if k in AF_KEYS]
+        obj = self.cfg.image.objective_name
+        if not keys or not obj:
+            return
+        from PySide6.QtWidgets import QMessageBox
+        names = ", ".join(f"{k} = {edited[k]:g}" for k in keys)
+        ans = QMessageBox.question(
+            self, "Autofocus distances",
+            f"Store {names} for objective {obj} (objectives.ini)?\n\n"
+            f"Yes: used whenever {obj} is selected.\nNo: this session only.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ans != QMessageBox.Yes:
+            self._log_event("info", f"{names}: this session only")
+            return
+        for k in keys:
+            try:
+                rep = self.ctrl.store_objective_af(k, edited[k], before.get(k))
+                self._log_event("info", f"{k} = {edited[k]:g} stored for objective {obj} "
+                                        f"({rep.get('path', '')})")
+            except Exception as exc:
+                self._log_event("error", f"could not store {k} for {obj}: {exc}")
 
     def _apply_stabiliser(self):
         vals = {"gain": self.stab_gain.value() / 100.0,
@@ -1655,6 +1714,7 @@ class MainWindow(QMainWindow):
         # Index X/Y or by a scan -- were silently put back to the form's old
         # numbers by an unrelated Apply (deep cleaning 2026-09-28).
         payload = {}
+        before_af = dict(self._form_shown.get("autofocus", {}))   # for "store for objective"
         for gname, _obj in groups:
             key = gname.lower()
             shown = self._form_shown.get(key, {})
@@ -1678,6 +1738,9 @@ class MainWindow(QMainWindow):
             self._log_event("info", f"applied settings: {', '.join(payload)}")
         except Exception as exc:
             self._log_event("error", f"apply failed: {exc}")
+            return
+        if payload.get("autofocus"):
+            self._offer_store_for_objective(payload["autofocus"], before_af)
 
     def _keep_scan_size(self, new: dict) -> None:
         """Changing only the NUMBER OF POINTS keeps the array size: the pitch
@@ -1954,7 +2017,11 @@ class MainWindow(QMainWindow):
         self._refresh_laser(s)
         _set_led(self.led_af, not s.af_running and s.af_error == "OK", T.OK)
         zcal_on = bool(getattr(s, "zcal_running", False))
-        self.lab_af.setText("run" if s.af_running else ("Z cal" if zcal_on else s.af_error))
+        # af_error now carries the failure's MESSAGE (rig 2026-09-29), which can
+        # be long: the small label shows its start, the tooltip all of it
+        af_txt = "run" if s.af_running else ("Z cal" if zcal_on else s.af_error)
+        self.lab_af.setText(af_txt if len(af_txt) <= 40 else af_txt[:37] + "...")
+        self.lab_af.setToolTip("" if af_txt == s.af_error == "OK" else af_txt)
         # Z follows the Z device: volts on the piezo rig, um on the KIM rig,
         # whose range (kim's leash) can change while we run.
         if s.z_unit != self._z_unit:
@@ -1963,6 +2030,7 @@ class MainWindow(QMainWindow):
             self.z_step.setSuffix(f" {s.z_unit}")
             self.af_plot._xlabel = f"Z ({s.z_unit})"
             self._label_z_fields(s.z_unit)
+        self._refresh_objective_af(s)
         if (s.z_min, s.z_max) != (self.z_spin.minimum(), self.z_spin.maximum()):
             self.z_spin.setRange(s.z_min, s.z_max)
         self.lab_best.setText(f"{s.best_focus_v:.2f} {s.z_unit}")

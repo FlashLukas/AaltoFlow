@@ -711,7 +711,12 @@ class CameraView(QWidget):
                 text = f"area {area}{rel}"
             else:
                 short = getattr(s, "spot_found_why_short", "")
-                text = f"spot not seen: {short}" if short else "spot not seen"
+                if "paused" in short:
+                    # the frame is at the autofocus exposure: the fixed threshold
+                    # was not applied, so "not seen" would be false (rig 2026-09-29)
+                    text = short
+                else:
+                    text = f"spot not seen: {short}" if short else "spot not seen"
             drawn.append(self._label(p, QPointF(sp.x() + 20, sp.y() - 20), text,
                                      SPOT_GREEN, drawn))
 

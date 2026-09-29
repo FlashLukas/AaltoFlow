@@ -348,6 +348,11 @@ class CameraService:
             return {"ok": True, "objective": b.set_objective(req["name"])}
         if cmd == "list_objectives":
             return {"ok": True, "objectives": b.list_objectives()}
+        if cmd == "store_objective_af":
+            # one autofocus distance into the CURRENT objective's section of
+            # objectives.ini (the AutoFocus tab's "store for this objective")
+            return {"ok": True, **b.store_objective_af(req["key"], req.get("value"),
+                                                       req.get("previous"))}
 
         # -- live camera parameters -------------------------------------- #
         if cmd == "camera_features":

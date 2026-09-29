@@ -28,8 +28,11 @@ LIMITS = [10000, 10000, 5000]   # symmetric, steps (a 200/200/100 um leash)
 class FakeKimService:
     """kim's wire contract with a stage that walks at `rate` steps/s."""
 
-    def __init__(self, rate: float = 4000.0, asym: float = 1.0):
+    def __init__(self, rate: float = 4000.0, asym: float = 1.0, has_save: bool = False):
         self.rate = rate
+        # kim's save_calibration (2026-09-29); False = an older kim without it
+        self.has_save = has_save
+        self.saves = 0
         self.asym = asym            # forward/backward step-size ratio (1 = symmetric)
         self.pos = [0.0, 0.0, 0.0]
         self.target = [0, 0, 0]
@@ -130,6 +133,9 @@ class FakeKimService:
                     self.bwd[a] = v
                 self.calibrations.append((req["axis"], v, d))
                 self._rep.send_json({"ok": True, "value": v})
+            elif cmd == "save_calibration" and self.has_save:
+                self.saves += 1
+                self._rep.send_json({"ok": True, "path": "C:/kim/kim.ini"})
             elif cmd == "move_image_px":
                 if not self.px_calibrated:
                     self._rep.send_json({"ok": False, "error": "RuntimeError: no camera "

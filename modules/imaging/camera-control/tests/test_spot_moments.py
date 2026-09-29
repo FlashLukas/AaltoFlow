@@ -439,7 +439,7 @@ def test_the_new_metrics_need_a_calibrated_spot():
     try:
         brain.cfg.autofocus.mechanism = "spot_d4sigma"
         s = _run_af(brain)
-        assert s.af_error == "RuntimeError"
+        assert s.af_error.startswith("RuntimeError: "), s.af_error   # + the message (2026-09-29)
     finally:
         brain.shutdown()
 

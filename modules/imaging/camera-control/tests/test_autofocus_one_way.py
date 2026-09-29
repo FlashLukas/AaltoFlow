@@ -119,7 +119,7 @@ def test_no_spot_anywhere_is_an_error_not_a_guess(rig):
     brain.cfg.spot.min_area_px = 10**7       # nothing is ever big enough to count
     before = z.read_z()
     s = _run(brain)
-    assert s.af_error == "RuntimeError"
+    assert s.af_error.startswith("RuntimeError: "), s.af_error   # + the message (2026-09-29)
     assert abs(z.read_z() - before) <= 6.0 + 2.0   # did not wander beyond max_travel
 
 
@@ -135,5 +135,5 @@ def test_a_failed_run_puts_z_back_where_it_started(rig, routine):
     brain.cfg.spot.min_area_px = 10**7       # the spot never counts
     before = z.read_z()
     s = _run(brain)
-    assert s.af_error == "RuntimeError"
+    assert s.af_error.startswith("RuntimeError: "), s.af_error   # + the message (2026-09-29)
     assert abs(z.read_z() - before) < 1e-6

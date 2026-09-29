@@ -276,6 +276,10 @@ class CameraClient:
     def list_objectives(self) -> list:
         return self._rpc(cmd="list_objectives")["objectives"]
 
+    def store_objective_af(self, key: str, value=None, previous=None) -> dict:
+        rep = self._rpc(cmd="store_objective_af", key=key, value=value, previous=previous)
+        return {k: rep.get(k) for k in ("objective", "key", "value", "path")}
+
     # live camera parameters
     def calibrate_spot(self, frames: int = 20) -> dict:
         return self._rpc(cmd="calibrate_spot", frames=frames)["spot"]

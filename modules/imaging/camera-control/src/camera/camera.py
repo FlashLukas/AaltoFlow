@@ -30,8 +30,10 @@ import json
 import math
 import os
 import re
+import sys
 import threading
 import time
+import traceback
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -69,8 +71,9 @@ class _AutofocusKilled(Exception):
 class AutofocusFailed(RuntimeError):
     """A run that must not be trusted, with a SHORT reason for af_error.
 
-    Any exception fails a run (af_error = its type name, the old behaviour,
-    which scan waits and tests rely on). This one carries a readable state
+    Any exception fails a run (af_error = "<Type>: <message>" since the rig
+    check of 2026-09-29, see failure_text; scan waits only test "OK"). This
+    one carries a readable state
     instead -- e.g. "park failed: never within park_tolerance" -- because
     "RuntimeError" alone does not tell an operator reading the scan log what
     went wrong. The full detail goes into the error event.
@@ -79,6 +82,57 @@ class AutofocusFailed(RuntimeError):
     def __init__(self, state: str, detail: str = ""):
         super().__init__(f"{state}: {detail}" if detail else state)
         self.state = state
+
+
+#: spot_found_why_short while the fixed-threshold check is paused because the
+#: frame is at the autofocus exposure (the GUI shows it instead of "not seen").
+SPOT_CHECK_PAUSED = "threshold check paused (autofocus exposure)"
+
+#: af_error / zcal_state carry at most this many characters of a failure.
+FAILURE_TEXT_MAX = 200
+
+
+def failure_text(exc: BaseException, limit: int = FAILURE_TEXT_MAX) -> str:
+    """"<Type>: <message>" of an exception, on ONE line, at most ``limit`` chars.
+
+    Why (rig 2026-09-29): a one_way autofocus ended with af_error
+    "RuntimeError" and nothing else -- the message was only in an event that
+    scrolled past, so the failure could not be diagnosed. The state a scan
+    log and the GUI show must say WHAT went wrong. Line breaks are folded (the
+    state is one line in the GUI and in a scan log); a long message is cut
+    with "..." (the full text is in the error event and the console).
+    """
+    name = type(exc).__name__
+    msg = " ".join(str(exc).split())
+    text = f"{name}: {msg}" if msg else name
+    if len(text) > limit:
+        text = text[:max(len(name), limit - 3)].rstrip() + "..."
+    return text
+
+
+def _log_traceback(what: str, exc: BaseException) -> None:
+    """Print an UNEXPECTED exception's traceback ONCE to the service console.
+
+    The error event and the state carry the message, but not where it came
+    from; the next time an "impossible" failure happens on the rig the
+    console must hold enough to find it. Once: the same exception passes up
+    through several handlers (the run, _do_autofocus, the engine loop), and
+    each of them must not print it again -- the exception is marked. ASCII
+    only (gotcha #14: the launcher reads the console through a cp1252 pipe).
+    """
+    if getattr(exc, "_camera_tb_logged", False):
+        return
+    try:
+        exc._camera_tb_logged = True
+    except Exception:
+        pass
+    try:
+        text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        text = text.encode("ascii", "backslashreplace").decode("ascii")
+        sys.stderr.write(f"camera: {what} failed unexpectedly -- traceback follows\n{text}")
+        sys.stderr.flush()
+    except Exception:
+        pass                      # the console is a diagnosis aid: never fail on it
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +207,9 @@ class CameraStatus:
     spot_exposure_hint: float = float("nan")
     # the autofocus exposure (autofocus.exposure_us) is on the camera NOW
     af_exposure_active: bool = False
+    # autofocus settings whose value comes from the current objective's
+    # section in objectives.ini (comma list of config names; "" = none)
+    af_objective_keys: str = ""
     # Bit depth of the frame the sizes above were measured on (2026-09-28): 8,
     # or 10/12 when the camera delivers its full depth (then spot_peak is in
     # those counts, 0..4095 for 12 bit). The display, the template matching
@@ -343,7 +400,11 @@ class Camera:
         # The fly-scan record of the laser position on the sample (stream.py).
         self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
 
-        # Objective table -> pixel size.
+        # Objective table -> pixel size (and the objective's autofocus
+        # distances, see _apply_objective_af).
+        self._af_obj_name: str | None = None   # objective whose AF values are applied
+        self._af_obj_applied: dict = {}        # {AF key: value put in by that objective}
+        self._af_obj_base: dict = {}           # {AF key: the value it replaced}
         self._objectives = OBJ.load_objectives(self.cfg.image.objectives_file)
         self._apply_objective(self.cfg.image.objective_name, quiet=True)
         self._last_frame: np.ndarray | None = None    # processed grayscale
@@ -544,8 +605,9 @@ class Camera:
                     else:
                         self._do_autofocus(req)
                 except Exception as exc:
+                    _log_traceback(req.get("kind", "autofocus"), exc)   # no-op if already printed
                     self._emit("error", f"engine: {req.get('kind', 'autofocus')} crashed: "
-                                        f"{type(exc).__name__}: {exc}")
+                                        f"{failure_text(exc, 2000)}")
             else:
                 try:
                     self._process()
@@ -835,6 +897,7 @@ class Camera:
             # spot_area's hint only while spot_area is the metric in use
             st.af_hint = self._af_hint if self.cfg.autofocus.mechanism == "spot_area" else ""
             st.spot_bit_note = self._deep_note
+            st.af_objective_keys = self._af_objective_keys()
             st.af_exposure_active = self._af_expo_active
             st.zcal_id, st.zcal_running = self._zcal_id, self._zcal_busy
             st.zcal_state = self._zcal_state
@@ -1398,8 +1461,26 @@ class Camera:
                           sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center),
                           max_area_is_auto=not (sp.max_area_px and sp.max_area_px > 0))
         st.spot_found = det.found
+        # (cleared when found: a routine's frames are measured into a COPY of
+        # the last status, which may still hold the previous frame's reason)
+        st.spot_found_why, st.spot_found_why_short = "", ""
         if not det.found:
             st.spot_found_why, st.spot_found_why_short = det.why, det.why_short
+            if self._af_expo_active or self._expo_hold_frames > 0:
+                # Rig 2026-09-29: during every autofocus the main view read "spot
+                # not seen: nothing above the threshold". The FIXED threshold
+                # (thr_lower) is set for the WORKING exposure; at the short
+                # autofocus exposure (65 us on the rig: peak ~200 only at focus)
+                # the spot is legitimately below it off focus. That frame says
+                # nothing about the spot, so the check is PAUSED, and says so --
+                # also for the frames still in flight after the restore (they
+                # were exposed short). The threshold-free sizes below keep
+                # running: they are what the autofocus measures.
+                st.spot_found_why = (
+                    f"threshold check paused: this frame is at the autofocus exposure "
+                    f"(autofocus.exposure_us), and the fixed threshold {sp.thr_lower:g} is "
+                    f"set for the working exposure; the threshold-free sizes keep running")
+                st.spot_found_why_short = SPOT_CHECK_PAUSED
         if det.found:
             st.spot_live_x, st.spot_live_y, st.spot_area = det.cx, det.cy, det.area
             st.spot_bbox_x, st.spot_bbox_y, st.spot_bbox_w, st.spot_bbox_h = det.bbox
@@ -1727,9 +1808,11 @@ class Camera:
             with self._exposure_for("autofocus"):
                 self._run_autofocus(req)
         except Exception as exc:
-            # crashed (not a handled failure): never "busy" forever, and say so
+            # crashed (not a handled failure): never "busy" forever, and say
+            # WHAT crashed -- the message too, not only the type (rig 2026-09-29)
+            _log_traceback("autofocus", exc)
             if self._af_state in ("queued", "running"):
-                self._af_finish(f"crashed: {type(exc).__name__}")
+                self._af_finish(f"crashed: {failure_text(exc)}")
             raise
         finally:
             if self._af_state in ("queued", "running"):   # left early (shutdown)
@@ -2073,6 +2156,11 @@ class Camera:
             self._af_finish("killed")
             self._emit("warn", "autofocus killed: Z left where it was")
         except Exception as exc:
+            if not isinstance(exc, AutofocusFailed):
+                # an EXPECTED failure (AutofocusFailed) says why by itself; any
+                # other exception is a surprise: its traceback goes to the
+                # console once, so the next occurrence can be diagnosed
+                _log_traceback("autofocus", exc)
             back = ""
             if z_start is not None and not self._stop.is_set():
                 try:
@@ -2082,11 +2170,13 @@ class Camera:
                 except Exception as exc2:            # incl. a kill during the return
                     back = f"; could NOT return Z to {z_start:.3f} {unit}: {exc2!r}"
             # Finished only once Z is back: a scan waiting on this run must not
-            # measure while Z is still walking home. af_error = the exception's
-            # type, or -- for a run that knows WHY it failed -- that reason.
-            state = exc.state if isinstance(exc, AutofocusFailed) else type(exc).__name__
+            # measure while Z is still walking home. af_error = "<Type>:
+            # <message>" (rig 2026-09-29: "RuntimeError" alone told nobody
+            # anything), or -- for a run that knows WHY it failed -- that reason.
+            state = exc.state if isinstance(exc, AutofocusFailed) else failure_text(exc)
             self._af_finish(state)
-            self._emit("error", f"autofocus failed: {exc}{back}")
+            what = str(exc) if isinstance(exc, AutofocusFailed) else failure_text(exc, 2000)
+            self._emit("error", f"autofocus failed: {what}{back}")
             self._check_area_saturation()
 
     # ------------------------------------------------------------------ #
@@ -2519,6 +2609,13 @@ class Camera:
         try:
             with self._exposure_for("Z step calibration"):
                 self._run_zcal(req)
+        except Exception as exc:
+            # crashed outside _run_zcal's own handler (e.g. the exposure
+            # switch): say what, like a crashed autofocus (rig 2026-09-29)
+            _log_traceback("Z step calibration", exc)
+            if self._zcal_state in ("queued", "running"):
+                self._zcal_finish(f"crashed: {failure_text(exc)}")
+            raise
         finally:
             if self._zcal_state == "running":     # left early (shutdown)
                 self._zcal_finish("stopped")
@@ -2631,9 +2728,13 @@ class Camera:
             while time.monotonic() < t_end:
                 time.sleep(min(0.05, max(0.0, t_end - time.monotonic())))
 
+        sems: list = []           # frame-to-frame error of each level's mean (park tolerance)
+
         def measure() -> float:
             vals = [self._zcal_metric(self._live_frame()) for _ in range(n_avg)]
             vals = [v for v in vals if np.isfinite(v)]
+            if len(vals) > 1:
+                sems.append(float(np.std(vals, ddof=1)) / math.sqrt(len(vals)))
             return float(np.mean(vals)) if vals else float("nan")
 
         def lowest(ms):
@@ -2765,6 +2866,7 @@ class Camera:
             g = float(af.zcal_step_um) if af.zcal_step_um > 0 else math.sqrt(up0 * down0)
             up, down = g * math.sqrt(q), g / math.sqrt(q)
             z.set_step_sizes(up, down)
+            save_note = self._save_z_step_sizes(z)
             with self._lock:
                 self._zcal_result.update({"zcal_ratio": q, "zcal_ratio_err": q_err,
                                           "zcal_up_um": up, "zcal_down_um": down})
@@ -2792,9 +2894,23 @@ class Camera:
                 n_end = n_down - margin
                 go(n_end)
                 n_focus = n_end + margin / q
-            note = self._zcal_park(go, measure, n_end, n_focus, step,
-                                   min(sh_u.m_min, sh_d.m_min))
-            self._zcal_finish("OK")
+            # The park aims at wr.m_ref = the LARGER of the two smoothed minima
+            # (the width levels' reference). It used to be the SMALLER one: a
+            # minimum that no later frame can match when the two walks differ a
+            # little (drift, noise) -- the same trap one_way fell into (rig
+            # 2026-09-29, "biased-low target").
+            noise = float(np.median(sems)) if sems else 0.0
+            in_focus, note = self._zcal_park(go, measure, n_end, n_focus, step, wr.m_ref,
+                                             noise, q, margin, sh_d, max_n, sh_up=sh_u)
+            if not in_focus:
+                # The ratio stands (it was measured and written), but Z is NOT
+                # at focus: never a silent OK (rig 2026-09-29: Z ended +184
+                # steps above focus, D4sigma 40 vs 29.8, and it said OK).
+                self._zcal_finish(f"{note}; steps written")
+                self._emit("warn", f"Z step calibration: {note} (the step sizes were "
+                                   f"written: ratio up/down {q:.3f})")
+            else:
+                self._zcal_finish("OK")
             self._emit("info", (
                 f"Z step calibration: ratio up/down {q:.3f} +- {q_err:.3f} from the curve "
                 f"WIDTHS at {len(wr.levels)} sigma^2 levels ({wr.summary()}; spread "
@@ -2803,11 +2919,14 @@ class Camera:
                 + f"; parabola fits (diagnostic): ratio {q_fit:.3f}, R^2 up "
                   f"{f_up['r2']:.4f} / down {f_dn['r2']:.4f}; steps written: up {up:.5g}, "
                   f"down {down:.5g} {unit}/step (geometric mean "
-                  f"{g:.5g}{', given' if af.zcal_step_um > 0 else ', kept'}); {note}"))
+                  f"{g:.5g}{', given' if af.zcal_step_um > 0 else ', kept'}){save_note}; "
+                  f"{note}"))
         except _AutofocusKilled:
             self._zcal_finish("killed")
             self._emit("warn", "Z step calibration killed: nothing written, Z left where it was")
         except Exception as exc:
+            if not isinstance(exc, AutofocusFailed):
+                _log_traceback("Z step calibration", exc)     # a surprise: console, once
             # the failed-run rule: Z back where it started, by the counter
             # (nothing else is known -- the calibration is what was missing)
             back = ""
@@ -2820,45 +2939,172 @@ class Camera:
                     back = f"; Z back to the start (counter {n_start * per_step:.3f} {unit})"
                 except Exception as exc2:
                     back = f"; could NOT return Z: {exc2!r}"
-            state = exc.state if isinstance(exc, AutofocusFailed) else f"failed: {type(exc).__name__}"
+            # the message, not only the type (rig 2026-09-29), like af_error
+            state = (exc.state if isinstance(exc, AutofocusFailed)
+                     else f"failed: {failure_text(exc)}")
             self._zcal_finish(state)
-            self._emit("error", f"Z step calibration: {exc}{back}")
+            what = str(exc) if isinstance(exc, AutofocusFailed) else failure_text(exc, 2000)
+            self._emit("error", f"Z step calibration: {what}{back}")
 
-    def _zcal_park(self, go, measure, n_now, n_focus, step, goal) -> str:
-        """Go UP to the focus the calibration predicts, and CHECK it on the image
-        (sigma^2 within the d4sigma park tolerance of ``goal``). If the image
-        disagrees, walk on up in half levels until it agrees; say how it ended.
+    def _save_z_step_sizes(self, z) -> str:
+        """Make the Z step sizes just written SURVIVE a kim restart, if the Z
+        stage can (kim's ``save_calibration``); returns a note for the event.
 
-        Why the prediction first: a walk that stops at the first level within
-        tolerance stops EARLY on its approach side (sigma^2 is flat at the
-        bottom: 4 % is ~0.27 Rayleigh ranges in the simulator); the predicted
-        counter value is the parabola's vertex itself.
+        Before 2026-09-29 kim kept them in memory only (the notes said "re-run
+        Calibrate Z steps after restarting kim"). A kim without the verb: the
+        sizes are live only -- a warning says so, the calibration still counts.
+        A Z without the method (simulator, piezo) has nothing to save: "".
         """
-        tol = self.cfg.autofocus.park_tolerance_d4sigma or self.cfg.autofocus.park_tolerance
-        if n_focus > n_now:                        # below it, as planned: straight up
-            go(n_focus)
-            m = measure()
-            if np.isfinite(m) and m <= (1.0 + tol) * goal:
-                return (f"Z parked at the predicted focus, confirmed by the image "
-                        f"(sigma^2 within {100 * tol:.0f} %)")
-        n = max(n_now, n_focus) + 0.5 * step
-        best, n_worse = None, 0
-        limit = n_focus + 4.0 * step
-        while n <= limit:
+        saver = getattr(z, "save_step_sizes", None)
+        if not callable(saver):
+            return ""
+        try:
+            path = saver()
+        except Exception as exc:
+            msg = (f"the Z stage could NOT save the step sizes ({failure_text(exc)}): "
+                   f"they are live only -- lost on a kim restart")
+            self._emit("warn", f"Z step calibration: {msg}")
+            return f"; {msg}"
+        if path is None:
+            msg = ("this kim has no save_calibration (an older kim): the step sizes are "
+                   "live only -- lost on a kim restart; update kim-control to keep them")
+            self._emit("warn", f"Z step calibration: {msg}")
+            return f"; {msg}"
+        return f"; saved by kim to {path}"
+
+    def _zcal_park(self, go, measure, n_now, n_focus, step, goal, noise, q, margin,
+                   sh_down, max_n, sh_up=None) -> tuple[bool, str]:
+        """Bring Z back to focus after the calibration's walks, BY THE IMAGE.
+
+        Returns (in_focus, note). ``in_focus`` is True only when a measured
+        sigma^2 was within the tolerance of ``goal`` (the smoothed minimum) at
+        the position Z is left at; otherwise the note says "Z left off focus
+        (D4sigma x vs y px at focus) -- run an autofocus".
+
+        Why it was rewritten (rig check of 1b4e63b, 2026-09-29): after a
+        calibration Z ended +184 counter steps from where it started, D4sigma
+        40 against 29.8 at focus, and the result said OK. The counter
+        prediction (the down walk's bottom, converted with 1/q) had landed
+        ABOVE focus -- the ratio varies ~8 % between runs on this Z, so a
+        prediction over a few um can miss by a fraction of a focal depth or
+        more. The old park could only walk further UP from a miss, stopped
+        when it got worse (further from focus than before), and reported OK
+        with a warning. Reproduced in the simulator with a rig-like ratio
+        (up steps 0.75 x down) whose up step grows after the walks.
+
+        Now: (1) go to the prediction (from below, as planned) and check it;
+        (2) otherwise walk UP in half levels, stopping at the first level
+        within tolerance; (3) if the image says the walk PASSED focus
+        (rise_levels levels worse than its best), back off below focus and walk
+        up again -- the back-off is computed from what the image says: the
+        stretch above the best level (q x its up-counter distance, down steps
+        are 1/q as long per true um) plus the down walk's own counter distance
+        from its bottom to a sigma^2 of 1.5 x the minimum (so the new walk
+        starts clearly below the band, on the approach side), plus a level
+        per attempt. Three attempts, each walk bounded, all within
+        zcal_max_travel_v. Always approached from below, like one_way's park.
+
+        Centring (as one_way's park_centre): a walk enters the band "within
+        tolerance" at its LOWER edge, a fraction of a focal depth before focus
+        (sim: 0.85 units at 8 %). The UP walk's own curve (``sh_up``, the same
+        direction as the park walk, so its step sizes -- also where they
+        change with position -- are in it) says how far on focus is from the
+        reading just taken: step that far up (never more than the band's half
+        width) and CONFIRM it on the image. A failed confirm is just another
+        walk level (no reversal); the next level inside parks, uncentred.
+
+        Tolerance = park_tolerance_d4sigma, never tighter than park_noise_k x
+        the frame-to-frame noise of a level (effective_park_tolerance, the
+        one_way rule), so a 4 % band on a 3 %-noisy reading is not a
+        coin toss.
+        """
+        af = self.cfg.autofocus
+        base = af.park_tolerance_d4sigma or af.park_tolerance
+        tol, tol_why = self.effective_park_tolerance(goal, noise, base=base)
+        bound = (1.0 + tol) * goal
+        half = 0.5 * step
+        n_rise = max(1, int(af.rise_levels))
+        rise = max(0.0, float(af.rise_fraction))
+        q = float(q) if np.isfinite(q) and q > 0 else 1.0
+        nan = float("nan")
+        last = {"m": nan, "n": float(n_now)}
+
+        def inside(m: float) -> bool:
+            return bool(np.isfinite(m) and m <= bound)
+
+        def at(n: float) -> float:
             go(n)
             m = measure()
-            if np.isfinite(m) and m <= (1.0 + tol) * goal:
-                return f"Z parked in focus by the image (sigma^2 within {100 * tol:.0f} %)"
-            if np.isfinite(m) and (best is None or m < best):
-                best, n_worse = m, 0
-            elif best is not None:
-                n_worse += 1
-                if n_worse >= max(1, int(self.cfg.autofocus.rise_levels)):
+            last["m"], last["n"] = m, float(n)
+            return m
+
+        def ok_note(how: str) -> tuple[bool, str]:
+            return True, (f"Z parked {how}, confirmed by the image (sigma^2 {last['m']:.1f} "
+                          f"within {100 * tol:.0f} % of {goal:.1f}: {tol_why})")
+
+        # 1. the prediction (Z is below it, as planned: straight up)
+        if n_focus > n_now:
+            if inside(at(n_focus)):
+                return ok_note("at the predicted focus")
+        else:
+            at(n_now)                              # where we are, for the walk below
+        start_n = last["n"]
+        centre = sh_up is not None
+        w_band = ZC.distance_from_bottom(sh_up, bound, side=-1) if centre else 0.0
+        for attempt in range(1, 4):
+            # 2. walk UP by the image
+            pos = last["n"]
+            best_m = last["m"] if np.isfinite(last["m"]) else None
+            best_n, n_worse, passed = pos, 0, False
+            walk_len = 6.0 * step if attempt == 1 else last_back / q + 4.0 * step
+            n = pos
+            while n + half <= pos + walk_len + 1e-9:
+                n += half
+                if abs(n - start_n) > max_n:
                     break
-            n += 0.5 * step
-        self._emit("warn", "Z step calibration: the image never got back within the park "
-                           "tolerance -- Z left near focus by the counter; run an autofocus")
-        return "Z left NEAR focus by the counter (run an autofocus)"
+                m = at(n)
+                if inside(m):
+                    if centre:
+                        centre = False
+                        to_go = min(ZC.distance_from_bottom(sh_up, m, side=-1), w_band)
+                        if to_go >= half / 4:
+                            n_in = n
+                            n = n + to_go
+                            if inside(at(n)):
+                                return ok_note(f"in focus by the image (walk {attempt}, "
+                                               f"centred {n - n_in:+.2f} counter steps on "
+                                               f"from the band's edge)")
+                            continue
+                    return ok_note(f"in focus by the image (walk {attempt})")
+                if np.isfinite(m) and (best_m is None or m < best_m):
+                    best_m, best_n, n_worse = m, n, 0
+                elif best_m is not None and (not np.isfinite(m) or m > best_m * (1.0 + rise)):
+                    n_worse += 1
+                    if n_worse >= n_rise:
+                        passed = True
+                        break
+            if not passed:
+                # ended while still improving (or nothing measurable): focus is
+                # further up -- the next walk goes on from here, no reversal
+                last_back = walk_len * q
+                continue
+            if attempt == 3:
+                break
+            # 3. passed focus: back off below it, then walk up again
+            above = max(0.0, last["n"] - best_n) * q          # in DOWN counter units
+            approach = ZC.distance_from_bottom(sh_down, 1.5 * goal)
+            last_back = above + approach + margin + attempt * step
+            target = last["n"] - last_back
+            if abs(target - start_n) > max_n:
+                break
+            go(target)
+            last["n"] = target
+            last["m"] = measure()
+        m = last["m"]
+        d_now = f"{4.0 * math.sqrt(m):.1f}" if np.isfinite(m) and m > 0 else "--"
+        return False, (f"Z left off focus (D4sigma {d_now} vs {4.0 * math.sqrt(goal):.1f} px "
+                       f"at focus: the image never got within {100 * tol:.0f} % of the "
+                       f"minimum in 3 park walks) -- run an autofocus")
 
     def park_tolerance(self) -> float:
         """The park tolerance for the focus metric in use (a fraction).
@@ -2877,7 +3123,8 @@ class Camera:
                "spot_relative": af.park_tolerance_relative}.get(af.mechanism, 0.0)
         return float(own) if own and own > 0 else float(af.park_tolerance)
 
-    def effective_park_tolerance(self, target: float, noise: float) -> tuple[float, str]:
+    def effective_park_tolerance(self, target: float, noise: float,
+                                 base: float | None = None) -> tuple[float, str]:
         """(tolerance as a fraction, why) for a park aiming at ``target``.
 
         The configured tolerance (park_tolerance()), but never tighter than
@@ -2887,9 +3134,13 @@ class Camera:
         level "worse" only beyond that, so a noise estimate bigger than it
         means the walk could not tell up from down either -- parking anywhere
         in a band that wide would hide that, not fix it.
+
+        ``base`` = the configured tolerance to start from (default: the one of
+        the AF mechanism in use); the Z step calibration always measures
+        sigma^2, so it passes park_tolerance_d4sigma whatever the AF metric.
         """
         af = self.cfg.autofocus
-        base = self.park_tolerance()
+        base = self.park_tolerance() if base is None else float(base)
         k = max(0.0, float(af.park_noise_k))
         frac = (abs(float(noise)) / abs(float(target))
                 if np.isfinite(noise) and np.isfinite(target) and target else 0.0)
@@ -3702,8 +3953,87 @@ class Camera:
             self._status.objective_name = name
             self._status.pixel_size_x = obj.pixel_size_x_um
             self._status.pixel_size_y = obj.pixel_size_y_um
+        af_note = ""
+        if name != self._af_obj_name:
+            # only when the objective CHANGES (or at start): apply_config calls
+            # this after every set_config, and a value the user edited for this
+            # session must not be put back by the next unrelated Apply
+            af_note = self._apply_objective_af(obj)
         if not quiet:
-            self._emit("info", f"objective {name}: {obj.pixel_size_x_um:.4f} um/px")
+            self._emit("info", f"objective {name}: {obj.pixel_size_x_um:.4f} um/px{af_note}")
+
+    def _apply_objective_af(self, obj) -> str:
+        """Put the objective's autofocus distances (objectives.ini) into the
+        autofocus config; returns a note for the event ("" = none).
+
+        Why per objective (Lukas 2026-09-29: "suggest zcal_max_travel 8 um,
+        but this differs between objective lenses"): the focal depth scales as
+        ~1/NA^2, so how far an autofocus / the Z step calibration may walk and
+        how big its steps are belong to the lens. Rules:
+          * a key the objective does not name keeps the autofocus config value;
+          * switching objectives first puts back what the previous objective
+            had replaced (``_af_obj_base``), so a 63x travel does not stay on
+            when the 20x (without that key) is selected;
+          * save_config writes those base values, not the objective's (see
+            save_config), so camera.ini stays the objective-neutral default.
+        """
+        af = self.cfg.autofocus
+        for k, v in self._af_obj_applied.items():
+            if k in self._af_obj_base:
+                setattr(af, k, self._af_obj_base[k])
+        self._af_obj_applied, self._af_obj_base = {}, {}
+        for k, v in (getattr(obj, "af", None) or {}).items():
+            if k in OBJ.AF_KEYS and hasattr(af, k):
+                self._af_obj_base[k] = getattr(af, k)
+                setattr(af, k, float(v))
+                self._af_obj_applied[k] = float(v)
+        self._af_obj_name = obj.name
+        if not self._af_obj_applied:
+            return ""
+        return "; autofocus from the objective: " + ", ".join(
+            f"{k} {v:g}" for k, v in self._af_obj_applied.items())
+
+    def _af_objective_keys(self) -> str:
+        """Comma list of the autofocus settings whose CURRENT value is the one
+        the objective put in (a value edited since then no longer counts)."""
+        af = self.cfg.autofocus
+        return ",".join(k for k, v in self._af_obj_applied.items()
+                        if getattr(af, k, None) == v)
+
+    def store_objective_af(self, key: str, value: float | None = None,
+                           previous: float | None = None) -> dict:
+        """Store an autofocus distance for the CURRENT objective in
+        objectives.ini (and use it now). ``value`` None = the current config
+        value. ``previous`` = the value before the user's edit: it becomes the
+        one to go back to for an objective without this key (the GUI sends it:
+        by the time it asks, the edit has already been applied).
+
+        Writes ONE line of the objectives file (objectives.store_af_value keeps
+        every other line and comment). A file that does not exist yet (the
+        built-in table) is first written out whole, so storing one value does
+        not reduce the table to that one objective.
+        """
+        from pathlib import Path
+        if key not in OBJ.AF_KEYS:
+            raise ValueError(f"{key!r} is not a per-objective autofocus setting "
+                             f"({', '.join(OBJ.AF_KEYS)})")
+        name = self.cfg.image.objective_name
+        obj = OBJ.resolve(self._objectives, name)
+        if obj is None:
+            raise ValueError(f"no objective {name!r} in the table: select one first")
+        v = float(getattr(self.cfg.autofocus, key) if value is None else value)
+        path = self.cfg.image.objectives_file
+        if not Path(path).exists():
+            OBJ.save_objectives(self._objectives, path)
+        OBJ.store_af_value(path, name, key, v)
+        obj.af[key] = v
+        if key not in self._af_obj_applied:
+            self._af_obj_base[key] = (float(previous) if previous is not None
+                                      else getattr(self.cfg.autofocus, key))
+        self._af_obj_applied[key] = v
+        setattr(self.cfg.autofocus, key, v)
+        self._emit("info", f"autofocus {key} = {v:g} stored for objective {name} ({path})")
+        return {"objective": name, "key": key, "value": v, "path": str(path)}
 
     # ------------------------------------------------------------------ #
     # clamps to the safety envelope
@@ -3983,7 +4313,19 @@ class Camera:
         """Write the whole config to an INI (default: camera-control/camera.ini)."""
         from .config import save_config
         path = path or self.config_file()
-        save_config(self.cfg, path)
+        # camera.ini holds the objective-NEUTRAL autofocus distances: a value
+        # that came from the objective (objectives.ini) is written as the one
+        # it replaced, or the next start with another objective would inherit
+        # the 63x travel. A value the user edited since is theirs and is saved.
+        af = self.cfg.autofocus
+        swapped = {k: getattr(af, k) for k in self._af_objective_keys().split(",") if k}
+        try:
+            for k in swapped:
+                setattr(af, k, self._af_obj_base[k])
+            save_config(self.cfg, path)
+        finally:
+            for k, v in swapped.items():
+                setattr(af, k, v)
         self._emit("info", f"config saved -> {path}")
         return path
 
