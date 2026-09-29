@@ -191,6 +191,18 @@ before/after routines.
     pointed at the illuminated block, not at the laser.
   - PixelFormat Mono8: the spot metrics run on 8-bit frames (the info line
     says so); Mono10/12 not yet tried.
+  - Re-checked after 9da7a07 (every spot search stays inside the search region
+    around the calibrated laser): locate = blob at 65 us finds the spot (0.6 px);
+    at the saturated working exposure blob and peak no longer land on the
+    illuminated block -- they report nothing ("1 larger than max area,
+    1 elongated") instead of a wrong position; the why-text at 65 us names the
+    laser 50 px from a hand-shifted calibration. Calibrate as "saturated" at the
+    working exposure: (973.39, 464.84) +- 0.94 px, 0.3 px from the unsaturated
+    calibration; with the calibration moved far away it refuses. An
+    "unsaturated / at the AF exposure" calibration with autofocus.exposure_us = 0
+    (not set in camera.ini) refuses correctly ("jumps by 99 px between frames").
+    Two one_way + D4sigma runs: OK, 30.3 / 29.7 px; the AF itself no longer
+    repeats the SATURATED info line.
 - Not yet checked on the rig: the lost-pattern fault of 2026-09-28, the Z step
   calibration, 12-bit spot frames.
 
