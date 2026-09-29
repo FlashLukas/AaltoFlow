@@ -40,6 +40,16 @@ class InstrumentError(RuntimeError):
     """A service replied {"ok": false}, or could not be reached at all."""
 
 
+class ScanBusy(InstrumentError):
+    """Another scan is using this instrument (one scan at a time; control.py).
+
+    Raised BEFORE the scan moves anything, so nothing needs undoing."""
+
+    def __init__(self, message: str, instrument: str = ""):
+        super().__init__(message)
+        self.instrument = instrument
+
+
 class InstrumentFault(InstrumentError):
     """The service answers, but its status says its readings are not trustworthy.
 
@@ -104,7 +114,10 @@ class Instrument:
                  timeout_ms: int = 3000, stale_after_s: float = STALE_AFTER_S,
                  fault_grace_s: float = FAULT_GRACE_S):
         self.name = name
-        self.identity = make_identity("machine", "scan-core")
+        # role "scan": one scan at a time per instrument (claim_scan below)
+        self.identity = make_identity("machine", "scan-core", role="scan")
+        self._gui_beat = False          # heartbeats for the Control tab's identity
+        self._scan_beat = False         # ... and for a scan that holds a claim
         # the Control tab's clicks go as a person ("gui"), see gui_command
         self.gui_identity = make_identity("gui", "measurement suite")
         self._hb: threading.Thread | None = None
@@ -186,16 +199,52 @@ class Instrument:
 
     def start_gui_heartbeat(self) -> None:
         """Say "the suite is still here" every few seconds, as a GUI does, so
-        the service lists it and a control it took does not lapse. Runs in a
-        thread (a REQ round trip must not sit on the GUI thread)."""
+        the service lists it and a control it took does not lapse."""
+        self._gui_beat = True
+        self._ensure_heartbeat()
+
+    def claim_scan(self, label: str) -> bool:
+        """Claim this instrument for ONE scan (suite_common/control.py).
+
+        True = claimed; the claim is kept alive by heartbeats until
+        `release_scan`. False = the service predates the claim (it answers
+        "unknown command") -- it cannot be protected, the caller decides what
+        to say. Raises ScanBusy when another scan holds it.
+        """
+        try:
+            self.command("claim_scan", label=label)
+        except InstrumentError as exc:
+            text = str(exc)
+            if "unknown command" in text:
+                return False
+            if "busy: scan" in text:
+                raise ScanBusy(text, self.name) from None
+            raise
+        self._scan_beat = True
+        self._ensure_heartbeat()
+        return True
+
+    def release_scan(self) -> None:
+        self._scan_beat = False
+        try:
+            self.command("release_scan")
+        except Exception:
+            pass           # down: the claim lapses by itself after the lease
+
+    def _ensure_heartbeat(self) -> None:
+        # ONE thread for both identities; it runs a REQ round trip, which must
+        # never sit on the GUI thread
         if self._hb is not None:
             return
 
         def beat():
             while not self._stop.wait(HEARTBEAT_S):
                 try:
-                    r = self.gui_command("heartbeat")
-                    self.control = r.get("control", self.control)
+                    if self._gui_beat:
+                        r = self.gui_command("heartbeat")
+                        self.control = r.get("control", self.control)
+                    if self._scan_beat:
+                        self.command("heartbeat")
                 except Exception:
                     pass        # a service without control, or down for a moment
         self._hb = threading.Thread(target=beat, daemon=True,

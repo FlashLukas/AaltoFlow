@@ -151,6 +151,38 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
         pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
+    """Execute `recipe` against `registry` -- ONE scan per instrument at a time.
+
+    Before anything moves, every instrument the scan uses is claimed for it
+    (`registry.scan_claim`, suite_common/control.py): Lukas, 2026-09-29, "make
+    sure there is no more than one scanning core running the same
+    instruments". A second suite -- on this PC or another -- gets ScanBusy
+    naming the scan that holds it, and nothing of this scan has been sent. The
+    claim is given back at the end, also after an abort or an error. The rest
+    is `_run` (below).
+    """
+    claim = getattr(registry, "scan_claim", None)
+    if claim is None:
+        return _run(recipe, registry, on_progress, should_abort, created_iso,
+                    on_point, on_log, data_path, on_fault, fault_check,
+                    pause_poll_s, on_window)
+    errs = recipe.validate(registry)
+    if errs:
+        raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
+    ids = _used_ids(recipe, recipe.compile(registry), registry)
+    release = claim(ids, getattr(recipe, "name", "") or "scan", on_log)
+    try:
+        return _run(recipe, registry, on_progress, should_abort, created_iso,
+                    on_point, on_log, data_path, on_fault, fault_check,
+                    pause_poll_s, on_window)
+    finally:
+        release()
+
+
+def _run(recipe, registry, on_progress=None, should_abort=None,
+         created_iso: str | None = None, on_point=None,
+         on_log=None, data_path=None, on_fault=None, fault_check=None,
+         pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_progress(done, total, eta_s) : optional callback for a GUI/CLI.

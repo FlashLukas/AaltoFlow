@@ -302,6 +302,11 @@ class Registry:
         #: sets it to the Lab's check, so the ENGINE -- which knows the ids a
         #: scan uses but nothing about sockets -- can ask before every reading.
         self.fault_check = None
+        #: `scan_claim(ids, label, on_log) -> release()`: claim the instruments
+        #: behind these ids for ONE scan (a second scan is refused with
+        #: ScanBusy). None = nothing to claim (the simulator). Set by
+        #: build_lab_registry; the engine calls it before the first move.
+        self.scan_claim = None
 
     def add(self, p: Parameter) -> Parameter:
         self._params[p.id] = p

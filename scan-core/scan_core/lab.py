@@ -169,6 +169,39 @@ class Lab:
             raise InstrumentError(f"{label}: not connected")
         return inst.command("clear_fault")
 
+    # ---- one scan at a time per instrument (suite_common/control.py) ------
+
+    def claim_scan(self, names, label: str, on_log=None):
+        """Claim every named instrument for ONE scan, or none of them.
+
+        Returns a `release()` to call when the scan ends (normally, aborted or
+        failed). Raises ScanBusy -- after giving back what it had claimed --
+        when another scan (a second suite, here or on another PC) uses one of
+        them: nothing has moved yet, so nothing needs undoing. A service that
+        predates the claim is reported through `on_log` and left unprotected.
+        """
+        log = on_log or (lambda m: None)
+        claimed = []
+        try:
+            for name in sorted(set(names)):
+                inst = self.instruments.get(name)
+                if inst is None or not hasattr(inst, "claim_scan"):
+                    continue
+                if inst.claim_scan(label):
+                    claimed.append(inst)
+                else:
+                    log(f"{module_prefix(inst)}: this service cannot be claimed for "
+                        "one scan (it predates it) -- another scan could drive it too")
+        except Exception:
+            for inst in claimed:
+                inst.release_scan()
+            raise
+
+        def release():
+            for inst in claimed:
+                inst.release_scan()
+        return release
+
     def close(self) -> None:
         for inst in self.instruments.values():
             inst.close()
@@ -366,7 +399,12 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
         names = {owner[i] for i in ids if i in owner}
         return lab.faults(names) if names else []
 
+    def scan_claim(ids, label, on_log=None):
+        # the instruments THIS scan uses, as for the fault check
+        return lab.claim_scan({owner[i] for i in ids if i in owner}, label, on_log)
+
     reg.fault_check = fault_check
+    reg.scan_claim = scan_claim
     reg.owner = owner
     try:
         for name in include:

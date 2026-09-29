@@ -205,3 +205,33 @@ DEMO_MANIFEST = {
          "args": [{"name": "amplitude_A", "type": "float", "default": 1.5}]},
     ],
 }
+
+
+#: DEMO_MANIFEST plus a STOP action (a safety verb: always allowed)
+CONTROLLED_MANIFEST = {**DEMO_MANIFEST, "parameters": DEMO_MANIFEST["parameters"] + [
+    {"id": "stop", "label": "STOP", "kind": "action", "type": "action", "danger": False}]}
+
+
+class ControlledFake(FakeService):
+    """The fake with the REAL control gate (suite_common/control.py) in front:
+    who holds control, one scan at a time. `sent` = what got through."""
+
+    def __init__(self, *a, **k):
+        from suite_common.control import ControlLease
+        super().__init__(*a, **k)
+        self.lease = ControlLease(safety={"stop"})
+        self.sent: list[dict] = []
+
+    def _status(self):
+        st = super()._status()
+        st["control"] = self.lease.status()
+        return st
+
+    def _handle(self, msg):
+        gate = self.lease.handle(msg)
+        if gate is not None:
+            return gate
+        self.sent.append(msg)
+        if msg.get("cmd") in ("stop", "set_enabled"):
+            return {"ok": True}
+        return super()._handle(msg)

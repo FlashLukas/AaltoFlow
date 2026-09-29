@@ -31,6 +31,16 @@ The rules (docs/DEVELOPER_NOTES.md, "Control: one controller, many viewers"):
   ``driving`` in the status's client list, and every control bar says "also
   driving: scan-core" -- a stage moving under a person's GUI is never a
   mystery.
+* ONE SCAN AT A TIME per instrument (Lukas, 2026-09-29: "make sure there is
+  no more than one scanning core running the same instruments"). A scan
+  engine identifies with ``role: "scan"`` and claims every instrument it uses
+  (``claim_scan{label}``) before its first point, releasing it at the end.
+  While one scan holds the claim, a change from ANY other scan engine -- a
+  second suite on the same PC or on another -- is refused, and so is its
+  claim. Separate from control on purpose: the camera's autofocus (a machine,
+  no scan role) and people keep their rules; only two scans are kept apart.
+  The claim lapses like control (no heartbeat for ``lease_s``), so a crashed
+  scan frees its instruments.
 * Nobody holds control -> everything is allowed, with or without an id, as
   before this file existed (a headless setup with no GUI works unchanged).
 * ``take_control{force: false}`` takes control only when it is free;
@@ -64,7 +74,7 @@ CLIENT_FORGET_S = 3 * LEASE_S
 #: Verbs every module treats as read-only (plus the prefixes below).
 READ_VERBS = frozenset({"status", "info", "describe", "get_config",
                         "heartbeat", "take_control", "release_control",
-                        "clients"})
+                        "clients", "claim_scan", "release_scan"})
 READ_PREFIXES = ("get_", "read_", "list_")
 #: Verbs allowed for everyone, always. ``shutdown``: see the module docstring.
 ALWAYS_VERBS = frozenset({"shutdown"})
@@ -72,7 +82,7 @@ ALWAYS_VERBS = frozenset({"shutdown"})
 KINDS = ("gui", "script", "machine")
 
 
-def make_identity(kind: str = "script", name: str = "") -> dict:
+def make_identity(kind: str = "script", name: str = "", role: str = "") -> dict:
     """A fresh identity for one client object: random id + who and where.
 
     The user and PC names are read at run time and travel only to the
@@ -85,8 +95,11 @@ def make_identity(kind: str = "script", name: str = "") -> dict:
         user = getpass.getuser()
     except Exception:
         user = "?"
-    return {"id": uuid.uuid4().hex, "kind": kind, "name": name or kind,
-            "host": f"{user}@{socket.gethostname()}"}
+    ident = {"id": uuid.uuid4().hex, "kind": kind, "name": name or kind,
+             "host": f"{user}@{socket.gethostname()}"}
+    if role:
+        ident["role"] = role      # "scan": the scan engine (see claim_scan)
+    return ident
 
 
 def pc_of(ident: dict | None) -> str:
@@ -140,6 +153,8 @@ class ControlLease:
         self._holder_seen = 0.0                # monotonic
         self._clients: dict[str, tuple[dict, float]] = {}   # id -> (identity, seen)
         self._changed: dict[str, float] = {}   # machine id -> when it last changed something
+        self._scan: dict | None = None          # the scan engine holding the scan claim
+        self._scan_seen = 0.0
 
     # ------------------------------------------------------------------ #
     def is_write(self, cmd) -> bool:
@@ -156,7 +171,8 @@ class ControlLease:
         if not isinstance(c, dict) or not c.get("id"):
             return None
         return {"id": str(c["id"]), "kind": str(c.get("kind") or "script"),
-                "name": str(c.get("name") or ""), "host": str(c.get("host") or "")}
+                "name": str(c.get("name") or ""), "host": str(c.get("host") or ""),
+                "role": str(c.get("role") or "")}
 
     def _expire(self, now: float) -> None:
         # caller holds the lock
@@ -165,6 +181,12 @@ class ControlLease:
             self._holder = None
             self.on_event("warn", f"control: {describe_holder(old)} went silent for "
                                   f"{self.lease_s:.0f} s -- control is free")
+        if self._scan is not None and now - self._scan_seen > self.lease_s:
+            old = self._scan
+            self._scan = None
+            self.on_event("warn", f"scan: '{old.get('label')}' ({describe_holder(old)}) "
+                                  f"went silent for {self.lease_s:.0f} s -- the "
+                                  "instrument is free for another scan")
         for cid in [k for k, (_, seen) in self._clients.items()
                     if now - seen > CLIENT_FORGET_S]:
             del self._clients[cid]
@@ -179,6 +201,8 @@ class ControlLease:
         self._clients[ident["id"]] = (ident, now)
         if self._holder is not None and same_pc(self._holder, ident):
             self._holder_seen = now
+        if self._scan is not None and self._scan["id"] == ident["id"]:
+            self._scan_seen = now
 
     def _holds(self, ident: dict | None) -> bool:
         # caller holds the lock
@@ -213,8 +237,24 @@ class ControlLease:
                     return {"ok": True, "released": True, "control": self._status_locked(now)}
                 return {"ok": True, "released": False, "control": self._status_locked(now)}
 
+            if cmd == "claim_scan":
+                return self._claim_scan(ident, str(req.get("label") or "scan"), now)
+            if cmd == "release_scan":
+                if ident is not None and self._scan is not None \
+                        and self._scan["id"] == ident["id"]:
+                    self._scan = None
+                    return {"ok": True, "released": True}
+                return {"ok": True, "released": False}
+
             if not self.is_write(cmd):
                 return None
+            # one scan at a time: a SCAN engine that does not hold the scan
+            # claim may not change anything while another scan holds it
+            if ident is not None and ident.get("role") == "scan" \
+                    and self._scan is not None and self._scan["id"] != ident["id"]:
+                return {"ok": False, "refused": "scan",
+                        "error": self._busy_text(cmd),
+                        "control": self._status_locked(now)}
             if ident is not None and ident["kind"] == "machine":
                 self._changed[ident["id"]] = now      # shown as "also driving"
                 return None
@@ -232,6 +272,31 @@ class ControlLease:
                     "error": f"read-only: {who} has control of this instrument "
                              f"(since {since}); {cmd!r} was not sent -- {hint}",
                     "control": self._status_locked(now)}
+
+    def _busy_text(self, cmd=None) -> str:
+        # caller holds the lock
+        s = self._scan or {}
+        since = time.strftime("%H:%M", time.localtime(s.get("since", 0)))
+        what = f"{cmd!r} was not sent -- " if cmd else ""
+        return (f"busy: scan '{s.get('label')}' from {describe_holder(s)} has been "
+                f"using this instrument since {since}; {what}only one scan may drive "
+                "an instrument at a time (wait for it to end, or abort it there)")
+
+    def _claim_scan(self, ident: dict | None, label: str, now: float) -> dict:
+        # caller holds the lock
+        if ident is None:
+            return {"ok": False, "error": "claim_scan needs a client identity"}
+        if self._scan is not None and self._scan["id"] != ident["id"]:
+            return {"ok": False, "refused": "scan", "error": self._busy_text(),
+                    "control": self._status_locked(now)}
+        fresh = self._scan is None
+        self._scan = dict(ident, label=label, since=time.time()) if fresh \
+            else dict(self._scan, label=label)
+        self._scan_seen = now
+        if fresh:
+            self.on_event("info", f"scan: '{label}' ({describe_holder(ident)}) started "
+                                  "using this instrument")
+        return {"ok": True, "granted": True, "control": self._status_locked(now)}
 
     def _take(self, ident: dict | None, force: bool, now: float) -> dict:
         # caller holds the lock
@@ -273,6 +338,9 @@ class ControlLease:
         # (the suite's Control tab) keeps exactly those buttons usable
         return {"holder": dict(h) if h else None, "clients": clients,
                 "lease_s": self.lease_s,
+                # the scan engine using this instrument right now (label, host,
+                # since), or None -- one scan at a time
+                "scan": dict(self._scan) if self._scan else None,
                 "always": sorted(self.safety | ALWAYS_VERBS)}
 
 

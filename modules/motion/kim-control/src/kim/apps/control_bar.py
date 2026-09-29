@@ -194,15 +194,19 @@ class ControlBar(QFrame):
         self.viewer = not mine
         me = self.client.identity
         clients = [c for c in ctl.get("clients", []) if c.get("id") != me["id"]]
-        # machines that changed something lately (a scan, the camera's autofocus)
-        driving = [c for c in clients if c.get("kind") == "machine" and c.get("driving")]
+        # machines that changed something lately (the camera's autofocus...);
+        # the scan holding this instrument is named by its own line below
+        scan = ctl.get("scan")
+        driving = [c for c in clients if c.get("kind") == "machine" and c.get("driving")
+                   and c.get("id") != (scan or {}).get("id")]
         # people elsewhere: not this PC (it shares control with us), no machines
         others = [c for c in clients if c.get("kind") != "machine"
                   and c.get("id") != (holder or {}).get("id")
                   and _pc(c) != _pc(me)]
         key = (mine, (holder or {}).get("id"),
                tuple(sorted(c.get("id", "") for c in others)),
-               tuple(sorted(c.get("id", "") for c in driving)))
+               tuple(sorted(c.get("id", "") for c in driving)),
+               (scan or {}).get("id"), (scan or {}).get("label"))
         if key == self._last_key and not self._flashing:
             return
         self._last_key = key
@@ -216,6 +220,8 @@ class ControlBar(QFrame):
                     "nothing can be changed here")
         else:
             text = "VIEWER — nobody has control at the moment."
+        if scan:
+            text += f"  ·  scan '{scan.get('label')}' running ({_pc(scan) or '?'})"
         if driving:
             text += "  ·  also driving: " + ", ".join(
                 c.get("name") or "a program" for c in driving)

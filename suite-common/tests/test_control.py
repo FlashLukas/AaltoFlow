@@ -144,6 +144,52 @@ def test_a_machine_that_changes_something_is_shown_as_driving():
     assert l.status()["clients"][0]["driving"] is False           # scan over
 
 
+def _scan_engine(name="scan-core", host=None):
+    i = C.make_identity("machine", name, role="scan")
+    i["host"] = host or next(_pcs)
+    return i
+
+
+def test_only_one_scan_may_drive_an_instrument():
+    """Lukas: no more than one scanning core on the same instruments -- a
+    second suite on the same PC as much as one on another PC."""
+    l, _, events = lease()
+    s1 = _scan_engine(host="lab@lab-pc")
+    s2 = _scan_engine(host="lab@lab-pc")             # same PC, second suite
+    s3 = _scan_engine(host="me@office")
+    assert l.handle(req("claim_scan", s1, label="field map"))["granted"]
+    assert l.handle(req("move_to_um", s1)) is None                 # the owner scans
+    for other in (s2, s3):
+        r = l.handle(req("claim_scan", other, label="other"))
+        assert r["ok"] is False and r["refused"] == "scan"
+        assert "field map" in r["error"] and "one scan" in r["error"]
+        r = l.handle(req("move_to_um", other))                     # without claiming
+        assert r["refused"] == "scan"
+    # not a scan: the camera's autofocus and people keep their own rules
+    cam = ident("camera", kind="machine")
+    assert l.handle(req("move_to_um", cam)) is None
+    assert l.handle(req("stop", s2)) is None                       # safety: always
+    assert l.status()["scan"]["label"] == "field map"
+    assert any("field map" in m and "started" in m for _, m in events)
+    assert l.handle(req("release_scan", s2))["released"] is False  # not its claim
+    assert l.handle(req("release_scan", s1))["released"] is True
+    assert l.handle(req("claim_scan", s3, label="next"))["granted"]
+
+
+def test_a_crashed_scan_frees_the_instrument():
+    l, clock, events = lease(lease_s=10)
+    s1, s2 = _scan_engine(), _scan_engine()
+    l.handle(req("claim_scan", s1, label="a"))
+    clock.t += 8
+    l.handle(req("heartbeat", s1))                    # a long settle: still alive
+    clock.t += 8
+    assert l.status()["scan"] is not None
+    clock.t += 11                                     # the process died
+    assert l.status()["scan"] is None
+    assert any("went silent" in m and "'a'" in m for _, m in events)
+    assert l.handle(req("claim_scan", s2, label="b"))["granted"]
+
+
 def test_take_needs_an_identity_and_unknown_commands_are_not_writes():
     l, _, _ = lease()
     assert l.handle(req("take_control"))["ok"] is False

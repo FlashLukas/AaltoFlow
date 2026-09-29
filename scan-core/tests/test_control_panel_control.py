@@ -19,36 +19,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6 import QtWidgets  # noqa: E402
 
-from conftest import DEMO_MANIFEST, FakeService  # noqa: E402
+from conftest import CONTROLLED_MANIFEST as MANIFEST, ControlledFake  # noqa: E402
 from scan_core.lab import build_lab_registry  # noqa: E402
-from suite_common.control import ControlLease, make_identity  # noqa: E402
-
-MANIFEST = copy.deepcopy(DEMO_MANIFEST)
-MANIFEST["parameters"].append({"id": "stop", "label": "STOP", "kind": "action",
-                               "type": "action", "danger": False})
-
-
-class ControlledFake(FakeService):
-    """The conftest fake with the real control gate in front of it."""
-
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self.lease = ControlLease(safety={"stop"})
-        self.sent: list[dict] = []
-
-    def _status(self):
-        st = super()._status()
-        st["control"] = self.lease.status()
-        return st
-
-    def _handle(self, msg):
-        gate = self.lease.handle(msg)
-        if gate is not None:
-            return gate
-        self.sent.append(msg)
-        if msg.get("cmd") in ("stop", "set_enabled"):
-            return {"ok": True}
-        return super()._handle(msg)
+from suite_common.control import make_identity  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -103,9 +76,11 @@ def test_a_panel_at_another_pc_is_a_viewer_and_can_take_control(rig, monkeypatch
     assert svc.lease.handle({"cmd": "take_control", "client": trainer})["granted"]
     inst = next(iter(lab.instruments.values()))
 
-    assert _wait(lambda: (panel._refresh(), "fake" in panel.control_rows)[-1])
+    # (a status frame from before the take may come first: wait for the viewer)
+    assert _wait(lambda: (panel._refresh(), "fake" in panel.control_rows and
+                          "VIEWER" in panel.control_rows["fake"][1].text())[-1])
     _row, label, btn = panel.control_rows["fake"]
-    assert "VIEWER" in label.text() and "kim GUI" in label.text()
+    assert "kim GUI" in label.text()
     assert btn.text() == "Take control"
     w = panel.widgets
     assert not w["fake.rf_power"].isEnabled()          # a knob: greyed

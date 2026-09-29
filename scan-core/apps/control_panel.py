@@ -891,8 +891,13 @@ class ControlPanel(QtWidgets.QWidget):
                     f"since {since}")
         else:
             text = f"{module}: nobody has control -- changes allowed"
+        scan = ctl.get("scan")
+        if scan:
+            pc = str(scan.get("host") or "?").rpartition("@")[2]
+            text += f"  ·  scan '{scan.get('label')}' running ({pc})"
         driving = [c.get("name") or "a program" for c in ctl.get("clients", [])
-                   if c.get("kind") == "machine" and c.get("driving")]
+                   if c.get("kind") == "machine" and c.get("driving")
+                   and c.get("id") != (scan or {}).get("id")]
         if driving:
             text += "  ·  also driving: " + ", ".join(driving)
 

@@ -255,6 +255,21 @@ still assumes piezo/zpiezo.
     bar (and the suite's Control tab) says "also driving: scan-core" -- a stage
     moving under a person's GUI is never a mystery. Status `control.always`
     lists the verbs a viewer may still send.
+  - **One scan at a time per instrument** (Lukas: "no more than one scanning
+    core running the same instruments"). scan-core's identity carries
+    `role: "scan"`; `engine.run` claims every instrument the scan uses
+    (`registry.scan_claim` -> `Lab.claim_scan` -> verb `claim_scan{label}`)
+    BEFORE anything moves and releases them at the end (also after an abort
+    or an error). While a scan holds the claim, the service refuses another
+    scan engine's claim and its changes (`refused: "scan"`, "busy: scan
+    '<label>' from <who> ... since hh:mm") -- a second suite on the same PC as
+    much as one on another PC; that scan fails with `ScanBusy` before it has
+    sent anything. Heartbeats keep the claim alive through long settles; a
+    crashed scan frees it after 10 s. The camera's autofocus (machine, no scan
+    role), people and safety verbs are not affected. A service without
+    control cannot be claimed: the scan runs and logs that it is unprotected
+    -- another reason to roll control out to every module. Bars and the
+    Control tab say "scan '<label>' running (<PC>)".
   - **The measurement suite's Control tab is a PERSON**: its clicks go as a
     "gui" client (`Instrument.gui_command`, one identity per module
     connection, heartbeats from `start_gui_heartbeat`), while the scan engine
