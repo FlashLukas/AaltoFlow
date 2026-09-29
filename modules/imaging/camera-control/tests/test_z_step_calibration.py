@@ -252,3 +252,26 @@ def test_the_autofocus_tab_runs_it_and_shows_the_result():
     finally:
         brain.shutdown()
         app.processEvents()
+
+
+def test_the_live_spot_sizes_keep_running_during_the_z_calibration():
+    """Lukas 2026-09-29: 'during the step calibration the spot measurement is
+    not running' -- the routine owns the engine thread, so the live sizes and
+    the Spot tab trace stood still for the whole run."""
+    brain, z, events = _rig()
+    try:
+        n = brain.calibrate_z_steps()
+        seen = set()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 120:
+            s = brain.status()
+            if s.zcal_running:
+                v = s.spot_d4sigma_px
+                if math.isfinite(v):
+                    seen.add(round(v, 1))
+            elif s.zcal_id == n:
+                break
+            time.sleep(0.02)
+        assert len(seen) > 5, seen      # the size followed Z during the walks
+    finally:
+        brain.shutdown()

@@ -24,6 +24,7 @@ FIRE-AND-FORGET contract: setters return immediately; progress shows up in
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import math
@@ -663,33 +664,7 @@ class Camera:
         #    user decision -- "Calibrate spot" stores it (calibrate_spot), and
         #    THAT position is what click-to-go and the stabiliser use. Not
         #    calibrated -> no position -> neither acts on the spot.
-        sp = self.cfg.spot
-        center = (sp.ref_x, sp.ref_y) if (sp.ref_set and not self._measuring_spot) else None
-        # never the whole frame (Lukas 2026-09-29): uncalibrated -> the region
-        # around the frame centre, like every other spot search
-        where = center if center is not None else (gray.shape[1] / 2.0, gray.shape[0] / 2.0)
-        det = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot,
-                          sp.lookup_region_px, where, sp.min_area_px,
-                          self._max_area_px(gray.shape, where), sp.reject_border,
-                          sp.search_shape,
-                          sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center),
-                          max_area_is_auto=not (sp.max_area_px and sp.max_area_px > 0))
-        st.spot_found = det.found
-        if not det.found:
-            st.spot_found_why, st.spot_found_why_short = det.why, det.why_short
-        if det.found:
-            st.spot_live_x, st.spot_live_y, st.spot_area = det.cx, det.cy, det.area
-            st.spot_bbox_x, st.spot_bbox_y, st.spot_bbox_w, st.spot_bbox_h = det.bbox
-            st.spot_holes = det.n_holes
-            st.spot_orientation = det.orientation_deg
-        spot_position_ok = bool(sp.ref_set)
-        if spot_position_ok:
-            st.spot_x, st.spot_y = float(sp.ref_x), float(sp.ref_y)
-            st.spot_calibrated = True
-        # the threshold-free sizes, around the calibrated position (or, while
-        # calibrating / before calibration, around what the threshold found)
-        guess = center if center is not None else ((det.cx, det.cy) if det.found else None)
-        self._measure_size(gray, guess, st)
+        spot_position_ok = self._measure_spot(gray, st)
 
         # -- pixel size / objective ------------------------------------- #
         px_x = self.cfg.image.pixel_size_x_um
@@ -1390,6 +1365,59 @@ class Camera:
     # ------------------------------------------------------------------ #
     # spot size without a fixed threshold (2026-09-28)
     # ------------------------------------------------------------------ #
+    def _measure_spot(self, gray, st) -> bool:
+        """The per-frame spot check (threshold detection + the threshold-free
+        sizes) into ``st``. Returns whether a calibrated spot position exists.
+
+        A method of its own (2026-09-29) so the frames an autofocus run or the
+        Z step calibration grabs are measured too: those routines own the
+        engine thread, and the live sizes / trace used to stand still for the
+        whole run (Lukas: "during the step calibration the spot measurement is
+        not running")."""
+        sp = self.cfg.spot
+        center = (sp.ref_x, sp.ref_y) if (sp.ref_set and not self._measuring_spot) else None
+        # never the whole frame (Lukas 2026-09-29): uncalibrated -> the region
+        # around the frame centre, like every other spot search
+        where = center if center is not None else (gray.shape[1] / 2.0, gray.shape[0] / 2.0)
+        det = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot,
+                          sp.lookup_region_px, where, sp.min_area_px,
+                          self._max_area_px(gray.shape, where), sp.reject_border,
+                          sp.search_shape,
+                          sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center),
+                          max_area_is_auto=not (sp.max_area_px and sp.max_area_px > 0))
+        st.spot_found = det.found
+        if not det.found:
+            st.spot_found_why, st.spot_found_why_short = det.why, det.why_short
+        if det.found:
+            st.spot_live_x, st.spot_live_y, st.spot_area = det.cx, det.cy, det.area
+            st.spot_bbox_x, st.spot_bbox_y, st.spot_bbox_w, st.spot_bbox_h = det.bbox
+            st.spot_holes = det.n_holes
+            st.spot_orientation = det.orientation_deg
+        spot_position_ok = bool(sp.ref_set)
+        if spot_position_ok:
+            st.spot_x, st.spot_y = float(sp.ref_x), float(sp.ref_y)
+            st.spot_calibrated = True
+        # the threshold-free sizes, around the calibrated position (or, while
+        # calibrating / before calibration, around what the threshold found)
+        guess = center if center is not None else ((det.cx, det.cy) if det.found else None)
+        self._measure_size(gray, guess, st)
+        return bool(sp.ref_set)
+
+    def _publish_spot_live(self, gray) -> None:
+        """Measure the spot on a routine's frame and publish ONLY the spot
+        fields. The measurement fills a scratch copy of the status and the
+        fields are copied into the live one under the lock (gotcha #1)."""
+        try:
+            with self._lock:
+                scratch = dataclasses.replace(self._status)
+            self._measure_spot(gray, scratch)
+        except Exception:
+            return                       # a display nicety: never break the routine
+        names = [f.name for f in dataclasses.fields(scratch) if f.name.startswith("spot_")]
+        with self._lock:
+            for n in names:
+                setattr(self._status, n, getattr(scratch, n))
+
     def _measure_size(self, gray, guess, st) -> None:
         """Fill the threshold-free size fields of ``st`` for this frame.
 
@@ -1944,6 +1972,7 @@ class Camera:
                 self._last_frame = g
                 self._status.frame_number += 1
                 self._status.z_voltage = zr
+            self._publish_spot_live(g)        # live sizes keep running during the routine
             return g
 
         try:
@@ -2486,6 +2515,7 @@ class Camera:
             self._last_frame = g
             self._status.frame_number += 1
             self._status.z_voltage = zr
+        self._publish_spot_live(g)        # live sizes keep running during the routine
         return g
 
     def _zcal_metric(self, gray) -> float:
