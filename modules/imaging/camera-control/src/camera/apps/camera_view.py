@@ -92,15 +92,40 @@ class CameraView(QWidget):
         self._scan_last = None       # last image point (for move deltas)
         self._scan_new_start = None  # anchor for a fresh rectangle
         self._scan_rect = None       # persisted committed/recalled rectangle (px/deg)
+        # DISPLAY-only contrast stretch (Lukas 2026-09-29): at the short
+        # autofocus exposure the background is ~3 grey levels and a defocused
+        # spot is dim, so the zoomed view looked black during a run. The data
+        # the brain measures is never touched -- only the picture.
+        self._stretch = False
         self.setMouseTracking(True)
 
     # -- data in ----------------------------------------------------------- #
+    def set_stretch(self, on: bool) -> None:
+        """Stretch the displayed contrast (background -> black, the brightest
+        pixel -> white) -- used while the autofocus exposure is active."""
+        self._stretch = bool(on)
+
+    @staticmethod
+    def stretched(gray: np.ndarray) -> np.ndarray:
+        """Map [median, max] of the frame onto [0, 255]. The median is the
+        background (the spot is a tiny part of the frame); the MAX, not a high
+        percentile, so a small spot becomes white. A flat frame (range < 8
+        grey levels) is left as it is -- stretching noise shows nothing."""
+        lo = float(np.median(gray))
+        hi = float(gray.max())
+        if hi - lo < 8:
+            return gray
+        out = (gray.astype(np.float32) - lo) * (255.0 / (hi - lo))
+        return np.clip(out, 0, 255).astype(np.uint8)
+
     def set_frame(self, gray: np.ndarray | None) -> None:
         if gray is None:
             return
         if gray.ndim == 3:
             gray = gray[..., 0]
         gray = np.ascontiguousarray(gray, dtype=np.uint8)
+        if self._stretch:
+            gray = np.ascontiguousarray(self.stretched(gray))
         self._buf = gray
         self._frame_h, self._frame_w = gray.shape
         self._img = QImage(self._buf.data, self._frame_w, self._frame_h,

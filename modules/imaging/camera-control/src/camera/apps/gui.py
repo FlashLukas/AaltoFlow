@@ -1912,10 +1912,14 @@ class MainWindow(QMainWindow):
         self._refresh_af_sizes(s)
         on = bool(getattr(s, "af_exposure_active", False))
         self.lab_af_expo.setVisible(on)
+        # the short AF exposure makes the picture almost black: stretch the
+        # DISPLAY while it is active (the measured data is unchanged)
+        self.view.set_stretch(on)
         if on:
             self.lab_af_expo.setText(f"<b>autofocus exposure ON</b> "
                                      f"({self.cfg.autofocus.exposure_us:g} us) -- the working "
-                                     f"exposure comes back when the run ends")
+                                     f"exposure comes back when the run ends; the picture's "
+                                     f"contrast is stretched meanwhile (display only)")
         self._refresh_zcal(s)
         self._refresh_xy(s)
         self._sync_stage(s)                 # after _refresh_xy: it may re-enable Datum

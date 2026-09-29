@@ -492,3 +492,23 @@ def test_no_settings_tab_needs_sideways_scrolling_on_the_lab_screen():
     finally:
         w.close()
         brain.shutdown()
+
+
+def test_the_display_is_stretched_while_the_autofocus_exposure_is_active():
+    """Lukas 2026-09-29: at the 65 us AF exposure the zoomed view looked black
+    (background ~3, a dim defocused spot). Stretch the DISPLAY only."""
+    import numpy as np
+    pytest.importorskip("PySide6")
+    from camera.apps.camera_view import CameraView
+    frame = np.full((120, 160), 3, np.uint8)
+    frame[55:65, 75:85] = 40                        # a dim defocused spot
+    v = CameraView()
+    v.set_frame(frame)
+    assert int(v._buf.max()) == 40                  # normal: as measured
+    v.set_stretch(True)
+    v.set_frame(frame)
+    assert int(v._buf.max()) == 255 and int(np.median(v._buf)) == 0
+    assert int(frame.max()) == 40                   # the data itself untouched
+    flat = np.full((120, 160), 100, np.uint8)
+    v.set_frame(flat)
+    assert int(v._buf.max()) == 100                 # noise is not stretched
