@@ -409,20 +409,47 @@ class Autofocus:
     # A slip-stick Z steps UP and DOWN by different amounts, so its counter is
     # a poor ruler. The routine walks Z up through focus, then down through it,
     # in equal COUNTER steps, measuring sigma^2 (D4sigma) at every level, and
-    # fits a parabola per direction: the ratio of the two curvatures is
-    # (step up / step down)^2. Distances in the Z unit (um on kim), BY THE
+    # compares the WIDTHS of the two curves at equal sigma^2 levels (since
+    # 2026-09-29; before, one parabola per direction). Distances in the Z unit (um on kim), BY THE
     # COUNTER (the routine does not trust them -- that is the point).
     zcal_step_v: float = 0.25          # counter distance between two levels
     zcal_start_offset_v: float = 3.0   # the up walk starts this far below the current Z
     zcal_max_travel_v: float = 30.0    # give up if one walk goes further than this
     zcal_averages: int = 3             # frames averaged per level
-    # fit only the levels with sigma^2 <= this x the smallest one (and the
-    # walks end there): far out the faint wings drop below the camera's grey
-    # levels and sigma^2 reads LOW (rig: R^2 0.98-0.997 within 3x, the wings up
-    # to 50 % low beyond; simulator, 8 bit: already 15 % low at 3x on one side)
-    # -- 2 is the sweep's window too. With 12-bit frames 3 is worth a try.
+    # THE RATIO COMES FROM WIDTHS (2026-09-29). The rig's up walk was LOPSIDED
+    # (the step size changes within one walk), so one parabola per walk is the
+    # wrong model. Instead: at each sigma^2 level L = k x minimum, the counter
+    # distance between the two crossings (before and after focus) in the down
+    # walk divided by the same in the up walk IS step_up / step_down, whatever
+    # the step does along the way (camera/zcal.py explains why).
+    zcal_width_levels: str = "1.3, 1.5, 1.8, 2.0"  # the k's; a level counts only
+    #                                  if BOTH walks reach it on BOTH sides
+    zcal_width_max_spread: float = 0.10  # refuse when the per-level ratios differ
+    #                                  by more than this (max - min) / median
+    zcal_width_min_levels: int = 2     # refuse with fewer usable levels
+    # each walk goes on until sigma^2 has risen past this x its minimum on the
+    # far side (it must be above the highest level, or that level is never
+    # crossed); when the first (up) walk's NEAR side did not start that high,
+    # it is walked once more from below the down walk's end. 2.5, not 2.2:
+    # the next walk starts from here but loses a little to its approach and
+    # its skipped first level (simulator: 2.2 left the 2.0 level just out of
+    # reach). Walking further out is safe for the ratio: the faint wings may
+    # read low there, but they read low at the same TRUE heights in both walks.
+    zcal_walk_to: float = 2.5
+    # levels left out at the start of each walk: they follow a direction
+    # change, and on the rig the first level jumped (172 px^2, the next 136)
+    zcal_skip_first: int = 1
+    # the parabola fits are now a DIAGNOSTIC (their R^2 = how lopsided a walk
+    # is, their curvature ratio = what the old method would have said), over
+    # the levels within this x the smallest sigma^2 (the far 8-bit wings read
+    # LOW) -- 2 is the sweep's window too.
     zcal_fit_window: float = 2.0
-    zcal_min_r2: float = 0.97          # refuse (write nothing) below this, per walk
+    # ... and a SANITY gate only: below this R^2 a walk is not one valley at all
+    # (noise, a moving sample, other light), and its crossings cannot be
+    # trusted either. The rig's lopsided but good up walk had 0.955; the old
+    # gate was 0.97 under the name zcal_min_r2 (renamed so a saved 0.97 in a
+    # camera.ini does not come back as this gate).
+    zcal_fit_min_r2: float = 0.80
     zcal_min_side_levels: int = 3      # fitted levels needed on EACH side of the minimum
     # The absolute scale is not measurable this way (only the ratio). 0 = keep
     # the geometric mean of the two step sizes at the stage's current Z step;

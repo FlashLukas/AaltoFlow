@@ -398,6 +398,20 @@ class KimZFocus:
         self._dc.reset()
         self.link.fresh_status()          # read_z must see the new sizes at once
 
+    def zero_counter(self) -> None:
+        """Datum Z: kim's Z step counter set to 0 at the current position.
+
+        Nothing moves; only the counter. The camera's direction-aware position
+        (DirectionalCounter) re-anchors, because its anchor was counted from
+        the OLD zero -- read_z is 0 right after, and the next move is planned
+        from 0. ``_target_steps`` becomes 0 too: a wait_settled after the
+        datum must not wait for a count that now has a different meaning.
+        """
+        self.link.rpc(cmd="zero_counter", axis="Z")
+        self._dc.reset()
+        self._target_steps = 0
+        self.link.fresh_status()          # read_z must see the new counter at once
+
     def counter_steps(self) -> int:
         """kim's raw Z step counter."""
         return int(_position(self.link.status(), "position_steps")[2])

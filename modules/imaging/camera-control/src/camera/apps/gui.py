@@ -124,8 +124,11 @@ AF_LAYOUT = [
                             (_A, "continuous_gain"), (_A, "continuous_target")]),
      ("Z step calibration", [(_A, "zcal_step_v"), (_A, "zcal_start_offset_v"),
                              (_A, "zcal_max_travel_v"), (_A, "zcal_averages"),
-                             (_A, "zcal_fit_window"), (_A, "zcal_min_r2"),
-                             (_A, "zcal_min_side_levels"), (_A, "zcal_step_um")])],
+                             (_A, "zcal_width_levels"), (_A, "zcal_width_max_spread"),
+                             (_A, "zcal_width_min_levels"), (_A, "zcal_walk_to"),
+                             (_A, "zcal_skip_first"), (_A, "zcal_fit_window"),
+                             (_A, "zcal_fit_min_r2"), (_A, "zcal_min_side_levels"),
+                             (_A, "zcal_step_um")])],
 ]
 # which routine (or switch) uses which autofocus field; the rest of the tab is
 # used by both. Unused fields are GREYED (values kept), with a tooltip.
@@ -498,6 +501,12 @@ class MainWindow(QMainWindow):
         self.b_z_dn = QPushButton("▼  Z −"); self.b_z_dn.setToolTip("focus down: Z − step")
         self.b_z_dn.clicked.connect(lambda: self._step_focus(-1))
         row.addWidget(self.b_z_up); row.addWidget(self.b_z_dn)
+        # Datum Z (Lukas, 2026-09-29): he re-zeroes Z at every focus the image
+        # confirmed. Next to the Z controls; danger style + a confirm, since it
+        # redefines every Z noted before. Enabled only on a Z with a counter.
+        self.b_datum_z = QPushButton("Datum Z"); self.b_datum_z.setObjectName("danger")
+        self.b_datum_z.clicked.connect(self._datum_z)
+        row.addWidget(self.b_datum_z)
         l.addLayout(row)
         row2 = QHBoxLayout()
         self.b_af = QPushButton("Find focus"); self.b_af.setObjectName("primary")
@@ -870,12 +879,16 @@ class MainWindow(QMainWindow):
         # not a step down, so "go back to the best Z" by the counter misses.
         # The camera measures the two step sizes from the spot's sigma^2.
         f, l = _card("Z step calibration (open-loop Z)")
+        # 2026-09-29: the ratio comes from the curves' WIDTHS at equal sigma^2
+        # levels (the rig's walk was lopsided: the step size varies along a
+        # walk, so one parabola per walk was the wrong model)
         note = QLabel("With the spot calibrated and roughly in focus: walks Z up through "
-                      "focus, then down, measuring σ² (D4σ) at equal counter steps. The two "
-                      "parabolas' curvatures give the step ratio up/down; both step sizes go "
-                      "to kim (their geometric mean kept). Refuses rather than guess. The "
-                      "sweep routine relies on it on this Z. Kill AF stops it. Settings: "
-                      "zcal_* above.")
+                      "focus, then down, measuring σ² (D4σ) at equal counter steps. At "
+                      "equal σ² levels the down walk's counter width / the up walk's is the "
+                      "step ratio up/down (no parabola assumed); the levels must agree. "
+                      "Both step sizes go to kim (their geometric mean kept). Refuses rather "
+                      "than guess. The sweep routine relies on it on this Z. Kill AF stops "
+                      "it. Settings: zcal_* above.")
         note.setObjectName("muted"); note.setWordWrap(True)
         l.addWidget(note)
         row = QHBoxLayout()
@@ -942,14 +955,27 @@ class MainWindow(QMainWindow):
             lab.setText("not run yet")
             return
         q = getattr(s, "zcal_ratio", float("nan"))
+        levels = getattr(s, "zcal_levels", "")
+        spread = getattr(s, "zcal_ratio_spread", float("nan"))
+        q_fit = getattr(s, "zcal_ratio_fit", float("nan"))
+        # the evidence, shown for a result AND for a refusal: the per-level
+        # width ratios and their spread, then the parabola fits as diagnostics
+        evidence = ""
+        if levels:
+            evidence += (f"<br>per σ² level (× minimum): {levels} &nbsp; spread "
+                         f"{100 * spread:.1f} %")
+        if math.isfinite(q_fit):
+            evidence += (f"<br><span style='color:{T.COLORS['muted']}'>parabola fits "
+                         f"(diagnostic): ratio {q_fit:.3f}, R² {s.zcal_r2_up:.4f} / "
+                         f"{s.zcal_r2_down:.4f}</span>")
         if state == "OK" and math.isfinite(q):
             lab.setText(f"#{s.zcal_id}: step up / down = <b>{q:.3f}</b> ± "
-                        f"{s.zcal_ratio_err:.3f} &nbsp; R² {s.zcal_r2_up:.4f} / "
-                        f"{s.zcal_r2_down:.4f} &nbsp; up {s.zcal_up_um:.5g}, down "
-                        f"{s.zcal_down_um:.5g} {self._z_unit}/step")
+                        f"{s.zcal_ratio_err:.3f} (width method) &nbsp; up "
+                        f"{s.zcal_up_um:.5g}, down {s.zcal_down_um:.5g} "
+                        f"{self._z_unit}/step{evidence}")
         else:
             lab.setText(f"#{s.zcal_id}: <span style='color:{T.COLORS['danger']}'>"
-                        f"{state}</span>")
+                        f"{state}</span>{evidence}")
 
     def _update_zcal_plot(self):
         """The last Z step calibration's two walks: sigma^2 against the counter."""
@@ -964,10 +990,19 @@ class MainWindow(QMainWindow):
                    if m is not None and math.isfinite(m)]
             if pts:
                 series.append(([p[0] for p in pts], [p[1] for p in pts], color, name))
+        # the WIDTH method made visible: each sigma^2 level as a dashed line,
+        # and where each walk crossed it (open circles, the walk's colour).
+        # The width of a walk at a level = the distance between its two circles.
+        hlines, marks = [], []
+        for lev in c.get("levels", []):
+            hlines.append((lev.get("level"), T.MUTED))
+            for key, color in (("up", T.ACCENT_HI), ("down", T.OK)):
+                for x in lev.get(key, []):
+                    marks.append((x, lev.get("level"), color))
         if series:
             self.af_plot._xlabel = f"Z counter ({c.get('unit', self._z_unit)})"
             self.af_plot._ylabel = "σ² (px²)"
-            self.af_plot.set_series(series)
+            self.af_plot.set_series(series, hlines=hlines, marks=marks)
 
     # -- stage availability -------------------------------------------------
     # The stage (kim) is its own service and can be off or restarting. The
@@ -1038,6 +1073,14 @@ class MainWindow(QMainWindow):
             w.setEnabled(ok)
         if getattr(self, "b_datum", None) is not None:
             self.b_datum.setEnabled(ok and s.xy_has_datum)
+        if getattr(self, "b_datum_z", None) is not None:
+            has = bool(getattr(s, "z_has_datum", False))
+            busy = bool(getattr(s, "af_running", False) or getattr(s, "zcal_running", False))
+            self.b_datum_z.setEnabled(ok and has and not busy)
+            self.b_datum_z.setToolTip(
+                "Set the Z step counter to 0 HERE -- nothing moves. Use it at a focus "
+                "you trust." if has else
+                "no datum: this Z has no step counter (only the kim Z has one)")
         for lab, btn in getattr(self, "_stage_bars", []):
             if ok:
                 lab.setText("stage: connected")
@@ -1262,6 +1305,20 @@ class MainWindow(QMainWindow):
             self.ctrl.datum_xy()
         except Exception as exc:
             self._log_event("warn", f"datum: {exc}")
+
+    def _datum_z(self):
+        from PySide6.QtWidgets import QMessageBox
+        ans = QMessageBox.question(
+            self, "Datum Z",
+            "Set the Z step counter to 0 HERE -- nothing moves; use it at a focus "
+            "you trust.\n\nZ positions noted before this, and kim's leash box in Z, "
+            "will refer to the new 0.")
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            self.ctrl.datum_z()
+        except Exception as exc:
+            self._log_event("warn", f"Datum Z: {exc}")
 
     def _settings_tab(self, groups, compact=False, columns=None,
                       extras=None, partial=(), save=False,

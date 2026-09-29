@@ -118,17 +118,32 @@ class SimSlipStickZ(SimZFocus):
     commanded distance, a move down ``down_gain`` x, so every reversal makes the
     counter and the truth drift apart -- the reason the symmetric sweep parks
     off focus on the real rig, and the reason the one-way routine exists.
+
+    POSITION-DEPENDENT STEPS (2026-09-29, the rig's lopsided Z calibration walk):
+    on the real PIA25 the step size also changes WITHIN one walk in one
+    direction (the up walk through focus was ~2x less steep before focus than
+    after it). Model: a true move of ``gain(direction) x f(true_z)`` per
+    counter unit, with
+      * ``gain_slope`` s (per Z unit): f = 1 + s (z - gain_ref), the SAME law
+        for both directions (gain_ref defaults to z_focus); clipped >= 0.05;
+      * or ``gain_law(true_z, direction) -> f`` (direction +1 up / -1 down),
+        which may differ between the directions (a test of the refusal).
+    Default: f = 1 everywhere (the old uniform model, unchanged).
     """
 
     open_loop = True
 
     def __init__(self, z0: float = 0.0, z_focus: float = 7.6, vmin: float = -100.0,
                  vmax: float = 100.0, up_gain: float = 1.0, down_gain: float = 0.7,
-                 nominal_step: float = 1.0):
+                 nominal_step: float = 1.0, gain_slope: float = 0.0,
+                 gain_ref: float | None = None, gain_law=None):
         super().__init__(z0=z0, z_focus=z_focus, vmin=vmin, vmax=vmax)
         self._true = float(z0)
         self.up_gain = float(up_gain)
         self.down_gain = float(down_gain)
+        self.gain_slope = float(gain_slope)
+        self.gain_ref = float(z_focus if gain_ref is None else gain_ref)
+        self.gain_law = gain_law
         # Like kim: the counter is in STEPS, and the reading is steps x one
         # nominal step size (here 1 Z unit per "step", fractional steps
         # allowed). After a Z step calibration (set_step_sizes) read_z / set_z
@@ -142,8 +157,26 @@ class SimSlipStickZ(SimZFocus):
         up_gain or down_gain times as far -- the slip-stick asymmetry."""
         new = float(np.clip(counter_units, self._vmin, self._vmax))
         delta = new - self._v
-        self._true += delta * (self.up_gain if delta > 0 else self.down_gain)
+        g = self.up_gain if delta > 0 else self.down_gain
+        if self.gain_law is None and self.gain_slope == 0.0:
+            self._true += delta * g
+        else:
+            # dz/dn = g f(z): integrate in small pieces (midpoint rule), since
+            # the step size changes WHILE the stage travels
+            d = 1 if delta > 0 else -1
+            pieces = max(1, int(math.ceil(abs(delta) / 0.02)))
+            h = delta / pieces
+            z = self._true
+            for _ in range(pieces):
+                zm = z + 0.5 * h * g * self._gain_factor(z, d)
+                z += h * g * self._gain_factor(zm, d)
+            self._true = z
         self._v = new
+
+    def _gain_factor(self, z: float, direction: int) -> float:
+        if self.gain_law is not None:
+            return max(0.05, float(self.gain_law(z, direction)))
+        return max(0.05, 1.0 + self.gain_slope * (z - self.gain_ref))
 
     def read_z(self) -> float:
         if self._sizes is None:
@@ -165,6 +198,11 @@ class SimSlipStickZ(SimZFocus):
 
     def move_counter(self, steps: float) -> None:
         self._move_raw(float(steps) * self.nominal_step)
+
+    def zero_counter(self) -> None:
+        """Datum Z, like kim's: the counter becomes 0 HERE; the sample stays put."""
+        self._v = 0.0
+        self._dc.reset()
 
     def step_sizes(self) -> tuple:
         """(up, down) Z units per step as the stage believes them (nominal until set)."""

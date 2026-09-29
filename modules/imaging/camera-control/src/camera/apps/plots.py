@@ -67,19 +67,29 @@ class MiniPlot(QWidget):
         self._x_range = None                # (min, max) or None = autoscale
         self._y_min = None                  # fixed lower y bound, or None
         self._y_max = None
+        self._hlines: list[tuple] = []      # (y, colour_hex): dashed level lines
+        self._marks: list[tuple] = []       # (x, y, colour_hex): open circles
 
-    def set_series(self, series, vline=None, x_range=None, y_min=None, y_max=None) -> None:
+    def set_series(self, series, vline=None, x_range=None, y_min=None, y_max=None,
+                   hlines=None, marks=None) -> None:
         """series: list of (xs, ys, colour_hex, label). vline: x to mark, or None.
-        x_range: fixed (xmin, xmax). y_min / y_max: fixed y bounds (None = data)."""
+        x_range: fixed (xmin, xmax). y_min / y_max: fixed y bounds (None = data).
+        hlines: [(y, colour)] dashed horizontal lines (e.g. the sigma^2 levels
+        of the Z step calibration); marks: [(x, y, colour)] points drawn as open
+        circles on top of the series (e.g. where a walk crossed a level)."""
         self._series = [s for s in series if s and len(s[0]) > 0]
         self._vline = vline
         self._x_range = x_range
         self._y_min, self._y_max = y_min, y_max
+        self._hlines = list(hlines or [])
+        self._marks = list(marks or [])
         self.update()
 
     def clear(self) -> None:
         self._series = []
         self._vline = None
+        self._hlines = []
+        self._marks = []
         self.update()
 
     # -- ranges ---------------------------------------------------------------------
@@ -191,6 +201,10 @@ class MiniPlot(QWidget):
         # series, clipped to the plot area
         p.save()
         p.setClipRect(QRectF(left, top, right - left, bottom - top))
+        for yv, colour in self._hlines:
+            if yv is not None and math.isfinite(yv):
+                p.setPen(QPen(QColor(colour), 1, Qt.DashLine))
+                p.drawLine(QPointF(left, sy(yv)), QPointF(right, sy(yv)))
         for xs, ys, colour, _label in self._series:
             p.setPen(QPen(QColor(colour), 2))
             pts = [QPointF(sx(x), sy(y)) for x, y in zip(xs, ys)
@@ -202,6 +216,11 @@ class MiniPlot(QWidget):
                 for pt in pts:
                     p.drawEllipse(pt, 1.8, 1.8)
                 p.setBrush(Qt.NoBrush)
+        for xv, yv, colour in self._marks:
+            if None not in (xv, yv) and math.isfinite(xv) and math.isfinite(yv):
+                p.setPen(QPen(QColor(colour), 2))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(sx(xv), sy(yv)), 4.5, 4.5)
         p.restore()
 
         # legend in the header row, right-aligned: never on top of the data

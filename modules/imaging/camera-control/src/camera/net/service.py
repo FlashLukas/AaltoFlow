@@ -262,6 +262,9 @@ class CameraService:
         if cmd == "datum_xy":
             b.datum_xy()
             return {"ok": True}
+        if cmd == "datum_z":
+            b.datum_z()
+            return {"ok": True}
         if cmd == "reconnect_stage":
             return {"ok": True, **b.reconnect_stage()}
         if cmd == "read_z":

@@ -41,6 +41,7 @@ import numpy as np
 
 from . import objectives as OBJ
 from . import vision as V
+from . import zcal as ZC
 from .config import CALIB_MODES, LOCATE_MODES, Config
 from .stream import StreamRecorder
 from .template_io import BackupPattern, Reference, load_template, save_template
@@ -256,6 +257,14 @@ class CameraStatus:
     zcal_r2_down: float = float("nan")
     zcal_up_um: float = float("nan")
     zcal_down_um: float = float("nan")
+    # since 2026-09-29 zcal_ratio is the WIDTH ratio (median over the sigma^2
+    # levels); the spread across the levels, their mean, the per-level list
+    # ("1.3x 1.428, 1.5x 1.433") and the parabola fits' ratio (a diagnostic,
+    # what the old method would have said) next to it
+    zcal_ratio_mean: float = float("nan")
+    zcal_ratio_spread: float = float("nan")
+    zcal_ratio_fit: float = float("nan")
+    zcal_levels: str = ""
     best_focus_v: float = 0.0
     z_unit: str = "V"
     z_min: float = 0.0
@@ -272,6 +281,8 @@ class CameraStatus:
     stage_steps_x: int = 0
     stage_steps_y: int = 0
     xy_has_datum: bool = False
+    # the Z has a step counter that can be set to 0 (kim; Datum Z, 2026-09-29)
+    z_has_datum: bool = False
     limits_from_stage: bool = False
     # Is the motion hardware answering? A stage behind a service (kim) can be
     # off or restarting; the GUI greys the stage controls and offers
@@ -799,6 +810,7 @@ class Camera:
         st.stage_ok, st.stage_error = self.stage_state()
         st.xy_step_unit = self.xy_step_unit()
         st.xy_has_datum = callable(getattr(self.xy, "zero_counter", None))
+        st.z_has_datum = self.z_has_datum()
         st.limits_from_stage = bool(getattr(self.xy, "owns_limits", False))
         xylim = self.xy_limits()
         if xylim is not None:
@@ -2433,24 +2445,36 @@ class Camera:
     # lands elsewhere. Lukas chose to MEASURE the two step sizes with the
     # camera (2026-09-28).
     #
-    # HOW. sigma^2 of the spot (the D4sigma metric) is exactly a parabola in
-    # the TRUE Z: sigma^2 = s0 + K (z - z0)^2. Walk Z up through focus in equal
-    # COUNTER steps: the true Z advances s_up per counter unit, so in counter
-    # units the parabola's curvature is K s_up^2. Walk down through focus the
-    # same way: K s_down^2. Their ratio is (s_up / s_down)^2 -- K (the optics)
-    # and z0 (where focus is on the counter, which drifts) drop out. What does
-    # NOT come out is the absolute scale (a stage twice as coarse both ways
-    # gives the same ratio), so the geometric mean of the two sizes is kept at
-    # the stage's current step (or autofocus.zcal_step_um when that is known).
+    # HOW (2026-09-29, the WIDTH method; camera/zcal.py has the full argument).
+    # sigma^2 of the spot (the D4sigma metric) is symmetric about focus in the
+    # TRUE Z. Walk Z up through focus in equal COUNTER steps, then down. A
+    # sigma^2 level L is crossed at the same two true heights in both walks;
+    # the counter it takes to get from one to the other is the true distance
+    # divided by the step size -- so width_down(L) / width_up(L) = s_up /
+    # s_down, at every level, even when the step size changes ALONG the walk
+    # (it does on the rig: the up walk was lopsided, ~2x steeper after focus
+    # than before). What does NOT come out is the absolute scale (a stage twice
+    # as coarse both ways gives the same ratio), so the geometric mean of the
+    # two sizes is kept at the stage's current step (or autofocus.zcal_step_um
+    # when that is known).
+    # The first method -- one parabola per walk, ratio = sqrt of the curvature
+    # ratio -- assumed a constant step within a walk; on the lopsided rig walk
+    # its R^2 was 0.955 and the calibration refused. The fits are kept as a
+    # DIAGNOSTIC (R^2 = how lopsided, their ratio = what that method says) and
+    # as a sanity gate (zcal_fit_min_r2, 0.8: "is this one valley at all").
     #
     # Each walk is approached from beyond its start (so every counted level is
-    # reached moving in the walk's direction -- the first steps after a
-    # reversal are the unreliable ones) and ends by the IMAGE: once sigma^2 has
-    # passed its minimum and climbed back to zcal_fit_window x that minimum.
-    # Only levels within that window are fitted: far out the faint wings sink
-    # below the camera's grey levels and sigma^2 reads low (rig: up to 50 % in
-    # 8 bit). A poor fit (R^2), a minimum not bracketed, or no spot: REFUSED,
-    # nothing written, Z back where it started -- no guess.
+    # reached moving in the walk's direction), its first zcal_skip_first
+    # levels are left out (the rig's first level jumped), and it ends by the
+    # IMAGE: once sigma^2 has passed its minimum and climbed back past
+    # zcal_walk_to x that minimum -- above the highest level, so the far side
+    # crosses every level. If the first (up) walk's NEAR side did not start
+    # that high, it is walked once more, from the down walk's end (which is
+    # past zcal_walk_to below focus); the park then comes from that last up
+    # walk. The per-level ratios must
+    # agree within zcal_width_max_spread; fewer than zcal_width_min_levels
+    # usable levels, levels that disagree, a minimum not bracketed, or no spot:
+    # REFUSED, nothing written, Z back where it started -- no guess.
     def calibrate_z_steps(self) -> int:
         """Queue a Z step calibration; runs on the engine thread. Returns its NUMBER.
 
@@ -2537,8 +2561,10 @@ class Camera:
         nan = float("nan")
         with self._lock:
             self._zcal_state = "running"
-            self._zcal_result = {k: nan for k in ("zcal_ratio", "zcal_ratio_err", "zcal_r2_up",
-                                                  "zcal_r2_down", "zcal_up_um", "zcal_down_um")}
+            self._zcal_result = {k: nan for k in (
+                "zcal_ratio", "zcal_ratio_err", "zcal_r2_up", "zcal_r2_down", "zcal_up_um",
+                "zcal_down_um", "zcal_ratio_mean", "zcal_ratio_spread", "zcal_ratio_fit")}
+            self._zcal_result["zcal_levels"] = ""
             self._publish_zcal_locked()
         self._zcal_curve = {}
         need = ("counter_steps", "move_counter", "step_sizes", "set_step_sizes")
@@ -2561,6 +2587,10 @@ class Camera:
         margin = max(2.0 * step, abs(float(af.approach_margin)) / per_step)
         max_n = abs(float(af.zcal_max_travel_v)) / per_step
         window = max(1.2, float(af.zcal_fit_window))
+        # the walks go on until sigma^2 is past the highest level on the far
+        # side; never less than the diagnostic fit's window
+        walk_to = max(window, float(af.zcal_walk_to))
+        skip = max(0, int(af.zcal_skip_first))
         n_side = max(2, int(af.zcal_min_side_levels))
         n_avg = max(1, int(af.zcal_averages))
         wait = getattr(z, "wait_settled", None)
@@ -2571,13 +2601,23 @@ class Camera:
         settle_s = self.cfg.hardware.z_step_time_ms / 1000.0
         walks = {"up": ([], []), "down": ([], [])}
 
-        def publish(fits=None):
-            self._zcal_curve = {
-                "unit": unit, "per_step": per_step,
+        def publish(fits=None, widths=None):
+            curve = {
+                "unit": unit, "per_step": per_step, "skip_first": skip,
                 "up": {"z": [n * per_step for n in walks["up"][0]], "metric": list(walks["up"][1])},
                 "down": {"z": [n * per_step for n in walks["down"][0]],
                          "metric": list(walks["down"][1])},
                 "fits": fits or {}}
+            if widths is not None:
+                # for the plot: each usable level and where each walk crossed
+                # it (Z unit, by the counter) -- the width IS the measurement
+                curve["m_ref"] = widths.m_ref
+                curve["levels"] = [{"k": d["k"], "level": d["level"], "ratio": d["ratio"],
+                                    "up": [x * per_step for x in d["up"]],
+                                    "down": [x * per_step for x in d["down"]]}
+                                   for d in widths.levels]
+                curve["skipped"] = [[k, why] for k, why in widths.skipped]
+            self._zcal_curve = curve
 
         def go(n: float) -> None:
             z.move_counter(float(n))
@@ -2596,114 +2636,174 @@ class Camera:
             vals = [v for v in vals if np.isfinite(v)]
             return float(np.mean(vals)) if vals else float("nan")
 
+        def lowest(ms):
+            """Index of the smallest measured sigma^2 (the skipped first levels
+            left out) and the indices of the measurable levels."""
+            fin = [i for i, v in enumerate(ms) if i >= skip and np.isfinite(v)]
+            return (min(fin, key=lambda i: ms[i]) if fin else None), fin
+
         def walk(d: float, start: float, name: str):
             """Levels from ``start`` in direction d until the image says the
-            minimum is behind us (sigma^2 back up to window x its minimum)."""
+            minimum is behind us (sigma^2 back up past walk_to x its minimum)."""
+            ns, ms = walks[name]
+            ns.clear()
+            ms.clear()                             # a repeated walk starts afresh
             go(start - d * margin)                 # approach the first level moving in d
             go(start)
-            ns, ms = walks[name]
             n = start
             while True:
-                ns.append(n); ms.append(measure())
+                ns.append(n)
+                ms.append(measure())
                 publish()
-                fin = [i for i, v in enumerate(ms) if np.isfinite(v)]
-                if fin:
-                    i_min = min(fin, key=lambda i: ms[i])
+                i_min, fin = lowest(ms)
+                if i_min is not None:
                     after = [i for i in fin if i > i_min]
                     if (len(after) >= n_side and fin[-1] == len(ms) - 1
-                            and ms[-1] >= window * ms[i_min]):
+                            and ms[-1] >= walk_to * ms[i_min]):
                         return np.asarray(ns, float), np.asarray(ms, float)
                 n += d * step
                 if abs(n - start) > max_n:
                     raise AutofocusFailed(
                         f"failed: minimum not bracketed ({name} walk)",
-                        f"sigma^2 did not pass a minimum and climb back to {window:g} x it "
+                        f"sigma^2 did not pass a minimum and climb back to {walk_to:g} x it "
                         f"within zcal_max_travel_v = {af.zcal_max_travel_v:g} {unit}: start "
                         f"closer to focus (below it) or widen the travel")
                 go(n)
 
+        def near_rise(ms) -> float:
+            """How far sigma^2 was above its minimum BEFORE it (the walk's near
+            side), as a multiple of the minimum; 0 when there was nothing."""
+            i_min, fin = lowest(ms)
+            near = [ms[i] for i in fin if i < i_min]
+            return max(near) / ms[i_min] if near and ms[i_min] > 0 else 0.0
+
         def fit(ns, ms, name):
-            """Parabola in COUNTER steps over the levels within the window."""
-            ok = np.isfinite(ms)
-            if ok.sum() < 2 * n_side + 1:
+            """The parabola per walk: a DIAGNOSTIC now, plus the sanity gate."""
+            f = ZC.fit_parabola(ns, ms, window, n_side, skip_first=skip)
+            why = f.get("why")
+            if why == "too few measurable levels":
                 raise AutofocusFailed(f"failed: too few measurable levels ({name} walk)")
-            i_min = int(np.nanargmin(np.where(ok, ms, np.nan)))
-            # the CONTIGUOUS run of levels around the minimum that stay within
-            # the window: far out on the side where the light sits in a faint
-            # outer ring, 8-bit sigma^2 reads low and can dip back INTO the
-            # window (simulator: 2 Rayleigh ranges below focus) -- those levels
-            # are not on the parabola and must not be fitted
-            inside = ok & (ms <= window * ms[i_min])
-            sel = np.zeros_like(ok)
-            for rng in (range(i_min, -1, -1), range(i_min, len(ms))):
-                for i in rng:
-                    if not inside[i]:
-                        break
-                    sel[i] = True
-            x = ns - ns[i_min]                      # centred: well-conditioned
-            below, above = int((sel & (x < 0)).sum()), int((sel & (x > 0)).sum())
-            if min(below, above) < n_side:
+            if why == "not bracketed":
                 raise AutofocusFailed(
                     f"failed: minimum not bracketed ({name} walk)",
-                    f"only {below} level(s) before and {above} after the smallest sigma^2 "
-                    f"within {window:g} x it (need {n_side} each side): start further below "
-                    f"focus, or smaller zcal_step_v")
-            p, cov = np.polyfit(x[sel], ms[sel], 2, cov=True)
-            res = ms[sel] - np.polyval(p, x[sel])
-            ss = float(((ms[sel] - ms[sel].mean()) ** 2).sum())
-            r2 = 1.0 - float((res ** 2).sum()) / ss if ss > 0 else 0.0
-            if p[0] <= 0:
-                raise AutofocusFailed(f"failed: no parabola ({name} walk opens downwards)")
-            if r2 < float(af.zcal_min_r2):
+                    f"only {f['below']} level(s) before and {f['above']} after the smallest "
+                    f"sigma^2 within {window:g} x it (need {n_side} each side): start further "
+                    f"below focus, or smaller zcal_step_v")
+            if why:
+                raise AutofocusFailed(f"failed: no parabola ({name} walk {why})")
+            if f["r2"] < float(af.zcal_fit_min_r2):
                 raise AutofocusFailed(
-                    f"failed: poor fit ({name} walk R^2 {r2:.3f} < {af.zcal_min_r2:g})",
-                    "noise, a moving sample, or light other than the spot in the search region")
-            vert = float(ns[i_min] - p[1] / (2.0 * p[0]))
-            vmin = float(np.polyval(p, -p[1] / (2.0 * p[0])))
-            return {"a": float(p[0]), "var_a": float(cov[0, 0]), "r2": r2,
-                    "vertex": vert, "min": vmin, "n": int(sel.sum())}
+                    f"failed: poor fit ({name} walk R^2 {f['r2']:.3f} < "
+                    f"{af.zcal_fit_min_r2:g})",
+                    "not one valley: noise, a moving sample, or light other than the spot "
+                    "in the search region")
+            return f
 
         n_start = float(z.counter_steps())
         try:
+            try:
+                ks = ZC.parse_levels(af.zcal_width_levels)
+            except ValueError:
+                ks = []
+            if not ks:
+                raise AutofocusFailed(
+                    "failed: no usable zcal_width_levels",
+                    f"{af.zcal_width_levels!r}: give levels above 1, e.g. '1.3, 1.5, 1.8, 2.0'")
             self._wait_xy_still(lambda: self._live_frame())
             # 1. UP through focus (from below), 2. DOWN through it (from above)
-            ns_u, ms_u = walk(+1.0, n_start - abs(float(af.zcal_start_offset_v)) / per_step, "up")
+            ns_u, ms_u = walk(+1.0, n_start - abs(float(af.zcal_start_offset_v)) / per_step,
+                              "up")
+            # each later walk starts a little BEYOND the previous one's end
+            # (lead): the approach to its first level (margin the other way,
+            # then back) is counted with the other step size and can land
+            # closer to focus than where the previous walk ended, and its first
+            # zcal_skip_first levels are not used -- without the lead the near
+            # side of the next walk may just miss the highest level
+            lead = margin + (skip + 1) * step
+            ns_d, ms_d = walk(-1.0, float(ns_u[-1]) + lead, "down")
+            last = "down"
+            # A level counts only if it is crossed on BOTH sides. Each walk's
+            # far side is guaranteed by its end rule, and the down walk's near
+            # side starts where the up walk's far side ended (above walk_to).
+            # Only the FIRST walk's near side depends on a guess (the start
+            # offset). If it started too close to focus (or above it), walk up
+            # once more -- from the down walk's end, which is past walk_to below
+            # focus. (Restarting "further back by the counter" does not work on
+            # this Z: the way back down is counted with the other step size,
+            # so the true start hardly moves -- tried, 2026-09-29.)
+            rise = near_rise(ms_u)
+            if rise < walk_to:
+                self._emit("info", (
+                    f"Z step calibration: the up walk started too close to focus (sigma^2 "
+                    f"before its minimum only {rise:.2f} x it, need {walk_to:g}) -- walking "
+                    f"up once more from below the down walk's end"))
+                ns_u, ms_u = walk(+1.0, float(ns_d[-1]) - lead, "up")
+                last = "up"
             f_up = fit(ns_u, ms_u, "up")
-            ns_d, ms_d = walk(-1.0, float(ns_u[-1]), "down")
             f_dn = fit(ns_d, ms_d, "down")
-            # 3. the ratio, and the two sizes around the kept geometric mean
-            q = math.sqrt(f_up["a"] / f_dn["a"])
-            q_err = 0.5 * q * math.sqrt(f_up["var_a"] / f_up["a"] ** 2
-                                        + f_dn["var_a"] / f_dn["a"] ** 2)
+            # 3. the ratio from the WIDTHS at equal sigma^2 levels
+            sh_u = ZC.walk_shape(ns_u, ms_u, skip)
+            sh_d = ZC.walk_shape(ns_d, ms_d, skip)
+            if sh_u is None or sh_d is None:
+                raise AutofocusFailed("failed: too few measurable levels")
+            wr = ZC.width_ratio(sh_u, sh_d, ks, float(af.zcal_width_max_spread),
+                                int(af.zcal_width_min_levels))
+            q_fit = math.sqrt(f_up["a"] / f_dn["a"])
+            publish({"up": f_up, "down": f_dn}, wr)
+            with self._lock:           # shown even when refused: that is the evidence
+                self._zcal_result.update({
+                    "zcal_r2_up": f_up["r2"], "zcal_r2_down": f_dn["r2"],
+                    "zcal_ratio_fit": q_fit, "zcal_ratio_mean": wr.mean,
+                    "zcal_ratio_spread": wr.spread, "zcal_levels": wr.summary()})
+            if not wr.ok:
+                raise AutofocusFailed(f"failed: {wr.why}", (
+                    f"per level: {wr.summary() or 'none'}"
+                    + (f"; unusable: {wr.detail()}" if wr.skipped else "")
+                    + f"; parabola fits (diagnostic): ratio {q_fit:.3f}, R^2 up "
+                      f"{f_up['r2']:.3f} / down {f_dn['r2']:.3f}"))
+            q, q_err = wr.ratio, wr.err
             g = float(af.zcal_step_um) if af.zcal_step_um > 0 else math.sqrt(up0 * down0)
             up, down = g * math.sqrt(q), g / math.sqrt(q)
             z.set_step_sizes(up, down)
-            publish({"up": f_up, "down": f_dn})
             with self._lock:
-                self._zcal_result = {"zcal_ratio": q, "zcal_ratio_err": q_err,
-                                     "zcal_r2_up": f_up["r2"], "zcal_r2_down": f_dn["r2"],
-                                     "zcal_up_um": up, "zcal_down_um": down}
-            spread = abs(f_up["min"] - f_dn["min"]) / max(1e-12, min(f_up["min"], f_dn["min"]))
+                self._zcal_result.update({"zcal_ratio": q, "zcal_ratio_err": q_err,
+                                          "zcal_up_um": up, "zcal_down_um": down})
+            spread = abs(sh_u.m_min - sh_d.m_min) / max(1e-12, min(sh_u.m_min, sh_d.m_min))
             if spread > 0.25:
                 # the in-focus sigma^2 is a property of the beam, not of the
                 # direction: very different minima = something moved meanwhile
                 self._emit("warn", f"Z step calibration: the two walks' smallest sigma^2 "
-                                   f"differ by {100 * spread:.0f} % ({f_up['min']:.1f} vs "
-                                   f"{f_dn['min']:.1f} px2) -- check the result")
-            # 4. back to focus BY THE IMAGE. The down walk ended below focus; its
-            # vertex is where focus was on the counter moving DOWN. Going UP the
-            # steps are q x bigger, so focus is 1/q of that counter distance
-            # away. Approach it from below and stop on the image.
-            n_end = float(ns_d[-1])
-            n_focus = n_end + (f_dn["vertex"] - n_end) / q
+                                   f"differ by {100 * spread:.0f} % ({sh_u.m_min:.1f} vs "
+                                   f"{sh_d.m_min:.1f} px2) -- check the result")
+            # 4. back to focus BY THE IMAGE. The down walk ended below focus; the
+            # bottom of its curve is where focus was on the counter moving DOWN.
+            # Going UP over that same stretch of true Z takes 1/q of its counter
+            # distance (the width argument again: the same true path, steps q x
+            # bigger) -- right even when the step size varies along the way.
+            # Approach it from below and stop on the image.
+            if last == "down":
+                n_end = float(ns_d[-1])
+                n_focus = n_end + (ZC.bottom_position(sh_d) - n_end) / q
+            else:
+                # the last walk went UP and ended above focus: down over the
+                # same true stretch takes q x its counter distance; go a
+                # margin further down, then the park comes up to focus
+                n_down = float(ns_u[-1]) - (float(ns_u[-1]) - ZC.bottom_position(sh_u)) * q
+                n_end = n_down - margin
+                go(n_end)
+                n_focus = n_end + margin / q
             note = self._zcal_park(go, measure, n_end, n_focus, step,
-                                   min(f_up["min"], f_dn["min"]))
+                                   min(sh_u.m_min, sh_d.m_min))
             self._zcal_finish("OK")
             self._emit("info", (
-                f"Z step calibration: ratio up/down {q:.3f} +- {q_err:.3f} (R^2 up "
-                f"{f_up['r2']:.4f}, down {f_dn['r2']:.4f}; {f_up['n']}/{f_dn['n']} levels); "
-                f"steps written: up {up:.5g}, down {down:.5g} {unit}/step (geometric mean "
-                f"{g:.5g}{', given' if af.zcal_step_um > 0 else ', kept'}); {note}"))
+                f"Z step calibration: ratio up/down {q:.3f} +- {q_err:.3f} from the curve "
+                f"WIDTHS at {len(wr.levels)} sigma^2 levels ({wr.summary()}; spread "
+                f"{100 * wr.spread:.1f} %)"
+                + (f", unusable: {wr.detail()}" if wr.skipped else "")
+                + f"; parabola fits (diagnostic): ratio {q_fit:.3f}, R^2 up "
+                  f"{f_up['r2']:.4f} / down {f_dn['r2']:.4f}; steps written: up {up:.5g}, "
+                  f"down {down:.5g} {unit}/step (geometric mean "
+                  f"{g:.5g}{', given' if af.zcal_step_um > 0 else ', kept'}); {note}"))
         except _AutofocusKilled:
             self._zcal_finish("killed")
             self._emit("warn", "Z step calibration killed: nothing written, Z left where it was")
@@ -3308,6 +3408,47 @@ class Camera:
         self._xy_target = None
         self._emit("warn", "XY datum set: step counters are 0 here; "
                            "older stage coordinates now refer to the old origin")
+
+    def z_has_datum(self) -> bool:
+        return bool(self.cfg.hardware.use_z
+                    and callable(getattr(self.z, "zero_counter", None)))
+
+    def datum_z(self) -> None:
+        """Datum Z: the Z step counter becomes 0 HERE (kim's zero_counter, Z only).
+
+        Why (Lukas, 2026-09-29): he re-zeroes Z at every focus the image
+        confirmed -- the open-loop Z counter drifts from the truth over a
+        session, and kim's +-20 um leash is a box around the datum. Nothing
+        moves. Refused while an autofocus (also a recovery run) or a Z step
+        calibration is running or QUEUED: they count their Z positions from
+        the zero they started with, and a new zero under them would send the
+        park, or the failed run's "Z back to the start", somewhere else. The
+        check and the zeroing sit in one critical section with the request
+        verbs, so no run can be queued in between.
+        """
+        if not self.z_has_datum():
+            raise RuntimeError("this Z has no datum (no step counter to set to 0)")
+        with self._lock:
+            if self._af_busy:
+                raise RuntimeError("an autofocus is running or queued: its Z positions are "
+                                   "counted from the current zero -- wait for it (or Kill "
+                                   "AF), then set the datum")
+            if self._zcal_busy:
+                raise RuntimeError("a Z step calibration is running or queued: its walks are "
+                                   "counted from the current zero -- wait for it (or Kill "
+                                   "AF), then set the datum")
+            self.z.zero_counter()
+            # the focus step target was in the OLD counter's coordinates: the
+            # next step_z starts from the live reading (= 0) instead
+            self._z_target = None
+            try:
+                zr = float(self.z.read_z())
+            except Exception:
+                zr = 0.0
+            self._status.z_voltage = zr            # the readout says 0 at once
+        self._emit("warn", f"Z datum set: the Z step counter is 0 here (Z reads "
+                           f"{zr:.3f} {self.z_unit()}); older Z positions refer to the "
+                           "old zero")
 
     def set_z(self, volts: float) -> float:
         v = self._clamp_z(float(volts))

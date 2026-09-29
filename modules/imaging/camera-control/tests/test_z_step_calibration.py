@@ -223,10 +223,10 @@ def test_describe_verb_client_and_config():
     finally:
         brain.shutdown()
     cfg = Config()
-    cfg.autofocus.zcal_step_v, cfg.autofocus.zcal_min_r2 = 0.3, 0.9
+    cfg.autofocus.zcal_step_v, cfg.autofocus.zcal_fit_min_r2 = 0.3, 0.9
     wire = Config()
     apply_config_dict(wire, config_to_dict(cfg))
-    assert (wire.autofocus.zcal_step_v, wire.autofocus.zcal_min_r2) == (0.3, 0.9)
+    assert (wire.autofocus.zcal_step_v, wire.autofocus.zcal_fit_min_r2) == (0.3, 0.9)
 
 
 def test_the_autofocus_tab_runs_it_and_shows_the_result():

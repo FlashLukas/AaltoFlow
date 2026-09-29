@@ -174,6 +174,9 @@ class CameraClient:
     def datum_xy(self) -> None:
         self._rpc(cmd="datum_xy")
 
+    def datum_z(self) -> None:
+        self._rpc(cmd="datum_z")
+
     def save_scan_pattern(self, folder: str = "", name: str = "") -> dict:
         rep = self._rpc(cmd="save_scan_pattern", folder=folder, name=name)
         return {"path": rep.get("path"), "info": rep.get("info")}

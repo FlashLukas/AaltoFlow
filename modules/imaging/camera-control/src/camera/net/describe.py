@@ -319,6 +319,17 @@ def build_manifest(brain) -> dict:
            group="Position", order=93, read_path=["stage_ok"],
            help="False while the stage service (kim) does not answer: stage "
                 "controls are refused at once instead of waiting on a timeout."),
+        # DATUM Z (2026-09-29): kim's Z step counter to 0 at the current Z.
+        # danger: it redefines every Z coordinate noted before (and kim's
+        # leash box); nothing moves. A scan routine may call it after an
+        # autofocus it trusts (Lukas re-zeroes at every confirmed focus).
+        _p("datum_z", "Datum Z", "action", "action", group="Focus", order=103,
+           danger=True,
+           help="Sets the Z step counter to 0 HERE -- nothing moves; use it at a focus "
+                "you trust. Refused while an autofocus or Z step calibration is running "
+                "or queued, and on a Z without a step counter."),
+        _p("z_has_datum", "Z has a datum", "indicator", "bool", group="Focus",
+           order=27, read_path=["z_has_datum"]),
         _p("reconnect_stage", "Reconnect stage", "action", "action",
            group="Position", order=94,
            help="Rebuild the connection to the stage service, e.g. after it was restarted."),
@@ -374,12 +385,15 @@ def build_manifest(brain) -> dict:
                  "check": {"key": "zcal_state", "equals": "OK"},
                  "timeout_s": float(brain.cfg.autofocus.scan_timeout_s)},
            help="Needs a calibrated spot, roughly in focus, and the kim Z. Walks Z up "
-                "and down through focus measuring sigma^2 (D4sigma); the ratio of the "
-                "two parabolas' curvatures is (step up / step down)^2. Writes both "
-                "step sizes to kim (geometric mean kept). Refuses rather than guess."),
+                "and down through focus measuring sigma^2 (D4sigma); at equal sigma^2 "
+                "levels the counter width of the down walk / that of the up walk is "
+                "step up / step down (no parabola assumed: the step size may vary "
+                "along a walk). Writes both step sizes to kim (geometric mean kept). "
+                "Refuses rather than guess (levels that disagree, too few levels)."),
         _p("zcal_ratio", "Z step ratio up/down", "indicator", "float", group="Focus",
            order=25, decimals=4, read_path=["zcal_ratio"],
-           help="Result of the last Z step calibration (NaN before one / when refused)."),
+           help="Result of the last Z step calibration: the median over the sigma^2 "
+                "levels of the width ratios (NaN before one / when refused)."),
         _p("zcal_state", "Z calibration state", "indicator", "string", group="Focus",
            order=26, read_path=["zcal_state"]),
         _p("spot_bit_depth", "Spot size bit depth", "indicator", "int", group="Spot",
