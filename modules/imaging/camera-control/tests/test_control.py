@@ -48,6 +48,8 @@ def clients():
 
     def make(kind="gui", name="camera GUI"):
         c = CameraClient("127.0.0.1", CMD, PUB, timeout_ms=3000, kind=kind, name=name)
+        # control belongs to a PC: each test client sits at its OWN PC
+        c.identity["host"] = f"user@pc{len(made)}"
         c.start()
         made.append(c)
         return c

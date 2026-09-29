@@ -37,9 +37,12 @@ def clients():
     from kim.net.client import KimClient
     made = []
 
-    def make(kind="gui", name="kim GUI"):
+    def make(kind="gui", name="kim GUI", pc=None):
         c = KimClient(host="127.0.0.1", cmd_port=CMD, pub_port=PUB, timeout_ms=3000,
                       kind=kind, name=name)
+        # control belongs to a PC: each test client sits at its OWN PC unless
+        # the test says otherwise (all of them really run on this one)
+        c.identity["host"] = f"user@{pc or f'pc{len(made)}'}"
         c.start()
         made.append(c)
         return c
@@ -123,6 +126,36 @@ def test_a_take_over_is_announced_and_seen_in_status(svc, clients):
     st = svc.status_payload()["control"]
     assert st["holder"]["name"] == "kim GUI B"
     assert {c["name"] for c in st["clients"]} >= {"kim GUI A", "kim GUI B"}
+
+
+def test_two_windows_on_one_pc_share_control(svc, clients):
+    """Lukas: the kim GUI and the measurement suite on the lab PC both drive
+    kim; the trainee sits at a DIFFERENT PC."""
+    from kim.control import ControlRefused
+    gui = clients(name="kim GUI", pc="lab-pc")
+    suite = clients(kind="gui", name="measurement suite", pc="lab-pc")
+    trainee = clients(name="kim GUI", pc="student-pc")
+    assert gui.take_control()
+    suite.move_steps("X", 3)
+    assert suite.take_control() and suite.has_control()
+    with pytest.raises(ControlRefused):
+        trainee.move_steps("X", 3)
+
+
+def test_a_scan_moving_the_stage_is_shown_as_driving(qapp, svc, clients):
+    from kim.apps.gui import MainWindow
+    a = clients(name="kim GUI A")
+    scan = clients(kind="machine", name="scan-core")
+    w = MainWindow(a, Config(), remote=True)
+    w.show()
+    try:
+        _pump(qapp)
+        assert "also driving" not in w._control_bar.label.text()
+        scan.move_steps("X", 5)
+        assert _wait(lambda: (qapp.processEvents(), w._control_bar.refresh(),
+                              "also driving: scan-core" in w._control_bar.label.text())[-1])
+    finally:
+        w.close()
 
 
 def test_a_silent_holder_loses_control(svc, clients):

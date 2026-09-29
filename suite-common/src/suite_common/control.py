@@ -24,6 +24,13 @@ The rules (docs/DEVELOPER_NOTES.md, "Control: one controller, many viewers"):
   must not break a running autofocus. It is SELF-declared: this is a guard
   against mistakes between people who follow the rules, not security (anyone
   who reaches the port can send anything; the firewall is the security).
+* Control belongs to a PC, not to one window: every client on the holder's
+  PC may change things (Lukas: the kim GUI and the measurement suite on the
+  lab PC both drive kim; the trainee sits at a DIFFERENT PC). See same_pc().
+* A machine that changed something in the last DRIVING_S is marked
+  ``driving`` in the status's client list, and every control bar says "also
+  driving: scan-core" -- a stage moving under a person's GUI is never a
+  mystery.
 * Nobody holds control -> everything is allowed, with or without an id, as
   before this file existed (a headless setup with no GUI works unchanged).
 * ``take_control{force: false}`` takes control only when it is free;
@@ -82,6 +89,28 @@ def make_identity(kind: str = "script", name: str = "") -> dict:
             "host": f"{user}@{socket.gethostname()}"}
 
 
+def pc_of(ident: dict | None) -> str:
+    """The PC a client runs on ("user@PC" -> "pc"), "" when unknown."""
+    host = str((ident or {}).get("host") or "")
+    return host.rpartition("@")[2].strip().lower()
+
+
+def same_pc(a: dict | None, b: dict | None) -> bool:
+    """Control belongs to a PC, not to one window (Lukas, 2026-09-29: "if it is
+    the same machine you can leave kim unlocked"; the trainee sits at a
+    DIFFERENT PC). Two windows on the lab PC -- the kim GUI and the measurement
+    suite, say -- both control kim; a GUI on another PC is a viewer until it
+    takes control. An unknown PC never matches."""
+    pa, pb = pc_of(a), pc_of(b)
+    return bool(pa) and pa == pb
+
+
+#: A machine client that changed something within this many seconds is shown
+#: as "also driving" in every control bar, so a stage moving under a person's
+#: GUI (a scan, the camera's autofocus) is never a mystery.
+DRIVING_S = 10.0
+
+
 def describe_holder(h: dict | None) -> str:
     """One line for a GUI or an error text: 'kim GUI (anna@lab-pc)'."""
     if not h:
@@ -110,6 +139,7 @@ class ControlLease:
         self._holder: dict | None = None       # identity + "since" (wall clock)
         self._holder_seen = 0.0                # monotonic
         self._clients: dict[str, tuple[dict, float]] = {}   # id -> (identity, seen)
+        self._changed: dict[str, float] = {}   # machine id -> when it last changed something
 
     # ------------------------------------------------------------------ #
     def is_write(self, cmd) -> bool:
@@ -138,14 +168,22 @@ class ControlLease:
         for cid in [k for k, (_, seen) in self._clients.items()
                     if now - seen > CLIENT_FORGET_S]:
             del self._clients[cid]
+            self._changed.pop(cid, None)
 
     def _seen(self, ident: dict | None, now: float) -> None:
-        # caller holds the lock
+        # caller holds the lock. Any client on the holder's PC keeps the
+        # lease alive: control belongs to the PC (same_pc), so closing one of
+        # its two windows must not free the instrument.
         if ident is None:
             return
         self._clients[ident["id"]] = (ident, now)
-        if self._holder is not None and self._holder["id"] == ident["id"]:
+        if self._holder is not None and same_pc(self._holder, ident):
             self._holder_seen = now
+
+    def _holds(self, ident: dict | None) -> bool:
+        # caller holds the lock
+        return ident is not None and self._holder is not None and (
+            ident["id"] == self._holder["id"] or same_pc(ident, self._holder))
 
     # ------------------------------------------------------------------ #
     def handle(self, req: dict) -> dict | None:
@@ -169,8 +207,7 @@ class ControlLease:
             if cmd == "take_control":
                 return self._take(ident, bool(req.get("force", False)), now)
             if cmd == "release_control":
-                if ident is not None and self._holder is not None \
-                        and self._holder["id"] == ident["id"]:
+                if self._holds(ident):
                     self._holder = None
                     self.on_event("info", f"control: released by {describe_holder(ident)}")
                     return {"ok": True, "released": True, "control": self._status_locked(now)}
@@ -179,10 +216,11 @@ class ControlLease:
             if not self.is_write(cmd):
                 return None
             if ident is not None and ident["kind"] == "machine":
+                self._changed[ident["id"]] = now      # shown as "also driving"
                 return None
             if self._holder is None:
                 return None
-            if ident is not None and ident["id"] == self._holder["id"]:
+            if self._holds(ident):
                 return None
             since = time.strftime("%H:%M", time.localtime(self._holder.get("since", 0)))
             who = describe_holder(self._holder)
@@ -201,7 +239,7 @@ class ControlLease:
             return {"ok": False, "error": "take_control needs a client identity "
                                           "(\"client\": {\"id\", \"kind\", \"name\", \"host\"})"}
         h = self._holder
-        if h is not None and h["id"] == ident["id"]:
+        if self._holds(ident):                 # ours, or our PC's: nothing to take
             return {"ok": True, "granted": True, "control": self._status_locked(now)}
         if h is not None and not force:
             return {"ok": True, "granted": False, "control": self._status_locked(now)}
@@ -225,11 +263,17 @@ class ControlLease:
 
     def _status_locked(self, now: float) -> dict:
         h = self._holder
-        clients = [dict(ident, age_s=round(now - seen, 1))
+        # age_s = since last heard; driving = a machine that changed something
+        # within DRIVING_S (the bars show "also driving: scan-core")
+        clients = [dict(ident, age_s=round(now - seen, 1),
+                        driving=now - self._changed.get(ident["id"], -1e9) <= DRIVING_S)
                    for ident, seen in self._clients.values()]
         clients.sort(key=lambda c: c["age_s"])
+        # always = verbs a viewer may still send: a panel built from describe
+        # (the suite's Control tab) keeps exactly those buttons usable
         return {"holder": dict(h) if h else None, "clients": clients,
-                "lease_s": self.lease_s}
+                "lease_s": self.lease_s,
+                "always": sorted(self.safety | ALWAYS_VERBS)}
 
 
 # ---------------------------------------------------------------------- #
@@ -315,5 +359,6 @@ class ControlClient:
         return self._control
 
     def has_control(self) -> bool:
+        """True when this client, or another client on THIS PC, holds control."""
         h = (self._control or {}).get("holder")
-        return bool(h and h.get("id") == self.identity["id"])
+        return bool(h and (h.get("id") == self.identity["id"] or same_pc(h, self.identity)))

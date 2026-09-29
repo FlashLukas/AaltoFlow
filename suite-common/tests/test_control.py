@@ -11,8 +11,13 @@ class Clock:
         return self.t
 
 
-def ident(name, kind="gui"):
+_pcs = iter(f"user@pc{i}" for i in range(1000))
+
+
+def ident(name, kind="gui", host=None):
+    """A client on its OWN PC unless ``host`` says otherwise (control is per PC)."""
     i = C.make_identity(kind, name)
+    i["host"] = host or next(_pcs)
     return i
 
 
@@ -104,6 +109,41 @@ def test_release_and_status_lists_the_viewers():
     assert r["released"] is True and r["control"]["holder"] is None
 
 
+def test_control_belongs_to_the_pc_not_the_window():
+    """Lukas: the kim GUI and the suite on the lab PC both drive kim; the
+    trainee at another PC is a viewer."""
+    l, clock, _ = lease(lease_s=10)
+    gui = ident("kim GUI", host="lab@LAB-PC")
+    suite = ident("measurement suite", host="other.user@lab-pc")   # same PC, any user
+    trainee = ident("kim GUI", host="student@pc7")
+    assert l.handle(req("take_control", gui))["granted"]
+    assert l.handle(req("move_steps", suite)) is None            # same PC: allowed
+    assert l.handle(req("take_control", suite))["granted"]        # nothing to take
+    assert l.status()["holder"]["id"] == gui["id"]                # holder unchanged
+    assert l.handle(req("move_steps", trainee))["refused"] == "control"
+    # the GUI closes; the suite's heartbeats keep the PC's control alive
+    for _ in range(3):
+        clock.t += 8
+        l.handle(req("heartbeat", suite))
+    assert l.status()["holder"] is not None
+    assert l.handle(req("release_control", suite))["released"]   # the PC gives it up
+    assert l.handle(req("move_steps", trainee)) is None
+    assert not C.same_pc({"host": ""}, {"host": ""})              # unknown never matches
+
+
+def test_a_machine_that_changes_something_is_shown_as_driving():
+    l, clock, _ = lease()
+    scan = ident("scan-core", kind="machine")
+    l.handle(req("heartbeat", scan))
+    [c] = l.status()["clients"]
+    assert c["driving"] is False                                  # connected, idle
+    l.handle(req("move_to_um", scan))
+    assert l.status()["clients"][0]["driving"] is True
+    clock.t += C.DRIVING_S + 1
+    l.handle(req("heartbeat", scan))
+    assert l.status()["clients"][0]["driving"] is False           # scan over
+
+
 def test_take_needs_an_identity_and_unknown_commands_are_not_writes():
     l, _, _ = lease()
     assert l.handle(req("take_control"))["ok"] is False
@@ -119,6 +159,7 @@ def test_the_client_mixin_speaks_the_protocol():
     class Client(C.ControlClient):
         def __init__(self, name):
             self._control_setup("gui", name)
+            self.identity["host"] = f"user@{name}-pc"
 
         def _rpc(self, **r):
             self._with_identity(r)

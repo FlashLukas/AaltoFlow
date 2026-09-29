@@ -27,7 +27,7 @@ import threading
 import time
 
 import zmq
-from suite_common.control import make_identity
+from suite_common.control import HEARTBEAT_S, make_identity
 
 
 #: Defined in errors.py (which imports nothing) so the engine can catch it
@@ -105,6 +105,11 @@ class Instrument:
                  fault_grace_s: float = FAULT_GRACE_S):
         self.name = name
         self.identity = make_identity("machine", "scan-core")
+        # the Control tab's clicks go as a person ("gui"), see gui_command
+        self.gui_identity = make_identity("gui", "measurement suite")
+        self._hb: threading.Thread | None = None
+        #: the service's last word on control (from heartbeats), or None
+        self.control: dict | None = None
         #: see STALE_AFTER_S / FAULT_GRACE_S; per instrument, so a test (or a
         #: service that publishes unusually slowly) can change them
         self.stale_after_s = float(stale_after_s)
@@ -155,6 +160,8 @@ class Instrument:
     def close(self) -> None:
         self._stop.set()
         self._t.join(timeout=1.0)
+        if self._hb is not None:
+            self._hb.join(timeout=4.0)       # it may be inside one round trip
         self._req.close(0)
         self._sub.close(0)
 
@@ -168,7 +175,35 @@ class Instrument:
 
     # ---- commands and status --------------------------------------------
 
-    def command(self, verb: str, _timeout_ms: int | None = None, **kwargs) -> dict:
+    def gui_command(self, verb: str, **kwargs) -> dict:
+        """A command a PERSON sent from the measurement suite's Control tab.
+
+        It travels as a "gui" client, not as the scan's "machine": a person at a
+        panel is exactly who control exists for (a scan is not locked out, a
+        trainee at another PC is). See suite_common/control.py.
+        """
+        return self.command(verb, _client=self.gui_identity, **kwargs)
+
+    def start_gui_heartbeat(self) -> None:
+        """Say "the suite is still here" every few seconds, as a GUI does, so
+        the service lists it and a control it took does not lapse. Runs in a
+        thread (a REQ round trip must not sit on the GUI thread)."""
+        if self._hb is not None:
+            return
+
+        def beat():
+            while not self._stop.wait(HEARTBEAT_S):
+                try:
+                    r = self.gui_command("heartbeat")
+                    self.control = r.get("control", self.control)
+                except Exception:
+                    pass        # a service without control, or down for a moment
+        self._hb = threading.Thread(target=beat, daemon=True,
+                                    name=f"scan-heartbeat-{self.name}")
+        self._hb.start()
+
+    def command(self, verb: str, _timeout_ms: int | None = None,
+                _client: dict | None = None, **kwargs) -> dict:
         """Send one command. Raises InstrumentError unless the reply says ok.
 
         `_timeout_ms` raises the receive timeout for this ONE call. Needed when
@@ -183,7 +218,7 @@ class Instrument:
         # Who we are to the service (suite_common/control.py): a MACHINE
         # client, so a scan keeps running while a person's GUI holds control
         # of the instrument (Lukas's choice, 2026-09-29).
-        msg.setdefault("client", self.identity)
+        msg["client"] = _client or self.identity
         with self._req_lock:
             if _timeout_ms is not None:
                 self._req.setsockopt(zmq.RCVTIMEO, int(_timeout_ms))

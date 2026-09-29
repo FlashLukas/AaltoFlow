@@ -38,6 +38,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
+from suite_common.control import describe_holder, same_pc
 
 from apps.theme import C
 
@@ -205,6 +206,14 @@ def kind_legend() -> QtWidgets.QWidget:
 # One widget per descriptor
 # --------------------------------------------------------------------------- #
 
+def _person(inst):
+    """How a click on this panel reaches the service: as a PERSON ("gui"), not
+    as the scan engine's "machine" (suite_common/control.py) -- a trainee's
+    panel at another PC must not change what someone else controls. Test fakes
+    without gui_command fall back to command."""
+    return getattr(inst, "gui_command", None) or inst.command
+
+
 class ItemWidget(QtWidgets.QWidget):
     """A single control, indicator or action, built from its descriptor."""
 
@@ -327,7 +336,7 @@ class ItemWidget(QtWidgets.QWidget):
                 scale = float(self.item.get("scale", 1.0))
                 wire = value * scale if isinstance(value, (int, float)) \
                     and not isinstance(value, bool) else value
-                inst.command(spec["verb"], **{spec["arg"]: wire}, **extra)
+                _person(inst)(spec["verb"], **{spec["arg"]: wire}, **extra)
             elif param is not None:
                 param.set(float(value))
             else:
@@ -359,7 +368,7 @@ class ItemWidget(QtWidgets.QWidget):
             self.on_log(f"{item['pid']}: no connection")
             return
         try:
-            inst.command(item["id"], **values)
+            _person(inst)(item["id"], **values)
             self.on_log(f"{item['pid']}()" + (f" {values}" if values else ""))
         except Exception as exc:
             self.on_log(f"{item['pid']}: {exc}")
@@ -577,6 +586,15 @@ class ControlPanel(QtWidgets.QWidget):
         self.empty.setStyleSheet(f"color:{C['muted']};")
         v.addWidget(self.empty)
 
+        # One line per connected module that knows about control: who has it,
+        # and Take control / Release (suite_common/control.py). Filled by
+        # _refresh_remote from each module's status.
+        self.control_lay = QtWidgets.QVBoxLayout()
+        self.control_lay.setSpacing(3)
+        v.addLayout(self.control_lay)
+        self.control_rows: dict[str, tuple] = {}     # module -> (row, label, button)
+        self._control_seen: dict[str, dict] = {}     # module -> last control state
+
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True)
         inner = QtWidgets.QWidget()
         self.groups_lay = QtWidgets.QVBoxLayout(inner)
@@ -602,7 +620,17 @@ class ControlPanel(QtWidgets.QWidget):
     def set_source(self, registry=None, lab=None, prefix: bool = True):
         """Point the panel at a live lab, or at a simulated registry."""
         self.registry, self.lab = registry, lab
+        for row, _l, _b in self.control_rows.values():
+            row.setParent(None)
+        self.control_rows.clear()
+        self._control_seen.clear()
         if lab is not None:
+            # this panel is a GUI to every module: say "still here", so the
+            # module lists it and a control taken here does not lapse
+            for inst in lab.instruments.values():
+                start = getattr(inst, "start_gui_heartbeat", None)
+                if start is not None:
+                    start()
             items = items_from_lab(lab, prefix)
         elif registry is not None:
             items = items_from_registry(registry)
@@ -825,6 +853,7 @@ class ControlPanel(QtWidgets.QWidget):
             for pid, w in self.widgets.items():
                 if w.item["module"] == module:
                     w.update_from(status)
+            self._update_control(module, inst, status.get("control"))
 
             # LIMITS MOVE. One integer compare per module per poll, and a
             # manifest re-read only when it actually changed.
@@ -834,6 +863,96 @@ class ControlPanel(QtWidgets.QWidget):
                 self._revs[module] = rev
                 if not first:
                     self._reread_limits(inst, module)
+
+    # ---- control: who may change this module (suite_common/control.py) ----
+
+    def _update_control(self, module, inst, ctl):
+        """Show who controls `module`, and grey its knobs if it is another PC.
+
+        Buttons whose verb the service always accepts (ctl["always"]: STOP,
+        Kill AF, ...) stay usable, as in a module's own viewer window.
+        Indicators are never greyed -- they only show.
+        """
+        me = getattr(inst, "gui_identity", None)
+        if not isinstance(ctl, dict) or me is None:
+            row = self.control_rows.pop(module, None)
+            if row:
+                row[0].setParent(None)
+            return
+        self._control_seen[module] = ctl         # what the button acts on
+        holder = ctl.get("holder")
+        mine = bool(holder) and (holder.get("id") == me["id"] or same_pc(holder, me))
+        viewer = bool(holder) and not mine
+        if mine:
+            text = f"{module}: you have control (this PC)"
+        elif holder:
+            since = time.strftime("%H:%M", time.localtime(holder.get("since", 0)))
+            text = (f"{module}: VIEWER — {describe_holder(holder)} has control "
+                    f"since {since}")
+        else:
+            text = f"{module}: nobody has control -- changes allowed"
+        driving = [c.get("name") or "a program" for c in ctl.get("clients", [])
+                   if c.get("kind") == "machine" and c.get("driving")]
+        if driving:
+            text += "  ·  also driving: " + ", ".join(driving)
+
+        if module not in self.control_rows:
+            row = QtWidgets.QWidget()
+            h = QtWidgets.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
+            label = QtWidgets.QLabel(); label.setWordWrap(True)
+            btn = QtWidgets.QPushButton()
+            btn.clicked.connect(lambda _=False, m=module, i=inst: self._toggle_control(m, i))
+            h.addWidget(label, 1); h.addWidget(btn)
+            self.control_lay.addWidget(row)
+            self.control_rows[module] = (row, label, btn)
+        _row, label, btn = self.control_rows[module]
+        label.setText(text)
+        label.setStyleSheet(f"color:{C['accent'] if viewer else C['muted']};"
+                            + ("font-weight:700;" if viewer else ""))
+        btn.setText("Release" if mine else "Take control")
+        btn.setToolTip("Give control back: anyone may take it." if mine else
+                       "Take control of this module. If another PC has it, you "
+                       "are asked first; that PC becomes a viewer.")
+
+        always = set(ctl.get("always") or [])
+        for w in self.widgets.values():
+            item = w.item
+            if item["module"] != module or item.get("kind") == "indicator":
+                continue
+            if item.get("kind") == "action":
+                w.setEnabled(not viewer or item["id"] in always)
+            else:
+                w.setEnabled(not viewer)
+
+    def _toggle_control(self, module, inst):
+        """Take control of (or release) one module, as a person would.
+
+        Acts on the state the row SHOWS (the user decided on that), not on a
+        fresh read that could differ from what they saw."""
+        holder = (self._control_seen.get(module) or {}).get("holder")
+        me = inst.gui_identity
+        mine = bool(holder) and (holder.get("id") == me["id"] or same_pc(holder, me))
+        try:
+            if mine:
+                inst.gui_command("release_control")
+                self.on_log(f"{module}: control released")
+                return
+            force = False
+            if holder:
+                since = time.strftime("%H:%M", time.localtime(holder.get("since", 0)))
+                ans = QtWidgets.QMessageBox.question(
+                    self, "Take control",
+                    f"{describe_holder(holder)} has control of {module} since "
+                    f"{since}.\n\nTake it over? That PC becomes a viewer (it sees "
+                    "that you took it) and can take it back the same way.")
+                if ans != QtWidgets.QMessageBox.Yes:
+                    return
+                force = True
+            r = inst.gui_command("take_control", force=force)
+            self.on_log(f"{module}: " + ("you have control" if r.get("granted")
+                                         else "someone else took it first"))
+        except Exception as exc:
+            self.on_log(f"{module}: {exc}")
 
     def _reread_limits(self, inst, module):
         try:

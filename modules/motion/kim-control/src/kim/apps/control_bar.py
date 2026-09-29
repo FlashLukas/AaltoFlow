@@ -68,6 +68,12 @@ def mark_always(*widgets: QWidget) -> None:
             w.setProperty(ALWAYS_PROPERTY, True)
 
 
+def _pc(ident: dict | None) -> str:
+    """The PC part of "user@PC" (the same rule as control.pc_of; this file
+    imports nothing from the package so it stays a byte-identical copy)."""
+    return str((ident or {}).get("host") or "").rpartition("@")[2].strip().lower()
+
+
 def _who(h: dict | None) -> str:
     if not h:
         return "nobody"
@@ -186,24 +192,33 @@ class ControlBar(QFrame):
         holder = ctl.get("holder")
         mine = self.client.has_control()
         self.viewer = not mine
-        others = [c for c in ctl.get("clients", [])
-                  if c.get("id") != self.client.identity["id"]
-                  and c.get("id") != (holder or {}).get("id")]
-        key = (mine, (holder or {}).get("id"), tuple(sorted(c.get("id", "") for c in others)))
+        me = self.client.identity
+        clients = [c for c in ctl.get("clients", []) if c.get("id") != me["id"]]
+        # machines that changed something lately (a scan, the camera's autofocus)
+        driving = [c for c in clients if c.get("kind") == "machine" and c.get("driving")]
+        # people elsewhere: not this PC (it shares control with us), no machines
+        others = [c for c in clients if c.get("kind") != "machine"
+                  and c.get("id") != (holder or {}).get("id")
+                  and _pc(c) != _pc(me)]
+        key = (mine, (holder or {}).get("id"),
+               tuple(sorted(c.get("id", "") for c in others)),
+               tuple(sorted(c.get("id", "") for c in driving)))
         if key == self._last_key and not self._flashing:
             return
         self._last_key = key
-        watching = ", ".join(_who(c) for c in others)
         if mine:
-            text = "You have control"
-            if watching:
-                text += f"  ·  also connected: {watching}"
+            text = "You have control (this PC)"
+            if others:
+                text += "  ·  watching: " + ", ".join(_who(c) for c in others)
         elif holder:
             since = time.strftime("%H:%M", time.localtime(holder.get("since", 0)))
             text = (f"VIEWER — {_who(holder)} has control since {since}; "
                     "nothing can be changed here")
         else:
             text = "VIEWER — nobody has control at the moment."
+        if driving:
+            text += "  ·  also driving: " + ", ".join(
+                c.get("name") or "a program" for c in driving)
         self.label.setText(text)
         self.btn_take.setVisible(not mine)
         self.btn_release.setVisible(mine)

@@ -245,6 +245,24 @@ still assumes piezo/zpiezo.
     security).
   - Nobody holds control -> everything is allowed, with or without an id,
     exactly as before (a headless setup is unchanged).
+  - **Control belongs to a PC, not to one window** (Lukas: "if it is the same
+    machine you can leave kim unlocked"; the trainee sits at a DIFFERENT PC).
+    Every client whose `host` ("user@PC") names the holder's PC may change
+    things, keeps the lease alive and may release it; a GUI on another PC is a
+    viewer. `same_pc()` compares the PC part only (any user).
+  - **"also driving"**: a machine client that changed something in the last
+    10 s is marked `driving` in the status's client list, and every control
+    bar (and the suite's Control tab) says "also driving: scan-core" -- a stage
+    moving under a person's GUI is never a mystery. Status `control.always`
+    lists the verbs a viewer may still send.
+  - **The measurement suite's Control tab is a PERSON**: its clicks go as a
+    "gui" client (`Instrument.gui_command`, one identity per module
+    connection, heartbeats from `start_gui_heartbeat`), while the scan engine
+    stays "machine". Per module it shows who has control, a Take control /
+    Release button (asks before taking over another PC's control), greys the
+    knobs and the actions not in `control.always` while another PC holds
+    control. It does NOT take control by itself when it connects: with
+    nobody holding control everything passes as before.
   - Verbs `take_control{force}` (without force only when free; with force it
     takes over and the old holder becomes a viewer and is told who took it),
     `release_control`, `heartbeat`, `clients`. Status carries `control:
