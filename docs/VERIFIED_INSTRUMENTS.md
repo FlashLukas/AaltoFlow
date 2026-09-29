@@ -220,8 +220,19 @@ before/after routines.
     the whole frame after it ("Zoom to spot region" button); parked at D4sigma
     29.3 px. Not checked here (needs the mouse): wheel scrolling of the
     four-column AutoFocus tab, double-click during a run, the zoom button.
-- Not yet checked on the rig: the lost-pattern fault of 2026-09-28, the Z step
-  calibration, 12-bit spot frames.
+  - Z step calibration by the camera (1b4e63b; ratio from the WIDTH of the
+    sigma^2 curve at 1.3 / 1.5 / 1.8 / 2 x its minimum, up walk vs down walk),
+    twice at 63x with the walk capped at 8 um: up/down step ratio 0.743 +-
+    0.003 (levels 0.742 / 0.755 / 0.744 / 0.741) and 0.804 +- 0.002 (0.800 /
+    0.805 / 0.803 / 0.810) -- 8 % apart; the parabola-fit ratio repeats
+    better (0.784 / 0.787; R^2 0.94 -- 0.96, below the old 0.97 gate). kim then
+    moves Z by ~17.9 nm per step up, ~22.3 nm down. After it, the sweep routine
+    (D4sigma) parks at focus -- 30.2 px, against 0.2 -- 1 focal depths off the
+    day before -- and one_way at 30.1 px. The live spot size keeps updating
+    during the walk; the zoomed view shows the spot (stretched display) during
+    an autofocus.
+- Not yet checked on the rig: the lost-pattern fault of 2026-09-28, 12-bit spot
+  frames.
 
 ## signalhound -- Signal Hound SA44B + USB-TG44A
 
