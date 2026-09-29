@@ -72,6 +72,9 @@ CATEGORIES: dict[str, tuple[str, str]] = {
     "detector":    ("Detectors & analyzers", "lock-ins, power meters, VNAs, spectrometers"),
     "imaging":     ("Cameras & imaging", "cameras, vision, autofocus, tracking"),
     "environment": ("Environment & safety", "temperature, cryostats, interlocks, vacuum"),
+    # 2026-09-29, for the NI USB-6001: a general DAQ's purpose depends on what is
+    # wired to it (inputs, outputs, digital lines), so it fits none of the above
+    "io":          ("General I/O", "DAQ cards, analog / digital lines, relays, triggers"),
     "other":       ("Other", "anything else"),
 }
 DEFAULT_CATEGORY = "other"

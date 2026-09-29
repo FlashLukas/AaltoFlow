@@ -37,7 +37,7 @@ at start) and `safe_state = low|high` (written on a clean stop).
 ## Run
 
 ```powershell
-cd modules\other\usb6001-control
+cd modules\io\usb6001-control
 uv sync --extra gui                    # simulator + GUI
 uv sync --extra gui --extra real       # on the lab PC: + nidaqmx (name BOTH extras)
 uv run pytest -q

@@ -26,6 +26,10 @@
       "label": "Environment & safety",
       "hint": "temperature, cryostats, interlocks, vacuum"
     },
+    "io": {
+      "label": "General I/O",
+      "hint": "DAQ cards, analog / digital lines, relays, triggers"
+    },
     "other": {
       "label": "Other",
       "hint": "anything else"
@@ -381,7 +385,7 @@
     {
       "key": "signalhound",
       "name": "Spectrum analyser (Signal Hound)",
-      "description": "Signal Hound SA44B / SA124B spectrum analyser with USB-TG44A tracking generator: spectra, thru-normalised transmission",
+      "description": "Signal Hound SA44B / SA124B spectrum analyser; owner of the USB-TG44A tracking generator, which the shsg (CW) and shsna (TG sweeps) modules use through it",
       "category": "detector",
       "category_label": "Detectors & analyzers",
       "tags": [
@@ -802,6 +806,72 @@
       "ports": {
         "cmd": 5623,
         "pub": 5624
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
+      "key": "shsg",
+      "name": "Signal generator (Signal Hound TG)",
+      "description": "USB-TG44A tracking generator as a CW source, driven through the Signal Hound analyser service",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "signal generator",
+        "RF",
+        "Signal Hound"
+      ],
+      "folder": "shsg-control",
+      "version": "0.3.0",
+      "ports": {
+        "cmd": 5625,
+        "pub": 5626
+      },
+      "gui": true,
+      "start_after": [
+        "signalhound"
+      ]
+    },
+    {
+      "key": "shsna",
+      "name": "Scalar network analyser (Signal Hound)",
+      "description": "Transmission |S21| with the Signal Hound analyser + USB-TG44A tracking generator, thru-normalised",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "scalar network analyser",
+        "tracking generator",
+        "RF",
+        "Signal Hound"
+      ],
+      "folder": "shsna-control",
+      "version": "0.2.0",
+      "ports": {
+        "cmd": 5627,
+        "pub": 5628
+      },
+      "gui": true,
+      "start_after": [
+        "signalhound"
+      ]
+    },
+    {
+      "key": "usb6001",
+      "name": "General DAQ (NI USB-6001)",
+      "description": "NI USB-6001: analog inputs, two analog outputs, digital lines as inputs or outputs (set in the config, applied at start)",
+      "category": "io",
+      "category_label": "General I/O",
+      "tags": [
+        "DAQ",
+        "NI",
+        "analog",
+        "digital"
+      ],
+      "folder": "usb6001-control",
+      "version": "0.2.0",
+      "ports": {
+        "cmd": 5629,
+        "pub": 5630
       },
       "gui": true,
       "start_after": []

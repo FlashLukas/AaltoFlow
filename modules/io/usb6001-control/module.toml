@@ -5,7 +5,7 @@
 key = "usb6001"
 name = "General DAQ (NI USB-6001)"
 description = "NI USB-6001: analog inputs, two analog outputs, digital lines as inputs or outputs (set in the config, applied at start)"
-category = "other"
+category = "io"
 tags = ["DAQ", "NI", "analog", "digital"]
 icon = "icon.svg"
 order = 380
