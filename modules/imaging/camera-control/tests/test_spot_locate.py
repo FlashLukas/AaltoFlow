@@ -305,17 +305,25 @@ def test_saturation_is_information_once_per_episode_and_never_blocks():
 # calibrate spot: anywhere, both kinds, reporting where and how far
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("mode,peak", [("saturated", 700.0), ("unsaturated", 220.0)])
-def test_calibrate_spot_finds_it_anywhere_and_reports_the_move(mode, peak):
+def test_calibrate_spot_finds_it_in_the_region_and_reports_the_move(mode, peak):
+    """Changed 2026-09-29 (Lukas: "Always look for the laser spot in the safety
+    area around the laser only!"): a stale calibration INSIDE the region is
+    corrected and the move reported; one so stale that the spot is outside
+    the region is refused, with the way out -- the search never leaves it."""
     brain, cam, z, events = _rig(peak=peak)
     try:
-        brain.set_spot_position(100.0, 100.0)               # a stale calibration, far away
+        stale = (cam.spot_px[0] - 60.0, cam.spot_px[1] + 25.0)
+        brain.set_spot_position(*stale)                     # stale, but the spot is in the region
         brain.cfg.spot.calib_mode = mode
         res = brain.calibrate_spot(8)
         assert (res["x"], res["y"]) == pytest.approx(cam.spot_px, abs=0.5)
-        assert res["moved_px"] == pytest.approx(math.hypot(cam.spot_px[0] - 100.0,
-                                                           cam.spot_px[1] - 100.0), abs=1.0)
+        assert res["moved_px"] == pytest.approx(65.0, abs=1.0)
         assert res["mode"] == mode and res["frames"] >= 2 and res["jitter_px"] < 0.5
         assert brain.cfg.spot.ref_set
+        brain.set_spot_position(100.0, 100.0)               # far away: the spot is outside
+        with pytest.raises(RuntimeError, match="search region.*by hand"):
+            brain.calibrate_spot(4)
+        assert (brain.cfg.spot.ref_x, brain.cfg.spot.ref_y) == (100.0, 100.0)   # unchanged
     finally:
         brain.shutdown()
 

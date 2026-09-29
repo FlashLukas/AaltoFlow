@@ -394,7 +394,7 @@ class Camera:
         # Alignment-accuracy log: residual (dx_um, dy_um) per frame when enabled.
         self._acc_on = False
         self._acc_log: deque = deque(maxlen=256)
-        self._measuring_spot = False  # calibrate_spot() searches the whole frame
+        self._measuring_spot = False  # calibrate_spot() is running
         self._z_target: float | None = None   # last commanded Z (see step_z)
         self._z_target_t = 0.0
         self._stab_move_t = -1e9              # when the stabiliser last moved
@@ -654,8 +654,11 @@ class Camera:
         #    calibrated -> no position -> neither acts on the spot.
         sp = self.cfg.spot
         center = (sp.ref_x, sp.ref_y) if (sp.ref_set and not self._measuring_spot) else None
+        # never the whole frame (Lukas 2026-09-29): uncalibrated -> the region
+        # around the frame centre, like every other spot search
+        where = center if center is not None else (gray.shape[1] / 2.0, gray.shape[0] / 2.0)
         det = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot,
-                          sp.lookup_region_px if center else 0, center, sp.min_area_px,
+                          sp.lookup_region_px, where, sp.min_area_px,
                           sp.max_area_px, sp.reject_border, sp.search_shape,
                           sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center))
         st.spot_found = det.found
@@ -1463,27 +1466,35 @@ class Camera:
 
         The rig's screenshot said only "no spot above the noise" while the spot
         sat, plainly visible, 100 px from the calibrated position: the useful
-        news is how far the brightest light is and what to do about it."""
+        news is where the light is and what to do about it.
+
+        ONLY in the search region around the calibrated laser, and only light
+        that looks like a spot (vision.locate_spot's candidate rules). Rig
+        check 2026-09-29: the whole-frame "brightest light" was the top-left
+        corner (236, 0) of a saturated illuminated block 915 px away, while
+        the laser sat 50 px from the calibration; and Lukas's rule the same
+        day: "Always look for the laser spot in the safety area around the
+        laser only!"."""
         sp = self.cfg.spot
         why = why or "no spot"
+        calib = (float(sp.ref_x), float(sp.ref_y)) if sp.ref_set else None
         try:
-            bx, by, val = V.brightest_light(src, sp.bright_spot, top)
+            loc = V.locate_spot(src, calib, sp, "blob", max_value=top)
         except Exception:
             return why
-        d = float(np.hypot(bx - centre[0], by - centre[1]))
-        half = int(sp.lookup_region_px or 0)
+        if not loc.ok:
+            return f"{why}; {loc.why}"
+        d = float(np.hypot(loc.x - centre[0], loc.y - centre[1]))
         # a few spot radii away = somewhere else; closer = the spot itself is dim
         near = max(10.0, 1.5 * float(sp.ref_d4sigma_px or 0.0))
         if d <= near:
             return why
         where = ("calibrated position" if sp.locate == "calibrated" else "measured centre")
-        region = ""
-        if half > 0:
-            region = (f", outside the {half} px search region" if d > half
-                      else f", inside the {half} px search region")
-        return (f"{why}; the brightest light is {d:.0f} px from the {where} "
-                f"({bx:.0f}, {by:.0f}){region} -- pick locate = peak or blob, enlarge "
-                f"the search region, or recalibrate the spot")
+        half = int(sp.lookup_region_px or 0)
+        region = f" in the {half} px search region" if half > 0 else ""
+        return (f"{why}; the brightest spot-like light{region} is {d:.0f} px from the "
+                f"{where} ({loc.x:.0f}, {loc.y:.0f}) -- pick locate = peak or blob, or "
+                f"recalibrate the spot")
 
     def _note_saturation(self, saturated: bool, frac: float = float("nan"),
                          factor: float = float("nan")) -> None:
@@ -1497,7 +1508,15 @@ class Camera:
         focus -- usable for autofocus, just shallower; the Gaussian fit and the
         peak brightness are meaningless on a flat top. An episode ends after 15
         unsaturated frames in a row (one frame dipping under full scale must
-        not start a new message)."""
+        not start a new message).
+
+        Frames taken at the AF exposure (and the ones still in flight after
+        the restore) are NOT the working image: they neither end nor start an
+        episode. Rig 2026-09-29: the unsaturated AF frames ended the episode,
+        the restored working exposure started a new one -- the line came
+        twice per autofocus run."""
+        if self._af_expo_active or self._expo_hold_frames > 0:
+            return
         if not saturated:
             self._unsat_run += 1
             if self._unsat_run >= 15:
@@ -3535,8 +3554,15 @@ class Camera:
         threshold's largest blob (a flat top -- the old method, now refused
         when a second blob is nearly as large); "unsaturated" = the brightest
         smoothed blob, refined to its intensity centroid (a peaked spot the
-        threshold cannot select). Searched in the whole frame, not near the old
-        calibration: that one may be stale (the rig: 100 px off). With
+        threshold cannot select). Searched ONLY in the search region around
+        the previous calibration (the frame centre for the first one) -- Lukas
+        2026-09-29: "Always look for the laser spot in the safety area around
+        the laser only!" (a whole-frame search, the day's first version, locked
+        onto a saturated illuminated block on the rig). A spot outside the
+        region is refused with the way out: enlarge the region or set the
+        position by hand. Of several spot-like candidates the one nearest the
+        previous calibration is taken, and the per-frame positions must agree
+        within Spot.calib_max_jitter_px (else refused: something competes). With
         Spot.calib_at_af_exposure and autofocus.exposure_us set, the frames are
         taken at the autofocus exposure (switched and restored like an
         autofocus run) -- for a spot that saturates at the working exposure.
@@ -3580,14 +3606,31 @@ class Camera:
                         with self._lock:
                             gray = self._last_frame
                         if gray is not None:
-                            self._calib_frame(gray, mode, xs, ys, areas, whys, sizes, sats)
+                            self._calib_frame(gray, mode, xs, ys, areas, whys, sizes, sats,
+                                              before)
                 time.sleep(0.005)
         if len(xs) < 2:
             why = max(set(whys), key=whys.count) if whys else "no new frames from the camera"
             raise RuntimeError(f"spot calibration ({mode} spot) refused: {why}")
+        # The per-frame positions must AGREE. Rig 2026-09-29 (saturated mode,
+        # working exposure): the threshold caught the laser in some frames and
+        # a saturated illuminated block in others; the mean (a point on
+        # neither) was stored with "+/- 277 px". A real spot sits still to a
+        # fraction of a pixel (the unsaturated calibration: +/- 0.12 px).
+        jitter = float(np.hypot(np.std(xs), np.std(ys)))
+        max_jit = float(sp.calib_max_jitter_px or 0.0)
+        if max_jit > 0 and jitter > max_jit:
+            span = float(np.hypot(np.ptp(xs), np.ptp(ys)))
+            raise RuntimeError(
+                f"spot calibration ({mode} spot) refused: the found position jumps by "
+                f"{span:.0f} px between frames (+/- {jitter:.1f} px, allowed "
+                f"{max_jit:g} px): another bright object competes with the laser in the "
+                f"search region -- calibrate as an 'unsaturated spot' (at the autofocus "
+                f"exposure), raise the threshold, shrink the search region, or set the "
+                f"position by hand")
         sp.ref_x, sp.ref_y = float(np.mean(xs)), float(np.mean(ys))
         sp.ref_area = float(np.mean(areas))
-        sp.ref_jitter_px = float(np.hypot(np.std(xs), np.std(ys)))
+        sp.ref_jitter_px = jitter
 
         # the threshold-free sizes of the same frames, at the found position
         # (0 = not measurable): the one_way autofocus aims with them, the Spot
@@ -3628,14 +3671,21 @@ class Camera:
                 "moved_px": moved, "previous": list(before) if before else None,
                 "at_af_exposure": at_af}
 
-    def _calib_frame(self, gray, mode, xs, ys, areas, whys, sizes, sats) -> None:
-        """One frame of calibrate_spot: find, then measure the sizes there."""
+    def _calib_frame(self, gray, mode, xs, ys, areas, whys, sizes, sats, before=None) -> None:
+        """One frame of calibrate_spot: find, then measure the sizes there.
+
+        ``before`` = the previous calibration: the search region is around it
+        (around the frame centre when there is none) and, of several
+        spot-like candidates, the one nearest it is taken -- the same for
+        every frame, so that frames cannot alternate between two objects."""
         sp = self.cfg.spot
         src, top, _bits = self._spot_source(gray)
         # the saturated method thresholds the 8-bit frame (the threshold's
         # meaning); the unsaturated one works on the full-depth frame if any
-        r = (V.find_spot_for_calibration(gray, sp, "saturated") if mode == "saturated"
-             else V.find_spot_for_calibration(src, sp, "unsaturated", max_value=top))
+        r = (V.find_spot_for_calibration(gray, sp, "saturated", calib_xy=before)
+             if mode == "saturated" else
+             V.find_spot_for_calibration(src, sp, "unsaturated", max_value=top,
+                                         calib_xy=before))
         if not r.ok:
             whys.append(r.why)
             return

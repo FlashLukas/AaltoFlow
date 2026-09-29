@@ -393,7 +393,9 @@ class SpotTab(QWidget):
         l.addLayout(form)
 
         # Search region: where the per-frame size check looks, around the
-        # calibrated position (calibration itself searches the whole frame).
+        # calibrated position -- and so does Calibrate spot (Lukas 2026-09-29:
+        # "Always look for the laser spot in the safety area around the laser
+        # only!"; the frame centre when nothing is calibrated yet).
         form = QFormLayout()
         self.cmb_shape = QComboBox(); self.cmb_shape.addItems(["rectangle", "circle"])
         self.cmb_shape.setCurrentIndex(1 if sp.search_shape == "circle" else 0)
@@ -401,7 +403,8 @@ class SpotTab(QWidget):
         form.addRow("search region", self.cmb_shape)
         self.sp_look = QSpinBox(); self.sp_look.setRange(0, 5000)
         self.sp_look.setValue(int(sp.lookup_region_px)); self.sp_look.valueChanged.connect(self._on_edit)
-        self.sp_look.setToolTip("0 = search the whole frame every time")
+        self.sp_look.setToolTip("the safety area around the laser: locating and calibrating the "
+                                "spot look only here. 0 = the whole frame (not advised)")
         self.lab_look = QLabel("half-width ± x (px)")
         form.addRow(self.lab_look, self.sp_look)
         self.sp_look_y = QSpinBox(); self.sp_look_y.setRange(0, 5000)
@@ -422,7 +425,7 @@ class SpotTab(QWidget):
         l.addWidget(self.lab_warn)
         right.addWidget(f)
 
-        f, l = _card("3 · Spot position  (calibrate: found anywhere in the frame)")
+        f, l = _card("3 · Spot position  (calibrate: found in the search region)")
         # the calibration SWITCH (Lukas 2026-09-29): a saturated spot is a flat
         # top the threshold selects; an unsaturated one is peaked and needs the
         # brightest-blob search. Both look in the WHOLE frame.

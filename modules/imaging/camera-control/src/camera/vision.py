@@ -802,15 +802,43 @@ def spot_relative_area(frame: np.ndarray, guess_xy, cfg=None, max_value=None) ->
 # all of it. So the CENTRE of the size measurement is now a choice (Spot.locate):
 #   "calibrated" -- as before (the default: the position is a user calibration,
 #                   done once in a while, never tracked frame by frame);
-#   "peak"       -- the brightest point of a lightly smoothed copy of the search
-#                   region, sub-pixel by a small centroid around it;
-#   "blob"       -- the connected blobs above background + locate_k x noise in
-#                   the search region, filtered like the threshold spot (min /
-#                   max area, frame border): the BRIGHTEST one (its smoothed
-#                   peak -- not its energy: a large dim feature of the sample
-#                   carries more light than a small bright spot).
+#   "peak"       -- the brightest point of the chosen spot candidate (below),
+#                   sub-pixel; the middle of its flat top when it is saturated;
+#   "blob"       -- the chosen candidate's intensity centroid.
 # The measurement box and the mirror test then use the LOCATED centre. The
 # calibrated position is still THE position for motion (stabiliser, click to go).
+#
+# THE LASER AMONG OTHER BRIGHT LIGHT (rig check of 6da4e31, 2026-09-29).
+# Lukas's rule, the same day: "Always look for the laser spot in the safety
+# area around the laser only!" -- every search here (locate, the why-text, the
+# calibration) looks ONLY in the search region (lookup_region_px /
+# lookup_region_y_px / search_shape) around the calibrated laser position; with
+# no calibration yet, around the frame centre. lookup_region_px = 0 is the one
+# explicit exception (the old meaning: no region, the whole frame).
+# Inside that region a CANDIDATE must look like a laser spot:
+#   * above the threshold max(locate_k x noise, locate_rel x the region's
+#     brightest light). The noise is never below ONE 8-bit grey level: on the
+#     rig at 65 us the background read 2 counts nearly everywhere (MAD 0), the
+#     old floor made the threshold 1.5 counts, and the faintly lit sample
+#     (+2 counts) merged with the spot into one blob larger than max_area_px ->
+#     "no blob" although the spot peaked at 200. The relative part keeps a
+#     dim lit area or a scattered-light halo out of the spot at any exposure;
+#   * min_area_px <= area <= max_area_px, not touching the frame edge
+#     (reject_border), not reaching out of the region (it is looked at with a
+#     margin: a blob that still touches the margin's edge goes on outside --
+#     the rig's saturated illuminated block did, from the frame's top edge to
+#     ~50 px from the laser), not elongated (the long / short axis ratio of
+#     its pixels above max_elongation: a scratch or a lit edge is a line, a
+#     spot is round, and a defocused ring is round too), and its centre inside
+#     the region;
+#   * of the candidates at least NEAR_FRACTION as bright (as large, for the
+#     saturated calibration) as the best one, the one NEAREST the calibrated
+#     position wins -- not simply the brightest: at the working exposure the
+#     laser and the lit sample are BOTH at full scale, and "brightest" was a
+#     coin toss the block won (53 px off). With no calibration there is
+#     nothing to be near, so the brightest (largest) wins, and two nearly equal
+#     ones are refused (calibration) rather than guessed.
+
 
 @dataclass
 class SpotLocation:
@@ -827,34 +855,181 @@ class SpotLocation:
     # the runner-up, for the calibration's "several equally good" refusal
     second_xy: tuple | None = None
     second_peak: float = 0.0
+    # blobs that were NOT taken for the spot, by reason ("reaches out of the
+    # region": 1, ...) -- for the why-text and the Spot tab
+    rejected: dict = field(default_factory=dict)
 
 
-def _blobs(sm: np.ndarray, thr: float, offset, full_size, cfg) -> list:
-    """Connected blobs of ``sm >= thr`` (``sm`` = background-subtracted,
-    smoothed signal) that pass the spot filters (min / max area, frame border).
+# of the spot-like candidates, those at least this fraction as bright (large)
+# as the best one compete on distance to the calibration
+NEAR_FRACTION = 0.5
 
-    A list of dicts, brightest (smoothed peak) first: x, y = the centroid of
-    the signal above ``thr`` in full-frame px, peak, area, energy."""
-    mask = (sm >= thr).astype(np.uint8)
-    n, lab, stats, _c = cv2.connectedComponentsWithStats(mask, 8)
-    if n <= 1:
-        return []
-    ok = spot_candidates(stats, offset, full_size, int(_cfg(cfg, "min_area_px", 4)),
-                         int(_cfg(cfg, "max_area_px", 0) or 0),
-                         bool(_cfg(cfg, "reject_border", True)))
+# what to do when the region holds nothing usable
+REGION_HINT = ("enlarge the search region (Spot tab) or set the position by hand "
+               "(Set position / pick by clicking)")
+
+
+def _grey_level(arr: np.ndarray, max_value=None) -> float:
+    """ONE 8-bit grey level in this frame's counts: 1 on an 8-bit frame, 16 on
+    a 12-bit one (4095 / 255). The floor under every noise estimate of the
+    locate: a background that is quantised to (nearly) one value has a MAD of
+    0, and a threshold of k x "0" cuts through anything the sample shows.
+    Unknown full scale (float frames): the old 0.3-count floor."""
+    top = _full_scale(arr, max_value)
+    return 0.3 if top is None else float(top) / 255.0
+
+
+def _search_area(shape, calib_xy, cfg):
+    """(region or None, work box, region centre, centred on the frame centre?).
+
+    The region = the search region around the calibrated laser position (the
+    frame centre when there is none -- Lukas's rule, see above); None when
+    lookup_region_px is 0 (the whole frame, the explicit opt-out). The WORK
+    box is the region plus a margin, so that a candidate's whole shape is seen
+    and one that goes on outside the region can be recognised as such."""
+    h, w = shape[:2]
+    half = int(_cfg(cfg, "lookup_region_px", 0) or 0)
+    if half <= 0:
+        return None, (0, 0, w, h), calib_xy, False
+    at_centre = calib_xy is None
+    centre = (w / 2.0, h / 2.0) if at_centre else (float(calib_xy[0]), float(calib_xy[1]))
+    reg = search_region(centre, half, int(_cfg(cfg, "lookup_region_y_px", 0) or 0),
+                        _cfg(cfg, "search_shape", "rect"), (w, h))
+    if reg is None:                                  # the region lies outside the frame
+        return None, (0, 0, 0, 0), centre, at_centre
+    hx, hy = reg["half"]
+    m = max(12, max(hx, hy) // 4)
+    x0, y0, x1, y1 = reg["box"]
+    return reg, (max(0, x0 - m), max(0, y0 - m), min(w, x1 + m), min(h, y1 + m)), \
+        centre, at_centre
+
+
+def _in_region(reg, x: float, y: float) -> bool:
+    if reg is None:
+        return True
+    cx, cy = reg["center"]
+    hx, hy = reg["half"]
+    if reg["shape"] == "circle":
+        return (x - cx) ** 2 + (y - cy) ** 2 <= hx * hx
+    return abs(x - cx) <= hx + 0.5 and abs(y - cy) <= hy + 0.5
+
+
+def _region_words(reg, centre, at_centre) -> str:
+    """'inside the +/-100 px search region around the calibrated laser position (973, 465)'."""
+    if reg is None:
+        return "in the frame"
+    hx, hy = reg["half"]
+    size = (f"{hx} px radius" if reg["shape"] == "circle"
+            else f"+/-{hx} px" if hx == hy else f"+/-{hx} x {hy} px")
+    around = (f"the frame centre ({centre[0]:.0f}, {centre[1]:.0f}) -- there is no calibration "
+              f"yet" if at_centre else
+              f"the calibrated laser position ({centre[0]:.0f}, {centre[1]:.0f})")
+    return f"inside the {size} search region around {around}"
+
+
+def _rejected_words(rej: dict) -> str:
+    parts = [f"{n} {why}" for why, n in rej.items() if n]
+    return f" (ignored: {', '.join(parts)})" if parts else ""
+
+
+def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg, reg=None):
+    """The blobs of ``mask`` (in the work box at ``offset``) that may be the
+    laser spot, by the rules above. ``vals`` = the signal the mask came from
+    (its peak, the centroid's weights ``vals - thr``; ``thr`` None = every
+    pixel weighs the same, the thresholded binary centroid).
+
+    Returns (candidates, rejected counts, label image). A candidate is a dict:
+    x, y (centroid, full frame), peak, area, label, bbox (in the work box)."""
+    rej = {"smaller than min area": 0, "larger than max area": 0, "touching the frame edge": 0,
+           "reaching out of the region": 0, "elongated": 0, "centred outside the region": 0}
+    n, lab, stats, _c = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
     out = []
-    for i in np.nonzero(ok)[0] + 1:
-        ys, xs = np.nonzero(lab == i)
-        v = sm[ys, xs].astype(np.float64)
-        wgt = np.clip(v - thr, 0.0, None)
+    if n <= 1:
+        return out, rej, lab
+    mh, mw = mask.shape[:2]
+    fw, fh = int(full_size[0]), int(full_size[1])
+    ox, oy = int(offset[0]), int(offset[1])
+    min_a = max(1, int(_cfg(cfg, "min_area_px", 4)))
+    max_a = int(_cfg(cfg, "max_area_px", 0) or 0)
+    border = bool(_cfg(cfg, "reject_border", True))
+    max_el = float(_cfg(cfg, "max_elongation", 3.0) or 0.0)
+    for i in range(1, n):
+        bx = int(stats[i, cv2.CC_STAT_LEFT])
+        by = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_a:
+            rej["smaller than min area"] += 1
+            continue
+        if max_a > 0 and area > max_a:
+            rej["larger than max area"] += 1
+            continue
+        if border and (bx + ox <= 0 or by + oy <= 0 or bx + bw + ox >= fw or by + bh + oy >= fh):
+            rej["touching the frame edge"] += 1
+            continue
+        # the work box's edge where it is NOT the frame's edge: a blob touching
+        # it goes on outside what is looked at -- larger than the region, not
+        # a spot inside it (the rig's illuminated block)
+        if reg is not None and ((bx <= 0 < ox) or (by <= 0 < oy)
+                                or (bx + bw >= mw and ox + mw < fw)
+                                or (by + bh >= mh and oy + mh < fh)):
+            rej["reaching out of the region"] += 1
+            continue
+        sub = lab[by:by + bh, bx:bx + bw] == i
+        ys, xs = np.nonzero(sub)
+        if max_el > 0 and area >= 5:
+            # long / short axis of the pixel cloud; + 1/12 = a pixel's own
+            # extent, so a 1-px-wide line reads long, not infinite
+            ev = np.linalg.eigvalsh(np.cov(np.vstack([xs, ys]).astype(np.float64)))
+            if math.sqrt((ev[1] + 1 / 12) / (max(ev[0], 0.0) + 1 / 12)) > max_el:
+                rej["elongated"] += 1
+                continue
+        v = vals[by:by + bh, bx:bx + bw][sub].astype(np.float64)
+        wgt = np.clip(v - thr, 0.0, None) if thr is not None else np.ones_like(v)
         if wgt.sum() <= 0:
-            wgt = np.ones_like(wgt)
-        out.append({"x": float(xs @ wgt / wgt.sum()) + offset[0],
-                    "y": float(ys @ wgt / wgt.sum()) + offset[1],
-                    "peak": float(v.max()), "area": int(xs.size),
-                    "energy": float(np.clip(v, 0.0, None).sum())})
-    out.sort(key=lambda b: (-b["peak"], -b["energy"]))
-    return out
+            wgt = np.ones_like(v)
+        cx = float(xs @ wgt / wgt.sum()) + bx + ox
+        cy = float(ys @ wgt / wgt.sum()) + by + oy
+        if not _in_region(reg, cx, cy):
+            rej["centred outside the region"] += 1
+            continue
+        out.append({"x": cx, "y": cy, "peak": float(v.max()), "area": area, "label": i,
+                    "bbox": (bx, by, bw, bh)})
+    return out, rej, lab
+
+
+def _choose(cands: list, key: str, ref_xy):
+    """(the candidate taken for the spot, the runner-up or None) -- see the
+    rules above: nearest ``ref_xy`` among those >= NEAR_FRACTION of the best
+    ``key``; the best one when there is no ``ref_xy``."""
+    order = sorted(cands, key=lambda c: -c[key])
+    pick = order[0]
+    if ref_xy is not None and len(order) > 1:
+        close = [c for c in order if c[key] >= NEAR_FRACTION * order[0][key]]
+        pick = min(close, key=lambda c: (c["x"] - ref_xy[0]) ** 2 + (c["y"] - ref_xy[1]) ** 2)
+    others = [c for c in order if c is not pick]
+    return pick, (others[0] if others else None)
+
+
+def _plateau_peak(sm: np.ndarray, lab: np.ndarray, c: dict, noise: float) -> tuple:
+    """The PEAK of candidate ``c`` (work-box px). A saturated spot has a flat
+    top, and "the maximum" is then just its first pixel in raster order -- on
+    the rig 14 px from the middle. So: the pixels within max(2 noise, 1 %) of
+    the maximum; when they are a plateau (>= 9 px) their weighted centre,
+    else the small centroid around the maximum (a peaked spot)."""
+    bx, by, bw, bh = c["bbox"]
+    sub = lab[by:by + bh, bx:bx + bw] == c["label"]
+    v = np.where(sub, sm[by:by + bh, bx:bx + bw], -np.inf)
+    m = float(v.max())
+    base = m - max(2.0 * noise, 0.01 * abs(m))
+    top = sub & (v >= base)
+    ys, xs = np.nonzero(top)
+    if xs.size >= 9:
+        wgt = v[ys, xs].astype(np.float64) - base + 1e-9
+        return float(xs @ wgt / wgt.sum()) + bx, float(ys @ wgt / wgt.sum()) + by
+    iy, ix = np.unravel_index(int(np.argmax(v)), v.shape)
+    return _peak_centroid(sm, int(ix) + bx, int(iy) + by)
 
 
 def _peak_centroid(sig: np.ndarray, ix: int, iy: int, r: int = 3) -> tuple[float, float]:
@@ -874,9 +1049,10 @@ def _peak_centroid(sig: np.ndarray, ix: int, iy: int, r: int = 3) -> tuple[float
 def _smooth_signal(gray: np.ndarray, box: tuple, cfg, max_value=None):
     """(smoothed signal of ``box``, its background, the noise of the smoothed
     copy). The box is MOSTLY background (a spot is small against the search
-    region or the frame), so the robust level of all its pixels is the
-    background; the smoothing (detect_px, >= 0.8 px) keeps one hot pixel from
-    being "the brightest point"."""
+    region), so the robust level of all its pixels is the background; the
+    smoothing (detect_px, >= 0.8 px) keeps one hot pixel from being "the
+    brightest point". The noise is never below one 8-bit grey level
+    (_grey_level): the rig's 65 us background was 2 counts nearly everywhere."""
     x0, y0, x1, y1 = box
     bright = bool(_cfg(cfg, "bright_spot", True))
     a = _signal(gray[y0:y1, x0:x1], bright, max_value).astype(np.float32)
@@ -885,18 +1061,53 @@ def _smooth_signal(gray: np.ndarray, box: tuple, cfg, max_value=None):
     sig = max(0.8, float(_cfg(cfg, "detect_px", 2.0) or 0.0))
     sm = cv2.GaussianBlur(a, (0, 0), sig, borderType=cv2.BORDER_REFLECT)
     sub = sm[::2, ::2] if sm.size > 40000 else sm       # plenty of pixels for a median
-    bg, noise = _robust_level(sub.ravel())
-    return sm - bg, bg, noise
+    bg, noise = _dark_side_level(sub.ravel())
+    return sm - bg, bg, max(noise, _grey_level(gray, max_value))
+
+
+def _dark_side_level(vals: np.ndarray) -> tuple[float, float]:
+    """(background, noise) of a box that may be partly covered by BRIGHT light.
+
+    Rig 2026-09-29, working exposure: a saturated illuminated block covered a
+    third of the box around a stale calibration. The median / MAD then moved
+    up and the "noise" became the block's step: 5 x noise was above full
+    scale and nothing was found. The dark side is what the background alone
+    decides: the noise from the median down to the 15.9th percentile (one
+    sigma of a Gaussian), everything brighter than median + 3 of those
+    dropped, repeated until nothing more drops -- a bright part of up to
+    ~half the box goes, the background's own statistics stay."""
+    v = vals.astype(np.float64, copy=False)
+    med = float(np.median(v))
+    s = max(0.0, med - float(np.percentile(v, 15.87)))
+    for _ in range(5):
+        keep = vals[vals <= med + 3.0 * s + 1e-9]
+        if keep.size < 16 or keep.size == v.size:
+            break
+        v = keep.astype(np.float64, copy=False)
+        med = float(np.median(v))
+        s = max(0.0, med - float(np.percentile(v, 15.87)))
+    return med, s
+
+
+def _region_peak(sm: np.ndarray, reg, work) -> float:
+    """The brightest smoothed value inside the region's box (not the margin)."""
+    if reg is None:
+        return float(sm.max())
+    x0, y0, x1, y1 = reg["box"]
+    part = sm[y0 - work[1]:y1 - work[1], x0 - work[0]:x1 - work[0]]
+    return float(part.max()) if part.size else float(sm.max())
 
 
 def locate_spot(frame: np.ndarray, calib_xy, cfg=None, mode: str = "calibrated",
                 max_value=None) -> SpotLocation:
-    """The centre the spot SIZE is measured around (see the block comment above).
+    """The centre the spot SIZE is measured around (see the block comments above).
 
-    ``calib_xy`` is the calibrated position (the search region is around it;
-    None = the whole frame). ``cfg`` = the Spot config (lookup_region_px /
-    _y_px / search_shape, detect_px, locate_k, min/max_area_px, reject_border,
-    bright_spot). Never raises: ``ok`` False + ``why`` instead.
+    ``calib_xy`` is the calibrated laser position: the search region is around
+    it (None = not calibrated yet: around the frame centre) and, of several
+    equally good candidates, the one nearest it is the laser. ``cfg`` = the
+    Spot config (lookup_region_px / _y_px / search_shape, detect_px, locate_k,
+    locate_rel, min/max_area_px, reject_border, max_elongation, bright_spot).
+    Never raises: ``ok`` False + ``why`` instead.
     """
     mode = str(mode or "calibrated")
     if mode == "calibrated":
@@ -905,184 +1116,156 @@ def locate_spot(frame: np.ndarray, calib_xy, cfg=None, mode: str = "calibrated",
         return SpotLocation(True, float(calib_xy[0]), float(calib_xy[1]), mode)
     gray = to_gray(frame) if frame.ndim == 3 else frame
     h, w = gray.shape[:2]
-    box = _limit_box(gray.shape, calib_xy, cfg)
-    sm, _bg, snoise = _smooth_signal(gray, box, cfg, max_value)
+    reg, work, centre, at_centre = _search_area(gray.shape, calib_xy, cfg)
     out = SpotLocation(method=mode)
+    sm, _bg, snoise = _smooth_signal(gray, work, cfg, max_value)
     if sm.size == 0:
-        out.why = "empty search region"
+        out.why = "the search region is outside the frame"
         return out
+    where = _region_words(reg, centre, at_centre)
+    hint = f" -- {REGION_HINT}" if reg is not None else ""
     k = max(1.0, float(_cfg(cfg, "locate_k", 5.0)))
+    top = _region_peak(sm, reg, work)
+    if top <= k * snoise:
+        out.why = (f"no light above background + {k:g} x noise {where} (brightest "
+                   f"{top:.1f} counts above the background, noise {snoise:.2f}){hint}")
+        return out
+    thr = max(k * snoise, float(_cfg(cfg, "locate_rel", 0.2) or 0.0) * top)
+    cands, rej, lab = _candidates(sm >= thr, sm, thr, (work[0], work[1]), (w, h), cfg, reg)
+    out.n_candidates, out.rejected = len(cands), rej
+    if not cands:
+        out.why = f"no spot-like light {where}{_rejected_words(rej)}{hint}"
+        return out
+    pick, second = _choose(cands, "peak", calib_xy)
+    out.ok, out.peak, out.area = True, pick["peak"], pick["area"]
     if mode == "peak":
-        iy, ix = np.unravel_index(int(np.argmax(sm)), sm.shape)
-        out.peak = float(sm[iy, ix])
-        if out.peak <= k * snoise:
-            out.why = (f"no light above the noise in the search region (brightest "
-                       f"{out.peak:.1f} counts above the background, noise {snoise:.2f})")
-            return out
-        out.ok, out.n_candidates = True, 1
-        out.x, out.y = _refine_located(gray, cfg, max_value, ix + box[0], iy + box[1],
-                                       "peak", k)
-        return out
-    # "blob"
-    blobs = _blobs(sm, k * snoise, (box[0], box[1]), (w, h), cfg)
-    out.n_candidates = len(blobs)
-    if not blobs:
-        out.why = (f"no blob above background + {k:g} x noise in the search region "
-                   f"(that passes min / max area and the frame border)")
-        return out
-    b = blobs[0]
-    out.ok, out.peak, out.area = True, b["peak"], b["area"]
-    out.x, out.y = _refine_located(gray, cfg, max_value, b["x"], b["y"], "blob", k)
-    if len(blobs) > 1:
-        out.second_xy, out.second_peak = (blobs[1]["x"], blobs[1]["y"]), blobs[1]["peak"]
+        px, py = _plateau_peak(sm, lab, pick, snoise)
+        out.x, out.y = px + work[0], py + work[1]
+    else:
+        out.x, out.y = pick["x"], pick["y"]
+    if second is not None:
+        out.second_xy, out.second_peak = (second["x"], second["y"]), second["peak"]
     return out
 
 
-def _refine_located(gray, cfg, max_value, x: float, y: float, mode: str, k: float):
-    """The located centre, measured again in a box centred on it.
-
-    Why: the spot the locate is for sits at the EDGE of the search region (the
-    rig case), so the first pass sees only part of it -- a blob cut by the box
-    edge has its centroid pulled inwards (1.2 px in the simulator). A second
-    look, centred on the first answer and as wide as the search region, sees
-    all of it. Only the object found the first time counts: its blob (the one
-    under the first answer) or its peak window -- never a new brightest object
-    that the re-centred box may reach."""
-    h, w = gray.shape[:2]
-    half = max(8, int(_cfg(cfg, "lookup_region_px", 0) or 0) or 50)
-    box = (max(0, int(x) - half), max(0, int(y) - half),
-           min(w, int(x) + half + 1), min(h, int(y) + half + 1))
-    sm, _bg, snoise = _smooth_signal(gray, box, cfg, max_value)
-    if sm.size == 0:
-        return float(x), float(y)
-    ix, iy = int(round(x)) - box[0], int(round(y)) - box[1]
-    ix, iy = min(max(ix, 0), sm.shape[1] - 1), min(max(iy, 0), sm.shape[0] - 1)
-    if mode == "peak":
-        r = 4                                   # climb to the local maximum first
-        y0, y1 = max(0, iy - r), min(sm.shape[0], iy + r + 1)
-        x0, x1 = max(0, ix - r), min(sm.shape[1], ix + r + 1)
-        jy, jx = np.unravel_index(int(np.argmax(sm[y0:y1, x0:x1])), (y1 - y0, x1 - x0))
-        cx, cy = _peak_centroid(sm, x0 + int(jx), y0 + int(jy))
-        return cx + box[0], cy + box[1]
-    thr = k * snoise
-    mask = (sm >= thr).astype(np.uint8)
-    _n, lab, _st, _c = cv2.connectedComponentsWithStats(mask, 8)
-    j = lab[iy, ix]
-    if j == 0:
-        return float(x), float(y)
-    ys, xs = np.nonzero(lab == j)
-    wgt = np.clip(sm[ys, xs].astype(np.float64) - thr, 0.0, None)
-    if wgt.sum() <= 0:
-        return float(x), float(y)
-    return float(xs @ wgt / wgt.sum()) + box[0], float(ys @ wgt / wgt.sum()) + box[1]
-
-
-def brightest_light(frame: np.ndarray, bright: bool = True, max_value=None,
-                    smooth: float = 2.0) -> tuple[float, float, float]:
-    """(x, y, counts above the frame's background) of the brightest light in the
-    WHOLE frame, lightly smoothed (one hot pixel does not count). For the
-    "why was no spot measured" text: where the light IS, against where the
-    measurement looked."""
-    gray = to_gray(frame) if frame.ndim == 3 else frame
-    a = _signal(gray, bright, max_value).astype(np.float32)
-    sm = cv2.GaussianBlur(a, (0, 0), max(0.5, smooth))
-    iy, ix = np.unravel_index(int(np.argmax(sm)), sm.shape)
-    bg = float(np.median(sm[::4, ::4]))
-    return float(ix), float(iy), float(sm[iy, ix] - bg)
-
-
 # --------------------------------------------------------------------------- #
-# Calibration: find the spot ANYWHERE in the frame (2026-09-29)
+# Calibration: find the spot in the SAFETY AREA around the laser (2026-09-29)
 # --------------------------------------------------------------------------- #
 # The old calibration thresholded the whole frame and took the largest blob:
 # right for a SATURATED spot (a flat top well above the illuminated sample),
 # useless for an UNSATURATED one (a peaked spot with no flat top, dimmer than
-# the threshold). Lukas: a switch, and it must find the spot wherever it is --
-# the old calibration may be stale (rig: 100 px off).
-#   "saturated"   -- the fixed threshold (thr_lower..thr_upper), min / max area,
-#                    frame border: the largest blob, its centroid (as before),
-#                    now REFUSED when a second blob is nearly as large;
-#   "unsaturated" -- the brightest blob of a smoothed copy of the whole frame,
-#                    refined to the background-subtracted intensity centroid by
-#                    the second moment's iterated box; REFUSED when another
-#                    blob peaks nearly as bright.
-# "Nearly" = within AMBIGUOUS (80 %). Refusing is cheaper than calibrating on
-# the wrong object: the stabiliser would then steer the sample to it.
+# the threshold). Lukas: a switch --
+#   "saturated"   -- the fixed threshold (thr_lower..thr_upper): the largest
+#                    spot-like blob, its centroid (as before);
+#   "unsaturated" -- the brightest spot-like blob of a smoothed copy, refined
+#                    to the background-subtracted intensity centroid by the
+#                    second moment's iterated box.
+# At first (earlier on 2026-09-29) both searched the WHOLE frame, so that a
+# stale calibration could not hide the spot. The rig showed what that costs: at
+# the working exposure a saturated illuminated block won, frame after frame
+# alternating with the laser (+-277 px). Lukas's rule since: "Always look for
+# the laser spot in the safety area around the laser only!" -- the search
+# region around the previous calibration (the frame centre for the very first
+# one), the candidate rules above, and of several the one nearest the previous
+# calibration. A spot outside the region is refused with the way out:
+# enlarge the region, or set the position by hand.
+# Without a previous calibration two nearly equal candidates (within
+# AMBIGUOUS, 80 %) are refused: refusing is cheaper than calibrating on the
+# wrong object -- the stabiliser would then steer the sample to it.
 AMBIGUOUS = 0.8
 
 
 def find_spot_for_calibration(frame: np.ndarray, cfg=None, mode: str = "saturated",
-                              max_value=None) -> SpotLocation:
-    """One frame's whole-frame spot position for Calibrate spot (see above)."""
+                              max_value=None, calib_xy=None) -> SpotLocation:
+    """One frame's spot position for Calibrate spot (see above), searched in
+    the region around ``calib_xy`` (the PREVIOUS calibration; None = the frame
+    centre)."""
     gray = to_gray(frame) if frame.ndim == 3 else frame
     h, w = gray.shape[:2]
     bright = bool(_cfg(cfg, "bright_spot", True))
     out = SpotLocation(method=mode)
+    reg, work, centre, at_centre = _search_area(gray.shape, calib_xy, cfg)
+    x0, y0, x1, y1 = work
+    if x1 <= x0 or y1 <= y0:
+        out.why = f"the search region around ({centre[0]:.0f}, {centre[1]:.0f}) is outside the frame"
+        return out
+    where = _region_words(reg, centre, at_centre)
+    hint = f" -- {REGION_HINT}" if reg is not None else ""
     if mode == "saturated":
         g8 = gray if gray.dtype == np.uint8 else to_gray(gray)
+        g8 = g8[y0:y1, x0:x1]
         lo, hi = int(_cfg(cfg, "thr_lower", 200)), int(_cfg(cfg, "thr_upper", 255))
         if not bright:
             g8 = cv2.bitwise_not(g8)
             lo, hi = 255 - hi, 255 - lo
-        mask = cv2.inRange(g8, lo, hi)
-        n, lab, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
-        if n <= 1:
-            out.why = (f"nothing above the threshold {lo} anywhere in the frame (frame max "
-                       f"{int(g8.max())}) -- lower the threshold, or calibrate as an "
-                       f"'unsaturated spot'")
+        mask = cv2.inRange(g8, lo, hi) > 0
+        if not mask.any():
+            out.why = (f"nothing above the threshold {lo} {where} (max there {int(g8.max())}) "
+                       f"-- lower the threshold, calibrate as an 'unsaturated spot', or "
+                       f"{REGION_HINT if reg is not None else 'check the laser'}")
             return out
-        ok = spot_candidates(stats, (0, 0), (w, h), int(_cfg(cfg, "min_area_px", 4)),
-                             int(_cfg(cfg, "max_area_px", 0) or 0),
-                             bool(_cfg(cfg, "reject_border", True)))
-        idx = np.nonzero(ok)[0] + 1
-        out.n_candidates = int(idx.size)
-        if idx.size == 0:
-            out.why = ("blobs above the threshold, but none passes min / max area and the "
-                       "frame border -- check the area limits")
+        cands, rej, lab = _candidates(mask, g8, None, (x0, y0), (w, h), cfg, reg)
+        out.n_candidates, out.rejected = len(cands), rej
+        if not cands:
+            out.why = (f"light above the threshold {lo} {where}, but nothing spot-like"
+                       f"{_rejected_words(rej)} -- check the area limits, or "
+                       f"{REGION_HINT if reg is not None else 'the threshold'}")
             return out
-        areas = stats[idx, cv2.CC_STAT_AREA]
-        order = np.argsort(-areas)
-        j = idx[order[0]]
-        blob = (lab == j).astype(np.uint8)
-        m = cv2.moments(blob, binaryImage=True)
-        out.x, out.y = m["m10"] / m["m00"], m["m01"] / m["m00"]
-        out.area, out.peak = int(areas[order[0]]), float(g8[lab == j].max())
+        pick, second = _choose(cands, "area", calib_xy)
+        out.x, out.y, out.area, out.peak = pick["x"], pick["y"], pick["area"], pick["peak"]
         out.ok = True
-        if idx.size > 1:
-            k2 = idx[order[1]]
-            out.second_xy = (float(cents[k2][0]), float(cents[k2][1]))
-            out.second_peak = float(areas[order[1]])
-            if areas[order[1]] >= AMBIGUOUS * areas[order[0]]:
+        if second is not None:
+            out.second_xy, out.second_peak = (second["x"], second["y"]), float(second["area"])
+            if calib_xy is None and second["area"] >= AMBIGUOUS * pick["area"]:
                 out.ok = False
                 out.why = (f"two blobs of nearly the same size above the threshold: "
-                           f"{int(areas[order[0]])} px at ({out.x:.0f}, {out.y:.0f}) and "
-                           f"{int(areas[order[1]])} px at ({out.second_xy[0]:.0f}, "
-                           f"{out.second_xy[1]:.0f}) -- raise the threshold or the min area")
+                           f"{pick['area']} px at ({out.x:.0f}, {out.y:.0f}) and "
+                           f"{second['area']} px at ({second['x']:.0f}, {second['y']:.0f}) "
+                           f"-- raise the threshold or the min area, or set the position by hand")
         return out
-    # "unsaturated": the brightest smoothed blob, then the moment centroid
-    sm, _bg, snoise = _smooth_signal(gray, (0, 0, w, h), cfg, max_value)
+    # "unsaturated": the brightest spot-like smoothed blob, then the moment centroid
+    sm, _bg, snoise = _smooth_signal(gray, work, cfg, max_value)
     k = max(1.0, float(_cfg(cfg, "locate_k", 5.0)))
-    blobs = _blobs(sm, k * snoise, (0, 0), (w, h), cfg)
-    out.n_candidates = len(blobs)
-    if not blobs:
-        out.why = (f"no light above background + {k:g} x noise anywhere in the frame "
-                   f"(that passes min / max area and the frame border)")
+    top = _region_peak(sm, reg, work)
+    if top <= k * snoise:
+        out.why = (f"no light above background + {k:g} x noise {where} (brightest "
+                   f"{top:.1f} counts above the background, noise {snoise:.2f}){hint}")
         return out
-    b = blobs[0]
+    thr = max(k * snoise, float(_cfg(cfg, "locate_rel", 0.2) or 0.0) * top)
+    cands, rej, _lab = _candidates(sm >= thr, sm, thr, (x0, y0), (w, h), cfg, reg)
+    out.n_candidates, out.rejected = len(cands), rej
+    if not cands:
+        out.why = f"no spot-like light {where}{_rejected_words(rej)}{hint}"
+        return out
+    b, second = _choose(cands, "peak", calib_xy)
     out.peak, out.area = b["peak"], b["area"]
-    if len(blobs) > 1:
-        out.second_xy, out.second_peak = (blobs[1]["x"], blobs[1]["y"]), blobs[1]["peak"]
-        if blobs[1]["peak"] >= AMBIGUOUS * b["peak"]:
+    if second is not None:
+        out.second_xy, out.second_peak = (second["x"], second["y"]), second["peak"]
+        if calib_xy is None and second["peak"] >= AMBIGUOUS * b["peak"]:
             out.why = (f"two spots of nearly the same brightness: {b['peak']:.0f} at "
-                       f"({b['x']:.0f}, {b['y']:.0f}) and {blobs[1]['peak']:.0f} at "
-                       f"({blobs[1]['x']:.0f}, {blobs[1]['y']:.0f}) -- which one is the laser?")
+                       f"({b['x']:.0f}, {b['y']:.0f}) and {second['peak']:.0f} at "
+                       f"({second['x']:.0f}, {second['y']:.0f}) -- which one is the laser? "
+                       f"(set the position by hand)")
             return out
-    # refine: the second moment's iterated box around the brightest blob gives
-    # the background-subtracted intensity centroid (rings, a hole: all counted)
+    # refine: the second moment's iterated box around the chosen blob gives
+    # the background-subtracted intensity centroid (rings, a hole: all
+    # counted) -- but its box reaches whatever else is lit around the spot, and
+    # a faintly lit sample next to it pulls that centroid over (12.5 px in a
+    # copy of the rig's 65 us frame). The blob's own centroid (the part above
+    # the threshold, weighted) is the position; the moment centroid replaces
+    # it only when the two AGREE to within CALIB_REFINE_PX -- then it is the
+    # same spot measured with more of its light, a little less noisy.
     m = spot_second_moment(frame, (b["x"], b["y"]), cfg, max_value=max_value)
     out.ok = True
-    out.x, out.y = (m.cx, m.cy) if m.ok else (b["x"], b["y"])
+    out.x, out.y = b["x"], b["y"]
+    if m.ok and math.hypot(m.cx - b["x"], m.cy - b["y"]) <= CALIB_REFINE_PX:
+        out.x, out.y = m.cx, m.cy
     return out
+
+
+# see find_spot_for_calibration, "unsaturated": how far (px) the second
+# moment's centroid may sit from the blob's before it is not trusted
+CALIB_REFINE_PX = 1.0
 
 
 # --------------------------------------------------------------------------- #

@@ -58,7 +58,12 @@ def test_spot_position_is_calibrated_not_tracked():
         brain.cfg.spot.ref_x += 200.0
         assert _wait(lambda: not brain.status().spot_found)
         assert brain.status().spot_x == pytest.approx(res["x"] + 200.0)   # position unchanged by it
-        # ...while calibrating again searches the whole frame and finds it
+        # ...and calibrating again searches ONLY that region too (Lukas
+        # 2026-09-29: "Always look for the laser spot in the safety area around
+        # the laser only!"): refused, with the way out; a larger region finds it
+        with pytest.raises(RuntimeError, match="enlarge the search region"):
+            brain.calibrate_spot(4)
+        brain.cfg.spot.lookup_region_px = 250
         res2 = brain.calibrate_spot(10)
         assert abs(res2["x"] - 320) < 2
     finally:

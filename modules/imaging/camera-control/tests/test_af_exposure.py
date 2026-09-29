@@ -268,6 +268,31 @@ def test_the_z_step_calibration_runs_at_the_af_exposure_too():
         brain.shutdown()
 
 
+def test_one_saturation_line_across_an_af_exposure_switch():
+    """Rig 2026-09-29: "the laser spot is SATURATED" came twice per AF run --
+    the unsaturated frames at the AF exposure ended the episode, and the
+    restored working exposure started a new one. Those frames say nothing
+    about the WORKING image: one line per episode of the working image."""
+    brain, cam, z, events = _rig()
+    try:
+        _calibrate(brain)
+        assert _wait(lambda: brain.status().spot_saturated)
+        f0 = brain.status().frame_number
+        assert _wait(lambda: brain.status().frame_number > f0 + 5)
+        brain.cfg.autofocus.exposure_us = AFX
+        for _ in range(2):
+            z.set_z(z.read_z() - 3.0 / z.down_gain)
+            s = _run_af(brain)
+            assert s.af_error == "OK", s.af_error
+            f0 = brain.status().frame_number
+            assert _wait(lambda: brain.status().frame_number > f0 + 25)
+            assert brain.status().spot_saturated
+        said = [m for _l, m in events if "SATURATED" in m]
+        assert len(said) == 1, said
+    finally:
+        brain.shutdown()
+
+
 def test_calibrate_the_spot_at_the_af_exposure():
     brain, cam, z, events = _rig(peak=900.0)
     try:

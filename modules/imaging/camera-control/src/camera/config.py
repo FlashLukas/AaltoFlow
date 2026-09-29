@@ -61,7 +61,7 @@ SEARCH_SHAPES = ("rect", "circle")
 SIZE_METHODS = ("threshold", "relative", "d4sigma", "encircled", "gauss", "peak")
 # Where the size is measured around (Spot.locate), see vision.locate_spot.
 LOCATE_MODES = ("calibrated", "peak", "blob")
-# How Calibrate spot finds the spot in the whole frame (Spot.calib_mode), see
+# How Calibrate spot finds the spot in the search region (Spot.calib_mode), see
 # vision.find_spot_for_calibration.
 CALIB_MODES = ("saturated", "unsaturated")
 # The real camera backends (Camera.driver).
@@ -142,7 +142,10 @@ class Spot:
     thr_upper: int = 255
     bright_spot: bool = True           # True: bright spot on dark background
     # Per-frame size check: search only a region around the CALIBRATED spot
-    # (uncalibrated, or lookup_region_px = 0: the whole frame).
+    # (uncalibrated: around the frame centre; never the whole frame -- the
+    # region is at least MIN_SEARCH_REGION_PX, see Spot.__setattr__). Since 2026-09-29 this is THE safety area of every
+    # spot search -- locate, why-text, Calibrate spot (Lukas: "Always look for
+    # the laser spot in the safety area around the laser only!").
     search_shape: str = "rect"         # "rect" | "circle"
     lookup_region_px: int = 100        # rect: half-width (+/- px in x); circle: radius
     lookup_region_y_px: int = 0        # rect: half-height (+/- px in y); 0 = same as x
@@ -156,7 +159,7 @@ class Spot:
     symmetric: bool = True
 
     # CALIBRATED spot position (Spot tab -> "Calibrate spot": the centroid
-    # averaged over N frames, searched over the whole frame). The laser spot is
+    # averaged over N frames, searched in the search region). The laser spot is
     # FIXED in the image -- the sample moves under it -- so its position is a
     # user decision, and THIS is the position click-to-go and the stabiliser use
     # (decided with Lukas 2026-09-13). Each frame still thresholds a small box
@@ -191,9 +194,23 @@ class Spot:
     locate: str = "calibrated"         # calibrated | peak | blob
     locate_k: float = 5.0              # blob: above background + this x noise (smoothed)
     offset_warn_px: float = 20.0
+    # Telling the laser from other bright light (rig check 2026-09-29, see the
+    # block comment above vision.locate_spot). Every search -- locate, the
+    # why-text, Calibrate spot -- stays in the search region around the
+    # calibrated laser (Lukas: "Always look for the laser spot in the safety
+    # area around the laser only!"). A candidate must reach locate_rel x the
+    # region's brightest light (keeps a dim lit area or a halo out of the spot)
+    # and be at most max_elongation times longer than wide (a scratch or a lit
+    # edge is a line; 0 = off).
+    locate_rel: float = 0.2
+    max_elongation: float = 3.0
+    # Calibrate spot REFUSES when the per-frame positions scatter by more than
+    # this (std, px): the found position jumping between frames means another
+    # bright object competes (rig: +-277 px, and it was accepted).
+    calib_max_jitter_px: float = 2.0
     # encircled: the radius holding this fraction of the energy (0.86 -> D86)
     encircled_fraction: float = 0.86
-    # CALIBRATE SPOT finds the spot anywhere in the frame (2026-09-29):
+    # CALIBRATE SPOT finds the spot in the search region (2026-09-29):
     # "saturated" = the fixed threshold's largest blob (a flat top, as before);
     # "unsaturated" = the brightest smoothed blob, then its intensity centroid.
     # calib_at_af_exposure: calibrate at autofocus.exposure_us (switched and
@@ -224,6 +241,23 @@ class Spot:
     # on the opposite side of the calibrated centre -- a feature of the sample
     # next to the spot. The spot (round, elliptical, rings) always has one.
     reject_asymmetric: bool = True
+
+    # Lukas, 2026-09-29: "Always look for the laser spot in the safety area
+    # around the laser only!" A region of 0 used to mean "search the whole
+    # frame" -- that is where a saturated illuminated block 900 px away beat
+    # the laser. So the region can never be smaller than this, however it is
+    # set (INI, set_config, GUI): assignment itself clamps.
+    def __setattr__(self, name, value):
+        if name == "lookup_region_px":
+            try:
+                value = max(MIN_SEARCH_REGION_PX, int(value))
+            except (TypeError, ValueError):
+                value = MIN_SEARCH_REGION_PX
+        object.__setattr__(self, name, value)
+
+
+#: the smallest spot search region (half-width / radius, px) -- no whole-frame search
+MIN_SEARCH_REGION_PX = 10
 
 
 @dataclass
