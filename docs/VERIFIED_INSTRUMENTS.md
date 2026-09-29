@@ -203,6 +203,15 @@ before/after routines.
     (not set in camera.ini) refuses correctly ("jumps by 99 px between frames").
     Two one_way + D4sigma runs: OK, 30.3 / 29.7 px; the AF itself no longer
     repeats the SATURATED info line.
+  - After 70265b7 (the saturated laser at the working exposure, built on real
+    frames saved in the private lab repo; its 21 real-frame tests ran on the lab
+    PC): with max_area_px = 0 (automatic, a quarter of the search region) blob
+    and peak land on the laser at 2480 us, 0.7 px from the calibration, and the
+    live size has a value. camera.ini's max_area_px = 2000 still rejects it (the
+    laser + rings is 3.4 -- 7.8 k px^2 at +-2 um), with a message saying so. No
+    offset warning over four 65 <-> 2480 us switches; calibrating "at the AF
+    exposure" with autofocus.exposure_us = 0 warns and calibrates at the
+    working exposure (+- 0.34 px); why-texts appear once.
 - Not yet checked on the rig: the lost-pattern fault of 2026-09-28, the Z step
   calibration, 12-bit spot frames.
 
