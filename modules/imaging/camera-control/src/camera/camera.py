@@ -106,6 +106,12 @@ class CameraStatus:
     spot_holes: int = 0
     spot_orientation: float = 0.0
     spot_calibrated: bool = False     # True: spot_x/y are the CALIBRATED position, not detected
+    # Why the per-frame THRESHOLD check did not see the spot (spot_found
+    # False), e.g. "the blob at the calibrated position is 3419 px, larger
+    # than max area 2000 px -- set max area to 0 (automatic) ..." and a few
+    # words for the image label ("larger than max area"). "" when seen.
+    spot_found_why: str = ""
+    spot_found_why_short: str = ""
     # The spot's SIZE without a fixed threshold (2026-09-28, vision.py "Spot
     # SIZE"), measured every frame in the search region. Information and
     # autofocus metrics only -- the position used for motion stays spot_x/y.
@@ -666,8 +672,11 @@ class Camera:
                           sp.lookup_region_px, where, sp.min_area_px,
                           self._max_area_px(gray.shape, where), sp.reject_border,
                           sp.search_shape,
-                          sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center))
+                          sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center),
+                          max_area_is_auto=not (sp.max_area_px and sp.max_area_px > 0))
         st.spot_found = det.found
+        if not det.found:
+            st.spot_found_why, st.spot_found_why_short = det.why, det.why_short
         if det.found:
             st.spot_live_x, st.spot_live_y, st.spot_area = det.cx, det.cy, det.area
             st.spot_bbox_x, st.spot_bbox_y, st.spot_bbox_w, st.spot_bbox_h = det.bbox

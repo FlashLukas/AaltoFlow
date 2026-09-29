@@ -26,10 +26,10 @@ import html
 import math
 from dataclasses import fields
 
-from PySide6.QtCore import QLocale, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLocale, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout,
     QWidget,
@@ -38,7 +38,8 @@ from PySide6.QtWidgets import (
 from . import theme as T
 from .camera_view import CameraView
 from .plots import MiniPlot
-from .spot_tab import SpotTab, sizes_summary
+from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
+from .. import vision as V
 from ..config import (AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
                       FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, SIM_SPOTS, SIZE_METHODS,
                       SYMMETRIES, THEMES, XY_UNITS)
@@ -101,10 +102,15 @@ for _v in MECH_KNOBS.values():
             _SPOT_KNOBS.append(_k)
 
 _A = "autofocus"
+# FOUR columns (Lukas, 2026-09-29, screenshot: with three the third column --
+# Park + Scan + Z step calibration -- was the tallest and its bottom rows were
+# cut off on the lab screen: "four panels then... I want to see what is
+# below"). Balanced by height: the metric (its knobs vary with the metric) /
+# the routine / park + the AF exposure / scan + Z step calibration.
 AF_LAYOUT = [
     [("Metric", [(_A, "mechanism")] + [("spot", k) for k in _SPOT_KNOBS]
-      + [(_A, "focus_from_safety_area"), (_A, "averages_per_level")]),
-     ("Autofocus exposure", [(_A, "exposure_us"), (_A, "exposure_discard_frames")])],
+      + [(_A, "focus_from_safety_area"), (_A, "averages_per_level"),
+         (_A, "zoom_on_af")])],
     [("Routine", [(_A, "routine"), (_A, "approach_from"), (_A, "approach_margin"),
                   (_A, "fit_curve")]),
      ("Sweep", [(_A, "drive_amplitude_v"), (_A, "steps")]),
@@ -113,7 +119,8 @@ AF_LAYOUT = [
     [("Park", [(_A, "park_tolerance"), (_A, "park_tolerance_d4sigma"),
                (_A, "park_tolerance_relative"), (_A, "park_noise_k"), (_A, "park_centre"),
                (_A, "offset_from_found_v")]),
-     ("Scan & continuous", [(_A, "scan_timeout_s"), (_A, "continuous_enabled"),
+     ("Autofocus exposure", [(_A, "exposure_us"), (_A, "exposure_discard_frames")])],
+    [("Scan & continuous", [(_A, "scan_timeout_s"), (_A, "continuous_enabled"),
                             (_A, "continuous_gain"), (_A, "continuous_target")]),
      ("Z step calibration", [(_A, "zcal_step_v"), (_A, "zcal_start_offset_v"),
                              (_A, "zcal_max_travel_v"), (_A, "zcal_averages"),
@@ -142,6 +149,46 @@ CAMERA_LAYOUT = [
                                ("camera", "auto_exposure_iterations")]),
      ("Simulator", [("camera", "sim_spot_model"), ("camera", "sim_bit_depth")])],
 ]
+# --------------------------------------------------------------------------- #
+# ZOOM TO THE SPOT REGION (2026-09-29, Lukas: "add an option in autofocus that
+# when you call autofocus the image will zoom to the spot detection area").
+# The region is the spot SEARCH region (Spot tab: lookup_region_px /
+# lookup_region_y_px / search_shape) around the calibrated laser -- the same
+# geometry every spot search uses (vision.search_region) -- plus a margin so
+# the region's own dotted outline stays visible. Before the first calibration
+# the searches look around the frame CENTRE, so the zoom does too.
+ZOOM_MARGIN_FRACTION = 0.15        # of the region's half-size, per side
+ZOOM_MARGIN_MIN_PX = 10
+AF_ZOOM_NOTE = ("zoomed to the spot region (autofocus) -- "
+                "double-click to show the whole frame")
+ZOOM_IN_TEXT = "Zoom to spot region"
+ZOOM_OUT_TEXT = "Whole frame"
+
+
+def spot_zoom_rect(status, spot_cfg, frame_w: int, frame_h: int):
+    """(x0, y0, x1, y1) in image px: the spot search region around the
+    calibrated spot (frame centre when not calibrated) + a margin, clipped to
+    the frame. None if there is no region (cannot happen with the clamp in
+    config.Spot, but a zoom must never be guessed)."""
+    if getattr(status, "spot_calibrated", False):
+        centre = (float(status.spot_x), float(status.spot_y))
+    else:
+        centre = (frame_w / 2.0, frame_h / 2.0)
+    reg = V.search_region(centre, spot_cfg.lookup_region_px, spot_cfg.lookup_region_y_px,
+                          spot_cfg.search_shape)
+    if reg is None:
+        return None
+    hx, hy = reg["half"]
+    mx = max(ZOOM_MARGIN_MIN_PX, ZOOM_MARGIN_FRACTION * hx)
+    my = max(ZOOM_MARGIN_MIN_PX, ZOOM_MARGIN_FRACTION * hy)
+    x0, y0, x1, y1 = reg["box"]
+    x0, y0 = max(0.0, x0 - mx), max(0.0, y0 - my)
+    x1, y1 = min(float(frame_w), x1 + mx), min(float(frame_h), y1 + my)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    return (x0, y0, x1, y1)
+
+
 _P = "pattern"
 PATTERN_LAYOUT = [
     [("Matching", [(_P, "n_matches"), (_P, "min_match_score"), (_P, "angle_start"),
@@ -167,8 +214,15 @@ POSITIONER_LAYOUT = [
 ]
 # field widths: numbers are short, paths and hosts are not (no 1900-px boxes)
 _NUM_W = 110
+# A settings LABEL is at most this wide; a longer field name wraps at its
+# underscores ("park_tolerance_" / "relative"). Four autofocus columns of
+# unwrapped names were ~1220 px wide -- wider than the lab screen's 1080 px
+# content area, so the last column was off to the right (2026-09-29). The
+# AutoFocus tab uses the narrow width; the other tabs have room for more.
+_LABEL_W = 130
+_LABEL_W_AF = 100
 _TEXT_W = 170
-_PATH_W = 260
+_PATH_W = 220
 
 
 def _size_widget(name: str, w) -> None:
@@ -231,6 +285,19 @@ def _widget_for_field(name: str, value):
     return w, (lambda: w.text())
 
 
+def _set_label(lab: QLabel, text: str, width: int = _LABEL_W) -> None:
+    """A settings label no wider than ``width``: a name that fits stays on one
+    line; a longer one wraps at its underscores / spaces (a zero-width space
+    after each "_" marks where it may break). The minimum width is the text's
+    own (up to ``width``), so the layout never wraps a name that fits."""
+    lab.setText(text.replace("_", "_​"))
+    lab.setWordWrap(True)
+    lab.ensurePolished()          # the stylesheet's font, not the default one
+    one_line = lab.fontMetrics().horizontalAdvance(text) + 4
+    lab.setMinimumWidth(min(one_line, width))
+    lab.setMaximumWidth(width)
+
+
 def _sized_widget_for_field(name: str, value):
     w, get = _widget_for_field(name, value)
     _size_widget(name, w)
@@ -241,6 +308,40 @@ def _sized_widget_for_field(name: str, value):
 # main window
 # --------------------------------------------------------------------------- #
 COMPACT_COLS = 4          # label/field pairs per row in a compact settings form
+
+
+class _WheelToScroll(QObject):
+    """Mouse wheel over a number box or a combo SCROLLS THE PAGE unless that
+    box has the keyboard focus (click into it first to wheel its value).
+
+    Qt's default gives the wheel to whatever spin box / combo is under the
+    pointer: scrolling down a long settings tab silently changed values and the
+    page did not move -- so what was below looked unreachable (Lukas,
+    2026-09-29: "I want to see what is below"). The event is handed to the
+    enclosing scroll area's vertical scroll bar instead.
+    """
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel and not obj.hasFocus():
+            area = obj.parent()
+            while area is not None and not isinstance(area, QScrollArea):
+                area = area.parent()
+            if area is not None:
+                QApplication.sendEvent(area.verticalScrollBar(), ev)
+            return True           # never to the box itself
+        return False
+
+
+_WHEEL_GUARD = None
+
+
+def _guard_wheel(widget: QWidget) -> None:
+    global _WHEEL_GUARD
+    if isinstance(widget, (QAbstractSpinBox, QComboBox)):
+        if _WHEEL_GUARD is None:
+            _WHEEL_GUARD = _WheelToScroll()
+        widget.setFocusPolicy(Qt.StrongFocus)     # focus by click / Tab, not by wheel
+        widget.installEventFilter(_WHEEL_GUARD)
 
 
 def _scrolled(widget: QWidget) -> QScrollArea:
@@ -283,7 +384,17 @@ class MainWindow(QMainWindow):
         self.view.clicked.connect(self._on_view_click)
         self.view.roi_selected.connect(self._on_roi)
         self.view.scan_area_selected.connect(self._on_scan_area)
+        self.view.unzoom_requested.connect(self._dismiss_af_zoom)
         self._af_was_running = False
+        # Zoom state (see _refresh_zoom). _zoom_spot_on = the user's own
+        # "Zoom to spot region" toggle; the autofocus zoom is laid OVER it and
+        # the view the user had is put back when the run ends.
+        self._zoom_spot_on = False
+        self._af_zoom_active = False     # the autofocus zoom is applied now
+        self._af_zoom_dismissed = False  # the user un-zoomed during this run
+        self._zoom_saved = None          # the view (zoom rect) before the run
+        self._zoom_run_was = False       # an AF / Z calibration ran last refresh
+        self._zoom_run_key = None        # (af_id, zcal_id) of that run
 
         # objective list for the dropdown (from objectives.ini via the service)
         try:
@@ -340,7 +451,21 @@ class MainWindow(QMainWindow):
         # scanning", ...) below the screen, so the tab had to be scrolled to
         # reach them (Lukas, 2026-09-25). Two columns halve that height; the
         # image gives up the width, and keeps its aspect as it shrinks.
-        lay.addWidget(self.view, 4)
+        # the view with, under it, the zoom toggle (Lukas 2026-09-29): the same
+        # zoom the autofocus uses, useful outside autofocus too
+        left = QWidget(); lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(4)
+        lv.addWidget(self.view, 1)
+        zr = QHBoxLayout()
+        self.b_zoom = QPushButton(ZOOM_IN_TEXT)
+        self.b_zoom.setToolTip("Show only the spot search region around the calibrated "
+                               "laser (Spot tab: search region), or the whole frame again. "
+                               "During an autofocus zoom it shows the whole frame for the "
+                               "rest of that run.")
+        self.b_zoom.clicked.connect(self._toggle_zoom)
+        zr.addWidget(self.b_zoom); zr.addStretch(1)
+        lv.addLayout(zr)
+        lay.addWidget(left, 4)
         cards: list[QWidget] = []         # Focus, Pattern, Stabiliser, Imaging
 
         # Focus / Z card
@@ -712,7 +837,8 @@ class MainWindow(QMainWindow):
         v.addWidget(note)
         v.addWidget(self._settings_tab([("Autofocus", self.cfg.autofocus),
                                         ("Spot", self.cfg.spot)], columns=AF_LAYOUT,
-                                       partial=("spot",)))
+                                       partial=("spot",), save=True,
+                                       label_w=_LABEL_W_AF))
         self.lab_af_expo = QLabel("")
         self.lab_af_expo.setVisible(False)
         v.addWidget(self.lab_af_expo)
@@ -1024,14 +1150,19 @@ class MainWindow(QMainWindow):
                       "approach_margin": "approach_margin",
                       "coarse_step_v": "coarse_step",
                       "fine_step_v": "fine_step",
-                      "max_travel_v": "max_travel"}
+                      "max_travel_v": "max_travel",
+                      # the Z step calibration's Z distances too (Lukas
+                      # 2026-09-29: they showed the raw "_v" names)
+                      "zcal_step_v": "zcal_step",
+                      "zcal_start_offset_v": "zcal_start_offset",
+                      "zcal_max_travel_v": "zcal_max_travel"}
 
     def _label_z_fields(self, unit: str):
         labels = self._form_labels.get("autofocus", {})
         for name, text in self._Z_UNIT_FIELDS.items():
             lab = labels.get(name)
             if lab is not None:
-                lab.setText(f"{text} ({unit})")
+                _set_label(lab, f"{text} ({unit})", _LABEL_W_AF)
 
     def _apply_stabiliser(self):
         vals = {"gain": self.stab_gain.value() / 100.0,
@@ -1133,7 +1264,8 @@ class MainWindow(QMainWindow):
             self._log_event("warn", f"datum: {exc}")
 
     def _settings_tab(self, groups, compact=False, columns=None,
-                      extras=None, partial=()) -> QWidget:
+                      extras=None, partial=(), save=False,
+                      label_w: int = _LABEL_W) -> QWidget:
         """A settings form for ``groups`` [(name, dataclass)] with ONE Apply.
 
         ``compact`` (the scan form under the live view): label/field pairs,
@@ -1145,6 +1277,7 @@ class MainWindow(QMainWindow):
         {field: widget} placed right of that field (the Auto exposure button).
         ``partial``: groups of which the tab shows only the fields its layout
         names (the Spot knobs in the AutoFocus tab) -- no "More" box for them.
+        ``save``: a "Save config" button next to Apply (see _save_config).
         Apply sends only what was EDITED (see _apply_settings).
         """
         w = QWidget(); outer = QVBoxLayout(w)
@@ -1193,7 +1326,7 @@ class MainWindow(QMainWindow):
                     grid = QGridLayout(); grid.setHorizontalSpacing(8)
                     grid.setVerticalSpacing(4)
                     for r, (g, n) in enumerate(items):
-                        widget, lab = self._field_widget(g, objs[g], n)
+                        widget, lab = self._field_widget(g, objs[g], n, label_w)
                         grid.addWidget(lab, r, 0)
                         if n in extras:
                             holder = QWidget(); hl = QHBoxLayout(holder)
@@ -1220,12 +1353,15 @@ class MainWindow(QMainWindow):
                                 if k != "enforce"}
         b = QPushButton("Apply settings"); b.setObjectName("primary")
         b.clicked.connect(lambda _=False, gs=groups: self._apply_settings(gs))
-        rowb = QHBoxLayout(); rowb.addWidget(b); rowb.addStretch(1)
+        rowb = QHBoxLayout(); rowb.addWidget(b)
+        if save:
+            rowb.addWidget(self._save_config_button())
+        rowb.addStretch(1)
         outer.addLayout(rowb)
         outer.addStretch(1)
         return w
 
-    def _field_widget(self, key: str, obj, name: str):
+    def _field_widget(self, key: str, obj, name: str, label_w: int = _LABEL_W):
         """(editing widget, its label) for one config field, registered for
         Apply / sync (group ``key``)."""
         if name == "objective_name":
@@ -1244,7 +1380,9 @@ class MainWindow(QMainWindow):
         if name == "xy_unit":
             # a display choice: takes effect at once, no Apply needed
             widget.currentTextChanged.connect(self._on_xy_unit_changed)
-        lab = QLabel(name)
+        _guard_wheel(widget)
+        lab = QLabel()
+        _set_label(lab, name, label_w)
         self._getters.setdefault(key, {})[name] = getter
         self._form_widgets.setdefault(key, {})[name] = widget
         self._form_labels.setdefault(key, {})[name] = lab
@@ -1277,7 +1415,8 @@ class MainWindow(QMainWindow):
         ov.addWidget(self._settings_tab([("Image", self.cfg.image),
                                          ("Camera", self.cfg.camera)],
                                         columns=CAMERA_LAYOUT,
-                                        extras={"exposure_us": self.b_auto_expo}))
+                                        extras={"exposure_us": self.b_auto_expo},
+                                        save=True))
         # the four clip edges mean nothing while clipping is off: greyed
         clip = self._form_widgets.get("image", {}).get("clip_enabled")
         if clip is not None:
@@ -1739,6 +1878,7 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_frame(self._frame())
             self.view.set_overlay(s, self.cfg)
+        self._refresh_zoom(s)               # every tab: a run must not be missed
 
         _set_led(self.led_match, s.match_found, T.OK)
         if s.backups_n:
@@ -1817,6 +1957,106 @@ class MainWindow(QMainWindow):
                 self.lab_acc.setText(f"dX rms: {rms(acc['dx']):.3f} um   "
                                      f"dY rms: {rms(acc['dy']):.3f} um   "
                                      f"({len(acc['dx'])} samples)")
+
+    # -- Save config (2026-09-29) ------------------------------------------ #
+    # Before this the only way to keep settings over a restart was the button
+    # in the Spot tab. The same save is now next to Apply in the AutoFocus and
+    # Camera settings tabs. It writes the WHOLE config the camera is USING
+    # (local brain or the service, via ctrl.save_config) -- so Apply first:
+    # a form field not applied yet is not in the brain, so not in the file.
+    def _save_config_button(self) -> QPushButton:
+        b = QPushButton("Save config")
+        b.setToolTip(SAVE_CONFIG_TIP)
+        b.clicked.connect(self._save_config)
+        self._save_buttons = getattr(self, "_save_buttons", []) + [b]
+        return b
+
+    def _save_config(self) -> None:
+        try:
+            path = self.ctrl.save_config()
+            self._log_event("info", f"camera settings saved to {path} "
+                                    f"(loaded at service start)")
+        except Exception as exc:
+            self._log_event("error", f"save failed: {exc}")
+
+    # -- zoom to the spot region (2026-09-29) ------------------------------ #
+    def _frame_size(self) -> tuple:
+        return (self.view._frame_w, self.view._frame_h)
+
+    def _spot_zoom(self, s):
+        return spot_zoom_rect(s, self.cfg.spot, *self._frame_size())
+
+    def _user_view(self, s):
+        """The view the user chose: the spot region (their toggle, following a
+        new calibration) or whatever zoom was on before the run."""
+        if self._zoom_spot_on:
+            return self._spot_zoom(s)
+        return self._zoom_saved
+
+    def _toggle_zoom(self) -> None:
+        s = self._last_status()
+        if self._af_zoom_active and not self._af_zoom_dismissed:
+            self._dismiss_af_zoom()            # = "Whole frame" during the AF zoom
+            return
+        self._zoom_spot_on = not self._zoom_spot_on
+        # during a (dismissed) run the user's choice is what comes back at the end
+        self._zoom_saved = self._spot_zoom(s) if self._zoom_spot_on else None
+        self.view.set_zoom(self._zoom_saved)
+        self._zoom_button_text()
+
+    def _dismiss_af_zoom(self) -> None:
+        """Double-click on the autofocus zoom (or the button): the whole frame
+        for the REST of this run; the next run zooms again."""
+        if not self._af_zoom_active:
+            return
+        self._af_zoom_dismissed = True
+        self._zoom_spot_on = False
+        self.view.set_zoom(None)
+        self.view.set_zoom_note("")
+        self._zoom_button_text()
+
+    def _zoom_button_text(self) -> None:
+        zoomed = self.view.zoom() is not None
+        self.b_zoom.setText(ZOOM_OUT_TEXT if zoomed else ZOOM_IN_TEXT)
+
+    def _last_status(self):
+        s = getattr(self, "_status_seen", None)
+        return s if s is not None else self.ctrl.status()
+
+    def _refresh_zoom(self, s) -> None:
+        """Zoom the main view onto the spot region while an autofocus runs.
+
+        A RUN = an autofocus (af_running; also the recovery autofocus after a
+        lost pattern, which is an ordinary numbered run) or a Z step
+        calibration (zcal_running). A run starts when one of them rises, or
+        when af_id / zcal_id changes while running (a queued run that follows
+        straight on). At the start the view the user had is remembered; at the
+        end it comes back. autofocus.zoom_on_af off = nothing happens.
+        """
+        self._status_seen = s
+        running = bool(getattr(s, "af_running", False) or getattr(s, "zcal_running", False))
+        key = (getattr(s, "af_id", 0), getattr(s, "zcal_id", 0))
+        started = running and (not self._zoom_run_was or key != self._zoom_run_key)
+        ended = self._zoom_run_was and not running
+        self._zoom_run_was, self._zoom_run_key = running, key
+        if started:
+            self._af_zoom_dismissed = False     # a new run zooms again
+            if bool(getattr(self.cfg.autofocus, "zoom_on_af", True)) and \
+                    not self._af_zoom_active:
+                self._zoom_saved = self.view.zoom()
+                self._af_zoom_active = True
+        if ended and self._af_zoom_active:
+            self._af_zoom_active = False
+            self._af_zoom_dismissed = False
+            self.view.set_zoom_note("")
+            self.view.set_zoom(self._user_view(s))
+        elif self._af_zoom_active and not self._af_zoom_dismissed:
+            # re-evaluated every refresh: a recalibrated spot moves the zoom
+            self.view.set_zoom(self._spot_zoom(s))
+            self.view.set_zoom_note(AF_ZOOM_NOTE)
+        elif not self._af_zoom_active and self._zoom_spot_on:
+            self.view.set_zoom(self._spot_zoom(s))   # follow a new calibration
+        self._zoom_button_text()
 
     def _log_event(self, level, msg):
         color = {"info": T.ACCENT_HI, "warn": T.ACCENT, "error": T.DANGER}.get(level, T.TEXT)

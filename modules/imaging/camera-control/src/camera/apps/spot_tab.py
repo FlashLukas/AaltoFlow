@@ -66,6 +66,13 @@ SIZE_UNITS = {"threshold": "px²", "relative": "px²", "d4sigma": "px", "encircl
 LOCATE_LABELS = {"calibrated": "at the calibrated position",
                  "peak": "at the brightest point (search region)",
                  "blob": "at the brightest blob (search region)"}
+# The tooltip of every "Save config" button (this tab's, and since 2026-09-29
+# the ones next to Apply in the AutoFocus and Camera settings tabs): they all
+# call ctrl.save_config(), which writes the WHOLE config, not one tab.
+SAVE_CONFIG_TIP = ("Saves the WHOLE camera config the camera is using now -- spot "
+                   "calibration, autofocus, exposure settings, every tab -- into camera.ini, "
+                   "which the camera service loads when it starts. Apply edited fields "
+                   "first: a field not applied is not saved.")
 CALIB_LABELS = {"saturated": "saturated spot (flat top: threshold blob)",
                 "unsaturated": "unsaturated spot (peaked: brightest blob)"}
 
@@ -97,7 +104,11 @@ def sizes_summary(status, highlight: str = "") -> str:
         return f"{t} {unit}" if t is not None else "--"
 
     area = s.spot_area if getattr(s, "spot_found", False) else float("nan")
-    rows = [("spot_area", "threshold", "threshold area", val(area, ".0f", "px²")),
+    area_txt = val(area, ".0f", "px²")
+    short = "" if getattr(s, "spot_found", False) else getattr(s, "spot_found_why_short", "")
+    if short:                     # why the threshold did not see it, in a few words
+        area_txt = f"-- ({html.escape(short)})"
+    rows = [("spot_area", "threshold", "threshold area", area_txt),
             ("spot_relative", "relative", "relative area",
              val(getattr(s, "spot_rel_area", float("nan")), ".0f", "px²")),
             ("spot_d4sigma", "d4sigma", "D4σ",
@@ -490,6 +501,8 @@ class SpotTab(QWidget):
         l.addWidget(self.lab_ref)
         b = QPushButton("Save camera settings to file (survives restart)")
         b.clicked.connect(self._save)
+        b.setToolTip(SAVE_CONFIG_TIP)
+        self.b_save = b
         l.addWidget(b)
         right.addWidget(f)
 
@@ -927,7 +940,9 @@ class SpotTab(QWidget):
         sp = self.cfg.spot
         if not getattr(status, "spot_found", False):
             where = "around the calibrated position" if sp.ref_set else "in the frame"
-            self.lab_live.setText(f"spot NOT seen by the threshold {where} this frame"
+            why = getattr(status, "spot_found_why", "")
+            why = f" -- {html.escape(why)}" if why else ""
+            self.lab_live.setText(f"spot NOT seen by the threshold {where} this frame{why}"
                                   + self._free_sizes(status))
             return
         txt = f"seen · area {status.spot_area:.0f} px²"

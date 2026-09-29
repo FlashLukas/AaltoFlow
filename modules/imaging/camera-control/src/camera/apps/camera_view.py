@@ -9,6 +9,12 @@ travel range.  It reads instantly what the feedback system is doing.
 It also turns mouse clicks into image-pixel coordinates (letter-box aware) and
 emits them, so the window can wire "click to go" and template-ROI selection to
 it without the widget needing to know the brain.
+
+ZOOM (2026-09-29, Lukas: "when you call autofocus the image will zoom to the
+spot detection area"): ``set_zoom((x0, y0, x1, y1))`` shows only that part of
+the frame, scaled to fit. ONE transform (source rectangle + scale + where it
+lands in the widget) is used for the picture, every overlay and every
+click, so a click on a zoomed view still names the right image pixel.
 """
 
 from __future__ import annotations
@@ -51,6 +57,9 @@ class CameraView(QWidget):
     roi_selected = Signal(float, float, float, float)      # template ROI drag
     # scan-area rectangle: cx, cy, w, h (px), angle (deg)
     scan_area_selected = Signal(float, float, float, float, float)
+    # a double-click on the image while a zoom NOTE is shown (the autofocus
+    # zoom): the window un-zooms for the rest of that run
+    unzoom_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,6 +70,12 @@ class CameraView(QWidget):
         self._frame_h = 480
         self._draw_rect = QRectF(0, 0, 1, 1)  # where the image is drawn (widget px)
         self._scale = 1.0
+        # The part of the frame that is shown, in IMAGE px (x0, y0, x1, y1);
+        # None = the whole frame. _src is the same as a QRectF, recomputed by
+        # _layout() together with _scale and _draw_rect.
+        self._zoom: tuple | None = None
+        self._src = QRectF(0, 0, 640, 480)
+        self._zoom_note = ""          # text on the view while zoomed by autofocus
         self._status = None
         self._cfg = None
         self._roi_mode = False
@@ -90,6 +105,7 @@ class CameraView(QWidget):
         self._frame_h, self._frame_w = gray.shape
         self._img = QImage(self._buf.data, self._frame_w, self._frame_h,
                            self._frame_w, QImage.Format_Grayscale8)
+        self._layout()                  # a new frame size moves the transform
         self.update()
 
     def set_overlay(self, status, cfg) -> None:
@@ -140,21 +156,90 @@ class CameraView(QWidget):
         self._show_pattern_info = bool(on)
         self.update()
 
+    # -- zoom -------------------------------------------------------------- #
+    def set_zoom(self, rect) -> None:
+        """Show only ``rect`` = (x0, y0, x1, y1) of the frame (image px), scaled
+        to fit with its aspect kept; None = the whole frame.
+
+        The rectangle is clipped to the frame; one that is empty after that
+        (or smaller than 2 px) means the whole frame -- never a blank view.
+        """
+        z = None
+        if rect is not None:
+            x0, y0, x1, y1 = (float(v) for v in rect)
+            x0, x1 = sorted((x0, x1))
+            y0, y1 = sorted((y0, y1))
+            x0, y0 = max(0.0, x0), max(0.0, y0)
+            x1, y1 = min(float(self._frame_w), x1), min(float(self._frame_h), y1)
+            if x1 - x0 >= 2 and y1 - y0 >= 2:
+                z = (x0, y0, x1, y1)
+        if z != self._zoom:
+            self._zoom = z
+            self._layout()
+            self.update()
+
+    def zoom(self):
+        """The zoom rectangle (x0, y0, x1, y1) in image px, or None (whole frame)."""
+        return self._zoom
+
+    def set_zoom_note(self, text: str) -> None:
+        """A short note drawn on the view (the autofocus zoom says how to leave
+        it). Empty = none. While a note is shown a single click is NOT sent
+        as click-to-go: it may be the first half of the double-click that
+        un-zooms, and a stage move in the middle of an autofocus would spoil it."""
+        text = str(text or "")
+        if text != self._zoom_note:
+            self._zoom_note = text
+            self.update()
+
+    def zoom_note(self) -> str:
+        return self._zoom_note
+
     # -- coordinate mapping ------------------------------------------------ #
+    def _layout(self) -> None:
+        """Recompute the ONE image->widget transform: the shown source
+        rectangle (zoom or whole frame) fitted into the widget, aspect kept,
+        centred (letter-box). Everything -- picture, overlays, clicks -- uses it."""
+        if self._zoom is not None:
+            x0, y0, x1, y1 = self._zoom
+        else:
+            x0, y0, x1, y1 = 0.0, 0.0, float(self._frame_w), float(self._frame_h)
+        sw, sh = max(x1 - x0, 1e-6), max(y1 - y0, 1e-6)
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        self._src = QRectF(x0, y0, sw, sh)
+        self._scale = min(w / sw, h / sh)
+        dw, dh = sw * self._scale, sh * self._scale
+        self._draw_rect = QRectF((w - dw) / 2.0, (h - dh) / 2.0, dw, dh)
+
+    def resizeEvent(self, ev):
+        self._layout()
+        super().resizeEvent(ev)
+
     def _img_to_widget(self, x: float, y: float) -> QPointF:
-        return QPointF(self._draw_rect.left() + x * self._scale,
-                       self._draw_rect.top() + y * self._scale)
+        return QPointF(self._draw_rect.left() + (x - self._src.left()) * self._scale,
+                       self._draw_rect.top() + (y - self._src.top()) * self._scale)
 
     def _widget_to_img(self, x: float, y: float) -> tuple:
-        ix = (x - self._draw_rect.left()) / self._scale
-        iy = (y - self._draw_rect.top()) / self._scale
+        ix = self._src.left() + (x - self._draw_rect.left()) / self._scale
+        iy = self._src.top() + (y - self._draw_rect.top()) / self._scale
         return (ix, iy)
+
+    # public names (tests, the window): the same transform as the painter
+    def image_to_widget(self, x: float, y: float) -> tuple:
+        self._layout()
+        return self._img_to_widget(x, y).toTuple()
+
+    def widget_to_image(self, x: float, y: float) -> tuple:
+        self._layout()
+        return self._widget_to_img(x, y)
 
     # -- mouse ------------------------------------------------------------- #
     def mousePressEvent(self, ev):
         if ev.button() != Qt.LeftButton:
             return
         ipt = self._widget_to_img(ev.position().x(), ev.position().y())
+        if self._zoom_note and not (self._scan_mode or self._roi_mode):
+            return            # see set_zoom_note: maybe half of a double-click
         if self._scan_mode:
             self._scan_press(ipt)
         elif self._roi_mode:
@@ -163,6 +248,12 @@ class CameraView(QWidget):
         else:
             if 0 <= ipt[0] < self._frame_w and 0 <= ipt[1] < self._frame_h:
                 self.clicked.emit(ipt[0], ipt[1])
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self._zoom_note:
+            self.unzoom_requested.emit()
+            return
+        super().mouseDoubleClickEvent(ev)
 
     def mouseMoveEvent(self, ev):
         if self._scan_mode and self._scan_kind is not None:
@@ -308,16 +399,13 @@ class CameraView(QWidget):
     def paintEvent(self, _ev):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(T.BG))
-        w, h = self.width(), self.height()
 
-        # Fit the frame into the widget, preserving aspect ratio (letter-box).
-        self._scale = min(w / self._frame_w, h / self._frame_h)
-        dw, dh = self._frame_w * self._scale, self._frame_h * self._scale
-        left, top = (w - dw) / 2.0, (h - dh) / 2.0
-        self._draw_rect = QRectF(left, top, dw, dh)
+        # Fit the SHOWN part of the frame (zoom or all of it) into the widget,
+        # preserving aspect ratio (letter-box). _layout is the one transform.
+        self._layout()
 
         if self._img is not None:
-            p.drawImage(self._draw_rect, self._img)
+            p.drawImage(self._draw_rect, self._img, self._src)
             if self._show_threshold:
                 self._paint_threshold(p)
         else:
@@ -325,8 +413,18 @@ class CameraView(QWidget):
             p.drawText(self.rect(), Qt.AlignCenter, "no frame")
 
         p.setRenderHint(QPainter.Antialiasing, True)
+        # Zoomed, overlays of things outside the shown part would be drawn on
+        # the letter-box bars as if they were in the picture: clip them.
+        if self._zoom is not None:
+            p.save()
+            p.setClipRect(self._draw_rect)
         self._paint_overlays(p)
         self._paint_scan_rect(p)
+        if self._zoom is not None:
+            p.restore()
+        if self._zoom_note:
+            self._label(p, QPointF(self._draw_rect.left() + 6, self._draw_rect.top() + 6),
+                        self._zoom_note, T.COLORS["accent_hi"])
 
         # In-progress template-ROI rubber-band.
         if self._roi_mode and self._drag_start is not None and self._drag_now is not None:
@@ -383,7 +481,7 @@ class CameraView(QWidget):
         argb[mask] = SPOT_TINT_BGRA
         self._thr_buf = np.ascontiguousarray(argb)
         img = QImage(self._thr_buf.data, w, h, 4 * w, QImage.Format_ARGB32)
-        p.drawImage(self._draw_rect, img)
+        p.drawImage(self._draw_rect, img, self._src)
 
     def _paint_overlays(self, p: QPainter):
         s, cfg = self._status, self._cfg
@@ -587,7 +685,8 @@ class CameraView(QWidget):
                         else f"{s.spot_area:.0f} px²")
                 text = f"area {area}{rel}"
             else:
-                text = "spot not seen"
+                short = getattr(s, "spot_found_why_short", "")
+                text = f"spot not seen: {short}" if short else "spot not seen"
             drawn.append(self._label(p, QPointF(sp.x() + 20, sp.y() - 20), text,
                                      SPOT_GREEN, drawn))
 

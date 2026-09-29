@@ -96,6 +96,13 @@ class SpotReport:
     orientation_deg: float = 0.0
     major: float = 0.0       # blob major/minor extent (px)
     minor: float = 0.0
+    # Not found: WHY, in words (2026-09-29, Lukas's screenshot: "spot not seen"
+    # while the threshold-free sizes measured the spot fine -- the rig's
+    # max_area_px 2000 rejected the 2600-4400 px^2 spot out of focus, and
+    # nothing said so). ``why`` = a sentence with the numbers and what to
+    # change; ``why_short`` = a few words for a label on the image.
+    why: str = ""
+    why_short: str = ""
 
 
 def search_region(center, half_x: int, half_y: int = 0, shape: str = "rect",
@@ -177,6 +184,70 @@ def spot_candidates(stats, offset, full_size, min_area_px=4, max_area_px=0,
     return ok
 
 
+def _why_no_candidate(stats, labels, ok, offset, full_size, centre_xy, min_area_px,
+                      max_area_px, reject_border, max_area_is_auto=False):
+    """(why, why_short) when no thresholded blob was a candidate.
+
+    The blob AT the calibrated position (``centre_xy``, full-frame px) is the
+    one the user means by "the spot": when it exists and was rejected, its own
+    reason is given with its numbers. Otherwise the rejected blobs are
+    counted by reason.
+    """
+    s = stats[1:]
+    area = s[:, cv2.CC_STAT_AREA]
+    x0 = s[:, cv2.CC_STAT_LEFT] + offset[0]
+    y0 = s[:, cv2.CC_STAT_TOP] + offset[1]
+    x1 = x0 + s[:, cv2.CC_STAT_WIDTH]
+    y1 = y0 + s[:, cv2.CC_STAT_HEIGHT]
+    small = area < max(1, int(min_area_px))
+    large = (area > int(max_area_px)) if (max_area_px and max_area_px > 0) else \
+        np.zeros_like(small)
+    edge = (((x0 <= 0) | (y0 <= 0) | (x1 >= full_size[0]) | (y1 >= full_size[1]))
+            if reject_border else np.zeros_like(small))
+    if max_area_is_auto:
+        big_hint = ("the automatic limit is a quarter of the search region -- enlarge the "
+                    "search region (Spot tab)")
+    else:
+        big_hint = "set max area to 0 (automatic) or raise it (Spot tab)"
+    j = None
+    if centre_xy is not None:
+        # the label under the calibrated position; a donut (dark centre) has
+        # none there, so fall back to the largest blob whose box holds it
+        cx, cy = int(round(centre_xy[0])) - offset[0], int(round(centre_xy[1])) - offset[1]
+        if 0 <= cy < labels.shape[0] and 0 <= cx < labels.shape[1] and labels[cy, cx] > 0:
+            j = int(labels[cy, cx]) - 1
+        else:
+            gx, gy = centre_xy
+            holds = (x0 <= gx) & (gx < x1) & (y0 <= gy) & (gy < y1)
+            if holds.any():
+                j = int(np.argmax(np.where(holds, area, -1)))
+    if j is not None and not ok[j]:
+        a = int(area[j])
+        if large[j]:
+            return (f"the blob at the calibrated position is {a} px, larger than max area "
+                    f"{int(max_area_px)} px -- {big_hint}", "larger than max area")
+        if small[j]:
+            return (f"the blob at the calibrated position is {a} px, smaller than min area "
+                    f"{int(min_area_px)} px (Spot tab)", "smaller than min area")
+        if edge[j]:
+            return ("the blob at the calibrated position touches the frame edge "
+                    "(Spot tab: reject border)", "touches the frame edge")
+    parts = []
+    if large.any():
+        parts.append(f"{int(large.sum())} larger than max area {int(max_area_px)} px "
+                     f"(largest {int(area[large].max())} px)")
+    if small.any():
+        parts.append(f"{int(small.sum())} smaller than min area {int(min_area_px)} px")
+    if edge.any():
+        parts.append(f"{int(edge.sum())} touching the frame edge")
+    why = "no blob above the threshold was a candidate: " + ", ".join(parts)
+    if large.any() and not small.any() and not edge.any():
+        return why + f" -- {big_hint}", "larger than max area"
+    if small.any() and not large.any() and not edge.any():
+        return why, "smaller than min area"
+    return why, "no candidate blob"
+
+
 def find_spot(
     image: np.ndarray,
     thr_lower: int = 200,
@@ -190,6 +261,7 @@ def find_spot(
     search_shape: str = "rect",
     lookup_region_y_px: int = 0,
     symmetric: bool = False,
+    max_area_is_auto: bool = False,
 ) -> SpotReport:
     """Locate the laser spot by intensity threshold + centre of mass.
 
@@ -208,7 +280,12 @@ def find_spot(
     filling a corner of the frame was a 396 000 px blob touching the border, the
     real laser spot a 1 300 px blob in the middle -- and "largest blob" picked
     the corner, so the calibrated spot position was the centre of that corner.
+
+    Not found: ``why`` / ``why_short`` say why (see SpotReport) --
+    ``max_area_is_auto`` = the caller's ``max_area_px`` is the automatic limit
+    (Spot.max_area_px 0), which changes what the advice says.
     """
+    lo_user = int(thr_lower)
     gray = to_gray(image)
     full_h, full_w = gray.shape[:2]
     ox, oy = 0, 0
@@ -252,15 +329,30 @@ def find_spot(
         ox, oy = cx0, cy0
         center_rc = (hx, hy)
     if mask.sum() == 0:
-        return SpotReport(found=False)
+        top = int(gray.max()) if gray.size else 0
+        if not bright_spot:
+            top = 255 - top
+        why = (f"nothing above the threshold {lo_user} in the search region "
+               f"(brightest there {top})" if bright_spot else
+               f"nothing below the threshold in the search region")
+        if unsym is not None and unsym.any():
+            why = ("light above the threshold, but none of it symmetric about the "
+                   "calibrated position (Spot tab: symmetric) -- recalibrate the spot "
+                   "or switch symmetric off")
+            return SpotReport(found=False, why=why, why_short="not symmetric")
+        return SpotReport(found=False, why=why, why_short="nothing above the threshold")
 
     n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
     if n <= 1:
-        return SpotReport(found=False)
+        return SpotReport(found=False, why="nothing above the threshold in the search region",
+                          why_short="nothing above the threshold")
     ok = spot_candidates(stats, (ox, oy), (full_w, full_h), min_area_px, max_area_px,
                          reject_border)
     if not ok.any():
-        return SpotReport(found=False)
+        why, short = _why_no_candidate(stats, labels, ok, (ox, oy), (full_w, full_h),
+                                       last_xy, min_area_px, max_area_px, reject_border,
+                                       max_area_is_auto)
+        return SpotReport(found=False, why=why, why_short=short)
     if center_rc is not None:
         # the candidate CENTRED on the calibrated position (a symmetric blob's
         # centroid is the centre of symmetry; mirror pairs of blobs are not)
@@ -268,7 +360,15 @@ def find_spot(
         d = np.where(ok, d, np.inf)
         j = int(np.argmin(d))
         if not d[j] <= 1.5:
-            return SpotReport(found=False)
+            # the blob AT the centre may have been rejected (area, edge): say so
+            why, short = _why_no_candidate(stats, labels, ok, (ox, oy), (full_w, full_h),
+                                           last_xy, min_area_px, max_area_px,
+                                           reject_border, max_area_is_auto)
+            if not short.startswith(("larger", "smaller", "touches")):
+                why = ("no blob above the threshold is centred on the calibrated position "
+                       "(Spot tab: symmetric) -- recalibrate the spot or switch symmetric off")
+                short = "not centred on the calibration"
+            return SpotReport(found=False, why=why, why_short=short)
         idx = 1 + j
     else:
         # Largest CANDIDATE connected component = the spot.

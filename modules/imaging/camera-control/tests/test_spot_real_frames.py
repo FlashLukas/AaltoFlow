@@ -188,3 +188,44 @@ def test_the_brain_locates_and_sizes_the_saturated_laser_without_a_warning(frame
         assert not [m for _l, m in events if "px from its calibrated" in m]
     finally:
         brain.shutdown()
+
+
+# 2026-09-29: the per-frame THRESHOLD check says WHY it did not see the spot
+# (Lukas's screenshot: "spot not seen" while the new sizes measured it). The
+# rig's explicit max_area_px 2000 < the thresholded spot out of focus.
+def test_the_threshold_check_says_why_on_the_real_defocused_spot(frames):
+    sp = _rig_cfg(max_area_px=2000)
+    for f in frames["sat_above"]:
+        det = V.find_spot(f, sp.thr_lower, sp.thr_upper, True, sp.lookup_region_px, CENTRE,
+                          sp.min_area_px, sp.max_area_px, sp.reject_border, sp.search_shape,
+                          0, symmetric=True)
+        assert not det.found
+        assert det.why_short == "larger than max area", det.why
+        assert "larger than max area 2000 px" in det.why and "automatic" in det.why
+
+
+def test_the_brain_publishes_why_on_the_real_defocused_spot(frames):
+    cfg = Config()
+    cfg.camera.frame_rate = 100.0
+    for k, v in dict(lookup_region_px=200, search_shape="circle", min_area_px=4,
+                     thr_lower=200, max_area_px=2000).items():
+        setattr(cfg.spot, k, v)
+    xy = SimXYStage(x0=65.0, y0=65.0)
+    z = SimZFocus(z0=30.0, z_focus=30.0, vmin=cfg.limits.z_min_v, vmax=cfg.limits.z_max_v)
+    cam = FrameCam(list(frames["sat_above"]), xy, z, width=401, height=401, spot_px=CENTRE,
+                   pixel_size_x_um=cfg.image.pixel_size_x_um,
+                   pixel_size_y_um=cfg.image.pixel_size_y_um)
+    brain = Camera(cam, xy, z, cfg)
+    brain.start()
+    try:
+        brain.set_spot_position(*CENTRE)
+        f0 = brain.status().frame_number
+        assert _wait(lambda: brain.status().frame_number > f0 + 8)
+        s = brain.status()
+        assert not s.spot_found
+        assert s.spot_found_why_short == "larger than max area", s.spot_found_why
+        assert "larger than max area 2000 px" in s.spot_found_why
+        assert math.isfinite(s.spot_rel_area) and s.spot_rel_area > 0
+        assert brain.cfg.spot.max_area_px == 2000            # the user's value stays
+    finally:
+        brain.shutdown()

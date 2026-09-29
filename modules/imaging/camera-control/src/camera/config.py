@@ -321,6 +321,15 @@ class Autofocus:
     # the brain warns (af_hint), use spot_d4sigma for such a spot.
     mechanism: str = "spot_area"
     focus_from_safety_area: bool = False  # score the safety box, not full frame
+    # GUI only (2026-09-29, Lukas: "when you call autofocus the image will zoom
+    # to the spot detection area"): while an autofocus (or a Z step
+    # calibration, or a recovery autofocus after a lost pattern) runs, the
+    # main camera view shows only the spot SEARCH REGION around the calibrated
+    # laser (+ a small margin), so the spot's change of size is visible; the
+    # view the user had comes back when the run ends. False = the view is left
+    # alone. It is config (not a GUI preference) so it travels with camera.ini
+    # and over the wire like every other autofocus setting.
+    zoom_on_af: bool = True
     drive_amplitude_v: float = 6.0     # peak-to-peak Z sweep, volts
     steps: int = 21                    # focus levels per sweep
     averages_per_level: int = 3        # frames averaged at each Z
