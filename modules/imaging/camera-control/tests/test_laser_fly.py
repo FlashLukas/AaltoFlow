@@ -95,8 +95,11 @@ def test_the_stream_records_the_laser_while_the_sample_moves(tracked):
     brain, xy = tracked
     brain.stream.start()
     x, y = xy.read_xy()
-    for k in range(10):
-        xy.move_xy(x + 0.5 * k, y)
+    # 20 x 30 ms = 0.6 s of motion: at the sim's ~30 fps that is ~18 frames,
+    # a safe margin over the 10 asserted (0.3 s gave exactly 10 at best and
+    # 9 after a heavier test had run -- a timing flake, not a stream bug)
+    for k in range(20):
+        xy.move_xy(x + 0.25 * k, y)
         time.sleep(0.03)
     c = brain.stream.stop()
     lx = [v for v in c["values"]["laser_x"] if v is not None]

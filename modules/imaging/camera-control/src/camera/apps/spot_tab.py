@@ -379,8 +379,9 @@ class SpotTab(QWidget):
         form.addRow("min area (px²)", self.sp_area)
         self.sp_maxarea = QSpinBox(); self.sp_maxarea.setRange(0, 10_000_000)
         self.sp_maxarea.setValue(int(sp.max_area_px)); self.sp_maxarea.valueChanged.connect(self._on_edit)
-        self.sp_maxarea.setToolTip("Blobs larger than this are not the spot (e.g. a saturated "
-                                   "illumination patch). 0 = no limit.")
+        self.sp_maxarea.setToolTip("Blobs larger than this are not the spot. 0 = automatic: a "
+                                   "quarter of the search region (advised -- a saturated spot "
+                                   "with rings is several thousand px²).")
         form.addRow("max area (px²)", self.sp_maxarea)
         self.chk_edge = QCheckBox("ignore blobs touching the frame edge")
         self.chk_edge.setChecked(bool(sp.reject_border)); self.chk_edge.toggled.connect(self._on_edit)
@@ -444,7 +445,16 @@ class SpotTab(QWidget):
                                       "switched for the calibration, restored after.")
         self.chk_calib_afx.setChecked(bool(sp.calib_at_af_exposure))
         self.chk_calib_afx.toggled.connect(self._on_edit)
+        self.chk_calib_afx.toggled.connect(self.update_afx_note)
         l.addWidget(self.chk_calib_afx)
+        # Ticked with no autofocus exposure set, the brain calibrates at the
+        # WORKING exposure (it used to say nothing, 2026-09-29 late): said here,
+        # right under the box, and in the log when it happens.
+        self.lab_calib_afx = QLabel("")
+        self.lab_calib_afx.setWordWrap(True)
+        self.lab_calib_afx.setStyleSheet(f"color:{T.COLORS['accent']};")
+        self.lab_calib_afx.setVisible(False)
+        l.addWidget(self.lab_calib_afx)
         r = QHBoxLayout()
         r.addWidget(QLabel("average over"))
         self.sp_frames = QSpinBox(); self.sp_frames.setRange(2, 30); self.sp_frames.setValue(20)
@@ -612,6 +622,18 @@ class SpotTab(QWidget):
         self.cmb_shape.setCurrentIndex(1 if sp.search_shape == "circle" else 0)
         self.cmb_shape.blockSignals(False)
         self._on_shape(update=False)
+        self.update_afx_note()
+
+    def update_afx_note(self, *_):
+        """Show / hide the 'no autofocus exposure set' note under the
+        'at the autofocus exposure' checkbox (the AF tab can change the
+        exposure, so the refresh calls this too)."""
+        want = self.chk_calib_afx.isChecked()
+        none = float(getattr(self.cfg.autofocus, "exposure_us", 0.0) or 0.0) <= 0
+        if want and none:
+            self.lab_calib_afx.setText("no autofocus exposure set (AutoFocus tab, exposure_us "
+                                       "= 0) -- the calibration runs at the working exposure")
+        self.lab_calib_afx.setVisible(bool(want and none))
 
     def _on_shape(self, *_, update=True):
         circle = self.cmb_shape.currentIndex() == 1
@@ -761,6 +783,8 @@ class SpotTab(QWidget):
             return
         self._adopt(res)
         self.grab_frame()
+        if res.get("warning"):
+            self.log("warn", f"calibrate spot: {res['warning']}")
         moved = res.get("moved_px")
         how = (f", {moved:.1f} px from the previous calibration"
                if isinstance(moved, (int, float)) and math.isfinite(moved) else "")
@@ -898,6 +922,7 @@ class SpotTab(QWidget):
     # -- live readout: numbers from status only, no image work ---------------------
     def update_status(self, status):
         self._status = status
+        self.update_afx_note()
         self._draw_area()
         sp = self.cfg.spot
         if not getattr(status, "spot_found", False):

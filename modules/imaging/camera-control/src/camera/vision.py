@@ -123,6 +123,41 @@ def search_region(center, half_x: int, half_y: int = 0, shape: str = "rect",
             "half": (hx, hy), "box": (x0, y0, x1, y1)}
 
 
+# --------------------------------------------------------------------------- #
+# The LARGEST a spot may be: a fraction of the search region (2026-09-29 late)
+# --------------------------------------------------------------------------- #
+# max_area_px was introduced on 2026-09-14 to keep a saturated illuminated
+# corner (396 000 px) from being taken for the laser. Since 9da7a07 every spot
+# search is confined to the search region and the candidate rules (reaching
+# out of the region, elongated, centred outside it) reject such a patch by its
+# SHAPE -- and the fixed 2000 px^2 on the rig then rejected the LASER itself:
+# at the working exposure (2480 us) it is a saturated disc with rings of
+# 3.4-7.8 k px^2 above the locate threshold, and locate returned a 30-50 px
+# ring fragment 45-52 px away instead. So max_area_px = 0 (now the default)
+# means "a quarter of the search region's area": a spot filling more than
+# that is not a spot IN the region any more, whatever the exposure. An
+# explicit value still works (the why-text says when it rejected the spot).
+AUTO_MAX_AREA_FRACTION = 0.25
+
+
+def region_area(reg) -> float:
+    """Area (px^2) of a search region from :func:`search_region` (unclipped)."""
+    hx, hy = reg["half"]
+    if reg["shape"] == "circle":
+        return math.pi * hx * hx
+    return float((2 * hx + 1) * (2 * hy + 1))
+
+
+def max_area_limit(cfg, reg) -> float:
+    """The largest blob (px^2) that may be the spot: Spot.max_area_px when it is
+    set (> 0), else AUTO_MAX_AREA_FRACTION of the search region; 0 = no limit
+    (0 and no region: the whole-frame opt-out)."""
+    explicit = int(_cfg(cfg, "max_area_px", 0) or 0)
+    if explicit > 0:
+        return float(explicit)
+    return AUTO_MAX_AREA_FRACTION * region_area(reg) if reg is not None else 0.0
+
+
 def spot_candidates(stats, offset, full_size, min_area_px=4, max_area_px=0,
                     reject_border=False) -> np.ndarray:
     """Boolean per blob (``stats`` rows 1..n from connectedComponentsWithStats):
@@ -165,7 +200,9 @@ def find_spot(
     ``lookup_region_px``. Coordinates are still returned in FULL-frame pixels.
 
     Candidates are the thresholded blobs with ``min_area_px <= area`` and, when
-    given, ``area <= max_area_px``; with ``reject_border`` a blob touching the
+    given, ``area <= max_area_px`` (0 = no limit here; the camera passes
+    :func:`max_area_limit`, i.e. Spot.max_area_px 0 -> a quarter of the
+    region); with ``reject_border`` a blob touching the
     edge of the FULL frame is not a candidate either. The largest candidate wins.
     Why the two filters (lab rig, 63x, 2026-09-14): saturated illumination
     filling a corner of the frame was a 396 000 px blob touching the border, the
@@ -831,9 +868,17 @@ def spot_relative_area(frame: np.ndarray, guess_xy, cfg=None, max_value=None) ->
 #     its pixels above max_elongation: a scratch or a lit edge is a line, a
 #     spot is round, and a defocused ring is round too), and its centre inside
 #     the region;
+#   * (2026-09-29 late) the area limit is checked LAST and is automatic by
+#     default (a quarter of the region, see AUTO_MAX_AREA_FRACTION): the
+#     saturated laser with its rings is 3.4-7.8 k px^2 at the working
+#     exposure. A compact blob holding the calibrated position that an
+#     explicit limit rejects means "not found" with that reason, never a
+#     piece of its rings; and a FRAGMENT (under FRAGMENT_ENERGY of the light
+#     of a candidate at least about as bright) is never taken;
 #   * of the candidates at least NEAR_FRACTION as bright (as large, for the
-#     saturated calibration) as the best one, the one NEAREST the calibrated
-#     position wins -- not simply the brightest: at the working exposure the
+#     saturated calibration) as the best one, one whose bounding box HOLDS
+#     the calibrated position wins, else the one NEAREST the calibrated
+#     position -- not simply the brightest: at the working exposure the
 #     laser and the lit sample are BOTH at full scale, and "brightest" was a
 #     coin toss the block won (53 px off). With no calibration there is
 #     nothing to be near, so the brightest (largest) wins, and two nearly equal
@@ -932,14 +977,24 @@ def _rejected_words(rej: dict) -> str:
     return f" (ignored: {', '.join(parts)})" if parts else ""
 
 
-def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg, reg=None):
+def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg, reg=None,
+                ref_xy=None, too_large: list | None = None):
     """The blobs of ``mask`` (in the work box at ``offset``) that may be the
     laser spot, by the rules above. ``vals`` = the signal the mask came from
     (its peak, the centroid's weights ``vals - thr``; ``thr`` None = every
     pixel weighs the same, the thresholded binary centroid).
 
     Returns (candidates, rejected counts, label image). A candidate is a dict:
-    x, y (centroid, full frame), peak, area, label, bbox (in the work box)."""
+    x, y (centroid, full frame), peak, area, energy (its light above the
+    threshold -- or its summed values for a binary mask), label, bbox (in the
+    work box), contains (its bounding box holds ``ref_xy``, the calibrated
+    position).
+
+    The AREA LIMIT is checked LAST (2026-09-29 late): a blob that passes every
+    shape rule but is too large is still a compact spot-like light -- very
+    likely the laser under a limit set too small -- and goes to ``too_large``
+    (when a list is given) instead of just vanishing: the fragment rule
+    compares against it and the why-text names it."""
     rej = {"smaller than min area": 0, "larger than max area": 0, "touching the frame edge": 0,
            "reaching out of the region": 0, "elongated": 0, "centred outside the region": 0}
     n, lab, stats, _c = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
@@ -950,7 +1005,7 @@ def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg,
     fw, fh = int(full_size[0]), int(full_size[1])
     ox, oy = int(offset[0]), int(offset[1])
     min_a = max(1, int(_cfg(cfg, "min_area_px", 4)))
-    max_a = int(_cfg(cfg, "max_area_px", 0) or 0)
+    max_a = max_area_limit(cfg, reg)
     border = bool(_cfg(cfg, "reject_border", True))
     max_el = float(_cfg(cfg, "max_elongation", 3.0) or 0.0)
     for i in range(1, n):
@@ -961,9 +1016,6 @@ def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg,
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < min_a:
             rej["smaller than min area"] += 1
-            continue
-        if max_a > 0 and area > max_a:
-            rej["larger than max area"] += 1
             continue
         if border and (bx + ox <= 0 or by + oy <= 0 or bx + bw + ox >= fw or by + bh + oy >= fh):
             rej["touching the frame edge"] += 1
@@ -987,6 +1039,7 @@ def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg,
                 continue
         v = vals[by:by + bh, bx:bx + bw][sub].astype(np.float64)
         wgt = np.clip(v - thr, 0.0, None) if thr is not None else np.ones_like(v)
+        energy = float(wgt.sum()) if thr is not None else float(v.sum())
         if wgt.sum() <= 0:
             wgt = np.ones_like(v)
         cx = float(xs @ wgt / wgt.sum()) + bx + ox
@@ -994,20 +1047,103 @@ def _candidates(mask: np.ndarray, vals: np.ndarray, thr, offset, full_size, cfg,
         if not _in_region(reg, cx, cy):
             rej["centred outside the region"] += 1
             continue
-        out.append({"x": cx, "y": cy, "peak": float(v.max()), "area": area, "label": i,
-                    "bbox": (bx, by, bw, bh)})
+        contains = False
+        if ref_xy is not None:
+            rx, ry = int(round(ref_xy[0])) - ox, int(round(ref_xy[1])) - oy
+            contains = bx <= rx < bx + bw and by <= ry < by + bh
+        c = {"x": cx, "y": cy, "peak": float(v.max()), "area": area, "label": i,
+             "bbox": (bx, by, bw, bh), "energy": energy, "contains": contains}
+        if max_a > 0 and area > max_a:
+            rej["larger than max area"] += 1
+            if too_large is not None:
+                too_large.append(c)
+            continue
+        out.append(c)
     return out, rej, lab
+
+
+# A FRAGMENT is not the spot (2026-09-29 late, real frames at the working
+# exposure): a piece of a ring, or a speck of dust lit next to the laser, is
+# no brighter than the spot and carries a small fraction of its light. The
+# rig's fragments carried 0.03-0.1 % of the laser's light (65-180 against
+# 154 000), yet with the laser rejected by the area limit they WON (45-52 px
+# off); and a saturated glint as bright at the top as the laser wins "nearest
+# the calibration" whenever the calibration is a little stale. Rule: a
+# candidate with less than FRAGMENT_ENERGY of the light of another compact
+# candidate that is at least about as bright (peak >= FRAGMENT_PEAK x its own:
+# two saturated tops differ only by noise) is a fragment of it and is never
+# taken. Only against brighter-or-equal ones: a large DIM sample feature
+# carries more light than a small bright spot and must not throw the spot out
+# (the reason blob ranks by peak and not by energy).
+FRAGMENT_ENERGY = 0.2
+FRAGMENT_PEAK = 0.9
+FRAGMENT_WORDS = "fragment (little light next to a brighter spot)"
+
+
+def _drop_fragments(cands: list, too_large: list, rej: dict) -> list:
+    """``cands`` without the fragments (see above); the reference lights are
+    the candidates AND the compact blobs rejected only for their area."""
+    refs = cands + too_large
+    keep = []
+    for c in cands:
+        if any(o is not c and o["peak"] >= FRAGMENT_PEAK * c["peak"]
+               and c["energy"] < FRAGMENT_ENERGY * o["energy"] for o in refs):
+            rej[FRAGMENT_WORDS] = rej.get(FRAGMENT_WORDS, 0) + 1
+        else:
+            keep.append(c)
+    return keep
+
+
+def _too_large_words(big: dict, cfg, reg, at_calib: bool) -> str:
+    """Why the spot was not taken: the area limit rejected it."""
+    auto = AUTO_MAX_AREA_FRACTION * region_area(reg) if reg is not None else 0.0
+    what = "the blob at the calibrated position" if at_calib else "the brightest spot-like blob"
+    return (f"{what} ({big['x']:.0f}, {big['y']:.0f}) is {big['area']} px, larger than max "
+            f"area {int(max_area_limit(cfg, reg))} px (Spot tab) -- set max area to 0 "
+            f"(automatic: {auto:.0f} px, a quarter of the search region) or raise it")
+
+
+def _pick(cands: list, too_large: list, key: str, ref_xy, cfg, reg, rej: dict):
+    """(the candidate taken for the spot or None, the runner-up or None, why).
+
+    1. A compact blob that holds the calibrated position (``ref_xy``) but was
+       rejected by an explicit area limit: nothing is taken and the why says
+       so -- whatever else is found then is a piece of the laser's rings.
+    2. Fragments are dropped (_drop_fragments); fragments only -> nothing.
+    3. _choose among the rest.
+    ``why`` is "" when a candidate was taken, or when there was nothing."""
+    held = [b for b in too_large if b["contains"]]
+    if held:
+        return None, None, _too_large_words(max(held, key=lambda b: b["energy"]), cfg, reg, True)
+    cands = _drop_fragments(cands, too_large, rej)
+    if not cands:
+        if too_large:
+            return None, None, _too_large_words(max(too_large, key=lambda b: b["energy"]),
+                                                cfg, reg, False)
+        return None, None, ""
+    pick, second = _choose(cands, key, ref_xy)
+    return pick, second, ""
 
 
 def _choose(cands: list, key: str, ref_xy):
     """(the candidate taken for the spot, the runner-up or None) -- see the
-    rules above: nearest ``ref_xy`` among those >= NEAR_FRACTION of the best
-    ``key``; the best one when there is no ``ref_xy``."""
+    rules above: of those >= NEAR_FRACTION of the best ``key``, one HOLDING
+    ``ref_xy`` in its bounding box (the one with the most light), else the
+    nearest ``ref_xy``; the best one when there is no ``ref_xy``.
+
+    Why "holds" before "nearest" (2026-09-29 late): the calibrated position
+    inside a spot's own extent says it IS that spot, whatever the distances
+    of the centroids -- the centroid of a defocused, lopsided saturated spot
+    can sit further from a slightly stale calibration than a neighbour's."""
     order = sorted(cands, key=lambda c: -c[key])
     pick = order[0]
     if ref_xy is not None and len(order) > 1:
         close = [c for c in order if c[key] >= NEAR_FRACTION * order[0][key]]
-        pick = min(close, key=lambda c: (c["x"] - ref_xy[0]) ** 2 + (c["y"] - ref_xy[1]) ** 2)
+        held = [c for c in close if c.get("contains")]
+        if held:
+            pick = max(held, key=lambda c: c.get("energy", 0.0))
+        else:
+            pick = min(close, key=lambda c: (c["x"] - ref_xy[0]) ** 2 + (c["y"] - ref_xy[1]) ** 2)
     others = [c for c in order if c is not pick]
     return pick, (others[0] if others else None)
 
@@ -1131,12 +1267,16 @@ def locate_spot(frame: np.ndarray, calib_xy, cfg=None, mode: str = "calibrated",
                    f"{top:.1f} counts above the background, noise {snoise:.2f}){hint}")
         return out
     thr = max(k * snoise, float(_cfg(cfg, "locate_rel", 0.2) or 0.0) * top)
-    cands, rej, lab = _candidates(sm >= thr, sm, thr, (work[0], work[1]), (w, h), cfg, reg)
-    out.n_candidates, out.rejected = len(cands), rej
-    if not cands:
-        out.why = f"no spot-like light {where}{_rejected_words(rej)}{hint}"
+    big = []
+    cands, rej, lab = _candidates(sm >= thr, sm, thr, (work[0], work[1]), (w, h), cfg, reg,
+                                  calib_xy, big)
+    pick, second, why = _pick(cands, big, "peak", calib_xy, cfg, reg, rej)
+    out.rejected = rej
+    if pick is None:
+        out.why = (f"no spot {where}: {why}" if why else
+                   f"no spot-like light {where}{_rejected_words(rej)}{hint}")
         return out
-    pick, second = _choose(cands, "peak", calib_xy)
+    out.n_candidates = len(cands)
     out.ok, out.peak, out.area = True, pick["peak"], pick["area"]
     if mode == "peak":
         px, py = _plateau_peak(sm, lab, pick, snoise)
@@ -1204,14 +1344,17 @@ def find_spot_for_calibration(frame: np.ndarray, cfg=None, mode: str = "saturate
                        f"-- lower the threshold, calibrate as an 'unsaturated spot', or "
                        f"{REGION_HINT if reg is not None else 'check the laser'}")
             return out
-        cands, rej, lab = _candidates(mask, g8, None, (x0, y0), (w, h), cfg, reg)
-        out.n_candidates, out.rejected = len(cands), rej
-        if not cands:
-            out.why = (f"light above the threshold {lo} {where}, but nothing spot-like"
+        big = []
+        cands, rej, lab = _candidates(mask, g8, None, (x0, y0), (w, h), cfg, reg, calib_xy, big)
+        pick, second, why = _pick(cands, big, "area", calib_xy, cfg, reg, rej)
+        out.rejected = rej
+        if pick is None:
+            out.why = (f"above the threshold {lo} {where}: {why}" if why else
+                       f"light above the threshold {lo} {where}, but nothing spot-like"
                        f"{_rejected_words(rej)} -- check the area limits, or "
                        f"{REGION_HINT if reg is not None else 'the threshold'}")
             return out
-        pick, second = _choose(cands, "area", calib_xy)
+        out.n_candidates = len(cands)
         out.x, out.y, out.area, out.peak = pick["x"], pick["y"], pick["area"], pick["peak"]
         out.ok = True
         if second is not None:
@@ -1232,12 +1375,15 @@ def find_spot_for_calibration(frame: np.ndarray, cfg=None, mode: str = "saturate
                    f"{top:.1f} counts above the background, noise {snoise:.2f}){hint}")
         return out
     thr = max(k * snoise, float(_cfg(cfg, "locate_rel", 0.2) or 0.0) * top)
-    cands, rej, _lab = _candidates(sm >= thr, sm, thr, (x0, y0), (w, h), cfg, reg)
-    out.n_candidates, out.rejected = len(cands), rej
-    if not cands:
-        out.why = f"no spot-like light {where}{_rejected_words(rej)}{hint}"
+    big = []
+    cands, rej, _lab = _candidates(sm >= thr, sm, thr, (x0, y0), (w, h), cfg, reg, calib_xy, big)
+    b, second, why = _pick(cands, big, "peak", calib_xy, cfg, reg, rej)
+    out.rejected = rej
+    if b is None:
+        out.why = (f"no spot {where}: {why}" if why else
+                   f"no spot-like light {where}{_rejected_words(rej)}{hint}")
         return out
-    b, second = _choose(cands, "peak", calib_xy)
+    out.n_candidates = len(cands)
     out.peak, out.area = b["peak"], b["area"]
     if second is not None:
         out.second_xy, out.second_peak = (second["x"], second["y"]), second["peak"]

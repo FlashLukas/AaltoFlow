@@ -150,8 +150,12 @@ class Spot:
     lookup_region_px: int = 100        # rect: half-width (+/- px in x); circle: radius
     lookup_region_y_px: int = 0        # rect: half-height (+/- px in y); 0 = same as x
     min_area_px: int = 4               # ignore blobs smaller than this
-    max_area_px: int = 20000           # ...and larger than this (0 = no limit): a
-                                       #   saturated illumination patch is not a spot
+    # ...and larger than this. 0 (the default since 2026-09-29 late) = automatic:
+    # a quarter of the search region's area (vision.AUTO_MAX_AREA_FRACTION). The
+    # old fixed limit (20000, 2000 on the rig) was for a saturated illumination
+    # patch -- the region's shape rules reject that now -- and on the rig it
+    # rejected the saturated LASER (3.4-7.8 k px^2 with its rings).
+    max_area_px: int = 0
     reject_border: bool = True         # ignore blobs touching the frame edge
     # per-frame check only: count just the bright pixels that are symmetric
     # about the calibrated centre, so another object reaching into the search
@@ -194,6 +198,10 @@ class Spot:
     locate: str = "calibrated"         # calibrated | peak | blob
     locate_k: float = 5.0              # blob: above background + this x noise (smoothed)
     offset_warn_px: float = 20.0
+    # ...only when the offset PERSISTS for this many consecutive frames, and
+    # never on the frames in flight after an exposure change (2026-09-29 late:
+    # one false warning right at a 65 -> 2480 us switch with locate = blob)
+    offset_warn_frames: int = 5
     # Telling the laser from other bright light (rig check 2026-09-29, see the
     # block comment above vision.locate_spot). Every search -- locate, the
     # why-text, Calibrate spot -- stays in the search region around the

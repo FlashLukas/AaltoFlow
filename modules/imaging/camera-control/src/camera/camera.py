@@ -377,6 +377,11 @@ class Camera:
         self._af_expo_saved: float | None = None
         self._af_expo_active = False
         self._expo_hold_frames = 0
+        # The "spot is N px from its calibration" warning (_measure_size):
+        # consecutive far frames so far, and how many more frames to ignore
+        # after ANY exposure change (_note_exposure_change).
+        self._offset_run = 0
+        self._offset_quiet = 0
         self._af_area_sat = [0, 0]
         # Z step calibration (calibrate_z_steps): same pattern as the autofocus
         # state above -- brain attributes, copied into every frame (gotcha #1)
@@ -659,7 +664,8 @@ class Camera:
         where = center if center is not None else (gray.shape[1] / 2.0, gray.shape[0] / 2.0)
         det = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot,
                           sp.lookup_region_px, where, sp.min_area_px,
-                          sp.max_area_px, sp.reject_border, sp.search_shape,
+                          self._max_area_px(gray.shape, where), sp.reject_border,
+                          sp.search_shape,
                           sp.lookup_region_y_px, symmetric=bool(sp.symmetric and center))
         st.spot_found = det.found
         if det.found:
@@ -1399,14 +1405,32 @@ class Camera:
         src, top, bits = self._spot_source(gray)
         st.spot_bit_depth = bits
         centre, loc = self._size_centre(src, top, guess)
+        # Frames in flight after an exposure change (the AF exposure's switch
+        # and restore, or a new ExposureTime from the live panel / settings)
+        # were exposed with the OLD value: whatever is located on them says
+        # nothing about the laser. Rig 2026-09-29: one false "N px from its
+        # calibrated position" right at a 65 -> 2480 us switch, locate = blob.
+        expo_in_flight = (self._af_expo_active or self._expo_hold_frames > 0
+                          or self._offset_quiet > 0)
+        if self._offset_quiet > 0:
+            self._offset_quiet -= 1
         if sp.ref_set and centre is not None:
             st.spot_offset_px = float(np.hypot(centre[0] - sp.ref_x, centre[1] - sp.ref_y))
-            if (sp.locate != "calibrated" and st.spot_offset_px > float(sp.offset_warn_px)
-                    and float(sp.offset_warn_px) > 0):
+        # The warning needs the offset to PERSIST for offset_warn_frames
+        # consecutive working frames: a moved laser / stale calibration stays
+        # put, a single odd frame does not.
+        far = (sp.ref_set and centre is not None and sp.locate != "calibrated"
+               and float(sp.offset_warn_px) > 0 and st.spot_offset_px > float(sp.offset_warn_px))
+        if expo_in_flight or not far:
+            self._offset_run = 0
+        else:
+            self._offset_run += 1
+            if self._offset_run >= max(1, int(sp.offset_warn_frames)):
                 self._warn_limited(
                     "spot_offset", f"the spot is {st.spot_offset_px:.0f} px from its calibrated "
-                    f"position: the laser moved or the calibration is stale -- recalibrate "
-                    f"the spot (Spot tab); motion still uses the calibrated position", 60.0)
+                    f"position (for {self._offset_run} frames): the laser moved or the "
+                    f"calibration is stale -- recalibrate the spot (Spot tab); motion still "
+                    f"uses the calibrated position", 60.0)
         if centre is None:
             st.spot_size_why = self._why_no_spot(src, top, guess, loc.why)
             return
@@ -1483,6 +1507,11 @@ class Camera:
         except Exception:
             return why
         if not loc.ok:
+            # With locate = blob the caller's ``why`` IS this same look's
+            # answer: joining the two printed one sentence twice (rig,
+            # 2026-09-29). Add only what is new.
+            if not loc.why or loc.why in why:
+                return why
             return f"{why}; {loc.why}"
         d = float(np.hypot(loc.x - centre[0], loc.y - centre[1]))
         # a few spot radii away = somewhere else; closer = the spot itself is dim
@@ -1697,6 +1726,7 @@ class Camera:
             yield False
             return
         try:
+            self._note_exposure_change()
             self.backend.set_feature("ExposureTime", want)
         except Exception as exc:
             self._emit("warn", f"{what}: cannot set the autofocus exposure {want:g} us "
@@ -1714,6 +1744,7 @@ class Camera:
             yield True
         finally:
             try:
+                self._note_exposure_change()
                 self.backend.set_feature("ExposureTime", old)
                 self._emit("info", f"{what}: exposure restored to {old:g} us")
             except Exception as exc:
@@ -1770,6 +1801,7 @@ class Camera:
         if ea is not None and "Once" in [str(o) for o in (ea.get("options") or [])] \
                 and ea.get("writable", True):
             method = "camera ExposureAuto=Once"
+            self._note_exposure_change()
             self.backend.set_feature("ExposureAuto", "Once")
             done = False
             while time.monotonic() < t_end:
@@ -1784,6 +1816,9 @@ class Camera:
                     pass
                 raise RuntimeError("the camera's ExposureAuto=Once did not finish in time; "
                                    "switched back to Off")
+            # the camera changed its exposure all the time it ran: frames in
+            # flight from the last change still arrive
+            self._note_exposure_change()
             new = float(self.backend.get_feature("ExposureTime"))
         else:
             method = "software"
@@ -1809,6 +1844,7 @@ class Camera:
                 want = float(np.clip(cur * factor, lo, hi))
                 if abs(want - cur) <= 1e-6 * max(1.0, cur):
                     break                              # at a limit
+                self._note_exposure_change()
                 self.backend.set_feature("ExposureTime", want)
                 cur = float(self.backend.get_feature("ExposureTime"))
             new = cur
@@ -2834,7 +2870,8 @@ class Camera:
                                    "(Spot tab -> Calibrate spot)")
             det = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot,
                               sp.lookup_region_px, (sp.ref_x, sp.ref_y), sp.min_area_px,
-                              sp.max_area_px, sp.reject_border, sp.search_shape,
+                              self._max_area_px(gray.shape, (sp.ref_x, sp.ref_y)),
+                              sp.reject_border, sp.search_shape,
                               sp.lookup_region_y_px, symmetric=bool(sp.symmetric))
             if det.found:
                 # was this level's spot SATURATED? (spot_area only makes sense
@@ -3433,8 +3470,29 @@ class Camera:
     def get_camera_feature(self, name: str):
         return self.backend.get_feature(name)
 
+    def _max_area_px(self, shape, centre) -> int:
+        """The area limit of the fixed-threshold spot search around ``centre``:
+        Spot.max_area_px, or (0, the default since 2026-09-29 late) a quarter
+        of the search region -- the saturated laser with its rings is several
+        thousand px^2 at the working exposure (vision.AUTO_MAX_AREA_FRACTION)."""
+        sp = self.cfg.spot
+        reg = V.search_region(centre, sp.lookup_region_px, sp.lookup_region_y_px,
+                              sp.search_shape, (shape[1], shape[0]))
+        return int(V.max_area_limit(sp, reg))
+
+    def _note_exposure_change(self) -> None:
+        """An exposure write is about to happen: the next frames were (partly)
+        exposed with the old value. Nothing located on them may count toward
+        the spot-offset warning. n_drop + 2 = the frames the camera still
+        delivers with the old exposure (autofocus.exposure_discard_frames,
+        # VERIFY on the IDS) + 1 grabbed before the write + 1 margin."""
+        self._offset_run = 0
+        self._offset_quiet = max(0, int(self.cfg.autofocus.exposure_discard_frames)) + 2
+
     def set_camera_feature(self, name: str, value):
         """Set one camera parameter; returns its read-back value."""
+        if name == "ExposureTime":
+            self._note_exposure_change()           # BEFORE the write: no frame slips past
         self.backend.set_feature(name, value)
         try:
             v = self.backend.get_feature(name)
@@ -3586,6 +3644,16 @@ class Camera:
         sp = self.cfg.spot
         mode = sp.calib_mode if sp.calib_mode in CALIB_MODES else "saturated"
         at_af = bool(sp.calib_at_af_exposure) and float(self.cfg.autofocus.exposure_us or 0) > 0
+        # "at the autofocus exposure" asked for, but there is none: it used to
+        # calibrate at the working exposure WITHOUT A WORD (2026-09-29 late) --
+        # a saturated spot where the user expected an unsaturated one. Say it
+        # (event + reply); calibrating anyway is still the right thing: the
+        # user pressed Calibrate.
+        warning = ""
+        if bool(sp.calib_at_af_exposure) and not at_af:
+            warning = ("no autofocus exposure set (autofocus.exposure_us = 0) -- calibrated "
+                       "at the working exposure")
+            self._emit("warn", f"spot calibration: {warning}")
         before = (float(sp.ref_x), float(sp.ref_y)) if sp.ref_set else None
         xs, ys, areas, whys, sizes, sats = [], [], [], [], [], []
         skip = 2 + (max(0, int(self.cfg.autofocus.exposure_discard_frames)) if at_af else 0)
@@ -3669,7 +3737,7 @@ class Camera:
                 "d86_px": sp.ref_d86_px, "gauss_sigma2": sp.ref_gauss_sigma2,
                 "jitter_px": sp.ref_jitter_px, "frames": len(xs), "mode": mode,
                 "moved_px": moved, "previous": list(before) if before else None,
-                "at_af_exposure": at_af}
+                "at_af_exposure": at_af, "warning": warning}
 
     def _calib_frame(self, gray, mode, xs, ys, areas, whys, sizes, sats, before=None) -> None:
         """One frame of calibrate_spot: find, then measure the sizes there.
