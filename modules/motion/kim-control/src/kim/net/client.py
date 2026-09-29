@@ -217,6 +217,14 @@ class KimClient:
     def set_config(self, config: dict) -> None:
         self._rpc(cmd="set_config", config=config)
 
+    def save_calibration(self) -> str:
+        """Save the step sizes into the SERVICE's kim.ini; returns its path."""
+        return self._rpc(cmd="save_calibration")["path"]
+
+    def save_config(self) -> str:
+        """Save the whole config into the SERVICE's kim.ini; returns its path."""
+        return self._rpc(cmd="save_config")["path"]
+
     # motion -- STEP language
     def move_to_step(self, axis, position) -> int:
         return self._rpc(cmd="move_to_step", axis=axis, position=position)["target"]

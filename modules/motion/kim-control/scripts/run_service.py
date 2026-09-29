@@ -4,6 +4,11 @@
     python scripts/run_service.py --real          # real KIM101 via pylablib
     python scripts/run_service.py --config my.ini # load config first
 
+Without --config the service loads ``kim.ini`` from the kim-control folder when
+it exists (the step sizes saved by the save_calibration verb, e.g. after the
+camera's "Calibrate Z steps"). Loading a file writes nothing to the controller:
+its drive voltage / rate / acceleration are still ADOPTED at start.
+
 The service binds to 0.0.0.0 so localhost and the lab Ethernet are the same
 code -- a coordinator on another PC connects to this host's IP.
 """
@@ -17,7 +22,7 @@ from pathlib import Path
 # Allow running straight from a checkout without installing (src layout).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from kim.config import Config, load_config  # noqa: E402
+from kim.config import load_startup_config  # noqa: E402
 from kim.hwlock import HardwareBusy  # noqa: E402
 from kim.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from kim.net.service import KimService, PortInUse  # noqa: E402
@@ -32,15 +37,19 @@ EXIT_HARDWARE_BUSY = 4
 def main() -> int:
     ap = argparse.ArgumentParser(description="3D piezo-inertia stage service (KIM101/PIA25)")
     ap.add_argument("--real", action="store_true", help="use the real KIM101 (default: simulator)")
-    ap.add_argument("--config", help="INI config file to load")
+    ap.add_argument("--config", help="INI config file to load (default: kim.ini in the "
+                                     "kim-control folder, if present)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
     ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
     ap.add_argument("--status-hz", type=float, default=8.0)
     args = ap.parse_args()
 
-    cfg = load_config(args.config) if args.config else Config()
+    cfg, cfg_path, loaded = load_startup_config(args.config)
     brain, _backend = (build_real_system if args.real else build_sim_system)(cfg)
+    # save_calibration / save_config write back to the file we started from,
+    # so what is saved is what the next start loads.
+    brain.config_path = cfg_path
 
     service = KimService(
         brain, host=args.host, cmd_port=args.cmd_port,
@@ -48,6 +57,8 @@ def main() -> int:
     )
     kind = "REAL KIM101" if args.real else "SIMULATOR"
     print(f"kim service [{kind}] on tcp://{args.host}:{args.cmd_port} (cmd) / {args.pub_port} (pub)")
+    print(f"config: {cfg_path}" + ("" if loaded else " (not found -- defaults; "
+                                                     "save_calibration creates it)"))
     print("Ctrl-C to stop.")
     try:
         service.serve_forever()

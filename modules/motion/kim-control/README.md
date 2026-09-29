@@ -115,6 +115,23 @@ kim> move_relative_um X 10
 kim> set_velocity_um X 50
 ```
 
+### Saved settings: `kim.ini`
+
+Without `--config`, the service (and a local GUI) loads `kim.ini` from the
+kim-control folder when it exists. That is where the step sizes are kept: the
+STEP SIZE card's **Save** button (or the `save_calibration` verb) writes the
+Calibration group -- every axis, forward and backward, and
+`use_px_calibration` -- into it, leaving the file's other sections alone.
+Settings ▸ **Save config** (verb `save_config`) applies and saves everything.
+The camera's "Calibrate Z steps" writes the measured Z up/down steps with
+`set_calibration` and then calls `save_calibration`, so they survive a kim
+restart. With `--config FILE`, that file is read and saved instead.
+
+Loading the file changes nothing on the controller: the drive voltage, step
+rate and acceleration are still READ from the KIM101 at start and adopted (the
+suite's adopt-on-start rule); from the file only the calibration, limits,
+leash and UI count. `kim.ini` is lab data and is gitignored.
+
 ## Remote-control quick reference
 
 Commands are JSON over a REQ/REP socket on port 5567; every reply is
@@ -133,7 +150,9 @@ Commands are JSON over a REQ/REP socket on port 5567; every reply is
 | set step rate / acceleration    | `set_step_rate` / `set_acceleration` (each `{axis,value}`) |
 | set velocity in µm/s            | `{"cmd":"set_velocity_um","axis":"X","value":50.0}` |
 | set drive voltage (step size)   | `{"cmd":"set_voltage","axis":"X","value":115.0}` |
-| set µm/step calibration         | `{"cmd":"set_calibration","axis":"X","value":0.021}` |
+| set µm/step calibration         | `{"cmd":"set_calibration","axis":"X","value":0.021}` (`"direction"`: 1 forward, -1 backward, 0 both) |
+| save the step sizes to kim.ini  | `{"cmd":"save_calibration"}` → `{"ok":true,"path":...}` |
+| save the whole config           | `{"cmd":"save_config"}` → `{"ok":true,"path":...}` |
 | arm/resize the travel leash     | `{"cmd":"set_leash","enabled":true,"leash_xy":50000,"leash_z":50000}` |
 | datum (zero the counter here)   | `{"cmd":"zero_counter"}` (all) or `{"axis":"X"}` |
 | display zero / clear            | `{"cmd":"set_zero"}` · `{"cmd":"clear_zero"}` |

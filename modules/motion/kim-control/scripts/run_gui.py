@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kim.apps.gui import run_app  # noqa: E402
-from kim.config import Config, load_config  # noqa: E402
+from kim.config import Config, load_startup_config  # noqa: E402
 from kim.net.protocol import (  # noqa: E402
     DEFAULT_CMD_PORT,
     DEFAULT_PUB_PORT,
@@ -58,8 +58,10 @@ def main(theme: str | None = None) -> None:
             cfg.ui.theme = theme
         return sys.exit(run_app(client, cfg, remote=True))
 
-    # Local: own the brain in-process.
-    cfg = load_config(args.config) if args.config else Config()
+    # Local: own the brain in-process. Same start-up file as the service
+    # (--config, else kim.ini if present), so a local GUI on the rig knows the
+    # saved step sizes too, and its Save buttons write the same file.
+    cfg, cfg_path, _loaded = load_startup_config(args.config)
     if theme:
         cfg.ui.theme = theme
     if args.real:
@@ -70,6 +72,7 @@ def main(theme: str | None = None) -> None:
         from kim.sim_system import build_sim_system
 
         brain, _ = build_sim_system(cfg)
+    brain.config_path = cfg_path
     brain.start()
     try:
         sys.exit(run_app(brain, cfg, remote=False))

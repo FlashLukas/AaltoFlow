@@ -74,6 +74,17 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
+        # "Save config" = OK + write everything to kim.ini (the SERVICE's file,
+        # loaded at its next start). OK alone changes only the running
+        # service. The dialog does not save by itself: it only edits a Config;
+        # the main window reads `save_requested` and asks the brain/service,
+        # which knows where its file is.
+        self.save_requested = False
+        self._save_btn = buttons.addButton("Save config", QDialogButtonBox.ApplyRole)
+        self._save_btn.setToolTip("Apply these settings and save them to kim.ini "
+                                  "(read at the next start; the drive voltage / rate / "
+                                  "acceleration are still read from the controller then)")
+        self._save_btn.clicked.connect(self._accept_and_save)
         lay.addWidget(buttons)
 
     def _make_editor(self, type_name: str, value):
@@ -94,6 +105,10 @@ class SettingsDialog(QDialog):
             return w
         w = QLineEdit(str(value))
         return w
+
+    def _accept_and_save(self) -> None:
+        self.save_requested = True
+        self._accept()
 
     def _accept(self) -> None:
         """Write the editors back into the Config groups in place."""

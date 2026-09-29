@@ -507,6 +507,16 @@ class MainWindow(QWidget):
         apply.setObjectName("primary")
         apply.clicked.connect(self._apply_step_sizes)
         grid.addWidget(apply, 3, 3)
+        # Save = write the step sizes in force into kim.ini (on the service's
+        # PC), so a restart keeps them. Apply alone only changes the running
+        # service: on the lab PC kim used to start with no .ini at all, and a
+        # measured Z up/down pair was lost on every restart (2026-09-29).
+        self._cal_save_btn = QPushButton("Save")
+        self._cal_save_btn.setToolTip("Save the step sizes (all axes, both directions) "
+                                      "in force to kim.ini, loaded at the next start "
+                                      "(typed numbers: press Apply first)")
+        self._cal_save_btn.clicked.connect(self._save_step_sizes)
+        grid.addWidget(self._cal_save_btn, 2, 3)
         lay.addLayout(grid)
         self._cal_manual_hint = QLabel("")
         self._cal_manual_hint.setObjectName("hint")
@@ -567,6 +577,12 @@ class MainWindow(QWidget):
         # (this used to call get_config and throw the reply away)
         self._pull_config()
         self._sync_step_size_boxes()
+
+    def _save_step_sizes(self) -> None:
+        # Saves what the brain/service HOLDS, not the boxes: typed numbers
+        # count once Apply has sent them (the tooltip on Apply says so).
+        self._do(lambda: self._on_event("info", "step sizes saved to "
+                                                + self.ctrl.save_calibration()))
 
     def _build_calibration_card(self) -> QFrame:
         frame, lay = _card("CAMERA CALIBRATION  (step size in µm · X/Y · per voltage)")
@@ -840,6 +856,12 @@ class MainWindow(QWidget):
         if dlg.exec():
             self._push_config()
             self._sync_leash_fields()
+            if getattr(dlg, "save_requested", False):
+                # "Save config": apply as OK does, THEN save -- so the file
+                # holds what the service actually took, and it is saved where
+                # the service lives (its kim.ini), also from a remote GUI.
+                self._do(lambda: self._on_event("info", "config saved to "
+                                                        + self.ctrl.save_config()))
             # The Fast/Slow and Large/Small presets are NOT re-applied here
             # (Lukas, 2026-09-28). This used to press both preset buttons again,
             # so OK after changing only the theme turned an adopted 112 V /

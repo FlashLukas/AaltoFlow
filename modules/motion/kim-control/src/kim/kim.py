@@ -51,6 +51,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import config as _config
 from . import pxcal
 from .backends.base import KimBackend
 from .config import (
@@ -168,6 +169,11 @@ class Kim:
         self._hw_error = ""
         self._hw_lock = threading.Lock()
         self._last_good: dict | None = None
+        # Where save_calibration / save_config write. None = kim.ini in the
+        # project folder; run_service.py sets it to the file it loaded (the
+        # --config file, if one was given), so a save lands where the next
+        # start will read it.
+        self.config_path: Path | None = None
         try:
             self._pxcal = pxcal.load(self.px_file())
         except Exception as exc:
@@ -996,6 +1002,36 @@ class Kim:
     # ------------------------------------------------------------------ #
     def get_config(self) -> Config:
         return self.cfg
+
+    def config_file(self) -> Path:
+        """The .ini the save verbs write (and the next start reads)."""
+        # _config.default_config_path is looked up at CALL time (not imported
+        # by name) so the tests can redirect it away from the project folder.
+        return Path(self.config_path) if self.config_path else _config.default_config_path()
+
+    def save_calibration(self, path=None) -> str:
+        """Persist the CALIBRATION group (every per-axis, per-direction step
+        size, use_px_calibration, px_file) into the .ini, keeping the file's
+        other sections as they are.
+
+        WHY a separate verb from save_config: the camera's "Calibrate Z steps"
+        writes the measured up/down step sizes with set_calibration and then
+        calls this. It must not also freeze whatever leash, limits or drive
+        numbers happen to be live at that moment into the file -- a
+        calibration save should save the calibration and nothing else.
+        """
+        p = _config.save_sections(self.cfg, path or self.config_file(), ["Calibration"])
+        self._emit("info", f"calibration saved to {p}")
+        return str(p)
+
+    def save_config(self, path=None) -> str:
+        """Persist the WHOLE config into the .ini (merging: a section this
+        version does not know is kept). Written with what is live now, so the
+        Motion group holds the ADOPTED drive values -- harmless, because the
+        next start adopts from the controller again and never writes them."""
+        p = _config.save_sections(self.cfg, path or self.config_file())
+        self._emit("info", f"config saved to {p}")
+        return str(p)
 
     def apply_config(self) -> None:
         """Push the drive parameters after the config was edited in place.

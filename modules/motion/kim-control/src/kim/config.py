@@ -45,7 +45,10 @@ Datasheet anchors (VERIFY against your own actuators -- every unit differs):
 from __future__ import annotations
 
 import configparser
+import os
+import tempfile
 from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 
 # Axis order is fixed everywhere in the package: index 0=X, 1=Y, 2=Z.
 AXES = ("X", "Y", "Z")
@@ -392,6 +395,84 @@ def save_config(cfg: Config, path: str) -> None:
         cp[section] = {key: str(val) for key, val in asdict(obj).items()}
     with open(path, "w", encoding="utf-8") as fh:
         cp.write(fh)
+
+
+# --------------------------------------------------------------------------- #
+# The service's own settings file: kim.ini in the project folder (2026-09-29)
+# --------------------------------------------------------------------------- #
+#: File name of the lab's saved kim settings. Gitignored: it holds the step
+#: sizes measured on THIS rig (lab data, like the camera's camera.ini).
+DEFAULT_INI_NAME = "kim.ini"
+
+
+def default_config_path() -> Path:
+    """<kim-control>/kim.ini (this file is src/kim/config.py -> parents[2]).
+
+    A function, not a constant, so the tests can point it at a temp folder and
+    never write into the project."""
+    return Path(__file__).resolve().parents[2] / DEFAULT_INI_NAME
+
+
+def load_startup_config(config_arg: str | None = None,
+                        default_path: Path | None = None) -> tuple[Config, Path, bool]:
+    """The config a service / local GUI starts with: (cfg, file, loaded).
+
+    ``--config FILE`` wins; otherwise kim.ini in the project folder IF it
+    exists; otherwise the built-in defaults. ``file`` is where a later
+    save_calibration / save_config writes -- the file we read, or kim.ini.
+
+    WHY this matters (Lukas, 2026-09-29): on the lab PC kim ran without any
+    .ini, so step sizes the camera measured and wrote with set_calibration
+    were gone after a restart. Loading a file only fills cfg; it sends NOTHING
+    to the KIM101 -- Kim.start() then READS rate / acceleration / voltage from
+    the controller and overwrites cfg.motion with them (adopt-on-start rule).
+    So from the file what counts is the calibration, limits, leash and UI.
+    """
+    if config_arg:
+        path = Path(config_arg)
+        return load_config(str(path)), path, True
+    path = Path(default_path) if default_path is not None else default_config_path()
+    if path.is_file():
+        return load_config(str(path)), path, True
+    return Config(), path, False
+
+
+def save_sections(cfg: Config, path, sections=None) -> Path:
+    """Write the named INI sections of ``cfg`` into ``path``, MERGING.
+
+    ``sections`` = e.g. ["Calibration"]; None = every group. Sections already
+    in the file that we were not asked to write are kept as they are -- saving
+    the step sizes must not wipe a [Limits] or [UI] someone set up by hand.
+    (configparser drops comments, so hand-written comments are not kept.)
+
+    Atomic: written to a temp file in the same folder, then os.replace()d over
+    the old one. A crash or a full disk mid-write leaves the old file intact
+    instead of a half-written one that would load as defaults next start.
+    """
+    path = Path(path)
+    groups = _sections(cfg)
+    names = list(groups) if sections is None else list(sections)
+    for name in names:
+        if name not in groups:
+            raise ValueError(f"unknown config section {name!r}")
+    cp = configparser.ConfigParser()
+    if path.is_file():
+        cp.read(path, encoding="utf-8")
+    for name in names:
+        cp[name] = {key: str(val) for key, val in asdict(groups[name]).items()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            cp.write(fh)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def load_config(path: str) -> Config:

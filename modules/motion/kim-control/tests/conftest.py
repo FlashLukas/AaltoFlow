@@ -21,3 +21,8 @@ def px_file_per_test(monkeypatch, tmp_path):
     """
     monkeypatch.setattr("kim.kim.Kim.px_file",
                         lambda self, _p=tmp_path / "px_calibration.json": _p)
+    # Same reason for kim.ini (2026-09-29): save_calibration / save_config
+    # default to the project's kim.ini, and the lab's real one must never be
+    # written -- or read -- by a test.
+    monkeypatch.setattr("kim.config.default_config_path",
+                        lambda _p=tmp_path / "kim.ini": _p, raising=False)

@@ -254,6 +254,14 @@ class KimService:
             P.apply_config_dict(b.cfg, req.get("config", {}))
             b.apply_config()
             return {"ok": True}
+        # Persist to the service's OWN .ini (kim.ini, or the --config file).
+        # No path argument on the wire on purpose: the file belongs to the PC
+        # the service runs on, and a client elsewhere on the network should
+        # not choose where this process writes.
+        if cmd == "save_calibration":
+            return {"ok": True, "path": b.save_calibration()}
+        if cmd == "save_config":
+            return {"ok": True, "path": b.save_config()}
 
         # -- motion: STEP language --------------------------------------- #
         if cmd == "move_to_step":
