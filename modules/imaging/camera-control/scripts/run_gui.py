@@ -38,7 +38,9 @@ def main() -> None:
 
     if args.connect:
         from camera.net.client import CameraClient
-        ctrl = CameraClient(args.connect, args.cmd, args.pub)
+        # kind "gui": the service counts this window as a viewer, and the first
+        # GUI to connect gets control (control.py / apps/control_bar.py)
+        ctrl = CameraClient(args.connect, args.cmd, args.pub, kind="gui", name="camera GUI")
         ctrl.start()
         # populate the settings forms with the server's current config
         try:

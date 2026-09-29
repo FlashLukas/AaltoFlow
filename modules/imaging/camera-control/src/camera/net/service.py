@@ -24,6 +24,7 @@ import zmq
 
 from .describe import build_manifest
 from ..camera import Camera, status_to_dict
+from ..control import ControlLease
 from . import protocol as P
 
 
@@ -55,6 +56,13 @@ class CameraService:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # One controller, many viewers (control.py): the gate every command
+        # passes. Kill AF and cancelling a laser placement stay open to
+        # everyone: a viewer who sees a run go wrong must be able to stop it.
+        self.control = ControlLease(
+            safety={"kill_af", "cancel_laser_target"},
+            read={"stream_read", "camera_features"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -128,6 +136,7 @@ class CameraService:
         """
         st = status_to_dict(self.brain.status())
         st["describe_rev"] = self.describe_rev()
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -209,6 +218,11 @@ class CameraService:
 
     # ------------------------------------------------------------------ #
     def _dispatch(self, req: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(req)
+        if gate is not None:
+            return gate
         cmd = (req or {}).get("cmd")
         b = self.brain
 

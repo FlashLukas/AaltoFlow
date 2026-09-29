@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from ..config import Config
 from . import theme
+from .control_bar import ControlBar, mark_always
 from .settings_dialog import SettingsDialog
 from .theme import repolish
 
@@ -273,6 +274,10 @@ class MainWindow(QWidget):
         self._poll.start()
 
         self._reload_positions()
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -291,6 +296,15 @@ class MainWindow(QWidget):
         settings_btn.clicked.connect(self._open_settings)
         top.addWidget(settings_btn)
         root.addLayout(top)
+        # a viewer may LOOK at the settings; the service refuses an OK from it
+        mark_always(settings_btn)
+
+        # Control or viewer (control_bar.py), only for a GUI on a service
+        # whose client knows about control; a local GUI owns its brain.
+        self._control_bar = None
+        if self.remote and hasattr(self.ctrl, "take_control"):
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            root.addWidget(self._control_bar)
 
         # A failed hardware read, in red, above everything else (2026-09-28).
         # The positions below then repeat the LAST GOOD reading, so this line
@@ -436,6 +450,7 @@ class MainWindow(QWidget):
         repolish(stop)
         stop.clicked.connect(lambda: self._do(self.ctrl.stop_all))
         row.addWidget(stop)
+        mark_always(stop)            # a viewer can always stop the stage
         lay.addLayout(row)
         # Which step size the µm boxes use. It is NOT one number: the camera
         # calibration measures each direction, and they differ on a slip-stick
@@ -624,6 +639,7 @@ class MainWindow(QWidget):
         repolish(abort)
         abort.clicked.connect(lambda: self._do(self.ctrl.abort_px_calibration))
         row2.addWidget(abort)
+        mark_always(abort)
         self._cal_state = QLabel("")
         self._cal_state.setWordWrap(True)
         row2.addWidget(self._cal_state, 1)
@@ -1106,6 +1122,8 @@ class MainWindow(QWidget):
     # polling + events
     # ------------------------------------------------------------------ #
     def _refresh(self) -> None:
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         st = self.ctrl.status()
         err = getattr(st, "hw_error", "") or ""
         if err:

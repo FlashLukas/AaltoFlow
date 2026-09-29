@@ -215,6 +215,52 @@ still assumes piezo/zpiezo.
   knob ends an older set's wait at once in scan-core (a "stop here" must not
   leave the move's wait waiting for an echo that will never come). Why, and the
   ordering rule the module must follow: gotcha #40.
+- **Control: one controller, many viewers (2026-09-29; kim + camera first,
+  the other modules follow).** Many clients can connect to one service: GUIs
+  on several PCs, scan-core, the camera driving kim, scripts, consoles. Lukas,
+  for a lab where several people train on one instrument: the FIRST GUI gets
+  control, every later GUI opens as a VIEWER (live readouts, nothing can be
+  changed), and control changes hands only deliberately. The rules
+  (`suite-common/src/suite_common/control.py`, copied byte-identical into
+  every module as `src/<pkg>/control.py`, like hwlock):
+  - Every request may carry `"client": {"id", "kind", "name", "host"}`;
+    `kind` is `gui`, `script` or `machine`. Clients send `heartbeat` every
+    2 s; a holder silent for 10 s loses control (a crashed GUI never locks an
+    instrument for good).
+  - The SERVICE enforces it: `ControlLease.handle(req)` runs first in
+    `_dispatch` and refuses a command that changes something unless it comes
+    from the holder -- `{"ok": false, "refused": "control", "error":
+    "read-only: <who> has control ... take control first"}` (the client raises
+    `ControlRefused`). Always allowed: read verbs (`status`, `info`,
+    `describe`, `get_config`, anything `get_*` / `read_*` / `list_*`, plus
+    extra read verbs the module names, e.g. `stream_read`), the module's
+    SAFETY verbs (kim `stop`, camera `kill_af` -- a viewer who sees a stage
+    run away must be able to stop it), `shutdown` (the launcher's clean stop,
+    gotcha #25), and the control verbs.
+  - `kind: machine` bypasses the lock: the camera moving kim during an
+    autofocus, scan-core during a scan (Lukas's choice: opening a kim GUI
+    must not break a running autofocus). SELF-declared -- the lock guards
+    against mistakes between people who follow the rules; it is not security
+    (whoever reaches the port can send anything; the firewall is the
+    security).
+  - Nobody holds control -> everything is allowed, with or without an id,
+    exactly as before (a headless setup is unchanged).
+  - Verbs `take_control{force}` (without force only when free; with force it
+    takes over and the old holder becomes a viewer and is told who took it),
+    `release_control`, `heartbeat`, `clients`. Status carries `control:
+    {"holder", "clients", "lease_s"}`.
+  - A SCRIPT is a client like a GUI (Lukas's option C): while a GUI holds
+    control it can read and stop, and must `take_control(force=True)` to
+    change anything -- visible to the GUI it took it from. The consoles have
+    `take` / `take!` / `release` / `clients`.
+  - GUI side: `apps/control_bar.py` (master in suite-common, copied like
+    control.py) -- a bar under the title ("You have control" + who else is
+    connected / "VIEWER -- <who> has control since hh:mm" + Take control, which
+    asks before taking it over) and an application event filter that swallows
+    input to the window's inputs while viewing. Safety buttons are marked with
+    `mark_always(widget)`; dialogs (Settings) are not guarded -- a viewer may
+    look, the service refuses the OK. `tools/check_modules.py` checks the
+    copies wherever a module has them.
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the
   table below mirrors them) and can be overridden per PC in the launcher; every
@@ -688,6 +734,26 @@ zpiezo has no GUI.
     its timeout. In scan-core a newer set of the same knob ends an older set's
     wait (the fly row's "stop here" supersedes its move), so an echo that will
     never come cannot hold a row for its whole timeout.
+41. **A port that times out may simply have nothing listening** (2026-09-29).
+    After IT opened TCP 5550-5600 from the office PC to the lab network, every
+    connect still hung for 5 s -- because the services had been closed. On the
+    Windows firewall's PUBLIC profile (the lab PC's Ethernet) a closed port is
+    DROPPED silently, exactly like a filtered one; only a private/domain
+    profile answers "refused" at once. So a timeout proves nothing until
+    something is known to listen. Test with a bare listener run by the SAME
+    interpreter the services use (a program rule allows that python.exe) and
+    confirm on the far side that the connection arrived; then start the
+    services. The connection test that settled it: a plain `socket.accept()`
+    loop on 5563 and 5590, both accepted in 2-19 ms.
+42. **Guard a viewer's inputs with an event filter, not `setEnabled(False)`**
+    (2026-09-29, control_bar.py). Every GUI switches its own widgets on and
+    off from its status timer (during an autofocus, while the stage is down).
+    Disabling from outside fights that code, and re-enabling afterwards
+    switches on buttons that ought to stay off. An application event filter
+    that swallows mouse / wheel / key input to the main window's input widgets
+    leaves every enabled state alone; widgets carrying the `control_always`
+    property (STOP, Kill AF) pass. `QTest.mouseClick` goes through the
+    application's filters, so the guard is testable offscreen.
 
 ---
 

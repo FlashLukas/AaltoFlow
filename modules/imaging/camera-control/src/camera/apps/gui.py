@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from . import theme as T
 from .camera_view import CameraView
+from .control_bar import ControlBar, mark_always
 from .plots import MiniPlot
 from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
 from .. import vision as V
@@ -411,6 +412,10 @@ class MainWindow(QMainWindow):
 
         self._timer = QTimer(self); self._timer.timeout.connect(self._refresh)
         self._timer.start(60)
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # -- UI construction --------------------------------------------------- #
     def _build_ui(self):
@@ -440,6 +445,12 @@ class MainWindow(QMainWindow):
         tabs.currentChanged.connect(self._on_tab_changed)
 
         central = QWidget(); root = QVBoxLayout(central)
+        # Control or viewer (control_bar.py), only for a GUI on a service
+        # whose client knows about control; a local GUI owns its brain.
+        self._control_bar = None
+        if self.remote and hasattr(self.ctrl, "take_control"):
+            self._control_bar = ControlBar(self.ctrl, self, log=self._log_event)
+            root.addWidget(self._control_bar)
         root.addWidget(tabs, 1)
         self.log = QPlainTextEdit(); self.log.setObjectName("log")
         self.log.setReadOnly(True); self.log.setMaximumHeight(120)
@@ -466,6 +477,7 @@ class MainWindow(QMainWindow):
                                "During an autofocus zoom it shows the whole frame for the "
                                "rest of that run.")
         self.b_zoom.clicked.connect(self._toggle_zoom)
+        mark_always(self.b_zoom)     # the view only: fine for a viewer
         zr.addWidget(self.b_zoom); zr.addStretch(1)
         lv.addLayout(zr)
         lay.addWidget(left, 4)
@@ -513,6 +525,7 @@ class MainWindow(QMainWindow):
         self.b_af.clicked.connect(lambda: self.ctrl.autofocus())
         b_kill = QPushButton("Kill AF"); b_kill.setObjectName("danger")
         b_kill.clicked.connect(lambda: self.ctrl.kill_af())
+        mark_always(b_kill)          # a viewer can always stop an autofocus
         row2.addWidget(self.b_af); row2.addWidget(b_kill); l.addLayout(row2)
         r3 = QHBoxLayout(); r3.addWidget(QLabel("AF")); self.led_af = _led(T.OK)
         r3.addWidget(self.led_af); self.lab_af = QLabel("OK"); r3.addWidget(self.lab_af)
@@ -685,6 +698,7 @@ class MainWindow(QMainWindow):
         self.b_laser_place.clicked.connect(self._laser_place)
         self.b_laser_cancel = QPushButton("Cancel")
         self.b_laser_cancel.clicked.connect(self._laser_cancel)
+        mark_always(self.b_laser_cancel)
         r.addWidget(self.b_laser_here); r.addWidget(self.b_laser_place)
         r.addWidget(self.b_laser_cancel); l.addLayout(r)
         self.lab_laser_state = QLabel("no target"); self.lab_laser_state.setObjectName("muted")
@@ -869,9 +883,9 @@ class MainWindow(QMainWindow):
         l.addWidget(self.af_plot)
         row = QHBoxLayout()
         b = QPushButton("Show last sweep"); b.clicked.connect(self._update_af_plot)
-        row.addWidget(b)
+        row.addWidget(b); mark_always(b)        # only reads: fine for a viewer
         b = QPushButton("Show Z calibration"); b.clicked.connect(self._update_zcal_plot)
-        row.addWidget(b)
+        row.addWidget(b); mark_always(b)
         row.addStretch(1)
         l.addLayout(row)
         v.addWidget(f)
@@ -1548,7 +1562,7 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("Read live from the camera; changes apply immediately."))
         row.addStretch(1)
         b = QPushButton("Refresh"); b.clicked.connect(self._build_cam_params)
-        row.addWidget(b)
+        row.addWidget(b); mark_always(b)        # only reads
         l.addLayout(row)
         self._cam_param_host = QWidget()
         self._cam_param_form = QFormLayout(self._cam_param_host)
@@ -1985,6 +1999,8 @@ class MainWindow(QMainWindow):
             return None
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         # keep cfg mirror's live fields in step so overlays are correct
         self.cfg.image.pixel_size_x_um = s.pixel_size_x

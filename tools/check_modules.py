@@ -18,6 +18,9 @@ Static checks, per module:
     for a person). A key found twice is a WARN naming both folders.
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
+  * src/<pkg>/control.py and src/<pkg>/apps/control_bar.py, WHERE PRESENT
+    (one controller, many viewers -- being rolled out module by module), are
+    byte-identical to the masters in suite-common/src/suite_common/
   * src/<pkg>/hwlock.py exists and is byte-identical to the master copy
     suite-common/src/suite_common/hwlock.py (FAIL otherwise: a stale copy may
     normalise addresses differently, and then two modules would not see that
@@ -79,6 +82,9 @@ from suite_common.modules import (MANIFEST, MODULES_DIR, discover_local,  # noqa
 # without suite-common, like theme.py), so the copies must stay identical to
 # this master or two modules could disagree on what "the same address" is.
 HWLOCK_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "hwlock.py"
+# Control (one controller, many viewers): the same copy-per-module rule.
+CONTROL_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "control.py"
+CONTROL_BAR_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "control_bar.py"
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -200,6 +206,31 @@ def package_dir(d: Path) -> Path | None:
         return None
     pkgs = sorted(p for p in src.iterdir() if (p / "__init__.py").is_file())
     return pkgs[0] if len(pkgs) == 1 else None
+
+
+def control_check(rep: Report, m):
+    """control.py / apps/control_bar.py, where a module has them, are the
+    master copies (suite-common/src/suite_common/). A stale copy could let a
+    viewer change what the others refuse, or speak an older control protocol.
+    A module without them is not yet part of the rollout: reported as INFO in
+    the detail, not failed."""
+    pkg = package_dir(m.dir)
+    if pkg is None:
+        return
+    for rel, master in (("control.py", CONTROL_MASTER),
+                        ("apps/control_bar.py", CONTROL_BAR_MASTER)):
+        copy = pkg / rel
+        name = f"{rel} is the master copy"
+        if not copy.is_file():
+            continue
+        if not master.is_file():
+            rep.add(m.key, name, "FAIL", f"master {master} missing")
+        elif copy.read_bytes() != master.read_bytes():
+            rep.add(m.key, name, "FAIL",
+                    f"src/{pkg.name}/{rel} differs: copy suite-common/src/suite_common/"
+                    f"{Path(rel).name}")
+        else:
+            rep.add(m.key, name, "PASS")
 
 
 def hwlock_check(rep: Report, m, master: bytes | None):
@@ -478,6 +509,7 @@ def main(argv=None) -> int:
             except ET.ParseError as exc:
                 rep.add(m.key, "icon.svg well-formed", "FAIL", str(exc))
         hwlock_check(rep, m, master)
+        control_check(rep, m)
 
         py = venv_python(m.dir)
         if py is None:

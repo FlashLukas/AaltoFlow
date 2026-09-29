@@ -41,6 +41,7 @@ import time
 
 import zmq
 
+from ..control import make_identity
 from .base import DirectionalCounter
 
 AXES = ("X", "Y", "Z")
@@ -72,6 +73,11 @@ class KimLink:
         self._cache: dict | None = None
         self._cache_t = 0.0
         self._users = 0               # XY and Z both open/close the link
+        # The camera is a MACHINE client of kim (control.py): its stabiliser
+        # and autofocus keep moving the stage while a person's kim GUI holds
+        # control -- opening a kim window must not break a running autofocus
+        # (Lukas's choice, 2026-09-29).
+        self.identity = make_identity("machine", "camera")
         self._stop = threading.Event()
         self._sub_thread: threading.Thread | None = None
 
@@ -194,6 +200,7 @@ class KimLink:
                                       "use 'Reconnect stage' once it runs")
             if self._req is None:
                 self._make_req()
+            req.setdefault("client", self.identity)
             try:
                 self._req.send_json(req)
                 reply = self._req.recv_json()

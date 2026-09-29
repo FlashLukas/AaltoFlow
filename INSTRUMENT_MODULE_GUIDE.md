@@ -284,6 +284,59 @@ A single file that speaks the raw protocol with **only `pyzmq` + `json`, no
 package import**, so it can be copied to any machine. Interactive REPL + one-shot
 mode. Great for poking the wire by hand and for verifying a new service fast.
 
+### Control — one controller, many viewers (2026-09-29)
+
+Several clients can connect to one service at once (GUIs on several PCs,
+scan-core, another module, scripts). The first GUI gets **control**; every
+later GUI is a **viewer** that sees everything live and changes nothing; control
+changes hands only by a deliberate "Take control". The rules and the reasons
+are in `docs/DEVELOPER_NOTES.md` section 4 ("Control"). kim and camera have it;
+the other modules are being rolled out. What a module needs:
+
+1. **Copy two files, never edit them:** `suite-common/src/suite_common/control.py`
+   → `src/<pkg>/control.py`, and `.../control_bar.py` →
+   `src/<pkg>/apps/control_bar.py`. `tools/check_modules.py` compares them with
+   the masters, as it does hwlock.py.
+2. **Service** — in `__init__`, name the module's SAFETY verbs (always allowed,
+   also for a viewer: stop, abort, kill) and any read verb whose name does not
+   start with `get_` / `read_` / `list_`:
+   ```python
+   self.control = ControlLease(safety={"stop"}, read={"stream_read"},
+       on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
+   ```
+   first thing in `_dispatch`:
+   ```python
+   gate = self.control.handle(req)
+   if gate is not None:
+       return gate
+   ```
+   and in `status_payload()`: `st["control"] = self.control.status()`.
+   Nothing else: the gate answers `take_control` / `release_control` /
+   `heartbeat` / `clients` itself.
+3. **Client** — `class <Inst>Client(ControlClient)`; `__init__` takes
+   `kind="script", name="<inst> client"` and calls
+   `self._control_setup(kind, name)`; `_rpc` calls `self._with_identity(req)`
+   before sending and `self._raise_refusal(reply)` on a failed reply; the SUB
+   loop feeds `self._control_from_status(payload)` on every status frame;
+   `start()` calls `self.start_heartbeat()`, `close()` `self.stop_heartbeat()`.
+   `run_gui.py` builds its client with `kind="gui", name="<inst> GUI"`. A client
+   inside ANOTHER module that must not be locked out (the camera driving kim)
+   sends `"client": make_identity("machine", "<who>")`.
+4. **GUI** — only when `remote` and the client has `take_control`: a
+   `ControlBar(self.ctrl, self, log=...)` at the top of the window,
+   `bar.refresh()` from the status timer, `bar.claim_if_free()` once after the
+   UI exists, and `mark_always(button)` on every safety button (the ones whose
+   verbs are in `safety`) and on buttons that only read (Refresh, Show curve).
+   A local GUI (its own brain) has no bar.
+5. **Console** — include `"client": IDENTITY` in every request (kind
+   `script`), add `take` / `take!` / `release` / `clients`, and run a heartbeat
+   thread on its own socket in the REPL.
+6. **Tests** — see `kim-control/tests/test_control.py`: first GUI controls,
+   second is refused naming the holder, safety verbs pass, a `machine` client
+   passes, a script must take control, a forced take-over is announced, a
+   silent holder loses control, and the GUI viewer blocks a click while STOP
+   still works.
+
 ---
 
 ## 6b. `describe` — the module's self-description (added 2026-09-10)
@@ -812,11 +865,16 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
    keep and retune.
 7. `net/protocol.py` `*_to_dict` helpers; `service.py` `_dispatch` verbs;
    `client.py` facade + `RemoteStatus`; `net/describe.py` for X's variables.
+   **Control (§6, "Control — one controller, many viewers"):** if the template
+   did not bring `control.py` + `apps/control_bar.py`, copy them from
+   suite-common and wire them in; decide which of X's verbs are SAFETY verbs
+   (stop / abort / off -- always allowed, also for a viewer).
 8. Scripts: `run_service.py`, `<x>_console.py`, `run_gui.py`, `smoke_test.py` --
    keeping the command-line contract of section 11.
 9. GUI: `theme.py` came with the copy; build `MainWindow` + a new signature
    indicator widget for X; `settings_dialog.py` tabs = config groups. Draw a real
-   `icon.svg`.
+   `icon.svg`. Remote mode gets the control bar; `mark_always` X's safety
+   buttons.
 10. Tests (§9), then `python tools/check_modules.py x --live`, then an offscreen
     render (`python tools/render_all.py x`).
 11. Update the module's README (and `docs/DEVELOPER_NOTES.md` if a shared rule changed); commit.
@@ -847,7 +905,7 @@ key = "hf2"            # unique; letters/digits/_; must equal "module" in descri
 name = "Lock-in"       # launcher card title
 description = "Zurich HF2LI 50 MHz - 2 demodulator channels + aux inputs"
 category = "detector"  # what it is FOR: motion | field | source | detector |
-                       # imaging | environment | other  (a typo is an error)
+                       # imaging | environment | io | other  (a typo is an error)
 tags = ["lock-in", "Zurich Instruments", "HF2LI"]   # search words
 icon = "icon.svg"      # 40x40 viewBox; accent colours are swapped for the theme
 order = 80             # position in lists

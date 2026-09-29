@@ -27,6 +27,7 @@ import threading
 import time
 
 import zmq
+from suite_common.control import make_identity
 
 
 #: Defined in errors.py (which imports nothing) so the engine can catch it
@@ -103,6 +104,7 @@ class Instrument:
                  timeout_ms: int = 3000, stale_after_s: float = STALE_AFTER_S,
                  fault_grace_s: float = FAULT_GRACE_S):
         self.name = name
+        self.identity = make_identity("machine", "scan-core")
         #: see STALE_AFTER_S / FAULT_GRACE_S; per instrument, so a test (or a
         #: service that publishes unusually slowly) can change them
         self.stale_after_s = float(stale_after_s)
@@ -178,6 +180,10 @@ class Instrument:
         """
         msg = {"cmd": verb}
         msg.update(kwargs)
+        # Who we are to the service (suite_common/control.py): a MACHINE
+        # client, so a scan keeps running while a person's GUI holds control
+        # of the instrument (Lukas's choice, 2026-09-29).
+        msg.setdefault("client", self.identity)
         with self._req_lock:
             if _timeout_ms is not None:
                 self._req.setsockopt(zmq.RCVTIMEO, int(_timeout_ms))

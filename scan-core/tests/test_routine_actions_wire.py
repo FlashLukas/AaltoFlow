@@ -161,6 +161,9 @@ def test_the_action_sends_the_default_args(vna_on):
     svc, _, reg, _ = vna_on(15906)
     reg.get_action("vna.take_reference").run()
     sent = [m for m in svc.commands if m.get("cmd") == "take_reference"]
+    # every request also names its sender (suite_common/control.py): scan-core
+    # is a MACHINE client, so a person's GUI holding control does not stop a scan
+    assert [m.pop("client")["kind"] for m in sent] == ["machine"]
     assert sent == [{"cmd": "take_reference", "averages": 4}]
 
 

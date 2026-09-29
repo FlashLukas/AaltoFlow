@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from . import theme as T
 from .camera_view import SPOT_GREEN, SPOT_TINT_BGRA, CameraView, outlined_pen
+from .control_bar import mark_always
 from .plots import MiniPlot
 from .. import vision as V
 from ..config import CALIB_MODES, LOCATE_MODES, SIZE_METHODS
@@ -369,7 +370,7 @@ class SpotTab(QWidget):
         f, l = _card("1 · Grab a frame")
         r = QHBoxLayout()
         b = QPushButton("Grab frame"); b.clicked.connect(self.grab_frame)
-        r.addWidget(b)
+        r.addWidget(b); mark_always(b)          # only reads: fine for a viewer
         self.lab_snap = QLabel("no frame grabbed"); self.lab_snap.setObjectName("muted")
         r.addWidget(self.lab_snap, 1)
         l.addLayout(r)

@@ -22,6 +22,7 @@ import time
 import zmq
 
 from ..kim import Kim
+from ..control import ControlLease
 from .describe import build_manifest
 from . import protocol as P
 
@@ -54,6 +55,13 @@ class KimService:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # One controller, many viewers (control.py): the gate every command
+        # passes. The safety verbs stay open to everyone -- a viewer who sees
+        # the stage run away must be able to stop it.
+        self.control = ControlLease(
+            safety={"stop", "abort_px_calibration"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -132,6 +140,7 @@ class KimService:
         """
         st = P.status_to_dict(self.brain.status())
         st["describe_rev"] = self.describe_rev()
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -222,6 +231,11 @@ class KimService:
     # command dispatch
     # ------------------------------------------------------------------ #
     def _dispatch(self, req: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(req)
+        if gate is not None:
+            return gate
         cmd = (req or {}).get("cmd")
         b = self.brain
 
