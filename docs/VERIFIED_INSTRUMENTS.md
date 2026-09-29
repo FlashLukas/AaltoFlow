@@ -22,7 +22,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 |---|---|---|---|
 | [`pm16`](../modules/detector/pm16-control) | Thorlabs PM16-121 USB power meter | **verified**, incl. a scan-core scan | 2026-09-15 |
 | [`kim`](../modules/motion/kim-control) | Thorlabs KIM101 + 3x PIA25 inertia stage | **verified** (moves, datum, camera calibration, rasters) | 2026-09-25 |
-| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma) | 2026-09-28 |
+| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma / D86 / Gauss, AF exposure, auto exposure) | 2026-09-29 |
 | [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **verified** (spectrum mode, TG CW + TG sweep via shsg / shsna) | 2026-09-28 |
 | [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
 | [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
@@ -161,7 +161,38 @@ before/after routines.
   - During the test the Z counter at focus climbed from -1.5 to +344 um: kim's
     Z steps UP are now much smaller than steps DOWN (one step size in the
     config). Only a routine that parks by the image works on this axis.
-- Not yet checked on the rig: the lost-pattern fault of 2026-09-28.
+- 2026-09-29, after 429497c / 6da4e31 (Z kept within +-20 um of a hand-set
+  focus by kim's Z leash, 650 steps, re-zeroed at every image-confirmed focus):
+  - The "+344 um" Z drift of the day before was COUNTER micrometres (steps x the
+    default 20 nm): +17 300 steps net over ~110 runs whose parks were all at the
+    same focus by the image -- the up/down step imbalance, not a physical move.
+  - 429497c: a park that never gets within tolerance now FAILS ("park failed")
+    and returns Z to the start -- seen on the rig. It failed there because the
+    target was a single 8-bit noise dip (51.2 against neighbours of ~56 px^2).
+  - 6da4e31: one_way + spot_d4sigma parks against the FITTED fine-walk minimum
+    with a noise-aware tolerance (2 x the measured 3 -- 10 %/level, capped at
+    10 %): 5/5 OK in 14 -- 16 s from 2 focal depths below, D4sigma at park
+    29.2 -- 30.2 px (minimum ~29.6); spot_encircled and spot_gauss 1/1 each
+    (Gauss parks slightly lower, D4sigma 32.3 px).
+  - autofocus.exposure_us: 2480 -> 65 us during the run and restored after it,
+    also after a kill. "Auto exposure (once)" = the camera's ExposureAuto=Once
+    (2454 -> 2480 us), which returns to Off by itself.
+  - Six sizes through Z (65 us, unsaturated, +-5 um): optima within 1 um of
+    each other (Gauss sigma^2 and relative area at 0, peak +0.25, D86 +0.5,
+    D4sigma +0.75 -- 1.0 with a broad flat minimum). Gauss fit R^2 0.98 -- 0.99
+    near focus, 0.63 -- 0.76 at +-5 um, where its sigma^2 blows up.
+  - Calibrate spot "unsaturated" (at the AF exposure): 0.12 -- 0.16 px jitter,
+    0.7 px from the old calibration. "saturated" at the working exposure
+    ACCEPTED a result 92 px off with 277 px jitter: the fixed threshold also
+    takes the saturated illuminated block in this field of view.
+  - Locating the spot: "peak" is right at 65 us (1.4 px; finds a 50 px-off
+    calibration); "blob" finds nothing at 65 us and is 53 px off at the working
+    exposure (a false "moved" warning). At the working exposure the "why" text
+    pointed at the illuminated block, not at the laser.
+  - PixelFormat Mono8: the spot metrics run on 8-bit frames (the info line
+    says so); Mono10/12 not yet tried.
+- Not yet checked on the rig: the lost-pattern fault of 2026-09-28, the Z step
+  calibration, 12-bit spot frames.
 
 ## signalhound -- Signal Hound SA44B + USB-TG44A
 
