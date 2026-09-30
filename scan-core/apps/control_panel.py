@@ -206,6 +206,87 @@ def kind_legend() -> QtWidgets.QWidget:
 # One widget per descriptor
 # --------------------------------------------------------------------------- #
 
+def _lock_icon(colour: str, closed: bool, size: int = 14) -> QtGui.QIcon:
+    """A small padlock for a module's control state in the tree: closed =
+    another PC has control, open = yours or free. A lock and not a dot, because
+    the tree's rows already use dots for their KIND (set / read / run)."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    c = QtGui.QColor(colour)
+    p.setPen(QtGui.QPen(c, 1.6))
+    p.setBrush(QtCore.Qt.NoBrush)
+    # the shackle: an arch over the body; lifted and shifted right when open
+    dx, dy = (0, 0) if closed else (3, -2)
+    p.drawArc(QtCore.QRectF(4 + dx, 1.5 + dy, 6, 8), 0, 180 * 16)
+    p.drawLine(QtCore.QPointF(4 + dx, 5.5 + dy), QtCore.QPointF(4 + dx, 7))
+    if closed:
+        p.drawLine(QtCore.QPointF(10, 5.5), QtCore.QPointF(10, 7))
+    p.setBrush(c)
+    p.drawRoundedRect(QtCore.QRectF(2.5, 7, 9, 6), 1.2, 1.2)
+    p.end()
+    return QtGui.QIcon(pm)
+
+
+class _FlowLayout(QtWidgets.QLayout):
+    """Lays widgets out left to right and wraps to a new line when full (Qt's
+    own "flow layout" example, trimmed) -- the control chips of ten modules
+    stay one line on a wide window and two on a narrow one."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):                     # noqa: N802 (Qt names)
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):                         # noqa: N802
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):                         # noqa: N802
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):               # noqa: N802
+        return QtCore.Qt.Orientations(0)
+
+    def hasHeightForWidth(self):                 # noqa: N802
+        return True
+
+    def heightForWidth(self, width):             # noqa: N802
+        return self._place(QtCore.QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect):                 # noqa: N802
+        super().setGeometry(rect)
+        self._place(rect, move=True)
+
+    def sizeHint(self):                          # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self):                       # noqa: N802
+        size = QtCore.QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _place(self, rect, move: bool) -> int:
+        x, y, line_h, gap = rect.x(), rect.y(), 0, self.spacing()
+        for item in self._items:
+            w, h = item.sizeHint().width(), item.sizeHint().height()
+            if x + w > rect.right() and line_h > 0:
+                x, y, line_h = rect.x(), y + line_h + gap, 0
+            if move:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), item.sizeHint()))
+            x += w + gap
+            line_h = max(line_h, h)
+        return y + line_h - rect.y()
+
+
 def _person(inst):
     """How a click on this panel reaches the service: as a PERSON ("gui"), not
     as the scan engine's "machine" (suite_common/control.py) -- a trainee's
@@ -524,6 +605,7 @@ class ControlPanel(QtWidgets.QWidget):
         # every hidden trace back. A layout saves and restores it too.
         self.hidden: set[str] = set()
         self.layouts = _load_layouts()
+        self._tree_tops: dict[str, QtWidgets.QTreeWidgetItem] = {}   # module -> tree node
 
         outer = QtWidgets.QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -584,16 +666,19 @@ class ControlPanel(QtWidgets.QWidget):
             "then tick parameters on the left.")
         self.empty.setAlignment(QtCore.Qt.AlignCenter)
         self.empty.setStyleSheet(f"color:{C['muted']};")
-        v.addWidget(self.empty)
 
-        # One line per connected module that knows about control: who has it,
-        # and Take control / Release (suite_common/control.py). Filled by
-        # _refresh_remote from each module's status.
-        self.control_lay = QtWidgets.QVBoxLayout()
-        self.control_lay.setSpacing(3)
-        v.addLayout(self.control_lay)
-        self.control_rows: dict[str, tuple] = {}     # module -> (row, label, button)
+        # ONE strip of small chips, one per connected module: who has control
+        # (suite_common/control.py). Lukas: a line per module "takes quite some
+        # space for more modules". Click a chip = Take control / Release; the
+        # tooltip says who holds it and whether a scan runs. Wraps when full.
+        strip = QtWidgets.QWidget()
+        self.control_lay = _FlowLayout(strip, spacing=6)
+        v.addWidget(strip)                 # at the TOP, above everything else
+        v.addWidget(self.empty)
+        self.control_strip = strip
+        self.control_chips: dict[str, QtWidgets.QToolButton] = {}
         self._control_seen: dict[str, dict] = {}     # module -> last control state
+        self._chip_key: dict[str, tuple] = {}        # module -> what the chip shows
 
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True)
         inner = QtWidgets.QWidget()
@@ -620,10 +705,12 @@ class ControlPanel(QtWidgets.QWidget):
     def set_source(self, registry=None, lab=None, prefix: bool = True):
         """Point the panel at a live lab, or at a simulated registry."""
         self.registry, self.lab = registry, lab
-        for row, _l, _b in self.control_rows.values():
-            row.setParent(None)
-        self.control_rows.clear()
+        for chip in self.control_chips.values():
+            self.control_lay.removeWidget(chip)
+            chip.setParent(None)
+        self.control_chips.clear()
         self._control_seen.clear()
+        self._chip_key.clear()
         if lab is not None:
             # this panel is a GUI to every module: say "still here", so the
             # module lists it and a control taken here does not lapse
@@ -652,8 +739,11 @@ class ControlPanel(QtWidgets.QWidget):
             group = item.get("group") or "Other"
             by_module.setdefault(item["module"], {}).setdefault(group, []).append(item)
 
+        self._tree_tops = {}
+        self._chip_key.clear()           # the new tree nodes need their dot again
         for module in sorted(by_module):
             top = QtWidgets.QTreeWidgetItem([module])
+            self._tree_tops[module] = top
             top.setFlags(QtCore.Qt.ItemIsEnabled)
             font = top.font(0); font.setBold(True); top.setFont(0, font)
             self.tree.addTopLevelItem(top)
@@ -776,7 +866,9 @@ class ControlPanel(QtWidgets.QWidget):
     # ---- polling ---------------------------------------------------------
 
     def _refresh(self):
-        if not self.widgets:
+        # with a live lab, poll even with nothing ticked: the control chips
+        # show every connected module
+        if not self.widgets and self.lab is None:
             return
         if self.lab is not None:
             self._refresh_remote()
@@ -875,49 +967,35 @@ class ControlPanel(QtWidgets.QWidget):
         """
         me = getattr(inst, "gui_identity", None)
         if not isinstance(ctl, dict) or me is None:
-            row = self.control_rows.pop(module, None)
-            if row:
-                row[0].setParent(None)
+            # a module without control (yet): a grey chip that says so
+            self._control_seen.pop(module, None)
+            self._show_chip(module, inst, "none", [
+                f"{module}: this module has no control yet -- anyone connected "
+                "may change it, and a scan cannot claim it"])
             return
-        self._control_seen[module] = ctl         # what the button acts on
+        self._control_seen[module] = ctl         # what the chip's menu acts on
         holder = ctl.get("holder")
         mine = bool(holder) and (holder.get("id") == me["id"] or same_pc(holder, me))
         viewer = bool(holder) and not mine
         if mine:
-            text = f"{module}: you have control (this PC)"
+            lines = [f"{module}: you have control (this PC)"]
         elif holder:
             since = time.strftime("%H:%M", time.localtime(holder.get("since", 0)))
-            text = (f"{module}: VIEWER — {describe_holder(holder)} has control "
-                    f"since {since}")
+            lines = [f"{module}: VIEWER — {describe_holder(holder)} has control "
+                     f"since {since}"]
         else:
-            text = f"{module}: nobody has control -- changes allowed"
+            lines = [f"{module}: nobody has control — changes allowed"]
         scan = ctl.get("scan")
         if scan:
             pc = str(scan.get("host") or "?").rpartition("@")[2]
-            text += f"  ·  scan '{scan.get('label')}' running ({pc})"
+            lines.append(f"scan '{scan.get('label')}' running ({pc})")
         driving = [c.get("name") or "a program" for c in ctl.get("clients", [])
                    if c.get("kind") == "machine" and c.get("driving")
                    and c.get("id") != (scan or {}).get("id")]
         if driving:
-            text += "  ·  also driving: " + ", ".join(driving)
-
-        if module not in self.control_rows:
-            row = QtWidgets.QWidget()
-            h = QtWidgets.QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0)
-            label = QtWidgets.QLabel(); label.setWordWrap(True)
-            btn = QtWidgets.QPushButton()
-            btn.clicked.connect(lambda _=False, m=module, i=inst: self._toggle_control(m, i))
-            h.addWidget(label, 1); h.addWidget(btn)
-            self.control_lay.addWidget(row)
-            self.control_rows[module] = (row, label, btn)
-        _row, label, btn = self.control_rows[module]
-        label.setText(text)
-        label.setStyleSheet(f"color:{C['accent'] if viewer else C['muted']};"
-                            + ("font-weight:700;" if viewer else ""))
-        btn.setText("Release" if mine else "Take control")
-        btn.setToolTip("Give control back: anyone may take it." if mine else
-                       "Take control of this module. If another PC has it, you "
-                       "are asked first; that PC becomes a viewer.")
+            lines.append("also driving: " + ", ".join(driving))
+        self._show_chip(module, inst, "mine" if mine else "viewer" if viewer else "free",
+                        lines, running=bool(scan))
 
         always = set(ctl.get("always") or [])
         for w in self.widgets.values():
@@ -928,6 +1006,61 @@ class ControlPanel(QtWidgets.QWidget):
                 w.setEnabled(not viewer or item["id"] in always)
             else:
                 w.setEnabled(not viewer)
+
+    #: chip state -> (dot, colour key, meaning). Colours from the theme, so they
+    #: read in both palettes; the dot's SHAPE differs too, not only its colour.
+    CHIP_STATES = {"mine": ("●", "ok", "you have control"),
+                   "viewer": ("◆", "accent", "another PC has control"),
+                   "free": ("○", "muted", "nobody has control"),
+                   "none": ("○", "muted", "no control in this module")}
+
+    def _show_chip(self, module, inst, state, lines, running=False):
+        """The chip for `module` in the strip, and the dot in the tree.
+
+        Rebuilt only when what it shows changes: a menu rebuilt at the poll
+        rate would close under the user's mouse."""
+        key = (state, tuple(lines), running)
+        if self._chip_key.get(module) == key:
+            return
+        self._chip_key[module] = key
+        chip = self.control_chips.get(module)
+        if chip is None:
+            chip = QtWidgets.QToolButton()
+            chip.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+            chip.setMenu(QtWidgets.QMenu(chip))
+            self.control_lay.addWidget(chip)
+            self.control_chips[module] = chip
+        dot, colour, _meaning = self.CHIP_STATES[state]
+        short = module.split("_", 1)[0]            # "kim_130_233_..." -> "kim"
+        chip.setText(f"{dot} {short}" + ("  ▶" if running else ""))
+        chip.setProperty("state", state)
+        chip.setToolTip("\n".join(lines))
+        chip.setStyleSheet(
+            f"QToolButton {{ color:{C[colour]}; border:1px solid {C['border']};"
+            f" border-radius:9px; padding:1px 8px; font-weight:700; }}"
+            "QToolButton::menu-indicator { image: none; }")
+        menu = chip.menu()
+        menu.clear()
+        for line in lines:
+            a = menu.addAction(line)
+            a.setEnabled(False)
+        if state != "none":
+            menu.addSeparator()
+            act = menu.addAction("Release" if state == "mine" else "Take control")
+            act.triggered.connect(lambda _=False, m=module, i=inst:
+                                  self._toggle_control(m, i))
+        # a padlock on the module's name in the AVAILABLE tree
+        top = self._tree_tops.get(module)
+        if top is not None:
+            # signals blocked: changing an item's icon emits itemChanged, which
+            # the panel reads as a tick and REBUILDS every widget (found by
+            # test_control_tab_reclamps_when_the_limits_move)
+            self.tree.blockSignals(True)
+            try:
+                top.setIcon(0, _lock_icon(C[colour], closed=state == "viewer"))
+                top.setToolTip(0, "\n".join(lines))
+            finally:
+                self.tree.blockSignals(False)
 
     def _toggle_control(self, module, inst):
         """Take control of (or release) one module, as a person would.

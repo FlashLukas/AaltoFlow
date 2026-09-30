@@ -40,6 +40,13 @@ def _tick(panel, pid):
     return False
 
 
+def _menu_action(chip, text):
+    for a in chip.menu().actions():
+        if a.text() == text:
+            return a
+    return None
+
+
 def _wait(pred, timeout=3.0):
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
@@ -77,11 +84,13 @@ def test_a_panel_at_another_pc_is_a_viewer_and_can_take_control(rig, monkeypatch
     inst = next(iter(lab.instruments.values()))
 
     # (a status frame from before the take may come first: wait for the viewer)
-    assert _wait(lambda: (panel._refresh(), "fake" in panel.control_rows and
-                          "VIEWER" in panel.control_rows["fake"][1].text())[-1])
-    _row, label, btn = panel.control_rows["fake"]
-    assert "kim GUI" in label.text()
-    assert btn.text() == "Take control"
+    assert _wait(lambda: (panel._refresh(), "fake" in panel.control_chips and
+                          panel.control_chips["fake"].property("state") == "viewer")[-1])
+    chip = panel.control_chips["fake"]
+    assert "VIEWER" in chip.toolTip() and "kim GUI" in chip.toolTip()
+    assert chip.text().startswith("\u25c6 fake")              # one small chip
+    assert _menu_action(chip, "Take control") is not None
+    assert not panel._tree_tops["fake"].icon(0).isNull()      # the dot in the tree
     w = panel.widgets
     assert not w["fake.rf_power"].isEnabled()          # a knob: greyed
     assert not w["fake.demag"].isEnabled()             # an action it may not send
@@ -98,10 +107,11 @@ def test_a_panel_at_another_pc_is_a_viewer_and_can_take_control(rig, monkeypatch
     # take it over: asks first, then the panel controls the module
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",
                         lambda *a, **k: QtWidgets.QMessageBox.Yes)
-    btn.click()
+    _menu_action(chip, "Take control").trigger()
     assert svc.lease.status()["holder"]["id"] == inst.gui_identity["id"]
     assert _wait(lambda: (panel._refresh(), w["fake.rf_power"].isEnabled())[-1])
-    assert "you have control" in label.text() and btn.text() == "Release"
+    assert chip.property("state") == "mine" and "you have control" in chip.toolTip()
+    assert _menu_action(chip, "Release") is not None
     w["fake.rf_power"]._send(-5.0)
     assert svc.sent[-1]["cmd"] == "set_power" and svc.sent[-1]["client"]["kind"] == "gui"
 
@@ -113,8 +123,8 @@ def test_the_same_pc_shares_control_and_a_scan_shows_as_driving(rig):
     gui["host"] = inst.gui_identity["host"]            # a kim GUI on THIS PC
     svc.lease.handle({"cmd": "take_control", "client": gui})
     inst.command("set_power", power_dBm=-3.0)          # the scan changes something
-    assert _wait(lambda: (panel._refresh(), "fake" in panel.control_rows)[-1])
-    _row, label, _btn = panel.control_rows["fake"]
-    assert _wait(lambda: (panel._refresh(), "also driving: scan-core" in label.text())[-1])
-    assert "you have control (this PC)" in label.text()
+    assert _wait(lambda: (panel._refresh(), "fake" in panel.control_chips)[-1])
+    chip = panel.control_chips["fake"]
+    assert _wait(lambda: (panel._refresh(), "also driving: scan-core" in chip.toolTip())[-1])
+    assert "you have control (this PC)" in chip.toolTip()
     assert panel.widgets["fake.rf_power"].isEnabled()

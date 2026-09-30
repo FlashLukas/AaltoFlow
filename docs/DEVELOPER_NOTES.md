@@ -270,11 +270,20 @@ still assumes piezo/zpiezo.
     control cannot be claimed: the scan runs and logs that it is unprotected
     -- another reason to roll control out to every module. Bars and the
     Control tab say "scan '<label>' running (<PC>)".
+  - **A scan needs control** (Lukas, 2026-09-30: "I don't know why you would
+    not want this"). The claim is refused while ANOTHER PC holds control of
+    the instrument (`ScanBusy` naming the holder, nothing sent); allowed when
+    the scan's own PC holds it (the person keeps it afterwards); when nobody
+    holds it, the scan's PC takes control for the length of the scan (a GUI
+    elsewhere is a viewer meanwhile) and it is freed again at the end.
   - **The measurement suite's Control tab is a PERSON**: its clicks go as a
     "gui" client (`Instrument.gui_command`, one identity per module
     connection, heartbeats from `start_gui_heartbeat`), while the scan engine
-    stays "machine". Per module it shows who has control, a Take control /
-    Release button (asks before taking over another PC's control), greys the
+    stays "machine". One strip of small chips at the top, one per connected
+    module (green ● you / amber ◆ another PC / grey ○ nobody or no control
+    yet; "▶" while a scan runs; the tooltip says who and since when; a click
+    opens Take control / Release, asking before taking over another PC's
+    control) and a padlock on each module in the AVAILABLE tree; it greys the
     knobs and the actions not in `control.always` while another PC holds
     control. It does NOT take control by itself when it connects: with
     nobody holding control everything passes as before.
