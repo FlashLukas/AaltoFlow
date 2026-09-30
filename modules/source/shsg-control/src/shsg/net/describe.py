@@ -166,6 +166,11 @@ def build_manifest(gen) -> dict:
            order=5, read_path=["hw_error"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=6,
            read_path=["idn"]),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("rf_off", "RF off (park)", "action", "action", group="Signal", order=90,
+           help="Park the tracking generator (10 kHz / -30 dBm): the only way "
+                "'off' exists on the TG. Allowed for anyone, also a viewer."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "shsg",
                 "label": "Signal generator (Signal Hound TG)", "parameters": params}

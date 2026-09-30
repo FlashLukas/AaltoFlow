@@ -407,6 +407,9 @@ def build_manifest(brain) -> dict:
                 "this module never changes it)."),
         _p("kill_af", "Kill autofocus", "action", "action", group="Focus",
            order=101, danger=True),
+        # a SAFETY verb (control.py): a viewer may always cancel a placement
+        _p("cancel_laser_target", "Cancel laser placement", "action", "action",
+           group="Laser on sample", order=92),
         # 2026-09-29: where the size was measured, the new sizes, saturation as
         # information, and the autofocus exposure
         _p("spot_offset_px", "Spot offset from calibration", "indicator", "float",

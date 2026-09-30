@@ -312,7 +312,16 @@ the other modules are being rolled out. What a module needs:
    ```
    and in `status_payload()`: `st["control"] = self.control.status()`.
    Nothing else: the gate answers `take_control` / `release_control` /
-   `heartbeat` / `clients` itself.
+   `heartbeat` / `clients` / `claim_scan` / `release_scan` itself.
+   **Every safety verb is also an ACTION in `describe`** (Lukas, 2026-09-30),
+   so the suite's Control tab offers it to a viewer (it keeps exactly the
+   actions listed in `control.always` usable). If the module has no verb that
+   ONLY makes things safe -- its "off" is `set_current(0)` / `set_rf(false)`,
+   which can also switch things on or drive anywhere -- add one (clMag
+   `ramp_to_zero`, shsg `rf_off`) and use it for the GUI's off button and the
+   console. Acquisition triggers (`acquire`, `take_reference`) are NOT safety:
+   a trigger replaces the sample other clients wait on. A refused command
+   RAISES in the client (`ControlRefused`) -- scripts see "read-only: ...".
 3. **Client** — `class <Inst>Client(ControlClient)`; `__init__` takes
    `kind="script", name="<inst> client"` and calls
    `self._control_setup(kind, name)`; `_rpc` calls `self._with_identity(req)`

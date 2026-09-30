@@ -200,6 +200,10 @@ def build_manifest(signalhound) -> dict:
         _p("acquire", "Acquire trace", "action", "action", group="Measurement", order=1,
            help="Average the next fresh sweeps and latch the result."),
         _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
+        # a SAFETY verb (control.py): a viewer may always cancel a TG sweep
+        _p("tg_abort", "Abort TG sweep", "action", "action", group="Measurement",
+           order=2.5, help="Cancel a running tracking-generator sweep. Allowed for "
+                           "anyone, also a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",

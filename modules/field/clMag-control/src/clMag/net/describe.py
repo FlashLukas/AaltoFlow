@@ -147,6 +147,10 @@ def build_manifest(ctrl) -> dict:
                 "needs to move the current."),
 
         # ---- actions -------------------------------------------------------
+        # the SAFETY verb as a button (control.py: a viewer may always send it)
+        _p("ramp_to_zero", "Ramp to zero", "action", "action", group="Routines",
+           order=45, help="Ramp the current to 0 A. Allowed for anyone, also a "
+                          "viewer: taking the current away only makes things safer."),
         _p("demag", "Demagnetise", "action", "action", group="Routines",
            order=50, danger=True,
            args=[{"name": "amplitude_A", "label": "Start amplitude",

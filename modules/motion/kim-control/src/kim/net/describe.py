@@ -206,6 +206,9 @@ def build_manifest(brain) -> dict:
            order=2, read_path=["hw_error"]),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
            danger=True),
+        # a SAFETY verb (control.py): a viewer may always abort a calibration
+        _p("abort_px_calibration", "Abort camera calibration", "action", "action",
+           group="Routines", order=91),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "kim",
                 "label": "3D inertia stage", "parameters": params}
