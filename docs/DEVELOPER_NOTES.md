@@ -796,6 +796,21 @@ zpiezo has no GUI.
     leaves every enabled state alone; widgets carrying the `control_always`
     property (STOP, Kill AF) pass. `QTest.mouseClick` goes through the
     application's filters, so the guard is testable offscreen.
+43. **A fake stream sampled by a test thread measures the test machine**
+    (2026-10-01, scan-core fly tests). The fly tests failed now and then in
+    full runs ("samples per pixel >= 3") and always passed alone. Their fake
+    streams sampled the world in a Python thread every 1/rate s; under CPU
+    load Windows woke that thread a scheduler quantum late, so a "400 Hz"
+    stream gave one sample per ~35 ms (gaps up to 170 ms) and a pixel meant to
+    hold 10 samples held 0-2 -- while the engine had flown every pixel. The
+    fakes now sample on a fixed TIME GRID, computed at read time from where
+    the stage WAS at each grid time (`scan-core/tests/timed_stream.py`: a
+    stage kept as a history of moves), as a hardware-timed buffer does. The
+    tests still prove what they guard: re-introducing the approach bug or
+    gotcha #35 still empties 24 of 25 pixels. To reproduce load: run a few
+    dozen busy-loop processes next to pytest. Do NOT reproduce it by running
+    the same suite twice in parallel: the fixed test ports then collide, which
+    is a different failure.
 
 ---
 
