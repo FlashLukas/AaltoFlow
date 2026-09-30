@@ -83,6 +83,11 @@ caller polls `status` for the effect. Every module has the same universal verbs
 (`status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`) plus one
 verb per setter.
 
+Because every service accepts many clients at once, each one also decides
+**who may change the instrument**: one PC has control, every other GUI is a live
+viewer whose knobs are locked, and STOP-type buttons work from everywhere (see
+[Control](#control----one-controller-many-viewers)).
+
 Because the transport is the network, a client does not care whether it runs on
 the same PC or across the lab Ethernet — only the host changes. `camera-control`
 demonstrates this: it owns no motion hardware at all and drives XY through
@@ -142,6 +147,75 @@ and since when. Every knob swallows its clicks; a blocked click flashes the bar
 red and says why, and **RF Off** still works because it is a safety verb:
 
 ![a viewer GUI](front-panels/control-viewer.png)
+
+### How a GUI locks itself
+
+A module window started on its own (no `--connect`) owns its instrument
+in-process and has nobody to share it with, so it has no lock and no bar.
+Everything below applies to a window **connected to a service**, and that is
+how the launcher opens a GUI whenever the module's service is running.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Asking: the window opens and connects
+    Asking --> Control: nobody holds control
+    Asking --> Viewer: another PC holds control
+    Control --> Viewer: Release, or another PC takes over
+    Control --> Viewer: silent for 10 s (lease ran out)
+    Viewer --> Control: Take control (asks first if another PC holds it)
+    Viewer --> Viewer: a click on a knob is swallowed, the bar flashes red
+```
+
+1. **At start the window asks once.** When the window has been built, it
+   asks the service for control *without* force. If nobody holds control, it
+   gets it, and the log says "this window has control". If another PC holds
+   control, the window opens as a viewer, and the log says who holds control.
+   It never takes control from somebody by itself, not even later, when control
+   becomes free. That is why the *first* GUI gets control and why control changes
+   hands only when somebody clicks.
+2. **The bar follows the service, not the window.** Every status frame the
+   service broadcasts (several per second) carries `control: {holder,
+   clients, lease_s}`. The window's status timer passes it to the bar, and the
+   bar redraws only when something in it changed:
+   - **holder** (this PC): "You have control (this PC) · watching: <who> ·
+     also driving: <machine>", with a **Release** button;
+   - **viewer**: an amber bar, "VIEWER -- <who> has control since hh:mm;
+     nothing can be changed here", with a **Take control** button;
+   - **nobody holds control** (the holder released it or went silent): still a
+     viewer, "nobody has control at the moment", and one click on Take control
+     makes it yours. Nothing becomes yours without a click, so a person who
+     walks up to a screen always knows whether it can change the instrument.
+3. **A viewer's inputs swallow their input.** The bar installs one event
+   filter for the whole application. In viewer mode it throws away mouse
+   presses, releases, double clicks, the wheel and key presses on every *input*
+   widget of the main window: buttons, number boxes, combo boxes, text fields,
+   sliders. A blocked press turns the bar red for a moment, so the person sees
+   *why* nothing happened. Everything that only shows keeps working: readouts,
+   live plots and camera pictures, tabs, scrolling, selecting text in the log.
+4. **Safety buttons are exempt.** A button marked with `mark_always` (STOP,
+   RF off, Kill AF, Cancel zero, Settings, Refresh, ...) passes the filter,
+   because the service accepts its verb from anyone. A module with one on/off
+   toggle and no separate off button (kepco, chopper, cs260, mag2d, ...) marks
+   the toggle *while it reads "off"*: a viewer can then switch the output off
+   (the toggle sends the safety verb), but not on.
+5. **Dialogs are not guarded.** A viewer may open Settings and *look*. Its OK
+   goes to the service, and the service refuses it with a message that names
+   the holder.
+
+**Why an event filter and not `setEnabled(False)`:** every GUI already enables
+and disables its own widgets from its status timer (during an autofocus, while
+a stage is homing, when the instrument is disconnected). Greying the window
+from outside would fight that code, and switching everything back on at the
+next hand-over would enable buttons that should stay off. The filter leaves the
+widgets exactly as their own code wants them and only drops what a person does
+to them.
+
+**Why the GUI locks at all, if the service already refuses:** the service is
+what protects the instrument. Without the lock in the window, a viewer could
+turn a number box to a new value and click Set; the box would show the new
+value, and only then would an error arrive. The window would then show a
+setting the instrument does not have. With the lock, what a viewer window shows
+is always what the instrument is doing.
 
 ### The rules
 
