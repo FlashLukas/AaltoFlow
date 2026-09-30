@@ -25,19 +25,37 @@ Commands
     watch [seconds]         stream peak / exposure from the status broadcast (default 5 s)
     help                    show this list
     quit / exit             leave
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                    take control if nobody has it
+    take!                   take it over from whoever has it (they become a viewer)
+    release                 give it back
+    clients                 who holds control, who is connected
+  While a GUI on another PC holds control, this console can read and use the
+  safety verb (abort) but change nothing until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
+import threading
 import time
+import uuid
 
 import zmq
 
 CMD_PORT = 5603
 PUB_PORT = 5604
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "ccs200 console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 
 def _f(v, fmt=".4f"):
@@ -62,6 +80,7 @@ class Console:
         return s
 
     def cmd(self, **msg) -> dict:
+        msg.setdefault("client", IDENTITY)      # say who we are (control)
         self.req.send_json(msg)
         try:
             return self.req.recv_json()
@@ -69,6 +88,23 @@ class Console:
             self.req.close(0)
             self.req = self._new_req()
             return {"ok": False, "error": "service did not respond (timeout)"}
+
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            hb = self._new_req()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = self._new_req()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
 
     def run(self, words: list[str]) -> bool:
         """Execute one command line. Returns False to quit."""
@@ -85,6 +121,10 @@ class Console:
             "light": lambda: self.cmd(cmd="set_light", on=_on(args[0])),
             "sim": lambda: self.cmd(cmd="set_sim", name=args[0], value=num(1)),
             "abort": lambda: self.cmd(cmd="abort"),
+            "take": lambda: self.cmd(cmd="take_control", force=False),
+            "take!": lambda: self.cmd(cmd="take_control", force=True),
+            "release": lambda: self.cmd(cmd="release_control"),
+            "clients": lambda: json.dumps(self.cmd(cmd="clients"), indent=1),
             "cleardark": lambda: self.cmd(cmd="clear_dark"),
         }
         try:
@@ -167,6 +207,7 @@ def main() -> int:
     if args.words:
         con.run(args.words)
         return 0
+    con.start_heartbeat()
     print(f"ccs200 console -> {args.connect}:{args.cmd_port}   (help for commands)")
     while True:
         try:

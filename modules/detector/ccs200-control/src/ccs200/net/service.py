@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..spectrometer import Spectrometer
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -45,6 +46,21 @@ class Ccs200Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send: `abort` (cancel the running
+        #   acquisition / take_dark). It only STOPS something (aborting a
+        #   take_dark also drops the old dark, so nobody subtracts a dark they
+        #   did not ask for -- still a stop, never a start). `acquire` and
+        #   `take_dark` are triggers (they replace the sample a scan waits on),
+        #   `clear_dark` throws a measured dark away, and set_continuous can
+        #   also switch scanning ON -- none of them is safety.
+        #   READ: none beyond get_/read_/list_ and the universal verbs
+        #   (get_trace, get_wavelengths, get_sample are reads by their names).
+        self.control = ControlLease(
+            safety={"abort"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -107,6 +123,8 @@ class Ccs200Service:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.ccs200.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -157,6 +175,11 @@ class Ccs200Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         v = self.ccs200
         try:

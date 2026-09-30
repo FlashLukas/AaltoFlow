@@ -232,8 +232,11 @@ def build_manifest(meter) -> dict:
                      "timeout_s": 120.0},
                help="Cover the head first: whatever light reaches it becomes the "
                     "new zero. Usable in a scan routine (e.g. behind a closed shutter)."),
+            # a SAFETY verb (control.py): a viewer may always cancel a zero
             _p("cancel_zero", "Cancel zero", "action", "action", group="Zero", order=2,
-               wait={"ready": {"policy": "immediate"}}),
+               wait={"ready": {"policy": "immediate"}},
+               help="Stop a running zero adjustment; the previous zero stays. "
+                    "Allowed for anyone, also a viewer."),
             _p("zeroing", "Zeroing", "indicator", "bool", group="Zero", order=3,
                read_path=["zeroing"]),
             _p("zero_id", "Zero #", "indicator", "int", group="Zero", order=4,

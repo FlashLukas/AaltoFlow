@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..analyzer import SpectrumAnalyzer
 from ..model import DETECTORS
 from .describe import build_manifest
@@ -46,6 +47,23 @@ class Gsp818Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send: `abort` (cancel the running
+        #   acquisition / reference) and `tg_off` (tracking generator output
+        #   off: RF goes out of GEN OUTPUT into whatever is connected, and a
+        #   viewer who sees it on must be able to switch it off). Both only
+        #   make things safer. `tg_off` is a verb of its own because `set_tg`
+        #   can also switch the output ON. `acquire` / `take_reference` are
+        #   triggers (they replace what a scan waits on), `clear_reference`
+        #   throws a measured reference away, and set_continuous can also
+        #   switch sweeping ON -- none of them is safety.
+        #   READ: none beyond get_/read_/list_ and the universal verbs
+        #   (get_trace, get_frequencies, get_sample are reads by their names).
+        self.control = ControlLease(
+            safety={"abort", "tg_off"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -108,6 +126,8 @@ class Gsp818Service:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.gsp818.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -158,6 +178,11 @@ class Gsp818Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         v = self.gsp818
         # verb -> (brain method, argument name, cast). One table instead of a
@@ -191,6 +216,10 @@ class Gsp818Service:
             if cmd in setters:
                 fn, arg, cast = setters[cmd]
                 fn(cast(msg[arg]))
+            elif cmd == "tg_off":
+                # the SAFETY verb: set_tg(False), but a verb of its own so a
+                # viewer may send it (it can only make things safer)
+                v.tg_off()
             elif cmd == "set_bench":
                 v.set_bench(str(msg["name"]), float(msg["value"]))
             elif cmd == "acquire":
