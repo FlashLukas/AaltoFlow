@@ -24,8 +24,10 @@ Commands
     angle <deg>            rotate, keeping the magnitude
     vector <bx> <by>       set Bx and By in mT
     bx <mT> / by <mT>      set one component, keep the other
-    zero                   field 0 mT (angle kept); also ABORTS a calibration
-    output on|off          energize / ramp down and switch off
+    zero                   field 0 mT (angle kept); also ABORTS a calibration.
+                           A safety verb: works also while a GUI has control
+    output on|off          energize / ramp down and switch off ('off' is the safety
+                           verb output_off: works also while a GUI has control)
     bypass on|off          water interlock bypass (DANGER)
     stabilizer on|off      the slow long-term drift trim
     calibrate [n] [dwell] [vmax]
@@ -43,19 +45,37 @@ Commands
     shutdown               ask the SERVICE to ramp down and exit
     help                   show this list
     quit / exit            leave the console (the service keeps running)
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                   take control if nobody has it
+    take!                  take it over from whoever has it (they become a viewer)
+    release                give it back
+    clients                who holds control, who is connected
+  While a GUI on another PC holds control, this console can read, 'zero' and
+  'output off' but not change anything else until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
 import sys
+import threading
+import uuid
 
 import zmq
 
 CMD_PORT = 5577
 PUB_PORT = 5578
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "mag2dcal console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 
 def _on(word: str) -> bool:
@@ -79,6 +99,7 @@ class Console:
         self.req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def send(self, msg: dict) -> dict:
+        msg.setdefault("client", IDENTITY)       # say who we are (control)
         try:
             self.req.send_json(msg)
             return self.req.recv_json()
@@ -182,7 +203,18 @@ class Console:
             elif cmd == "zero":
                 print(self.send({"cmd": "zero"}))
             elif cmd == "output":
-                print(self.send({"cmd": "set_output", "enabled": _on(args[0])}))
+                if _on(args[0]):
+                    print(self.send({"cmd": "set_output", "enabled": True}))
+                else:
+                    # the safety verb: allowed even while another PC has control
+                    print(self.send({"cmd": "output_off"}))
+            elif cmd in ("take", "take!"):
+                print(self.send({"cmd": "take_control", "force": cmd == "take!"}))
+            elif cmd == "release":
+                print(self.send({"cmd": "release_control"}))
+            elif cmd == "clients":
+                r = self.send({"cmd": "clients"})
+                print("  " + json.dumps(r, indent=2).replace("\n", "\n  "))
             elif cmd == "bypass":
                 print(self.send({"cmd": "set_water_bypass", "enabled": _on(args[0])}))
             elif cmd == "stabilizer":
@@ -228,7 +260,32 @@ class Console:
             print(f"  bad arguments for '{cmd}': {exc}  (try 'help')")
         return True
 
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            def make():
+                s = self.ctx.socket(zmq.REQ)
+                s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+                s.setsockopt(zmq.LINGER, 0)
+                s.connect(f"tcp://{self.host}:{self.cmd_port}")
+                return s
+            hb = make()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = make()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
+
     def close(self):
+        if getattr(self, "_hb_stop", None) is not None:
+            self._hb_stop.set()
         self.req.close(0)
 
 
@@ -245,6 +302,7 @@ def main() -> int:
         if args.words:
             con.run_line(" ".join(args.words))
             return 0
+        con.start_heartbeat()
         print(f"connected to tcp://{args.connect}:{args.cmd_port}   (type 'help' or 'quit')")
         while True:
             try:

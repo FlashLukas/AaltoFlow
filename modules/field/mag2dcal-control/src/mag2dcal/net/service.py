@@ -20,6 +20,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..controller import Controller, Refused
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -51,6 +52,24 @@ class Mag2dcalService:
         self._rev = 0
         self._rev_at = -1e9
         self._started = False
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send, because they can only make
+        #   the magnet safer: `zero` (field setpoint 0 mT; it only lowers, the
+        #   controller allows it even during a FAULT, and it aborts a running
+        #   calibration sweep -- the panic button) and `output_off` (ramp the
+        #   coils to 0 V and switch the enable line off). `set_output`
+        #   is NOT in the list even though it can switch off -- with
+        #   enabled=true it energizes the coils; that is why `output_off` is a
+        #   verb of its own. `clear_fault` and `set_water_bypass` are not
+        #   safety either: both can lead to the coils being driven again; nor
+        #   are `calibrate` (drives both axes to full field), `set_calibration`
+        #   and `set_stabilizer` (they change how the field is reached).
+        #   READ = none: every read-only verb here is already status/info/
+        #   describe/get_config.
+        self.control = ControlLease(
+            safety={"zero", "output_off"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -122,6 +141,8 @@ class Mag2dcalService:
         (the describe_rev bug found in clMag)."""
         st = status_to_dict(self.ctrl.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -174,6 +195,11 @@ class Mag2dcalService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         c = self.ctrl
         try:
@@ -192,6 +218,10 @@ class Mag2dcalService:
                 c.zero()
             elif cmd == "set_output":
                 c.set_output(_as_bool(msg["enabled"]))
+            elif cmd == "output_off":
+                # the SAFETY verb: set_output(false) under a name of its own,
+                # so a viewer may send it (it can never energize anything)
+                c.output_off()
             elif cmd == "set_water_bypass":
                 c.set_water_bypass(_as_bool(msg["enabled"]))
             elif cmd == "set_stabilizer":

@@ -30,19 +30,38 @@ Commands
     watch [seconds]          stream the live status broadcast (default 5 s)
     help                     show this list
     quit / exit              leave
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                     take control if nobody has it
+    take!                    take it over from whoever has it (they become a viewer)
+    release                  give it back
+    clients                  who holds control, who is connected
+  While a GUI on another PC holds control, this console can read ('ai', 'di',
+  'status') but not set an output until it takes control (a general DAQ has no
+  safety verb: no output value is safe for every setup).
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
 import sys
+import threading
+import uuid
 
 import zmq
 
 CMD_PORT = 5629
 PUB_PORT = 5630
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "usb6001 console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 LINES = [f"p0.{i}" for i in range(8)] + [f"p1.{i}" for i in range(4)] + ["p2.0"]
 
@@ -65,6 +84,7 @@ class Console:
     # ---- send one command, get one reply --------------------------------
 
     def send(self, msg: dict) -> dict:
+        msg.setdefault("client", IDENTITY)       # say who we are (control)
         try:
             self.req.send_json(msg)
             return self.req.recv_json()
@@ -146,13 +166,45 @@ class Console:
                 print("  " + json.dumps(r.get("info", r), indent=2).replace("\n", "\n  "))
             elif cmd == "watch":
                 self.watch(float(args[0]) if args else 5.0)
+            elif cmd in ("take", "take!"):
+                print(self.send({"cmd": "take_control", "force": cmd == "take!"}))
+            elif cmd == "release":
+                print(self.send({"cmd": "release_control"}))
+            elif cmd == "clients":
+                r = self.send({"cmd": "clients"})
+                print("  " + json.dumps(r, indent=2).replace("\n", "\n  "))
             else:
                 print(f"  unknown command: {cmd!r}  (try 'help')")
         except (IndexError, ValueError) as exc:
             print(f"  bad arguments for '{cmd}': {exc}  (try 'help')")
         return True
 
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            def make():
+                s = self.ctx.socket(zmq.REQ)
+                s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+                s.setsockopt(zmq.LINGER, 0)
+                s.connect(f"tcp://{self.host}:{self.cmd_port}")
+                return s
+            hb = make()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = make()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
+
     def close(self):
+        if getattr(self, "_hb_stop", None) is not None:
+            self._hb_stop.set()
         self.req.close(0)
 
 
@@ -169,6 +221,7 @@ def main() -> int:
         if args.words:                       # one-shot mode
             con.run_line(" ".join(args.words))
             return 0
+        con.start_heartbeat()
         print(f"connected to tcp://{args.connect}:{args.cmd_port}   (type 'help' or 'quit')")
         while True:
             try:
