@@ -347,6 +347,22 @@ are in `docs/DEVELOPER_NOTES.md` section 4 ("Control"). Every module has it
    silent holder loses control, and the GUI viewer blocks a click while STOP
    still works.
 
+
+### Encryption -- CurveZMQ (2026-09-30, prototype: kim, camera)
+
+A module can speak CurveZMQ, so that only PCs in the lab keyring reach it and
+every identity it receives is checked against the sender's key (README,
+"Encryption and keys"; developer notes section 4, "Encryption"). To add it:
+copy `suite-common/src/suite_common/secure.py` to `src/<pkg>/secure.py`
+(byte-identical, like control.py); in the service call
+`secure.secure_server(ctx, [rep, pub], "<key>", on_event=...)` before binding,
+receive with `recv(copy=False)` and run `guard.check(req,
+secure.user_id(frame))` before `_dispatch`, and `release_server` in `stop()`;
+in the client call `secure.secure_client(sock, host, "<key>")` before every
+`connect`; in the console load `secure.py` by file path; point
+AALTOFLOW_SECURITY_DIR at an empty folder in `tests/conftest.py`. kim is the
+reference, and `tests/test_secure.py` there shows what to test.
+
 ---
 
 ## 6b. `describe` — the module's self-description (added 2026-09-10)

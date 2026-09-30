@@ -44,6 +44,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from suite_common import get_setting, set_setting
 from suite_common import hwlock
+from suite_common import secure
 from suite_common import (ENDPOINTS_ENV, PRODUCT, add_remote, default_root,
                           discover, endpoints_json, gui_args, probe,
                           remove_remote, service_args, set_ports, set_real,
@@ -268,18 +269,39 @@ def build_command(project_dir: Path, script: str, extra: list[str], gui: bool,
 
 # ───────────────────────── talking to services ────────────────────────────
 
-def fetch_describe(host: str, port: int, timeout_ms: int = 1500) -> dict | None:
+def fetch_describe(host: str, port: int, timeout_ms: int = 1500,
+                   module: str = "") -> dict | None:
     """Ask a service for its `describe` manifest; None if it does not answer.
 
     A fresh REQ socket per call, closed at once: a REQ socket that timed out is
     stuck for good, so reusing one would break every later request.
+
+    `module` (key or module id): encrypted when the lab's policy secures it
+    (suite_common/secure.py). Without it -- "Add a service on another PC",
+    where the module is what we are asking about -- plain first, then, if the
+    lab has security on, each secured module's way in turn.
     """
+    if module:
+        return _describe_once(host, port, timeout_ms, module)
+    manifest = _describe_once(host, port, timeout_ms, "")
+    if manifest is None and secure.policy()["mode"] != "off":
+        for m in secure.policy()["modules"]:
+            if m != "*":
+                manifest = _describe_once(host, port, timeout_ms, m)
+                if manifest is not None:
+                    break
+    return manifest
+
+
+def _describe_once(host: str, port: int, timeout_ms: int, module: str) -> dict | None:
     import zmq
     sock = zmq.Context.instance().socket(zmq.REQ)
     sock.setsockopt(zmq.LINGER, 0)
     sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
     sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
     try:
+        if module:
+            secure.secure_client(sock, host, module)
         sock.connect(f"tcp://{host}:{int(port)}")
         sock.send_json({"cmd": "describe"})
         reply = sock.recv_json()
@@ -290,7 +312,8 @@ def fetch_describe(host: str, port: int, timeout_ms: int = 1500) -> dict | None:
         sock.close(0)
 
 
-def request_shutdown(host: str, port: int, timeout_ms: int = 1000) -> bool:
+def request_shutdown(host: str, port: int, timeout_ms: int = 1000,
+                     module: str = "") -> bool:
     """Ask a service to stop ITSELF; True if it agreed.
 
     Why not just kill it: on Windows QProcess.terminate() cannot reach a console
@@ -307,6 +330,8 @@ def request_shutdown(host: str, port: int, timeout_ms: int = 1000) -> bool:
     sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
     sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
     try:
+        if module:                 # encrypted when the policy secures it
+            secure.secure_client(sock, host, module)
         sock.connect(f"tcp://{host}:{int(port)}")
         sock.send_json({"cmd": "shutdown"})
         return bool(sock.recv_json().get("ok"))
@@ -415,7 +440,7 @@ class Prober:
             self._busy.add(module_id)
 
         def run():
-            manifest = fetch_describe(host, port)
+            manifest = fetch_describe(host, port, module=module_id)
             with self._lock:
                 self._busy.discard(module_id)
             self.bridge.described.emit(module_id, manifest)
@@ -1509,7 +1534,7 @@ class ModuleCard(QtWidgets.QFrame):
             pid = int(proc.processId() or 0)
             self.win.log(f"[{self.spec.id}] stopping service…")
             # First ask it to stop itself, so it can close its hardware.
-            if request_shutdown(self.spec.host, self.spec.cmd) and \
+            if request_shutdown(self.spec.host, self.spec.cmd, module=self.spec.id) and \
                     proc.waitForFinished(graceful_wait_ms):
                 self.win.prober.probe_now()
                 return

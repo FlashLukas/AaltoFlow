@@ -27,6 +27,7 @@ import threading
 import time
 
 import zmq
+from suite_common import secure
 from suite_common.control import HEARTBEAT_S, make_identity
 
 
@@ -136,9 +137,13 @@ class Instrument:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures this module (suite_common/secure.py); plain otherwise
+        secure.secure_client(self._req, host, name)
         self._req.connect(f"tcp://{host}:{self.cmd_port}")
 
         self._sub = self._ctx.socket(zmq.SUB)
+        secure.secure_client(self._sub, host, name)
         self._sub.connect(f"tcp://{host}:{self.pub_port}")
         self._sub.setsockopt(zmq.SUBSCRIBE, b"")
 
@@ -413,6 +418,7 @@ class Instrument:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        secure.secure_client(self._req, self.host, self.name)
         if endpoint:
             self._req.connect(
                 endpoint.decode() if isinstance(endpoint, bytes) else endpoint)

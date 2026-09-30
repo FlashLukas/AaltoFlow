@@ -33,6 +33,27 @@ import sys
 
 import zmq
 
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured camera will
+    not answer it."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "camera" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("camera_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
 DEFAULT_CMD_PORT = 5563  # keep in sync with protocol.py
 
 
@@ -84,6 +105,8 @@ def main() -> None:
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 5000)
     sock.setsockopt(zmq.LINGER, 0)
+    if _SECURE is not None:          # CurveZMQ when the lab's policy secures the camera
+        _SECURE.secure_client(sock, args.host, "camera")
     sock.connect(f"tcp://{args.host}:{args.port}")
 
     def send(line: str) -> None:

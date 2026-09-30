@@ -21,6 +21,7 @@ import numpy as np
 
 from ..camera import CameraStatus
 from ..control import ControlClient
+from .. import secure
 from . import protocol as P
 
 _FIELDS = {f.name for f in fields(CameraStatus)}
@@ -85,6 +86,9 @@ class CameraClient(ControlClient):
         self._req = self._ctx.socket(self._zmq.REQ)
         self._req.setsockopt(self._zmq.RCVTIMEO, self.timeout_ms)
         self._req.setsockopt(self._zmq.LINGER, 0)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures the camera (secure.py); plain otherwise
+        secure.secure_client(self._req, self.host, "camera")
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _rpc(self, **req) -> dict:
@@ -105,6 +109,7 @@ class CameraClient(ControlClient):
     # -- SUB caching thread ------------------------------------------------ #
     def _sub_loop(self) -> None:
         sub = self._ctx.socket(self._zmq.SUB)
+        secure.secure_client(sub, self.host, "camera")   # telemetry too
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(self._zmq.SUBSCRIBE, b"")
         poller = self._zmq.Poller()

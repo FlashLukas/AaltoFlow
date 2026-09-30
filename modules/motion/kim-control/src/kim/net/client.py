@@ -19,6 +19,7 @@ import zmq
 
 from . import protocol as P
 from ..control import ControlClient
+from .. import secure
 
 
 @dataclass
@@ -163,6 +164,9 @@ class KimClient(ControlClient):
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures kim (secure.py); plain otherwise
+        secure.secure_client(self._req, self.host, "kim")
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _rpc(self, **req) -> dict:
@@ -186,6 +190,7 @@ class KimClient(ControlClient):
     # ------------------------------------------------------------------ #
     def _sub_loop(self) -> None:
         sub = self._ctx.socket(zmq.SUB)
+        secure.secure_client(sub, self.host, "kim")      # telemetry too
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"")  # all topics
         poller = zmq.Poller()

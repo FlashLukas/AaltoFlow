@@ -18,6 +18,7 @@ import threading
 import zmq
 
 from ..control import make_identity
+from .. import secure
 
 
 class RemoteZFocus:
@@ -57,6 +58,9 @@ class RemoteZFocus:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        # CurveZMQ once the lab's policy secures zpiezo (secure.py); plain
+        # until then
+        secure.secure_client(self._req, self.host, "zpiezo")
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _rpc(self, **req) -> dict:

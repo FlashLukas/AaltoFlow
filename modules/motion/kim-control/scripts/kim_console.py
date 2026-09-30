@@ -51,6 +51,33 @@ import uuid
 
 import zmq
 
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured kim will not
+    answer it."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "kim" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("kim_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
+
+def _secure(sock, host: str) -> None:
+    """Make `sock` a CurveZMQ client when the lab's policy secures kim."""
+    if _SECURE is not None:
+        _SECURE.secure_client(sock, host, "kim")
+
 DEFAULT_CMD_PORT = 5567  # keep in sync with protocol.py
 
 # Who this console is to the service (the same fields as control.py's
@@ -131,6 +158,7 @@ def main() -> None:
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 3000)
     sock.setsockopt(zmq.LINGER, 0)
+    _secure(sock, args.host)
     sock.connect(f"tcp://{args.host}:{args.port}")
 
     def send(line: str) -> None:
@@ -161,6 +189,7 @@ def main() -> None:
         hb = ctx.socket(zmq.REQ)
         hb.setsockopt(zmq.RCVTIMEO, 3000)
         hb.setsockopt(zmq.LINGER, 0)
+        _secure(hb, args.host)
         hb.connect(f"tcp://{args.host}:{args.port}")
         while not stop.wait(HEARTBEAT_S):
             try:
@@ -171,6 +200,7 @@ def main() -> None:
                 hb = ctx.socket(zmq.REQ)
                 hb.setsockopt(zmq.RCVTIMEO, 3000)
                 hb.setsockopt(zmq.LINGER, 0)
+                _secure(hb, args.host)
                 hb.connect(f"tcp://{args.host}:{args.port}")
         hb.close(0)
 

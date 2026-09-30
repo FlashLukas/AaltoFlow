@@ -304,6 +304,61 @@ still assumes piezo/zpiezo.
     `mark_always(widget)`; dialogs (Settings) are not guarded -- a viewer may
     look, the service refuses the OK. `tools/check_modules.py` checks the
     copies wherever a module has them.
+- **Encryption: CurveZMQ (2026-09-30; prototype in kim + camera).** Why: the
+  control lock trusts what a client says about itself (`kind`, `host`), and
+  anybody on the network can read, command or impersonate a service. How to
+  use it: README, "Encryption and keys". How it is built:
+  - `suite-common/src/suite_common/secure.py` is the master, copied
+    byte-identical into a module as `src/<pkg>/secure.py`, like control.py
+    (check_modules compares it). It imports only the standard library at the
+    top; zmq only where a socket or a key is made.
+  - Per PC, `security_dir()` (%LOCALAPPDATA%\AaltoFlow\security, moved by
+    AALTOFLOW_SECURITY_DIR): `security.json` {"keyring": folder},
+    `this_pc.key` / `this_pc.key_secret` (the zmq certificate text format,
+    metadata `pc`, `host`, `machine`, `addresses`). Per lab, the keyring
+    folder: one `<pc>.key` per trusted PC and `policy.json` {"mode": off |
+    warn | enforce, "modules": [...] or ["*"]}. Missing anything = "off".
+  - Service: `self._guard = secure.secure_server(ctx, [rep, pub], "<key>",
+    on_event=...)` between creating the sockets and binding them (it sets
+    `curve_server`, a ZAP domain of its own, and starts one
+    ThreadAuthenticator per context); the commander receives with
+    `sock.recv(copy=False)` and, before `_dispatch`, `refused =
+    self._guard.check(req, secure.user_id(frame))` -- the ZAP handler sets
+    each message's User-Id to the sender's public key. `release_server` in
+    `stop()` and on every failed start.
+  - Client: `secure.secure_client(sock, host, "<key>")` before EVERY
+    `connect` (REQ and SUB, and the rebuilt socket after a timeout). It is a
+    no-op unless the policy lists the module, so a client can call it for a
+    module that has no secure.py yet (the camera's piezo/zpiezo links do).
+    The server key: this PC's own for localhost / its own name, else the
+    keyring entry whose `pc`, `host` or `addresses` match the host.
+  - The guard: a key must be in the keyring (or be the service PC's own);
+    the PC part of `client.host` must be one of that entry's names; `kind:
+    machine` needs `machine = yes` (the service's own PC: yes unless the
+    keyring says no). `warn` logs each problem once and lets it through.
+    Refusal: `{"ok": false, "refused": "security", "error": "refused
+    (security): ..."}`. The keyring is re-read at most every 2 s.
+  - Generic clients: scan-core's `Instrument` and mission-control's
+    `fetch_describe` / `request_shutdown` use `suite_common.secure` with the
+    instance name ("kim", "kim_pc-a", "kim@pc-a:5567" all count as kim).
+    "Add a service on another PC" does not know the module yet: plain first,
+    then each secured module's way.
+  - Consoles load `../src/<pkg>/secure.py` by file path (so they still import
+    no package), registering it in `sys.modules` first (its dataclasses need
+    that).
+  - Tests: every conftest of a project that uses secure.py points
+    AALTOFLOW_SECURITY_DIR at an empty temp folder, so the security setup of
+    the PC running the tests never changes them; `check_modules --live` runs
+    its services and probes the same way (it tests the contract, not the
+    keys). kim-control/tests/test_secure.py builds a three-PC lab in a temp
+    folder (the other PCs reach "pc-a" as 127.0.0.2).
+  - Known limits of the prototype: a plain client to a secured module just
+    times out (CurveZMQ servers do not answer NULL clients); the keys sit in
+    the user's profile, so a second Windows account on the same PC needs its
+    own key (`new --pc <pc>-<user>`, with `--address`); the keyring's write
+    protection is the whole trust anchor; `scripts/kim_xy_calibration.py`
+    (camera) talks plain.
+
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the
   table below mirrors them) and can be overridden per PC in the launcher; every

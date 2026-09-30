@@ -42,6 +42,7 @@ import time
 import zmq
 
 from ..control import make_identity
+from .. import secure
 from .base import DirectionalCounter
 
 AXES = ("X", "Y", "Z")
@@ -110,6 +111,10 @@ class KimLink:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        # kim's key, from the lab keyring, when the policy secures kim
+        # (secure.py): the camera then drives kim over an encrypted link,
+        # and kim checks that this PC may act as a "machine"
+        secure.secure_client(self._req, self.host, "kim")
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _sub_loop(self) -> None:
@@ -118,6 +123,7 @@ class KimLink:
         sub = self._ctx.socket(zmq.SUB)
         sub.setsockopt(zmq.RCVTIMEO, 200)
         sub.setsockopt(zmq.LINGER, 0)
+        secure.secure_client(sub, self.host, "kim")
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"status")
         try:

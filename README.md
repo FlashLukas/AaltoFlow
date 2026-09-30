@@ -348,13 +348,135 @@ sends heartbeats while it is open.
 | usb6001 | -- (an output value that is safe depends on the setup) | |
 | zpiezo | -- (a voltage is a focus position; nothing moves on its own) | |
 
-The lock guards against mistakes between people who follow the rules. It is
-**not security**: the `kind` is declared by the client itself, and whoever
-reaches the port can send anything. The firewall is what keeps other people
-out. The full rules and the reasons behind them are in
+On its own, the lock guards against mistakes between people who follow the
+rules. It is **not security**: the `kind` and the PC name are declared by the
+client itself, and whoever reaches the port can send anything. Encryption
+(next section) is what makes those claims checkable. The full rules and the
+reasons behind them are in
 [docs/DEVELOPER_NOTES.md](docs/DEVELOPER_NOTES.md), section 4 ("Control");
 how to add control to a new module is in
 [INSTRUMENT_MODULE_GUIDE.md](INSTRUMENT_MODULE_GUIDE.md), section 6.
+
+## Encryption and keys
+
+> **Prototype:** kim and the camera speak it so far (plus the generic clients:
+> scan-core, the launcher, the consoles). The other modules follow the same
+> way Control did. Until the lab switches it on, nothing changes.
+
+Without encryption, anybody on the lab network can read what the modules say,
+send them commands, pretend to be one of them, or claim to be a "machine" and
+so pass the control lock. AaltoFlow can use **CurveZMQ**, the encryption
+built into ZeroMQ. It needs nothing extra installed, and the JSON commands,
+the GUIs and the control lock stay exactly as they are; only the pipe between
+them becomes private and checked.
+
+### How it works
+
+**Every PC gets a padlock and its key.** Each lab PC has a *key pair*. The
+*public key* is like a padlock: you can hand it out freely, and it is one small
+text file. The *secret key* is the only key that opens it, and it never leaves
+the PC.
+
+**The lab has a keyring.** This is a folder, on a network share for example,
+that holds the public-key file of every trusted PC and a `policy.json`. Only the
+lab's administrator should be able to write to it, because whoever can put a
+file there is trusted.
+
+When a GUI on PC-B connects to kim on PC-A:
+
+```
+PC-B (GUI)                                    PC-A (kim service)
+   |  "hello, I am PC-B"  (proved with B's key)  |
+   |-------------------------------------------->|  Is PC-B in the keyring? yes -> ok
+   |  "hello, I am PC-A"  (proved with A's key)  |
+   |<--------------------------------------------|  B checks: really PC-A's key? yes -> ok
+   |==== everything after this is encrypted ====|
+   |  {"cmd": "move_to_step", ...}               |  and kim knows it came from PC-B
+```
+
+| someone tries to... | result |
+|---|---|
+| read the traffic (commands or telemetry) | sees only noise |
+| send commands from a PC whose key is not in the keyring | no answer; the command never reaches the instrument |
+| pretend to be the kim service | the GUI does not believe it (it knows PC-A's key) |
+| claim `"kind": "machine"`, or another PC's name | refused: "refused (security): ... claims to be a machine, and pc-b may not act as one" |
+
+The last row is what makes the control lock real. The service knows which PC's
+key sent each message, so the PC name in the client's identity must be that PC.
+The identity may say `machine` only if the keyring allows that PC to act as a
+machine. A program on the service's *own* PC (the camera next to kim) may act
+as a machine by default.
+
+### Setting it up
+
+**Once, for the lab** (on any PC):
+
+```
+python tools/keys.py init \\server\share\aaltoflow-keyring --mode warn --modules kim,camera
+```
+
+**For every PC**, this one included (about two minutes):
+
+```
+python tools/keys.py use \\server\share\aaltoflow-keyring
+uv run --with pyzmq python tools/keys.py new            # --machine if this PC runs scan-core
+```
+
+`new` makes the PC's key pair and copies its public half into the keyring. If
+the keyring is read-only from that PC, `new` leaves the file next to you, and
+the administrator copies it in. That is all. A new module, GUI or script on a
+trusted PC needs nothing, because keys belong to PCs, not to modules.
+
+**Everyday:**
+
+| | |
+|---|---|
+| `python tools/keys.py status` | this PC: its key, the keyring, the policy, "in the keyring: yes/no" |
+| `python tools/keys.py list` | the trusted PCs |
+| `python tools/keys.py machine lab-pc-1 yes` | programs on lab-pc-1 may act as a machine (scan-core, the camera) |
+| `python tools/keys.py remove old-laptop` | stop trusting a PC (or just delete its file) |
+| `python tools/keys.py policy --mode enforce` | switch the whole lab to enforce |
+
+Adding or removing a PC takes effect within seconds, because the keyring is
+re-read. A change of mode or of the module list takes effect when a module's
+service restarts.
+
+### The policy and the modes
+
+`policy.json` sits in the keyring, so the whole lab switches together:
+
+```json
+{"mode": "warn", "modules": ["kim", "camera"]}
+```
+
+- **`off`** (also for a PC that was never set up): plain, exactly as before.
+- **`warn`** (switch this on first): everything is encrypted, and unknown keys
+  and false identities are let through. Each one is written to the service's
+  log once ("security: a PC whose key is not in the keyring connected ...").
+  After a week without warnings, switch to enforce.
+- **`enforce`**: unknown keys get no answer, and false identities are refused.
+
+`modules` lists the modules that speak CurveZMQ (`["*"]` when all of them do).
+While the rollout is under way, a module that is not listed keeps talking
+plain, and every client -- which reads the same list -- talks plain to it. So
+kim can be encrypted while piezo is not.
+
+### When something does not connect
+
+- **A client has no key, or its PC's security is off**, while the module is
+  secured: the service does not answer at all ("no reply ... within 2000 ms").
+  Run `python tools/keys.py status` on the client PC.
+- **"no key for '10.0.0.7' in the keyring"**: the client reaches that PC by an
+  address the keyring does not know. Add it with `tools/keys.py new --address`
+  on that PC, or connect by the PC's name.
+- **"this PC has no AaltoFlow key yet"**: run `tools/keys.py new` on this PC.
+- **The consoles** (`scripts/<module>_console.py`) use their module's
+  `secure.py` when they sit in their module folder. A console copied elsewhere
+  talks plain, so a secured module will not answer it.
+
+How it is built (`suite-common/src/suite_common/secure.py`, copied into each
+module like `control.py`) is described in
+[docs/DEVELOPER_NOTES.md](docs/DEVELOPER_NOTES.md), section 4 ("Encryption").
 
 ## Adding a module
 
@@ -697,14 +819,14 @@ docs/flyers/                 one-page flyers (PDF + PNG)
 docs/video/                  demo videos (mp4)
 INSTRUMENT_MODULE_GUIDE.md   the blueprint for building a new instrument module
 <instrument>-control/        eight instrument modules, one uv project each (each with module.toml)
-suite-common/                module discovery, shared by the launcher, scan-core and the tools
+suite-common/                module discovery, control and encryption masters, shared by all
 scan-core/                   the N-D scan engine, Scan Builder and measurement suite
                              (the data viewer comes from the aaltoview repo)
 mission-control/             the launcher
 installer/                   Setup.exe: the wizard, the component generator, the post-install step
 front-panels/                reference renders of each GUI
 spikes/                      earlier QCoDeS experiments, kept as reference
-tools/                       new_module, check_modules, panel renderer, lab deploy script
+tools/                       new_module, check_modules, keys (encryption), panel renderer, deploy
 suite_local.json             THIS PC's ports / real flags / remote services (not in git)
 ```
 

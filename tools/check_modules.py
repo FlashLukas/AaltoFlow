@@ -18,9 +18,10 @@ Static checks, per module:
     for a person). A key found twice is a WARN naming both folders.
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
-  * src/<pkg>/control.py and src/<pkg>/apps/control_bar.py, WHERE PRESENT
-    (one controller, many viewers -- being rolled out module by module), are
-    byte-identical to the masters in suite-common/src/suite_common/
+  * src/<pkg>/control.py and src/<pkg>/apps/control_bar.py (one controller,
+    many viewers) and src/<pkg>/secure.py (CurveZMQ encryption -- being
+    rolled out module by module), WHERE PRESENT, are byte-identical to the
+    masters in suite-common/src/suite_common/
   * src/<pkg>/hwlock.py exists and is byte-identical to the master copy
     suite-common/src/suite_common/hwlock.py (FAIL otherwise: a stale copy may
     normalise addresses differently, and then two modules would not see that
@@ -85,6 +86,7 @@ HWLOCK_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "hwlock.py"
 # Control (one controller, many viewers): the same copy-per-module rule.
 CONTROL_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "control.py"
 CONTROL_BAR_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "control_bar.py"
+SECURE_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "secure.py"
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -218,7 +220,8 @@ def control_check(rep: Report, m):
     if pkg is None:
         return
     for rel, master in (("control.py", CONTROL_MASTER),
-                        ("apps/control_bar.py", CONTROL_BAR_MASTER)):
+                        ("apps/control_bar.py", CONTROL_BAR_MASTER),
+                        ("secure.py", SECURE_MASTER)):
         copy = pkg / rel
         name = f"{rel} is the master copy"
         if not copy.is_file():
@@ -452,6 +455,12 @@ def main(argv=None) -> int:
     ap.add_argument("--live", action="store_true", help="start each service and query it")
     ap.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.live:
+        # The live checks test the wire contract, not this PC's keys: run the
+        # services and the probes with security off (an empty security folder,
+        # secure.py), also on a lab PC whose policy secures some modules.
+        import tempfile
+        os.environ["AALTOFLOW_SECURITY_DIR"] = tempfile.mkdtemp(prefix="aaltoflow-check-")
 
     rep = Report()
     mods, problems = discover_local(args.root)
