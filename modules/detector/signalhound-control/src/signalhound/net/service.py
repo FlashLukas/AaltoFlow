@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..instruments import TG_RANGE_HZ
 from ..spectrum import SpectrumAnalyzer
 from .describe import build_manifest
@@ -46,6 +47,22 @@ class SignalhoundService:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send: `abort` (cancel the running
+        #   acquisition) and `tg_abort` (cancel a tracking-generator sweep; the
+        #   analyser is then restored). Both only STOP something. `tg_cw` is
+        #   not in the list even with on=false: the same verb also retunes the
+        #   TG, and the TG has no real "off" (it parks). The client modules
+        #   shsg / shsna drive the TG as kind "machine", so a person's GUI
+        #   holding control never locks them out.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `tg_grid` only COMPUTES the grid a TG sweep would use
+        #   (sweeps nothing, sends nothing to the analyser).
+        self.control = ControlLease(
+            safety={"abort", "tg_abort"},
+            read={"tg_grid"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -108,6 +125,8 @@ class SignalhoundService:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.signalhound.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -158,6 +177,11 @@ class SignalhoundService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         v = self.signalhound
         try:

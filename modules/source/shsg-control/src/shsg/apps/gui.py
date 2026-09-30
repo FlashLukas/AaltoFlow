@@ -31,6 +31,8 @@ from ..config import Config
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
+from ..control import ControlRefused
 
 
 # ------------------------------------------------------------- signal bridge
@@ -216,12 +218,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1080, 660)
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its generator and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         # generator events -> log
         self.bridge = Bridge()
@@ -239,6 +254,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -254,6 +274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("⚙  Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -344,7 +365,9 @@ class MainWindow(QtWidgets.QMainWindow):
         off_btn.setToolTip("The TG44A cannot be silenced: this parks it at the park "
                            "frequency and minimum level.")
         off_btn.setMinimumHeight(38)
-        off_btn.clicked.connect(lambda: self._safe(self.ctrl.set_rf, False))
+        # the SAFETY verb (net/service.py): works for a viewer too
+        off_btn.clicked.connect(lambda: self._safe(self.ctrl.rf_off))
+        mark_always(off_btn)
         col.addWidget(off_btn)
         return panel
 
@@ -433,7 +456,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             fn(*args)
         except Exception as exc:
-            if "did not respond" in str(exc):
+            # ... and a refusal because another PC holds control (the service
+            # emits no event for that; normally the viewer guard stops the click)
+            if "did not respond" in str(exc) or isinstance(exc, ControlRefused):
                 self._on_event("error", str(exc))
 
     def _toggle_rf(self):
@@ -465,6 +490,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         unknown = bool(getattr(s, "tg_unknown", False))
         # Unknown state counts as "maybe on": the big button then offers OFF,

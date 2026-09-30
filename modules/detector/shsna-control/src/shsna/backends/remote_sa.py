@@ -48,6 +48,7 @@ import time
 import numpy as np
 import zmq
 
+from ..control import make_identity
 from .base import SweepFailed
 
 
@@ -72,6 +73,11 @@ class OwnerLink:
         self._cache_t = 0.0
         self._stop = threading.Event()
         self._sub_thread: threading.Thread | None = None
+        # Who we are to the signalhound service (control.py): a MACHINE, like
+        # the camera driving kim -- a person's analyser GUI holding control
+        # must not break a network-analyser sweep (tg_sweep_acquire / tg_abort).
+        # Sent with every command (rpc below).
+        self.identity = make_identity("machine", "shsna")
 
     @property
     def address(self) -> str:
@@ -146,6 +152,7 @@ class OwnerLink:
                 raise ConnectionError(f"signalhound service at {self.address} is not answering")
             if self._req is None:
                 self._make_req()
+            req.setdefault("client", self.identity)
             try:
                 self._req.send_json(req)
                 reply = self._req.recv_json()

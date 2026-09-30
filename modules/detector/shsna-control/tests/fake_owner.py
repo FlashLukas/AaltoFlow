@@ -29,6 +29,9 @@ class FakeOwner:
         self.fail_next = ""              # the next sweep fails with this tg_error
         self.hw_error = ""
         self.requests: list[dict] = []   # every command received, in order
+        # who sent each one (control.py identity, None if absent), kept APART
+        # so the contract tests compare the commands themselves
+        self.identities: list[dict | None] = []
         self._lock = threading.Lock()
         self.supports_grid = True      # False = an owner older than tg_grid
         #: added to the first bin of every sweep: an analyser whose grid does
@@ -93,6 +96,9 @@ class FakeOwner:
         while not self._stop.is_set():
             if poller.poll(100):
                 msg = self._rep.recv_json()
+                self.identities.append(msg.get("client") if isinstance(msg, dict) else None)
+                if isinstance(msg, dict):
+                    msg = {k: v for k, v in msg.items() if k != "client"}
                 self.requests.append(msg)
                 try:
                     reply = self._dispatch(msg)

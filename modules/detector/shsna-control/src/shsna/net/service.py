@@ -17,6 +17,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..analyzer import Analyzer
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -46,6 +47,18 @@ class ShsnaService:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send: `abort` (cancel the running
+        #   sweep / reference; it also aborts our TG sweep at the signalhound
+        #   owner). It only STOPS something. `clear_reference` is not safety
+        #   (it throws a measured reference away), nor set_continuous (it can
+        #   also switch sweeping ON).
+        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        self.control = ControlLease(
+            safety={"abort"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -108,6 +121,8 @@ class ShsnaService:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.shsna.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -158,6 +173,11 @@ class ShsnaService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         v = self.shsna
         try:

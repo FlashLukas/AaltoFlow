@@ -269,6 +269,12 @@ class Controller:
     def set_current(self, amps: float) -> int:
         return self._enqueue("set_current", _finite("current_A", amps))
 
+    def ramp_to_zero(self) -> int:
+        """Ramp the current to 0 A (the GUI's "Ramp to Zero & Stop"). Same as
+        set_current(0); a name of its own because over the wire it is the
+        SAFETY verb a viewer may always send (net/service.py, control)."""
+        return self.set_current(0.0)
+
     def set_field(self, field_mT: float, use_pid: bool = True) -> int:
         return self._enqueue("set_field", _finite("field_mT", field_mT), use_pid)
 

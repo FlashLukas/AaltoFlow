@@ -56,6 +56,8 @@ import time
 
 import zmq
 
+from ..control import make_identity
+
 
 #: the TG44A's minimum level, where the owner parks it (# VERIFY vs its config)
 PARK_LEVEL_DBM = -30.0
@@ -87,6 +89,11 @@ class RemoteTG:
         self._cache_lock = threading.Lock()
         self._stop = threading.Event()
         self._sub_t: threading.Thread | None = None
+        # Who we are to the signalhound service (control.py): a MACHINE, like
+        # the camera driving kim -- a person's analyser GUI holding control
+        # must not lock the generator out of the TG (nor its clean shutdown,
+        # which parks the TG). Sent with every command.
+        self.identity = make_identity("machine", "shsg")
 
     # ---- lifecycle -------------------------------------------------------
     def open(self) -> None:
@@ -167,7 +174,7 @@ class RemoteTG:
         if self._fresh() is None:
             # fail fast: no frame for ALIVE_S -> the owner is down
             raise ConnectionError(_is_owner_down_msg(self.host, self.cmd_port))
-        req = {"cmd": "tg_cw"}
+        req = {"cmd": "tg_cw", "client": self.identity}
         if on is not None:
             req["on"] = bool(on)
         if freq_hz is not None:

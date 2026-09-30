@@ -20,6 +20,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..controller import Controller
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -55,6 +56,21 @@ class ClMagService:
         # would be pure waste.
         self._rev = 0
         self._rev_at = 0.0
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a magnet the only
+        #   "make it safe" action is taking the current away, so it is
+        #   `ramp_to_zero` (the GUI's "Ramp to Zero & Stop"): a viewer who sees
+        #   the coil run hot must be able to switch it off. `set_current` is NOT
+        #   in the list even though it can also go to 0 A -- it can go anywhere
+        #   else too. `demag` is not safety either: it swings the current
+        #   through large alternating values before it ends at zero.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `aux_read_ai` only reads a DAQ input.
+        self.control = ControlLease(
+            safety={"ramp_to_zero"},
+            read={"aux_read_ai"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -140,6 +156,8 @@ class ClMagService:
         """
         st = status_to_dict(self.ctrl.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -171,6 +189,11 @@ class ClMagService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         # Queued commands answer with their sequence number `seq`; a status
         # frame whose `cmd_done` >= seq already reflects the command (the one
@@ -181,6 +204,10 @@ class ClMagService:
                     float(msg["field_mT"]), bool(msg.get("use_pid", True)))}
             elif cmd == "set_current":
                 return {"ok": True, "seq": self.ctrl.set_current(float(msg["current_A"]))}
+            elif cmd == "ramp_to_zero":
+                # the SAFETY verb: the same as set_current 0, but a verb of its
+                # own so a viewer may send it (it can only make things safer)
+                return {"ok": True, "seq": self.ctrl.set_current(0.0)}
             elif cmd == "demag":
                 return {"ok": True, "seq": self.ctrl.demag(float(msg["amplitude_A"]))}
             elif cmd == "calibrate":

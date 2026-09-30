@@ -162,6 +162,12 @@ class Generator:
                    "CW off requested -- the TG44A cannot be silenced: it is PARKED "
                    "(park frequency, minimum level)")
 
+    def rf_off(self) -> None:
+        """RF off (= PARK on the TG44A). Same as set_rf(False); a name of its
+        own because over the wire it is the SAFETY verb a viewer may always
+        send (net/service.py, control)."""
+        self.set_rf(False)
+
     def set_power(self, dBm: float) -> None:
         lim = self.cfg.limits
         value, clamped = _clamp(float(dBm), lim.power_min_dBm, lim.power_max_dBm)

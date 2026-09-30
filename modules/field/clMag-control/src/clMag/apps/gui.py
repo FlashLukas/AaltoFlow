@@ -28,6 +28,7 @@ from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
 from .calibration_viewer import CalibrationViewer, can_view
 from .aux_panel import AuxPanel
+from .control_bar import ControlBar, mark_always
 
 
 # ------------------------------------------------------------- signal bridge
@@ -172,7 +173,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._window_s = 30.0
 
         tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(tabs)
+        # Control or viewer (control_bar.py): a bar above the tabs, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its controller and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget()
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(tabs, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(tabs)
 
         control = QtWidgets.QWidget(); control.setObjectName("root")
         outer = QtWidgets.QHBoxLayout(control)
@@ -199,6 +213,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self, cal: FieldCalibration) -> QtWidgets.QWidget:
@@ -214,6 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("⚙  Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -309,6 +329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vrow = QtWidgets.QHBoxLayout()
         view_btn = QtWidgets.QPushButton("View curve…")
         view_btn.clicked.connect(self._view_calibration)
+        mark_always(view_btn)        # only reads the calibration
         vrow.addStretch(1); vrow.addWidget(view_btn)
         alay.addLayout(vrow)
 
@@ -320,7 +341,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         col.addStretch(1)
         stop_btn = QtWidgets.QPushButton("Ramp to Zero  &  Stop"); stop_btn.setObjectName("danger")
-        stop_btn.clicked.connect(lambda: self.ctrl.set_current(0.0))
+        # the SAFETY verb (net/service.py): works for a viewer too
+        stop_btn.clicked.connect(lambda: self.ctrl.ramp_to_zero())
+        mark_always(stop_btn)
         col.addWidget(stop_btn)
         return panel
 
@@ -425,6 +448,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         t = time.monotonic() - self._t0
         self._t.append(t)

@@ -12,6 +12,7 @@ from __future__ import annotations
 from PySide6 import QtWidgets, QtCore
 
 from .theme import COLORS
+from .control_bar import mark_always
 
 
 def _card(title: str):
@@ -81,6 +82,7 @@ class AuxPanel(QtWidgets.QWidget):
             lay.addLayout(row)
         read = QtWidgets.QPushButton("Read now")
         read.clicked.connect(self._read_all_ai)
+        mark_always(read)            # only reads: fine for a viewer (control_bar.py)
         lay.addWidget(read)
         return card
 

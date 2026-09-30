@@ -54,6 +54,9 @@ class FakeOwner:
             "sweeping": False,          # an SNA key shsg must ignore
         }
         self.requests: list[dict] = []      # every command received, in order
+        # who sent each one (control.py identity, None if absent), kept APART
+        # so the contract tests above compare the commands themselves
+        self.identities: list[dict | None] = []
         self.applied_at: list[tuple[float, dict]] = []   # (monotonic, applied tg_cw)
         self._stop = threading.Event()
         self._ctx = zmq.Context.instance()
@@ -98,6 +101,9 @@ class FakeOwner:
         while not self._stop.is_set():
             if poller.poll(100):
                 msg = self._rep.recv_json()
+                self.identities.append(msg.get("client") if isinstance(msg, dict) else None)
+                if isinstance(msg, dict):
+                    msg = {k: v for k, v in msg.items() if k != "client"}
                 self.requests.append(msg)
                 self._rep.send_json(self._handle(msg))
         self._rep.close(0)
