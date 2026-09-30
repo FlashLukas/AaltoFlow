@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import zmq
 
+from ..control import ControlClient
 from ..stage import StageStatus
 from . import protocol as P
 
@@ -67,14 +68,24 @@ def _status_from_dict(d: dict) -> RemoteStatus:
     )
 
 
-class StageClient:
+class StageClient(ControlClient):
+    """``kind`` / ``name``: who this client is to the service (control.py) --
+    "gui" for a window, "script" (default) for a script or console, "machine"
+    only for a program that must not be locked out (scan-core, another
+    module). A script must ``take_control()`` before it may change anything
+    while a GUI on another PC holds control; a refused command raises
+    ``ControlRefused``."""
+
     def __init__(
         self,
         host: str = P.DEFAULT_HOST,
         cmd_port: int = P.DEFAULT_CMD_PORT,
         pub_port: int = P.DEFAULT_PUB_PORT,
         timeout_ms: int = 2000,
+        kind: str = "script",
+        name: str = "stage client",
     ):
+        self._control_setup(kind, name)
         self.host = host
         self.cmd_port = cmd_port
         self.pub_port = pub_port
@@ -104,6 +115,7 @@ class StageClient:
             target=self._sub_loop, name="stage-client-sub", daemon=True
         )
         self._sub_thread.start()
+        self.start_heartbeat()           # "still here": counted as a viewer / keeps control
         # Prime info/config so callers can rely on them right after start().
         try:
             self.info()
@@ -112,6 +124,7 @@ class StageClient:
             pass
 
     def close(self) -> None:
+        self.stop_heartbeat()
         self._stop.set()
         if self._sub_thread is not None:
             self._sub_thread.join(timeout=1.0)
@@ -130,6 +143,7 @@ class StageClient:
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _rpc(self, **req) -> dict:
+        self._with_identity(req)         # say who we are (control.py)
         with self._lock:
             try:
                 self._req.send_json(req)
@@ -140,6 +154,7 @@ class StageClient:
                 self._make_req()
                 raise TimeoutError(f"no reply to {req.get('cmd')} within {self.timeout_ms} ms")
         if not reply.get("ok", False):
+            self._raise_refusal(reply)       # ControlRefused: another client has control
             raise RuntimeError(reply.get("error", "command failed"))
         return reply
 
@@ -160,6 +175,7 @@ class StageClient:
                     payload = json.loads(raw.decode("utf-8"))
                     if topic == P.TOPIC_STATUS:
                         self._status = _status_from_dict(payload)
+                        self._control_from_status(payload)
                     elif topic == P.TOPIC_EVENT:
                         try:
                             self._on_event(payload.get("level", "info"), payload.get("msg", ""))

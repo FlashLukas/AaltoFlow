@@ -17,6 +17,8 @@ import threading
 
 import zmq
 
+from ..control import make_identity
+
 
 class RemoteXYStage:
     def __init__(self, host: str = "127.0.0.1", cmd_port: int = 5561,
@@ -27,6 +29,12 @@ class RemoteXYStage:
         self._ctx = zmq.Context.instance()
         self._lock = threading.Lock()
         self._req = None
+        # The camera is a MACHINE client of piezo (control.py), exactly as it is
+        # of kim (remote_kim.py): the stabiliser and click-to-go keep moving the sample
+        # while a person's GUI (or the suite's Control tab) on another PC holds
+        # control of piezo -- opening a window must not break a running
+        # autofocus (Lukas's choice, 2026-09-29). Sent with every command.
+        self.identity = make_identity("machine", "camera")
 
     # -- lifecycle --------------------------------------------------------- #
     def open(self) -> None:
@@ -48,6 +56,7 @@ class RemoteXYStage:
         with self._lock:
             if self._req is None:
                 self._make_req()
+            req.setdefault("client", self.identity)
             try:
                 self._req.send_json(req)
                 reply = self._req.recv_json()

@@ -22,17 +22,35 @@ REPL examples:
     save_positions positions.json
     {"cmd": "describe"}     (anything else is sent as raw JSON)
     quit
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                  (take control if nobody has it)
+    take!                 (take it over from whoever has it -- they become a viewer)
+    release               (give it back)
+    clients               (who holds control, who is connected)
+  While a GUI on another PC holds control, this console can read and STOP
+  but not change anything until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
 import sys
+import threading
+import uuid
 
 import zmq
 
 DEFAULT_CMD_PORT = 5597  # keep in sync with module.toml
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "smaract console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 
 def build_request(line: str) -> dict:
@@ -40,8 +58,12 @@ def build_request(line: str) -> dict:
     verb, a = parts[0], parts[1:]
     if verb in ("status", "info", "get_config", "describe", "get_positions",
                 "find_reference", "stop", "set_zero", "clear_zero",
-                "stream_start", "stream_read", "stream_stop", "shutdown"):
+                "stream_start", "stream_read", "stream_stop", "shutdown", "clients"):
         return {"cmd": verb}
+    if verb in ("take", "take!"):
+        return {"cmd": "take_control", "force": verb == "take!"}
+    if verb == "release":
+        return {"cmd": "release_control"}
     if verb == "move_to":
         return {"cmd": "move_to", "position": float(a[0])}
     if verb == "move_by":
@@ -84,6 +106,7 @@ def main() -> None:
         except Exception as exc:
             print(f"! parse error: {exc}")
             return
+        req.setdefault("client", IDENTITY)       # say who we are (control)
         sock.send_json(req)
         try:
             # ensure_ascii keeps the printed text ASCII (gotcha #14)
@@ -97,6 +120,27 @@ def main() -> None:
         send(" ".join(args.oneshot))
         return
 
+    # "still here" in the background, on its OWN socket (a ZeroMQ socket
+    # belongs to one thread): while you think, control stays yours
+    def heartbeat() -> None:
+        def make():
+            hb = ctx.socket(zmq.REQ)
+            hb.setsockopt(zmq.RCVTIMEO, 3000)
+            hb.setsockopt(zmq.LINGER, 0)
+            hb.connect(f"tcp://{args.host}:{args.port}")
+            return hb
+        hb = make()
+        while not stop.wait(HEARTBEAT_S):
+            try:
+                hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                hb.recv_json()
+            except zmq.Again:                     # stuck REQ: rebuild it
+                hb.close(0)
+                hb = make()
+        hb.close(0)
+
+    stop = threading.Event()
+    threading.Thread(target=heartbeat, daemon=True).start()
     print(f"smaract console -> tcp://{args.host}:{args.port}  (type 'quit' to exit)")
     while True:
         try:

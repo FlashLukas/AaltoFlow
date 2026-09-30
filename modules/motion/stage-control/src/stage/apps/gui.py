@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from ..config import Config, axis_limits
 from . import theme
+from .control_bar import ControlBar, mark_always
 from .image_pane import ImagePane
 from .settings_dialog import SettingsDialog
 from .theme import repolish
@@ -237,6 +238,10 @@ class MainWindow(QWidget):
         self._poll.start()
 
         self._reload_positions()
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -256,6 +261,15 @@ class MainWindow(QWidget):
         settings_btn.clicked.connect(self._open_settings)
         top.addWidget(settings_btn)
         root.addLayout(top)
+        # a viewer may LOOK at the settings; the service refuses an OK from it
+        mark_always(settings_btn)
+
+        # Control or viewer (control_bar.py), only for a GUI on a service
+        # whose client knows about control; a local GUI owns its brain.
+        self._control_bar = None
+        if self.remote and hasattr(self.ctrl, "take_control"):
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            root.addWidget(self._control_bar)
 
         # Hardware-error banner (2026-09-28).  Hidden while the controller
         # answers; when its reads fail the service keeps showing the LAST GOOD
@@ -289,6 +303,11 @@ class MainWindow(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         self._image = ImagePane(self.ctrl, self.cfg, log=self._on_event)
+        # The sample overview only changes what THIS window shows (the image,
+        # its rotation, the pixel calibration file on this PC), so a viewer may
+        # use it. A click-to-move on the image still goes to the service,
+        # which refuses it from a viewer (the pane logs the refusal).
+        mark_always(self._image)
 
         splitter.addWidget(scroll)
         splitter.addWidget(self._image)
@@ -381,6 +400,7 @@ class MainWindow(QWidget):
         stop.setObjectName("danger")
         repolish(stop)
         stop.clicked.connect(lambda: self._do(self.ctrl.stop_all))
+        mark_always(stop)            # the SAFETY verb: a viewer can always stop the stage
         row.addWidget(stop)
         lay.addLayout(row)
 
@@ -544,6 +564,8 @@ class MainWindow(QWidget):
     # polling + events
     # ------------------------------------------------------------------ #
     def _refresh(self) -> None:
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         st = self.ctrl.status()
         for a in range(3):
             val = st.position[a]

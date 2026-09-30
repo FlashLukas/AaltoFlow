@@ -13,6 +13,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from .describe import build_manifest
 from ..zpiezo import ZPiezo, status_to_dict
 from . import protocol as P
@@ -33,6 +34,20 @@ class ZPiezoService:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY: none. The z piezo has no motion to stop -- set_voltage is
+        #   one write, done at once -- and no "off": every voltage is just a
+        #   focus. Parking it (v_min, what shutdown does) would defocus the
+        #   measurement of whoever holds control, which is exactly what a
+        #   viewer must not be able to do. So a viewer can only read.
+        #   READ: none beyond the universal verbs and read_voltage (read_*).
+        # The camera's autofocus drives this service as kind "machine" and is
+        # not affected by a GUI holding control (camera backends/remote_z.py).
+        self.control = ControlLease(
+            safety=set(),
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     def start(self) -> None:
         # Bind BOTH ports first, here in the calling thread, and only then open
@@ -98,6 +113,9 @@ class ZPiezoService:
         """
         st = status_to_dict(self.brain.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (control bars and the suite's
+        # Control tab read this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -174,6 +192,11 @@ class ZPiezoService:
             sock.close(linger=500)
 
     def _dispatch(self, req: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(req)
+        if gate is not None:
+            return gate
         cmd = (req or {}).get("cmd")
         b = self.brain
         if cmd == "status":
