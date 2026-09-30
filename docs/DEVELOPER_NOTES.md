@@ -321,7 +321,8 @@ still assumes piezo/zpiezo.
   - Service: `self._guard = secure.secure_server(ctx, [rep, pub], "<key>",
     on_event=...)` between creating the sockets and binding them (it sets
     `curve_server`, a ZAP domain of its own, and starts one
-    ThreadAuthenticator per context); the commander receives with
+    `secure.ZapHandler` per context -- our own key checker, a plain thread,
+    NOT pyzmq's ThreadAuthenticator: see gotcha #43); the commander receives with
     `sock.recv(copy=False)` and, before `_dispatch`, `refused =
     self._guard.check(req, secure.user_id(frame))` -- the ZAP handler sets
     each message's User-Id to the sender's public key. `release_server` in
@@ -852,6 +853,29 @@ zpiezo has no GUI.
     leaves every enabled state alone; widgets carrying the `control_always`
     property (STOP, Kill AF) pass. `QTest.mouseClick` goes through the
     application's filters, so the guard is testable offscreen.
+43. **pyzmq's ThreadAuthenticator dies on Windows without `tornado`**
+    (2026-09-30, found on the lab PC). It runs an asyncio loop in its thread,
+    and Windows' default (proactor) loop cannot watch zmq sockets unless
+    tornado >= 6.1 is installed: "Proactor event loop does not implement
+    add_reader ...". The thread died at start, so NO encrypted client was ever
+    answered (a secured service was deaf), every later start failed with
+    "Address in use (inproc://zeromq.zap.01)", and `stop()` waited forever for
+    the dead thread -- a test run hung for five hours. It passed on Linux,
+    where the default loop can. `secure.ZapHandler` answers the ZAP requests
+    itself: a plain thread and poll, `start()` raises if it cannot run,
+    `stop()` returns within ~2 s, a failed bind closes its socket (an open
+    socket makes the context's `term()` wait forever), and the loop answers
+    "500" rather than dying. Lesson: code that starts a background thread
+    must check that the thread is really running, and its stop must have a
+    timeout -- a dead helper thread should be a loud error, not a hang.
+44. **On a share that maps Linux permissions, a file written from one PC may
+    be unreadable from another** (2026-09-30, the lab keyring). A new file
+    got read access for its owner and one group only; Windows `icacls` /
+    `Set-Acl` could not change it ("No mapping between account names and
+    security IDs"). A key file is public, so the fix was to write it from the
+    PC whose files everyone can read (or `chmod 644` from a Linux login).
+    `Keyring.problems` and `keys.py list/status` now name every key file that
+    could not be read, instead of that PC silently missing.
 
 ---
 

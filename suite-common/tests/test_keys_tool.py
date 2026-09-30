@@ -58,6 +58,29 @@ def test_status_on_a_pc_that_was_never_set_up(me, capsys):
     assert "none yet" in out and "mode 'off'" in out and out.isascii()
 
 
+def test_list_and_status_say_which_key_files_cannot_be_read(me, capsys, monkeypatch):
+    """On the lab share the office PC's key was unreadable from the lab PC and
+    `list` just left it out (2026-09-30). Now both commands say so."""
+    kr = me / "keyring"
+    K.main(["init", str(kr), "--mode", "warn", "--modules", "kim"])
+    secure.write_cert(kr / "office.key", "a" * 40, meta={"pc": "office"})
+    secure.write_cert(kr / "lab.key", "b" * 40, meta={"pc": "lab"})
+    real = secure.read_cert
+
+    def read(path):
+        if Path(path).name == "office.key":
+            raise PermissionError(13, "Access is denied", str(path))
+        return real(path)
+    monkeypatch.setattr(secure, "read_cert", read)
+    capsys.readouterr()
+    assert K.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "1 key file(s) could not be read" in out and "office.key" in out
+    assert "lab" in out and out.isascii()
+    assert K.main(["status"]) == 0
+    assert "office.key: cannot be read (permissions?)" in capsys.readouterr().out
+
+
 def test_use_warns_about_a_folder_without_a_policy(me, capsys):
     (me / "empty").mkdir()
     assert K.main(["use", str(me / "empty")]) == 0

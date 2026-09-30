@@ -470,6 +470,11 @@ kim can be encrypted while piezo is not.
   address the keyring does not know. Add it with `tools/keys.py new --address`
   on that PC, or connect by the PC's name.
 - **"this PC has no AaltoFlow key yet"**: run `tools/keys.py new` on this PC.
+- **"N key file(s) could not be read here"** (`keys.py list` / `status`, or
+  "security: keyring file skipped" in a service's log): that PC's key file is
+  not readable from this PC -- on a share that maps Linux permissions, a
+  file written from one PC can be. A public key may be readable by everyone:
+  write the file from a PC whose files all can read, or `chmod 644` it.
 - **The consoles** (`scripts/<module>_console.py`) use their module's
   `secure.py` when they sit in their module folder. A console copied elsewhere
   talks plain, so a secured module will not answer it.

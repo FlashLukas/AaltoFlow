@@ -79,6 +79,19 @@ def _find_entry(keyring: Path, pc: str) -> Path:
 
 # ---------------------------------------------------------------- commands ---
 
+def _say_problems(ring, prefix: str = "") -> None:
+    """Key files this PC could not use -- a PC otherwise just goes missing.
+    On a share that maps Linux permissions, a key file written from ANOTHER PC
+    may be unreadable here: write it from a PC every other PC can read, or
+    make it readable for all (a public key may be; only WRITING the keyring
+    must be restricted)."""
+    ring.entries()                       # reads the folder
+    if ring.problems:
+        print(f"{prefix}! {len(ring.problems)} key file(s) could not be read here:")
+        for p in ring.problems:
+            print(f"{prefix}    {p}")
+
+
 def cmd_status(args) -> int:
     d = secure.security_dir()
     print(f"this PC          : {secure.this_pc_name()}")
@@ -96,6 +109,8 @@ def cmd_status(args) -> int:
     pol = secure.policy()
     mods = ", ".join(pol["modules"]) or "none"
     print(f"policy           : mode '{pol['mode']}', secured modules: {mods}")
+    if kr is not None and kr.is_dir():
+        _say_problems(secure.Keyring(kr), prefix="                   ")
     if kr is not None and kr.is_dir() and public:
         e = secure.Keyring(kr).by_key(public)
         if e is None:
@@ -179,7 +194,9 @@ def cmd_new(args) -> int:
 
 def cmd_list(args) -> int:
     kr = _keyring_or_die()
-    entries = secure.Keyring(kr).entries()
+    ring = secure.Keyring(kr)
+    entries = ring.entries()
+    _say_problems(ring)
     if not entries:
         print(f"no PCs in {kr} yet")
         return 0

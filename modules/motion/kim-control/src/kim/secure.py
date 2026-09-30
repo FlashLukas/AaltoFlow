@@ -236,10 +236,20 @@ class Entry:
             self.names.add(self.host.lower())
 
 
-def _entry_from(path: Path) -> Entry | None:
+def _entry_from(path: Path, problems: list | None = None) -> Entry | None:
+    """The Entry in a key file, or None -- and then WHY in `problems`.
+
+    It used to return None silently: on the lab share a key file written from
+    another PC was unreadable (the share maps Linux permissions: a new file is
+    readable by its owner and group only), and that PC simply was not in the
+    keyring, with no hint why (2026-09-30)."""
     try:
         public, _, meta = read_cert(path)
-    except (OSError, SecurityError):
+    except (OSError, SecurityError) as exc:
+        if problems is not None:
+            why = "cannot be read (permissions?)" if isinstance(exc, PermissionError) \
+                else str(exc)
+            problems.append(f"{path.name}: {why}")
         return None
     pc = str(meta.get("pc") or path.stem).strip().lower()
     addrs = tuple(a for a in re.split(r"[\s,;]+", str(meta.get("addresses", ""))) if a)
@@ -258,6 +268,9 @@ class Keyring:
         self._checked = -1e9
         self._stamp: tuple = ()
         self._by_key: dict[str, Entry] = {}
+        #: key files that could not be used, with the reason (keys.py and the
+        #: service's log say so, instead of a PC silently missing)
+        self.problems: list[str] = []
 
     def _refresh(self) -> None:
         now = time.monotonic()
@@ -271,12 +284,12 @@ class Keyring:
         stamp = tuple((p.name, p.stat().st_mtime_ns) for p in files)
         if stamp == self._stamp:
             return
-        by_key = {}
+        by_key, problems = {}, []
         for p in files:
-            e = _entry_from(p)
+            e = _entry_from(p, problems)
             if e is not None:
                 by_key[e.public] = e
-        self._by_key, self._stamp = by_key, stamp
+        self._by_key, self._stamp, self.problems = by_key, stamp, problems
 
     def entries(self) -> list[Entry]:
         with self._lock:
@@ -350,6 +363,8 @@ class Guard:
         act as a machine unless the keyring says otherwise: a program on the
         service's own PC (the camera driving kim) is the usual machine."""
         e = self.keyring.by_key(public)
+        for problem in self.keyring.problems:     # once each, in the service log
+            self._say("file:" + problem, "warn", f"keyring file skipped -- {problem}")
         if e is None and public == self.own_public:
             e = Entry(pc=self.own_pc, public=public, machine=True)
         return e
@@ -400,8 +415,113 @@ class Guard:
         return {"ok": False, "refused": "security", "error": "refused (security): " + text}
 
 
+#: the fixed address where libzmq asks "may this key connect?" (the ZAP RFC)
+ZAP_ENDPOINT = "inproc://zeromq.zap.01"
+
+
+class ZapHandler:
+    """Answers libzmq's "may this key connect?" questions for one context.
+
+    Why our own and not pyzmq's ThreadAuthenticator (found on the lab PC,
+    2026-09-30): that one runs an ASYNCIO loop in its thread, and on Windows
+    the default (proactor) loop cannot watch zmq sockets unless `tornado` is
+    installed. Without it the thread died at start -- no key was ever answered
+    (a secured service is deaf) -- and its stop() then waited forever for the
+    dead thread (a service could not shut down; a test run hung for hours).
+    This is a plain thread with a plain poll: no asyncio, no extra package, and
+    ``stop()`` returns within about a second whatever happened.
+
+    ``providers`` maps a ZAP domain (one per service, see secure_server) to
+    its Guard. A CURVE handshake on a known domain is decided by that Guard's
+    ``callback``; the reply's User-Id is the client's key (z85), which is what
+    ``user_id(frame)`` reads on every received message. Anything else (NULL on
+    a plain socket that happens to share the context) is let through, as
+    libzmq would without a handler; CURVE on an unknown domain is refused.
+    """
+
+    POLL_MS = 200
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.providers: dict = {}
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="aaltoflow-zap")
+
+    def start(self, timeout: float = 5.0) -> None:
+        self._thread.start()
+        if not self._ready.wait(timeout) or self._error is not None:
+            self._stop.set()
+            raise SecurityError(
+                "the key checker (ZAP) did not start"
+                + (f": {self._error}" if self._error else " in time")
+                + " -- the service would not answer any encrypted client")
+
+    def alive(self) -> bool:
+        return self._thread.is_alive() and self._error is None
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        self._thread.join(timeout)
+
+    def _run(self) -> None:
+        import zmq
+        sock = None
+        try:
+            sock = self.ctx.socket(zmq.REP)
+            sock.linger = 0
+            sock.bind(ZAP_ENDPOINT)
+        except BaseException as exc:          # e.g. another handler already bound
+            # close it: an open socket makes the context's term() wait forever
+            if sock is not None:
+                sock.close(0)
+            self._error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+        try:
+            while not self._stop.is_set():
+                if not sock.poll(self.POLL_MS):
+                    continue
+                try:
+                    msg = sock.recv_multipart()
+                except zmq.ZMQError:
+                    break
+                # a REP socket that received MUST answer (gotcha #39), and this
+                # loop must never die: an answer that cannot be built is "500"
+                try:
+                    reply = self._answer(msg)
+                except Exception as exc:
+                    reply = [b"1.0", msg[1] if len(msg) > 1 else b"", b"500",
+                             str(exc).encode("utf-8", "replace")[:200], b"", b""]
+                sock.send_multipart(reply)
+        finally:
+            sock.close(0)
+
+    def _answer(self, msg: list) -> list:
+        from zmq.utils import z85
+        # request: version, request id, domain, address, identity, mechanism, credentials...
+        if len(msg) < 6:
+            return [b"1.0", b"", b"500", b"malformed ZAP request", b"", b""]
+        version, request_id, domain, _addr, _identity, mechanism = msg[:6]
+        creds = msg[6:]
+        if mechanism == b"CURVE" and creds:
+            key = z85.encode(creds[0])
+            guard = self.providers.get(domain.decode("utf-8", "replace"))
+            try:
+                ok = guard is not None and bool(guard.callback(domain, key))
+            except Exception:
+                ok = False                     # a crashing check must not let anyone in
+            if ok:
+                return [version, request_id, b"200", b"OK", key, b""]
+            return [version, request_id, b"400", b"not in the keyring", b"", b""]
+        return [version, request_id, b"200", b"OK", b"", b""]
+
+
 _auth_lock = threading.Lock()
-_auths: dict = {}                              # id(context) -> [authenticator, n]
+_auths: dict = {}                              # id(context) -> [ZapHandler, n]
 
 
 def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
@@ -414,18 +534,20 @@ def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
         return None
     public, secret, pc = own_keys()
     guard = Guard(module, pol["mode"], Keyring(keyring_dir()), public, pc, on_event)
-    from zmq.auth.thread import ThreadAuthenticator
     with _auth_lock:
         slot = _auths.get(id(ctx))
+        if slot is not None and not slot[0].alive():
+            _auths.pop(id(ctx), None)          # a dead checker: start a fresh one
+            slot = None
         if slot is None:
-            auth = ThreadAuthenticator(ctx)
-            auth.start()
-            slot = _auths[id(ctx)] = [auth, 0]
+            handler = ZapHandler(ctx)
+            handler.start()                    # raises if it cannot run
+            slot = _auths[id(ctx)] = [handler, 0]
         slot[1] += 1
         # one ZAP domain per service, so several services in one process
         # (the tests) each get their own guard
         guard.domain = f"aaltoflow-{module}-{id(guard):x}"
-        slot[0].configure_curve_callback(domain=guard.domain, credentials_provider=guard)
+        slot[0].providers[guard.domain] = guard
     guard._ctx_id = id(ctx)
     for s in sockets:
         s.zap_domain = guard.domain.encode("ascii")
@@ -446,13 +568,10 @@ def release_server(guard: Guard | None) -> None:
         slot = _auths.get(getattr(guard, "_ctx_id", None))
         if slot is None:
             return
-        slot[0].credentials_providers.pop(guard.domain, None)
+        slot[0].providers.pop(guard.domain, None)
         slot[1] -= 1
         if slot[1] <= 0:
-            try:
-                slot[0].stop()
-            except Exception:
-                pass
+            slot[0].stop()                     # returns within ~2 s, never hangs
             _auths.pop(guard._ctx_id, None)
 
 

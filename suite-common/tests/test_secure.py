@@ -9,6 +9,7 @@ strings -- the format is all these tests need.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -159,6 +160,32 @@ def test_warn_mode_passes_a_lie_but_says_so_once(pc):
     assert g.check(lie, _key("b")) is None
     assert g.check(lie, _key("b")) is None
     assert len(said) == 1 and "'warn' lets it through" in said[0]
+
+
+def test_an_unreadable_key_file_is_reported_not_silently_skipped(pc, monkeypatch):
+    """Found on the lab share (2026-09-30): a key file written from the office
+    PC was unreadable from the lab PC, and that PC was simply missing from the
+    keyring -- `keys.py list` said nothing. Now the keyring names the file."""
+    _d, kr = pc
+    secure.write_cert(kr / "office.key", _key("A"), meta={"pc": "office"})
+    secure.write_cert(kr / "lab.key", _key("B"), meta={"pc": "lab"})
+    real = secure.read_cert
+
+    def read(path):
+        if Path(path).name == "office.key":
+            raise PermissionError(13, "Access is denied", str(path))
+        return real(path)
+    monkeypatch.setattr(secure, "read_cert", read)
+    ring = secure.Keyring(kr)
+    assert [e.pc for e in ring.entries()] == ["lab"]
+    assert ring.problems == ["office.key: cannot be read (permissions?)"]
+    # and a service says so, once, in its log
+    said = []
+    g = secure.Guard("kim", "warn", ring, _key("C"), "lab", lambda lv, m: said.append(m))
+    g.entry(_key("B"))
+    g.entry(_key("B"))
+    assert [m for m in said if "office.key" in m] == [
+        "security: keyring file skipped -- office.key: cannot be read (permissions?)"]
 
 
 def test_the_master_is_ascii_and_imports_no_zmq_at_top():
