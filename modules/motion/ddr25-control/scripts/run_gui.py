@@ -42,7 +42,10 @@ def main() -> None:
     if args.connect:
         from ddr25.net.client import Ddr25Client
 
-        client = Ddr25Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port)
+        # kind "gui": the service counts this window as a viewer, and the first
+        # GUI to connect gets control (control.py / apps/control_bar.py)
+        client = Ddr25Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port,
+                             kind="gui", name="ddr25 GUI")
         client.start()
         # Mirror the service's config so the dial and Settings show its limits.
         cfg = Config()

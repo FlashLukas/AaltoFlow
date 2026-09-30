@@ -288,6 +288,13 @@ class Heater:
         if changed:
             self._emit("info", "heater output " + ("ENABLED" if on else "disabled"))
 
+    def heater_off(self) -> None:
+        """Switch the heater output off (the GUI's "Heater OFF"). Same as
+        set_enabled(False); a name of its own because over the wire it is the
+        SAFETY verb a viewer may always send (net/service.py, control) --
+        set_enabled can also switch the heater ON."""
+        self.set_enabled(False)
+
     def set_p_gain(self, p: int) -> None:
         self._set_gain("p_gain", p, P_GAIN_RANGE, self.backend.set_p_gain)
 

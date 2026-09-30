@@ -22,6 +22,14 @@ REPL examples (MICROMETRE language, via the measured step size):
     set_calibration X 0.048        (um per step, both directions)
     set_calibration X 0.041 -1     (backward only)
 
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                  (take control if nobody has it)
+    take!                 (take it over from whoever has it -- they become a viewer)
+    release               (give it back)
+    clients               (who holds control, who is connected)
+  While a GUI on another PC holds control, this console can read and STOP but
+  not change anything until it takes control.
+
 Other:
     zero_counter          (datum all)   |   zero_counter X
     set_zero              (display 0)   |   set_zero X   |   clear_zero
@@ -35,12 +43,22 @@ Other:
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
 import sys
+import threading
+import uuid
 
 import zmq
 
 DEFAULT_CMD_PORT = 5595  # keep in sync with protocol.py / module.toml
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "agilis console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 _AXIS = {"x": "X", "y": "Y", "0": "X", "1": "Y"}
 
@@ -54,8 +72,12 @@ def build_request(line: str) -> dict:
         return _AXIS.get(v.lower(), v)
 
     if verb in ("status", "info", "get_config", "get_positions", "describe",
-                "stream_start", "stream_read", "stream_stop"):
+                "stream_start", "stream_read", "stream_stop", "clients"):
         return {"cmd": verb}
+    if verb in ("take", "take!"):
+        return {"cmd": "take_control", "force": verb == "take!"}
+    if verb == "release":
+        return {"cmd": "release_control"}
     if verb == "move_to_step":
         return {"cmd": verb, "axis": axis(a[0]), "position": int(a[1])}
     if verb == "move_steps":
@@ -112,6 +134,7 @@ def main() -> None:
         except Exception as exc:
             print(f"! parse error: {exc}")
             return
+        req.setdefault("client", IDENTITY)       # say who we are (control)
         sock.send_json(req)
         try:
             print(json.dumps(sock.recv_json(), indent=2))
@@ -124,6 +147,27 @@ def main() -> None:
         send(" ".join(args.oneshot))
         return
 
+    # "still here" in the background, on its OWN socket (a ZeroMQ socket
+    # belongs to one thread): while you think, control stays yours
+    def heartbeat() -> None:
+        def make():
+            s = ctx.socket(zmq.REQ)
+            s.setsockopt(zmq.RCVTIMEO, 3000)
+            s.setsockopt(zmq.LINGER, 0)
+            s.connect(f"tcp://{args.host}:{args.port}")
+            return s
+        hb = make()
+        while not stop.wait(HEARTBEAT_S):
+            try:
+                hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                hb.recv_json()
+            except zmq.Again:                     # stuck REQ: rebuild it
+                hb.close(0)
+                hb = make()
+        hb.close(0)
+
+    stop = threading.Event()
+    threading.Thread(target=heartbeat, daemon=True).start()
     print(f"agilis console -> tcp://{args.host}:{args.port}  (type 'quit' to exit)")
     while True:
         try:

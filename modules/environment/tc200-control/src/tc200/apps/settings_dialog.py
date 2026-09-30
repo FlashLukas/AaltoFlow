@@ -226,7 +226,13 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _apply_and_close(self):
         self._pull_into_cfg()
-        self.ctrl.apply_config()
+        try:
+            self.ctrl.apply_config()
+        except Exception as exc:
+            # e.g. ControlRefused: this window is a VIEWER (another PC has
+            # control) -- say so and keep the dialog open, do not crash
+            QtWidgets.QMessageBox.warning(self, "Settings not applied", str(exc))
+            return
         self.on_applied()
         self.accept()
 
