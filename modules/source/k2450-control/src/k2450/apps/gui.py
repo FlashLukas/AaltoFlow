@@ -31,6 +31,7 @@ from ..backends.base import range_table
 from ..config import Config
 from ..sim_system import build_sim_system
 from ..smu import fmt_si
+from .control_bar import ALWAYS_PROPERTY, ControlBar, mark_always
 from .settings_dialog import SettingsDialog
 from .theme import COLORS, apply_palette, build_stylesheet, set_theme
 
@@ -315,12 +316,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         root = QtWidgets.QWidget()
         root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its SourceMeter and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -337,6 +351,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- layout ----------------------------------------------------------
 
@@ -355,6 +374,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -446,6 +466,7 @@ class MainWindow(QtWidgets.QMainWindow):
         off_btn.setObjectName("danger")
         off_btn.setMinimumHeight(38)
         off_btn.clicked.connect(self._output_off)
+        mark_always(off_btn)         # the SAFETY verb (net/service.py): a viewer too
         col.addWidget(off_btn)
         return panel
 
@@ -605,17 +626,23 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---- actions ---------------------------------------------------------
 
     def _call(self, fn, *args):
-        """Run a command; a refusal becomes a red log line, not a crash."""
+        """Run a command; a refusal becomes a red log line, not a crash
+        (RuntimeError covers ControlRefused: another PC holds control --
+        normally the viewer guard stops the click first)."""
         try:
             fn(*args)
         except (ValueError, RuntimeError) as exc:
             self._on_event("error", str(exc))
 
     def _toggle_output(self):
-        self._call(self.ctrl.set_output, not self._out_on)
+        if self._out_on:
+            self._output_off()
+        else:
+            self._call(self.ctrl.set_output, True)
 
     def _output_off(self):
-        self._call(self.ctrl.set_output, False)
+        # the SAFETY verb output_off (not set_output(False)): a viewer may send it
+        self._call(self.ctrl.output_off)
 
     def _set_function(self, _idx=None):
         self._call(self.ctrl.set_source_function, self.fn_combo.currentText())
@@ -679,8 +706,14 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         self._out_on = bool(s.output)
+        # While it reads "Output OFF" the big button sends the safety verb, so
+        # a viewer may press it (control_bar.py); reading "Output ON" it is
+        # blocked like every other input.
+        self.out_btn.setProperty(ALWAYS_PROPERTY, self._out_on)
 
         # a remote client learns a function change from status; pull the config
         # then, so the spins show the stored level/limit of the new function

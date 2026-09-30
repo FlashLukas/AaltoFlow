@@ -345,6 +345,13 @@ class BipolarSupply:
         else:
             self._emit("info", "output OFF requested: ramping to zero first")
 
+    def output_off(self) -> None:
+        """Output OFF the gentle way: ramp to zero, then switch off. Same as
+        set_output(False); a name of its own because over the wire it is the
+        SAFETY verb a viewer may always send (net/service.py, control) --
+        set_output can also switch the output ON."""
+        self.set_output(False)
+
     def output_off_now(self) -> None:
         """EMERGENCY: OUTP OFF without ramping. On the BOP that programs 0 V /
         0 A in one step -- with a coil attached the supply then has to absorb

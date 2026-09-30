@@ -323,6 +323,12 @@ class SuperK:
         self._emit("warn" if on else "info",
                    "EMISSION ON requested (class 4 laser)" if on else "emission OFF")
 
+    def emission_off(self) -> None:
+        """Emission OFF. Same as set_emission(False); a name of its own
+        because over the wire it is the SAFETY verb a viewer may always send
+        (net/service.py, control) -- set_emission can also switch it ON."""
+        self.set_emission(False)
+
     def touch(self, client: str | None) -> None:
         """A client said something (the service calls this on EVERY command,
         `ping` included). Only the owner's words feed the lost-client guard:

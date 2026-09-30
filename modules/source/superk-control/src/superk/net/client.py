@@ -14,7 +14,8 @@ the same way.
 A background thread owns the SUB socket and keeps the latest status; commands go
 out on a REQ socket guarded by a lock (REQ is strict request/reply, one at a time).
 
-LOST-CLIENT GUARD. Every command carries this client's random id. Switching
+LOST-CLIENT GUARD. Every command carries this client's random id (inside its
+control identity, control.py). Switching
 emission ON sends that id as the "owner", and from then on the same background
 thread sends a `ping` every `ping_s` seconds. If this process dies or the
 network goes, the pings stop and the service switches emission off after
@@ -27,11 +28,11 @@ from __future__ import annotations
 import json
 import threading
 import time
-import uuid
 
 import zmq
 
 from ..config import Config, N_LINES
+from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, config_to_dict, apply_config_dict)
 
@@ -69,15 +70,28 @@ class RemoteStatus:
         self.describe_rev = d.get("describe_rev")
 
 
-class SuperkClient:
+class SuperkClient(ControlClient):
+    """``kind`` / ``name``: who this client is to the service (control.py) --
+    "gui" for a window, "script" (default) for a script or console, "machine"
+    only for a program that must not be locked out (scan-core, another
+    module). While a GUI on another PC holds control, a script must
+    ``take_control()`` before it may change anything; a refused command
+    raises ``ControlRefused``."""
+
     def __init__(self, host: str = "localhost",
                  cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int = DEFAULT_PUB_PORT,
-                 timeout_ms: int = 3000, ping_s: float = 1.0):
+                 timeout_ms: int = 3000, ping_s: float = 1.0,
+                 kind: str = "script",
+                 name: str = "superk client"):
+        self._control_setup(kind, name)
         self._timeout_ms = timeout_ms
         # a random id per client object: tells the service WHICH client owns
-        # the emission, so another client's traffic cannot keep it alive
-        self.client_id = uuid.uuid4().hex[:12]
+        # the emission, so another client's traffic cannot keep it alive. It
+        # is the control identity's id (control.py): every command carries
+        # that identity as "client", and the service's lost-client guard
+        # reads its "id" -- one id, not two.
+        self.client_id = self.identity["id"]
         self._ping_s = float(ping_s)
         self._pinging = False          # True after we switched emission on
         self._ctx = zmq.Context.instance()
@@ -104,6 +118,7 @@ class SuperkClient:
     def start(self) -> dict:
         """Fetch static info and pull the service's config into self.cfg."""
         info = self.info()
+        self.start_heartbeat()   # "still here": counted as a viewer / keeps control
         self.get_config()
         return info
 
@@ -145,6 +160,11 @@ class SuperkClient:
         self._must(d)
         self._pinging = bool(on)             # heartbeat while we own emission
 
+    def emission_off(self):
+        """Emission OFF -- the safety verb, allowed also while viewing."""
+        self._must({"cmd": "emission_off"})
+        self._pinging = False
+
     def reset_interlock(self):
         self._must({"cmd": "reset_interlock"})
 
@@ -172,6 +192,7 @@ class SuperkClient:
         switched emission on (and still owns it), its pings stop here, so the
         service's lost-client guard switches emission off after
         hardware.client_timeout_s."""
+        self.stop_heartbeat()
         self._stop.set()
         time.sleep(0.25)
         self._req.close(0)
@@ -190,15 +211,26 @@ class SuperkClient:
         return r
 
     def _cmd(self, d: dict) -> dict:
-        d = {**d, "client": self.client_id}  # every command is a heartbeat
+        # say who we are (control.py); the same identity makes every command
+        # a heartbeat for the lost-client guard (its "id" is client_id)
+        d = self._with_identity(dict(d))
         with self._req_lock:
             self._req.send_json(d)
             try:
-                return self._req.recv_json()
+                reply = self._req.recv_json()
             except zmq.Again:
                 # timed out; the REQ socket is now in a bad state -> rebuild it
                 self._reset_req()
                 return {"ok": False, "error": "service did not respond (timeout)"}
+        # Refused because another PC holds control: RAISE (ControlRefused), so
+        # a script never believes the laser took a setting it refused.
+        if not reply.get("ok", False):
+            self._raise_refusal(reply)
+        return reply
+
+    def _rpc(self, **req) -> dict:
+        """The name control.py's ControlClient calls (heartbeat, take_control)."""
+        return self._cmd(req)
 
     def _reset_req(self):
         endpoint = self._req.LAST_ENDPOINT
@@ -228,6 +260,7 @@ class SuperkClient:
                     if topic == TOPIC_STATUS:
                         with self._lock:
                             self._latest = d
+                        self._control_from_status(d)
                     elif topic == TOPIC_EVENT:
                         self._on_event(d.get("level", "info"), d.get("msg", ""))
             except zmq.ZMQError:

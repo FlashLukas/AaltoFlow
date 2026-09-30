@@ -26,6 +26,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..supply import BipolarSupply
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -56,6 +57,21 @@ class KepcoService:
         self._stopped = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a power supply the
+        #   "make it safe" action is taking the output away: `output_off`
+        #   (ramp to zero, then off -- the gentle way, right for a coil) and
+        #   `output_off_now` (the emergency switch-off without ramp). A viewer
+        #   who sees the coil driven where it should not be must be able to
+        #   stop it. `set_output` is NOT in the list even though on=false is
+        #   the same thing -- the same verb also switches the output ON.
+        #   READ: `ping` only says "a client is alive" (the lost-client
+        #   watchdog); every client sends it, a viewer too.
+        self.control = ControlLease(
+            safety={"output_off", "output_off_now"},
+            read={"ping"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -120,6 +136,8 @@ class KepcoService:
         `status` reply, so the two can never drift apart."""
         st = status_to_dict(self.supply.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.2) -> int:
@@ -172,6 +190,11 @@ class KepcoService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         s = self.supply
         s.touch()                        # any command proves a client is alive
@@ -182,6 +205,10 @@ class KepcoService:
                 s.set_mode(str(msg["mode"]))
             elif cmd == "set_output":
                 s.set_output(bool(msg["on"]))
+            elif cmd == "output_off":
+                # the SAFETY verb: set_output(False), but a verb of its own so
+                # a viewer may send it (it can only make things safer)
+                s.output_off()
             elif cmd == "output_off_now":
                 s.output_off_now()
             elif cmd == "set_current":

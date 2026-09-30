@@ -19,6 +19,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..smu import SourceMeter
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -48,6 +49,20 @@ class K2450Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a SourceMeter the one
+        #   "make it safe" action is `output_off` (the GUI's Output OFF): a
+        #   viewer who sees a sample driven where it should not be must be able
+        #   to take the source away. `set_output` is NOT in the list even
+        #   though on=false is the same thing -- the same verb also switches
+        #   the output ON. `acquire` is not safety either: a trigger replaces
+        #   the sample other clients wait on.
+        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        self.control = ControlLease(
+            safety={"output_off"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -109,6 +124,8 @@ class K2450Service:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.smu.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.2) -> int:
@@ -158,6 +175,11 @@ class K2450Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         s = self.smu
         try:
