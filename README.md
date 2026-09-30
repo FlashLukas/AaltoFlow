@@ -10,6 +10,11 @@ a new folder, and it appears in the launcher, the control panel and the scan
 builder by itself. The companion data viewer is
 [AaltoView](https://github.com/FlashLukas/AaltoView).
 
+Several people can work on one setup at once: the first GUI to connect **controls**
+an instrument, every other window on another PC is a live **viewer**, and the
+STOP / RF-off buttons work from all of them -- see
+[Control](#control----one-controller-many-viewers).
+
 *Aalto* is Finnish for "wave". AaltoFlow was born as the Python replacement of
 the LabVIEW software of the TR-MOKE (time-resolved magneto-optical Kerr effect)
 setup of the NanoSpin group, Aalto University, and was called TRMOKE until
@@ -111,6 +116,171 @@ add services running on other PCs, and shows each module's variables as the
 service reports them. It never imports the instrument packages; it only spawns
 their scripts, so there is no version coupling. The measurement suite follows
 what the launcher has.
+
+## Control -- one controller, many viewers
+
+Every module is a network service, so many clients can be connected to one
+instrument at the same time: GUIs on several PCs, the measurement suite,
+scan-core, another module (the camera drives the piezo stages), scripts and
+consoles. That is what makes remote work and teaching possible -- and it is
+also how a trainee's click on another PC ends up moving a stage under somebody
+else's measurement. AaltoFlow therefore has one rule for all 38 modules:
+
+> **One PC controls an instrument; everybody else watches.** The first GUI to
+> connect gets control. Every later GUI opens as a **viewer**: it sees all
+> readouts live, but nothing in it can be changed -- except the buttons that
+> make the instrument *safe* (STOP, RF off, output off, ...). Control changes
+> hands only by a deliberate "Take control".
+
+The GUI that holds control shows a quiet line at the top of its window -- who
+else is watching, and which programs are driving the instrument as well:
+
+![a GUI that holds control](front-panels/control-holder.png)
+
+The same instrument seen from another PC. The amber bar says who has control
+and since when. Every knob swallows its clicks; a blocked click flashes the bar
+red and says why, and **RF Off** still works because it is a safety verb:
+
+![a viewer GUI](front-panels/control-viewer.png)
+
+### The rules
+
+- **The service enforces it, not the GUI.** Every request may carry a
+  `"client": {"id", "kind", "name", "host"}`. The first thing a service does with
+  a command (`ControlLease.handle`, in `control.py`) is check who sent it. A
+  command that would change something is refused unless it comes from the
+  holder's PC, with `{"ok": false, "refused": "control", "error": "read-only:
+  <who> has control since hh:mm ... take control first"}`. The client libraries
+  raise `ControlRefused` on that reply, so a script never believes a setting
+  was taken when it was not. The viewer bar in the GUI only makes this visible
+  -- it is not what protects the instrument.
+- **Control belongs to a PC, not to a window.** Any client whose `host`
+  (`user@PC`) names the holder's PC may change things, keep control alive and
+  release it: a GUI and a console on the same PC work together. A window on a
+  different PC is a viewer.
+- **Always allowed, for everyone:** reading (`status`, `info`, `describe`,
+  `get_config`, every `get_*` / `read_*` / `list_*` verb, plus a module's own
+  read verbs such as `stream_read`), the module's **safety verbs** (below),
+  `shutdown` (the launcher's clean stop) and the control verbs themselves. A
+  person who sees a stage run away must be able to stop it from any window.
+- **Safety verbs only make things safe.** If a module's only "off" is a
+  setter that can also switch something *on* (`set_rf(false)`,
+  `set_output(false)`), the module has a dedicated verb that can only switch
+  off (`rf_off`, `output_off`, `ramp_to_zero`, ...). Acquisition triggers
+  (`acquire`, `take_reference`) are *not* safety: a new trigger replaces the
+  sample another client is waiting for. Every safety verb is also an action in
+  the module's `describe`, so the suite's Control tab can offer it to a viewer.
+- **Machines are not locked out.** A client with `kind: "machine"` passes the
+  lock: the camera moving the piezo stages during an autofocus, the
+  signal-generator module driving the Signal Hound's tracking generator,
+  scan-core during a scan. Opening a GUI must never break a running autofocus.
+  So that a moving stage is never a mystery, a machine that changed something
+  in the last 10 s is shown as **"also driving: <name>"** in every control bar
+  and in the suite.
+- **A silent holder loses control.** Clients send a `heartbeat` every 2 s. A
+  holder that has been silent for 10 s (a crashed GUI, a closed laptop) loses
+  control, so no instrument stays locked for good.
+- **Taking over is announced.** `take_control` succeeds when nobody holds
+  control. `take_control(force=True)` ("Take control" in a viewer, `take!` in
+  a console) takes it over from another PC (the GUI asks first); the old
+  holder becomes a viewer, and its log says who took over.
+- **Nobody holding control means no lock.** With no holder every command
+  passes, with or without an identity, exactly as before. A headless setup and
+  an old script therefore keep working unchanged.
+- **A script is a client like any other.** A script or console (`kind:
+  "script"`) can always read and stop. While a GUI on another PC holds control
+  it must take control before it may change anything, and that take-over is
+  visible to the GUI it took it from.
+
+### Scans and control
+
+- **A scan needs control.** Before anything moves, scan-core claims every
+  instrument the scan uses (`claim_scan`). The claim is refused while another
+  PC holds control of one of them: the scan stops with `ScanBusy` naming the
+  holder, and nothing has been sent. If the scan's own PC holds control, the
+  person keeps it afterwards. If nobody holds control, the scan's PC takes it
+  for the length of the scan, and it is freed again at the end (also after an
+  abort or an error).
+- **One scan at a time per instrument.** While a scan holds the claim, a
+  second scan engine is refused (`busy: scan '<label>' from <who> ... since
+  hh:mm`), whether it runs on the same PC or on another one. Heartbeats keep
+  the claim alive through long settles, and a crashed scan frees it after 10 s.
+  Control bars and the Control tab show `scan '<label>' running (<PC>)`.
+
+### In the measurement suite
+
+The suite's Control tab counts as a person, not a machine: its clicks go out as
+a GUI client, while its scan engine stays a machine. A strip of chips at the
+top shows the state of every connected module -- green ● you have control,
+amber ◆ another PC has it, grey ○ nobody has it (▶ while a scan runs). The
+tooltip says who and since when, and a click on a chip offers Take control or
+Release. A padlock on each module in the AVAILABLE tree shows the same state.
+While another PC holds control, the tab greys that module's knobs, except
+the actions the service still accepts. The suite does not take control by
+itself when it connects.
+
+![the Control tab with control chips](front-panels/suite-control.png)
+
+Above, this PC holds clMag (●), a GUI on another PC holds kim and hf2 (◆, closed
+padlocks), and smb and piezo are free (○).
+
+### From a script or a console
+
+```python
+from kim.net.client import KimClient
+
+c = KimClient(host="lab-pc", kind="script", name="my alignment script")
+c.start()                         # starts the heartbeat as well
+c.take_control()                  # False if a GUI on another PC holds it ...
+c.take_control(force=True)        # ... this takes it over (the GUI is told)
+c.move_to_step(0, 4000)           # raises ControlRefused if control was lost
+c.release_control()
+c.close()
+```
+
+Every console (`scripts/<module>_console.py`) has `take`, `take!` (take
+over), `release` and `clients` (who holds control, who is connected), and
+sends heartbeats while it is open.
+
+### What counts as safety, per module
+
+| module | safety verbs (always allowed) | extra read verbs |
+|---|---|---|
+| agilis, ddr25, smaract | `stop` | `stream_read` |
+| elliptec, piezo, stage | `stop` | |
+| kim | `stop`, `abort_px_calibration` | `stream_read` |
+| chopper | `stop` (wheel to standby) | |
+| camera | `kill_af`, `cancel_laser_target` | `stream_read`, `camera_features` |
+| clMag | `ramp_to_zero` | `aux_read_ai` |
+| mag2d, mag2dcal | `zero`, `output_off` (mag2dcal: `zero` also aborts a calibration) | |
+| kepco | `output_off` (ramped), `output_off_now` | `ping` |
+| k2450, dsphase | `output_off` | |
+| sr830 | `output_off` (SINE OUT to its minimum, AUX OUTs to 0 V) | `stream_read` |
+| sr7230 | `output_off` (oscillator to 0 V) | `stream_read` |
+| smb, hp8648, dssg, shsg | `rf_off` | |
+| windfreak | `all_rf_off` | |
+| superk | `emission_off` | `ping` |
+| dsamp | `amp_off` | |
+| tc200 | `heater_off` | |
+| cs260 | `abort`, `close_shutter` | |
+| gsp818 | `abort`, `tg_off` | |
+| signalhound | `abort`, `tg_abort` | `tg_grid` |
+| ccs200, shsna, vna | `abort` | |
+| pm16 | `cancel_zero` | `stream_read` |
+| pm400 | `cancel_zero` | |
+| hf2 | -- (drives no output) | `stream_read` |
+| ls455 | -- (a gaussmeter: nothing to switch off) | `reread_probe` |
+| ppms | -- (every verb is a setpoint or a rate) | |
+| usb6001 | -- (an output value that is safe depends on the setup) | |
+| zpiezo | -- (a voltage is a focus position; nothing moves on its own) | |
+
+The lock guards against mistakes between people who follow the rules. It is
+**not security**: the `kind` is declared by the client itself, and whoever
+reaches the port can send anything. The firewall is what keeps other people
+out. The full rules and the reasons behind them are in
+[docs/DEVELOPER_NOTES.md](docs/DEVELOPER_NOTES.md), section 4 ("Control");
+how to add control to a new module is in
+[INSTRUMENT_MODULE_GUIDE.md](INSTRUMENT_MODULE_GUIDE.md), section 6.
 
 ## Adding a module
 
