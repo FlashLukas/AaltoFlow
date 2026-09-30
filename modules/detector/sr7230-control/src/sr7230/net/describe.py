@@ -286,6 +286,10 @@ def build_manifest(lockin) -> dict:
            wait=auto_wait, help="Auto sensitivity, then auto phase (ASM)."),
         _p("auto_busy", "Auto operation running", "indicator", "bool", group="Auto",
            order=10, read_path=["auto_busy"]),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("output_off", "Oscillator off", "action", "action", group="Reference", order=90,
+           help="OSC OUT amplitude to 0 V. Allowed for anyone, also a viewer."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,

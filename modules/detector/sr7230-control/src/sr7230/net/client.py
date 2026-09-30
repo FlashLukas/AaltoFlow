@@ -18,6 +18,7 @@ import time
 import zmq
 
 from ..config import Config
+from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, config_to_dict, apply_config_dict)
 
@@ -68,11 +69,21 @@ class RemoteStatus:
         self.describe_rev = d.get("describe_rev")
 
 
-class Sr7230Client:
+class Sr7230Client(ControlClient):
+    """``kind`` / ``name``: who this client is to the service (control.py) --
+    "gui" for a window, "script" (default) for a script or console, "machine"
+    only for a program that must not be locked out (scan-core, another
+    module). While a GUI on another PC holds control, a script must
+    ``take_control()`` before it may change anything; a refused command
+    raises ``ControlRefused``."""
+
     def __init__(self, host: str = "localhost",
                  cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int = DEFAULT_PUB_PORT,
-                 timeout_ms: int = 3000):
+                 timeout_ms: int = 3000,
+                 kind: str = "script",
+                 name: str = "sr7230 client"):
+        self._control_setup(kind, name)
         self._timeout_ms = timeout_ms
         self._ctx = zmq.Context.instance()
         self._req = self._new_req(f"tcp://{host}:{cmd_port}")
@@ -95,6 +106,7 @@ class Sr7230Client:
     def start(self) -> dict:
         """Fetch static info and pull the service's config into self.cfg."""
         info = self.info()
+        self.start_heartbeat()   # "still here": counted as a viewer / keeps control
         self.get_config()
         return info
 
@@ -122,6 +134,11 @@ class Sr7230Client:
 
     def set_amplitude(self, volts: float):
         return self._cmd({"cmd": "set_amplitude", "amplitude_V": float(volts)})
+
+    def output_off(self):
+        """OSC OUT amplitude to 0 V -- the safety verb, allowed also while
+        viewing."""
+        return self._cmd({"cmd": "output_off"})
 
     def set_phase(self, deg: float):
         return self._cmd({"cmd": "set_phase", "phase_deg": float(deg)})
@@ -190,6 +207,7 @@ class Sr7230Client:
 
     def shutdown(self):
         """Close the client. Does NOT stop the remote service."""
+        self.stop_heartbeat()
         self._stop.set()
         time.sleep(0.25)
         self._req.close(0)
@@ -215,10 +233,11 @@ class Sr7230Client:
         return s
 
     def _cmd(self, d: dict) -> dict:
+        self._with_identity(d)           # say who we are (control.py)
         with self._req_lock:
             self._req.send_json(d)
             try:
-                return self._req.recv_json()
+                reply = self._req.recv_json()
             except zmq.Again:
                 # a timed-out REQ socket is stuck; rebuild it
                 endpoint = self._req.LAST_ENDPOINT
@@ -226,6 +245,15 @@ class Sr7230Client:
                 self._req = self._new_req(endpoint.decode() if isinstance(endpoint, bytes)
                                           else endpoint)
                 return {"ok": False, "error": "service did not respond (timeout)"}
+        # Refused because another PC holds control: RAISE (ControlRefused), so
+        # a script never believes the instrument took a setting it refused.
+        if not reply.get("ok", False):
+            self._raise_refusal(reply)
+        return reply
+
+    def _rpc(self, **req) -> dict:
+        """The name control.py's ControlClient calls (heartbeat, take_control)."""
+        return self._cmd(req)
 
     def _listen(self):
         poller = zmq.Poller()
@@ -240,5 +268,6 @@ class Sr7230Client:
                 if topic == TOPIC_STATUS:
                     with self._lock:
                         self._latest = d
+                    self._control_from_status(d)
                 elif topic == TOPIC_EVENT:
                     self._on_event(d.get("level", "info"), d.get("msg", ""))

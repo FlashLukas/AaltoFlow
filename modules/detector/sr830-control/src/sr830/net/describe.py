@@ -300,6 +300,11 @@ def build_manifest(lockin) -> dict:
            read_path=["auto_id"]),
         _p("auto_note", "Last auto result", "indicator", "string", group="Auto",
            order=12, read_path=["auto_note"]),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("output_off", "Outputs off", "action", "action", group="Reference", order=90,
+           help="SINE OUT to its 4 mV minimum (an SR830 cannot switch it off) and "
+                "every AUX OUT to 0 V. Allowed for anyone, also a viewer."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,

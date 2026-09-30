@@ -182,7 +182,10 @@ def build_manifest(meter) -> dict:
         _p("zero", "Zero (dark adjust)", "action", "action", group="Zero", order=1,
            danger=True,
            help="COVER THE SENSOR FIRST: whatever light reaches it becomes the new zero."),
-        _p("cancel_zero", "Cancel zero", "action", "action", group="Zero", order=2),
+        # a SAFETY verb (control.py): a viewer may always cancel a zero
+        _p("cancel_zero", "Cancel zero", "action", "action", group="Zero", order=2,
+           help="Stop a running zero adjustment; the previous zero stays. "
+                "Allowed for anyone, also a viewer."),
         _p("zeroing", "Zeroing", "indicator", "bool", group="Zero", order=3,
            read_path=["zeroing"]),
         _p("dark_offset", "Dark offset", "indicator", "float", unit="A",

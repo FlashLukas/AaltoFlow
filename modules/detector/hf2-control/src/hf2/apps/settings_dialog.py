@@ -78,6 +78,10 @@ class SettingsPanel(QtWidgets.QWidget):
         revert = QtWidgets.QPushButton("Revert")
         revert.setToolTip("Throw away edits here and show the settings in use")
         revert.clicked.connect(self.reload)
+        # kept as attributes so a remote GUI can leave the two that only READ
+        # (save the form to a file, show the settings in use) usable for a
+        # viewer (control_bar.mark_always); Load applies, so it stays guarded
+        self.save_btn, self.revert_btn = save_btn, revert
         self.bar.addWidget(load_btn); self.bar.addWidget(save_btn); self.bar.addStretch(1)
         self.bar.addWidget(revert)
 

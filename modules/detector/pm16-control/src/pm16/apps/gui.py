@@ -24,6 +24,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
+from ..control import ControlRefused
 
 
 class Bridge(QtCore.QObject):
@@ -185,11 +187,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._paused = False
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its meter and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -205,6 +220,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -218,6 +238,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         header.addWidget(settings_btn)
         col.addLayout(header)
 
@@ -236,7 +257,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wl_spin.setDecimals(1); self.wl_spin.setSingleStep(1.0); self.wl_spin.setSuffix("  nm")
         self.wl_spin.setRange(self.cfg.limits.wavelength_min_nm, self.cfg.limits.wavelength_max_nm)
         b = QtWidgets.QPushButton("Set"); b.setObjectName("primary")
-        b.clicked.connect(lambda: self.ctrl.set_wavelength(self.wl_spin.value()))
+        b.clicked.connect(lambda: self._safe(self.ctrl.set_wavelength, self.wl_spin.value()))
         row.addWidget(self.wl_spin, 1); row.addWidget(b)
         wlay.addLayout(row)
         col.addWidget(wcard)
@@ -244,14 +265,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # range
         rcard, rlay = _card("Range")
         self.auto_chk = QtWidgets.QCheckBox("Auto range")
-        self.auto_chk.clicked.connect(lambda on: self.ctrl.set_auto_range(on))  # .clicked: user only
+        self.auto_chk.clicked.connect(lambda on: self._safe(self.ctrl.set_auto_range, on))  # .clicked: user only
         rlay.addWidget(self.auto_chk)
         row = QtWidgets.QHBoxLayout()
         self.range_spin = QtWidgets.QDoubleSpinBox()
         self.range_spin.setDecimals(4); self.range_spin.setSuffix("  mW")
         self.range_spin.setRange(0.0, self.cfg.limits.range_max_W * 1e3)
         self.range_set = QtWidgets.QPushButton("Set"); self.range_set.setObjectName("primary")
-        self.range_set.clicked.connect(lambda: self.ctrl.set_range(self.range_spin.value() * 1e-3))
+        self.range_set.clicked.connect(
+            lambda: self._safe(self.ctrl.set_range, self.range_spin.value() * 1e-3))
         row.addWidget(self.range_spin, 1); row.addWidget(self.range_set)
         rlay.addLayout(row)
         self.range_label = QtWidgets.QLabel("—"); self.range_label.setObjectName("hint")
@@ -265,7 +287,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.readings_spin.setRange(self.cfg.limits.readings_min, self.cfg.limits.readings_max)
         self.readings_spin.setSuffix("  readings")
         b = QtWidgets.QPushButton("Set")
-        b.clicked.connect(lambda: self.ctrl.set_acquisition(self.readings_spin.value()))
+        b.clicked.connect(lambda: self._safe(self.ctrl.set_acquisition, self.readings_spin.value()))
         row.addWidget(self.readings_spin, 1); row.addWidget(b)
         alay.addLayout(row)
         self.acq_btn = QtWidgets.QPushButton("Acquire"); self.acq_btn.setObjectName("primary")
@@ -285,6 +307,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zero_btn.setObjectName("danger"); self.zero_btn.setMinimumHeight(36)
         self.zero_btn.clicked.connect(self._zero)
         col.addWidget(self.zero_btn)
+        # the SAFETY verb (net/service.py): stop a zero started by mistake (the
+        # old zero stays). Enabled only while a zero runs; works for a viewer.
+        self.cancel_zero_btn = QtWidgets.QPushButton("Cancel zero")
+        self.cancel_zero_btn.setToolTip("Stop the running zero adjustment; the previous "
+                                        "zero stays. Works also for a viewer.")
+        self.cancel_zero_btn.setEnabled(False)
+        self.cancel_zero_btn.clicked.connect(lambda: self._safe(self.ctrl.cancel_zero))
+        mark_always(self.cancel_zero_btn)
+        col.addWidget(self.cancel_zero_btn)
         return panel
 
     def _build_main(self) -> QtWidgets.QWidget:
@@ -327,6 +358,8 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.pause_btn)
         clear = QtWidgets.QPushButton("Clear"); clear.clicked.connect(self._hist.clear)
         bar.addWidget(clear)
+        # these only change what THIS window shows: fine for a viewer
+        mark_always(self.window_combo, self.pause_btn, clear)
         bar.addStretch(1)
         self.stats_label = QtWidgets.QLabel(""); self.stats_label.setObjectName("hint")
         bar.addWidget(self.stats_label)
@@ -357,6 +390,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return w, curve
 
     # ---- actions ---------------------------------------------------------
+
+    def _safe(self, fn, *args):
+        """Run a setter from a button; a refusal lands in the log instead of
+        an unhandled exception in a Qt slot. The service refuses a change from
+        a viewer (ControlRefused; normally the viewer guard stops the click
+        first); a local meter raises ValueError on a bad value."""
+        try:
+            return fn(*args)
+        except (ControlRefused, ValueError, RuntimeError) as exc:
+            self._on_event("warn", str(exc))
+            return None
 
     def _acquire(self):
         try:
@@ -410,6 +454,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.auto_chk.blockSignals(False)
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         now = time.monotonic()
 
@@ -453,6 +499,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acq_bar.setValue(int(100 * s.acq_progress) if s.acquiring else 0)
         self.acq_btn.setEnabled(bool(s.connected) and not s.acquiring and not s.zeroing)
         self.zero_btn.setEnabled(bool(s.connected) and not s.acquiring and not s.zeroing)
+        self.cancel_zero_btn.setEnabled(bool(s.zeroing))
         smp = s.sample
         if smp and smp.get("acq_id") != self._last_acq:
             self._last_acq = smp.get("acq_id")

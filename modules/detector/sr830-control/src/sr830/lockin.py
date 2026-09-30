@@ -496,6 +496,23 @@ class DspLockIn:
         else:
             self._emit("info", f"aux out {k} = {value:+.3f} V")
 
+    # ---- output off (the safety verb) ------------------------------------------------
+
+    def output_off(self) -> None:
+        """Take what the lock-in drives off the sample: SINE OUT to its 4 mV
+        minimum (an SR830 cannot switch it off) and every AUX OUT to 0 V --
+        the same as a clean stop does (config.Safety), but at any time.
+
+        A verb of its own, not set_sine_out(min) / set_aux_out(k, 0): over the
+        wire it is the SAFETY verb a viewer may always send (net/service.py,
+        control), and those setters can also turn an output UP. Like them it
+        is refused while an auto function runs (the SR830 is busy then; it
+        takes a few seconds at most).
+        """
+        self.set_sine_out(self.cfg.limits.sine_min_V)
+        for k in (1, 2, 3, 4):
+            self.set_aux_out(k, 0.0)
+
     # ---- auto functions ------------------------------------------------------------------
 
     def auto_gain(self) -> int:
