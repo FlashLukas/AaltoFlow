@@ -69,6 +69,26 @@ def test_the_claim_is_given_back_after_an_abort_and_after_an_error(svc, monkeypa
         lab.close()
 
 
+def test_a_scan_needs_control_of_its_instruments(svc):
+    """Lukas: a scan must have control, like a person -- refused while
+    ANOTHER PC holds it, before anything is sent."""
+    from suite_common.control import make_identity
+    trainer = make_identity("gui", "kim GUI")
+    trainer["host"] = "trainer@another-pc"
+    svc.lease.handle({"cmd": "take_control", "client": trainer})
+    reg, lab = _lab(svc.cmd_port)
+    try:
+        n = len(svc.sent)
+        with pytest.raises(ScanBusy, match="another-pc"):
+            run(_recipe(), reg)
+        assert not any(m.get("cmd") == "set_power" for m in svc.sent[n:])
+        svc.lease.handle({"cmd": "release_control", "client": trainer})
+        run(_recipe(), reg)                              # nobody: it runs...
+        assert svc.lease.status()["holder"] is None      # ...and frees control after
+    finally:
+        lab.close()
+
+
 def test_a_service_that_predates_the_claim_still_scans_with_a_warning():
     old = FakeService(15898, manifest=CONTROLLED_MANIFEST).start()
     reg, lab = _lab(old.cmd_port)

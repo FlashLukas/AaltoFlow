@@ -41,6 +41,9 @@ The rules (docs/DEVELOPER_NOTES.md, "Control: one controller, many viewers"):
   no scan role) and people keep their rules; only two scans are kept apart.
   The claim lapses like control (no heartbeat for ``lease_s``), so a crashed
   scan frees its instruments.
+* A scan needs CONTROL as well: its claim is refused while another PC holds
+  control; when nobody does, the scan's PC takes control for the scan and
+  gives it back at the end (a GUI elsewhere is a viewer meanwhile).
 * Nobody holds control -> everything is allowed, with or without an id, as
   before this file existed (a headless setup with no GUI works unchanged).
 * ``take_control{force: false}`` takes control only when it is free;
@@ -183,7 +186,7 @@ class ControlLease:
                                   f"{self.lease_s:.0f} s -- control is free")
         if self._scan is not None and now - self._scan_seen > self.lease_s:
             old = self._scan
-            self._scan = None
+            self._end_scan()
             self.on_event("warn", f"scan: '{old.get('label')}' ({describe_holder(old)}) "
                                   f"went silent for {self.lease_s:.0f} s -- the "
                                   "instrument is free for another scan")
@@ -242,7 +245,7 @@ class ControlLease:
             if cmd == "release_scan":
                 if ident is not None and self._scan is not None \
                         and self._scan["id"] == ident["id"]:
-                    self._scan = None
+                    self._end_scan()
                     return {"ok": True, "released": True}
                 return {"ok": True, "released": False}
 
@@ -273,6 +276,15 @@ class ControlLease:
                              f"(since {since}); {cmd!r} was not sent -- {hint}",
                     "control": self._status_locked(now)}
 
+    def _end_scan(self) -> None:
+        # caller holds the lock. Control the scan took only for itself (nobody
+        # had it) goes back to "nobody"; control a person holds stays theirs.
+        s = self._scan
+        self._scan = None
+        h = self._holder
+        if s is not None and h is not None and h.get("by_scan") and h["id"] == s["id"]:
+            self._holder = None
+
     def _busy_text(self, cmd=None) -> str:
         # caller holds the lock
         s = self._scan or {}
@@ -289,6 +301,23 @@ class ControlLease:
         if self._scan is not None and self._scan["id"] != ident["id"]:
             return {"ok": False, "refused": "scan", "error": self._busy_text(),
                     "control": self._status_locked(now)}
+        # A scan needs CONTROL too (Lukas: "I don't know why you would not want
+        # this"): refused while ANOTHER PC holds it; allowed when its own PC
+        # does; and when nobody does, the scan's PC takes control for the
+        # length of the scan (freed at release_scan / when the scan goes silent)
+        # -- a GUI opened meanwhile elsewhere is a viewer, not a second driver.
+        h = self._holder
+        if h is not None and not same_pc(h, ident):
+            since = time.strftime("%H:%M", time.localtime(h.get("since", 0)))
+            return {"ok": False, "refused": "control",
+                    "error": f"read-only: {describe_holder(h)} has control of this "
+                             f"instrument (since {since}); a scan needs control -- take "
+                             "control first (a GUI or the suite's Control tab), or ask "
+                             "them to release it",
+                    "control": self._status_locked(now)}
+        if h is None:
+            self._holder = dict(ident, since=time.time(), by_scan=True)
+            self._holder_seen = now
         fresh = self._scan is None
         self._scan = dict(ident, label=label, since=time.time()) if fresh \
             else dict(self._scan, label=label)

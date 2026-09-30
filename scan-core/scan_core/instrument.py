@@ -209,7 +209,9 @@ class Instrument:
         True = claimed; the claim is kept alive by heartbeats until
         `release_scan`. False = the service predates the claim (it answers
         "unknown command") -- it cannot be protected, the caller decides what
-        to say. Raises ScanBusy when another scan holds it.
+        to say. Raises ScanBusy when another scan holds it, or another PC holds
+        control of it (when nobody does, the service gives this scan's PC
+        control until release_scan).
         """
         try:
             self.command("claim_scan", label=label)
@@ -217,7 +219,9 @@ class Instrument:
             text = str(exc)
             if "unknown command" in text:
                 return False
-            if "busy: scan" in text:
+            # another scan holds it, or another PC holds CONTROL (a scan
+            # needs control too): refused before anything moved
+            if "busy: scan" in text or "read-only:" in text:
                 raise ScanBusy(text, self.name) from None
             raise
         self._scan_beat = True

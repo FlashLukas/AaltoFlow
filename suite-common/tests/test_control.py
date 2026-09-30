@@ -176,6 +176,37 @@ def test_only_one_scan_may_drive_an_instrument():
     assert l.handle(req("claim_scan", s3, label="next"))["granted"]
 
 
+def test_a_scan_needs_control():
+    """Lukas: a scan must have control of its instruments, like a person."""
+    l, _, _ = lease()
+    trainee = ident("kim GUI", host="student@pc7")
+    lab_gui = ident("kim GUI", host="lab@lab-pc")
+    lab_scan = _scan_engine(host="lab@lab-pc")
+    office_scan = _scan_engine(host="me@office")
+
+    # another PC holds control: refused, named, nothing claimed
+    l.handle(req("take_control", trainee))
+    r = l.handle(req("claim_scan", lab_scan, label="map"))
+    assert r["ok"] is False and r["refused"] == "control" and "student@pc7" in r["error"]
+    assert l.status()["scan"] is None
+    l.handle(req("release_control", trainee))
+
+    # its own PC holds control: allowed, and the person keeps it afterwards
+    l.handle(req("take_control", lab_gui))
+    assert l.handle(req("claim_scan", lab_scan, label="map"))["granted"]
+    l.handle(req("release_scan", lab_scan))
+    assert l.status()["holder"]["id"] == lab_gui["id"]
+    l.handle(req("release_control", lab_gui))
+
+    # nobody holds it: the scan's PC takes control for the scan, then frees it
+    assert l.handle(req("claim_scan", office_scan, label="map"))["granted"]
+    assert l.status()["holder"]["id"] == office_scan["id"]
+    assert l.handle(req("move_to_um", trainee))["refused"] == "control"
+    assert l.handle(req("take_control", trainee))["granted"] is False
+    l.handle(req("release_scan", office_scan))
+    assert l.status()["holder"] is None
+
+
 def test_a_crashed_scan_frees_the_instrument():
     l, clock, events = lease(lease_s=10)
     s1, s2 = _scan_engine(), _scan_engine()
