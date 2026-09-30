@@ -188,6 +188,18 @@ def test_an_unreadable_key_file_is_reported_not_silently_skipped(pc, monkeypatch
         "security: keyring file skipped -- office.key: cannot be read (permissions?)"]
 
 
+def test_security_lines_also_reach_the_console(pc, capsys):
+    """On the lab PC the lines went only to the event stream: the start line
+    reached no GUI (none connected yet), so the console never showed that a
+    service was encrypted (2026-09-30). They are printed as well, once each."""
+    _d, kr = pc
+    g = secure.Guard("kim", "warn", secure.Keyring(kr), _key("C"), "lab", None)
+    g.check({"client": {"kind": "machine", "host": "u@elsewhere"}}, _key("C"))
+    g.check({"client": {"kind": "machine", "host": "u@elsewhere"}}, _key("C"))
+    out = capsys.readouterr().out
+    assert out.count("[warn] security:") == 1 and "elsewhere" in out and out.isascii()
+
+
 def test_the_master_is_ascii_and_imports_no_zmq_at_top():
     from pathlib import Path
     text = Path(secure.__file__).read_text(encoding="utf-8")

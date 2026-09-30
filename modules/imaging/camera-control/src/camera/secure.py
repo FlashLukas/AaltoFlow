@@ -373,6 +373,7 @@ class Guard:
         if key in self._warned:                # once per problem, not per message
             return
         self._warned.add(key)
+        _to_console(level, f"security: {msg}")
         self.on_event(level, f"security: {msg}")
 
     # ZAP: may this key connect at all?
@@ -554,9 +555,23 @@ def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
         s.curve_secretkey = secret.encode("ascii")
         s.curve_publickey = public.encode("ascii")
         s.curve_server = True
-    on_event and on_event("info", f"security: {module} is encrypted (CurveZMQ, "
-                                  f"mode '{pol['mode']}')")
+    line = f"security: {module} is encrypted (CurveZMQ, mode '{pol['mode']}')"
+    _to_console("info", line)
+    on_event and on_event("info", line)
     return guard
+
+
+def _to_console(level: str, msg: str) -> None:
+    """Every security line also goes to the service's console (stdout: the
+    window it runs in, or the launcher's log). The event stream alone lost
+    them: a line said at start reaches no GUI -- none is connected yet --
+    and a warning only reaches the GUIs open at that moment (found on the
+    lab PC, 2026-09-30). ASCII, flushed (gotchas #14, #19)."""
+    try:
+        text = msg.encode("ascii", "replace").decode("ascii")
+        print(f"[{level}] {text}", flush=True)
+    except Exception:
+        pass                                   # a console problem must not stop the service
 
 
 def release_server(guard: Guard | None) -> None:
