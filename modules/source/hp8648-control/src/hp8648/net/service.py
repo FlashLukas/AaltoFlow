@@ -22,6 +22,7 @@ import time
 import zmq
 
 from .. import spec
+from ..control import ControlLease
 from ..source import SignalSource
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -50,6 +51,20 @@ class Hp8648Service:
         self._stopped = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a signal generator the
+        #   one "make it safe" action is RF off, so it is `rf_off` (the GUI's
+        #   "RF Off" button): a viewer who sees the output hit something it
+        #   should not must be able to take it away. `set_rf` is NOT in the
+        #   list even though on=false is the same thing -- the same verb also
+        #   switches the RF ON (and re-arms the reverse-power protection).
+        #   The 8648 runs no sweep here, so there is nothing else to stop.
+        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        self.control = ControlLease(
+            safety={"rf_off"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -122,6 +137,8 @@ class Hp8648Service:
         """
         st = status_to_dict(self.src.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self) -> int:
@@ -173,10 +190,19 @@ class Hp8648Service:
     def _dispatch(self, msg: dict) -> dict:
         if not isinstance(msg, dict):
             return {"ok": False, "error": "a command must be a JSON object"}
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         try:
             if cmd == "set_rf":
                 self.src.set_rf(_bool(msg["on"]))
+            elif cmd == "rf_off":
+                # the SAFETY verb: set_rf(False), but a verb of its own so a
+                # viewer may send it (it can only make things safer)
+                self.src.rf_off()
             elif cmd == "set_power":
                 self.src.set_power(float(msg["power_dBm"]))
             elif cmd == "set_frequency":

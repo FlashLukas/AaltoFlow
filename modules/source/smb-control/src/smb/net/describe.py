@@ -137,6 +137,10 @@ def build_manifest(gen) -> dict:
            order=1, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
            read_path=["idn"]),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("rf_off", "RF off", "action", "action", group="Output", order=90,
+           help="Switch the RF output off. Allowed for anyone, also a viewer."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "smb",
                 "label": "RF signal generator", "parameters": params}

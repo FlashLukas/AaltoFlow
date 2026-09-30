@@ -50,6 +50,8 @@ def test_manifest_shape_and_required_fields():
                 assert "set" in p and "verb" in p["set"] and "arg" in p["set"], p["id"]
                 # a settle key the status does not publish would hang a scan
                 assert p["settle"]["key"] in status, p["id"]
+            if p["kind"] == "action":
+                continue        # a button (the safety verb rf_off): nothing to read back
             assert p["read_path"], p["id"]
             assert read_path(status, p["read_path"]) is not None, p["id"]
     finally:

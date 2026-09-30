@@ -243,6 +243,12 @@ class Synthesizer:
         self._push(self.backend.set_output, self._rf_on)
         self._emit("info", f"RF {'ON' if self._rf_on else 'OFF'}")
 
+    def rf_off(self) -> None:
+        """RF off. Same as set_rf(False); a name of its own because over the
+        wire it is the SAFETY verb a viewer may always send (net/service.py,
+        control)."""
+        self.set_rf(False)
+
     def set_frequency(self, hz: float) -> None:
         lim = self.limits()
         value, clamped = _clamp(float(hz), lim["freq_min_Hz"], lim["freq_max_Hz"])
