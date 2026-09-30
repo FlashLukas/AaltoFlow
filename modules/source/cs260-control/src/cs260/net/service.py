@@ -22,6 +22,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..monochromator import Monochromator
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -51,6 +52,20 @@ class Cs260Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send:
+        #   * `abort` -- stop the wavelength drive and drop queued moves;
+        #   * `close_shutter` -- block the light at the exit slit (a viewer who
+        #     sees light going onto a sample or a detector that must stay dark
+        #     must be able to stop it). A verb of its own because `set_shutter`
+        #     is NOT safety: the same verb also OPENS the shutter.
+        #   Not safety: `step` / `calibrate` (they move or rewrite the drive).
+        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        self.control = ControlLease(
+            safety={"abort", "close_shutter"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -117,6 +132,8 @@ class Cs260Service:
         """
         st = status_to_dict(self.mono.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.2) -> int:
@@ -170,6 +187,11 @@ class Cs260Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         try:
             if cmd == "set_wavelength":
@@ -179,6 +201,10 @@ class Cs260Service:
                 return {"ok": True, "grating": self.mono.set_grating(int(msg["grating"]))}
             elif cmd == "set_shutter":
                 self.mono.set_shutter(_bool(msg["open"]))
+            elif cmd == "close_shutter":
+                # a SAFETY verb: set_shutter(False), but a verb of its own so a
+                # viewer may send it (it can only make things safer)
+                self.mono.close_shutter()
             elif cmd == "set_filter":
                 return {"ok": True, "filter": self.mono.set_filter(int(msg["filter"]))}
             elif cmd == "set_port":

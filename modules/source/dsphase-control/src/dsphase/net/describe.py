@@ -119,6 +119,10 @@ def build_manifest(brain) -> dict:
            set={"verb": "set_output", "arg": "on"},
            settle={"policy": "echoes", "key": "output_on"},
            help="Output on/off, read back from the unit."),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("output_off", "RF output off", "action", "action", group="Output", order=90,
+           help="Switch the RF output off. Allowed for anyone, also a viewer."),
 
         _p("frequency", "Carrier frequency", "control", "float", unit="MHz",
            group="Phase", order=20, decimals=3, step=1.0,

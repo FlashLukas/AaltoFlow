@@ -23,6 +23,7 @@ import time
 import zmq
 
 from ..config import Config
+from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, config_to_dict, apply_config_dict)
 
@@ -60,11 +61,21 @@ class RemoteStatus:
         self.describe_rev = d.get("describe_rev")
 
 
-class ChopperClient:
+class ChopperClient(ControlClient):
+    """``kind`` / ``name``: who this client is to the service (control.py) --
+    "gui" for a window, "script" (default) for a script or console, "machine"
+    only for a program that must not be locked out (scan-core, another
+    module). While a GUI on another PC holds control, a script must
+    ``take_control()`` before it may change anything; a refused command
+    raises ``ControlRefused``."""
+
     def __init__(self, host: str = "localhost",
                  cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int = DEFAULT_PUB_PORT,
-                 timeout_ms: int = 3000):
+                 timeout_ms: int = 3000,
+                 kind: str = "script",
+                 name: str = "chopper client"):
+        self._control_setup(kind, name)
         self._ctx = zmq.Context.instance()
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
@@ -89,6 +100,7 @@ class ChopperClient:
     def start(self) -> dict:
         """Fetch static info and pull the service's config into self.cfg."""
         info = self.info()
+        self.start_heartbeat()   # "still here": counted as a viewer / keeps control
         self.get_config()
         return info
 
@@ -138,6 +150,10 @@ class ChopperClient:
     def set_enable(self, on: bool) -> int:
         return int(self._checked({"cmd": "set_enable", "on": bool(on)}).get("lock_gen", 0))
 
+    def standby(self) -> int:
+        """Stop the wheel -- the safety verb `stop`, allowed also while viewing."""
+        return int(self._checked({"cmd": "stop"}).get("lock_gen", 0))
+
     def set_blade(self, name: str) -> None:
         self._checked({"cmd": "set_blade", "blade": str(name)})
 
@@ -176,6 +192,7 @@ class ChopperClient:
 
     def shutdown(self):
         """Close the client. Does NOT stop the remote service."""
+        self.stop_heartbeat()
         self._stop.set()
         time.sleep(0.25)
         self._req.close(0)
@@ -187,14 +204,24 @@ class ChopperClient:
         return self._cmd({"cmd": "info"}).get("info", {})
 
     def _cmd(self, d: dict) -> dict:
+        self._with_identity(d)           # say who we are (control.py)
         with self._req_lock:
             self._req.send_json(d)
             try:
-                return self._req.recv_json()
+                reply = self._req.recv_json()
             except zmq.Again:
                 # timed out; the REQ socket is now in a bad state -> rebuild it
                 self._reset_req()
                 return {"ok": False, "error": "service did not respond (timeout)"}
+        # Refused because another PC holds control: RAISE (ControlRefused), so
+        # a script never believes the chopper took a setting it refused.
+        if not reply.get("ok", False):
+            self._raise_refusal(reply)
+        return reply
+
+    def _rpc(self, **req) -> dict:
+        """The name control.py's ControlClient calls (heartbeat, take_control)."""
+        return self._cmd(req)
 
     def _reset_req(self):
         endpoint = self._req.LAST_ENDPOINT
@@ -215,5 +242,6 @@ class ChopperClient:
                 if topic == TOPIC_STATUS:
                     with self._lock:
                         self._latest = d
+                    self._control_from_status(d)
                 elif topic == TOPIC_EVENT:
                     self._on_event(d.get("level", "info"), d.get("msg", ""))

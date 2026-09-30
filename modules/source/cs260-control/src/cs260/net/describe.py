@@ -153,6 +153,11 @@ def build_manifest(mono) -> dict:
            read_path=["shutter_open"],
            set={"verb": "set_shutter", "arg": "open"},
            settle={"policy": "echoes", "key": "shutter_open"}),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("close_shutter", "Close shutter", "action", "action", group="Shutter", order=31,
+           help="Close the shutter (jumps the move queue). Allowed for anyone, "
+                "also a viewer."),
     ]
     if acc.filter_wheel:
         params += [

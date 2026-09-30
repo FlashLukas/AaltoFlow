@@ -21,6 +21,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..shifter import PhaseShifter
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -50,6 +51,19 @@ class DsphaseService:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a phase shifter (an RF
+        #   path with an output switch) the one "make it safe" action is RF
+        #   output OFF, so it is `output_off` (the GUI's "RF Output Off"): a
+        #   viewer who sees RF going where it should not must be able to take
+        #   it away. `set_output` is NOT in the list even though on=false is
+        #   the same thing -- the same verb also switches the output ON.
+        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        self.control = ControlLease(
+            safety={"output_off"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -116,6 +130,8 @@ class DsphaseService:
         """
         st = status_to_dict(self.brain.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -169,10 +185,19 @@ class DsphaseService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         try:
             if cmd == "set_output":
                 self.brain.set_output(_as_bool(msg["on"]))
+            elif cmd == "output_off":
+                # the SAFETY verb: set_output(False), but a verb of its own so
+                # a viewer may send it (it can only make things safer)
+                self.brain.output_off()
             elif cmd == "set_phase":
                 self.brain.set_phase(float(msg["phase_deg"]))
             elif cmd == "set_attenuation":
