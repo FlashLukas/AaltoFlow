@@ -12,3 +12,6 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# this PC's settings (COM port, ...): lab data, never in git
+dssg.ini
