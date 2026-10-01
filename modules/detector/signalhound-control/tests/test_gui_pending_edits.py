@@ -54,6 +54,59 @@ def test_edits_survive_the_poll_until_apply(app):
         win.close()
 
 
+def test_start_and_stop_set_the_band(app):
+    """Lukas: set START and STOP instead of centre/span."""
+    from signalhound.apps.gui import MainWindow
+    cfg = Config()
+    sa, _sim = build_sim_system(cfg, realtime=False, seed=3)
+    win = MainWindow(_NoThread(sa), cfg)
+    try:
+        win._refresh()
+        win.start_spin.setValue(1.0)
+        win.stop_spin.setValue(1.2)
+        win._refresh()                             # the poll does not undo them
+        assert win.start_spin.value() == pytest.approx(1.0)
+        win._apply_sweep()
+        st = sa.status()
+        assert st.start_Hz == pytest.approx(1.0e9) and st.stop_Hz == pytest.approx(1.2e9)
+        win._refresh()                             # centre / span follow the new band
+        assert win.center_spin.value() == pytest.approx(1.1)
+        assert win.span_spin.value() == pytest.approx(200.0)
+        # a reversed band is refused, nothing sent
+        win.start_spin.setValue(1.5)
+        win.stop_spin.setValue(1.4)
+        win._apply_sweep()
+        assert sa.status().start_Hz == pytest.approx(1.0e9)
+    finally:
+        win.close()
+
+
+def test_points_choose_the_rbw_and_show_the_real_bins(app):
+    """Lukas's choice: N points = the RBW that gives about N bins; the box then
+    shows the bin count the analyser really made."""
+    from signalhound.apps.gui import MainWindow
+    cfg = Config()
+    cfg.sweep.span_Hz = 20e6
+    cfg.acquisition.sweep_on_start = True
+    sa, _sim = build_sim_system(cfg, realtime=False, seed=3)
+    win = MainWindow(_NoThread(sa), cfg)
+    try:
+        sa.step()
+        win._refresh()
+        before = sa.status().points
+        assert before >= 2 and win.points_spin.value() == before
+        win.points_spin.setValue(before * 4)       # four times finer
+        win._apply_sweep()
+        sa.step()
+        win._refresh()
+        after = sa.status().points
+        assert after > before * 2                  # the RBW really went down
+        assert sa.status().vbw_Hz <= sa.status().rbw_Hz
+        assert win.points_spin.value() == after    # shows what the analyser made
+    finally:
+        win.close()
+
+
 def test_enter_in_a_box_applies(app):
     from signalhound.apps.gui import MainWindow
     cfg = Config()

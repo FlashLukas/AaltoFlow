@@ -353,12 +353,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rbw_spin = self._dspin(lim.rbw_min_Hz / 1e3, lim.rbw_max_Hz / 1e3, 4, "  kHz", 1.0)
         self.vbw_spin = self._dspin(lim.rbw_min_Hz / 1e3, lim.rbw_max_Hz / 1e3, 4, "  kHz", 1.0)
         self.avg_spin = QtWidgets.QSpinBox(); self.avg_spin.setRange(lim.averages_min, lim.averages_max)
+        # Start / Stop: the same band as Centre / Span, the other way round
+        # (Lukas, 2026-10-01). Whichever pair was edited is what Apply sends.
+        self.start_spin = self._dspin(lim.freq_min_Hz / 1e9, lim.freq_max_Hz / 1e9, 6, "  GHz", 0.01)
+        self.stop_spin = self._dspin(lim.freq_min_Hz / 1e9, lim.freq_max_Hz / 1e9, 6, "  GHz", 0.01)
+        # Points: the SA44B chooses its own bins from span and RBW, so a number
+        # of points is reached by choosing the RBW (Lukas's choice). The box
+        # then shows the bin count the analyser really made.
+        self.points_spin = QtWidgets.QSpinBox(); self.points_spin.setRange(2, 1_000_000)
+        self.points_spin.setToolTip("Sets the RBW for about this many bins over the span; "
+                                    "shows the bins the analyser chose.")
         self.det_combo = QtWidgets.QComboBox(); self.det_combo.addItems(list(DETECTORS))
         # applies at once: it is a choice, not a number being typed
         self.det_combo.activated.connect(lambda _i: self._call(
             self.ctrl.set_detector, self.det_combo.currentText()))
         for label, wdg in (("Centre", self.center_spin), ("Span", self.span_spin),
+                           ("Start", self.start_spin), ("Stop", self.stop_spin),
                            ("Ref level", self.ref_spin), ("RBW", self.rbw_spin),
+                           ("Points (sets RBW)", self.points_spin),
                            ("VBW", self.vbw_spin), ("Detector", self.det_combo),
                            ("Averages", self.avg_spin)):
             form.addRow(label, wdg)
@@ -384,8 +396,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # an amber outline, and Apply (or Enter in it) sends it and clears it.
         self._dirty: set = set()
         self._syncing = False            # True while the POLL sets values
-        self._sweep_spins = (self.center_spin, self.span_spin, self.ref_spin,
-                             self.rbw_spin, self.vbw_spin, self.avg_spin)
+        self._sweep_spins = (self.center_spin, self.span_spin, self.start_spin,
+                             self.stop_spin, self.ref_spin, self.rbw_spin,
+                             self.points_spin, self.vbw_spin, self.avg_spin)
         for spin in self._sweep_spins:
             spin.valueChanged.connect(lambda _v, s=spin: self._mark_dirty(s))
             spin.lineEdit().returnPressed.connect(self._apply_sweep)
@@ -516,20 +529,49 @@ class MainWindow(QtWidgets.QMainWindow):
         logs an event, and six of them for one click would bury the log.
         RBW goes before VBW, because VBW may not exceed it."""
         s = self.ctrl.status()
-        for spin, now, scale, setter in (
-                (self.center_spin, s.center_Hz, 1e9, self.ctrl.set_center),
-                (self.span_spin, s.span_Hz, 1e6, self.ctrl.set_span),
-                (self.ref_spin, s.ref_level_dBm, 1, self.ctrl.set_ref_level),
-                (self.rbw_spin, s.rbw_Hz, 1e3, self.ctrl.set_rbw),
+        by_edges = bool({self.start_spin, self.stop_spin} & self._dirty)
+        if by_edges:
+            # the band was typed as Start / Stop: send that pair, not centre/span
+            a, b = self.start_spin.value() * 1e9, self.stop_spin.value() * 1e9
+            if b <= a:
+                self._on_event("warn", "Stop must be above Start -- not sent")
+                return
+            self._call(self.ctrl.set_start_stop, a, b)
+            span_Hz = b - a
+        else:
+            span_Hz = self.span_spin.value() * 1e6
+        # Points -> the RBW that gives about that many bins over the span. The
+        # bin width follows the RBW in a fixed ratio on this analyser; take the
+        # ratio from what it reports now (100 kHz RBW -> 28.6 kHz bins: 3.5),
+        # so the rule follows the device rather than a number typed here.
+        rbw_want = None
+        if self.points_spin in self._dirty:
+            ratio = (s.rbw_Hz / s.bin_Hz) if (isinstance(s.bin_Hz, float)
+                                               and math.isfinite(s.bin_Hz) and s.bin_Hz > 0
+                                               and s.rbw_Hz > 0) else 3.5
+            rbw_want = ratio * span_Hz / max(2, self.points_spin.value())
+        rows = [(self.ref_spin, s.ref_level_dBm, 1, self.ctrl.set_ref_level),
                 (self.vbw_spin, s.vbw_Hz, 1e3, self.ctrl.set_vbw),
-                (self.avg_spin, s.averages, 1, self.ctrl.set_averages)):
+                (self.avg_spin, s.averages, 1, self.ctrl.set_averages)]
+        if rbw_want is None:
+            rows.insert(1, (self.rbw_spin, s.rbw_Hz, 1e3, self.ctrl.set_rbw))
+        if not by_edges:
+            rows[:0] = [(self.center_spin, s.center_Hz, 1e9, self.ctrl.set_center),
+                        (self.span_spin, s.span_Hz, 1e6, self.ctrl.set_span)]
+        for spin, now, scale, setter in rows:
+            if setter is self.ctrl.set_vbw and rbw_want is not None:
+                continue                         # handled with the RBW below
             want = spin.value() * scale
             if not (isinstance(now, (int, float)) and math.isclose(want, now, rel_tol=1e-9,
                                                                      abs_tol=1e-9)):
                 self._call(setter, want)
+        if rbw_want is not None:
+            # RBW before VBW: VBW may not exceed RBW
+            self._call(self.ctrl.set_rbw, rbw_want)
+            self._call(self.ctrl.set_vbw, min(self.vbw_spin.value() * 1e3, rbw_want))
         # a new span may have been refused until the new centre was in; send it again
-        if not math.isclose(self.span_spin.value() * 1e6, self.ctrl.status().span_Hz, abs_tol=1.0):
-            self._call(self.ctrl.set_span, self.span_spin.value() * 1e6)
+        if not by_edges and not math.isclose(span_Hz, self.ctrl.status().span_Hz, abs_tol=1.0):
+            self._call(self.ctrl.set_span, span_Hz)
         # sent: the boxes follow the service again (a refused value is put back
         # by the next poll, and the log says why)
         for spin in list(self._dirty):
@@ -574,6 +616,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             for spin, val in ((self.center_spin, s.center_Hz / 1e9),
                               (self.span_spin, s.span_Hz / 1e6),
+                              (self.start_spin, getattr(s, "start_Hz", math.nan) / 1e9),
+                              (self.stop_spin, getattr(s, "stop_Hz", math.nan) / 1e9),
                               (self.ref_spin, s.ref_level_dBm), (self.rbw_spin, s.rbw_Hz / 1e3),
                               (self.vbw_spin, s.vbw_Hz / 1e3)):
                 if math.isfinite(val) and (force or (not spin.hasFocus()
@@ -581,6 +625,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     spin.setValue(val)
             if force or (not self.avg_spin.hasFocus() and self.avg_spin not in self._dirty):
                 self.avg_spin.setValue(int(s.averages))
+            points = int(getattr(s, "points", 0) or 0)
+            if points >= 2 and (force or (not self.points_spin.hasFocus()
+                                          and self.points_spin not in self._dirty)):
+                self.points_spin.setValue(points)   # the bins the analyser really made
         finally:
             self._syncing = False
         if force or not self.det_combo.view().isVisible():
