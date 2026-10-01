@@ -616,3 +616,47 @@ def test_a_long_description_wraps_to_two_lines_and_ends_with_dots(env):
     card.desc.resize(300, 80)
     app.processEvents()
     assert card.desc.shown_text() == "short" and card.desc.toolTip() == ""
+
+
+def test_instruments_dialog_lists_and_assigns_an_address(env, monkeypatch):
+    """Instruments...: the scan's rows, the held one marked, and "Use for
+    module..." writes the address for the module it fits (suite_local.json),
+    which the service then gets with --real."""
+    mc, win, root, app = env
+    toml = root / "modules/other/lockin-control/module.toml"
+    toml.write_text(toml.read_text() + '\n[hardware]\naddress_arg = "--resource"\nbus = "visa"\n')
+    win.rescan(force=True)
+    from suite_common import instruments as I
+    rows = [I.Found("GPIB0::8::INSTR", "gpib", identity="Stanford_Research_Systems,SR830,1,1"),
+            I.Found("GPIB0::6::INSTR", "gpib", held_by="kepco",
+                    detail="held by a running service: not opened"),
+            I.Found("COM5", "serial", identity="USB Serial Port (COM5)", detail="FTDI")]
+    monkeypatch.setattr(mc.finder, "scan", lambda ask_visa=True: (list(rows), ["a note"]))
+    dlg = win.show_instruments()
+    _pump(app, 0.5)
+    try:
+        assert dlg.table.rowCount() == 3
+        assert dlg.table.item(1, 4).text() == "kepco"
+        assert dlg.notes.text() == "a note"
+        dlg.table.selectRow(2)                         # COM5: only a serial port may be asked
+        assert dlg.ask_btn.isEnabled()
+        # ... and a VISA module can take it under VISA's name for the port
+        assert [a.text() for a in dlg.use_btn.menu().actions()] == \
+            ["lockin module [lockin]: ASRL5::INSTR"]
+        dlg.table.selectRow(0)                         # the SR830
+        assert not dlg.ask_btn.isEnabled()
+        actions = dlg.use_btn.menu().actions()
+        assert [a.text() for a in actions] == ["lockin module [lockin]: GPIB0::8::INSTR"]
+        actions[0].trigger()
+        _pump(app, 0.2)
+        win.rescan(force=True)
+        spec = win.found.get("lockin")
+        assert spec.address == "GPIB0::8::INSTR"
+        mc.set_real("lockin", True, root)
+        spec = mc.discover(root).get("lockin")
+        assert mc.service_args(spec)[-2:] == ["--resource", "GPIB0::8::INSTR"]
+        assert "lockin" in win.logbox.toPlainText() and "GPIB0::8::INSTR" in win.logbox.toPlainText()
+    finally:
+        dlg.close()
+        mc.set_real("lockin", False, root)
+        mc.set_address("lockin", None, root)

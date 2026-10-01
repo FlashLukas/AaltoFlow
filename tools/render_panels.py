@@ -83,6 +83,7 @@ SIZES = {
     # 1360 the axis row's "pts" box was clipped by the result pane.
     "scan-core": (1520, 840),
     "mission-control": (1180, 1150),
+    "mission-control-instruments": (1080, 460),
     "suite-control": (1500, 950),
     "suite-control-dynacool": (1500, 950),
     "suite-scan": (1500, 950),
@@ -769,6 +770,53 @@ def _mission_control(theme):
     return show, warm_up, 3.0
 
 
+def _mission_control_instruments(theme):
+    """Instruments on this PC, on a made-up lab: the scan is replaced by a
+    fixed list (no PC renders this with a GPIB card attached), with invented
+    addresses and no serial numbers -- a published picture names no real
+    instrument."""
+    sys.path.insert(0, str(ROOT / "mission-control"))
+    import mission_control
+    from suite_common.instruments import Found
+
+    rows = [
+        Found("GPIB0::6::INSTR", "gpib", held_by="kepco",
+              detail="held by a running service: not opened"),
+        Found("GPIB0::8::INSTR", "gpib", identity="Stanford_Research_Systems,SR830,s/n00000,ver1.07",
+              asked=True),
+        Found("GPIB0::28::INSTR", "gpib", identity="Rohde&Schwarz,SMB100A,1406.6000k03/000000,3.1.19",
+              asked=True),
+        Found("GPIB0::9::INSTR", "gpib", error="no answer to *IDN? (timeout)", asked=True),
+        Found("USB0::0x1313::0x8078::P0000000::INSTR", "usb",
+              identity="Thorlabs,PM100D,P0000000,2.8.0", asked=True),
+        Found("TCPIP0::192.168.1.20::inst0::INSTR", "tcpip",
+              identity="Keysight Technologies,N5222A,MY00000000,A.13.95", asked=True),
+        Found("COM3", "serial", identity="USB Serial Port (COM3)", detail="FTDI, USB 0403:6001",
+              held_by="superk", aliases=["ASRL3::INSTR"]),
+        Found("COM5", "serial", identity="Silicon Labs CP210x USB to UART Bridge (COM5)",
+              detail="Silicon Labs, USB 10C4:EA60", aliases=["ASRL5::INSTR"]),
+        Found("COM7", "serial", identity="USB Serial Device (COM7)",
+              detail="Microsoft, USB 0483:5740", aliases=["ASRL7::INSTR"]),
+    ]
+    mission_control.finder.scan = lambda ask_visa=True: (list(rows), [])
+
+    def show():
+        return mission_control.main(["--theme", theme])
+
+    def warm_up(win):
+        box = getattr(win, "logbox", None)
+        if box is not None:
+            box.clear()
+        dlg = win.show_instruments()
+        from PySide6 import QtWidgets
+        for _ in range(20):
+            QtWidgets.QApplication.processEvents()
+        dlg.table.selectRow(2)                     # the SMB100A: "Use for module..." lit
+        return dlg
+
+    return show, warm_up, 1.5
+
+
 def _pm16(theme):
     from pm16.config import Config
     from pm16.sim_system import build_sim_system
@@ -934,6 +982,7 @@ TARGETS = {
     "hf2-instrument": _hf2_tab(3),
     "scan-core": _scan_core,
     "mission-control": _mission_control,
+    "mission-control-instruments": _mission_control_instruments,
 }
 
 

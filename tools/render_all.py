@@ -53,6 +53,7 @@ PROJECTS.update({
     "viewer-map": ("scan-core", True),
     "viewer-1d": ("scan-core", True),
     "mission-control": ("mission-control", False),   # PySide6 is a base dep
+    "mission-control-instruments": ("mission-control", False),
 })
 
 

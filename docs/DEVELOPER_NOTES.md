@@ -303,6 +303,31 @@ still assumes piezo/zpiezo.
     `mark_always(widget)`; dialogs (Settings) are not guarded -- a viewer may
     look, the service refuses the OK. `tools/check_modules.py` checks the
     copies wherever a module has them.
+- **Finding instruments (2026-10-01).** Mission Control's *Instruments…*
+  lists what this PC can reach; the logic is
+  `suite-common/src/suite_common/instruments.py` (no Qt, tested with a fake
+  pyvisa / pyserial), the window is `InstrumentsDialog` in mission_control.py.
+  Rules, and why:
+  - VISA resources ending in `::INSTR` / `::SOCKET` on GPIB, USB or TCPIP are
+    asked `*IDN?` (1.5 s timeout: an empty GPIB address costs that much, so
+    the scan runs in a thread). Interfaces (`::INTFC`, e.g. the Prologix
+    adapter pyvisa-py lists on every serial port) are not listed at all.
+  - A serial port is NEVER written to by the scan -- not even through VISA's
+    `ASRLn::INSTR` -- only described from pyserial (USB description,
+    manufacturer, VID:PID, serial number). `ask_serial` sends `*IDN?` to one
+    port, on a click, at the baud rate the person picked.
+  - An address in `hwlock.held()` is never opened; the row names the holder.
+    VISA's `ASRL5::INSTR` and pyserial's `COM5` are merged into one row
+    (hwlock's normalisation; `ASRL/dev/ttyUSB0::INSTR` = `/dev/ttyUSB0`).
+  - "Use for module…": a module declares `[hardware] address_arg` / `bus`
+    in its module.toml (guide section 11); `instruments.address_for` turns
+    a found address into that module's form, `modules.set_address` stores it
+    in suite_local.json, `service_args` passes it after `--real` (only then:
+    the simulator opens nothing). check_modules checks that the flag exists.
+  - The extra `instruments` of mission-control: pyvisa, pyvisa-py (when no
+    NI / Keysight VISA is installed), pyserial, psutil + zeroconf (pyvisa-py
+    searches the LAN on every network card and finds HiSLIP instruments).
+
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the
   table below mirrors them) and can be overridden per PC in the launcher; every

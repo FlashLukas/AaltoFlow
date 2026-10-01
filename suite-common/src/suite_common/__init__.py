@@ -17,7 +17,7 @@ from .modules import (Discovery, ManifestError, ModuleSpec, add_remote,
                       default_root, discover, endpoints_json, get_setting,
                       gui_args, load_local, port_conflicts, probe,
                       remove_remote, save_local, service_args, set_ports,
-                      set_real, set_setting, start_order)
+                      set_address, set_real, set_setting, start_order)
 from .settings_bundle import (ImportPlan, apply_import, export_bundle,
                               read_bundle)
 
@@ -25,7 +25,7 @@ __all__ = [
     "Discovery", "ManifestError", "ModuleSpec", "add_remote", "default_root",
     "discover", "endpoints_json", "get_setting", "gui_args", "load_local",
     "port_conflicts", "probe", "remove_remote", "save_local", "service_args",
-    "set_ports", "set_real", "set_setting", "start_order",
+    "set_address", "set_ports", "set_real", "set_setting", "start_order",
     "ENDPOINTS_ENV", "PRODUCT", "ROOT_ENV", "getenv", "set_setup_name",
     "setup_name", "title", "MODULES_DIR", "manifest_paths", "module_home",
     "is_legacy_location", "rel_to_root",

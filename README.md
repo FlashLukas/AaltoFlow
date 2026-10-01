@@ -229,6 +229,24 @@ Mission Control starts every service and opens every GUI from one place:
 
 ![mission control](front-panels/mission-control.png)
 
+**Instruments…** (next to Rescan) shows every instrument this PC can reach and
+at which address: GPIB, USB and LAN instruments through VISA, each asked who it
+is (`*IDN?`), and every COM port with what its USB chip says about it. A COM
+port is sent nothing until you press **Ask this port** (a stray query at the
+wrong baud rate can upset a motor controller or a laser), and an address a
+running service holds is never opened -- the row says which module holds it.
+**Use for module…** offers the selected address to every module it fits and
+remembers the choice on this PC; the service gets it at its next start with
+*real* ticked, and the card's *real* box shows it. An instrument on the network
+that does not announce itself: type its IP and press **Test**.
+
+![instruments on this PC](front-panels/mission-control-instruments.png)
+
+It needs `uv sync --extra instruments` in `mission-control` (pyvisa, pyvisa-py,
+pyserial) and, for GPIB, the VISA library of the GPIB card's maker (NI-VISA or
+Keysight IO Libraries). Vendor-only instruments (IDS camera, Zurich HF2, NI DAQ,
+Signal Hound, Thorlabs Kinesis) are not listed yet.
+
 The Scan Builder stacks axes outer-to-inner with no length limit, and runs the
 engine against whichever registry it was given -- simulated here, real
 instruments on the bench:

@@ -927,7 +927,22 @@ pub = 5570
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"    # "" for a headless module
 start_after = []              # keys to start first when started together
+
+# [hardware]           # optional (hf2 has none; smb, for example, has):
+# address_arg = "--visa"      # the run_service.py flag that takes the address
+# bus = "visa"                # what it wants: visa | serial | ip
 ```
+
+**`[hardware]` (2026-10-01).** A module whose service takes the instrument's
+address on the command line declares the flag and the kind of address here.
+Mission Control's **Instruments…** (README, "What it looks like") then offers
+a found GPIB / USB / LAN / COM address to every module it fits, stores the
+choice for this PC in `suite_local.json`, and starts the service with
+`--real <address_arg> <address>`. `bus`: `visa` takes a VISA resource string
+(a COM port becomes `ASRL5::INSTR`), `serial` a COM port name, `ip` a host or
+IP. `check_modules.py` checks that the script accepts the flag. A module that
+finds its instrument another way (a Kinesis serial number, an NI device name)
+leaves the section out.
 
 **Identity only.** The controls and measured variables are NOT in this file: the
 running service reports them through `describe` (section 6b), and a copy here
@@ -948,7 +963,8 @@ follows ports changed in the launcher; and `PYTHONUNBUFFERED=1`, so prints reach
 the launcher's log live.
 
 **This PC's choices** live in `<root>/suite_local.json` (gitignored), written by
-the launcher, read by everyone: `{"modules": {key: {"real", "cmd", "pub"}},
+the launcher, read by everyone: `{"modules": {key: {"real", "cmd", "pub",
+"address"}},
 "remote": [{host, cmd, pub, key, name, description}]}`. A remote service's `key`
 is what its `describe` reported; it borrows the icon, description and GUI of the
 local module with that key. In registry ids it is called by its slug

@@ -519,6 +519,13 @@ def main(argv=None) -> int:
         miss = [f for f in ("--cmd-port", "--pub-port", "--real") if f not in text]
         rep.add(m.key, "run_service accepts --cmd-port --pub-port --real",
                 "FAIL" if miss else "PASS", "missing " + ", ".join(miss) if miss else "")
+        if m.address_arg:
+            # module.toml [hardware]: the launcher passes the address chosen in
+            # "Instruments on this PC" with this flag -- it must exist
+            ok = m.address_arg in text
+            rep.add(m.key, f"run_service accepts {m.address_arg} ([hardware])",
+                    "PASS" if ok else "FAIL",
+                    "" if ok else f"module.toml names {m.address_arg}, the script does not take it")
         if m.gui:
             text = help_text(py, m.dir, m.gui)
             miss = [f for f in ("--connect", "--cmd-port", "--pub-port") if f not in text]

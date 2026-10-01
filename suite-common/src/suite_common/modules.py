@@ -65,6 +65,9 @@ _KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 #: What a module is FOR -- the first question when you are looking for one
 #: ("I need a lock-in"). A fixed list on purpose: free text would give
 #: "detector", "Detectors" and "sensor" for the same thing. key -> (label, hint).
+#: what kind of address a module's [hardware] address_arg wants
+ADDRESS_BUSES = ("visa", "serial", "ip")
+
 CATEGORIES: dict[str, tuple[str, str]] = {
     "motion":      ("Motion & positioning", "stages, piezos, rotators, focus"),
     "field":       ("Magnetic field", "electromagnets, vector magnets, field control"),
@@ -123,6 +126,18 @@ class ModuleSpec:
     version: str = ""
     remote: bool = False
     real: bool = False
+    #: How the module's service is told WHICH instrument to open (module.toml
+    #: [hardware]): the flag its run_service.py takes ("--visa", "--port"),
+    #: and what kind of address that flag wants -- "visa" (a VISA resource
+    #: string), "serial" (a COM port) or "ip" (a host or IP address). Empty
+    #: = the module takes no address from the launcher. Mission Control's
+    #: "Instruments on this PC" uses both to offer a found address to the
+    #: modules it fits.
+    address_arg: str = ""
+    address_bus: str = ""
+    #: THIS PC's choice (suite_local.json), passed as `address_arg address`
+    #: when the module runs on real hardware; "" = the module's own config.
+    address: str = ""
     #: A name safe for parameter ids and data files ("hf2", "hf2_lab2"). The id
     #: "hf2@lab2:5569" is fine for a settings file, but '@' and ':' do not
     #: belong in a recipe's parameter id or a netCDF variable name.
@@ -209,6 +224,15 @@ def parse_manifest(path: Path) -> ModuleSpec:
     tags = mod.get("tags", [])
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         raise ManifestError(f"{path}: [module] tags must be a list of words")
+    hw = data.get("hardware") or {}
+    address_arg = str(hw.get("address_arg", "")).strip()
+    address_bus = str(hw.get("bus", "")).strip().lower()
+    if address_arg and not address_arg.startswith("--"):
+        raise ManifestError(f"{path}: [hardware] address_arg {address_arg!r} must be "
+                            f"a flag of the service script, like \"--visa\"")
+    if address_arg and address_bus not in ADDRESS_BUSES:
+        raise ManifestError(f"{path}: [hardware] bus {address_bus!r} is not one of "
+                            + ", ".join(ADDRESS_BUSES))
 
     return ModuleSpec(
         id=key, key=key, name=name,
@@ -219,6 +243,7 @@ def parse_manifest(path: Path) -> ModuleSpec:
         service=service, gui=gui,
         start_after=[str(k) for k in after],
         category=category, tags=[t.strip() for t in tags if t.strip()],
+        address_arg=address_arg, address_bus=address_bus if address_arg else "",
     )
 
 
@@ -359,6 +384,18 @@ def set_real(key: str, real: bool, root: Path | None = None) -> None:
     save_local(data, root)
 
 
+def set_address(key: str, address: str | None, root: Path | None = None) -> None:
+    """Which instrument a local module opens on this PC (passed to its service
+    with the module's [hardware] address_arg); None or "" = its own config."""
+    data = load_local(root)
+    entry = data["modules"].setdefault(key, {})
+    if address:
+        entry["address"] = str(address).strip()
+    else:
+        entry.pop("address", None)
+    save_local(data, root)
+
+
 def get_setting(name: str, default=None, root: Path | None = None):
     """One of this PC's plain preferences out of suite_local.json.
 
@@ -465,6 +502,7 @@ def discover(root: Path | None = None) -> Discovery:
             problems.append(f"{LOCAL_FILE}: bad port override for {m.key}; using defaults")
             m.cmd, m.pub = m.default_cmd, m.default_pub
         m.real = bool(over.get("real", False))
+        m.address = str(over.get("address", "") or "").strip() if m.address_arg else ""
 
     remote = []
     for r in settings["remote"]:
@@ -578,6 +616,10 @@ def service_args(m: ModuleSpec) -> list[str]:
     args = ["--cmd-port", str(m.cmd), "--pub-port", str(m.pub)]
     if m.real:
         args.append("--real")
+        # the instrument this PC chose for it (Instruments on this PC); only
+        # with --real: the simulator opens nothing
+        if m.address and m.address_arg:
+            args += [m.address_arg, m.address]
     return args
 
 
