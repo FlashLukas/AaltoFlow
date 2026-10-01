@@ -219,6 +219,20 @@ class DsiSG12000L:
             self._release()
             raise
 
+    def reopen(self) -> None:
+        """The link died (USB unplugged, the adapter's driver replaced): drop
+        it WITHOUT sending anything and open it again. The hwlock claim on the
+        address stays ours meanwhile. Opening only clears the error queue and
+        reads *IDN? / PHASE? (adopt rule), so nothing on the unit changes.
+        Raises while the port is still missing; the brain tries again later."""
+        link, self._link = self._link, None
+        if link is not None:
+            try:
+                link.close()
+            except Exception:
+                pass
+        self._open_link()
+
     def _release(self) -> None:
         lock, self._lock = self._lock, None
         if lock is not None:
