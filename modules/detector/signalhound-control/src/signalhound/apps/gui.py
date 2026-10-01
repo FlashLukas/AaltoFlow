@@ -375,6 +375,20 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(apply)
         slay.addLayout(row)
         col.addWidget(scard)
+        # EDITED BUT NOT APPLIED. The status poll keeps the boxes following
+        # changes made elsewhere (console, scan) -- but it used to skip only
+        # the box with keyboard focus, so a value typed into Centre was put
+        # back the moment you clicked into Span (Lukas, 2026-10-01: "whenever
+        # I change any settings it comes back to the original ones"). A box
+        # the user changed is now "dirty": the poll leaves it alone, it gets
+        # an amber outline, and Apply (or Enter in it) sends it and clears it.
+        self._dirty: set = set()
+        self._syncing = False            # True while the POLL sets values
+        self._sweep_spins = (self.center_spin, self.span_spin, self.ref_spin,
+                             self.rbw_spin, self.vbw_spin, self.avg_spin)
+        for spin in self._sweep_spins:
+            spin.valueChanged.connect(lambda _v, s=spin: self._mark_dirty(s))
+            spin.lineEdit().returnPressed.connect(self._apply_sweep)
 
         # acquisition
         acard, alay = _card("Acquire (scan-safe trace)")
@@ -516,6 +530,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # a new span may have been refused until the new centre was in; send it again
         if not math.isclose(self.span_spin.value() * 1e6, self.ctrl.status().span_Hz, abs_tol=1.0):
             self._call(self.ctrl.set_span, self.span_spin.value() * 1e6)
+        # sent: the boxes follow the service again (a refused value is put back
+        # by the next poll, and the log says why)
+        for spin in list(self._dirty):
+            self._clear_dirty(spin)
+
+    def _mark_dirty(self, spin):
+        if self._syncing or spin in self._dirty:
+            return                       # the poll set it, or already marked
+        self._dirty.add(spin)
+        spin.setStyleSheet(f"border: 1px solid {COLORS['accent']};")
+        spin.setToolTip("changed here, not sent yet -- press Apply (or Enter)")
+
+    def _clear_dirty(self, spin):
+        self._dirty.discard(spin)
+        spin.setStyleSheet("")
+        spin.setToolTip("")
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -533,15 +563,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_inputs(self, force: bool = False):
         """Input boxes follow settings changed ELSEWHERE (console, scan), but
-        never while the user is typing in them."""
+        never while the user is typing in them, and never a box the user
+        changed and has not applied yet (``_dirty``). ``force`` (after the
+        Settings dialog) puts every box back to the service's value."""
         s = self.ctrl.status()
-        for spin, val in ((self.center_spin, s.center_Hz / 1e9), (self.span_spin, s.span_Hz / 1e6),
-                          (self.ref_spin, s.ref_level_dBm), (self.rbw_spin, s.rbw_Hz / 1e3),
-                          (self.vbw_spin, s.vbw_Hz / 1e3)):
-            if math.isfinite(val) and (force or not spin.hasFocus()):
-                spin.setValue(val)
-        if force or not self.avg_spin.hasFocus():
-            self.avg_spin.setValue(int(s.averages))
+        if force:
+            for spin in list(self._dirty):
+                self._clear_dirty(spin)
+        self._syncing = True             # these setValue calls are not user edits
+        try:
+            for spin, val in ((self.center_spin, s.center_Hz / 1e9),
+                              (self.span_spin, s.span_Hz / 1e6),
+                              (self.ref_spin, s.ref_level_dBm), (self.rbw_spin, s.rbw_Hz / 1e3),
+                              (self.vbw_spin, s.vbw_Hz / 1e3)):
+                if math.isfinite(val) and (force or (not spin.hasFocus()
+                                                     and spin not in self._dirty)):
+                    spin.setValue(val)
+            if force or (not self.avg_spin.hasFocus() and self.avg_spin not in self._dirty):
+                self.avg_spin.setValue(int(s.averages))
+        finally:
+            self._syncing = False
         if force or not self.det_combo.view().isVisible():
             i = self.det_combo.findText(s.detector)
             if i >= 0:
