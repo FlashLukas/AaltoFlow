@@ -68,22 +68,30 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
-### Bug: scan point index offered as 0..48 for a 48-point array (2026-10-02)
+### Bug: the Scan tab keeps old limits (scan point index 0..48 for 45 points) (2026-10-02)
 
-The Scan tab offered "Scan point X (index)" as camera 0 to 48 (49 values)
-for an array of 48 points.
+Seen in the lab: the camera's array set to 48, then 45 points; the Scan tab
+still offered "Scan point X (index)" up to 48, also after removing and
+re-adding the axis.
 
-- The camera's describe is right: `scan_ix` / `scan_iy` declare
-  `max = points - 1`, looked up when the manifest is built, and
-  `set_selected_index` clamps to 0..points-1 (camera net/describe.py,
-  camera.py).
-- So the suite most likely held a STALE manifest: built while the array had
-  49 points, not refreshed after it was changed to 48. Check whether the
-  Scan tab / registry follows `describe_rev` when the array is redrawn (the
-  revision should change with the bound), and whether an axis already in the
-  stack re-clamps to the new limits.
-- Reproduce with the camera simulator: connect the suite, change points_x,
-  look at the axis's "to" limit; add a test for it.
+- Not the camera: its describe declares `max = points - 1`, the revision
+  changes with it, and `Lab.refresh_stale` moves the registry's limits
+  correctly (reproduced with the simulator 2026-10-02: points 3 -> 45 gave
+  limits 0..2 -> 0..44).
+- The cause is WHEN the suite refreshes: `refresh_axis_limits()` runs only
+  on switching TO the Scan tab, on Run and on a queue start. `add_axis()`
+  reads the limits the registry already holds, so with the Scan tab already
+  open, changing the camera and re-adding the axis still shows the old
+  range. (Run refreshes first, so such a scan is refused by validation, not
+  clamped silently.) Work-around: click another tab, then Scan again.
+- Fix: refresh in `add_axis()` (and when a condition / routine row is
+  added); and while the Scan tab is visible, compare the revisions on a
+  timer (~1-2 s -- one integer per instrument from the cached status stream)
+  or when the suite window is activated, refreshing the rows when one moved.
+  Test: offscreen suite on a fake camera whose revision and max change; the
+  open tab's axis row and a newly added one both follow.
+- While at it: the palette's subtitle ("camera - 0 to 48") should follow the
+  refreshed limits too.
 
 ### Measurement tab: where the running scan is (2026-10-02)
 
