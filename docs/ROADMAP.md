@@ -45,6 +45,29 @@ in the file. NaN means "not measured yet".
 All of 1-4 together: ~3-4 days. Suggested order: 3 + 1 first (the biggest
 saving, and the ground for camera images), then 4, then 5 only if needed.
 
+**The storage type comes from `describe`, not from a setting.** Every
+detector already declares `type` (float / int / bool / enum / string, enums
+with `options`), so the engine can pick the storage itself:
+
+| declared | stored as | "not measured" |
+|---|---|---|
+| bool | uint8 0/1 | 255 |
+| enum | integer code + `flag_values` / `flag_meanings` | -1 |
+| int | narrowest integer that fits `min`/`max` (or `bits`); int32 without bounds | the type's extreme value |
+| float | float64 (float32 when the module says the precision allows) | NaN |
+| string | text | "" |
+
+- `min` / `max` are in the contract but almost only on controls (1 of ~445
+  indicators declares them). Modules add them -- or a new optional
+  `"bits": 12` for cameras and digitisers -- to the detectors where size
+  matters. A backwards-compatible extension of `describe`.
+- The bounds are the module's promise; the engine must never store a wrong
+  value. A value that does not fit stops the scan with a clear message (as a
+  changed array shape does today) -- no wrap-around, no clipping.
+- With the type chosen automatically there is no per-detector setting and
+  no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
+  `bits` / `min` / `max`.
+
 ### Scientific cameras for spectroscopy (2026-10-02)
 
 CCD / sCMOS cameras on a spectrograph (Andor, Teledyne Princeton
