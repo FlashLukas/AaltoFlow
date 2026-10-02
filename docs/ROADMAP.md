@@ -68,6 +68,27 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Camera GUI: zoom into the live image freely (2026-10-02)
+
+Today the camera window zooms only to the spot search region (the
+"Zoom to spot region" button, and automatically during an autofocus). Wanted:
+zoom anywhere, at any level, to look at details.
+
+- The ground is there: `apps/camera_view.py` draws the picture, every
+  overlay and every click through ONE transform (source rectangle + scale),
+  via `set_zoom((x0, y0, x1, y1))`, so a click on a zoomed view already
+  names the right image pixel.
+- To add: mouse-wheel zoom about the cursor; pan with the middle button or
+  Space + drag (the left button is taken: click-to-go, template ROI, scan
+  rectangle); "Fit" and "1:1 pixels" buttons; the zoom level shown on the
+  view; maybe a small overview inset with the zoomed rectangle.
+- The autofocus zoom lies over the user's zoom and gives it back at the end
+  (as the spot-region toggle does now).
+- View only, so it stays usable in a viewer window (no control needed).
+
+Effort: ~1 day with tests (zoom/pan maths, clicks on a zoomed and panned view
+still hitting the right pixel, the autofocus hand-back).
+
 ### Oscilloscope traces, e.g. Digilent Analog Discovery (2026-10-02)
 
 Record scope traces as a scan detector: one trace (or one per channel) at
