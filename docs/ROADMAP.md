@@ -71,27 +71,33 @@ with `options`), so the engine can pick the storage itself:
 ### Bug: the Scan tab keeps old limits (scan point index 0..48 for 45 points) (2026-10-02)
 
 Seen in the lab: the camera's array set to 48, then 45 points; the Scan tab
-still offered "Scan point X (index)" up to 48, also after removing and
-re-adding the axis.
+still offered "Scan point X (index)" up to 48 -- after removing and
+re-adding the axis, and after switching tabs.
 
-- Not the camera: its describe declares `max = points - 1`, the revision
-  changes with it, and `Lab.refresh_stale` moves the registry's limits
-  correctly (reproduced with the simulator 2026-10-02: points 3 -> 45 gave
-  limits 0..2 -> 0..44).
-- The cause is WHEN the suite refreshes: `refresh_axis_limits()` runs only
-  on switching TO the Scan tab, on Run and on a queue start. `add_axis()`
-  reads the limits the registry already holds, so with the Scan tab already
-  open, changing the camera and re-adding the axis still shows the old
-  range. (Run refreshes first, so such a scan is refused by validation, not
-  clamped silently.) Work-around: click another tab, then Scan again.
-- Fix: refresh in `add_axis()` (and when a condition / routine row is
-  added); and while the Scan tab is visible, compare the revisions on a
-  timer (~1-2 s -- one integer per instrument from the cached status stream)
-  or when the suite window is activated, refreshing the rows when one moved.
-  Test: offscreen suite on a fake camera whose revision and max change; the
-  open tab's axis row and a newly added one both follow.
-- While at it: the palette's subtitle ("camera - 0 to 48") should follow the
-  refreshed limits too.
+**Cause (reproduced offscreen 2026-10-02 with the camera simulator and the
+real Suite window):** two consumers of one signal.
+
+1. The camera is right: describe declares `max = points - 1` and the
+   revision (`describe_rev`) changes with it.
+2. The Control tab polls every module and, when `describe_rev` moves,
+   `control_panel._reread_limits` re-reads describe and stores it as
+   `inst.manifest` -- but updates only its OWN widgets, not the registry.
+3. `Lab.refresh_stale` (Scan tab switch, Run, queue) decides "stale" by
+   comparing the live revision with `inst.manifest["revision"]`. That copy
+   is now the new one, so it skips -- and the registry's Settable keeps the
+   old limits for good. Reproduction: points 3 -> 45, Control -> Scan tab:
+   registry still 0..2, cached revision == live revision.
+
+**Fix (small):** let `refresh_stale` keep its own marker of the revision
+whose limits it last pushed into the registry (per instrument, set when the
+registry is built), instead of reading `inst.manifest`; or have
+`_reread_limits` apply the limits to the registry too (`_apply_limits`) --
+the first is safer, the second shows the change at once. Plus: refresh in
+`add_axis()`, and keep the palette subtitle ("camera - 0 to 48") in step.
+Test: offscreen Suite on the camera simulator -- change points_x, let the
+Control tab poll, switch to Scan: the axis row and the registry show the new
+range. Run validates with refreshed limits, so a scan past the end is
+refused, not clamped -- but it must not get that far.
 
 ### Measurement tab: where the running scan is (2026-10-02)
 
