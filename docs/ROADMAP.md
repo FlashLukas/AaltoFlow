@@ -68,6 +68,31 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Bug: the Scan tab keeps old limits (scan point index 0..48 for 45 points) (2026-10-02)
+
+Seen in the lab: the camera's array set to 48, then 45 points; the Scan tab
+still offered "Scan point X (index)" up to 48, also after removing and
+re-adding the axis.
+
+- Not the camera: its describe declares `max = points - 1`, the revision
+  changes with it, and `Lab.refresh_stale` moves the registry's limits
+  correctly (reproduced with the simulator 2026-10-02: points 3 -> 45 gave
+  limits 0..2 -> 0..44).
+- The cause is WHEN the suite refreshes: `refresh_axis_limits()` runs only
+  on switching TO the Scan tab, on Run and on a queue start. `add_axis()`
+  reads the limits the registry already holds, so with the Scan tab already
+  open, changing the camera and re-adding the axis still shows the old
+  range. (Run refreshes first, so such a scan is refused by validation, not
+  clamped silently.) Work-around: click another tab, then Scan again.
+- Fix: refresh in `add_axis()` (and when a condition / routine row is
+  added); and while the Scan tab is visible, compare the revisions on a
+  timer (~1-2 s -- one integer per instrument from the cached status stream)
+  or when the suite window is activated, refreshing the rows when one moved.
+  Test: offscreen suite on a fake camera whose revision and max change; the
+  open tab's axis row and a newly added one both follow.
+- While at it: the palette's subtitle ("camera - 0 to 48") should follow the
+  refreshed limits too.
+
 ### Measurement tab: where the running scan is (2026-10-02)
 
 Once a scan runs, the header should say where it is -- next to RUNNING:
