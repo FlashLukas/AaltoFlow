@@ -68,6 +68,31 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Measurement tab: where the running scan is (2026-10-02)
+
+Once a scan runs, the header should say where it is -- next to RUNNING:
+
+    RUNNING  elapsed 13:30   point 25 / 125   dssg.frequency 1000 MHz (1/5)
+             camera.scan_ix 24 (25/25)   ~56 min left   now: autofocus (start of sweep)
+
+- The engine's `on_progress(done, total, eta)` gives the count and a
+  MEASURED remaining time (elapsed / done x left), but not which point:
+  pass the grid index (zig-zag aware -- `_zigzag` already knows) and each
+  axis's current value with it, so the GUI does not recompute the order.
+- "now: ..." comes from the routine log (`_on_log`), which today only lands
+  in the progress bar's text.
+- Mark the current point on the live plot (an outlined cell on a map, a
+  vertical line on a 1D plot), so the eye finds it at once.
+- Fix alongside: the summary line's "ETA ~ 0m 01s @ 0.01 s/pt" counts only
+  the per-point dwell (not settling, not routines such as the autofocus) and
+  stays on screen during the run -- with 13:30 elapsed it still says
+  1 s. While running, show the measured remaining time instead (and label
+  the pre-run figure "dwell only").
+- Also for a queue: "scan 2 of 3" next to it (the queue label exists).
+
+Effort: ~half a day to a day with tests (the index and values handed to
+on_progress, zig-zag included; the header text; the marker).
+
 ### Camera GUI: show which point an external client is moving to (2026-10-02)
 
 When scan-core (or another machine client) drives the camera's scan point,
