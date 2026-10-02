@@ -68,6 +68,42 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Oscilloscope traces, e.g. Digilent Analog Discovery (2026-10-02)
+
+Record scope traces as a scan detector: one trace (or one per channel) at
+every point, like a VNA trace or a spectrum.
+
+- Fits the existing 1D-detector path: each channel is an array detector
+  sharing a time axis (built from the sample rate and the trigger position,
+  fetched once per scan like the VNA's frequency axis). An `acquire` block
+  arms the trigger and waits until the capture is done (timeout from the
+  record length and the trigger timeout); averaging N triggers in the module
+  keeps the file small.
+- Analog Discovery 2 / 3: two 14-bit scope channels (AD2 100 MS/s, AD3
+  125 MS/s), a buffer of a few thousand to a few tens of thousands of
+  samples per channel, plus a 2-channel waveform generator, digital I/O and
+  small power supplies. Driven through Digilent's WaveForms SDK (the `dwf`
+  library installed with WaveForms; Python via ctypes or a wrapper such as
+  dwfpy) -- the real driver is the only file that imports it, lazily, as
+  usual.
+- Controls: timebase / sample rate, record length, vertical range and offset
+  per channel, coupling, trigger source / level / slope / position,
+  averages. The waveform generator (frequency, amplitude, offset, shape) can
+  be controls of the same module and so scan axes. Safety verbs: stop the
+  acquisition, generator output off, supplies off.
+- One device, one service: claim the device's serial number with hwlock.
+  "Instruments on this PC" does not list it yet (it is not VISA): a Digilent
+  probe belongs with the other vendor-specific probes.
+- Storage: a few thousand float64 per point is small. Raw 14-bit samples as
+  int16 plus a scale factor would follow from "Data types" above.
+- Later: a SCPI scope over VISA (Rigol, Keysight, Tektronix) as a second
+  backend with the same describe, so scans and the viewer do not care which
+  scope it is.
+
+Effort: module with a simulator (sine / pulse with noise, trigger) and
+tests ~3-4 days, plus a hardware session. **Needs first:** which Analog
+Discovery (2 or 3), which channels and trigger, typical record length.
+
 ### Scientific cameras for spectroscopy (2026-10-02)
 
 CCD / sCMOS cameras on a spectrograph (Andor, Teledyne Princeton
