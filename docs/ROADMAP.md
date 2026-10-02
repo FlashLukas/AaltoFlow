@@ -68,6 +68,23 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Bug: scan point index offered as 0..48 for a 48-point array (2026-10-02)
+
+The Scan tab offered "Scan point X (index)" as camera 0 to 48 (49 values)
+for an array of 48 points.
+
+- The camera's describe is right: `scan_ix` / `scan_iy` declare
+  `max = points - 1`, looked up when the manifest is built, and
+  `set_selected_index` clamps to 0..points-1 (camera net/describe.py,
+  camera.py).
+- So the suite most likely held a STALE manifest: built while the array had
+  49 points, not refreshed after it was changed to 48. Check whether the
+  Scan tab / registry follows `describe_rev` when the array is redrawn (the
+  revision should change with the bound), and whether an axis already in the
+  stack re-clamps to the new limits.
+- Reproduce with the camera simulator: connect the suite, change points_x,
+  look at the axis's "to" limit; add a test for it.
+
 ### Measurement tab: where the running scan is (2026-10-02)
 
 Once a scan runs, the header should say where it is -- next to RUNNING:
