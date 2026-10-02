@@ -68,6 +68,29 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Camera GUI: show which point an external client is moving to (2026-10-02)
+
+When scan-core (or another machine client) drives the camera's scan point,
+the window should make that obvious.
+
+- Today the overlay already follows: `_refresh` copies the service's
+  `selected_index_x/y` into the cfg mirror every tick, so the magenta aim
+  marker moves to the point scan-core picks. But the Stabiliser's Index X / Y
+  boxes are only filled when a pattern is loaded or Select is pressed, so
+  they keep showing the old numbers while something else drives the point.
+- To add: the Index X / Y boxes follow the service whenever the user is not
+  editing them (no focus, no change since the last tick) -- the same rule
+  the other live forms use; a line under them while a machine client drives
+  it ("scan-core: point (3, 5) of 10 x 10, moving / stable"), using the
+  control status's "also driving"; on the image, the target point drawn
+  distinctly (and optionally the points already visited, and the path) while
+  the stage moves; stable / distance readouts as now.
+- View only, so it works in a viewer window too.
+
+Effort: ~half a day with an offscreen GUI test (a machine client sets the
+index; the boxes and the note follow; a box being edited is not
+overwritten).
+
 ### Camera GUI: zoom into the live image freely (2026-10-02)
 
 Today the camera window zooms only to the spot search region (the
