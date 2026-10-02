@@ -248,7 +248,17 @@ class Lab:
             cached = getattr(inst, "manifest", None)
             if not cached:
                 continue                      # built from the fallback declaration
-            live_rev = (inst.status() or {}).get("describe_rev")
+            # ONE module that does not answer must not stop the others being
+            # refreshed. status() RAISES for a silent service (since 2026-09-28),
+            # and that used to leave this loop: the camera was never re-read,
+            # a scan to scan_ix 48 passed validation against the camera's OLD
+            # limits, and the camera (48 points: 0..47) clamped it -- the run
+            # then sat out a 60 s timeout (2026-10-02).
+            try:
+                live_rev = (inst.status() or {}).get("describe_rev")
+            except Exception as exc:
+                warn(f"{name}: no status ({exc}); its limits may be stale")
+                continue
             if live_rev is None or live_rev == cached.get("revision"):
                 continue                      # unchanged, or a service that
                                               # does not publish the revision
