@@ -31,6 +31,10 @@ import xarray as xr
 from PySide6 import QtCore, QtWidgets
 
 from aaltoview.apps.widgets import DimRow  # noqa: F401  (one row widget, shared)
+# The map's image item and its "drawing" choices come from AaltoView too (one
+# copy, tested there and here): MapImage combines a block of points into one
+# screen pixel by their mean, max or min. See _build_drawing_combo.
+from aaltoview.apps.viewer import MAP_REDUCE, MapImage
 from scan_core import view as V
 from apps.theme import C
 
@@ -128,6 +132,10 @@ class DataView(QtWidgets.QWidget):
             # the Windows locale and would want "0,004" (root gotcha #18)
             w.editingFinished.connect(self._z_typed)
             axr.addWidget(w)
+        axr.addSpacing(14)
+        axr.addWidget(QtWidgets.QLabel("drawing"))
+        self.reduce_combo = self._build_drawing_combo()
+        axr.addWidget(self.reduce_combo)
         v.addLayout(axr)
 
         self.rows_box = QtWidgets.QVBoxLayout()
@@ -138,8 +146,18 @@ class DataView(QtWidgets.QWidget):
         self.plot = self.glw.addPlot()
         self.plot.setLabel("bottom", "—"); self.plot.setLabel("left", "—")
         # row-major declared HERE, not inherited from a global set by whoever
-        # imported scan_builder first -- without it the map draws transposed
-        self.img = pg.ImageItem(axisOrder="row-major")
+        # imported scan_builder first -- without it the map draws transposed.
+        #
+        # autoDownsample: a map with more points than the screen has pixels
+        # (a 21 000-point spectrum on a ~600 px wide plot) is reduced BEFORE it
+        # is drawn, one block of points per pixel. Without it Qt shrinks the
+        # image by SAMPLING rows and columns, and a one-point line -- a
+        # generator tone, a narrow resonance -- falls between the samples and
+        # shows as dashes or not at all (2026-10-03). MapImage (AaltoView) lets
+        # that block be combined by its max or min instead of pyqtgraph's mean,
+        # which would dilute the same line ~35x; the "drawing" combo picks.
+        self.img = MapImage(axisOrder="row-major", autoDownsample=True)
+        self.img.set_reduce(self.reduce_combo.currentData())
         self.plot.addItem(self.img)
         self.cbar = pg.ColorBarItem(colorMap=pg.colormap.get("magma"))
         self.cbar.setImageItem(self.img, insert_in=self.plot)
@@ -154,6 +172,22 @@ class DataView(QtWidgets.QWidget):
         for it in (self.vline, self.hline, self.dot):
             it.setVisible(False)
             self.plot.addItem(it, ignoreBounds=True)
+        # WHERE the running scan is (set_marker): the cell just measured,
+        # outlined on a map; a solid vertical line on a 1-D plot; a line
+        # across the map when only one of its two coordinates is known (a fly
+        # scan reports whole rows). Solid, so it is never mistaken for the
+        # dashed cursor above. Drawn in the text colour, which stands out
+        # against the colour map in both themes.
+        mpen = pg.mkPen(C["text"], width=2)
+        self.mark_rect = QtWidgets.QGraphicsRectItem()
+        self.mark_rect.setPen(mpen)
+        self.mark_vline = pg.InfiniteLine(angle=90, pen=mpen)
+        self.mark_hline = pg.InfiniteLine(angle=0, pen=mpen)
+        for it in (self.mark_rect, self.mark_vline, self.mark_hline):
+            it.setVisible(False)
+            self.plot.addItem(it, ignoreBounds=True)
+        #: {dim name: coordinate} of the point to mark, or None
+        self._marker: dict | None = None
         self.plot.scene().sigMouseMoved.connect(self._hover)
         self.plot.scene().sigMouseClicked.connect(self._clicked)
         v.addWidget(self.glw, 1)
@@ -188,6 +222,7 @@ class DataView(QtWidgets.QWidget):
         listed = [self.det_combo.itemText(i) for i in range(self.det_combo.count())]
         if names != listed:
             self._fill(self.det_combo, names, keep=self.det_combo.currentText())
+        self._default_drawing()
         self._rebuild_controls()
         self.refresh()
 
@@ -286,6 +321,7 @@ class DataView(QtWidgets.QWidget):
         # a fixed range belongs to the detector it was set on -- a lock-in
         # voltage range makes no sense on a stage position
         self.z_auto.setChecked(True)
+        self._default_drawing()
         self._rebuild_controls()
         self.refresh()
 
@@ -376,6 +412,7 @@ class DataView(QtWidgets.QWidget):
             self.plot.setLabel("left", f"{self.det_combo.currentText()} [{unit}]".strip())
             self._shown = ("line", np.asarray(xc, dtype=float), None, arr, unit)
         self._update_cursor()
+        self._place_marker()
 
         bits = []
         if red.averaged > 1:
@@ -472,6 +509,51 @@ class DataView(QtWidgets.QWidget):
             self.vline.setVisible(False); self.hline.setVisible(False)
         self.readout.setText(self._text(i, j) + "   (held -- click off the data to release)")
 
+    # ---- the running scan's point -------------------------------------------
+    def set_marker(self, coords: dict | None) -> None:
+        """Mark the point a running scan has just measured.
+
+        `coords` = {dim name: coordinate value} (from the engine's `where`),
+        None to remove the mark. COORDINATES, not indices, for the same reason
+        as the held cursor: the picture is drawn in ascending order and may be
+        flipped, and a value finds its cell either way. A dim that is not on
+        screen (held by a slider, or averaged) is simply not used.
+        """
+        self._marker = dict(coords) if coords else None
+        self._place_marker()
+
+    def _place_marker(self):
+        shown, mark = self._shown, self._marker
+        for it in (self.mark_rect, self.mark_vline, self.mark_hline):
+            it.setVisible(False)
+        if shown is None or not mark:
+            return
+        kind, xc, yc, _, _ = shown
+        x = mark.get(self.x_combo.currentText())
+        y = mark.get(self.y_combo.currentText()) if kind == "map" else None
+        if x is not None and y is not None:
+            # the whole cell, edges half a step either side of its centre --
+            # exactly where _draw put that pixel
+            i = int(np.argmin(np.abs(xc - x)))
+            j = int(np.argmin(np.abs(yc - y)))
+            hx, hy = self._half_step(xc, i), self._half_step(yc, j)
+            self.mark_rect.setRect(QtCore.QRectF(float(xc[i]) - hx, float(yc[j]) - hy,
+                                                 2 * hx, 2 * hy))
+            self.mark_rect.setVisible(True)
+        elif x is not None:
+            self.mark_vline.setPos(float(x)); self.mark_vline.setVisible(True)
+        elif y is not None:
+            self.mark_hline.setPos(float(y)); self.mark_hline.setVisible(True)
+
+    @staticmethod
+    def _half_step(c: np.ndarray, i: int) -> float:
+        """Half the spacing around c[i]: half a pixel on the map."""
+        if c.size > 1:
+            return abs(float(c[min(i + 1, c.size - 1)] - c[max(i - 1, 0)])) / (
+                2 * (min(i + 1, c.size - 1) - max(i - 1, 0)))
+        lo, hi = DataView._extent(c)
+        return (hi - lo) / 2
+
     def _coord(self, dim: str, n: int) -> np.ndarray:
         if self.ds is not None and dim in self.ds.coords:
             return np.asarray(self.ds[dim].values)
@@ -481,6 +563,41 @@ class DataView(QtWidgets.QWidget):
         unit = (self.ds[dim].attrs.get("units", "")
                 if self.ds is not None and dim in self.ds.coords else "")
         return f"{dim} [{unit}]" if unit else dim
+
+    # ---- drawing (how a block of points becomes one pixel) ----------------------
+    def _build_drawing_combo(self) -> QtWidgets.QComboBox:
+        combo = QtWidgets.QComboBox()
+        for text, how in MAP_REDUCE.items():         # average / max / min, AaltoView's words
+            combo.addItem(text, how)
+        combo.setToolTip(
+            "When the map has more points than the screen has pixels, each pixel shows a\n"
+            "block of points: their average (smooth, but a ONE-point line -- a narrow\n"
+            "peak in a long spectrum -- is averaged away), their max (keeps peaks) or\n"
+            "their min (keeps dips, e.g. an absorption line in |S21|). Zoom in and\n"
+            "every point is drawn as it is. Only the drawing: the saved data never changes.\n"
+            "A detector in dBm starts on max (a spectrum); anything else on average.")
+        combo.currentIndexChanged.connect(self._drawing_changed)
+        #: the detector the drawing default was last chosen for -- the default
+        #: is applied when the detector CHANGES, never on a live redraw, so a
+        #: choice the operator made survives the whole run
+        self._drawing_for: str | None = None
+        return combo
+
+    def _drawing_changed(self, *_):
+        if hasattr(self, "img"):
+            self.img.set_reduce(self.reduce_combo.currentData())
+
+    def _default_drawing(self):
+        """max for a dBm detector (a spectrum: the narrow peaks are the point),
+        average for everything else -- once per detector, not per redraw."""
+        da = self._current_da()
+        name = self.det_combo.currentText()
+        if da is None or name == self._drawing_for:
+            return
+        self._drawing_for = name
+        unit = str(da.attrs.get("units", "")).strip().lower()
+        how = "max" if unit == "dbm" else "mean"
+        self.reduce_combo.setCurrentIndex(self.reduce_combo.findData(how))
 
     # ---- colour scale ----------------------------------------------------------
     @staticmethod

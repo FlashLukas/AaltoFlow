@@ -74,6 +74,11 @@ def main() -> int:
     ap.add_argument("--cmd-port", "--cmd", dest="cmd", type=int, default=P.DEFAULT_CMD_PORT)
     ap.add_argument("--pub-port", "--pub", dest="pub", type=int, default=P.DEFAULT_PUB_PORT)
     ap.add_argument("--status-hz", type=float, default=8.0)
+    # Which camera (its serial number). Mission Control passes the one chosen in
+    # "Instruments on this PC" (module.toml [hardware]); without the flag the
+    # camera.ini choice is used (hardware.cam_device / camera.camera_name).
+    ap.add_argument("--camera", default=None,
+                    help="serial number of the camera to open (default: from the config)")
     args = ap.parse_args()
 
     # No --config: use camera.ini in the project folder if one was saved (the GUI's
@@ -85,6 +90,12 @@ def main() -> int:
     if args.config:
         print(f"camera service: config <- {args.config}")
     apply_launcher_endpoints(cfg)
+    if args.camera:
+        # IDSCamera(device=hardware.cam_device or camera.camera_name) picks the
+        # device whose serial (or display name) equals this; the GenICam
+        # backend reads cam_device as its index / id, as before.
+        cfg.hardware.cam_device = args.camera.strip()
+        print(f"camera service: camera {cfg.hardware.cam_device} (from the launcher)")
 
     if args.real:
         from camera.sim_system import build_real_system

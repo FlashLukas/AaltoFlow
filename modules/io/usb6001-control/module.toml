@@ -18,3 +18,12 @@ pub = 5630
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which card the service opens on real hardware: Mission Control's
+# "Instruments on this PC" lists the NI-DAQmx devices with scripts/probe.py (list
+# only) and passes the chosen DAQmx name as --device <name> (suite_local.json,
+# this PC). bus "device" = an id the module takes verbatim.
+[hardware]
+address_arg = "--device"
+bus = "device"
+probe = "scripts/probe.py"

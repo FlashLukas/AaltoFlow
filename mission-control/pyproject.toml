@@ -13,6 +13,20 @@ dependencies = [
 # suite-common is not on PyPI: it is the folder next door. `editable = true`
 # means the launcher always uses the CURRENT code in ../suite-common -- an edit
 # there needs no re-install, just a restart of the launcher.
+# "Instruments on this PC" (the Instruments... button) needs these to look
+# for instruments; without them it says what to install. GPIB also needs the
+# VISA library of the GPIB card's maker (NI-VISA / Keysight IO Libraries);
+# pyvisa-py is the fallback for USB, LAN and serial when there is none.
+#   uv sync --extra instruments
+[project.optional-dependencies]
+instruments = [
+    "pyvisa>=1.13",
+    "pyvisa-py>=0.7",
+    "pyserial>=3.5",
+    "psutil>=5.9",      # pyvisa-py: look for LAN instruments on every network card
+    "zeroconf>=0.130",  # pyvisa-py: find HiSLIP instruments that announce themselves
+]
+
 [tool.uv.sources]
 suite-common = { path = "../suite-common", editable = true }
 

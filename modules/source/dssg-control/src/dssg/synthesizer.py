@@ -107,6 +107,7 @@ class Synthesizer:
         self._poll_t: threading.Thread | None = None
         self._status = self._offline_snapshot()
         self._last_err_check = 0.0
+        self._last_reopen = -1e9            # see REOPEN_S / _poll_once
         # replaced by the service to forward events; default = no-op
         self._on_event = lambda level, msg: None
 
@@ -344,9 +345,40 @@ class Synthesizer:
                 self._emit("error", f"read-back failed: {msg}")
             st = Status(**{**prev.__dict__, "hw_error": msg, "polls": prev.polls + 1})
             errs = []
+            self._try_reopen()
+        else:
+            if prev.hw_error:
+                self._emit("info", "hardware link recovered")
         self._status = st
         for e in errs:
             self._emit("warn", f"instrument error: {e}")
+
+    #: while reads fail, re-open the link at most this often (s)
+    REOPEN_S = 3.0
+
+    def _try_reopen(self) -> None:
+        """A dead link heals itself once the unit is back.
+
+        Found on the office PC (2026-10-01): Windows Update replaced the FTDI
+        driver of the generator's USB adapter while the service ran; the COM
+        port vanished and came back, and every write then failed with "Access
+        is denied" -- for good, because the open port handle belonged to the
+        old device. Now the brain re-opens the link (the backend's ``reopen``:
+        drop the dead handle without sending, open again, read *IDN? -- it
+        changes nothing on the unit) at most every REOPEN_S while reads fail.
+        A failed attempt is quiet; the read-back error already says it all.
+        """
+        reopen = getattr(self.backend, "reopen", None)
+        now = time.monotonic()
+        if reopen is None or now - self._last_reopen < self.REOPEN_S:
+            return
+        self._last_reopen = now
+        try:
+            with self._io:
+                reopen()
+            self._emit("info", "link to the unit re-opened")
+        except Exception:
+            pass
 
     def _poller(self) -> None:
         """Read back at `poll_hz`, or at once after a command (the poke).

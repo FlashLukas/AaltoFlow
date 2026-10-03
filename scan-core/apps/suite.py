@@ -182,11 +182,21 @@ class Suite(QtWidgets.QMainWindow):
         self.elapsed_lbl = QtWidgets.QLabel("elapsed 0:00")
         self.elapsed_lbl.setStyleSheet(f"color:{C['muted']};")
         h.addWidget(self.elapsed_lbl)
-        h.addStretch(1)
-        hint = QtWidgets.QLabel("define the scan on the Scan tab")
-        hint.setStyleSheet(f"color:{C['muted']};")
-        h.addWidget(hint)
+        h.addSpacing(20)
+        # WHERE the running scan is -- point n / N, each axis's value (i/len),
+        # the MEASURED time left, the routine step in progress, the queue
+        # position (ScanBuilder.run_status_text, pushed at every point through
+        # builder.on_status, and again by _tick). Before 2026-10-02 the only
+        # number here was the elapsed time.
+        self.where_lbl = QtWidgets.QLabel("")
+        self.where_lbl.setWordWrap(True)
+        self.where_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        h.addWidget(self.where_lbl, 1)
+        self.hint = QtWidgets.QLabel("define the scan on the Scan tab")
+        self.hint.setStyleSheet(f"color:{C['muted']};")
+        h.addWidget(self.hint)
         v.addWidget(strip)
+        self.builder.on_status = self._show_status
 
         # The builder's own run pane, adopted rather than reimplemented.
         v.addWidget(self.builder.right_pane, 1)
@@ -230,6 +240,11 @@ class Suite(QtWidgets.QMainWindow):
             return
         self.data_view.set_dataset(ds, self.builder.last_saved)
 
+    def _show_status(self, text: str):
+        """The header's WHERE line; the "define the scan" hint when idle."""
+        self.where_lbl.setText(text)
+        self.hint.setVisible(not text)
+
     def _tick(self):
         if self.scan_running():
             if getattr(self, "_t0", None) is None:
@@ -237,7 +252,9 @@ class Suite(QtWidgets.QMainWindow):
             self.run_state.setText("RUNNING")
             secs = int(time.monotonic() - self._t0)
             self.elapsed_lbl.setText(f"elapsed {secs // 60}:{secs % 60:02d}")
+            self._show_status(self.builder.run_status_text())
         else:
+            self._show_status("")
             if getattr(self, "_t0", None) is not None:
                 self.log("scan finished")
                 self._t0 = None

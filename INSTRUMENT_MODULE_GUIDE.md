@@ -928,7 +928,61 @@ pub = 5570
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"    # "" for a headless module
 start_after = []              # keys to start first when started together
+
+# [hardware]           # optional (smb and kim, for example, have one):
+# address_arg = "--visa"      # the run_service.py flag that takes the address
+# bus = "visa"                # what it wants: visa | serial | ip | device
+# probe = "scripts/probe.py"  # optional: LISTS the devices its vendor library sees
 ```
+
+**`[hardware]` (2026-10-01).** A module whose service takes the instrument's
+address on the command line declares the flag and the kind of address here.
+Mission Control's **Instruments…** (README, "What it looks like") then offers
+a found GPIB / USB / LAN / COM address to every module it fits, stores the
+choice for this PC in `suite_local.json`, and starts the service with
+`--real <address_arg> <address>`. `bus`: `visa` takes a VISA resource string
+(a COM port becomes `ASRL5::INSTR`), `serial` a COM port name, `ip` a host or
+IP, `device` an id the module's own vendor library understands verbatim (a
+Kinesis serial, `Dev1`, `dev1234`, a camera serial). `check_modules.py` checks
+that the script accepts the flag. Add the flag WITHOUT changing the default:
+absent, the service uses its config exactly as before.
+
+**A probe (2026-10-03)** is how an instrument that is not VISA or COM shows up
+in *Instruments…*. Declare `probe = "scripts/probe.py"`; Mission Control runs
+it with the module's own venv python (where the vendor library lives -- the
+launcher installs no vendor SDK), in a thread, with a 20 s timeout. Contract:
+
+- It **only lists**. It never opens a device, never sends a byte, never changes
+  a setting: enumerate (`list_kinesis_devices`, `DeviceManager.Update()`,
+  `System.local().devices`, `saGetSerialNumberList`, `ziDiscovery.findAll`,
+  `TLPMX_findRsrc` with vi = 0), then stop. Mark each vendor call `# VERIFY`
+  until it ran on the instrument.
+- It prints ONE ASCII JSON line and exits 0, also when nothing is found:
+  `{"devices": [{"address": "...", "identity": "...", "detail": "...",
+  "lock": "..."}], "note": "..."}`. `address` is what `address_arg` takes;
+  `lock` (optional) the address the backend claims in hwlock when it is spelled
+  differently (`CAMERA::<serial>`), so a held device is shown as held.
+- The vendor library is imported LAZILY inside the probe function; missing, the
+  probe prints `devices: []` and a note saying what to install (`uv sync
+  --all-extras`, the vendor runtime). A probe is the one place besides the real
+  backend that may import the vendor library.
+- A vendor list can hide a device a service has OPEN (pylablib listed nothing
+  while kim held the KIM101), or list it differently (TLPMX: no serial). So
+  the probe also reports what its own module holds (`hwlock.held()`), as
+  "held by the running <key> service" -- appended to a listed device's detail
+  too, and a serial-less listing is folded into the held row, never a second row.
+- A device the vendor library lists that is NOT for this module (Kinesis' FTDI
+  scan also sees the Signal Hound TG44A) gets `"other": true`: shown as
+  information, never suggested for or offered to the module.
+- Put the logic in `src/<pkg>/probe.py` (a `probe() -> dict` function) and keep
+  `scripts/probe.py` a thin wrapper; test it with a FAKE vendor library in
+  `sys.modules` whose open call raises (see kim-control's `tests/test_probe.py`).
+  `check_modules.py` runs the probe twice: as installed, and with the vendor
+  SDK made missing; both must print the JSON line.
+
+The operating system's USB list (`suite_common/usb_devices.py`) needs nothing
+from the module: add the device's VID:PID to `KNOWN_USB` there, with the module
+key, once it has been seen in Device Manager.
 
 **Identity only.** The controls and measured variables are NOT in this file: the
 running service reports them through `describe` (section 6b), and a copy here
@@ -949,7 +1003,8 @@ follows ports changed in the launcher; and `PYTHONUNBUFFERED=1`, so prints reach
 the launcher's log live.
 
 **This PC's choices** live in `<root>/suite_local.json` (gitignored), written by
-the launcher, read by everyone: `{"modules": {key: {"real", "cmd", "pub"}},
+the launcher, read by everyone: `{"modules": {key: {"real", "cmd", "pub",
+"address"}},
 "remote": [{host, cmd, pub, key, name, description}]}`. A remote service's `key`
 is what its `describe` reported; it borrows the icon, description and GUI of the
 local module with that key. In registry ids it is called by its slug

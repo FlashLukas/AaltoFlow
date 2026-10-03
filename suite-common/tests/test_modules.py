@@ -272,3 +272,39 @@ def test_the_pre_rename_environment_names_still_work(monkeypatch, tmp_path):
     assert M.default_root() == tmp_path
     monkeypatch.setenv("AALTOFLOW_ROOT", str(tmp_path / "new"))
     assert M.default_root() == tmp_path / "new"      # the new name wins
+
+
+# ---- [hardware]: which instrument the service opens (Instruments on this PC)
+
+def test_hardware_section_and_the_address_this_pc_chose(tmp_path):
+    make_module(tmp_path, "smb-control", "smb", 5557,
+                extra='[hardware]\naddress_arg = "--visa"\nbus = "visa"\n')
+    make_module(tmp_path, "kim-control", "kim", 5567)          # takes no address
+    found = M.discover(tmp_path)
+    smb, kim = found.get("smb"), found.get("kim")
+    assert (smb.address_arg, smb.address_bus, smb.address) == ("--visa", "visa", "")
+    assert (kim.address_arg, kim.address_bus) == ("", "")
+
+    M.set_address("smb", "GPIB0::28::INSTR", tmp_path)
+    M.set_address("kim", "COM9", tmp_path)                    # ignored: no address_arg
+    found = M.discover(tmp_path)
+    smb = found.get("smb")
+    assert smb.address == "GPIB0::28::INSTR" and found.get("kim").address == ""
+    # simulated: no address passed (the simulator opens nothing)
+    assert "--visa" not in M.service_args(smb)
+    M.set_real("smb", True, tmp_path)
+    smb = M.discover(tmp_path).get("smb")
+    assert M.service_args(smb)[-3:] == ["--real", "--visa", "GPIB0::28::INSTR"]
+    # forgetting it goes back to the module's own config
+    M.set_address("smb", None, tmp_path)
+    assert M.service_args(M.discover(tmp_path).get("smb"))[-1] == "--real"
+
+
+@pytest.mark.parametrize("extra, why", [
+    ('[hardware]\naddress_arg = "visa"\nbus = "visa"\n', "must be a flag"),
+    ('[hardware]\naddress_arg = "--visa"\nbus = "gpib"\n', "is not one of"),
+])
+def test_a_bad_hardware_section_is_reported(tmp_path, extra, why):
+    make_module(tmp_path, "smb-control", "smb", 5557, extra=extra)
+    with pytest.raises(M.ManifestError, match=why):
+        M.parse_manifest(tmp_path / "smb-control" / "module.toml")

@@ -19,6 +19,7 @@ a blocking `set` still blocks correctly -- the module states its own rule for
 from __future__ import annotations
 
 import threading
+import time
 
 from .instrument import (Instrument, InstrumentError, adopt_then_flag, echoes,
                          flag_only, immediate)
@@ -54,6 +55,73 @@ _POLICIES = {
     "immediate": lambda c: immediate(),
     "state_in": lambda c: _state_in(_k(c, "key"), c["states"]),
 }
+
+
+#: an echoed setpoint that sits on another value for this long is checked
+#: against the module's CURRENT limits (see _clamp_guard)
+CLAMP_CHECK_S = 2.0
+
+
+def _clamp_guard(predicate, inst, desc: dict, wire, pid: str, is_bool: bool):
+    """Fail FAST when the service adopted a DIFFERENT value than asked for.
+
+    Found on the rig (2026-10-02): a scan asked the camera for scan point 48;
+    the camera's array had 48 points (0..47) by then, so it clamped to 47,
+    reported index 47 and "settled" -- and the adopt check, waiting for 48,
+    sat out its whole 60 s timeout ("the measurement suite is stuck").
+
+    For a settle that waits for an ECHO (adopt_then_flag's setpoint_key, or
+    echoes' key): if the echo has stayed on another value for CLAMP_CHECK_S,
+    re-read `describe` ONCE; if the request lies outside the module's current
+    [min, max], raise at once, naming both values and the limits. Inside the
+    limits it is just slow, and the normal wait goes on.
+    """
+    if is_bool:
+        return predicate
+    settle = desc.get("settle") or {}
+    name = settle.get("setpoint_key") if settle.get("policy") == "adopt_then_flag" \
+        else settle.get("key") if settle.get("policy") == "echoes" else None
+    if not name:
+        return predicate
+    key = [name, int(settle["index"])] if settle.get("index") is not None else name
+    tol = float(settle.get("tol", 1e-6))
+    state = {"since": None, "seen": None, "checked": False}
+
+    def guarded(st):
+        if predicate(st):
+            return True
+        from .instrument import _lookup
+        got = _lookup(st, key)
+        if not isinstance(got, (int, float)) or isinstance(got, bool) \
+                or abs(got - wire) <= tol:
+            state["since"] = None
+            return False
+        now = time.monotonic()
+        if state["seen"] != got:                       # still moving: restart the clock
+            state["seen"], state["since"] = got, now
+            return False
+        if state["checked"] or now - state["since"] < CLAMP_CHECK_S:
+            return False
+        state["checked"] = True
+        try:
+            fresh = inst.command("describe").get("describe") or {}
+        except Exception:
+            return False                               # cannot tell: keep waiting
+        inst.manifest = fresh
+        mine = next((p for p in fresh.get("parameters", [])
+                     if p.get("id") == desc.get("id")), {})
+        lo, hi = mine.get("min"), mine.get("max")
+        scale = float(desc.get("scale", 1.0)) or 1.0
+        if (lo is not None and wire < lo) or (hi is not None and wire > hi):
+            module = getattr(inst, "alias", None) or fresh.get("module") or inst.name
+            raise InstrumentError(
+                f"{module} clamped {pid} {wire / scale:g} -> {got / scale:g}: its limits "
+                f"are now [{(lo if lo is not None else float('-inf')) / scale:g}, "
+                f"{(hi if hi is not None else float('inf')) / scale:g}] -- the module "
+                f"changed (e.g. a smaller scan array) since the scan was checked")
+        return False
+
+    return guarded
 
 
 def _state_in(key, states):
@@ -208,7 +276,7 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
 
             def setter(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
                        _id=pid, _u=unit, _bool=(dtype == "bool"), _scale=scale,
-                       _int=(dtype == "int"), timeout_s=None, _gen=gen):
+                       _int=(dtype == "int"), timeout_s=None, _gen=gen, _d=d):
                 extra = dict(_s.get("extra") or {})
                 scale = _scale
                 # Send a bool as a bool. Settable hands us 0.0/1.0 after its
@@ -231,7 +299,7 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 shown = wire if _bool else f"{value:g} {_u}".strip()
                 # timeout_s: a fly scan's row is ONE long move, far slower
                 # than the ordinary step this timeout was declared for
-                _inst.wait_until(_settle(wire),
+                _inst.wait_until(_clamp_guard(_settle(wire), _inst, _d, wire, _id, _bool),
                                  timeout_s=_t if timeout_s is None else timeout_s,
                                  what=f"{_id} = {shown}",
                                  cancel=lambda: _gen[0] != mine)

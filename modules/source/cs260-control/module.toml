@@ -18,3 +18,10 @@ pub = 5602
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which instrument the service opens on real hardware: Mission Control's
+# "Instruments on this PC" offers a found visa address to this module and
+# passes it to the service as --visa <address> (suite_local.json, this PC).
+[hardware]
+address_arg = "--visa"
+bus = "visa"

@@ -1356,6 +1356,10 @@ class ScanWorker(QtCore.QThread):
     paused = QtCore.Signal(object)
     #: RESONANCE WINDOW readout after every point (dict, see WindowRunner.state)
     window = QtCore.Signal(object)
+    #: WHERE the scan is: the engine's where_of() of the point just measured
+    #: (grid index, zig-zag applied, and each axis's value). Emitted just
+    #: BEFORE `progress`, so the progress handler already has it.
+    where = QtCore.Signal(object)
 
     #: Seconds between live redraws. Building the snapshot costs something, and
     #: a 400-point scan of settling points does not need 60 fps.
@@ -1431,10 +1435,17 @@ class ScanWorker(QtCore.QThread):
         if due_save:
             self._write(ds, done, total)
 
+    def _progress(self, done, total, eta, where=None):
+        # `where` is the engine's keyword (engine.where_of); a fly scan sends
+        # it once per row and not in between, so None just means "unchanged"
+        if where is not None:
+            self.where.emit(where)
+        self.progress.emit(done, total, eta)
+
     def run(self):
         try:
             ds = run(self.recipe, self.registry,
-                     on_progress=lambda d, t, e: self.progress.emit(d, t, e),
+                     on_progress=self._progress,
                      should_abort=lambda: self._abort,
                      on_point=self._live,
                      on_log=self.log.emit,
@@ -1995,6 +2006,18 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: mag2d.field = 150 mT ... done") land there, and in `run_log`.
         self.on_log = None
         self.run_log: list[str] = []
+        #: WHERE the running scan is (see run_status_text): the engine's
+        #: where_of() of the last point, (done, total, measured eta_s), and the
+        #: routine step in progress ("" = none). All None/"" when idle.
+        self._running = False
+        self.run_where: dict | None = None
+        self.run_progress: tuple | None = None
+        self.run_now = ""
+        #: the summary's detail line in three parts (before the ETA, the
+        #: pre-run ETA clause, after it) -- so the ETA alone can be swapped for
+        #: the measured remaining time while a scan runs. See _show_detail.
+        self._detail_parts: tuple[str, str, str] | None = None
+        self._detail_shown = ""
         #: The routines card, one section per moment (see _build_routines).
         self.routines: dict[str, RoutineSection] = {}
         #: Routines that run DURING the scan (every N points / each sweep), in
@@ -2549,6 +2572,15 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.queue_lbl.hide()
         v.addWidget(self.queue_lbl)
 
+        # WHERE the running scan is (run_status_text). In the suite the same
+        # line sits in the Measurement tab's header, next to RUNNING, so this
+        # copy is only shown in the standalone builder.
+        self.where_lbl = QtWidgets.QLabel("")
+        self.where_lbl.setStyleSheet(f"color:{C['accent']};")
+        self.where_lbl.setWordWrap(True)
+        self.where_lbl.hide()
+        v.addWidget(self.where_lbl)
+
         self.progress = QtWidgets.QProgressBar(); self.progress.setValue(0)
         v.addWidget(self.progress)
         self.save_lbl = QtWidgets.QLabel(""); self.save_lbl.setObjectName("hint")
@@ -2592,6 +2624,13 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.add_axis(pid)
 
     def add_axis(self, pid, raw=None):
+        # a NEW row starts from the module's CURRENT limits (a camera array
+        # resized since the last refresh would otherwise be offered as it was)
+        if self.limits_refresher is not None:
+            try:
+                self.limits_refresher()
+            except Exception:
+                pass                     # a dead service must not block adding
         p = self.registry.get(pid)
         sp = find_speed_param(self.registry, pid)
         # A streamed coordinate with no speed knob of its own is MEASURED, not
@@ -2973,6 +3012,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if parked:
             conditions += (f"   ·   {parked} detector(s) set aside while flying "
                            f"(they cannot be recorded continuously)")
+        self._detail_parts = None            # set again below, if there is an ETA
         if not self.rows:
             self.summary.setText("no axes")
             self.detail.setText(conditions.strip(" ·") if conditions else "")
@@ -2997,11 +3037,28 @@ class ScanBuilder(QtWidgets.QMainWindow):
             eta = n * self.per_pt.value()
             how = f"@ {self.per_pt.value():g}s/pt"
             self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} pts")
-        self.detail.setText(f"dims: {', '.join(d.name for d in comp.dims)}   ·   "
-                            f"ETA ≈ {int(eta // 60):d}m {int(eta % 60):02d}s "
-                            f"{how}"
-                            + ("   ·   zig-zag" if self.zigzag_box.isChecked() else "")
-                            + conditions)
+        # The pre-run ETA counts only what this window can know -- the dwell
+        # per point (or per fly row) -- not settling, not routines such as an
+        # autofocus, which on the rig can be most of the time. So it says
+        # "dwell only", and once the scan runs it is replaced by the MEASURED
+        # remaining time (_show_detail).
+        self._detail_parts = (
+            f"dims: {', '.join(d.name for d in comp.dims)}   ·   ",
+            f"ETA ≈ {int(eta // 60):d}m {int(eta % 60):02d}s {how} (dwell only)",
+            ("   ·   zig-zag" if self.zigzag_box.isChecked() else "") + conditions)
+        self._show_detail()
+
+    def _show_detail(self):
+        """The detail line, with the ETA clause that fits NOW: while a scan
+        runs, its measured remaining time; otherwise the dwell-only estimate."""
+        if self._detail_parts is None:
+            return
+        head, pre, tail = self._detail_parts
+        clause = pre
+        if self._running and self.run_progress is not None:
+            clause = f"~{_fmt_duration(self.run_progress[2])} left (measured)"
+        self._detail_shown = head + clause + tail
+        self.detail.setText(self._detail_shown)
 
     def _sync_window_card(self) -> None:
         """Offer the resonance window for the TICKED detectors that support it."""
@@ -3104,6 +3161,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_btn.setEnabled(False); self.abort_btn.setEnabled(True)
         path = self.autosave_path(recipe)
         self.worker = ScanWorker(recipe, self.registry, save_path=path)
+        self._run_started()
+        self.worker.where.connect(self._on_where)
         self.worker.progress.connect(self._on_progress)
         self.worker.partial.connect(self._on_partial)
         self.worker.done.connect(self._on_done)
@@ -3398,15 +3457,96 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _on_progress(self, done, total, eta):
         self.progress.setFormat("%p%")      # the points have started
         self.progress.setMaximum(total); self.progress.setValue(done)
+        self.run_progress = (int(done), int(total), float(eta))
         if self.queue_running():
             self._queue_label(eta)
+        else:
+            self._show_detail()             # the ETA becomes the measured one
+        self._show_where()
+
+    # ---- where the running scan is -------------------------------------------
+    def _run_started(self):
+        """A scan is starting: forget the last one's position."""
+        self._running = True
+        self.run_where, self.run_progress, self.run_now = None, None, ""
+        self.view.set_marker(None)
+        self._show_where()
+
+    def _on_where(self, where):
+        """The engine's where_of() of the point just measured: kept for the
+        status line, and marked on the live plot."""
+        self.run_where = where
+        coords = {a["name"]: a["value"] for a in (where or {}).get("axes", ())
+                  if a.get("value") is not None}
+        self.view.set_marker(coords)
+
+    def run_status_text(self) -> str:
+        """One line: WHERE the running scan is ("" when idle). E.g.
+
+            scan 2 of 3   point 25 / 125   dssg.frequency 1000 MHz (1/5)
+            camera.scan_ix 24 (25/25)   ~56m 00s left   now: run camera.autofocus
+            (start of each sweep of camera.scan_ix)
+
+        Every number comes from the engine (index, values, measured remaining
+        time); nothing here recomputes the order of the points.
+        """
+        if not self._running:
+            return ""
+        bits = []
+        if self.queue_running() and self._queue_i >= 0:
+            bits.append(f"scan {self._queue_i + 1} of {len(self._queue)}")
+        prog = self.run_progress
+        bits.append(f"point {prog[0]:,} / {prog[1]:,}" if prog else "starting")
+        where = self.run_where or {}
+        if where.get("row"):
+            bits.append("row {} / {}".format(*where["row"]))
+        for a in where.get("axes", ()):
+            if a.get("value") is None:
+                continue                    # a fly axis: the whole row at once
+            unit = f" {a['unit']}" if a.get("unit") else ""
+            bits.append(f"{a['name']} {a['value']:g}{unit} ({a['i'] + 1}/{a['n']})")
+        if prog and prog[0] < prog[1]:
+            bits.append(f"~{_fmt_duration(prog[2])} left")
+        if self.run_now:
+            bits.append(f"now: {self.run_now}")
+        return "   ".join(bits)
+
+    #: Set by the suite: called with run_status_text() whenever it changes,
+    #: so the Measurement tab's header follows every point, not its 0.5 s clock.
+    on_status = None
+
+    def _show_where(self):
+        text = self.run_status_text()
+        self.where_lbl.setText(text)
+        self.where_lbl.setVisible(bool(text) and not self.embedded)
+        if self.on_status is not None:
+            self.on_status(text)
+
+    @staticmethod
+    def _routine_step(msg: str) -> str | None:
+        """'<when>: <step> ...' (a routine step starting) -> '<step> (<when>)';
+        '' for the step's end (done / FAILED / not waited for); None for any
+        other message. The format is hooks.py's `call` (step())."""
+        label, sep, what = msg.partition(": ")
+        if not sep:
+            return None
+        if what.endswith(" ..."):
+            return f"{what[:-4]} ({label})"
+        if what.endswith((" done", "carrying on", "(aborted)")):
+            return ""
+        return None
 
     def _on_log(self, msg: str):
         """A routine step. Shown IN the progress bar -- which otherwise sits at
         0 % through a two-minute magnet ramp and reference sweep, saying nothing
-        about why -- and passed to the suite's log."""
+        about why -- as "now: ..." in the status line, and passed to the
+        suite's log."""
         self.run_log.append(msg)
         self.progress.setFormat(msg)
+        step = self._routine_step(msg)
+        if step is not None:
+            self.run_now = step
+            self._show_where()
         if self.on_log is not None:
             self.on_log(msg)
 
@@ -3476,6 +3616,15 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_btn.setEnabled(not self.queue_running())
         self.abort_btn.setEnabled(False)
         self.worker = None          # is_aborting() is False again for the next run
+        # No longer "here": drop the mark and the status line, and put the
+        # dwell-only ETA back -- unless the line now says something else (why
+        # the run failed), which must stay readable.
+        was_running = self.detail.text() == self._detail_shown
+        self._running = False
+        self.view.set_marker(None)
+        self._show_where()
+        if was_running and not self.queue_running():
+            self._show_detail()
 
     def _update_plot(self):
         """Redraw with whatever the viewer's controls currently say."""

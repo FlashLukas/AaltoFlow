@@ -18,3 +18,12 @@ pub = 5568
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which KIM101 the service opens on real hardware: Mission Control's
+# "Instruments on this PC" lists the controllers with scripts/probe.py (pylablib,
+# list only) and passes the chosen Kinesis serial as --serial <serial>
+# (suite_local.json, this PC). bus "device" = an id the module takes verbatim.
+[hardware]
+address_arg = "--serial"
+bus = "device"
+probe = "scripts/probe.py"

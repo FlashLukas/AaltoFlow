@@ -33,8 +33,23 @@ driving.
 
 In the builder: double-click a parameter (left) to add it as an axis, reorder the
 stack outer→inner (↑/↓), tick detectors, watch the dimensions/points/ETA update,
-then **Run** — the result heatmap is the innermost two dims (outer dims sliced at
-0). Load/Save recipe is YAML; Save data is netCDF.
+then **Run**. Load/Save recipe is YAML; Save data is netCDF.
+
+The ETA before a run counts the per-point dwell only (it says so): settling and
+routines such as an autofocus cannot be known in advance. While the scan runs it
+is replaced by the MEASURED remaining time, and the suite's Measurement tab says
+where the scan is: point n / N, each axis's value with (i/len), the routine step
+in progress ("now: ...") and, in a queue, "scan x of y". The engine hands the
+grid index and the axis values to `on_progress` as a `where=` keyword
+(`engine.where_of`; zig-zag already applied, once per row for a fly scan); a
+callback with the old `(done, total, eta)` signature is still called that way.
+The live map outlines the point just measured (a vertical line on a 1-D plot).
+
+The live map is AaltoView's `MapImage`: with more points than pixels, each pixel
+shows a block of points by their average, max (keeps peaks -- a one-point tone
+in a 21 000-point spectrum) or min (keeps dips), picked with **drawing** next to
+the colour controls. A detector in dBm starts on max. Only the drawing changes;
+the data never does.
 
 ## Data viewer (the AaltoView successor)
 
@@ -364,7 +379,7 @@ starts; **Stop queue** ends all of it; an error stops the queue.
 ## Tests
 
 ```bash
-uv run pytest -q        # 346 tests, all offline
+uv run pytest -q        # 456 pass + 2 skipped (2026-10-03), all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so

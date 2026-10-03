@@ -18,3 +18,13 @@ pub = 5572
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which instrument the service opens on real hardware: Mission Control's
+# "Instruments on this PC" offers a found visa address to this module and
+# passes it to the service as --resource <address> (suite_local.json, this PC).
+[hardware]
+address_arg = "--resource"
+bus = "visa"
+# Thorlabs meters sit on Thorlabs' own USB driver, which VISA may not see:
+# scripts/probe.py lists them through TLPMX (list only, no session).
+probe = "scripts/probe.py"

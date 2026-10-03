@@ -24,45 +24,46 @@ import numpy as np
 import pytest
 
 from scan_core import Recipe, run
-from scan_core.registry import Gettable, Registry, Settable
-from scan_core.sim_stream import SimStreamer
+from scan_core.registry import Gettable, Registry, Settable, StreamSpec
+from timed_stream import TimedStream, Track
+
+
+def timed(group, sample_at, rate_hz):
+    """A stream sampled on its own clock (timed_stream.py): the sample counts
+    per pixel then depend on where the stage went, not on how promptly this
+    test's threads were scheduled."""
+    st = TimedStream(sample_at, rate_hz)
+    return StreamSpec(group, st.start, st.read, st.stop)
 
 
 class World:
-    """One stage (moved at a speed) and a camera that sees the sample."""
+    """One stage (moved at a speed) and a camera that sees the sample.
+
+    The stage is a Track, which remembers every move, so the streams can ask
+    where the laser was at any past moment (see timed_stream.py for why)."""
 
     def __init__(self, gain=-1.2, offset=7.0, drift_um_per_s=0.4):
         self.lock = threading.Lock()
-        self.p0 = self.p1 = 0.0
-        self.t0 = self.t1 = time.monotonic()
+        self.track = Track()
         self.speed = 50.0
         self.gain, self.offset, self.drift = gain, offset, drift_um_per_s
-        self.t_start = time.monotonic()
+        self.t_start = time.time()
         self.gen = 0
 
     def stage(self, t=None):
-        t = time.monotonic() if t is None else t
-        with self.lock:
-            if t >= self.t1 or self.t1 == self.t0:
-                return self.p1
-            return self.p0 + (self.p1 - self.p0) * (t - self.t0) / (self.t1 - self.t0)
+        return self.track.pos(t)
 
     def cam(self, t=None):
         """Where the laser is on the sample, as the camera measures it."""
-        t = time.monotonic() if t is None else t
+        t = time.time() if t is None else t
         return self.offset + self.drift * (t - self.t_start) + self.gain * self.stage(t)
 
     def move(self, target, wait=True):
         with self.lock:
-            here = self.p0 + (self.p1 - self.p0) * min(
-                1.0, (time.monotonic() - self.t0) / max(1e-9, self.t1 - self.t0)) \
-                if self.t1 > self.t0 else self.p1
-            self.p0, self.p1 = here, float(target)
-            self.t0 = time.monotonic()
-            self.t1 = self.t0 + abs(self.p1 - self.p0) / self.speed
+            t1 = self.track.move(target, self.speed)
             self.gen += 1
             me = self.gen
-        while wait and time.monotonic() < self.t1 and self.gen == me:
+        while wait and time.time() < t1 and self.gen == me:
             time.sleep(0.002)
 
 
@@ -91,11 +92,11 @@ def build(world):
 
     reg.add(Settable("cam.lx", "Laser on sample X", "um", (-60, 60), place, world.cam))
     reg.add(Settable("dummy.row", "Row", "", (0, 10), lambda v: None, lambda: 0.0))
-    cam = SimStreamer("cam.laser", lambda: {"lx": world.cam()}, rate_hz=60.0)
-    det = SimStreamer("det", lambda: {"a": float(signal(world.cam()))}, rate_hz=200.0)
-    reg.get("cam.lx").stream, reg.get("cam.lx").stream_channel = cam.spec(), "lx"
+    cam = timed("cam.laser", lambda t: {"lx": world.cam(t)}, 60.0)
+    det = timed("det", lambda t: {"a": float(signal(world.cam(t)))}, 200.0)
+    reg.get("cam.lx").stream, reg.get("cam.lx").stream_channel = cam, "lx"
     g = reg.add(Gettable("det.a", "A", "V", lambda: float(signal(world.cam()))))
-    g.stream, g.stream_channel = det.spec(), "a"
+    g.stream, g.stream_channel = det, "a"
     return reg
 
 
@@ -202,13 +203,12 @@ def build2(rig):
                      lambda v: rig.place(lx=v), rig.lx))
     reg.add(Settable("camera.laser_y", "LY", "um", (-60, 60),
                      lambda v: rig.place(ly=v), rig.ly))
-    cam = SimStreamer("camera.laser", lambda: {"x": rig.lx(), "y": rig.ly()}, rate_hz=60.0)
-    spec = cam.spec()
+    spec = timed("camera.laser", lambda t: {"x": rig.x.cam(t), "y": rig.y.cam(t)}, 60.0)
     for pid, ch in (("camera.laser_x", "x"), ("camera.laser_y", "y")):
         reg.get(pid).stream, reg.get(pid).stream_channel = spec, ch
-    det = SimStreamer("pm16", lambda: {"p": float(signal2(rig.lx(), rig.ly()))}, rate_hz=200.0)
+    det = timed("pm16", lambda t: {"p": float(signal2(rig.x.cam(t), rig.y.cam(t)))}, 200.0)
     g = reg.add(Gettable("pm16.power", "P", "mW", lambda: 0.0))
-    g.stream, g.stream_channel = det.spec(), "p"
+    g.stream, g.stream_channel = det, "p"
     return reg
 
 

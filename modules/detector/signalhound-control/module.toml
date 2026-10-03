@@ -18,3 +18,12 @@ pub = 5588
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which analyser the service opens on real hardware: Mission Control's
+# "Instruments on this PC" lists the serial numbers with scripts/probe.py
+# (saGetSerialNumberList, opens none) and passes the chosen one as --serial <n>
+# (suite_local.json, this PC). bus "device" = an id the module takes verbatim.
+[hardware]
+address_arg = "--serial"
+bus = "device"
+probe = "scripts/probe.py"

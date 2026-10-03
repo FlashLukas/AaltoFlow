@@ -24,6 +24,7 @@ from __future__ import annotations
 import html
 
 import math
+import time
 from dataclasses import fields
 
 from PySide6.QtCore import QEvent, QLocale, QObject, Qt, QTimer, Signal
@@ -167,6 +168,21 @@ AF_ZOOM_NOTE = ("zoomed to the spot region (autofocus) -- "
                 "double-click to show the whole frame")
 ZOOM_IN_TEXT = "Zoom to spot region"
 ZOOM_OUT_TEXT = "Whole frame"
+
+# --------------------------------------------------------------------------- #
+# THE POINT ANOTHER CLIENT DRIVES (2026-10-02). When scan-core -- or a script,
+# or another person's GUI -- picks the scan point, the Index X / Y boxes follow
+# and a line under them says who drives it. "Driven from elsewhere" is read
+# from the index CHANGING without a Select in this window; the control status
+# (control.py) adds WHO, when the service reports it. The line stays while the
+# changes keep coming (each within DRIVE_NOTE_S of the last -- the same window
+# the control bars use for "also driving") or while the scan that made them
+# still holds the camera (a slow scan point can take longer than that).
+DRIVE_NOTE_S = 10.0
+# A change within this long after a local action that may move the index
+# (Select, a loaded pattern, Apply, a drawn scan area) is ours, not a driver's:
+# a remote window sees the new index only a status frame or two later.
+LOCAL_CHANGE_S = 2.0
 
 
 def spot_zoom_rect(status, spot_cfg, frame_w: int, frame_h: int):
@@ -389,7 +405,18 @@ class MainWindow(QMainWindow):
         self.view.roi_selected.connect(self._on_roi)
         self.view.scan_area_selected.connect(self._on_scan_area)
         self.view.unzoom_requested.connect(self._dismiss_af_zoom)
+        self.view.user_zoomed.connect(self._on_user_zoom)
         self._af_was_running = False
+        # The scan point another client drives (see DRIVE_NOTE_S, _refresh_index).
+        self._clock = time.monotonic       # replaceable: the tests set the time
+        self._idx_dirty: set = set()       # Index boxes changed here, not sent yet
+        self._idx_syncing = False          # True while the POLL writes the boxes
+        self._idx_last = None              # the index the last status frame had
+        self._idx_requested = None         # what this window's Select asked for
+        self._idx_local_until = 0.0        # changes before this are ours
+        self._drive_last = None            # clock time of the last driven change
+        self._drive_scan_id = None         # the scan holding the camera then
+        self._drive_visited: list = []     # the points driven to, in order
         # Zoom state (see _refresh_zoom). _zoom_spot_on = the user's own
         # "Zoom to spot region" toggle; the autofocus zoom is laid OVER it and
         # the view the user had is put back when the run ends.
@@ -478,7 +505,22 @@ class MainWindow(QMainWindow):
                                "rest of that run.")
         self.b_zoom.clicked.connect(self._toggle_zoom)
         mark_always(self.b_zoom)     # the view only: fine for a viewer
-        zr.addWidget(self.b_zoom); zr.addStretch(1)
+        # Free zoom (2026-10-02): the wheel zooms about the cursor, the middle
+        # button (or Space + left button) pans; these two jump to the two
+        # natural levels. All display only, so a viewer window has them too.
+        self.b_fit = QPushButton("Fit")
+        self.b_fit.setToolTip("The whole frame, as large as the view allows.\n"
+                              "Mouse wheel on the image: zoom about the cursor; "
+                              "middle button or Space + drag: pan.")
+        self.b_fit.clicked.connect(self.view.fit)
+        self.b_one = QPushButton("1:1 pixels")
+        self.b_one.setToolTip("One camera pixel per screen pixel, around the middle "
+                              "of what is shown now.")
+        self.b_one.clicked.connect(self.view.one_to_one)
+        for b in (self.b_fit, self.b_one):
+            mark_always(b)
+        zr.addWidget(self.b_zoom); zr.addWidget(self.b_fit); zr.addWidget(self.b_one)
+        zr.addStretch(1)
         lv.addLayout(zr)
         lay.addWidget(left, 4)
         cards: list[QWidget] = []         # Focus, Pattern, Stabiliser, Imaging
@@ -575,9 +617,22 @@ class MainWindow(QMainWindow):
         r.addWidget(self.sp_ix)
         r.addWidget(QLabel("Y")); self.sp_iy = QSpinBox(); self.sp_iy.setRange(0, 999)
         r.addWidget(self.sp_iy)
-        b_idx = QPushButton("Select"); b_idx.clicked.connect(
-            lambda: self.ctrl.set_selected_index(self.sp_ix.value(), self.sp_iy.value()))
-        r.addWidget(b_idx); l.addLayout(r)
+        # The boxes FOLLOW the service (a scan picks the point) unless the user
+        # is editing them: a box with the keyboard focus, or one changed and not
+        # sent with Select yet ("dirty", outlined), is left alone (_refresh_index).
+        for box in (self.sp_ix, self.sp_iy):
+            box.valueChanged.connect(lambda _v, b=box: self._mark_idx_dirty(b))
+        self._b_idx = QPushButton("Select")
+        self._b_idx.clicked.connect(self._select_index)
+        r.addWidget(self._b_idx); l.addLayout(r)
+        # who else drives the point, and where it is going (hidden when nobody)
+        self.lab_drive = QLabel("")
+        self.lab_drive.setWordWrap(True)
+        self.lab_drive.setToolTip("Another client (a scan, a script, another window) "
+                                  "is choosing the scan point; this window only shows it.")
+        self.lab_drive.setStyleSheet(f"color: {T.COLORS['accent']};")
+        self.lab_drive.hide()
+        l.addWidget(self.lab_drive)
         # How it behaves (Lukáš: "faster, more bold, and a distance that counts
         # as stable"). Edits go to the brain 300 ms after the last change, no
         # Apply button: you tune it while watching it work.
@@ -1740,6 +1795,7 @@ class MainWindow(QMainWindow):
             payload[key] = edited
         if "scanning" in payload:
             self._keep_scan_size(payload["scanning"])
+            self._local_index_change()    # fewer points can move the index: ours
         try:
             self.ctrl.set_config(payload)
             for key, vals in payload.items():     # applied: now that is what is shown
@@ -1881,6 +1937,7 @@ class MainWindow(QMainWindow):
             self._log_event("error", f"clear backups: {exc}")
 
     def _on_scan_area(self, cx, cy, w, h, angle):
+        self._local_index_change()        # a new array may clip the index: ours
         try:
             res = self.ctrl.set_scan_area(cx, cy, w, h, angle)
             self._log_event("info",
@@ -1973,8 +2030,10 @@ class MainWindow(QMainWindow):
             for group in ("scanning", "image"):
                 self._sync_form(group)
             self._sync_size_fields()
-            self.sp_ix.setValue(self.cfg.scanning.selected_index_x)
-            self.sp_iy.setValue(self.cfg.scanning.selected_index_y)
+            # the file's selected point: shown, and a change to it is ours
+            self._local_index_change()
+            self._show_index(self.cfg.scanning.selected_index_x,
+                             self.cfg.scanning.selected_index_y, force=True)
             self.view.clear_scan_rect()           # a drawn rectangle belongs to the old array
             sc = self.cfg.scanning
             self._log_event("info", f"pattern array: {sc.points_x} x {sc.points_y} points, "
@@ -2015,6 +2074,7 @@ class MainWindow(QMainWindow):
             self.view.set_frame(self._frame())
             self.view.set_overlay(s, self.cfg)
         self._refresh_zoom(s)               # every tab: a run must not be missed
+        self._refresh_index(s)              # every tab: a driven change must not be missed
 
         _set_led(self.led_match, s.match_found, T.OK)
         if s.backups_n:
@@ -2161,8 +2221,25 @@ class MainWindow(QMainWindow):
         self._zoom_button_text()
 
     def _zoom_button_text(self) -> None:
-        zoomed = self.view.zoom() is not None
-        self.b_zoom.setText(ZOOM_OUT_TEXT if zoomed else ZOOM_IN_TEXT)
+        # The button is about the SPOT-REGION zoom (the user's toggle or the
+        # autofocus's), not about any zoom: a wheel zoom has Fit to undo it.
+        spot = self._zoom_spot_on or (self._af_zoom_active and not self._af_zoom_dismissed)
+        self.b_zoom.setText(ZOOM_OUT_TEXT if spot else ZOOM_IN_TEXT)
+
+    def _on_user_zoom(self) -> None:
+        """The user zoomed or panned by hand (wheel, drag, Fit, 1:1).
+
+        Their view wins: it ends the "follow the spot region" toggle, and
+        during an autofocus zoom it takes over for the rest of that run (as the
+        double-click does) and is what the end of the run gives back -- the
+        user looked somewhere on purpose, so it is not snapped away."""
+        self._zoom_spot_on = False
+        if self._af_zoom_active:
+            if not self._af_zoom_dismissed:
+                self._af_zoom_dismissed = True
+                self.view.set_zoom_note("")
+            self._zoom_saved = self.view.zoom()
+        self._zoom_button_text()
 
     def _last_status(self):
         s = getattr(self, "_status_seen", None)
@@ -2202,6 +2279,133 @@ class MainWindow(QMainWindow):
         elif not self._af_zoom_active and self._zoom_spot_on:
             self.view.set_zoom(self._spot_zoom(s))   # follow a new calibration
         self._zoom_button_text()
+
+    # -- the scan point another client drives (2026-10-02) ------------------ #
+    def _mark_idx_dirty(self, box) -> None:
+        """A value the USER put in an Index box (the poll's own writes run with
+        _idx_syncing set and do not count): keep it until Select sends it."""
+        if self._idx_syncing or box in self._idx_dirty:
+            return
+        self._idx_dirty.add(box)
+        box.setStyleSheet(f"border: 1px solid {T.COLORS['accent']};")
+        box.setToolTip("changed here, not sent yet -- press Select")
+
+    def _clear_idx_dirty(self) -> None:
+        for box in list(self._idx_dirty):
+            box.setStyleSheet("")
+            box.setToolTip("")
+        self._idx_dirty.clear()
+
+    def _show_index(self, ix: int, iy: int, force: bool = False) -> None:
+        """Write the service's index into the boxes -- not into one being
+        edited (focus or dirty) unless ``force``."""
+        if force:
+            self._clear_idx_dirty()
+        self._idx_syncing = True
+        try:
+            for box, v in ((self.sp_ix, int(ix)), (self.sp_iy, int(iy))):
+                if force or (not box.hasFocus() and box not in self._idx_dirty):
+                    if box.value() != v:
+                        box.setValue(v)
+        finally:
+            self._idx_syncing = False
+
+    def _local_index_change(self) -> None:
+        """Something done in THIS window may move the index: a change seen in
+        the next LOCAL_CHANGE_S is ours, not another client's."""
+        self._idx_local_until = self._clock() + LOCAL_CHANGE_S
+
+    def _select_index(self) -> None:
+        ix, iy = self.sp_ix.value(), self.sp_iy.value()
+        self._idx_requested = (ix, iy)
+        self._local_index_change()
+        try:
+            self.ctrl.set_selected_index(ix, iy)
+        except Exception as exc:
+            self._log_event("warn", f"select point: {exc}")
+        # sent (or refused -- the log says why): the boxes follow the service
+        # again, and the next poll shows what it really has
+        self._clear_idx_dirty()
+
+    def _control_info(self):
+        """The service's control status (control.py): who holds control, which
+        scan holds the camera, which machine clients are driving. None for a
+        local brain or a service that does not report it."""
+        f = getattr(self.ctrl, "control", None)
+        if not callable(f):
+            return None
+        try:
+            c = f()
+        except Exception:
+            return None
+        return c if isinstance(c, dict) else None
+
+    def _refresh_index(self, s) -> None:
+        """Index boxes, the "who drives it" line and the marks on the image.
+
+        Display only -- nothing here sends anything, so it works the same in a
+        viewer window. A change of the index that this window did not ask for
+        is "driven from elsewhere"; while such changes keep coming, the line
+        under the boxes names the driver and the point, and the image marks
+        the target point while the stage is still moving to it (plus the
+        points already visited)."""
+        now = self._clock()
+        idx = (int(s.selected_index_x), int(s.selected_index_y))
+        self._show_index(*idx)
+        ctl = self._control_info() or {}
+        scan = ctl.get("scan") or None
+        if self._idx_last is not None and idx != self._idx_last:
+            ours = idx == self._idx_requested or now < self._idx_local_until
+            if not ours:
+                if not self._drive_active(now, scan):
+                    self._drive_visited = []          # a new driving session
+                elif self._idx_last not in self._drive_visited:
+                    self._drive_visited.append(self._idx_last)
+                self._drive_last = now
+                self._drive_scan_id = (scan or {}).get("id")
+        if idx == self._idx_requested:
+            self._idx_requested = None                # arrived: done with it
+        self._idx_last = idx
+
+        if not self._drive_active(now, scan):
+            self.lab_drive.hide()
+            self.view.set_drive_marks(None, [])
+            return
+        sc = self.cfg.scanning
+        if not getattr(s, "stabilize_on", False):
+            state = "stabiliser off"                  # chosen, but nothing moves to it
+        elif getattr(s, "point_settled", False):
+            state = "stable"
+        else:
+            state = "moving"
+        text = (f"{self._driver_name(ctl, scan)}: point ({idx[0]}, {idx[1]}) of "
+                f"{sc.points_x} x {sc.points_y}, {state}")
+        if self.lab_drive.text() != text:
+            self.lab_drive.setText(text)
+        self.lab_drive.show()
+        visited = [p for p in self._drive_visited if p != idx]
+        self.view.set_drive_marks(idx if state == "moving" else None, visited)
+
+    def _drive_active(self, now: float, scan) -> bool:
+        if self._drive_last is None:
+            return False
+        if now - self._drive_last <= DRIVE_NOTE_S:
+            return True
+        # a slow scan: still the one that drove it, still holding the camera
+        return bool(scan) and self._drive_scan_id is not None \
+            and scan.get("id") == self._drive_scan_id
+
+    @staticmethod
+    def _driver_name(ctl: dict, scan) -> str:
+        """Who drives the point: the scan holding the camera, else machine
+        clients the service lists as driving, else just "another client"."""
+        if scan:
+            name = scan.get("name") or "scan"
+            label = scan.get("label")
+            return f"{name} ('{label}')" if label else name
+        driving = [c.get("name") or "a program" for c in ctl.get("clients", []) or []
+                   if c.get("kind") == "machine" and c.get("driving")]
+        return ", ".join(driving) if driving else "another client"
 
     def _log_event(self, level, msg):
         color = {"info": T.ACCENT_HI, "warn": T.ACCENT, "error": T.DANGER}.get(level, T.TEXT)

@@ -29,36 +29,27 @@ from scan_core import Recipe, run                                    # noqa: E40
 from scan_core.instrument import Instrument                          # noqa: E402
 from scan_core.manifest import register_manifest                     # noqa: E402
 from scan_core.registry import Registry                              # noqa: E402
+from timed_stream import TimedStream, Track                          # noqa: E402
 
 
 class World:
-    """The physics both fakes share: one stage position, moved over time."""
+    """The physics both fakes share: one stage position, moved over time.
+
+    Its Track remembers every move, so the streams can ask where the stage
+    was at any past moment (see timed_stream.py for why they need to)."""
 
     def __init__(self):
-        self.lock = threading.Lock()
-        self.p0 = self.p1 = 0.0
-        self.t0 = self.t1 = time.time()
+        self.track = Track()
         self.speed = 100.0
 
     def move(self, target):
-        with self.lock:
-            here = self._pos(time.time())
-            self.p0, self.p1 = here, float(target)
-            self.t0 = time.time()
-            self.t1 = self.t0 + abs(self.p1 - self.p0) / self.speed
-
-    def _pos(self, t):
-        if t >= self.t1 or self.t1 == self.t0:
-            return self.p1
-        return self.p0 + (self.p1 - self.p0) * (t - self.t0) / (self.t1 - self.t0)
+        self.track.move(target, self.speed)
 
     def pos(self, t=None):
-        with self.lock:
-            return self._pos(time.time() if t is None else t)
+        return self.track.pos(t)
 
     def moving(self):
-        with self.lock:
-            return time.time() < self.t1
+        return self.track.moving()
 
 
 def signal(x):
@@ -67,18 +58,19 @@ def signal(x):
 
 
 class FakeStreamer:
-    """One service: REP commands, PUB status, a recorder thread."""
+    """One service: REP commands, PUB status, and a stream sampled on the
+    service's own clock (a TimedStream: no sample is lost when this test's
+    threads are starved of CPU, as a hardware-timed buffer loses none)."""
 
     def __init__(self, port, manifest, sample, status, handle=None,
                  clock_offset=0.0, rate_hz=400.0, delay_s=None):
         self.port = port
         self.manifest = manifest
-        self._sample, self._status, self._handle = sample, status, handle
+        self._status, self._handle = status, handle
         self.clock_offset = clock_offset          # this "PC"'s clock error
-        self.rate = rate_hz
-        self.delay_s = delay_s or {}
-        self._buf, self._rec = [], False
-        self._lock = threading.Lock()
+        self.stream = TimedStream(sample, rate_hz,
+                                  stamp=lambda t: t + self.clock_offset,
+                                  delay_s=delay_s, extra=lambda: {"now": self.now()})
         self._stop = threading.Event()
         self._ctx = zmq.Context.instance()
         self.commands = []
@@ -87,7 +79,7 @@ class FakeStreamer:
         return time.time() + self.clock_offset
 
     def start(self):
-        for fn in (self._serve, self._publish, self._record):
+        for fn in (self._serve, self._publish):
             threading.Thread(target=fn, daemon=True).start()
         time.sleep(0.15)
         return self
@@ -95,24 +87,6 @@ class FakeStreamer:
     def stop(self):
         self._stop.set()
         time.sleep(0.2)
-
-    def _record(self):
-        while not self._stop.is_set():
-            t_true = time.time()
-            if self._rec:
-                row = self._sample(t_true)
-                with self._lock:
-                    self._buf.append((t_true + self.clock_offset, row))
-            time.sleep(1.0 / self.rate)
-
-    def _drain(self):
-        with self._lock:
-            rows, self._buf = self._buf, []
-        chans = list(rows[0][1]) if rows else []
-        return {"t": [r[0] for r in rows],
-                "values": {c: [r[1][c] for r in rows] for c in chans},
-                "delay_s": {c: self.delay_s.get(c, 0.0) for c in chans},
-                "overflow": False, "now": self.now()}
 
     def _serve(self):
         rep = self._ctx.socket(zmq.REP)
@@ -130,14 +104,12 @@ class FakeStreamer:
             elif cmd == "status":
                 rep.send_json({"ok": True, "status": self._status()})
             elif cmd == "stream_start":
-                with self._lock:
-                    self._buf, self._rec = [], True
+                self.stream.start()
                 rep.send_json({"ok": True})
             elif cmd == "stream_read":
-                rep.send_json({"ok": True, "stream": self._drain()})
+                rep.send_json({"ok": True, "stream": self.stream.read()})
             elif cmd == "stream_stop":
-                self._rec = False
-                rep.send_json({"ok": True, "stream": self._drain()})
+                rep.send_json({"ok": True, "stream": self.stream.stop()})
             elif self._handle is not None:
                 rep.send_json(self._handle(msg))
             else:
