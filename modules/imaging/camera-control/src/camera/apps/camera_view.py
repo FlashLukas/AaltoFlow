@@ -15,6 +15,19 @@ spot detection area"): ``set_zoom((x0, y0, x1, y1))`` shows only that part of
 the frame, scaled to fit. ONE transform (source rectangle + scale + where it
 lands in the widget) is used for the picture, every overlay and every
 click, so a click on a zoomed view still names the right image pixel.
+
+FREE ZOOM AND PAN (2026-10-02): the mouse wheel zooms about the cursor (the
+image point under the cursor stays under it), the MIDDLE button -- or Space
+held + the left button -- drags the picture (the left button alone is taken:
+click-to-go, template ROI, scan rectangle), ``fit()`` shows the whole frame
+and ``one_to_one()`` one camera pixel per screen pixel. All of it only
+chooses a new source rectangle for the same transform, so clicks and
+overlays stay right. It is display only: nothing is sent to the camera, so
+a viewer window can zoom as freely as the one in control.
+
+DRIVEN POINT (2026-10-02): while another client (a scan) picks the scan
+point, the window hands the view the point it is moving to and the points
+visited so far (``set_drive_marks``); they are drawn on the array points.
 """
 
 from __future__ import annotations
@@ -24,7 +37,7 @@ import math
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QWidget
 
 from . import theme as T
 from .. import vision as V
@@ -37,6 +50,15 @@ SPOT_TINT_BGRA = (106, 255, 43, 105)   # thresholded pixels, same green, translu
 OUTLINE = QColor(0, 0, 0, 200)         # under every green line: readable on white too
 AIM_COLOUR = "#ff4fd8"                 # the stabiliser's target (selected scan point)
 LASER_TARGET_COLOUR = "#35d4ff"        # where the laser is being PLACED (set_laser_target)
+
+# Free zoom. One wheel notch multiplies the magnification by WHEEL_STEP, so
+# four notches double it (1.19**4 = 2.0): fine enough to stop where you want,
+# coarse enough to get from the whole frame to single pixels in a few turns.
+WHEEL_STEP = 2.0 ** 0.25
+# The deepest zoom, in screen pixels per camera pixel: at 32 one camera pixel
+# is a 32 px square -- enough to read single pixel values, and the shown
+# part of the frame (a few tens of pixels) never becomes empty.
+MAX_ZOOM = 32.0
 
 
 def outlined_pen(p: QPainter, colour: str, width: float, style=Qt.SolidLine):
@@ -60,6 +82,10 @@ class CameraView(QWidget):
     # a double-click on the image while a zoom NOTE is shown (the autofocus
     # zoom): the window un-zooms for the rest of that run
     unzoom_requested = Signal()
+    # the USER changed the zoom (wheel, pan, Fit, 1:1) -- not set_zoom(), which
+    # is the window's own (autofocus, spot region). The window uses it to let
+    # the user's zoom win over a running autofocus zoom.
+    user_zoomed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -97,7 +123,18 @@ class CameraView(QWidget):
         # spot is dim, so the zoomed view looked black during a run. The data
         # the brain measures is never touched -- only the picture.
         self._stretch = False
+        # Free zoom (2026-10-02). _scale_cap: a magnification BELOW "fit" (the
+        # frame smaller than the view shown at 1:1); None = fit as usual.
+        self._scale_cap: float | None = None
+        self._pan_last = None        # widget point of the last pan step (None = no pan)
+        self._pan_button = None      # the button that started the pan
+        self._space_down = False     # Space held: the left button pans
+        # The point an external client is moving to + the ones visited (indices)
+        self._drive_target = None
+        self._drive_visited: list = []
         self.setMouseTracking(True)
+        # keyboard focus by click or wheel, so Space reaches the view
+        self.setFocusPolicy(Qt.WheelFocus)
 
     # -- data in ----------------------------------------------------------- #
     def set_stretch(self, on: bool) -> None:
@@ -188,7 +225,12 @@ class CameraView(QWidget):
 
         The rectangle is clipped to the frame; one that is empty after that
         (or smaller than 2 px) means the whole frame -- never a blank view.
+        This is the WINDOW's zoom (autofocus, spot region): it ends a 1:1 view
+        of a small frame and does not emit user_zoomed.
         """
+        self._apply_zoom(rect, None)
+
+    def _apply_zoom(self, rect, cap) -> None:
         z = None
         if rect is not None:
             x0, y0, x1, y1 = (float(v) for v in rect)
@@ -198,8 +240,10 @@ class CameraView(QWidget):
             x1, y1 = min(float(self._frame_w), x1), min(float(self._frame_h), y1)
             if x1 - x0 >= 2 and y1 - y0 >= 2:
                 z = (x0, y0, x1, y1)
-        if z != self._zoom:
+        cap = None if z is not None or cap is None else float(cap)
+        if z != self._zoom or cap != self._scale_cap:
             self._zoom = z
+            self._scale_cap = cap
             self._layout()
             self.update()
 
@@ -220,6 +264,110 @@ class CameraView(QWidget):
     def zoom_note(self) -> str:
         return self._zoom_note
 
+    # -- free zoom (wheel, pan, Fit, 1:1) ------------------------------------ #
+    def _dpr(self) -> float:
+        """Device pixels per widget pixel (Windows display scaling: 1.5 at
+        150 %). "1:1 pixels" means one camera pixel per DEVICE pixel."""
+        try:
+            return float(self.devicePixelRatioF()) or 1.0
+        except Exception:
+            return 1.0
+
+    def zoom_level(self) -> float:
+        """Screen (device) pixels per camera pixel: 1.0 = 1:1, 2.0 = each
+        camera pixel is a 2 x 2 square."""
+        self._layout()
+        return self._scale * self._dpr()
+
+    def zoom_text(self) -> str:
+        """What the view shows in its corner: "fit 62 %" or "250 %"."""
+        pct = f"{self.zoom_level() * 100:.0f} %"
+        return f"fit {pct}" if self._zoom is None and self._scale_cap is None else pct
+
+    def _fit_scale(self) -> float:
+        return min(max(self.width(), 1) / max(self._frame_w, 1),
+                   max(self.height(), 1) / max(self._frame_h, 1))
+
+    def _view_at(self, cx: float, cy: float, scale: float):
+        """(rect, cap) for showing the frame at ``scale`` widget px per camera px
+        with (cx, cy) in the middle of the view.
+
+        The rectangle has the WIDGET's shape, so the zoomed picture fills the
+        view without bars, and it is slid back inside the frame near an edge
+        (rather than showing empty space beyond the camera's picture). In a
+        direction where the whole frame fits it simply spans the frame. When
+        the whole frame fits both ways there is no rectangle: None, plus a
+        cap if the scale is below "fit" (a small frame at 1:1)."""
+        fw, fh = float(self._frame_w), float(self._frame_h)
+        vw, vh = max(self.width(), 1) / scale, max(self.height(), 1) / scale
+        if vw >= fw and vh >= fh:
+            return None, (scale if scale < self._fit_scale() * (1 - 1e-9) else None)
+        vw, vh = min(vw, fw), min(vh, fh)
+        x0 = min(max(cx - vw / 2.0, 0.0), fw - vw)
+        y0 = min(max(cy - vh / 2.0, 0.0), fh - vh)
+        return (x0, y0, x0 + vw, y0 + vh), None
+
+    def _user_view(self, rect, cap) -> None:
+        self._apply_zoom(rect, cap)
+        self.user_zoomed.emit()
+
+    def zoom_about(self, wx: float, wy: float, factor: float) -> None:
+        """Magnify by ``factor`` keeping the camera pixel under widget point
+        (wx, wy) where it is -- the wheel's zoom."""
+        self._layout()
+        dpr = self._dpr()
+        lo = min(self._fit_scale(), 1.0 / dpr)    # whole frame, or 1:1 if smaller
+        hi = MAX_ZOOM / dpr
+        new = min(max(self._scale * factor, lo), hi)
+        if abs(new - self._scale) < 1e-12 * max(new, 1.0):
+            return                                  # at a limit already
+        ix, iy = self._widget_to_img(wx, wy)
+        if abs(new - self._fit_scale()) < 1e-9 * new:
+            self._user_view(None, None)             # exactly fit = the plain whole frame
+            return
+        # the camera pixel (ix, iy) must stay at widget (wx, wy): the view's
+        # left edge is ix - wx / new, its centre half a view further
+        cx = ix - wx / new + self.width() / (2.0 * new)
+        cy = iy - wy / new + self.height() / (2.0 * new)
+        self._user_view(*self._view_at(cx, cy, new))
+
+    def pan_by(self, dx: float, dy: float) -> None:
+        """Move the picture by (dx, dy) widget px (the drag), stopping at the
+        frame's edges. Nothing to pan when the whole frame is shown."""
+        if self._zoom is None:
+            return
+        self._layout()
+        x0, y0, x1, y1 = self._zoom
+        w, h = x1 - x0, y1 - y0
+        nx0 = min(max(x0 - dx / self._scale, 0.0), self._frame_w - w)
+        ny0 = min(max(y0 - dy / self._scale, 0.0), self._frame_h - h)
+        self._user_view((nx0, ny0, nx0 + w, ny0 + h), None)
+
+    def fit(self) -> None:
+        """The whole frame, as large as the view allows."""
+        self._user_view(None, None)
+
+    def one_to_one(self) -> None:
+        """One camera pixel per screen pixel, centred on the middle of what is
+        shown now (so 1:1 looks closer at the same place)."""
+        self._layout()
+        cx = self._src.left() + self._src.width() / 2.0
+        cy = self._src.top() + self._src.height() / 2.0
+        self._user_view(*self._view_at(cx, cy, 1.0 / self._dpr()))
+
+    # -- the point an external client drives (2026-10-02) -------------------- #
+    def set_drive_marks(self, target, visited=()) -> None:
+        """``target`` = (ix, iy) of the array point a client is moving to (None:
+        none / settled); ``visited`` = the points it went to before."""
+        target = None if target is None else (int(target[0]), int(target[1]))
+        visited = [(int(a), int(b)) for a, b in visited]
+        if (target, visited) != (self._drive_target, self._drive_visited):
+            self._drive_target, self._drive_visited = target, visited
+            self.update()
+
+    def drive_marks(self) -> tuple:
+        return (self._drive_target, list(self._drive_visited))
+
     # -- coordinate mapping ------------------------------------------------ #
     def _layout(self) -> None:
         """Recompute the ONE image->widget transform: the shown source
@@ -233,6 +381,8 @@ class CameraView(QWidget):
         w, h = max(self.width(), 1), max(self.height(), 1)
         self._src = QRectF(x0, y0, sw, sh)
         self._scale = min(w / sw, h / sh)
+        if self._zoom is None and self._scale_cap is not None:
+            self._scale = min(self._scale, self._scale_cap)   # small frame at 1:1
         dw, dh = sw * self._scale, sh * self._scale
         self._draw_rect = QRectF((w - dw) / 2.0, (h - dh) / 2.0, dw, dh)
 
@@ -259,7 +409,64 @@ class CameraView(QWidget):
         return self._widget_to_img(x, y)
 
     # -- mouse ------------------------------------------------------------- #
+    def wheelEvent(self, ev):
+        # One notch = 120 units; a touchpad sends fractions -- the power keeps
+        # the zoom smooth and the same overall for the same finger travel.
+        notches = ev.angleDelta().y() / 120.0
+        if notches == 0:
+            return
+        pos = ev.position()
+        self.zoom_about(pos.x(), pos.y(), WHEEL_STEP ** notches)
+        ev.accept()
+
+    def _pan_starts(self, ev) -> bool:
+        return (ev.button() == Qt.MiddleButton
+                or (ev.button() == Qt.LeftButton and self._space_down))
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Space:
+            if not ev.isAutoRepeat():
+                self._space_down = True
+                if self._pan_last is None:
+                    self.setCursor(Qt.OpenHandCursor)
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def keyReleaseEvent(self, ev):
+        if ev.key() == Qt.Key_Space:
+            if not ev.isAutoRepeat():
+                self._space_down = False
+                if self._pan_last is None:
+                    self.unsetCursor()
+            ev.accept()
+            return
+        super().keyReleaseEvent(ev)
+
+    def focusOutEvent(self, ev):
+        # a Space released while another widget had the keyboard never arrives here
+        self._space_down = False
+        if self._pan_last is None:
+            self.unsetCursor()
+        super().focusOutEvent(ev)
+
+    def enterEvent(self, ev):
+        # The mouse over the picture: take the keyboard focus so Space pans --
+        # otherwise Space would PRESS whichever button had focus (Snapshot,
+        # Select...). Never from a box being typed into.
+        fw = QApplication.focusWidget()
+        if fw is None or isinstance(fw, QAbstractButton):
+            self.setFocus(Qt.MouseFocusReason)
+        super().enterEvent(ev)
+
     def mousePressEvent(self, ev):
+        if self._pan_starts(ev):
+            # a pan: the left button's own jobs (click-to-go, ROI, scan
+            # rectangle) do not happen while Space is held
+            self._pan_last = ev.position()
+            self._pan_button = ev.button()
+            self.setCursor(Qt.ClosedHandCursor)
+            return
         if ev.button() != Qt.LeftButton:
             return
         ipt = self._widget_to_img(ev.position().x(), ev.position().y())
@@ -281,6 +488,11 @@ class CameraView(QWidget):
         super().mouseDoubleClickEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        if self._pan_last is not None:
+            pos = ev.position()
+            self.pan_by(pos.x() - self._pan_last.x(), pos.y() - self._pan_last.y())
+            self._pan_last = pos
+            return
         if self._scan_mode and self._scan_kind is not None:
             self._scan_move(self._widget_to_img(ev.position().x(), ev.position().y()))
         elif self._roi_mode and self._drag_start is not None:
@@ -288,6 +500,14 @@ class CameraView(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, ev):
+        if self._pan_last is not None:
+            if ev.button() == self._pan_button:
+                self._pan_last = self._pan_button = None
+                if self._space_down:
+                    self.setCursor(Qt.OpenHandCursor)
+                else:
+                    self.unsetCursor()
+            return
         if self._scan_mode and self._scan_kind is not None:
             self._scan_release()
         elif self._roi_mode and self._drag_start is not None:
@@ -450,6 +670,14 @@ class CameraView(QWidget):
         if self._zoom_note:
             self._label(p, QPointF(self._draw_rect.left() + 6, self._draw_rect.top() + 6),
                         self._zoom_note, T.COLORS["accent_hi"])
+        if self._img is not None:
+            # the zoom level in the picture's bottom-right corner
+            text = self.zoom_text()
+            fm = p.fontMetrics()
+            w, h = fm.horizontalAdvance(text) + 10, fm.height() + 6
+            self._label(p, QPointF(self._draw_rect.right() - w - 4,
+                                   self._draw_rect.bottom() - h - 4), text,
+                        T.COLORS["accent"])
 
         # In-progress template-ROI rubber-band.
         if self._roi_mode and self._drag_start is not None and self._drag_now is not None:
@@ -565,18 +793,9 @@ class CameraView(QWidget):
                 p.drawRect(QRectF(tp.x() - sa, tp.y() - sa, 2 * sa, 2 * sa))
 
             # -- scanning-point array pinned to the template ------------------ #
-            offs = V.scanning_array_pixel_offsets(
-                cfg.scanning.points_x, cfg.scanning.points_y,
-                cfg.scanning.dx_um, cfg.scanning.dy_um, cfg.scanning.angle_deg,
-                cfg.image.pixel_size_x_um, cfg.image.pixel_size_y_um)
-            acx = s.template_x  # array centre offset already baked into template? no:
-            # array centre = template + stored offset; the brain reports the
-            # selected point, but for ALL points we approximate the centre from
-            # the selected point minus its own offset.
+            offs, acx, acy = self._array_geometry()
             six = int(np.clip(cfg.scanning.selected_index_x, 0, cfg.scanning.points_x - 1))
             siy = int(np.clip(cfg.scanning.selected_index_y, 0, cfg.scanning.points_y - 1))
-            acx = s.selected_point_x - offs[siy, six, 0]
-            acy = s.selected_point_y - offs[siy, six, 1]
             r = max(2.0, cfg.scanning.overlay_size * self._scale)
             for iy in range(cfg.scanning.points_y if self._show_scan_points else 0):
                 for ix in range(cfg.scanning.points_x):
@@ -591,6 +810,7 @@ class CameraView(QWidget):
                         p.setBrush(Qt.NoBrush)
                     p.drawEllipse(wp, r, r)
             p.setBrush(Qt.NoBrush)
+            self._paint_drive_marks(p)
 
         # -- the spot SEARCH REGION around the calibrated position ------------ #
         sp_cfg = cfg.spot
@@ -719,6 +939,62 @@ class CameraView(QWidget):
                     text = f"spot not seen: {short}" if short else "spot not seen"
             drawn.append(self._label(p, QPointF(sp.x() + 20, sp.y() - 20), text,
                                      SPOT_GREEN, drawn))
+
+    def _array_geometry(self):
+        """(offsets, centre x, centre y) of the scan-point array in image px,
+        or None without a matched pattern. The brain reports only the
+        SELECTED point's position; the array centre is that point minus its
+        own offset, and every other point is centre + its offset."""
+        s, cfg = self._status, self._cfg
+        if s is None or cfg is None or not getattr(s, "match_found", False):
+            return None
+        sc = cfg.scanning
+        offs = V.scanning_array_pixel_offsets(
+            sc.points_x, sc.points_y, sc.dx_um, sc.dy_um, sc.angle_deg,
+            cfg.image.pixel_size_x_um, cfg.image.pixel_size_y_um)
+        six = int(np.clip(sc.selected_index_x, 0, sc.points_x - 1))
+        siy = int(np.clip(sc.selected_index_y, 0, sc.points_y - 1))
+        return (offs, s.selected_point_x - offs[siy, six, 0],
+                s.selected_point_y - offs[siy, six, 1])
+
+    def array_point_image(self, ix: int, iy: int):
+        """Image position (x, y) of array point (ix, iy), or None (no match,
+        or an index outside the array)."""
+        g = self._array_geometry()
+        if g is None:
+            return None
+        offs, acx, acy = g
+        if not (0 <= iy < offs.shape[0] and 0 <= ix < offs.shape[1]):
+            return None
+        return (float(acx + offs[iy, ix, 0]), float(acy + offs[iy, ix, 1]))
+
+    def _paint_drive_marks(self, p: QPainter) -> None:
+        """The points an external client (a scan) went to: small pink dots;
+        the point it is moving to now: a pink target ring with four ticks.
+        Pink = the stabiliser's aim colour, because that IS where the stage
+        is being driven; a ring (not an "x") says "on its way there"."""
+        for ix, iy in self._drive_visited:
+            pt = self.array_point_image(ix, iy)
+            if pt is None:
+                continue
+            c = self._img_to_widget(*pt)
+            p.setPen(QPen(OUTLINE, 1.0))
+            p.setBrush(QColor(AIM_COLOUR))
+            p.drawEllipse(c, 2.5, 2.5)
+        p.setBrush(Qt.NoBrush)
+        if self._drive_target is None:
+            return
+        pt = self.array_point_image(*self._drive_target)
+        if pt is None:
+            return
+        c = self._img_to_widget(*pt)
+        r, t = 11.0, 6.0
+        for _ in outlined_pen(p, AIM_COLOUR, 2.0):
+            p.drawEllipse(c, r, r)
+            p.drawLine(QPointF(c.x() - r - t, c.y()), QPointF(c.x() - r + 2, c.y()))
+            p.drawLine(QPointF(c.x() + r - 2, c.y()), QPointF(c.x() + r + t, c.y()))
+            p.drawLine(QPointF(c.x(), c.y() - r - t), QPointF(c.x(), c.y() - r + 2))
+            p.drawLine(QPointF(c.x(), c.y() + r - 2), QPointF(c.x(), c.y() + r + t))
 
     def _label(self, p: QPainter, at: QPointF, text: str, colour: str,
                avoid: list = ()) -> QRectF:
