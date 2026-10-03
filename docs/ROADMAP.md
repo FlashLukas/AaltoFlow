@@ -68,6 +68,39 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### dssg: show the MEASURED harmonic content in its window (2026-10-03)
+
+The DS Instruments generator is unfiltered, so its harmonics are real.
+Today the window's little spectrum (`apps/gui.py`, `SpectrumIndicator`)
+draws the 2nd and 3rd harmonic at fixed "typical" levels (-25 / -35 dBc,
+hard-coded: "illustrative, not a measurement"). Plan: measure them once and
+show the real numbers.
+
+- **Measure:** a scan of the generator against a spectrum analyser -- dssg
+  frequency (and power, if the harmonics depend on it) as axes, the
+  analyser's trace as the detector, as in the 512 x 21 000-point
+  signalhound map. A ready-made recipe in `scan-core/recipes/` makes it
+  repeatable. Note the analyser's range: the SA44B stops at 4.4 GHz, so a
+  2nd harmonic is only measurable for carriers up to 2.2 GHz, a 3rd up to
+  ~1.47 GHz; above that the table says "not measured" (or a second
+  instrument fills it in).
+- **Extract:** a small tool (or an AaltoView analysis) reads the .nc, finds
+  the peak within a window around n x f for n = 2..N (plus the carrier, for
+  the reference), and writes a harmonics table in dBc against frequency
+  (and power) -- a file next to the module's config, picked up by "Export
+  settings". No serial numbers in tracked files.
+- **Use it in dssg:** the brain loads the table and interpolates (log f,
+  power) for the current setting; status and describe gain indicators
+  (`h2_dbc`, `h3_dbc`, ...) a scan can record next to its data; the GUI
+  draws the measured lines with their levels ("2nd -31 dBc, measured
+  2026-..") and falls back to the typical values, marked "typical", outside
+  the measured range or with no table.
+- Later, the same for the other generators (smb, hp8648, windfreak) -- the
+  table format and the extraction tool are generic.
+
+Effort: ~1-1.5 days (extraction + table + dssg indicators + GUI + tests with
+a simulated measurement), plus the measurement itself.
+
 ### Live map: narrow (one-point) features vanish when drawn (2026-10-03)
 
 A one-frequency-point line in a map (a spectrum-analyser tone, a narrow
