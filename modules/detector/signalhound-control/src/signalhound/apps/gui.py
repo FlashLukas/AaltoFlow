@@ -393,7 +393,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # back the moment you clicked into Span (Lukas, 2026-10-01: "whenever
         # I change any settings it comes back to the original ones"). A box
         # the user changed is now "dirty": the poll leaves it alone, it gets
-        # an amber outline, and Apply (or Enter in it) sends it and clears it.
+        # an amber outline, and Apply (or Enter in it) sends it and clears it
+        # (developer notes gotcha #45).
         self._dirty: set = set()
         self._syncing = False            # True while the POLL sets values
         self._sweep_spins = (self.center_spin, self.span_spin, self.start_spin,

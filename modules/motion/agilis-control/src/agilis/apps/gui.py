@@ -571,6 +571,21 @@ class MainWindow(QWidget):
         lay.addWidget(self._amp_hint)
         self._suppress_presets = False
         self._preset_state = None
+        # EDITED BUT NOT APPLIED. The status poll keeps these boxes following
+        # amplitudes changed elsewhere (console, preset, scan) -- but it used
+        # to skip only the box with keyboard focus, so X forward typed in was
+        # put back the moment you clicked into X backward, and "Apply
+        # amplitudes" sent the old value (the signalhound bug, Lukas
+        # 2026-10-01; developer notes gotcha #45). A box the user changed is
+        # now "dirty": the poll leaves it alone, it gets an amber outline, and
+        # Apply (or Enter in it) sends it and clears it.
+        self._dirty: set = set()
+        for pair in self._amp_boxes:
+            for box in pair:
+                # the poll sets values under blockSignals, so only the USER
+                # reaches valueChanged here
+                box.valueChanged.connect(lambda _v, b=box: self._mark_dirty(b))
+                box.lineEdit().returnPressed.connect(self._apply_amplitudes)
         return frame
 
     def _build_step_size_card(self) -> QFrame:
@@ -743,6 +758,7 @@ class MainWindow(QWidget):
                 self._do(lambda: self.ctrl.set_config(config_to_dict(self.cfg)))
             else:
                 self._do(self.ctrl.apply_config)
+            self._clear_dirty(*list(self._dirty))   # the dialog set the amplitudes
             self._on_event("info", "settings applied")
 
     # ------------------------------------------------------------------ #
@@ -836,12 +852,47 @@ class MainWindow(QWidget):
         for a, (f, b) in enumerate(self._amp_boxes):
             self._do(lambda a=a, v=f.value(): self.ctrl.set_amplitude(a, v, +1))
             self._do(lambda a=a, v=b.value(): self.ctrl.set_amplitude(a, v, -1))
+        # sent: the boxes follow the controller again (a refused value is put
+        # back by the next poll, and the log says why)
+        self._clear_dirty(*list(self._dirty))
+
+    def _mark_dirty(self, box) -> None:
+        if box in self._dirty:
+            return
+        self._dirty.add(box)
+        box.setStyleSheet(f"border: 1px solid {theme.COLORS['accent']};")
+        box.setToolTip("changed here, not sent yet -- press Apply amplitudes (or Enter)")
+
+    def _clear_dirty(self, *boxes) -> None:
+        for box in boxes:
+            if box in self._dirty:
+                self._dirty.discard(box)
+                box.setStyleSheet("")
+                box.setToolTip("")
+
+    def _sync_amplitudes(self, st, force: bool = False) -> None:
+        """The amplitude boxes follow the controller, but never while the user
+        is typing in one, and never a box changed here and not applied yet.
+        ``force`` (a preset, the Settings dialog: the user just set every
+        amplitude another way) drops the unsent edits."""
+        if force:
+            self._clear_dirty(*list(self._dirty))
+        for a, (f, b) in enumerate(self._amp_boxes):
+            for box, v in ((f, st.amplitude_fwd[a]), (b, st.amplitude_bwd[a])):
+                if force or (not box.hasFocus() and box not in self._dirty):
+                    if box.value() != int(v):
+                        box.blockSignals(True)
+                        box.setValue(int(v))
+                        box.blockSignals(False)
 
     def _toggle_steps(self, checked: bool) -> None:
         if self._suppress_presets:
             return
         self._do(lambda: self.ctrl.set_step_size(bool(checked)))
         self._paint_steps_button(checked)
+        # the preset set every amplitude: an unsent edit is out of date (the
+        # boxes show the new values at the next poll)
+        self._clear_dirty(*list(self._dirty))
 
     def _paint_steps_button(self, large: bool) -> None:
         self._steps_btn.setText("Steps: Large" if large else "Steps: Small")
@@ -960,12 +1011,7 @@ class MainWindow(QWidget):
             "now: " + " · ".join(f"{AXES[a]} +{st.amplitude_fwd[a]} / -{st.amplitude_bwd[a]}"
                                  for a in range(2))
             + ". Low amplitudes may not move at all; forward and backward differ.")
-        for a, (f, b) in enumerate(self._amp_boxes):
-            for box, v in ((f, st.amplitude_fwd[a]), (b, st.amplitude_bwd[a])):
-                if not box.hasFocus() and box.value() != int(v):
-                    box.blockSignals(True)
-                    box.setValue(int(v))
-                    box.blockSignals(False)
+        self._sync_amplitudes(st)
         if st.step_large != self._preset_state:
             self._preset_state = st.step_large
             self._suppress_presets = True

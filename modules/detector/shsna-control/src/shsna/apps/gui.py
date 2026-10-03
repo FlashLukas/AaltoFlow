@@ -276,6 +276,21 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(apply)
         slay.addLayout(row)
         col.addWidget(scard)
+        # EDITED BUT NOT APPLIED. The status poll keeps the boxes following
+        # changes made elsewhere (console, scan) -- but it used to skip only
+        # the box with keyboard focus, so a value typed into Start was put
+        # back the moment you clicked into Stop, and Apply sent the old one
+        # (the signalhound bug, Lukas 2026-10-01; developer notes gotcha #45).
+        # A box the user changed is now "dirty": the poll leaves it alone, it
+        # gets an amber outline, and Apply (or Enter in it) sends it and
+        # clears it.
+        self._dirty: set = set()
+        self._syncing = False            # True while the POLL sets values
+        self._sweep_spins = (self.start_spin, self.stop_spin, self.points_spin,
+                             self.rbw_spin, self.avg_spin)
+        for spin in self._sweep_spins:
+            spin.valueChanged.connect(lambda _v, s=spin: self._mark_dirty(s))
+            spin.lineEdit().returnPressed.connect(self._apply_sweep)
 
         # acquisition
         acard, alay = _card("Acquire (scan-safe)")
@@ -453,6 +468,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # a new start may have been clamped until the new stop was in; send it again
         if not math.isclose(self.start_spin.value() * 1e6, self.ctrl.status().start_Hz, abs_tol=1.0):
             self._call(self.ctrl.set_start, self.start_spin.value() * 1e6)
+        # sent: the boxes follow the analyser again (a refused value is put
+        # back by the next poll, and the log says why)
+        for spin in list(self._dirty):
+            self._clear_dirty(spin)
+
+    def _mark_dirty(self, spin):
+        if self._syncing or spin in self._dirty:
+            return                       # the poll set it, or already marked
+        self._dirty.add(spin)
+        spin.setStyleSheet(f"border: 1px solid {COLORS['accent']};")
+        spin.setToolTip("changed here, not sent yet -- press Apply (or Enter)")
+
+    def _clear_dirty(self, spin):
+        self._dirty.discard(spin)
+        spin.setStyleSheet("")
+        spin.setToolTip("")
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -470,15 +501,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_inputs(self, force: bool = False):
         """Input boxes follow settings changed ELSEWHERE (console, scan), but
-        never while the user is typing in them."""
+        never while the user is typing in them, and never a box the user
+        changed and has not applied yet (``_dirty``). ``force`` (after the
+        Settings dialog) puts every box back to the analyser's value."""
         s = self.ctrl.status()
-        for spin, val in ((self.start_spin, s.start_Hz / 1e6), (self.stop_spin, s.stop_Hz / 1e6),
-                          (self.rbw_spin, s.rbw_Hz / 1e3)):
-            if isinstance(val, (int, float)) and math.isfinite(val) and (force or not spin.hasFocus()):
-                spin.setValue(val)
-        for spin, val in ((self.avg_spin, s.averages), (self.points_spin, s.points)):
-            if (force or not spin.hasFocus()) and isinstance(val, (int, float)) and val > 0:
-                spin.setValue(int(val))
+        if force:
+            for spin in list(self._dirty):
+                self._clear_dirty(spin)
+
+        def free(spin):
+            return force or (not spin.hasFocus() and spin not in self._dirty)
+
+        self._syncing = True             # these setValue calls are not user edits
+        try:
+            for spin, val in ((self.start_spin, s.start_Hz / 1e6), (self.stop_spin, s.stop_Hz / 1e6),
+                              (self.rbw_spin, s.rbw_Hz / 1e3)):
+                if isinstance(val, (int, float)) and math.isfinite(val) and free(spin):
+                    spin.setValue(val)
+            for spin, val in ((self.avg_spin, s.averages), (self.points_spin, s.points)):
+                if free(spin) and isinstance(val, (int, float)) and val > 0:
+                    spin.setValue(int(val))
+        finally:
+            self._syncing = False
         for chk, val in ((self.cont_chk, s.continuous),
                          (self.dut_chk, getattr(s, "sim_dut_inserted", False))):
             chk.blockSignals(True)

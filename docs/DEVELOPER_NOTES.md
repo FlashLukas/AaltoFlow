@@ -876,6 +876,25 @@ zpiezo has no GUI.
     PC whose files everyone can read (or `chmod 644` from a Linux login).
     `Keyring.problems` and `keys.py list/status` now name every key file that
     could not be read, instead of that PC silently missing.
+45. **A status poll must not write into a box whose value waits for Apply**
+    (2026-10-01, signalhound; the same bug then fixed in ccs200, gsp818,
+    shsna, vna and agilis on 2026-10-03). The panels refresh their input boxes
+    from status every ~60 ms so they follow changes made elsewhere (console,
+    scan, another GUI), and the only guard was `not spin.hasFocus()`. Where a
+    box is sent only by an Apply / Set button, that guard protects the ONE box
+    being typed in: type a value into Centre, click into Span, and Centre is
+    back to the old value before Apply is pressed -- Apply then sends the old
+    value ("whenever I change any settings it comes back to the original
+    ones"). Rules: (a) a box the user changed is *dirty* until its button (or
+    Enter in it) sends it; the poll skips dirty boxes, which get an amber
+    outline and a tooltip; (b) the poll's own `setValue` must not count as a
+    user edit (a `_syncing` flag, or `blockSignals` as in gotcha #13); (c) an
+    action that sets the same values another way (Settings dialog, a preset)
+    drops the unsent edits. Two other patterns are safe and were left alone:
+    copying a value in only when the SERVICE's value changed since the last
+    copy (hf2, sr830, sr7230, kim's step-size and leash boxes), and syncing a
+    form only on events, never on the poll (camera). A box whose value is sent
+    the moment it changes is not affected either.
 
 ---
 

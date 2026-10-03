@@ -308,8 +308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b = QtWidgets.QPushButton("Set")
         b.setToolTip("The manual field and angle (used when the source is manual, "
                      "and until a magnet is heard)")
-        b.clicked.connect(lambda: self._call(self.ctrl.set_manual_field, self.manual_spin.value(),
-                                             self.manual_angle_spin.value()))
+        b.clicked.connect(self._apply_manual_field)
         row.addWidget(self.manual_spin, 3); row.addWidget(self.manual_angle_spin, 2)
         row.addWidget(b)
         flay.addLayout(row)
@@ -346,6 +345,20 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(apply)
         slay.addLayout(row)
         col.addWidget(scard)
+        # EDITED BUT NOT APPLIED. The status poll keeps the boxes following
+        # changes made elsewhere (console, scan) -- but it used to skip only
+        # the box with keyboard focus, so a value typed into Start was put
+        # back the moment you clicked into Stop, and Apply sent the old one
+        # (the signalhound bug, Lukas 2026-10-01; developer notes gotcha #45).
+        # A box the user changed is now "dirty": the poll leaves it alone, it
+        # gets an amber outline, and its button (or Enter in it) sends it and
+        # clears it.
+        self._dirty: set = set()
+        self._syncing = False            # True while the POLL sets values
+        self._sweep_spins = (self.start_spin, self.stop_spin, self.points_spin,
+                             self.ifbw_spin, self.power_spin, self.avg_spin)
+        self._watch_edits(self._sweep_spins, self._apply_sweep)
+        self._watch_edits((self.manual_spin, self.manual_angle_spin), self._apply_manual_field)
 
         # acquisition
         acard, alay = _card("Acquire (scan-safe trace)")
@@ -510,6 +523,34 @@ class MainWindow(QtWidgets.QMainWindow):
         # a new start may be refused until the new stop is in; send start again
         if not math.isclose(self.start_spin.value() * 1e9, self.ctrl.status().start_Hz, abs_tol=1.0):
             self._call(self.ctrl.set_start, self.start_spin.value() * 1e9)
+        # sent: the boxes follow the analyser again (a refused value is put
+        # back by the next poll, and the log says why)
+        self._clear_dirty(*self._sweep_spins)
+
+    def _apply_manual_field(self):
+        self._call(self.ctrl.set_manual_field, self.manual_spin.value(),
+                   self.manual_angle_spin.value())
+        self._clear_dirty(self.manual_spin, self.manual_angle_spin)
+
+    def _watch_edits(self, spins, apply_fn):
+        """A user change marks a box dirty; Enter in it sends its group."""
+        for spin in spins:
+            spin.valueChanged.connect(lambda _v, s=spin: self._mark_dirty(s))
+            spin.lineEdit().returnPressed.connect(apply_fn)
+
+    def _mark_dirty(self, spin):
+        if self._syncing or spin in self._dirty:
+            return                       # the poll set it, or already marked
+        self._dirty.add(spin)
+        spin.setStyleSheet(f"border: 1px solid {COLORS['accent']};")
+        spin.setToolTip("changed here, not sent yet -- press Apply / Set (or Enter)")
+
+    def _clear_dirty(self, *spins):
+        for spin in spins:
+            if spin in self._dirty:
+                self._dirty.discard(spin)
+                spin.setStyleSheet("")
+                spin.setToolTip("")
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -527,17 +568,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_inputs(self, force: bool = False):
         """Input boxes follow settings changed ELSEWHERE (console, scan), but
-        never while the user is typing in them."""
+        never while the user is typing in them, and never a box the user
+        changed and has not applied yet (``_dirty``). ``force`` (after the
+        Settings dialog) puts every box back to the analyser's value."""
         s = self.ctrl.status()
-        for spin, val in ((self.start_spin, s.start_Hz / 1e9), (self.stop_spin, s.stop_Hz / 1e9),
-                          (self.ifbw_spin, s.ifbw_Hz / 1e3), (self.power_spin, s.power_dBm),
-                          (self.manual_spin, s.manual_field_mT),
-                          (self.manual_angle_spin, s.manual_angle_deg)):
-            if math.isfinite(val) and (force or not spin.hasFocus()):
-                spin.setValue(val)
-        for spin, val in ((self.points_spin, s.points), (self.avg_spin, s.averages)):
-            if force or not spin.hasFocus():
-                spin.setValue(int(val))
+        if force:
+            self._clear_dirty(*list(self._dirty))
+
+        def free(spin):
+            return force or (not spin.hasFocus() and spin not in self._dirty)
+
+        self._syncing = True             # these setValue calls are not user edits
+        try:
+            for spin, val in ((self.start_spin, s.start_Hz / 1e9), (self.stop_spin, s.stop_Hz / 1e9),
+                              (self.ifbw_spin, s.ifbw_Hz / 1e3), (self.power_spin, s.power_dBm),
+                              (self.manual_spin, s.manual_field_mT),
+                              (self.manual_angle_spin, s.manual_angle_deg)):
+                if math.isfinite(val) and free(spin):
+                    spin.setValue(val)
+            for spin, val in ((self.points_spin, s.points), (self.avg_spin, s.averages)):
+                if free(spin):
+                    spin.setValue(int(val))
+        finally:
+            self._syncing = False
         for combo, text in ((self.source_combo, s.field_source_set),
                             (self.sparam_combo, s.sparam)):
             if force or not combo.view().isVisible():

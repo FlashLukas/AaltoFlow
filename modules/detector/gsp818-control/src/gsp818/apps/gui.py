@@ -407,7 +407,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda on: self._call(self.ctrl.set_tg, True) if on else self._call(self.ctrl.tg_off))
         self.tg_level_spin = self._dspin(lim.tg_level_min_dBm, lim.tg_level_max_dBm, 1, "  dBm", 1.0)
         b = QtWidgets.QPushButton("Set level")
-        b.clicked.connect(lambda: self._call(self.ctrl.set_tg_level, self.tg_level_spin.value()))
+        b.clicked.connect(self._apply_tg_level)
         row.addWidget(self.tg_btn, 1); row.addWidget(self.tg_level_spin, 1); row.addWidget(b)
         tlay.addLayout(row)
         self.dut_row = QtWidgets.QWidget()
@@ -419,6 +419,26 @@ class MainWindow(QtWidgets.QMainWindow):
         drow.addWidget(self.dut_combo, 1)
         tlay.addWidget(self.dut_row)
         col.addWidget(tcard)
+
+        # EDITED BUT NOT APPLIED. The status poll keeps the boxes following
+        # changes made elsewhere (console, scan) -- but it used to skip only
+        # the box with keyboard focus, so a value typed into Center was put
+        # back the moment you clicked into Span, and "Set center/span" sent
+        # the old one (the signalhound bug, Lukas 2026-10-01; developer notes
+        # gotcha #45). A box the user changed is now "dirty": the poll leaves
+        # it alone, it gets an amber outline, and its card's button (or Enter
+        # in it) sends it and clears it.
+        self._dirty: set = set()
+        self._syncing = False            # True while the POLL sets values
+        self._freq_spins = (self.start_spin, self.stop_spin, self.center_spin,
+                            self.span_spin, self.points_spin)
+        self._bw_spins = (self.rbw_spin, self.vbw_spin, self.ref_spin,
+                          self.att_spin, self.swt_spin, self.avg_spin)
+        self._watch_edits((self.start_spin, self.stop_spin), self._apply_start_stop)
+        self._watch_edits((self.center_spin, self.span_spin), self._apply_center_span)
+        self._watch_edits((self.points_spin,), self._apply_points)
+        self._watch_edits(self._bw_spins, self._apply_bandwidth)
+        self._watch_edits((self.tg_level_spin,), self._apply_tg_level)
 
         # acquisition
         acard, alay = _card("Acquire (scan-safe trace)")
@@ -568,15 +588,20 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._call(self.ctrl.set_start, start); self._call(self.ctrl.set_stop, stop)
         self._apply_points()
+        # start/stop and center/span are two ways to say ONE band: once the
+        # band is sent, edits left in the other pair are out of date
+        self._clear_dirty(*self._freq_spins)
 
     def _apply_center_span(self):
         self._call(self.ctrl.set_center, self.center_spin.value() * 1e6)
         self._call(self.ctrl.set_span, self.span_spin.value() * 1e6)
         self._apply_points()
+        self._clear_dirty(*self._freq_spins)      # see _apply_start_stop
 
     def _apply_points(self):
         if self.points_spin.value() != self.ctrl.status().points:
             self._call(self.ctrl.set_points, self.points_spin.value())
+        self._clear_dirty(self.points_spin)
 
     def _apply_bandwidth(self):
         """Send only what changed: every change restarts an acquisition and logs
@@ -597,6 +622,33 @@ class MainWindow(QtWidgets.QMainWindow):
             same = isinstance(now, (int, float)) and math.isclose(want, now, rel_tol=1e-9, abs_tol=1e-9)
             if not (same and manual_now):
                 self._call(setter, want)
+        # sent: the boxes follow the instrument again (a refused value is put
+        # back by the next poll, and the log says why)
+        self._clear_dirty(*self._bw_spins)
+
+    def _apply_tg_level(self):
+        self._call(self.ctrl.set_tg_level, self.tg_level_spin.value())
+        self._clear_dirty(self.tg_level_spin)
+
+    def _watch_edits(self, spins, apply_fn):
+        """A user change marks a box dirty; Enter in it sends its card."""
+        for spin in spins:
+            spin.valueChanged.connect(lambda _v, s=spin: self._mark_dirty(s))
+            spin.lineEdit().returnPressed.connect(apply_fn)
+
+    def _mark_dirty(self, spin):
+        if self._syncing or spin in self._dirty:
+            return                       # the poll set it, or already marked
+        self._dirty.add(spin)
+        spin.setStyleSheet(f"border: 1px solid {COLORS['accent']};")
+        spin.setToolTip("changed here, not sent yet -- press Set / Apply (or Enter)")
+
+    def _clear_dirty(self, *spins):
+        for spin in spins:
+            if spin in self._dirty:
+                self._dirty.discard(spin)
+                spin.setStyleSheet("")
+                spin.setToolTip("")
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -614,24 +666,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_inputs(self, force: bool = False):
         """Input boxes follow settings changed ELSEWHERE (console, scan), but
-        never while the user is typing in them. A box whose auto is on shows
-        the value IN USE, greyed out."""
+        never while the user is typing in them, and never a box the user
+        changed and has not applied yet (``_dirty``). A box whose auto is on
+        shows the value IN USE, greyed out. ``force`` (after the Settings
+        dialog) puts every box back to the instrument's value."""
         s = self.ctrl.status()
         auto = {k: bool(getattr(s, f"{k}_auto", False)) for k in self.auto_chk}
-        for spin, val in (
-                (self.start_spin, s.start_Hz / 1e6), (self.stop_spin, s.stop_Hz / 1e6),
-                (self.center_spin, s.center_Hz / 1e6), (self.span_spin, s.span_Hz / 1e6),
-                (self.rbw_spin, (s.rbw_Hz if auto["rbw"] else s.rbw_set_Hz) / 1e3),
-                (self.vbw_spin, (s.vbw_Hz if auto["vbw"] else s.vbw_set_Hz) / 1e3),
-                (self.ref_spin, s.ref_level_dBm),
-                (self.att_spin, s.atten_dB if auto["atten"] else s.atten_set_dB),
-                (self.swt_spin, s.sweep_time_s if auto["sweep_time"] else s.sweep_time_set_s),
-                (self.tg_level_spin, s.tg_level_dBm)):
-            if isinstance(val, (int, float)) and math.isfinite(val) and (force or not spin.hasFocus()):
-                spin.setValue(val)
-        for spin, val in ((self.points_spin, s.points), (self.avg_spin, s.averages)):
-            if force or not spin.hasFocus():
-                spin.setValue(int(val))
+        if force:
+            self._clear_dirty(*list(self._dirty))
+        # a box whose auto is on cannot be typed into: it shows the value in use
+        self._clear_dirty(*(spin for k, spin in (("rbw", self.rbw_spin), ("vbw", self.vbw_spin),
+                                                 ("atten", self.att_spin),
+                                                 ("sweep_time", self.swt_spin)) if auto[k]))
+
+        def free(spin):
+            return force or (not spin.hasFocus() and spin not in self._dirty)
+
+        self._syncing = True             # these setValue calls are not user edits
+        try:
+            for spin, val in (
+                    (self.start_spin, s.start_Hz / 1e6), (self.stop_spin, s.stop_Hz / 1e6),
+                    (self.center_spin, s.center_Hz / 1e6), (self.span_spin, s.span_Hz / 1e6),
+                    (self.rbw_spin, (s.rbw_Hz if auto["rbw"] else s.rbw_set_Hz) / 1e3),
+                    (self.vbw_spin, (s.vbw_Hz if auto["vbw"] else s.vbw_set_Hz) / 1e3),
+                    (self.ref_spin, s.ref_level_dBm),
+                    (self.att_spin, s.atten_dB if auto["atten"] else s.atten_set_dB),
+                    (self.swt_spin, s.sweep_time_s if auto["sweep_time"] else s.sweep_time_set_s),
+                    (self.tg_level_spin, s.tg_level_dBm)):
+                if isinstance(val, (int, float)) and math.isfinite(val) and free(spin):
+                    spin.setValue(val)
+            for spin, val in ((self.points_spin, s.points), (self.avg_spin, s.averages)):
+                if free(spin):
+                    spin.setValue(int(val))
+        finally:
+            self._syncing = False
         for key, chk in self.auto_chk.items():
             chk.blockSignals(True); chk.setChecked(auto[key]); chk.blockSignals(False)
         self.rbw_spin.setEnabled(not auto["rbw"]); self.vbw_spin.setEnabled(not auto["vbw"])

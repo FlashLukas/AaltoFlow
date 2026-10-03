@@ -380,12 +380,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wmax_spin = self._dspin(150.0, 1100.0, 1, "  nm", 1.0)
         b = QtWidgets.QPushButton("Set")
         b.setToolTip("Peak and integrated intensity look only inside this window")
-        b.clicked.connect(lambda: self._call(self.ctrl.set_window, self.wmin_spin.value(),
-                                             self.wmax_spin.value()))
+        b.clicked.connect(self._apply_window)
         row.addWidget(self.wmin_spin, 1); row.addWidget(QtWidgets.QLabel("to"))
         row.addWidget(self.wmax_spin, 1); row.addWidget(b)
         wlay.addLayout(row)
         col.addWidget(wcard)
+
+        # EDITED BUT NOT APPLIED. The status poll keeps the boxes following
+        # changes made elsewhere (console, scan) -- but it used to skip only
+        # the box with keyboard focus, so a value typed into Integration was
+        # put back the moment you clicked into Averages, and Apply sent the old
+        # one (the signalhound bug, Lukas 2026-10-01; developer notes gotcha
+        # #45). A box the user changed is now "dirty": the poll leaves it
+        # alone, it gets an amber outline, and its button (or Enter in it)
+        # sends it and clears it.
+        self._dirty: set = set()
+        self._syncing = False            # True while the POLL sets values
+        self._watch_edits((self.int_spin, self.avg_spin), self._apply_scan)
+        self._watch_edits((self.wmin_spin, self.wmax_spin), self._apply_window)
 
         # the simulated light (hidden on the real instrument)
         self.sim_card, simlay = _card("Simulated light")
@@ -509,6 +521,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self._call(self.ctrl.set_integration_time, want_t)
         if int(self.avg_spin.value()) != int(s.averages):
             self._call(self.ctrl.set_averages, int(self.avg_spin.value()))
+        # sent: the boxes follow the instrument again (a refused value is put
+        # back by the next poll, and the log says why)
+        self._clear_dirty(self.int_spin, self.avg_spin)
+
+    def _apply_window(self):
+        self._call(self.ctrl.set_window, self.wmin_spin.value(), self.wmax_spin.value())
+        self._clear_dirty(self.wmin_spin, self.wmax_spin)
+
+    def _watch_edits(self, spins, apply_fn):
+        """A user change marks a box dirty; Enter in it sends its group."""
+        for spin in spins:
+            spin.valueChanged.connect(lambda _v, s=spin: self._mark_dirty(s))
+            spin.lineEdit().returnPressed.connect(apply_fn)
+
+    def _mark_dirty(self, spin):
+        if self._syncing or spin in self._dirty:
+            return                       # the poll set it, or already marked
+        self._dirty.add(spin)
+        spin.setStyleSheet(f"border: 1px solid {COLORS['accent']};")
+        spin.setToolTip("changed here, not sent yet -- press Apply / Set (or Enter)")
+
+    def _clear_dirty(self, *spins):
+        for spin in spins:
+            if spin in self._dirty:
+                self._dirty.discard(spin)
+                spin.setStyleSheet("")
+                spin.setToolTip("")
 
     def _set_log(self, on: bool):
         self.plot.setLogMode(y=bool(on))
@@ -530,14 +569,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_inputs(self, force: bool = False):
         """Input boxes follow settings changed ELSEWHERE (console, scan), but
-        never while the user is typing in them."""
+        never while the user is typing in them, and never a box the user
+        changed and has not applied yet (``_dirty``). ``force`` (after the
+        Settings dialog) puts every box back to the instrument's value."""
         s = self.ctrl.status()
-        for spin, val in ((self.int_spin, s.integration_time_s * 1e3),
-                          (self.wmin_spin, s.window_min_nm), (self.wmax_spin, s.window_max_nm)):
-            if isinstance(val, (int, float)) and math.isfinite(val) and (force or not spin.hasFocus()):
-                spin.setValue(val)
-        if force or not self.avg_spin.hasFocus():
-            self.avg_spin.setValue(int(s.averages))
+        if force:
+            self._clear_dirty(*list(self._dirty))
+
+        def free(spin):
+            return force or (not spin.hasFocus() and spin not in self._dirty)
+
+        self._syncing = True             # these setValue calls are not user edits
+        try:
+            for spin, val in ((self.int_spin, s.integration_time_s * 1e3),
+                              (self.wmin_spin, s.window_min_nm), (self.wmax_spin, s.window_max_nm)):
+                if isinstance(val, (int, float)) and math.isfinite(val) and free(spin):
+                    spin.setValue(val)
+            if free(self.avg_spin):
+                self.avg_spin.setValue(int(s.averages))
+        finally:
+            self._syncing = False
         for chk, val in ((self.cont_chk, s.continuous), (self.sub_chk, s.dark_subtract),
                          (self.light_chk, s.light_on)):
             chk.blockSignals(True)
