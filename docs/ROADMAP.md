@@ -68,6 +68,38 @@ with `options`), so the engine can pick the storage itself:
   no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
   `bits` / `min` / `max`.
 
+### Live map: narrow (one-point) features vanish when drawn (2026-10-03)
+
+A one-frequency-point line in a map (a spectrum-analyser tone, a narrow
+resonance) shows as dashes or not at all once the map has more points than
+the screen has pixels; zoomed in it is all there, so the data is fine.
+
+- AaltoView fixed this (PR #7, AaltoView `main` 7e4267a, already the version
+  scan-core pins): `MapImage(pg.ImageItem)` with `autoDownsample=True` and a
+  `reduce` of "mean" / "max" / "min" -- its `render()` swaps pyqtgraph's
+  `functions.downsample` (always a mean) for `block_reduce` (NaN-aware block
+  max or min) -- and a "drawing" combo on the map's colour row: average
+  (default), max (keeps peaks), min (keeps dips, e.g. an absorption line in
+  |S21|). The suite's Data tab IS AaltoView, so it already has it.
+- scan-core's live map (Measurement tab RESULT, `apps/data_view.py`) uses a
+  plain `pg.ImageItem(axisOrder="row-major")` WITHOUT autoDownsample: Qt then
+  shrinks the image by sampling rows / columns, which drops a one-point line
+  into dashes -- a different mechanism, the same symptom.
+- Fix: import `MapImage` from `aaltoview.apps.viewer` (scan-core depends on
+  AaltoView already -- no second copy to keep in step), construct it with
+  `autoDownsample=True`, and add the same "drawing" combo (average / max /
+  min) next to the colour controls; perhaps default to max for a detector
+  whose unit is dBm.
+- Only the drawing changes; saved data never does. Caveat as in AaltoView:
+  it relies on `ImageItem.render` calling `functions.downsample` (pyqtgraph
+  0.14.0) -- a test there and here catches a pyqtgraph upgrade that changes
+  it.
+- Test (as AaltoView's): a 21 000-point map with a one-point -20 dBm tone on
+  -75 dBm, drawn into ~200 pixels: average below -60, max exactly -20; and
+  the live map widget really uses MapImage.
+
+Effort: ~2-3 hours with the test.
+
 ### Camera: autofocus at a fixed AF position, then back (2026-10-02)
 
 Sometimes focus must be found somewhere else than where you measure (a
