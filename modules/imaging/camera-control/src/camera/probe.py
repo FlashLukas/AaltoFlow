@@ -69,6 +69,9 @@ def probe() -> dict:
                 if not serial:
                     continue
                 bits = [f"serial {serial}"]
+                # DisplayName carries IDS' device id ("1409<hex>U3-...-0"),
+                # i.e. an identifier: fine on screen, but tests / renders /
+                # docs use made-up ones only
                 if name and name != model:
                     bits.append(name)
                 devices.append({"address": serial,
@@ -84,7 +87,13 @@ def probe() -> dict:
                 except Exception:
                     pass
     seen = {d["address"] for d in devices}
-    for serial in _held_serials():
+    held = _held_serials()
+    for d in devices:
+        # IDS peak still lists a camera the service has open (lab PC
+        # 2026-10-03): the row must say it is held, not look free
+        if d["address"] in held:
+            d["detail"] += "; held by the running camera service"
+    for serial in held:
         if serial not in seen:
             devices.append({"address": serial, "identity": "IDS camera", "detail": HELD,
                             "lock": hwclaim.camera_address(serial)})

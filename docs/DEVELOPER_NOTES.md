@@ -351,7 +351,14 @@ still assumes piezo/zpiezo.
     Kinesis list was empty while kim held the KIM101) -- the USB list still
     shows it, hwlock marks it held, and each probe reports its own module's
     held addresses, so the row reads "held by the running kim service", not
-    "nothing found".
+    "nothing found". Found on the lab PC the same day: (a) Kinesis' FTDI
+    scan lists the Signal Hound TG44A too ("SignalHoundTG") -- a probe marks
+    such entries `"other": true`, which never suggest its module; (b) TLPMX
+    lists a held meter as `USB0::0x1313::0x807B::::INSTR`, serial "n/a" --
+    folded into the held row; (c) FTDI's channel letter: pyserial / FTDIBUS
+    say `<serial>A`, the `USB\` entry `<serial>` -- the merge compares both
+    spellings; (d) a row a running service HOLDS suggests that service's
+    module (the best evidence there is, also for an ambiguous FTDI cable).
 
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the

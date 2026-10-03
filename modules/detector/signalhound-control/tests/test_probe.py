@@ -62,6 +62,16 @@ def test_a_held_analyser_is_reported():
     assert [(d["address"], d["detail"]) for d in out["devices"]] == [("17000003", P.HELD)]
 
 
+def test_a_listed_analyser_the_service_holds_says_held():
+    lock = hwlock.claim("SIGNALHOUND::17000004", "signalhound", wait_s=0.0)
+    try:
+        out = P.probe(dll=ListOnlyDll([17000004]))
+    finally:
+        lock.release()
+    assert len(out["devices"]) == 1
+    assert "held by the running signalhound service" in out["devices"][0]["detail"]
+
+
 def test_a_missing_dll_is_a_note(monkeypatch):
     def fail(path):
         raise OSError("not found")

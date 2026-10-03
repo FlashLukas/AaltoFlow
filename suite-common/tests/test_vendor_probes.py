@@ -296,5 +296,45 @@ def test_a_declared_probe_must_exist(tmp_path):
         M.parse_manifest(d / "module.toml")
 
 
+# ------------------------------------------- lab PC findings, 2026-10-03 ---
+
+def test_a_probes_other_device_does_not_claim_the_module():
+    """Kinesis' FTDI scan also lists the Signal Hound TG44A. kim's probe marks
+    it "other": information only, offered to nobody, no module suggested."""
+    probe, _ = I.parse_probe(json.dumps({"devices": [
+        {"address": "A0000001", "identity": "Signal Hound TG44A tracking generator",
+         "detail": "Kinesis 'SignalHoundTG'", "other": True}]}), "kim")
+    usb = I.usb_rows([U.UsbDevice(0x0403, 0x6001, "USB Serial Converter", "USB", "A0000001")],
+                     held={})
+    rows = I.merge(probe, usb)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.suggest == "" and row.found_by == [] and "kim probe" in row.source
+    assert row.identity.startswith("Signal Hound TG44A")
+    assert I.modules_for(row, [_spec("kim", "device", "--serial")]) == []
+
+
+def test_an_ftdi_channel_letter_does_not_split_one_device():
+    """The SG12000L showed twice: COM3 (pyserial's serial with FTDI's channel
+    letter, held by dssg) and the USB row (the serial without it)."""
+    com = I.Found("COM3", "serial", identity="USB Serial Port (COM3)",
+                  detail="FTDI, USB 0403:6015, serial DS000001A", source="COM port",
+                  usb_id="0403:6015", serial_no="DS000001A", held_by="dssg")
+    usb = I.usb_rows([U.UsbDevice(0x0403, 0x6015, "USB Serial Port (COM3)", "Ports",
+                                  "DS000001")], held={})
+    rows = I.merge([com], usb)
+    assert len(rows) == 1 and rows[0].address == "COM3"
+    assert "USB list" in rows[0].source
+    # the holder is the best evidence of what the device is
+    assert rows[0].suggest == "dssg"
+
+
+def test_a_held_usb_row_suggests_its_holder():
+    usb = I.usb_rows([U.UsbDevice(0x0403, 0x6001, "USB Serial Converter", "USB", "A0000002")],
+                     held={"A0000002": "signalhound"})
+    rows = I.merge([], usb)
+    assert rows[0].suggest == "signalhound"
+
+
 def test_new_files_are_ascii():
     assert Path(U.__file__).read_text(encoding="utf-8").isascii()

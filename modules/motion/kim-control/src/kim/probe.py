@@ -27,6 +27,10 @@ from . import hwlock
 KIM101_PREFIX = "97"
 #: what pylablib's list says for a KIM101 (lab PC 2026-10-03)
 KIM101_DESCRIPTION = "Piezo Motor Controller"
+#: non-Thorlabs FTDI devices Kinesis' scan lists, by their description
+OTHER_NAMES = {
+    "SignalHoundTG": "Signal Hound TG44A tracking generator (seen by Kinesis' FTDI scan)",
+}
 #: why a held controller is missing from the vendor list
 HELD = "held by the running kim service (a controller is not listed while it is open)"
 
@@ -59,14 +63,27 @@ def probe() -> dict:
     for conn, desc in listed:
         serial, desc = str(conn).strip(), str(desc or "").strip()
         is_kim = serial.startswith(KIM101_PREFIX)
-        devices.append({
+        dev = {
             "address": serial,
-            "identity": "Thorlabs KIM101" if is_kim else f"Thorlabs {desc or 'Kinesis device'}",
-            "detail": (f"Kinesis '{desc}', serial {serial}" if desc else f"Kinesis serial {serial}")
-                      + ("" if is_kim else " (not a KIM101: serial does not start with 97)"),
-        })
+            "identity": "Thorlabs KIM101",
+            "detail": f"Kinesis '{desc}', serial {serial}" if desc else f"Kinesis serial {serial}",
+        }
+        if not is_kim:
+            # Kinesis' scan lists EVERY FTDI device with a description, not only
+            # Thorlabs controllers (lab PC 2026-10-03: the Signal Hound TG44A,
+            # "SignalHoundTG"). Information only: "other" = not for kim, so it
+            # is never suggested for or offered to this module.
+            dev["other"] = True
+            dev["identity"] = OTHER_NAMES.get(desc, f"{desc or 'Kinesis device'} "
+                                                    f"(seen by Kinesis' FTDI scan)")
+            dev["detail"] += " (not a KIM101: serial does not start with 97)"
+        devices.append(dev)
     seen = {d["address"] for d in devices}
-    for serial in _held_by_kim():
+    held = _held_by_kim()
+    for d in devices:
+        if d["address"] in held:                 # listed AND held: say so
+            d["detail"] += "; held by the running kim service"
+    for serial in held:
         if serial not in seen:
             devices.append({"address": serial, "identity": "Thorlabs KIM101",
                             "detail": HELD})

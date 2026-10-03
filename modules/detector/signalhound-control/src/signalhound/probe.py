@@ -76,7 +76,11 @@ def probe(dll=None) -> dict:
             a = str(info.get("address", ""))
             if info.get("module") == LOCK_MODULE and a.upper().startswith("SIGNALHOUND::"):
                 sn = a.split("::", 1)[1]
-                if sn not in seen:
+                if sn in seen:                   # listed AND held: say so
+                    for d in devices:
+                        if d["address"] == sn:
+                            d["detail"] += "; held by the running signalhound service"
+                else:
                     devices.append({"address": sn, "identity": "Signal Hound analyser",
                                     "detail": HELD, "lock": a})
     except Exception:

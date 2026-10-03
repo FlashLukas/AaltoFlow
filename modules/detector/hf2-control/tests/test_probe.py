@@ -58,6 +58,16 @@ def test_held_and_nothing_listed(monkeypatch):
     assert [(d["address"], d["detail"]) for d in out["devices"]] == [("dev300", P.HELD)]
 
 
+def test_a_listed_device_the_service_holds_says_held(monkeypatch):
+    _fake_zhinst(monkeypatch, {"dev400": {"devicetype": "HF2LI"}})
+    lock = hwlock.claim("dev400", "hf2", wait_s=0.0)
+    try:
+        out = P.probe()
+    finally:
+        lock.release()
+    assert len(out["devices"]) == 1 and P.HELD in out["devices"][0]["detail"]
+
+
 def test_missing_zhinst_is_a_note(monkeypatch):
     monkeypatch.setitem(sys.modules, "zhinst", None)
     monkeypatch.setitem(sys.modules, "zhinst.core", None)

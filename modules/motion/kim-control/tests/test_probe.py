@@ -54,7 +54,19 @@ def test_lists_a_kim101_and_names_other_kinesis_devices(monkeypatch):
     assert (kim["address"], kim["identity"]) == ("97000001", "Thorlabs KIM101")
     assert "Piezo Motor Controller" in kim["detail"]
     assert other["address"] == "70000001" and "not a KIM101" in other["detail"]
+    assert other["other"] is True                 # never suggested for kim
     assert out["note"] == ""
+
+
+def test_a_non_kim101_entry_is_information_only(monkeypatch):
+    """Lab PC 2026-10-03: Kinesis' FTDI scan also lists the Signal Hound TG44A
+    ("SignalHoundTG"). It must not be offered to kim."""
+    _fake_pylablib(monkeypatch, [("97000001", "Piezo Motor Controller"),
+                                 ("A0000001", "SignalHoundTG")])
+    kim, tg = P.probe()["devices"]
+    assert not kim.get("other")
+    assert tg["other"] is True
+    assert tg["identity"] == "Signal Hound TG44A tracking generator (seen by Kinesis' FTDI scan)"
 
 
 def test_a_controller_the_service_holds_is_reported_as_held(monkeypatch):

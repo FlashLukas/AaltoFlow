@@ -54,6 +54,16 @@ def test_a_held_card_is_reported(monkeypatch):
     assert [(d["address"], d["detail"]) for d in out["devices"]] == [("Dev3", P.HELD)]
 
 
+def test_a_listed_card_the_service_holds_says_held(monkeypatch):
+    _fake_nidaqmx(monkeypatch, [_dev("Dev1", "USB-6001", 0x01ABCDEF)])
+    lock = hwlock.claim("Dev1", "usb6001", wait_s=0.0)
+    try:
+        out = P.probe()
+    finally:
+        lock.release()
+    assert len(out["devices"]) == 1 and P.HELD in out["devices"][0]["detail"]
+
+
 def test_missing_nidaqmx_is_a_note(monkeypatch):
     monkeypatch.setitem(sys.modules, "nidaqmx", None)
     out = P.probe()

@@ -82,6 +82,26 @@ def test_a_held_meter_is_reported(monkeypatch):
     assert [(d["address"], d["detail"]) for d in out["devices"]] == [(res, P.HELD)]
 
 
+def test_a_resource_without_serial_is_not_a_phantom_row(monkeypatch):
+    """Lab PC 2026-10-03: while the service holds the meter, TLPMX lists it as
+    USB0::0x1313::0x807B::::INSTR with serial "n/a". That is the held meter,
+    not a second one: it folds into the held row."""
+    held_res = "USB0::0x1313::0x807B::100000009::INSTR"
+    pid = held_res.split("::")[2]
+    blank = (f"USB0::0x1313::{pid}::::INSTR", "PM160" if MODULE == "pm16" else "PM400",
+             "n/a", False)
+    _fake(monkeypatch, [blank])
+    lock = hwlock.claim(held_res, MODULE, wait_s=0.0)
+    try:
+        out = P.probe()
+    finally:
+        lock.release()
+    assert [d["address"] for d in out["devices"]] == [held_res]
+    _fake(monkeypatch, [blank])                       # nobody holds it: a note, no row
+    out = P.probe()
+    assert out["devices"] == [] and "without a serial" in out["note"]
+
+
 def test_missing_tlpmx_is_a_note(monkeypatch):
     def missing(path=""):
         raise tlpmx.TLPMXError("TLPMX library not found")

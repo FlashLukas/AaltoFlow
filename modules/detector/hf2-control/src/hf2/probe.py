@@ -65,7 +65,13 @@ def probe() -> dict:
     try:
         for info in hwlock.held():
             a = str(info.get("address", ""))
-            if info.get("module") == MODULE and a and a.upper() not in seen:
+            if info.get("module") != MODULE or not a:
+                continue
+            if a.upper() in seen:                # listed AND held: say so
+                for d in devices:
+                    if d["address"].upper() == a.upper():
+                        d["detail"] += "; " + HELD
+            else:
                 devices.append({"address": a, "identity": "Zurich Instruments HF2LI",
                                 "detail": HELD})
     except Exception:

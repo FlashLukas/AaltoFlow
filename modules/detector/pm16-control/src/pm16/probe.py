@@ -39,6 +39,12 @@ def _mine(r: dict) -> bool:
         PID_TEXT in str(r.get("resource", "")).upper()
 
 
+def _no_serial(r: dict) -> bool:
+    """A listing without a serial ("n/a", or an empty field in the resource)."""
+    serial = str(r.get("serial", "") or "").strip().lower()
+    return serial in ("", "n/a", "na", "none") or "::::" in str(r.get("resource", ""))
+
+
 def probe(lister=list_resources) -> dict:
     """{"devices": [...], "note": "..."} -- never raises. `lister` = a fake in tests."""
     devices, notes = [], []
@@ -50,10 +56,17 @@ def probe(lister=list_resources) -> dict:
     except Exception as exc:
         found = None
         notes.append(f"TLPMX could not list meters: {type(exc).__name__}: {exc}")
-    others = 0
+    others = blank = 0
     for r in found or []:
         if not _mine(r):
             others += 1
+            continue
+        if _no_serial(r):
+            # Lab PC 2026-10-03: while a service has the meter open, TLPMX
+            # lists it as USB0::0x1313::0x807B::::INSTR, serial "n/a" -- the
+            # SAME meter, not a second one. It is folded into the held row
+            # below (or explained in the note when nobody here holds it).
+            blank += 1
             continue
         bits = [f"S/N {r.get('serial', '')}".strip(), "TLPMX"]
         if not r.get("available", True):
@@ -64,13 +77,24 @@ def probe(lister=list_resources) -> dict:
     if others:
         notes.append(f"{others} other Thorlabs meter(s) listed by TLPMX, not a PM16")
     seen = {hwlock.normalize(d["address"]) for d in devices}
+    n_held = 0
     try:
         for info in hwlock.held():
             a = str(info.get("address", ""))
-            if info.get("module") == MODULE and a and hwlock.normalize(a) not in seen:
+            if info.get("module") != MODULE or not a:
+                continue
+            n_held += 1
+            if hwlock.normalize(a) in seen:
+                for d in devices:
+                    if hwlock.normalize(d["address"]) == hwlock.normalize(a):
+                        d["detail"] += "; " + HELD
+            else:
                 devices.append({"address": a, "identity": "Thorlabs PM16", "detail": HELD})
     except Exception:
         pass
+    if blank > n_held:
+        notes.append(f"{blank - n_held} meter(s) listed by TLPMX without a serial "
+                     "(open in another program, e.g. Thorlabs OPM?)")
     if found is not None and not devices and not notes:
         notes.append("no PM16 listed (plugged in? Thorlabs OPM closed?)")
     return {"devices": devices, "note": "; ".join(notes)}

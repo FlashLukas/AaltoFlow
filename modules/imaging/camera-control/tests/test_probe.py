@@ -77,6 +77,19 @@ def test_a_held_camera_is_reported_even_when_ids_does_not_list_it(monkeypatch):
     assert [(d["address"], d["detail"]) for d in out["devices"]] == [("4100000002", P.HELD)]
 
 
+def test_a_listed_camera_the_service_holds_says_held(monkeypatch):
+    """Lab PC 2026-10-03: IDS peak still lists a held camera; the probe must
+    say it is held (not only the CAMERA:: lock for the merge to find)."""
+    _fake_ids(monkeypatch, [_Descr("4100000003", "U3-0000XCP-M", "cam1")])
+    lock = hwlock.claim("CAMERA::4100000003", "camera", wait_s=0.0)
+    try:
+        out = P.probe()
+    finally:
+        lock.release()
+    assert len(out["devices"]) == 1
+    assert "held by the running camera service" in out["devices"][0]["detail"]
+
+
 def test_missing_ids_peak_is_a_note(monkeypatch):
     monkeypatch.setitem(sys.modules, "ids_peak", None)
     out = P.probe()

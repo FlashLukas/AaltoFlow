@@ -966,8 +966,13 @@ launcher installs no vendor SDK), in a thread, with a 20 s timeout. Contract:
   --all-extras`, the vendor runtime). A probe is the one place besides the real
   backend that may import the vendor library.
 - A vendor list can hide a device a service has OPEN (pylablib listed nothing
-  while kim held the KIM101). So the probe also reports what its own module
-  holds (`hwlock.held()`), as "held by the running <key> service".
+  while kim held the KIM101), or list it differently (TLPMX: no serial). So
+  the probe also reports what its own module holds (`hwlock.held()`), as
+  "held by the running <key> service" -- appended to a listed device's detail
+  too, and a serial-less listing is folded into the held row, never a second row.
+- A device the vendor library lists that is NOT for this module (Kinesis' FTDI
+  scan also sees the Signal Hound TG44A) gets `"other": true`: shown as
+  information, never suggested for or offered to the module.
 - Put the logic in `src/<pkg>/probe.py` (a `probe() -> dict` function) and keep
   `scripts/probe.py` a thin wrapper; test it with a FAKE vendor library in
   `sys.modules` whose open call raises (see kim-control's `tests/test_probe.py`).

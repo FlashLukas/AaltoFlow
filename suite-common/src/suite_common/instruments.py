@@ -484,11 +484,17 @@ def parse_probe(text: str, key: str) -> tuple[list[Found], list[str]]:
             continue
         address = str(dev["address"]).strip()
         bus = bus_of(address)
+        # "other": the vendor library also listed a device that is NOT for
+        # this module (Kinesis' FTDI scan sees the Signal Hound TG44A). Shown
+        # as information; it never suggests, and is never offered to, the
+        # module whose probe happened to see it.
+        other = bool(dev.get("other"))
         rows.append(Found(address=address, bus="device" if bus == "other" else bus,
                           identity=str(dev.get("identity", "") or ""),
                           detail=str(dev.get("detail", "") or ""),
                           lock=str(dev.get("lock", "") or ""),
-                          source=f"{key} probe", suggest=key, found_by=[key]))
+                          source=f"{key} probe", suggest="" if other else key,
+                          found_by=[] if other else [key]))
     note = str(data.get("note", "") or "").strip()
     if note:
         notes.append(f"{key}: {note}")
@@ -561,16 +567,36 @@ def _twin(f: Found, rows: list) -> Found | None:
     for r in rows:
         if r.key == f.key:
             return r
-    s = f.serial_no.upper()
-    if len(s) >= 4:
+    mine = _serial_variants(f.serial_no)
+    if mine:
         for r in rows:
-            if r.serial_no and r.serial_no.upper() == s and (not r.usb_id or not f.usb_id
-                                                             or r.usb_id == f.usb_id):
+            if r.serial_no and (_serial_variants(r.serial_no) & mine) and (
+                    not r.usb_id or not f.usb_id or r.usb_id == f.usb_id):
                 return r
             text = " ".join((r.address, r.lock, r.detail)).upper()
-            if re.search(r"(?<![0-9A-Z])" + re.escape(s) + r"(?![0-9A-Z])", text):
-                return r
+            for s in mine:
+                # the serial as a whole word, optionally followed by FTDI's
+                # channel letter (pyserial's "DS000001A" for USB's "DS000001")
+                if re.search(r"(?<![0-9A-Z])" + re.escape(s) + r"[A-D]?(?![0-9A-Z])", text):
+                    return r
     return None
+
+
+def _serial_variants(serial: str) -> set:
+    """A USB serial and its spelling without FTDI's channel letter.
+
+    FTDI's driver appends the channel (A, B on a dual chip) to the serial it
+    reports through FTDIBUS -- and pyserial passes that on -- while Windows'
+    USB\\ entry has the bare serial. The lab PC's DS Instruments generator
+    showed as two rows (COM3 with "...A", the USB list without) until both
+    spellings were compared. Short serials (< 4 characters) match nothing."""
+    s = str(serial or "").strip().upper()
+    if len(s) < 4:
+        return set()
+    out = {s}
+    if s[-1] in "ABCD" and len(s) > 4:
+        out.add(s[:-1])
+    return out
 
 
 def merge(rows: list, extra: list) -> list:
@@ -598,6 +624,13 @@ def merge(rows: list, extra: list) -> list:
             twin.identity = f.identity
         if f.detail and f.detail not in twin.detail:
             twin.detail = f"{twin.detail}; {f.detail}" if twin.detail else f.detail
+    for r in out:
+        # a running service HOLDS it: the best evidence of what the device is
+        # (it also names an ambiguous FTDI cable correctly). hwlock's module
+        # name is the module key; "a service" (no name in the lock) says nothing.
+        if r.held_by and not r.suggest and r.held_by != "a service":
+            r.suggest = r.held_by
+            r.known = True
     _sort(out)
     return out
 
