@@ -354,6 +354,16 @@ class LockIn:
         else:
             self._emit("info", f"OSC OUT = {value:g} V rms")
 
+    def output_off(self) -> None:
+        """OSC OUT amplitude to 0 V: nothing drives the sample any more.
+
+        The same as set_amplitude(0), but a verb of its own because over the
+        wire it is the SAFETY verb a viewer may always send (net/service.py,
+        control) -- set_amplitude can also turn the drive UP. Never refused
+        during an auto operation, like the amplitude itself.
+        """
+        self.set_amplitude(0.0)
+
     def set_phase(self, deg: float) -> None:
         self._refuse_during_auto("phase")
         # wrap into -180..180: the same phase, and the range every readout uses.

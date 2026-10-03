@@ -29,6 +29,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..config import AI_CHANNELS, AO_CHANNELS, DIO_LINES, Config
 from ..sim_system import build_sim_system, demo_config
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
 from .theme import COLORS, apply_palette, build_stylesheet, set_theme
 
 
@@ -214,11 +215,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1280, 860)
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar above everything, only for
+        # a GUI on a service whose client knows about control -- a local GUI
+        # owns its card and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -231,6 +245,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        # No output is marked "always": this DAQ has no safety verb
+        # (net/service.py) -- only Settings and the read button are.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- layout --------------------------------------------------------------------
 
@@ -246,6 +267,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -304,6 +326,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rrow = QtWidgets.QHBoxLayout()
         read_btn = QtWidgets.QPushButton("Read inputs now")
         read_btn.clicked.connect(self._read_now)
+        mark_always(read_btn)        # read_ai only reads: fine for a viewer
         rrow.addWidget(read_btn); rrow.addStretch(1)
         rlay.addLayout(rrow)
         self.sample_label = _muted("No sample yet. A scan reads inputs this way: "
@@ -461,6 +484,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         if s.connected:
             self.conn_dot.setText("●  connected")

@@ -19,6 +19,7 @@ import time
 import zmq
 
 from ..config import Config
+from ..control import ControlClient
 from ..controller import Refused
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS, TOPIC_EVENT,
                        config_to_dict, apply_config_dict)
@@ -64,11 +65,20 @@ class RemoteStatus:
         self.describe_rev = d.get("describe_rev")
 
 
-class Mag2dClient:
+class Mag2dClient(ControlClient):
+    """``kind`` / ``name``: who this client is to the service (control.py) --
+    "gui" for a window, "script" (default) for a script or console, "machine"
+    only for a program that must not be locked out (scan-core). While a GUI on
+    another PC holds control, a script must ``take_control()`` before it may
+    change anything; a refused command raises ``ControlRefused``."""
+
     def __init__(self, host: str = "localhost",
                  cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int = DEFAULT_PUB_PORT,
-                 timeout_ms: int = 3000):
+                 timeout_ms: int = 3000,
+                 kind: str = "script",
+                 name: str = "mag2d client"):
+        self._control_setup(kind, name)
         self._timeout_ms = timeout_ms
         self._ctx = zmq.Context.instance()
         self._req = self._ctx.socket(zmq.REQ)
@@ -94,6 +104,7 @@ class Mag2dClient:
     def start(self) -> dict:
         """Fetch static info and pull the service's config into self.cfg."""
         info = self.info()
+        self.start_heartbeat()   # "still here": counted as a viewer / keeps control
         self.get_config()
         return info
 
@@ -137,6 +148,11 @@ class Mag2dClient:
     def set_output(self, enabled: bool):
         self._do({"cmd": "set_output", "enabled": bool(enabled)})
 
+    def output_off(self):
+        """Ramp down to 0 V and switch off -- the safety verb, allowed also
+        while viewing (set_output can also switch ON, so it is not)."""
+        self._do({"cmd": "output_off"})
+
     def set_water_bypass(self, enabled: bool):
         self._do({"cmd": "set_water_bypass", "enabled": bool(enabled)})
 
@@ -145,6 +161,7 @@ class Mag2dClient:
 
     def shutdown(self):
         """Close the CLIENT. Does NOT stop the remote service (use stop_service)."""
+        self.stop_heartbeat()
         self._stop.set()
         time.sleep(0.25)
         self._req.close(0)
@@ -212,10 +229,11 @@ class Mag2dClient:
         return r
 
     def _cmd(self, d: dict) -> dict:
+        self._with_identity(d)           # say who we are (control.py)
         with self._req_lock:
             try:
                 self._req.send_json(d)
-                return self._req.recv_json()
+                reply = self._req.recv_json()
             except zmq.Again:
                 # timed out; the REQ socket is now in a bad state -> rebuild it
                 self._reset_req()
@@ -223,6 +241,17 @@ class Mag2dClient:
             except zmq.ZMQError as exc:
                 self._reset_req()
                 return {"ok": False, "error": f"socket error: {exc}"}
+        # Refused because another PC holds control: RAISE (ControlRefused),
+        # never a quiet {"ok": false} -- a script must not believe the magnet
+        # went where it asked. Other failures keep their old shape (`_do`
+        # turns them into Refused).
+        if not reply.get("ok", False):
+            self._raise_refusal(reply)
+        return reply
+
+    def _rpc(self, **req) -> dict:
+        """The name control.py's ControlClient calls (heartbeat, take_control)."""
+        return self._cmd(req)
 
     def _reset_req(self):
         endpoint = self._req.LAST_ENDPOINT
@@ -244,6 +273,7 @@ class Mag2dClient:
                     if topic == TOPIC_STATUS:
                         with self._lock:
                             self._latest = d
+                        self._control_from_status(d)
                     elif topic == TOPIC_EVENT:
                         self._on_event(d.get("level", "info"), d.get("msg", ""))
             except zmq.ZMQError:

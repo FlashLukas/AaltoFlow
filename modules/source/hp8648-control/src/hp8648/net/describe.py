@@ -151,6 +151,10 @@ def build_manifest(src) -> dict:
            read_path=["idn"]),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
            order=6, read_path=["hw_error"]),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("rf_off", "RF off", "action", "action", group="Output", order=90,
+           help="Switch the RF output off. Allowed for anyone, also a viewer."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "hp8648",
                 "label": "RF generator (HP 8648D)", "parameters": params}

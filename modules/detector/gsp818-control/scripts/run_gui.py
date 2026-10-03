@@ -44,7 +44,10 @@ def main() -> int:
         # --real is ignored here: the SERVICE decides what it drives, and the
         # GUI shows whichever it is.
         from gsp818.net.client import Gsp818Client
-        client = Gsp818Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port)
+        # kind "gui": the service counts this window as a viewer, and the first
+        # GUI to connect gets control (control.py / apps/control_bar.py)
+        client = Gsp818Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port,
+                              kind="gui", name="gsp818 GUI")
         info = client.start()      # also pulls the service's config into client.cfg
         if args.theme:
             client.cfg.ui.theme = args.theme

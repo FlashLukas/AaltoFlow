@@ -482,6 +482,13 @@ class Chopper:
         self._emit("info", "chopper RUNNING" if on else "chopper in STANDBY")
         return gen
 
+    def standby(self) -> int:
+        """Stop the wheel (standby). Same as set_enable(False); a name of its
+        own because over the wire it is the SAFETY verb `stop` a viewer may
+        always send (net/service.py, control), and the GUI's Stop button calls
+        it on a local brain and a remote client alike."""
+        return self.set_enable(False)
+
     def set_blade(self, name: str) -> None:
         self._require_connected()
         blade = blade_by_name(name)

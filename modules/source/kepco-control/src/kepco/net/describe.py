@@ -230,6 +230,12 @@ def build_manifest(supply) -> dict:
            help="The limit channel has taken over: the setpoint is not reached."),
 
         # ---- safety -------------------------------------------------------------
+        # the SAFETY verbs as buttons (control.py: a viewer may always send
+        # them), so the suite's Control tab offers them to a viewer too
+        _p("output_off", "Output off (ramp down)", "action", "action",
+           group="Safety", order=0,
+           help="Ramp to zero, then switch the output off (the normal way, "
+                "right for a coil). Allowed for anyone, also a viewer."),
         _p("output_off_now", "Output off NOW (no ramp)", "action", "action",
            group="Safety", order=1, danger=True,
            help="Emergency only: switches off without ramping. With a coil "

@@ -17,8 +17,11 @@ exception in serve_forever) always runs the brain's shutdown, which switches RF
 and emission OFF before disconnecting. A HARD kill runs no code at all; for that
 case the brain arms the laser's own watchdog (hardware.watchdog_s).
 
-LOST CLIENT: a message may carry "client": <id>. Every message is passed to
-`laser.touch(client)` BEFORE it is dispatched, so any command -- or the plain
+LOST CLIENT: a message may carry "client": <id> -- today the control identity
+{"id", "kind", "name", "host"} (control.py), whose "id" is used; a bare id
+string from an older client still works. Every message is passed to
+`laser.touch(id)` BEFORE it is dispatched (the control gate's `heartbeat`
+included), so any command -- or the plain
 `ping` verb the remote GUI's client sends every second -- counts as a
 heartbeat. `set_emission{on: true, owner: <id>}` makes that client the owner;
 if the owner goes silent for hardware.client_timeout_s, the brain switches
@@ -35,6 +38,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..laser import SuperK
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -65,6 +69,22 @@ class SuperkService:
         self._stopped = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a class 4 laser the
+        #   one "make it safe" action is `emission_off` (the GUI's Emission
+        #   OFF): a viewer who sees the beam where it should not be must be
+        #   able to switch it off. `set_emission` is NOT in the list even
+        #   though on=false is the same thing -- the same verb also switches
+        #   the emission ON. (`set_rf` off only darkens the AOTF output while
+        #   the laser keeps lasing, and the same verb switches it on: not
+        #   safety either.)
+        #   READ: `ping` only says "this client is alive" (the lost-client
+        #   guard); it changes nothing.
+        self.control = ControlLease(
+            safety={"emission_off"},
+            read={"ping"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -130,6 +150,8 @@ class SuperkService:
         (a client uses the REQ path until its first PUB frame arrives)."""
         st = status_to_dict(self.laser.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -184,7 +206,14 @@ class SuperkService:
     def _dispatch(self, msg: dict) -> dict:
         cmd = msg.get("cmd")
         L = self.laser
-        L.touch(msg.get("client"))               # heartbeat for the lost-client guard
+        # heartbeat for the lost-client guard -- BEFORE the control gate, so a
+        # refused command and the gate's own `heartbeat` count as "alive" too
+        L.touch(_client_id(msg))
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         try:
             if cmd == "ping":
                 return {"ok": True}
@@ -192,8 +221,8 @@ class SuperkService:
                 L.set_emission(_bool(msg["on"]), owner=msg.get("owner"))
             elif cmd == "emission_on":           # describe action (danger)
                 L.set_emission(True, owner=msg.get("owner"))
-            elif cmd == "emission_off":          # describe action
-                L.set_emission(False)
+            elif cmd == "emission_off":          # describe action; the SAFETY verb
+                L.emission_off()
             elif cmd == "reset_interlock":
                 L.reset_interlock()
             elif cmd == "set_power":
@@ -258,6 +287,15 @@ def _bool(v) -> bool:
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "on")
     return bool(v)
+
+
+def _client_id(msg: dict) -> str | None:
+    """The sender's id for the lost-client guard: the control identity's
+    "id" (control.py), or the bare id string older clients sent."""
+    c = msg.get("client") if isinstance(msg, dict) else None
+    if isinstance(c, dict):
+        return str(c.get("id") or "") or None
+    return c if isinstance(c, str) and c else None
 
 
 def _json(d: dict) -> bytes:

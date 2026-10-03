@@ -22,6 +22,7 @@ import time
 import zmq
 
 from ..agilis import AgilisStage
+from ..control import ControlLease
 from .describe import build_manifest
 from . import protocol as P
 
@@ -54,6 +55,19 @@ class AgilisService:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a stage that is
+        #   `stop`: it halts every axis AND aborts a running routine (MA, PA,
+        #   measure step size), so a viewer who sees the stage run away must
+        #   be able to stop it. `jog` with speed 0 also ends a jog, but it can
+        #   start one too, so it is not in the list.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `stream_read` only drains the recorded fly-scan positions.
+        self.control = ControlLease(
+            safety={"stop"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -132,6 +146,8 @@ class AgilisService:
         """
         st = P.status_to_dict(self.brain.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -222,6 +238,11 @@ class AgilisService:
     # command dispatch
     # ------------------------------------------------------------------ #
     def _dispatch(self, req: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(req)
+        if gate is not None:
+            return gate
         cmd = (req or {}).get("cmd")
         b = self.brain
 

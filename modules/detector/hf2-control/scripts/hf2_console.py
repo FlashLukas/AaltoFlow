@@ -33,19 +33,37 @@ Commands
     quit / exit                    leave
 
 Channels are 1 and 2.
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                   take control if nobody has it
+    take!                  take it over from whoever has it (they become a viewer)
+    release                give it back
+    clients                who holds control, who is connected
+  While a GUI on another PC holds control, this console can read but
+  change nothing until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
+import threading
 import time
+import uuid
 
 import zmq
 
 CMD_PORT = 5569
 PUB_PORT = 5570
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "hf2 console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 _TC = {"us": 1e-6, "ms": 1e-3, "s": 1.0}
 _HZ = {"hz": 1.0, "khz": 1e3, "mhz": 1e6}
@@ -84,6 +102,7 @@ class Console:
         return s
 
     def send(self, msg: dict) -> dict:
+        msg.setdefault("client", IDENTITY)       # say who we are (control)
         try:
             self.req.send_json(msg)
             return self.req.recv_json()
@@ -178,7 +197,13 @@ class Console:
             print(__doc__.split("Commands")[1])
             return True
         try:
-            if cmd == "tc":
+            if cmd in ("take", "take!"):
+                print(self.send({"cmd": "take_control", "force": cmd == "take!"}))
+            elif cmd == "release":
+                print(self.send({"cmd": "release_control"}))
+            elif cmd == "clients":
+                print("  " + json.dumps(self.send({"cmd": "clients"}), indent=2).replace("\n", "\n  "))
+            elif cmd == "tc":
                 print(self.send({"cmd": "set_time_constant", "channel": int(args[0]),
                                  "time_constant_s": _value(args[1:], _TC, "s")}))
             elif cmd == "order":
@@ -206,7 +231,32 @@ class Console:
             print(f"  bad arguments for '{cmd}': {exc}  (try 'help')")
         return True
 
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            def make():
+                s = self.ctx.socket(zmq.REQ)
+                s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+                s.setsockopt(zmq.LINGER, 0)
+                s.connect(f"tcp://{self.host}:{self.cmd_port}")
+                return s
+            hb = make()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = make()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
+
     def close(self):
+        if getattr(self, "_hb_stop", None) is not None:
+            self._hb_stop.set()
         self.req.close(0)
 
 
@@ -223,6 +273,7 @@ def main() -> int:
         if args.words:
             con.run_line(" ".join(args.words))
             return 0
+        con.start_heartbeat()            # interactive: keep control while you think
         print(f"connected to tcp://{args.connect}:{args.cmd_port}   (type 'help' or 'quit')")
         while True:
             try:

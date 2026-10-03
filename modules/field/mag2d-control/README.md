@@ -61,13 +61,19 @@ DAQ keeps its last output. Do not taskkill a running magnet.
 | `set_angle` | `angle_deg` | rotate, keep the magnitude |
 | `set_vector` | `bx_mT`, `by_mT` | |
 | `set_bx` / `set_by` | `bx_mT` / `by_mT` | set one component, keep the other |
-| `zero` | | field 0 mT, angle kept |
+| `zero` | | field 0 mT, angle kept (safety verb) |
 | `set_output` | `enabled` | on = regulate; off = ramp to 0 V, then disable |
+| `output_off` | | = `set_output` off (safety verb) |
 | `set_water_bypass` | `enabled` | DANGER |
 | `clear_fault` | | refused while the cause is still there |
 
 plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 A refused command (a setpoint during a FAULT) replies `{"ok": false, "error": "..."}`.
+
+Control (one controller, many viewers -- docs/DEVELOPER_NOTES.md section 4):
+the first GUI gets control, later ones are viewers; a viewer (or a script
+without control) may still send the safety verbs `zero` and `output_off`.
+`kind: machine` clients (scan-core) bypass the lock.
 
 A setpoint is stored **exactly as sent**; `field_stable` goes False in the same
 instant, and True again once every axis has been within `control.tolerance_mT`

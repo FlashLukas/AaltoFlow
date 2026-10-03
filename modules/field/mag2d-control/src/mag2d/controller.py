@@ -404,6 +404,13 @@ class Controller:
         if msg:
             self._emit("info", msg)
 
+    def output_off(self) -> None:
+        """Ramp down to 0 V and switch the output off (the GUI's "Ramp down +
+        off"). Same as set_output(False); a name of its own because over the
+        wire it is the SAFETY verb a viewer may always send (net/service.py,
+        control) -- set_output can also switch the coils ON."""
+        self.set_output(False)
+
     def set_water_bypass(self, enabled: bool) -> None:
         self.cfg.interlock.water_bypass = bool(enabled)
         if enabled:

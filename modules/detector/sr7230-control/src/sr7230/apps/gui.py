@@ -39,6 +39,7 @@ from ..config import Config, REF_SOURCES, INPUT_MODES
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsPanel
+from .control_bar import ControlBar, mark_always
 
 
 # ------------------------------------------------------------- helpers
@@ -732,6 +733,7 @@ class AdcTab(QtWidgets.QWidget):
         clear = QtWidgets.QPushButton("Clear")
         clear.setToolTip("Forget the recorded history of every plot")
         clear.clicked.connect(win.history.clear)
+        mark_always(clear)       # only clears this window's plot: fine for a viewer
         head.addWidget(clear)
         lay.addLayout(head)
         # Two plots, not two curves on one: the inputs usually carry different
@@ -854,6 +856,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(root)
         outer = QtWidgets.QVBoxLayout(root)
         outer.setContentsMargins(16, 12, 16, 16); outer.setSpacing(10)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its lock-in and has nobody to share it with. The bar's log is
+        # a lambda because _on_event needs self.log, which exists only below.
+        self._control_bar = None
+        if remote and hasattr(ctrl, "take_control"):
+            self._control_bar = ControlBar(ctrl, self,
+                                           log=lambda lvl, msg: self._on_event(lvl, msg))
+            outer.addWidget(self._control_bar)
         outer.addWidget(self._build_strip())
 
         self.tabs = QtWidgets.QTabWidget()
@@ -869,6 +880,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controls = self.lockin_tab.controls
         self.meter = self.lockin_tab.meter
         self.log = self.inst_tab.log
+        # a viewer may save the settings form to a file or re-read the
+        # settings in use; Apply / Load change the instrument and stay guarded
+        mark_always(self.inst_tab.settings.save_btn, self.inst_tab.settings.revert_btn)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -880,6 +894,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- the shared strip -------------------------------------------------------
 
@@ -903,11 +922,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acq_bar = QtWidgets.QProgressBar(); self.acq_bar.setRange(0, 1000)
         self.acq_bar.setTextVisible(False); self.acq_bar.setFixedSize(120, 10)
         h.addWidget(self.acq_bar)
+        # the SAFETY verb (net/service.py): takes the outputs off the sample;
+        # works for a viewer too, so it is exempt from the viewer guard
+        self.off_btn = QtWidgets.QPushButton("Osc off"); self.off_btn.setObjectName("danger")
+        self.off_btn.setToolTip("OSC OUT amplitude to 0 V. Works also for a viewer.")
+        self.off_btn.clicked.connect(lambda: self.call(self.ctrl.output_off))
+        mark_always(self.off_btn)
+        h.addWidget(self.off_btn)
         self.sample_label = QtWidgets.QLabel("no sample yet"); self.sample_label.setObjectName("mono")
         h.addWidget(self.sample_label, 1)
         self.last_msg = QtWidgets.QLabel("")
         self.last_msg.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
-        self.last_msg.setMaximumWidth(460)
+        # 418, not 460: room for "Osc off" without widening the window
+        self.last_msg.setMaximumWidth(418)
         h.addWidget(self.last_msg)
         return card
 
@@ -917,7 +944,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Run a command and surface a refusal.
 
         A local LockIn raises ValueError; a remote client returns
-        {"ok": false, "error": ...}. The window treats both the same way.
+        {"ok": false, "error": ...}, or raises ControlRefused when another PC
+        holds control (normally the viewer guard stops the click first). The
+        window shows all of them in the log the same way.
         """
         try:
             r = fn(*args)
@@ -955,6 +984,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                     + (" font-weight:700;" if level != "info" else ""))
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
 
         if s.hw_error:

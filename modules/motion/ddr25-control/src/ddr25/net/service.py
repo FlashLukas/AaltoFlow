@@ -23,6 +23,7 @@ import zmq
 
 from ..config import WRAP_POLICIES
 from ..rotator import Rotator
+from ..control import ControlLease
 from .describe import build_manifest
 from . import protocol as P
 
@@ -55,6 +56,17 @@ class Ddr25Service:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a rotator that is
+        #   `stop`: it halts a move AND a homing run, so a viewer who sees the
+        #   stage turn where it should not must be able to stop it.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `stream_read` only drains the recorded fly-scan angles.
+        self.control = ControlLease(
+            safety={"stop"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # ------------------------------------------------------------------ #
     def start(self) -> None:
@@ -133,6 +145,8 @@ class Ddr25Service:
         """
         st = P.status_to_dict(self.brain.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -223,6 +237,11 @@ class Ddr25Service:
     # command dispatch
     # ------------------------------------------------------------------ #
     def _dispatch(self, req: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(req)
+        if gate is not None:
+            return gate
         cmd = (req or {}).get("cmd")
         b = self.brain
 

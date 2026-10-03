@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..lockin import DspLockIn
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -45,6 +46,25 @@ class Sr830Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. A lock-in drives the sample
+        #   through SINE OUT (a modulation coil, a piezo, a laser driver) and
+        #   AUX OUT, so the one "make it safe" action is taking those away:
+        #   `output_off` (SINE OUT to its 4 mV minimum -- an SR830 cannot
+        #   switch it off -- and every AUX OUT to 0 V). `set_sine_out` /
+        #   `set_aux_out` are NOT in the list even though they can go to the
+        #   minimum -- they can turn an output UP as well; that is why
+        #   `output_off` is a verb of its own. `acquire`, `stream_start/stop`
+        #   and the auto functions are not safety: they are triggers, and a
+        #   new sample (or an auto gain) changes what another client -- a
+        #   running scan -- is waiting on.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `stream_read` only drains the recorded fly-scan readings.
+        self.control = ControlLease(
+            safety={"output_off"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -106,6 +126,8 @@ class Sr830Service:
         `status` reply, so the two can never drift apart."""
         st = status_to_dict(self.lockin.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -177,6 +199,11 @@ class Sr830Service:
     }
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         li = self.lockin
         try:
@@ -185,6 +212,10 @@ class Sr830Service:
                 getattr(li, method)(msg[arg])
             elif cmd == "set_aux_out":
                 li.set_aux_out(msg["channel"], msg["volts"])
+            elif cmd == "output_off":
+                # the SAFETY verb: SINE OUT to minimum, AUX OUT to 0 V -- a verb
+                # of its own so a viewer may send it (it can only make safer)
+                li.output_off()
             elif cmd in ("auto_gain", "auto_reserve", "auto_phase"):
                 # Returns at once with a run number; the caller waits for status
                 # to show auto_id == that number with auto_busy false.

@@ -24,26 +24,45 @@ Commands
     preamp on|off
     avg <n>                 sweeps power-averaged per acquisition
     cont on|off             continuous sweeping
-    tg on|off               tracking generator output
+    tg on|off               tracking generator output (off = the safety verb tg_off:
+                            works also while a GUI has control)
     tglevel <dBm>           tracking generator level (-30 ... 0)
     dut thru|bandpass|lowpass|open     (simulator) the device under test
     status                  print one status snapshot
     watch [seconds]         stream peak / floor from the status broadcast (default 5 s)
     help                    show this list
     quit / exit             leave
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                    take control if nobody has it
+    take!                   take it over from whoever has it (they become a viewer)
+    release                 give it back
+    clients                 who holds control, who is connected
+  While a GUI on another PC holds control, this console can read and use the
+  safety verbs (abort, tg off) but change nothing until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
+import threading
 import time
+import uuid
 
 import zmq
 
 CMD_PORT = 5585
 PUB_PORT = 5586
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "gsp818 console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 
 def _f(v, scale=1.0, fmt=".4f"):
@@ -64,6 +83,7 @@ class Console:
         return s
 
     def cmd(self, **msg) -> dict:
+        msg.setdefault("client", IDENTITY)      # say who we are (control)
         self.req.send_json(msg)
         try:
             return self.req.recv_json()
@@ -77,6 +97,23 @@ class Console:
         if args[0].lower() == "auto":
             return self.cmd(cmd=auto_verb, on=True)
         return self.cmd(**{"cmd": verb, arg: float(args[0]) * scale})
+
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            hb = self._new_req()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = self._new_req()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
 
     def run(self, words: list[str]) -> bool:
         """Execute one command line. Returns False to quit."""
@@ -101,10 +138,16 @@ class Console:
             "preamp": lambda: self.cmd(cmd="set_preamp", on=onoff()),
             "avg": lambda: self.cmd(cmd="set_averages", averages=int(num())),
             "cont": lambda: self.cmd(cmd="set_continuous", on=onoff()),
-            "tg": lambda: self.cmd(cmd="set_tg", on=onoff()),
+            # "tg off" is the SAFETY verb tg_off: it works also while a GUI on
+            # another PC has control ("tg on" does not)
+            "tg": lambda: self.cmd(cmd="set_tg", on=True) if onoff() else self.cmd(cmd="tg_off"),
             "tglevel": lambda: self.cmd(cmd="set_tg_level", level_dBm=num()),
             "dut": lambda: self.cmd(cmd="set_dut", dut=args[0].lower()),
             "abort": lambda: self.cmd(cmd="abort"),
+            "take": lambda: self.cmd(cmd="take_control", force=False),
+            "take!": lambda: self.cmd(cmd="take_control", force=True),
+            "release": lambda: self.cmd(cmd="release_control"),
+            "clients": lambda: json.dumps(self.cmd(cmd="clients"), indent=1),
             "clearref": lambda: self.cmd(cmd="clear_reference"),
         }
         try:
@@ -193,6 +236,7 @@ def main() -> int:
     if args.words:
         con.run(args.words)
         return 0
+    con.start_heartbeat()
     print(f"gsp818 console -> {args.connect}:{args.cmd_port}   (help for commands)")
     while True:
         try:

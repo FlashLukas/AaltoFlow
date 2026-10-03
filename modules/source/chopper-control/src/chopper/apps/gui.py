@@ -28,6 +28,7 @@ from ..config import Config
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ALWAYS_PROPERTY, ControlBar, mark_always
 
 
 # ------------------------------------------------------------- signal bridge
@@ -242,12 +243,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1180, 760)
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its chopper and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         # brain events -> log
         self.bridge = Bridge()
@@ -266,6 +280,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.freq_spin.setValue(st.setpoint_frequency_Hz)
         self.phase_spin.setValue(st.phase_deg)
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -280,6 +299,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -415,7 +435,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
     def _toggle_run(self):
-        self._try(self.ctrl.set_enable, not self.ctrl.status().enabled)
+        # Running -> the button reads "Stop" and sends the SAFETY verb (which a
+        # viewer may send too, see _refresh); standby -> "Start", a change.
+        if self.ctrl.status().enabled:
+            self._try(self.ctrl.standby)
+        else:
+            self._try(self.ctrl.set_enable, True)
 
     def _set_frequency(self):
         self._try(self.ctrl.set_frequency, self.freq_spin.value())
@@ -476,6 +501,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         try:
             res = blade_by_name(s.blade).resolution_Hz
@@ -540,6 +567,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.state_badge.setText("STANDBY")
                 self._badge(self.state_badge, COLORS["muted"])
                 self.run_btn.setText("Start"); self.run_btn.setObjectName("primary")
+            # One button, two jobs: while it says "Stop" it is the safety
+            # button (a viewer may press it, control_bar.py); while it says
+            # "Start" the viewer guard blocks it like any other change.
+            self.run_btn.setProperty(ALWAYS_PROPERTY, bool(s.enabled))
             self.run_btn.style().unpolish(self.run_btn)
             self.run_btn.style().polish(self.run_btn)
             if s.locked:

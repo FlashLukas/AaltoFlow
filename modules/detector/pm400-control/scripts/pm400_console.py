@@ -18,24 +18,43 @@ Commands
     readings <n>           readings per acquisition
     settle <s>             ignore readings in the first <s> seconds of an acquisition
     zero                   zero adjustment -- COVER THE HEAD FIRST
+    cancelzero             stop a running zero adjustment (the old zero stays)
     status                 print one status snapshot
     info                   static info (limits, identity)
     watch [seconds]        stream the live status broadcast (default 5 s)
     help                   show this list
     quit / exit            leave
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                   take control if nobody has it
+    take!                  take it over from whoever has it (they become a viewer)
+    release                give it back
+    clients                who holds control, who is connected
+  While a GUI on another PC holds control, this console can read and use the
+  safety verb (cancelzero) but change nothing until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
+import threading
 import time
+import uuid
 
 import zmq
 
 CMD_PORT = 5617
 PUB_PORT = 5618
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "pm400 console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 _UNITS = {"w": 1.0, "mw": 1e-3, "uw": 1e-6, "nw": 1e-9,
           "j": 1.0, "mj": 1e-3, "uj": 1e-6, "nj": 1e-9}
@@ -65,6 +84,7 @@ class Console:
         return s
 
     def send(self, msg: dict) -> dict:
+        msg.setdefault("client", IDENTITY)      # say who we are (control)
         try:
             self.req.send_json(msg)
             return self.req.recv_json()
@@ -72,6 +92,23 @@ class Console:
             self.req.close(0)                  # a timed-out REQ socket is stuck: rebuild
             self.req = self._new_req()
             return {"ok": False, "error": "no reply (is the service running?)"}
+
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            hb = self._new_req()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = self._new_req()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
 
     @staticmethod
     def show_status(s: dict):
@@ -160,6 +197,16 @@ class Console:
             elif cmd == "zero":
                 if input("  head covered? [y/N] ").strip().lower() == "y":
                     print(self.send({"cmd": "zero"}))
+            elif cmd == "cancelzero":
+                print(self.send({"cmd": "cancel_zero"}))
+            elif cmd == "take":
+                print(self.send({"cmd": "take_control", "force": False}))
+            elif cmd == "take!":
+                print(self.send({"cmd": "take_control", "force": True}))
+            elif cmd == "release":
+                print(self.send({"cmd": "release_control"}))
+            elif cmd == "clients":
+                print("  " + json.dumps(self.send({"cmd": "clients"}), indent=1).replace("\n", "\n  "))
             elif cmd == "status":
                 r = self.send({"cmd": "status"})
                 self.show_status(r.get("status", {})) if r.get("ok") else print(r)
@@ -191,6 +238,7 @@ def main() -> int:
         if args.words:
             con.run_line(" ".join(args.words))
             return 0
+        con.start_heartbeat()
         print(f"connected to tcp://{args.connect}:{args.cmd_port}   (type 'help' or 'quit')")
         while True:
             try:

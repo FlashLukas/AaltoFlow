@@ -189,6 +189,13 @@ def build_manifest(ctrl) -> dict:
         # (scan-core only picks up actions that declare how to wait for them.)
         _p("zero", "Zero field", "action", "action", group="Field", order=5,
            help="Field setpoint 0 mT, angle kept. Also aborts a calibration."),
+        # the SAFETY verbs (zero above, output_off here) are actions so the
+        # suite's Control tab offers them to a viewer too (control.py)
+        _p("output_off", "Ramp down + off", "action", "action", group="Output",
+           order=55,
+           help="Ramp the drive to 0 V, then switch the output off (also aborts "
+                "a calibration). Allowed for anyone, also a viewer: it only "
+                "makes things safer."),
         _p("calibrate", "Run calibration", "action", "action",
            group="Calibration", order=250, danger=True,
            args=[{"name": "n_per_leg", "label": "points per leg", "type": "int",

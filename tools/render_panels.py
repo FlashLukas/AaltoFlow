@@ -65,6 +65,8 @@ NEUTRAL = (Path(r"C:\Users\Public\Documents\AaltoFlow") if sys.platform == "win3
 SIZES = {
     "clMag": (1320, 900),
     "smb": (1280, 620),
+    "control-holder": (1280, 660),
+    "control-viewer": (1280, 660),
     "stage": (1280, 800),
     "piezo": (1240, 760),
     "camera": (1400, 940),
@@ -981,7 +983,75 @@ def _mag2dcal(theme):
     return lambda: gui.run_app(ctrl, cfg), warm_up, 10.0
 
 
+def _control(as_viewer: bool):
+    """The smb window connected to a service (``--connect``), with the CONTROL
+    bar at the top (control.py / apps/control_bar.py): once as the GUI that
+    holds control, once as a VIEWER on another PC.
+
+    Everything runs in this one process: a simulated SmbService on scratch
+    ports, the GUI's own client, and the other clients the bar reports (a
+    second GUI, scan-core as a machine that is "also driving"). Their "user@PC"
+    names are invented on purpose -- a published picture must not show the
+    account or PC it was rendered on, and the real identity of this process
+    would be exactly that.
+    """
+    def make(theme):
+        from smb.config import Config
+        from smb.sim_system import build_sim_system
+        from smb.apps import gui
+        from smb.net.client import SmbClient
+        from smb.net.service import SmbService
+
+        cmd, pub = 18990, 18991          # scratch ports, not the module's own
+        gen, _ = build_sim_system(Config())
+        svc = SmbService(gen, host="127.0.0.1", cmd_port=cmd, pub_port=pub, status_hz=10)
+        svc.start()
+        others = []
+
+        def client(kind, name, host):
+            c = SmbClient(host="127.0.0.1", cmd_port=cmd, pub_port=pub,
+                          kind=kind, name=name)
+            c.identity["host"] = host
+            c.start()                    # heartbeats: the bar lists it
+            return c
+
+        # the "other PC": a GUI that holds control (viewer shot) or only
+        # watches (holder shot)
+        other = client("gui", "smb GUI", "student@lab-pc-2")
+        others.append(other)
+        if as_viewer:
+            other.take_control()
+        # scan-core, a machine client, changed something a moment ago: every
+        # bar then says "also driving: scan-core"
+        scan = client("machine", "scan-core", "operator@lab-pc-1")
+        others.append(scan)
+        scan.set_frequency(2.45e9)
+        scan.set_power(-3.0)
+        scan.set_rf(True)
+
+        me = SmbClient(host="127.0.0.1", cmd_port=cmd, pub_port=pub,
+                       kind="gui", name="smb GUI")
+        me.identity["host"] = "operator@lab-pc-1"
+        me.start()
+        me.cfg.ui.theme = theme
+
+        def warm_up(win):
+            def cleanup():
+                for c in others + [me]:
+                    try:
+                        c.shutdown()
+                    except Exception:
+                        pass
+                svc.stop()
+            win._render_cleanup = cleanup
+
+        return lambda: gui.run_app(me, me.cfg, remote=True), warm_up, 3.0
+    return make
+
+
 TARGETS = {
+    "control-holder": _control(as_viewer=False),
+    "control-viewer": _control(as_viewer=True),
     "pm16": _pm16,
     "ppms": _ppms,
     "mag2d": _mag2d,

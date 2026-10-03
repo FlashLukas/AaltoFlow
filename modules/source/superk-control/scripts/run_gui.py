@@ -40,7 +40,10 @@ def main() -> int:
         return run_local(theme=args.theme)
 
     from superk.net.client import SuperkClient
-    client = SuperkClient(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port)
+    # kind "gui": the service counts this window as a viewer, and the first
+    # GUI to connect gets control (control.py / apps/control_bar.py)
+    client = SuperkClient(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port,
+                          kind="gui", name="superk GUI")
     info = client.start()      # also pulls the service's config into client.cfg
     if args.theme:             # a local override wins over the service's stored theme
         client.cfg.ui.theme = args.theme

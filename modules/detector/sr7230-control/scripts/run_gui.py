@@ -36,7 +36,10 @@ def main() -> int:
         return run_local(theme=args.theme)
 
     from sr7230.net.client import Sr7230Client
-    client = Sr7230Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port)
+    # kind "gui": the service counts this window as a viewer, and the first
+    # GUI to connect gets control (control.py / apps/control_bar.py)
+    client = Sr7230Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port,
+                          kind="gui", name="sr7230 GUI")
     info = client.start()          # also pulls the service's config into client.cfg
     if args.theme:
         client.cfg.ui.theme = args.theme

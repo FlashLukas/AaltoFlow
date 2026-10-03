@@ -31,10 +31,12 @@ import pyqtgraph as pg
 
 from ..calibration import Calibration
 from ..config import Config
+from ..control import ControlRefused
 from ..controller import Refused
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .calibration_viewer import CalibrationViewer, can_view
 from .settings_dialog import SettingsDialog
+from .control_bar import ALWAYS_PROPERTY, ControlBar, mark_always
 
 
 class Bridge(QtCore.QObject):
@@ -244,7 +246,20 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
-        self.setCentralWidget(root)
+        # Control or viewer (control_bar.py): a bar above everything, only for
+        # a GUI on a service whose client knows about control -- a local GUI
+        # owns its controller and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -254,6 +269,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(50)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- layout ----------------------------------------------------------
 
@@ -277,6 +297,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         header.addWidget(settings_btn)
         col.addLayout(header)
 
@@ -313,6 +334,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.output_btn.clicked.connect(self._toggle_output)
         zero_btn = QtWidgets.QPushButton("Zero field")
         zero_btn.clicked.connect(lambda: self._call(self.ctrl.zero))
+        # a SAFETY verb (net/service.py): it only lowers the field, so it works
+        # for a viewer too. (The output button is marked while it reads "Ramp
+        # down + off" only -- see _set_output_mode.)
+        mark_always(zero_btn)
         row.addWidget(self.output_btn, 1); row.addWidget(zero_btn)
         olay.addLayout(row)
         self.drive_label = QtWidgets.QLabel("drive  X --   Y --")
@@ -391,6 +416,9 @@ class MainWindow(QtWidgets.QMainWindow):
         load.clicked.connect(self._load_calibration)
         save = QtWidgets.QPushButton("Save...")
         save.clicked.connect(self._save_calibration)
+        # View and Save only READ the service's calibration (Save writes a
+        # file on this PC): fine for a viewer (control_bar.py)
+        mark_always(view, save)
         grid.addWidget(self.cal_run_btn, 0, 0, 1, 2)
         grid.addWidget(view, 1, 0)
         grid.addWidget(load, 1, 1)
@@ -485,7 +513,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             fn(*args)
             return True
-        except (Refused, ValueError) as exc:
+        except (Refused, ControlRefused, ValueError) as exc:
+            # ControlRefused: another PC holds control (control.py) -- say so
+            # in the log, like any other refusal
             self._on_event("error", str(exc))
             return False
 
@@ -496,7 +526,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._call(self.ctrl.set_vector, self.bx_spin.value(), self.by_spin.value())
 
     def _toggle_output(self):
-        self._call(self.ctrl.set_output, self._out_mode != "off")
+        if self._out_mode == "off":
+            # switching off is the SAFETY verb output_off: a viewer may send it
+            self._call(self.ctrl.output_off)
+        else:
+            self._call(self.ctrl.set_output, True)
 
     def _bypass_clicked(self, checked: bool):
         if checked:
@@ -644,6 +678,9 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.output_btn.setText("Energize")
             self.output_btn.setObjectName("primary")
+        # Usable for a viewer only while it switches OFF (output_off is a
+        # safety verb); "Energize" stays blocked like every other input.
+        self.output_btn.setProperty(ALWAYS_PROPERTY, mode == "off")
         self.output_btn.style().unpolish(self.output_btn)
         self.output_btn.style().polish(self.output_btn)
 
@@ -659,6 +696,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._entries_seeded = True
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         cfg = self.cfg
         t = time.monotonic() - self._t0

@@ -27,6 +27,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..backends.base import DC_DIGITS, MODES, RMS_BANDS
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
 
 
 class Bridge(QtCore.QObject):
@@ -207,11 +208,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ranges: list = []
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its gaussmeter and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -227,6 +241,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -240,6 +259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         header.addWidget(settings_btn)
         col.addLayout(header)
 
@@ -253,6 +273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # swapping it, this asks again so the ranges follow the new probe
         self.probe_btn = QtWidgets.QPushButton("Re-read probe")
         self.probe_btn.clicked.connect(self._reread_probe)
+        mark_always(self.probe_btn)  # only reads which probe is plugged in
         clay.addWidget(self.probe_btn)
         col.addWidget(ccard)
 
@@ -262,13 +283,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems([m.upper() for m in MODES])
         # `activated` fires only on a USER choice, never on setCurrentIndex
-        self.mode_combo.activated.connect(lambda i: self.ctrl.set_mode(MODES[i]))
+        self.mode_combo.activated.connect(lambda i: self._call(self.ctrl.set_mode, MODES[i]))
         self.digits_combo = QtWidgets.QComboBox()
         self.digits_combo.addItems([f"{d} digits" for d in DC_DIGITS])
-        self.digits_combo.activated.connect(lambda i: self.ctrl.set_dc_digits(DC_DIGITS[i]))
+        self.digits_combo.activated.connect(lambda i: self._call(self.ctrl.set_dc_digits, DC_DIGITS[i]))
         self.band_combo = QtWidgets.QComboBox()
         self.band_combo.addItems([f"{b} band" for b in RMS_BANDS])
-        self.band_combo.activated.connect(lambda i: self.ctrl.set_rms_band(RMS_BANDS[i]))
+        self.band_combo.activated.connect(lambda i: self._call(self.ctrl.set_rms_band, RMS_BANDS[i]))
         row.addWidget(self.mode_combo); row.addWidget(self.digits_combo, 1)
         row.addWidget(self.band_combo, 1)
         mlay.addLayout(row)
@@ -279,7 +300,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # range
         rcard, rlay = _card("Range")
         self.auto_chk = QtWidgets.QCheckBox("Auto range")
-        self.auto_chk.clicked.connect(lambda on: self.ctrl.set_auto_range(on))  # .clicked: user only
+        self.auto_chk.clicked.connect(lambda on: self._call(self.ctrl.set_auto_range, on))  # .clicked: user only
         rlay.addWidget(self.auto_chk)
         row = QtWidgets.QHBoxLayout()
         self.range_combo = QtWidgets.QComboBox()
@@ -292,7 +313,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # relative
         lcard, llay = _card("Relative")
         self.rel_chk = QtWidgets.QCheckBox("Relative mode")
-        self.rel_chk.clicked.connect(lambda on: self.ctrl.set_relative(on))
+        self.rel_chk.clicked.connect(lambda on: self._call(self.ctrl.set_relative, on))
         llay.addWidget(self.rel_chk)
         row = QtWidgets.QHBoxLayout()
         self.rel_spin = QtWidgets.QDoubleSpinBox()
@@ -300,7 +321,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lim = self.cfg.limits.rel_setpoint_max_mT
         self.rel_spin.setRange(-lim, lim)
         b = QtWidgets.QPushButton("Set")
-        b.clicked.connect(lambda: self.ctrl.set_relative(True, self.rel_spin.value()))
+        b.clicked.connect(lambda: self._call(self.ctrl.set_relative, True, self.rel_spin.value()))
         here = QtWidgets.QPushButton("Here")
         here.setToolTip("Relative to the field measured now")
         here.clicked.connect(self._relative_here)
@@ -315,7 +336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.readings_spin.setRange(self.cfg.limits.readings_min, self.cfg.limits.readings_max)
         self.readings_spin.setSuffix("  readings")
         b = QtWidgets.QPushButton("Set")
-        b.clicked.connect(lambda: self.ctrl.set_acquisition(self.readings_spin.value()))
+        b.clicked.connect(lambda: self._call(self.ctrl.set_acquisition, self.readings_spin.value()))
         row.addWidget(self.readings_spin, 1); row.addWidget(b)
         alay.addLayout(row)
         self.acq_btn = QtWidgets.QPushButton("Acquire"); self.acq_btn.setObjectName("primary")
@@ -378,6 +399,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pause_btn.toggled.connect(lambda on: setattr(self, "_paused", on))
         bar.addWidget(self.pause_btn)
         clear = QtWidgets.QPushButton("Clear"); clear.clicked.connect(self._hist.clear)
+        # the plot's own view (window, pause, clear) changes nothing on the
+        # meter: fine for a viewer
+        mark_always(self.window_combo, self.pause_btn, clear)
         bar.addWidget(clear)
         bar.addStretch(1)
         self.stats_label = QtWidgets.QLabel(""); self.stats_label.setObjectName("hint")
@@ -412,10 +436,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- actions ---------------------------------------------------------
 
+    def _call(self, fn, *args):
+        """Run a setter; a refusal goes to the log, not a crash -- e.g. the
+        service's "read-only: <who> has control" (control.py) when another PC
+        took control a moment before the click."""
+        try:
+            r = fn(*args)
+        except Exception as exc:
+            self._on_event("warn", f"refused: {exc}")
+            return
+        if isinstance(r, dict) and not r.get("ok", True):
+            self._on_event("warn", f"refused: {r.get('error')}")
+
     def _set_range(self):
         i = self.range_combo.currentIndex()
         if 0 <= i < len(self._ranges):
-            self.ctrl.set_range(self._ranges[i])
+            self._call(self.ctrl.set_range, self._ranges[i])
 
     def _reread_probe(self):
         try:
@@ -493,6 +529,8 @@ class MainWindow(QtWidgets.QMainWindow):
             chk.blockSignals(False)
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         now = time.monotonic()
 
