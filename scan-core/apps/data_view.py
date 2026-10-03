@@ -172,6 +172,22 @@ class DataView(QtWidgets.QWidget):
         for it in (self.vline, self.hline, self.dot):
             it.setVisible(False)
             self.plot.addItem(it, ignoreBounds=True)
+        # WHERE the running scan is (set_marker): the cell just measured,
+        # outlined on a map; a solid vertical line on a 1-D plot; a line
+        # across the map when only one of its two coordinates is known (a fly
+        # scan reports whole rows). Solid, so it is never mistaken for the
+        # dashed cursor above. Drawn in the text colour, which stands out
+        # against the colour map in both themes.
+        mpen = pg.mkPen(C["text"], width=2)
+        self.mark_rect = QtWidgets.QGraphicsRectItem()
+        self.mark_rect.setPen(mpen)
+        self.mark_vline = pg.InfiniteLine(angle=90, pen=mpen)
+        self.mark_hline = pg.InfiniteLine(angle=0, pen=mpen)
+        for it in (self.mark_rect, self.mark_vline, self.mark_hline):
+            it.setVisible(False)
+            self.plot.addItem(it, ignoreBounds=True)
+        #: {dim name: coordinate} of the point to mark, or None
+        self._marker: dict | None = None
         self.plot.scene().sigMouseMoved.connect(self._hover)
         self.plot.scene().sigMouseClicked.connect(self._clicked)
         v.addWidget(self.glw, 1)
@@ -396,6 +412,7 @@ class DataView(QtWidgets.QWidget):
             self.plot.setLabel("left", f"{self.det_combo.currentText()} [{unit}]".strip())
             self._shown = ("line", np.asarray(xc, dtype=float), None, arr, unit)
         self._update_cursor()
+        self._place_marker()
 
         bits = []
         if red.averaged > 1:
@@ -491,6 +508,51 @@ class DataView(QtWidgets.QWidget):
             self.dot.setVisible(bool(np.isfinite(y)))
             self.vline.setVisible(False); self.hline.setVisible(False)
         self.readout.setText(self._text(i, j) + "   (held -- click off the data to release)")
+
+    # ---- the running scan's point -------------------------------------------
+    def set_marker(self, coords: dict | None) -> None:
+        """Mark the point a running scan has just measured.
+
+        `coords` = {dim name: coordinate value} (from the engine's `where`),
+        None to remove the mark. COORDINATES, not indices, for the same reason
+        as the held cursor: the picture is drawn in ascending order and may be
+        flipped, and a value finds its cell either way. A dim that is not on
+        screen (held by a slider, or averaged) is simply not used.
+        """
+        self._marker = dict(coords) if coords else None
+        self._place_marker()
+
+    def _place_marker(self):
+        shown, mark = self._shown, self._marker
+        for it in (self.mark_rect, self.mark_vline, self.mark_hline):
+            it.setVisible(False)
+        if shown is None or not mark:
+            return
+        kind, xc, yc, _, _ = shown
+        x = mark.get(self.x_combo.currentText())
+        y = mark.get(self.y_combo.currentText()) if kind == "map" else None
+        if x is not None and y is not None:
+            # the whole cell, edges half a step either side of its centre --
+            # exactly where _draw put that pixel
+            i = int(np.argmin(np.abs(xc - x)))
+            j = int(np.argmin(np.abs(yc - y)))
+            hx, hy = self._half_step(xc, i), self._half_step(yc, j)
+            self.mark_rect.setRect(QtCore.QRectF(float(xc[i]) - hx, float(yc[j]) - hy,
+                                                 2 * hx, 2 * hy))
+            self.mark_rect.setVisible(True)
+        elif x is not None:
+            self.mark_vline.setPos(float(x)); self.mark_vline.setVisible(True)
+        elif y is not None:
+            self.mark_hline.setPos(float(y)); self.mark_hline.setVisible(True)
+
+    @staticmethod
+    def _half_step(c: np.ndarray, i: int) -> float:
+        """Half the spacing around c[i]: half a pixel on the map."""
+        if c.size > 1:
+            return abs(float(c[min(i + 1, c.size - 1)] - c[max(i - 1, 0)])) / (
+                2 * (min(i + 1, c.size - 1) - max(i - 1, 0)))
+        lo, hi = DataView._extent(c)
+        return (hi - lo) / 2
 
     def _coord(self, dim: str, n: int) -> np.ndarray:
         if self.ds is not None and dim in self.ds.coords:
