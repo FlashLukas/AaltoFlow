@@ -33,6 +33,7 @@ panel showing a magnet at 0 mT with every lamp dark documents nothing.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -83,7 +84,7 @@ SIZES = {
     # 1360 the axis row's "pts" box was clipped by the result pane.
     "scan-core": (1520, 840),
     "mission-control": (1180, 1150),
-    "mission-control-instruments": (1080, 460),
+    "mission-control-instruments": (1240, 600),
     "suite-control": (1500, 950),
     "suite-control-dynacool": (1500, 950),
     "suite-scan": (1500, 950),
@@ -798,7 +799,35 @@ def _mission_control_instruments(theme):
         Found("COM7", "serial", identity="USB Serial Device (COM7)",
               detail="Microsoft, USB 0483:5740", aliases=["ASRL7::INSTR"]),
     ]
+    # the list-only sources: module probes and the USB device list (made-up
+    # serials; an IDS camera's real Windows name would carry its serial)
+    from suite_common import instruments as I
+    from suite_common.usb_devices import UsbDevice
+    probes = []
+    for key, devs in (
+            ("kim", [{"address": "97000000", "identity": "Thorlabs KIM101",
+                      "detail": "held by the running kim service (a controller is not "
+                                "listed while it is open)"}]),
+            ("camera", [{"address": "4100000000", "identity": "IDS U3-0000XCP-M",
+                         "detail": "IDS peak, serial 4100000000",
+                         "lock": "CAMERA::4100000000"}]),
+            ("usb6001", [{"address": "Dev1", "identity": "NI USB-6001",
+                          "detail": "DAQmx name Dev1, serial 00000000"}]),
+            ("pm16", [{"address": "USB0::0x1313::0x807B::000000000::INSTR",
+                       "identity": "Thorlabs PM160", "detail": "S/N 000000000, TLPMX"}])):
+        r, _ = I.parse_probe(json.dumps({"devices": devs}), key)
+        probes += r
+    probes[0].held_by = "kim"
+    usb = I.usb_rows([UsbDevice(0x0403, 0xFAF0, "APT USB Device", "USB", "97000000"),
+                      UsbDevice(0x1313, 0x807B, "PM160", "ThorlabsUSBDevice", "000000000"),
+                      UsbDevice(0x0403, 0x6010, "USB Composite Device", "USB", "SH000000"),
+                      UsbDevice(0x0403, 0x6001, "USB Serial Port (COM4)", "Ports", "A0000000"),
+                      UsbDevice(0x413C, 0x301A, "USB Input Device", "HIDClass", "")], held={})
+    vendor = I.merge(probes, usb)
     mission_control.finder.scan = lambda ask_visa=True: (list(rows), [])
+    mission_control.finder.scan_vendor = lambda *a, **k: (
+        list(vendor), ["hf2: zhinst-core is not installed: install LabOne, then add "
+                       "zhinst-core (the same version) to hf2-control and uv sync"])
 
     def show():
         return mission_control.main(["--theme", theme])
@@ -811,7 +840,9 @@ def _mission_control_instruments(theme):
         from PySide6 import QtWidgets
         for _ in range(20):
             QtWidgets.QApplication.processEvents()
-        dlg.table.selectRow(2)                     # the SMB100A: "Use for module..." lit
+        # the IDS camera, found by the camera module's probe: "Use for module..." lit
+        row = next((i for i, f in enumerate(dlg.shown) if f.address == "4100000000"), 0)
+        dlg.table.selectRow(row)
         return dlg
 
     return show, warm_up, 1.5

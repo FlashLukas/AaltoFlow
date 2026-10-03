@@ -327,6 +327,31 @@ still assumes piezo/zpiezo.
   - The extra `instruments` of mission-control: pyvisa, pyvisa-py (when no
     NI / Keysight VISA is installed), pyserial, psutil + zeroconf (pyvisa-py
     searches the LAN on every network card and finds HiSLIP instruments).
+  - **Vendor probes (2026-10-03).** Instruments that are not VISA / COM come
+    from two list-only sources, run in a second thread next to the VISA scan:
+    (1) `suite_common/usb_devices.py` -- the OS's USB list (Windows: ONE
+    PowerShell `Get-CimInstance Win32_PnPEntity` call for `USB\VID_*` and
+    `FTDIBUS\*`; Linux: /sys/bus/usb/devices), stdlib only, never raises.
+    `KNOWN_USB` names a device and its module; generic FTDI ids (0403:6001,
+    0403:6015) are named "could be ..." with NO module, because every
+    USB-serial cable looks the same. A composite device's interfaces and the
+    FTDIBUS twin of an FTDI device fold into one row; unknown devices are
+    hidden unless "show every USB device". (2) module probes: `[hardware]
+    probe` in module.toml, run with the module's venv python
+    (`instruments.module_python`: `.venv`, then `%LOCALAPPDATA%\uv-venvs`),
+    20 s timeout, all in parallel; the contract is in guide section 11.
+    `instruments.merge` folds a probe row, a USB-list row and a VISA/COM row
+    of one device together (same hwlock key, or the USB serial found in the
+    other row's address/lock/details); "Found by" says who saw it.
+    Bus `device` (a module takes an id verbatim): a probe's row is offered
+    only to the module whose probe found it, a USB-list row only to the
+    module KNOWN_USB names (its serial; a `visa` module gets
+    `USB0::0x<vid>::0x<pid>::<serial>::INSTR`). Lab finding: a device a
+    service has OPEN can be missing from its vendor's list (pylablib's
+    Kinesis list was empty while kim held the KIM101) -- the USB list still
+    shows it, hwlock marks it held, and each probe reports its own module's
+    held addresses, so the row reads "held by the running kim service", not
+    "nothing found".
 
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the

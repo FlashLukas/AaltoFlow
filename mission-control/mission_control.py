@@ -521,9 +521,18 @@ class InstrumentsDialog(QtWidgets.QDialog):
     window. The scan runs in a thread: asking every GPIB address *IDN? takes
     a second or two per absent instrument, and the launcher must not freeze.
     A COM port is never sent a byte unless "Ask this port" is pressed.
+
+    Instruments that are neither VISA nor COM (Kinesis, IDS cameras, NI DAQ,
+    Signal Hound, Zurich, Thorlabs TLPMX) come from two LIST-ONLY sources run
+    at the same time: each local module's probe (in that module's own venv --
+    the launcher never installs a vendor SDK) and the operating system's USB
+    device list. Neither opens a device.
     """
 
-    COLS = ("Bus", "Address", "Who it is", "Details", "In use by")
+    COLS = ("Bus", "Address", "Who it is", "Details", "Found by", "Module", "In use by")
+    #: how the Bus column names each kind of row
+    BUS_LABEL = {"gpib": "GPIB", "usb": "USB", "tcpip": "LAN", "serial": "COM",
+                 "device": "DEVICE", "usb-device": "USB DEV", "other": "OTHER"}
     _done = QtCore.Signal(object)                 # (rows, notes) from the thread
     _asked = QtCore.Signal(object)                # one Found from a click
 
@@ -531,16 +540,19 @@ class InstrumentsDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.modules = [m for m in modules if not m.remote]
         self.log = log or (lambda msg, level="info": None)
-        self.rows: list = []
+        self.rows: list = []          # everything the last scan found
+        self.shown: list = []         # the rows in the table (unknown USB devices may be hidden)
         self.setWindowTitle(suite_title("Instruments on this PC"))
-        self.resize(1080, 560)
+        self.resize(1240, 580)
         lay = QtWidgets.QVBoxLayout(self)
 
         intro = QtWidgets.QLabel(
-            "Every instrument this PC can reach over VISA (GPIB, USB, LAN) and every "
-            "COM port. VISA instruments are asked who they are (*IDN?); a COM port is "
-            "only described by its USB chip, until you press <b>Ask this port</b>. "
-            "An address a running service holds is never opened.")
+            "Every instrument this PC can reach over VISA (GPIB, USB, LAN), every COM "
+            "port, the devices the modules' own vendor libraries list (their <i>probes</i>: "
+            "Kinesis, IDS, NI-DAQmx, Signal Hound, LabOne, TLPMX) and the USB devices "
+            "Windows knows. VISA instruments are asked who they are (*IDN?); everything "
+            "else is only LISTED, and a COM port gets no byte until you press "
+            "<b>Ask this port</b>. An address a running service holds is never opened.")
         intro.setWordWrap(True); intro.setObjectName("meta")
         lay.addWidget(intro)
 
@@ -549,8 +561,18 @@ class InstrumentsDialog(QtWidgets.QDialog):
         self.scan_btn.clicked.connect(self.scan)
         self.ask_visa = QtWidgets.QCheckBox("ask VISA instruments who they are (*IDN?)")
         self.ask_visa.setChecked(True)
+        self.run_probes = QtWidgets.QCheckBox("run module probes")
+        self.run_probes.setChecked(True)
+        self.run_probes.setToolTip("Each module that declares a probe (module.toml [hardware]) "
+                                   "lists the devices its vendor library sees, in its own "
+                                   "environment. A probe opens nothing.")
+        self.all_usb = QtWidgets.QCheckBox("show every USB device")
+        self.all_usb.setToolTip("Also list USB devices that are not a known instrument "
+                                "(keyboards, cameras, hubs' children ...)")
+        self.all_usb.toggled.connect(lambda _=False: self._fill())
         self.status = QtWidgets.QLabel(""); self.status.setObjectName("meta")
         top.addWidget(self.scan_btn); top.addWidget(self.ask_visa)
+        top.addWidget(self.run_probes); top.addWidget(self.all_usb)
         top.addStretch(1); top.addWidget(self.status)
         lay.addLayout(top)
 
@@ -563,6 +585,7 @@ class InstrumentsDialog(QtWidgets.QDialog):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         hh.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        hh.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)   # long: full text in the tooltip
         self.table.itemSelectionChanged.connect(self._selected)
         lay.addWidget(self.table, 1)
 
@@ -576,7 +599,9 @@ class InstrumentsDialog(QtWidgets.QDialog):
         self.use_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.use_btn.setMenu(QtWidgets.QMenu(self.use_btn))
         self.use_btn.setToolTip("Remember this address for a module on this PC: its service "
-                                "gets it at the next start in real-hardware mode")
+                                "gets it at the next start in real-hardware mode. A device "
+                                "only a vendor library knows (a Kinesis serial, Dev1) is "
+                                "offered to the module that found it.")
         self.copy_btn = QtWidgets.QPushButton("Copy address")
         self.copy_btn.clicked.connect(self._copy)
         self.baud = QtWidgets.QComboBox()
@@ -607,15 +632,36 @@ class InstrumentsDialog(QtWidgets.QDialog):
 
     def scan(self):
         self.scan_btn.setEnabled(False)
-        self.status.setText("scanning… (an absent GPIB address takes a second)")
+        self.status.setText("scanning… (an absent GPIB address takes a second, "
+                            "a module probe a few)")
         ask = self.ask_visa.isChecked()
+        probes = self.run_probes.isChecked()
+        modules = list(self.modules)
 
         def run():
+            # VISA + COM in this thread, the list-only sources (probes, USB
+            # list) in a second one: they wait on different things
+            vendor: dict = {}
+
+            def other():
+                try:
+                    vendor["r"] = finder.scan_vendor(modules, probes=probes,
+                                                     python_for=finder.module_python)
+                except Exception as exc:
+                    vendor["r"] = ([], [f"vendor scan failed: {exc}"])
+            t = threading.Thread(target=other, daemon=True, name="instrument-vendor")
+            t.start()
             try:
-                result = finder.scan(ask_visa=ask)
+                rows, notes = finder.scan(ask_visa=ask)
             except Exception as exc:              # never take the launcher down
-                result = ([], [f"scan failed: {exc}"])
-            self._done.emit(result)
+                rows, notes = [], [f"scan failed: {exc}"]
+            t.join(finder.PROBE_TIMEOUT_S + 30)
+            extra, more = vendor.get("r", ([], ["the vendor scan did not finish"]))
+            try:
+                rows = finder.merge(rows, extra)
+            except Exception as exc:
+                more = more + [f"merge failed: {exc}"]
+            self._done.emit((rows, list(notes) + list(more)))
         threading.Thread(target=run, daemon=True, name="instrument-scan").start()
 
     def _show(self, result):
@@ -623,8 +669,10 @@ class InstrumentsDialog(QtWidgets.QDialog):
         self.rows = list(rows)
         self._fill()
         self.scan_btn.setEnabled(True)
-        n_held = sum(bool(f.held_by) for f in self.rows)
-        self.status.setText(f"{len(self.rows)} found" + (f", {n_held} in use" if n_held else ""))
+        n_held = sum(bool(f.held_by) for f in self.shown)
+        hidden = len(self.rows) - len(self.shown)
+        self.status.setText(f"{len(self.shown)} found" + (f", {n_held} in use" if n_held else "")
+                            + (f", {hidden} other USB device(s) hidden" if hidden else ""))
         self.notes.setText("\n".join(notes)); self.notes.setVisible(bool(notes))
         for n in notes:
             self.log(f"instruments: {n}", "warn")
@@ -645,17 +693,30 @@ class InstrumentsDialog(QtWidgets.QDialog):
         self._fill()
         self.status.setText(f"{f.address}: " + (f.identity or f.error or "no answer"))
 
+    def _module_label(self, key: str) -> str:
+        """The suggested module as the cards name it ("Inertia stage 3D [kim]")."""
+        if not key:
+            return ""
+        spec = next((m for m in self.modules if m.key == key), None)
+        return f"{spec.name} [{key}]" if spec is not None else f"{key} (not installed)"
+
     def _fill(self):
-        self.table.setRowCount(len(self.rows))
-        for r, f in enumerate(self.rows):
+        # an unrecognised USB device (keyboard, webcam ...) only on request
+        self.shown = [f for f in self.rows if f.known or self.all_usb.isChecked()]
+        self.table.setRowCount(len(self.shown))
+        for r, f in enumerate(self.shown):
             who = f.identity or (f"({f.error})" if f.error else "")
             detail = f.detail + (("; VISA: " + ", ".join(f.aliases)) if f.aliases else "")
-            for c, text in enumerate((f.bus.upper(), f.address, who, detail, f.held_by)):
+            cells = (self.BUS_LABEL.get(f.bus, f.bus.upper()), f.address, who, detail,
+                     f.source, self._module_label(f.suggest), f.held_by)
+            for c, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
-                if c == 2 and f.error and not f.identity:
+                if c == 2 and ((f.error and not f.identity) or not f.known):
                     item.setForeground(QtGui.QColor(C["muted"]))
-                if c == 4 and f.held_by:
+                if c == 6 and f.held_by:
                     item.setForeground(QtGui.QColor(C["accent_hi"]))
+                if c == 3:
+                    item.setToolTip(detail)
                 self.table.setItem(r, c, item)
         self._selected()
 
@@ -663,7 +724,7 @@ class InstrumentsDialog(QtWidgets.QDialog):
 
     def current(self):
         r = self.table.currentRow()
-        return self.rows[r] if 0 <= r < len(self.rows) and self.table.selectedItems() else None
+        return self.shown[r] if 0 <= r < len(self.shown) and self.table.selectedItems() else None
 
     def _selected(self):
         f = self.current()

@@ -25,3 +25,6 @@ start_after = []
 [hardware]
 address_arg = "--resource"
 bus = "visa"
+# Thorlabs meters sit on Thorlabs' own USB driver, which VISA may not see:
+# scripts/probe.py lists them through TLPMX (list only, no session).
+probe = "scripts/probe.py"

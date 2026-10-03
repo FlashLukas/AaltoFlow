@@ -20,3 +20,12 @@ gui = "scripts/run_gui.py"
 # The camera drives the sample stages over the network, so when they start
 # together they must be up first (kim on the lab rig, piezo + zpiezo otherwise).
 start_after = ["kim", "piezo", "zpiezo"]
+
+# Which camera the service opens on real hardware: Mission Control's
+# "Instruments on this PC" lists the IDS cameras with scripts/probe.py (IDS peak,
+# list only) and passes the chosen serial as --camera <serial> (suite_local.json,
+# this PC). bus "device" = an id the module takes verbatim.
+[hardware]
+address_arg = "--camera"
+bus = "device"
+probe = "scripts/probe.py"

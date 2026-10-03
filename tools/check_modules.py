@@ -32,8 +32,13 @@ Static checks, per module:
   * icon.svg exists and is well-formed XML
   * run_service.py accepts --cmd-port, --pub-port and --real
   * run_gui.py (if any) accepts --connect, --cmd-port and --pub-port
-  (the last two run `--help` with the module's own .venv python; a module that
-   has never been synced is reported as SKIP, not FAIL)
+  * a declared [hardware] probe (module.toml) exists -- else the manifest does
+    not parse -- and prints ONE valid JSON line {"devices": [...], "note": ...}
+    with exit code 0, twice: as it is, and with its vendor SDK made MISSING
+    (the usual vendor packages blocked, ctypes unable to load a DLL). A probe
+    only lists, so running it is safe on a PC with the instrument attached.
+  (these run with the module's own .venv python; a module that has never been
+   synced is reported as SKIP, not FAIL)
 
 Live checks (--live), per module with a .venv:
   * the service starts on a SCRATCH port pair (never its real ports, so a
@@ -271,6 +276,62 @@ def help_text(py: Path, d: Path, script: str) -> str:
     r = subprocess.run([str(py), script, "--help"], cwd=d, capture_output=True,
                        text=True, timeout=120)
     return r.stdout + r.stderr
+
+
+#: Run a probe with its vendor SDK made MISSING: the usual vendor packages
+#: cannot be imported and ctypes cannot load a DLL (TLPMX, sa_api). A probe
+#: must still print its JSON line -- with a note saying what to install.
+_NO_SDK = r"""
+import ctypes, runpy, sys
+for name in ("pylablib", "pylablib.devices", "ids_peak", "ids_peak.ids_peak",
+             "ids_peak_ipl", "harvesters", "harvesters.core", "nidaqmx",
+             "nidaqmx.system", "zhinst", "zhinst.core", "pyvisa", "serial"):
+    sys.modules[name] = None
+def _no_dll(*a, **k):
+    raise OSError("SDK missing (check_modules)")
+ctypes.CDLL = ctypes.WinDLL = _no_dll
+sys.argv = [sys.argv[1]]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+def probe_check(rep: Report, m, py: Path):
+    """A declared probe prints one valid JSON line, also without its SDK."""
+    script = m.dir / m.probe
+    for label, cmd in (("as installed", [str(py), str(script)]),
+                       ("with its SDK missing", [str(py), "-c", _NO_SDK, str(script)])):
+        name = f"probe prints its JSON line ({label})"
+        try:
+            r = subprocess.run(cmd, cwd=m.dir, capture_output=True, text=True,
+                               timeout=60, encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            rep.add(m.key, name, "FAIL", "no answer within 60 s")
+            continue
+        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+        why = ""
+        if r.returncode != 0:
+            err = [ln for ln in (r.stderr or "").splitlines() if ln.strip()]
+            why = f"exit code {r.returncode}" + (f": {err[-1][:160]}" if err else "")
+        elif not lines:
+            why = "printed nothing"
+        else:
+            try:
+                data = json.loads(lines[-1])
+                if not isinstance(data.get("devices"), list):
+                    why = "'devices' is not a list"
+                elif not all(isinstance(d, dict) and str(d.get("address", "")).strip()
+                             for d in data["devices"]):
+                    why = "a device without an address"
+                elif not lines[-1].isascii():
+                    why = "not ASCII (gotcha #14)"
+            except (ValueError, AttributeError) as exc:
+                why = f"not JSON ({exc})"
+        detail = why
+        if not why:
+            data = json.loads(lines[-1])
+            detail = f"{len(data['devices'])} device(s)" + \
+                (f"; note: {data.get('note')[:100]}" if data.get("note") else "")
+        rep.add(m.key, name, "FAIL" if why else "PASS", detail)
 
 
 def free_port_pair() -> tuple[int, int]:
@@ -526,6 +587,10 @@ def main(argv=None) -> int:
             rep.add(m.key, f"run_service accepts {m.address_arg} ([hardware])",
                     "PASS" if ok else "FAIL",
                     "" if ok else f"module.toml names {m.address_arg}, the script does not take it")
+        if m.probe:
+            # module.toml [hardware] probe: Mission Control runs it to LIST
+            # the devices the module's vendor library sees
+            probe_check(rep, m, py)
         if m.gui:
             text = help_text(py, m.dir, m.gui)
             miss = [f for f in ("--connect", "--cmd-port", "--pub-port") if f not in text]

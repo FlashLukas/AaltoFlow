@@ -65,8 +65,11 @@ _KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 #: What a module is FOR -- the first question when you are looking for one
 #: ("I need a lock-in"). A fixed list on purpose: free text would give
 #: "detector", "Detectors" and "sensor" for the same thing. key -> (label, hint).
-#: what kind of address a module's [hardware] address_arg wants
-ADDRESS_BUSES = ("visa", "serial", "ip")
+#: what kind of address a module's [hardware] address_arg wants: a VISA
+#: resource, a COM port, an IP / host, or "device" -- an id the module's own
+#: vendor library understands verbatim (a Kinesis serial, "Dev1", "dev1234"),
+#: which only the module's probe or the USB list can offer
+ADDRESS_BUSES = ("visa", "serial", "ip", "device")
 
 CATEGORIES: dict[str, tuple[str, str]] = {
     "motion":      ("Motion & positioning", "stages, piezos, rotators, focus"),
@@ -135,6 +138,10 @@ class ModuleSpec:
     #: modules it fits.
     address_arg: str = ""
     address_bus: str = ""
+    #: [hardware] probe: a script (relative to dir) that LISTS the devices the
+    #: module's vendor library can see, as one JSON line, opening none of them
+    #: (Mission Control runs it in the module's own venv). "" = no probe.
+    probe: str = ""
     #: THIS PC's choice (suite_local.json), passed as `address_arg address`
     #: when the module runs on real hardware; "" = the module's own config.
     address: str = ""
@@ -233,6 +240,9 @@ def parse_manifest(path: Path) -> ModuleSpec:
     if address_arg and address_bus not in ADDRESS_BUSES:
         raise ManifestError(f"{path}: [hardware] bus {address_bus!r} is not one of "
                             + ", ".join(ADDRESS_BUSES))
+    probe_rel = str(hw.get("probe", "")).strip()
+    if probe_rel and not (folder / probe_rel).is_file():
+        raise ManifestError(f"{path}: [hardware] probe script {probe_rel!r} does not exist")
 
     return ModuleSpec(
         id=key, key=key, name=name,
@@ -244,6 +254,7 @@ def parse_manifest(path: Path) -> ModuleSpec:
         start_after=[str(k) for k in after],
         category=category, tags=[t.strip() for t in tags if t.strip()],
         address_arg=address_arg, address_bus=address_bus if address_arg else "",
+        probe=probe_rel,
     )
 
 

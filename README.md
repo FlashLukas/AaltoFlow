@@ -247,8 +247,19 @@ that does not announce itself: type its IP and press **Test**.
 
 It needs `uv sync --extra instruments` in `mission-control` (pyvisa, pyvisa-py,
 pyserial) and, for GPIB, the VISA library of the GPIB card's maker (NI-VISA or
-Keysight IO Libraries). Vendor-only instruments (IDS camera, Zurich HF2, NI DAQ,
-Signal Hound, Thorlabs Kinesis) are not listed yet.
+Keysight IO Libraries).
+
+Instruments that are neither VISA nor COM -- a Thorlabs Kinesis controller, an
+IDS camera, an NI DAQ card, a Signal Hound, a Zurich lock-in, a Thorlabs power
+meter on its own driver -- show up too, from two sources that only LIST (no
+device is opened, no byte is sent): each module's **probe**, run in that
+module's own environment with its vendor library (so the launcher needs no
+vendor SDK), and the **USB device list** Windows keeps, which names known
+devices and the module that drives them. A device a running service holds may
+be missing from its vendor's list (FTDI does not list an open Kinesis
+controller); the USB list still shows it, marked as held. USB devices that are
+not a known instrument (keyboards, webcams) are hidden until *show every USB
+device* is ticked.
 
 The Scan Builder stacks axes outer-to-inner with no length limit, and runs the
 engine against whichever registry it was given -- simulated here, real
