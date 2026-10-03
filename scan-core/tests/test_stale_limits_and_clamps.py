@@ -55,6 +55,26 @@ def test_one_silent_module_does_not_stop_the_others_being_refreshed():
     assert any("pm16" in m and "stale" in m for m in said)
 
 
+def test_another_reader_of_describe_does_not_hide_the_change_from_the_registry():
+    """The Control tab (and the clamp guard) store a freshly read describe as
+    inst.manifest when the revision moves. refresh_stale compared with THAT
+    copy, skipped, and the registry kept the old limits: the Scan tab offered
+    scan point 0..48 for a 45-point array (roadmap bug, 2026-10-02)."""
+    lab = Lab()
+    cam = _Inst("camera", _manifest("camera", 10, 48), status={"describe_rev": 11})
+    cam.limits_rev = 10                         # what build_lab_registry recorded
+    cam.fresh = _manifest("camera", 11, 44)
+    lab.instruments = {"camera": cam}
+    reg = Registry()
+    reg.add(Settable("camera.scan_ix", "scan point X", "", (0, 48),
+                     set_fn=lambda v: None, get_fn=lambda: 0))
+    cam.manifest = cam.fresh                    # the Control tab got there first
+    assert lab.refresh_stale(reg, prefix=True) == ["camera.scan_ix"]
+    assert reg.get("camera.scan_ix").limits == (0.0, 44.0)
+    assert cam.limits_rev == 11
+    assert lab.refresh_stale(reg, prefix=True) == []       # and then it is current
+
+
 def test_a_clamped_setpoint_fails_fast_and_says_why(monkeypatch):
     monkeypatch.setattr(M, "CLAMP_CHECK_S", 0.0)
     desc = {"id": "scan_ix", "settle": {"policy": "adopt_then_flag",

@@ -259,7 +259,14 @@ class Lab:
             except Exception as exc:
                 warn(f"{name}: no status ({exc}); its limits may be stale")
                 continue
-            if live_rev is None or live_rev == cached.get("revision"):
+            # Compare with the revision whose limits are IN THE REGISTRY -- not
+            # with inst.manifest. Other readers refresh inst.manifest too (the
+            # Control tab when it re-clamps its own widgets, the clamp guard),
+            # and then the two revisions matched, this loop skipped, and the
+            # registry kept the OLD limits for good: the Scan tab offered scan
+            # point 0..48 for a 45-point array (roadmap bug, 2026-10-02).
+            applied = getattr(inst, "limits_rev", cached.get("revision"))
+            if live_rev is None or live_rev == applied:
                 continue                      # unchanged, or a service that
                                               # does not publish the revision
             try:
@@ -273,6 +280,7 @@ class Lab:
             inst.manifest = fresh
             changed += _apply_limits(registry, fresh, prefix, warn,
                                      module=module_prefix(inst, fresh))
+            inst.limits_rev = fresh.get("revision")
 
         return changed
 
@@ -452,6 +460,8 @@ def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
         inst.manifest = manifest
         register_manifest(reg, inst, manifest, prefix=prefix,
                           on_warn=warn, module_name=inst.alias)
+        # the revision whose limits the registry now holds (refresh_stale)
+        inst.limits_rev = manifest.get("revision")
         return
 
     # Fall back to the hand-written declaration for modules that have

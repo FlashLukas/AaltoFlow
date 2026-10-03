@@ -2592,6 +2592,13 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.add_axis(pid)
 
     def add_axis(self, pid, raw=None):
+        # a NEW row starts from the module's CURRENT limits (a camera array
+        # resized since the last refresh would otherwise be offered as it was)
+        if self.limits_refresher is not None:
+            try:
+                self.limits_refresher()
+            except Exception:
+                pass                     # a dead service must not block adding
         p = self.registry.get(pid)
         sp = find_speed_param(self.registry, pid)
         # A streamed coordinate with no speed knob of its own is MEASURED, not

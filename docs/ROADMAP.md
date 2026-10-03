@@ -164,37 +164,6 @@ After / Throughout, e.g. "start of each sweep of Scan point X").
 Effort: ~1 day with tests on the camera simulator (round trip ends on the
 original point; Z changed; a failing autofocus still returns; Kill AF).
 
-### Bug: the Scan tab keeps old limits (scan point index 0..48 for 45 points) (2026-10-02)
-
-Seen in the lab: the camera's array set to 48, then 45 points; the Scan tab
-still offered "Scan point X (index)" up to 48 -- after removing and
-re-adding the axis, and after switching tabs.
-
-**Cause (reproduced offscreen 2026-10-02 with the camera simulator and the
-real Suite window):** two consumers of one signal.
-
-1. The camera is right: describe declares `max = points - 1` and the
-   revision (`describe_rev`) changes with it.
-2. The Control tab polls every module and, when `describe_rev` moves,
-   `control_panel._reread_limits` re-reads describe and stores it as
-   `inst.manifest` -- but updates only its OWN widgets, not the registry.
-3. `Lab.refresh_stale` (Scan tab switch, Run, queue) decides "stale" by
-   comparing the live revision with `inst.manifest["revision"]`. That copy
-   is now the new one, so it skips -- and the registry's Settable keeps the
-   old limits for good. Reproduction: points 3 -> 45, Control -> Scan tab:
-   registry still 0..2, cached revision == live revision.
-
-**Fix (small):** let `refresh_stale` keep its own marker of the revision
-whose limits it last pushed into the registry (per instrument, set when the
-registry is built), instead of reading `inst.manifest`; or have
-`_reread_limits` apply the limits to the registry too (`_apply_limits`) --
-the first is safer, the second shows the change at once. Plus: refresh in
-`add_axis()`, and keep the palette subtitle ("camera - 0 to 48") in step.
-Test: offscreen Suite on the camera simulator -- change points_x, let the
-Control tab poll, switch to Scan: the axis row and the registry show the new
-range. Run validates with refreshed limits, so a scan past the end is
-refused, not clamped -- but it must not get that far.
-
 ### Measurement tab: where the running scan is (2026-10-02)
 
 Once a scan runs, the header should say where it is -- next to RUNNING:
