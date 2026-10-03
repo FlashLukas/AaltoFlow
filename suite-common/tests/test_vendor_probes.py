@@ -329,6 +329,22 @@ def test_an_ftdi_channel_letter_does_not_split_one_device():
     assert rows[0].suggest == "dssg"
 
 
+def test_a_com_port_wins_the_address_whichever_list_comes_first():
+    """The lab re-check merged the USB list FIRST: the SG12000L's one row then
+    showed the FTDI serial as its address, which dssg cannot use. A row that
+    is also a COM port must show (and offer) the COM port, in either order."""
+    com = I.Found("COM3", "serial", identity="USB Serial Port (COM3)",
+                  detail="FTDI, USB 0403:6015, serial DS000001A", source="COM port",
+                  usb_id="0403:6015", serial_no="DS000001A")
+    usb = I.usb_rows([U.UsbDevice(0x0403, 0x6015, "USB Serial Port (COM3)", "Ports",
+                                  "DS000001")], held={"COM3": "dssg"})
+    rows = I.merge(usb, [com])
+    assert len(rows) == 1
+    assert rows[0].address == "COM3" and rows[0].bus == "serial"
+    assert rows[0].serial_no                      # the USB serial is kept
+    assert I.modules_for(rows[0], [_spec("dssg", "serial", "--port")])[0][1] == "COM3"
+
+
 def test_a_held_usb_row_suggests_its_holder():
     usb = I.usb_rows([U.UsbDevice(0x0403, 0x6001, "USB Serial Converter", "USB", "A0000002")],
                      held={"A0000002": "signalhound"})

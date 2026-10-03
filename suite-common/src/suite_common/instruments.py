@@ -610,6 +610,13 @@ def merge(rows: list, extra: list) -> list:
         if twin is None:
             out.append(f)
             continue
+        if f.bus == "serial" and twin.bus == "usb-device":
+            # a USB-list row that is also a COM port: the port is what a
+            # serial module (dssg, superk ...) takes, the USB serial stays in
+            # serial_no. Without this the result depended on which list was
+            # merged first (the lab's SG12000L showed its FTDI serial).
+            twin.address, twin.bus = f.address, f.bus
+            twin.aliases = twin.aliases or list(f.aliases)
         if f.source and f.source not in twin.source:
             twin.source = f"{twin.source} + {f.source}" if twin.source else f.source
         for k in f.found_by:
