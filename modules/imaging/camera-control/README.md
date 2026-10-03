@@ -87,6 +87,22 @@ builds the simulated brain in-process.
 6. **Find focus** runs an autofocus sweep; **Continuous focus** holds it.
 7. **Save pattern** writes the annotated PNG; **Load pattern** restores everything.
 
+**Looking at the image.** The mouse wheel zooms about the cursor; the middle
+button, or Space + left drag, pans (the left button alone keeps click-to-go,
+the template ROI and the scan rectangle). **Fit** shows the whole frame, **1:1
+pixels** one camera pixel per screen pixel; the level is shown in the image's
+corner. An autofocus still zooms to the spot region and gives your view back
+when it ends; zooming by hand during the run keeps your view instead. Clicks
+on a zoomed, panned image hit the right camera pixel.
+
+**When something else picks the scan point** (scan-core, a script, another
+window), the Stabiliser's Index X / Y boxes follow it -- except a box you are
+typing in or have changed without pressing Select (outlined) -- and a line
+under them says who drives it and where, e.g.
+`scan-core ('map'): point (3, 5) of 10 x 10, moving`. On the image a pink ring
+marks the point being moved to and small pink dots the points already visited.
+Both zoom and these marks are display only, so they work in a viewer window.
+
 ## External control (from another program / coordinator)
 
 Every action is a ZeroMQ command (see `scripts/camera_console.py` for the verbs):

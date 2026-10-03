@@ -132,50 +132,6 @@ After / Throughout, e.g. "start of each sweep of Scan point X").
 Effort: ~1 day with tests on the camera simulator (round trip ends on the
 original point; Z changed; a failing autofocus still returns; Kill AF).
 
-### Camera GUI: show which point an external client is moving to (2026-10-02)
-
-When scan-core (or another machine client) drives the camera's scan point,
-the window should make that obvious.
-
-- Today the overlay already follows: `_refresh` copies the service's
-  `selected_index_x/y` into the cfg mirror every tick, so the magenta aim
-  marker moves to the point scan-core picks. But the Stabiliser's Index X / Y
-  boxes are only filled when a pattern is loaded or Select is pressed, so
-  they keep showing the old numbers while something else drives the point.
-- To add: the Index X / Y boxes follow the service whenever the user is not
-  editing them (no focus, no change since the last tick) -- the same rule
-  the other live forms use; a line under them while a machine client drives
-  it ("scan-core: point (3, 5) of 10 x 10, moving / stable"), using the
-  control status's "also driving"; on the image, the target point drawn
-  distinctly (and optionally the points already visited, and the path) while
-  the stage moves; stable / distance readouts as now.
-- View only, so it works in a viewer window too.
-
-Effort: ~half a day with an offscreen GUI test (a machine client sets the
-index; the boxes and the note follow; a box being edited is not
-overwritten).
-
-### Camera GUI: zoom into the live image freely (2026-10-02)
-
-Today the camera window zooms only to the spot search region (the
-"Zoom to spot region" button, and automatically during an autofocus). Wanted:
-zoom anywhere, at any level, to look at details.
-
-- The ground is there: `apps/camera_view.py` draws the picture, every
-  overlay and every click through ONE transform (source rectangle + scale),
-  via `set_zoom((x0, y0, x1, y1))`, so a click on a zoomed view already
-  names the right image pixel.
-- To add: mouse-wheel zoom about the cursor; pan with the middle button or
-  Space + drag (the left button is taken: click-to-go, template ROI, scan
-  rectangle); "Fit" and "1:1 pixels" buttons; the zoom level shown on the
-  view; maybe a small overview inset with the zoomed rectangle.
-- The autofocus zoom lies over the user's zoom and gives it back at the end
-  (as the spot-region toggle does now).
-- View only, so it stays usable in a viewer window (no control needed).
-
-Effort: ~1 day with tests (zoom/pan maths, clicks on a zoomed and panned view
-still hitting the right pixel, the autofocus hand-back).
-
 ### Oscilloscope traces, e.g. Digilent Analog Discovery (2026-10-02)
 
 Record scope traces as a scan detector: one trace (or one per channel) at
