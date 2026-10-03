@@ -16,7 +16,7 @@ from pm16 import hwlock
 from pm16.backends import tlpmx
 from pm16.backends.sim import SimulatedPM16
 
-RES = "USB0::0x1313::0x807B::200120316::INSTR"
+RES = "USB0::0x1313::0x807B::P00000001::INSTR"
 
 
 class FakeDll:
@@ -103,7 +103,7 @@ def test_same_meter_spelled_differently_conflicts(locks, monkeypatch):
     a = _backend(monkeypatch, dll, resource=RES)
     a.open()
     # Board number dropped, lower case, no ::INSTR: still the same box.
-    b = tlpmx.TLPMXPowerMeter(resource="usb::0x1313::0x807b::200120316")
+    b = tlpmx.TLPMXPowerMeter(resource="usb::0x1313::0x807b::P00000001")
     with pytest.raises(hwlock.HardwareBusy):
         b.open()
     a.close()
