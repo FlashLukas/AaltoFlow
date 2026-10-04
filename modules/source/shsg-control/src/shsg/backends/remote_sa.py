@@ -40,6 +40,17 @@ Design choices, and why:
 * No hwlock claim: we own no physical address. The owner claims the USB
   devices; a second shsg is harmless (both would be clients of one owner).
 
+* Encryption (secure.py, README "Encryption and keys"): both sockets speak
+  CurveZMQ with the SIGNALHOUND service's key when the lab's policy secures
+  signalhound -- the key of the module we talk to, not our own. If the owner
+  runs in the other mode than the policy now says (started before it
+  changed), a request that gets no answer flips the mode once (no_answer),
+  and the status stream follows. One catch specific to this backend: its
+  fail-fast rule trusts the status stream, and a stream in the wrong mode is
+  silent, so a silent owner is PROBED with one status request (at most every
+  PROBE_S, and only on a PC that has a key -- elsewhere the mode cannot be
+  wrong and a dead owner still fails at once).
+
 * open() does not fail when the owner is not running yet. The launcher starts
   it first (module.toml start_after), but opening two USB devices takes a few
   seconds, and a module that died because its owner was slow would be worse
@@ -56,6 +67,7 @@ import time
 
 import zmq
 
+from .. import secure
 from ..control import make_identity
 
 
@@ -72,6 +84,9 @@ class RemoteTG:
 
     #: the owner publishes at ~10 Hz; this long without a frame = it is gone
     ALIVE_S = 2.0
+    #: a silent owner may be one in the other encryption mode: ask it at most
+    #: this often (each probe can cost two timeouts while it is really down)
+    PROBE_S = 10.0
 
     def __init__(self, host: str = "127.0.0.1", cmd_port: int = 5587,
                  pub_port: int = 5588, timeout_ms: int = 1500,
@@ -89,6 +104,7 @@ class RemoteTG:
         self._cache_lock = threading.Lock()
         self._stop = threading.Event()
         self._sub_t: threading.Thread | None = None
+        self._probed_at = -1e9               # monotonic time of the last probe
         # Who we are to the signalhound service (control.py): a MACHINE, like
         # the camera driving kim -- a person's analyser GUI holding control
         # must not lock the generator out of the TG (nor its clean shutdown,
@@ -113,6 +129,8 @@ class RemoteTG:
             if self._fresh() is not None:
                 return
             time.sleep(0.02)
+        if self._probe_other_mode():
+            return
         # printed text stays ASCII: the launcher reads us through a pipe (gotcha #14)
         print(f"shsg: {_is_owner_down_msg(self.host, self.cmd_port)} -- commands are "
               f"refused until it answers; start the signalhound module", file=sys.stderr)
@@ -132,22 +150,41 @@ class RemoteTG:
         with self._req_lock:
             if self._req is not None:
                 self._req.close(0)
-            self._req = self._ctx.socket(zmq.REQ)
-            self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
-            self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
-            self._req.setsockopt(zmq.LINGER, 0)
-            self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
+            self._req = self._new_req_socket()
+
+    def _new_req_socket(self):
+        s = self._ctx.socket(zmq.REQ)
+        s.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        s.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+        s.setsockopt(zmq.LINGER, 0)
+        # signalhound's key, from the lab keyring, when the policy secures
+        # signalhound (secure.py); plain otherwise
+        secure.secure_client(s, self.host, "signalhound")
+        s.connect(f"tcp://{self.host}:{self.cmd_port}")
+        return s
 
     def _sub_loop(self) -> None:
         # A ZeroMQ socket must stay in the thread that uses it, so the SUB
         # socket is created and closed here.
-        sub = self._ctx.socket(zmq.SUB)
-        sub.setsockopt(zmq.RCVTIMEO, 200)
-        sub.setsockopt(zmq.LINGER, 0)
-        sub.connect(f"tcp://{self.host}:{self.pub_port}")
-        sub.setsockopt(zmq.SUBSCRIBE, b"status")
+        def make_sub():
+            s = self._ctx.socket(zmq.SUB)
+            s.setsockopt(zmq.RCVTIMEO, 200)
+            s.setsockopt(zmq.LINGER, 0)
+            secure.secure_client(s, self.host, "signalhound")     # telemetry too
+            s.connect(f"tcp://{self.host}:{self.pub_port}")
+            s.setsockopt(zmq.SUBSCRIBE, b"status")
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         try:
             while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found the owner in the other mode
+                    # (secure.no_answer): telemetry follows
+                    sub.close(0)
+                    sub, gen = make_sub()
                 try:
                     _topic, payload = sub.recv_multipart()
                     st = json.loads(payload.decode("utf-8"))
@@ -161,6 +198,54 @@ class RemoteTG:
         finally:
             sub.close(0)
 
+    def _request(self, req: dict) -> dict | None:
+        """One request/reply with the owner; None when it did not answer.
+
+        On a timeout the REQ socket is rebuilt, and when the owner may speak
+        the other encryption mode (secure.no_answer flipped) the request is
+        sent once more in that mode. Safe: a request in the wrong mode never
+        reaches the owner, so nothing is done twice."""
+        with self._req_lock:
+            if self._req is None:
+                return None                  # closed
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(req)
+                    return self._req.recv_json()
+                except zmq.Again:
+                    # A REQ socket that timed out is stuck mid-exchange: rebuild it.
+                    self._req.close(0)
+                    flipped = secure.no_answer(self.host, "signalhound")
+                    self._req = self._new_req_socket()
+                    if not (flipped and attempt == 1):
+                        return None
+        return None
+
+    def _probe_other_mode(self) -> bool:
+        """The owner is silent: is it one running in the other encryption mode?
+
+        Only worth asking on a PC that has a key (without one, encrypted is
+        impossible, so silence means "down" and we keep failing fast), and at
+        most every PROBE_S. A status request that gets an answer -- possibly
+        after the mode flipped -- makes the SUB thread reconnect in that mode;
+        then we wait briefly for the first frame. True when the owner is back."""
+        try:
+            secure.own_keys()
+        except secure.SecurityError:
+            return False
+        now = time.monotonic()
+        if now - self._probed_at < self.PROBE_S:
+            return False
+        self._probed_at = now
+        if self._request({"cmd": "status", "client": self.identity}) is None:
+            return False
+        end = time.monotonic() + self.ALIVE_S
+        while time.monotonic() < end:
+            if self._fresh() is not None:
+                return True
+            time.sleep(0.02)
+        return False
+
     def _fresh(self) -> dict | None:
         """The owner's latest status frame, or None if it is older than ALIVE_S."""
         with self._cache_lock:
@@ -171,7 +256,7 @@ class RemoteTG:
 
     # ---- the interface -----------------------------------------------------
     def set_cw(self, on=None, freq_hz=None, level_dbm=None) -> None:
-        if self._fresh() is None:
+        if self._fresh() is None and not self._probe_other_mode():
             # fail fast: no frame for ALIVE_S -> the owner is down
             raise ConnectionError(_is_owner_down_msg(self.host, self.cmd_port))
         req = {"cmd": "tg_cw", "client": self.identity}
@@ -181,17 +266,8 @@ class RemoteTG:
             req["freq_hz"] = float(freq_hz)
         if level_dbm is not None:
             req["level_dbm"] = float(level_dbm)
-        with self._req_lock:
-            try:
-                self._req.send_json(req)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # A REQ socket that timed out is stuck mid-exchange: rebuild it.
-                self._req.close(0)
-                self._req = None
-                reply = None
+        reply = self._request(req)
         if reply is None:
-            self._make_req()
             raise TimeoutError(f"signalhound service did not answer tg_cw within "
                                f"{self.timeout_ms} ms")
         if not reply.get("ok", False):
