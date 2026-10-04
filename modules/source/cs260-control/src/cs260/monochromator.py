@@ -71,15 +71,15 @@ class Status:
     wl_min_nm: float = _NAN          # LIVE envelope of the target grating
     wl_max_nm: float = _NAN
     # grating
-    grating: int = 0
+    grating: int | None = None       # 1..3; None = not read yet
     grating_target: int = 0
-    grating_lines: int = 0
+    grating_lines: int | None = None
     grating_label: str = ""
     n_gratings: int = 0
     bandpass_nm: float = _NAN
     # accessories
     shutter_open: bool = False
-    filter: int = 0
+    filter: int | None = None        # 1..6; None = no wheel / between positions
     filter_target: int = 0
     filter_label: str = ""
     filter_fitted: bool = False
@@ -87,8 +87,8 @@ class Status:
     port_target: int = 1
     port_fitted: bool = False
     # housekeeping
-    step_position: int = 0
-    error_code: int = -1             # last instrument error, -1 = none since start
+    step_position: int | None = None  # None = STEP? not understood
+    error_code: int = -1            # last instrument error, -1 = none since start
     error_text: str = ""
     moves: int = 0
     readings: int = 0
@@ -142,7 +142,9 @@ class Monochromator:
         self._busy_what = ""
         self._gen = 0                       # bumped by every command
         # what the worker last read (under _lock)
-        self._st = MonoState(wavelength_nm=_NAN, grating=0, shutter_open=False)
+        # nothing read yet: grating 0 / step None show as "not measured"
+        self._st = MonoState(wavelength_nm=_NAN, grating=0, shutter_open=False,
+                             step_position=None)
         self._error_code = -1
         self._moves = 0
         self._readings = 0
@@ -418,14 +420,19 @@ class Monochromator:
                 busy=self._busy_what if self._busy else "",
                 wl_min_nm=lo,
                 wl_max_nm=hi,
-                grating=st.grating,
+                # 0 is not a grating (they are 1..3): it means "not read yet".
+                # Report None ("not measured"), never a fake 0 -- scan-core
+                # would store the 0 as if the box had said it.
+                grating=st.grating or None,
                 grating_target=self._grating_target,
-                grating_lines=lines,
+                grating_lines=lines or None,
                 grating_label=label,
                 n_gratings=self._n_gratings(),
                 bandpass_nm=self._bandpass(lines),
                 shutter_open=bool(st.shutter_open),
-                filter=st.filter,
+                # FILTER? answers 0 for "no wheel" and "between positions"
+                # (manual 16.6): not a position, so None, never a fake 0
+                filter=st.filter or None,
                 filter_target=self._filter_target,
                 filter_label=self._filter_label(st.filter) if st.filter else "",
                 filter_fitted=bool(acc.filter_wheel),

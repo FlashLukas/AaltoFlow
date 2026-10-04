@@ -45,6 +45,11 @@ from .config import Config, N_LINES
 
 INTERLOCK_TEXT = {0: "open", 1: "needs reset", 2: "OK"}
 
+#: Every value Status.emission_state can take. describe declares it an enum
+#: with exactly these options: scan-core stores an enum as a code, and a value
+#: missing from the list would be recorded as "not measured" (developer notes 4b).
+EMISSION_STATES = ("off", "starting", "on", "interlock", "error")
+
 
 class SafetyError(ValueError):
     """A request refused for safety reasons (e.g. emission with an open interlock).
@@ -64,7 +69,7 @@ class Status:
     # EXTREME
     emission_set: bool = False
     emission_on: bool = False
-    emission_state: str = "off"        # off | starting | on | interlock | error
+    emission_state: str = "off"        # one of EMISSION_STATES (describe's enum)
     interlock_ok: bool = False
     interlock_code: int = 0
     interlock: str = "open"
@@ -75,7 +80,10 @@ class Status:
     # SELECT RF driver
     rf_set: bool = False
     rf_on: bool = False
-    filter: str = ""
+    # name of the active crystal; None = no crystal table / not connected yet.
+    # None, not "": describe declares an enum of the table's names, "" is not
+    # one of them, and scan-core would silently lose the point.
+    filter: str | None = None
     filter_min_nm: float = 0.0
     filter_max_nm: float = 0.0
     crystal_temp_C: float = 0.0
@@ -638,7 +646,7 @@ class SuperK:
         names = self.filter_names()
         st.power_set_pct = power_w
         st.rf_set = rf_w
-        st.filter = names[filt_w] if 0 <= filt_w < len(names) else ""
+        st.filter = names[filt_w] if 0 <= filt_w < len(names) else None
         st.filter_min_nm, st.filter_max_nm = range_w
         st.wavelength_set_nm = wl_w
         st.amplitude_set_pct = amp_w

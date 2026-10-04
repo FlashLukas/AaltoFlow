@@ -117,3 +117,69 @@ def test_actions():
                                              "invert": True}
     assert ids["calibrate"]["danger"] is True
     assert ids["step"]["args"][0]["name"] == "steps"
+
+
+# ---- declared types = how scan-core STORES each value (developer notes 4b) ----
+
+def _fits(d, v):
+    """True if status value v fits descriptor d's declared type (None always
+    fits: "not measured"). An indicator's min/max are a promise; a control's
+    are setting limits only (scan-core does not narrow them)."""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            lo, hi = d.get("min"), d.get("max")
+            return (lo is None or v >= lo) and (hi is None or v <= hi)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def _check_fits(mono):
+    st = status_to_dict(mono.status())
+    for p in build_manifest(mono)["parameters"]:
+        if p.get("read_path"):
+            v = read_path(st, p["read_path"])
+            assert _fits(p, v), (p["id"], v)
+
+
+def test_every_status_value_fits_its_declared_type_through_moves():
+    cfg, mono, clock = _brain(accessories__filter_wheel=True,
+                              accessories__dual_port=True)
+    _check_fits(mono)
+    mono.set_grating(2)
+    mono.set_filter(3)
+    mono.set_port(2)
+    for _ in range(400):                   # every frame of the swaps, not one
+        run(mono, clock, 0.05)
+        _check_fits(mono)
+        if not mono.status().moving:
+            break
+
+
+def test_grating_and_filter_are_none_not_a_fake_zero():
+    """0 is not a grating (1..3) nor a filter position (1..6): before the
+    first read, and with no wheel / a wheel between positions, the status
+    says None ("not measured") instead of a number scan-core would store."""
+    cfg = Config()
+    mono, _ = build_sim_system(cfg, clock=Clock())    # not started: nothing read
+    s = mono.status()
+    assert s.grating is None and s.filter is None and s.step_position is None
+    _cfg, mono, _clock = _brain()                     # started, no filter wheel
+    s = mono.status()
+    assert s.grating in (1, 2, 3) and s.filter is None
+    d = _by_id(build_manifest(mono))
+    for pid in ("grating", "grating_lines", "step_position"):
+        assert d[pid]["type"] == "int", pid
+    assert "min" not in d["step_position"], "a stepper count has no promised range"

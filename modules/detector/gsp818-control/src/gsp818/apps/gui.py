@@ -706,7 +706,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.att_spin.setEnabled(not auto["atten"]); self.swt_spin.setEnabled(not auto["sweep_time"])
         for combo, text in ((self.det_combo, s.detector), (self.dut_combo, getattr(s, "dut", ""))):
             if force or not combo.view().isVisible():
-                i = combo.findText(text)
+                i = combo.findText(text or "")      # None = not known (real analyser)
                 if i >= 0:
                     combo.setCurrentIndex(i)
         for chk, val in ((self.cont_chk, s.continuous), (self.preamp_chk, s.preamp)):

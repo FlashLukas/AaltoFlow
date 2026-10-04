@@ -31,7 +31,7 @@ class MonoState:
     shutter_open: bool
     filter: int = 0              # 0 = no wheel / out of position (manual, FILTER?)
     port: int = 1                # 1 = axial, 2 = lateral
-    step_position: int = 0       # STEP? -- motor steps from the home sensor
+    step_position: int | None = 0  # STEP? -- motor steps from home; None = unreadable
     moving: bool = False
     error_code: int | None = None  # ERROR? after STB? reported an error, else None
 

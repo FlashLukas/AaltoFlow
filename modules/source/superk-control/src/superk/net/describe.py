@@ -27,6 +27,7 @@ import json
 import zlib
 
 from ..config import N_LINES
+from ..laser import EMISSION_STATES
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -35,8 +36,12 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, wait=None, danger=False, help=""):
-    """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
+       settle=None, args=None, wait=None, danger=False, help="", bits=None):
+    """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract.
+
+    `type` (and an indicator's min/max/bits) also tells scan-core how to STORE
+    the value (developer notes 4b): an indicator's min/max/bits are a promise
+    the instrument cannot break, so they are only given where that is true."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
         "unit": unit, "group": group, "order": order,
@@ -47,7 +52,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("wait", wait), ("help", help)):
+                 ("wait", wait), ("help", help), ("bits", bits)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -156,8 +161,11 @@ def build_manifest(laser) -> dict:
                 ".ini, deliberately below 100 %."),
         _p("emission", "Emission", "indicator", "bool", group="Laser", order=20,
            read_path=["emission_on"]),
-        _p("emission_state", "Emission state", "indicator", "string",
-           group="Laser", order=21, read_path=["emission_state"]),
+        # an enum, not a string: the brain produces only these values
+        # (laser.EMISSION_STATES), so scan-core can store a 1-byte code
+        _p("emission_state", "Emission state", "indicator", "enum",
+           group="Laser", order=21, options=list(EMISSION_STATES),
+           read_path=["emission_state"]),
         _p("emission_guarded", "Lost-client guard", "indicator", "bool",
            group="Laser", order=22, read_path=["emission_guarded"],
            help="True while a remote GUI owns the emission: if it falls silent "
@@ -190,8 +198,12 @@ def build_manifest(laser) -> dict:
            group="Filter", order=3, decimals=1, read_path=["filter_min_nm"]),
         _p("filter_max", "Crystal max", "indicator", "float", unit="nm",
            group="Filter", order=4, decimals=1, read_path=["filter_max_nm"]),
+        # bits 8: the driver's "connected crystal" register is ONE byte
+        # (nktp.read_crystal reads it with _r8), so 0..255 is everything it
+        # can report -- a promise the hardware keeps, not a guess at NKT's
+        # numbering (which a firmware might extend).
         _p("crystal_no", "Connected crystal", "indicator", "int",
-           group="Filter", order=5, read_path=["crystal"],
+           group="Filter", order=5, read_path=["crystal"], bits=8,
            help="NKT's number of the crystal the RF driver reaches, READ from "
                 "the driver (1, 2 = the SELECT with the lower bus address, "
                 "3, 4 = the other; 0 = none)."),

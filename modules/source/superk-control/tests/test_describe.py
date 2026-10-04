@@ -124,3 +124,71 @@ def test_describe_over_the_wire_and_both_status_paths_agree(laser):
         if client is not None:
             client.shutdown()
         svc.stop()
+
+
+# ---- declared types = how scan-core STORES each value (developer notes 4b) ----
+
+def _fits(d, v):
+    """True if status value v fits descriptor d's declared type (None always
+    fits: "not measured"). The same promise scan-core keeps when it stores."""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        lo, hi = d.get("min"), d.get("max")
+        if d.get("bits") is not None:
+            lo, hi = 0, 2 ** d["bits"] - 1
+        if d["kind"] == "indicator":
+            return (lo is None or v >= lo) and (hi is None or v <= hi)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def test_every_status_value_fits_its_declared_type(laser):
+    for name in laser.filter_names():           # every crystal, every range
+        try:
+            laser.set_filter(name)
+        except Exception:                       # other housing: cable by hand
+            continue
+        m = build_manifest(laser)
+        st = status_to_dict(laser.status())
+        for p in m["parameters"]:
+            if p.get("read_path"):
+                v = read_path(st, p["read_path"])
+                assert _fits(p, v), (name, p["id"], v)
+
+
+def test_emission_state_enum_lists_every_state_the_code_can_produce():
+    """Enumerated from the SOURCE, not from one snapshot: every literal the
+    brain assigns to emission_state must be an option."""
+    import inspect
+    import re
+    from superk import laser as L
+    src = inspect.getsource(L)
+    produced = set(re.findall(r'emission_state\s*(?::\s*str\s*)?=\s*"([^"]+)"', src))
+    assert produced, "pattern found nothing -- update this test"
+    cfg = Config()
+    brain, _ = build_sim_system(cfg)
+    opts = _by_id(build_manifest(brain))["emission_state"]["options"]
+    assert produced <= set(opts), produced - set(opts)
+    assert list(opts) == list(L.EMISSION_STATES)
+
+
+def test_filter_is_none_not_empty_when_unknown_and_crystal_is_one_byte(laser):
+    from superk.laser import Status
+    assert Status().filter is None, "'' is not an enum option; report None"
+    d = _by_id(build_manifest(laser))
+    assert d["filter"]["type"] == "enum"
+    assert status_to_dict(laser.status())["filter"] in d["filter"]["options"]
+    c = d["crystal_no"]
+    assert c["type"] == "int" and c["bits"] == 8 and "min" not in c

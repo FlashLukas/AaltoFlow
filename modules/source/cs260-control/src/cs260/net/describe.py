@@ -138,6 +138,11 @@ def build_manifest(mono) -> dict:
            help="Spectral resolution = dispersion x slit width (typed in: fixed "
                 "slits cannot be read back)."),
 
+        # int controls (grating / filter / port): their min/max are SETTING
+        # limits, not a promise about the readback -- scan-core stores a
+        # control as int32 whatever they say. The readback is None, never a
+        # fake 0, before the first read or while the filter wheel is between
+        # positions (monochromator.status).
         _p("grating", "Grating", "control", "int", group="Grating", order=20,
            min=1, max=n_grat, step=1, read_path=["grating"],
            set={"verb": "set_grating", "arg": "grating"},

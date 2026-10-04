@@ -114,7 +114,9 @@ class Status:
     sweep_time_set_s: float = _NAN
     sweep_time_auto: bool = True
     detector: str = "auto"
-    detector_in_use: str = ""
+    # what "auto" resolves to (model.effective_detector); None until the
+    # worker's first frame -- describe declares an enum, and "" is no option
+    detector_in_use: str | None = None
     preamp: bool = False
     averages: int = 1
     continuous: bool = True
@@ -130,8 +132,9 @@ class Status:
     peak_dBm: float = _NAN
     floor_dBm: float = _NAN            # median of the latest trace
     overload: bool = False             # the mixer was driven into compression
-    # the simulated bench (NaN / "" on a real analyser)
-    dut: str = ""
+    # the simulated bench (NaN / None on a real analyser; None, not "",
+    # because `dut` is an enum of model.DUTS and "" is not one of them)
+    dut: str | None = None
     dut_center_Hz: float = _NAN
     dut_bw_Hz: float = _NAN
     dut_order: int = 0
@@ -657,7 +660,7 @@ class SpectrumAnalyzer:
                 sweeps=self._sweeps, trace_id=self._trace_id,
                 peak_Hz=last.get("peak_Hz", _NAN), peak_dBm=last.get("peak_dBm", _NAN),
                 floor_dBm=last.get("floor_dBm", _NAN), overload=bool(last.get("overload", False)),
-                dut=b.dut if sim else "",
+                dut=b.dut if sim else None,
                 dut_center_Hz=b.dut_center_Hz if sim else _NAN,
                 dut_bw_Hz=b.dut_bw_Hz if sim else _NAN,
                 dut_order=int(b.dut_order) if sim else 0,

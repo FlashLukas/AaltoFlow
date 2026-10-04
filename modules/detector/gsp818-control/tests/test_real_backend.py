@@ -232,7 +232,7 @@ def test_the_brain_on_the_real_backend():
         sa.step()
     t = sa.get_trace("sample")
     assert t["acq_id"] == n and t["power_dBm"].shape == (601,)
-    assert sa.status().simulated is False and sa.status().dut == ""
+    assert sa.status().simulated is False and sa.status().dut is None
     assert inst.writes == []                        # preset panel: nothing to fix
     sa.shutdown()
     assert inst.state["OUTP:TRAC"] == "OFF"

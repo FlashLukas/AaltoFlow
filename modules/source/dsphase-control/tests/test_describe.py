@@ -124,3 +124,36 @@ def test_describe_over_the_wire_and_both_status_paths_agree(brain):
         if client is not None:
             client.shutdown()
         svc.stop()
+
+
+# ---- declared types = how scan-core STORES each value (developer notes 4b) ----
+
+def _fits(d, v):
+    """True if status value v fits descriptor d's declared type (None always
+    fits: "not measured"). This module declares only float / bool / string
+    indicators and controls: no int range or enum option can be broken, but
+    a float that reads as text (or a flag as a number) would still stop a scan."""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return False                     # int / enum: none declared here (see below)
+
+
+def test_every_status_value_fits_its_declared_type(brain):
+    from dataclasses import asdict
+    m = build_manifest(brain)
+    types = {p["type"] for p in m["parameters"] if p["kind"] != "action"}
+    assert types <= {"float", "bool", "string"}, (
+        "an int or enum now needs honest min/max/bits/options -- extend this test")
+    for _ in range(3):
+        st = asdict(brain.status())
+        for p in m["parameters"]:
+            if p.get("read_path"):
+                v = read_path(st, p["read_path"])
+                assert _fits(p, v), (p["id"], v)

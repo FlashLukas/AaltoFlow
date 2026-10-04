@@ -46,6 +46,9 @@ import zlib
 from ..analyzer import BENCH_LIMITS
 from ..model import DETECTORS, DUTS
 
+#: every value status.detector_in_use can take: the concrete detectors
+EFFECTIVE_DETECTORS = tuple(d for d in DETECTORS if d != "auto")
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -250,8 +253,10 @@ def build_manifest(sa) -> dict:
                 "also a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
+        # min 0: a counter the brain starts at 0 and only increments (no max:
+        # it has none). scan-core stores an int in the type its bounds allow.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, read_path=["acq_id"]),
+           order=4, read_path=["acq_id"], min=0),
 
         # -- reference ------------------------------------------------------------------------
         _p("take_reference", "Take thru reference", "action", "action", group="Reference",
@@ -279,10 +284,14 @@ def build_manifest(sa) -> dict:
            group="Live", order=12, decimals=2, plottable=True, read_path=["floor_dBm"]),
         _p("live_overload", "Overload (live)", "indicator", "bool", group="Live", order=13,
            read_path=["overload"]),
+        # min 0: completed sweeps since start, a counter that only counts up
         _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=14,
-           read_path=["sweeps"]),
-        _p("detector_in_use", "Detector in use", "indicator", "string", group="Live",
-           order=15, read_path=["detector_in_use"]),
+           read_path=["sweeps"], min=0),
+        # an enum: what "auto" resolves to (model.effective_detector) can only
+        # be one of the concrete detectors -- never "auto" itself
+        _p("detector_in_use", "Detector in use", "indicator", "enum", group="Live",
+           order=15, options=list(EFFECTIVE_DETECTORS),
+           read_path=["detector_in_use"]),
 
         # -- status ------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
