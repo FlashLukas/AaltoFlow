@@ -47,6 +47,7 @@ import numpy as np
 import zmq
 
 from . import pxcal
+from . import secure
 
 
 class CalibrationAborted(Exception):
@@ -64,20 +65,36 @@ class CameraLink:
     def _make(self):
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        # the CAMERA's key, from the lab keyring, when the policy secures the
+        # camera (secure.py): the frames then travel encrypted; plain otherwise
+        secure.secure_client(self._req, self.host, "camera")
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def rpc(self, **req) -> dict:
         if self._req is None:
             self._make()
-        try:
-            self._req.send_json(req)
-            reply = self._req.recv_json()
-        except zmq.Again:
-            self._req.close(0)
-            self._req = None
-            raise TimeoutError(f"camera service at {self.host}:{self.cmd_port} did not answer "
-                               f"{req.get('cmd')!r}")
+        for attempt in (1, 2):
+            try:
+                self._req.send_json(req)
+                reply = self._req.recv_json()
+                break
+            except zmq.Again:
+                # a REQ socket that timed out is stuck mid-exchange: rebuild it
+                self._req.close(0)
+                self._req = None
+                # the camera may speak the other mode than the policy now says
+                # (started before it changed): try that mode once. Safe to
+                # resend: a wrong-mode request never reaches the camera.
+                flipped = secure.no_answer(self.host, "camera")
+                if not (flipped and attempt == 1):
+                    raise TimeoutError(
+                        f"camera service at {self.host}:{self.cmd_port} did not answer "
+                        f"{req.get('cmd')!r}") from None
+                self._make()
         if not reply.get("ok", False):
             raise RuntimeError(f"camera {req.get('cmd')}: {reply.get('error')}")
         return reply
