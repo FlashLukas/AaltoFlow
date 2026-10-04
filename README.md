@@ -300,6 +300,12 @@ padlocks), and smb and piezo are free (○).
 
 ### From a script or a console
 
+For an EXPERIMENT -- set, wait, focus, scan, repeat -- use scan-core's
+scripting API, [docs/SCRIPTING.md](docs/SCRIPTING.md): a script there is
+treated exactly like a scan (it claims each instrument it changes, and is
+refused while another PC holds control). Talking to one module's client
+directly, as below, is for small tools such as an alignment helper.
+
 ```python
 from kim.net.client import KimClient
 
@@ -838,7 +844,10 @@ cd scan-core
 uv sync --extra gui
 uv run python run_demo.py            # 2-D, 3-D and XY-raster scans -> out/*.nc
 uv run python apps/scan_builder.py
+uv run python examples/temperature_series.py   # a scripted experiment (sim)
 ```
+
+Scripts (set, wait, scan in a loop): [docs/SCRIPTING.md](docs/SCRIPTING.md).
 
 ## Installing on a lab PC
 
@@ -923,6 +932,7 @@ what was checked, the commit, the caveats.
 
 ```
 docs/DEVELOPER_NOTES.md      architecture, wire contract, conventions, gotchas
+docs/SCRIPTING.md            driving the lab from a Python script (scan_core.api)
 docs/flyers/                 one-page flyers (PDF + PNG)
 docs/video/                  demo videos (mp4)
 INSTRUMENT_MODULE_GUIDE.md   the blueprint for building a new instrument module
