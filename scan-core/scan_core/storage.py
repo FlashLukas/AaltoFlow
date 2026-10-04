@@ -31,8 +31,7 @@ and turns it back into NaN when the file is read. Only text is different in
 memory: an object array of str, "" = not measured.
 
 The declared range is a PROMISE. A value that does not fit -- an int outside
-[min, max], a non-integer for an int, a bool that is not 0/1, an enum value
-that is not one of its options -- STOPS the scan with a clear message (as a
+[min, max], a non-integer for an int, a bool that is not 0/1 -- STOPS the scan with a clear message (as a
 trace whose length changed mid-scan does). It is never clipped and never
 wrapped: a stored number that is silently wrong is worse than no number.
 `to_memory` is that check; the engine calls it where it stores a measured value.
@@ -110,6 +109,8 @@ class Storage:
         self.kind = kind
         self.bits = int(bits) if bits is not None else None
         self.options = list(options or [])
+        #: enum values met that are not options (the engine reports and empties it)
+        self.unknown_seen: list = []
         self.store = store if store in ("float32", "float64") else None
         if kind == "int" and self.bits is not None:
             lo, hi = 0, 2 ** self.bits - 1
@@ -226,7 +227,8 @@ class Storage:
         if v is None or (isinstance(v, (float, np.floating)) and math.isnan(v)):
             return math.nan
         if self.kind == "enum":
-            return float(self._code(v, what))
+            code = self._code(v, what)
+            return math.nan if code < 0 else float(code)
         # bool and int need a NUMBER; a string "5" is a module bug, not a 5
         if isinstance(v, (str, bytes)) or not isinstance(v, (int, float, np.number, np.bool_)):
             raise StorageError(f"{what}: got {v!r}, which is not a number, but its "
@@ -260,8 +262,13 @@ class Storage:
         for i, opt in enumerate(self.options):    # 3 vs "3", a JSON round trip
             if str(v) == str(opt):
                 return i
-        raise StorageError(f"{what}: got {v!r}, which is not one of its declared "
-                           f"options {self.options}")
+        # NOT a stop (Lukas, 2026-10-04): several modules read back a value
+        # outside their own option list ("--" for an unknown sensitivity, a
+        # front-panel time constant the list does not offer). The point is
+        # stored as "not measured" and the engine logs it once (unknown_seen).
+        # A wrong NUMBER still stops the scan: that would be wrong data.
+        self.unknown_seen.append(v)
+        return -1
 
     # ---- the file -----------------------------------------------------------
     def attrs(self) -> dict:

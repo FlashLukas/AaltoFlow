@@ -50,6 +50,8 @@ class _Guard:
         self.on_fault, self.should_abort = on_fault, should_abort
         self.log, self.poll_s = log, poll_s
         self.pauses = 0
+        #: (detector, value) pairs already reported as "not one of its options"
+        self.unknown_warned: set = set()
 
     def faults(self) -> list:
         if self._check is None:
@@ -632,12 +634,21 @@ def _checked_read(registry, dets, det_axes, data, shape, idx, guard) -> dict:
                     f"without reconfiguring it, or scan it as its own axis.")
             value = arr
         # The declared type is a PROMISE (storage.py): an int outside its
-        # min/max, a bool that is not 0/1, an enum value that is not one of
-        # its options STOPS the scan here -- before the value is kept, and
+        # min/max or a bool that is not 0/1 STOPS the scan here -- before the value is kept, and
         # exactly like a trace whose shape changed. Never clipped or wrapped.
         # An enum becomes its option's code, a bool/int a float holding it.
-        out[det] = storage_of(g).to_memory(
+        st = storage_of(g)
+        out[det] = st.to_memory(
             value, what=f"detector '{det}' at grid index {tuple(int(i) for i in idx)}")
+        # an enum value outside its options is stored as "not measured";
+        # say so once per detector and value, not at every point
+        while st.unknown_seen:
+            v = st.unknown_seen.pop()
+            if (det, repr(v)) not in guard.unknown_warned:
+                guard.unknown_warned.add((det, repr(v)))
+                guard.log(f"warning: {det} read {v!r}, which is not one of its "
+                          f"options {st.options} -- stored as 'not measured' "
+                          f"(the module's describe should list it)")
 
     # CHECK 2: did something fail WHILE we read? The values are only committed
     # when this passes too.

@@ -286,7 +286,6 @@ def test_every_variable_says_its_declared_type(typed_file):
     (Storage("int"), 2**31, "int32 (no min/max declared)"),
     (Storage("int"), "7", "not a number"),
     (Storage("bool"), 2, "bool"),
-    (Storage("enum", options=["a", "b"]), "c", "not one of its declared options"),
 ])
 def test_a_value_that_breaks_its_declared_type_stops_the_scan(storage, value, needle):
     reg = build_sim_registry()
@@ -303,6 +302,27 @@ def test_a_value_that_breaks_its_declared_type_stops_the_scan(storage, value, ne
         run(r, reg)
     assert needle in str(e.value)
     assert "detector 'bad' at grid index (1,)" in str(e.value)
+
+
+def test_an_unknown_enum_value_is_not_measured_and_said_once():
+    """Lukas, 2026-10-04: modules read back values outside their own option
+    lists ("--", a front-panel time constant), so an unknown option must not
+    stop a scan: the point is stored as not measured, and the log says it ONCE
+    per detector and value."""
+    reg = build_sim_registry()
+    s = reg._state
+    reg.add(Gettable("mode", "Mode", "",
+                     lambda: "c" if s.field_mT > 0 else "a",
+                     storage=Storage("enum", options=["a", "b"])))
+    r = Recipe(name="t", axes=[{"type": "array", "param": "field",
+                                "values": [0, 5, 10]}],
+               detectors=["lockin_r", "mode"])
+    logs = []
+    ds = run(r, reg, on_log=logs.append)
+    vals = ds["mode"].values
+    assert vals[0] == 0 and np.isnan(vals[1]) and np.isnan(vals[2])
+    said = [m for m in logs if "not one of its options" in m]
+    assert len(said) == 1 and "'c'" in said[0] and "mode" in said[0]
 
 
 def test_none_and_nan_are_not_measured_not_refused():

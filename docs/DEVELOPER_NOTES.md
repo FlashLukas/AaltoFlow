@@ -524,11 +524,15 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
 - **The range is a promise.** The engine checks every measured value where it
   keeps it (`engine._checked_read` -> `Storage.to_memory`): an int outside
   [min, max] (or beyond int32 without bounds), a non-integer for an int, a
-  bool that is not True/False/0/1, a string where a number is declared, an
-  enum value not in its options -- the scan STOPS with
+  bool that is not True/False/0/1, a string where a number is declared --
+  the scan STOPS with
   `StorageError: detector 'x' at grid index (i,): got ..., outside ...`, like a
   trace whose length changed. Never clipped, never wrapped. `None`/NaN is
   "no value at this point" (stored as not measured), as for a float.
+  An ENUM value that is not one of its options does NOT stop (Lukas,
+  2026-10-04: several modules read back "--" or a front-panel setting outside
+  their list): the point is stored as not measured and the scan log says it
+  once per detector and value.
 - **A control read back as a detector** keeps its type (bool -> uint8, int ->
   int32 or its `bits`), but its min/max do NOT narrow the storage: they are
   limits on what may be set, not a promise about the readback (sr830's

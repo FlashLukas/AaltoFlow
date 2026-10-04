@@ -495,8 +495,9 @@ an `enum` or a `string`, not a float -- and both are recordable since then.
   recorded as a detector is never narrowed by them.
 - **`enum` options must cover every value status can report.** A readback that
   is not one of the options (a "--", an empty string, a front-panel setting
-  outside the offered list) stops a scan that records it. `None` is fine: it is
-  stored as "not measured".
+  outside the offered list) is stored as "not measured", with one warning in
+  the scan log -- the value is lost, so list every value the instrument can
+  report. `None` is stored as "not measured" too.
 - **`bits`** (new, optional): an int detector that is an N-bit count (a 12-bit
   camera, a 16-bit digitiser) -> stored unsigned, 0..2^N-1 allowed.
 - **`store: "float32"`** (new, optional): a float/complex detector whose
