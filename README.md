@@ -407,7 +407,65 @@ The identity may say `machine` only if the keyring allows that PC to act as a
 machine. A program on the service's *own* PC (the camera next to kim) may act
 as a machine by default.
 
-### Setting it up
+### Setting it up -- in Mission Control
+
+Everything is in **Mission Control > Security...** (next to *Instruments...*;
+the badge beside it says the lab's mode: *Security: off*, *warn (all
+modules)*, *enforce (3 modules)*). The window has three tabs: **This PC**
+(what is set up here, and one line saying what to do next), **Trusted PCs**
+(the keyring) and **Lab policy**.
+
+**Once, for the lab** (on the lab PC, by whoever runs the lab):
+
+1. Make an empty folder for the keyring, on a share every lab PC can read,
+   and make it writable *only* for yourself: whoever can put a file into it
+   is trusted.
+2. *This PC* > **Choose keyring folder...** > pick that folder. It has no
+   policy yet, so the window offers to make it the lab's keyring. Say yes:
+   the policy starts as *off*, so nothing changes yet.
+3. **Make this PC's key**. Tick *this PC may run scans (machine)* if it runs
+   scan-core or the camera. Its public key goes straight into the keyring.
+
+**Every other PC** (about two minutes):
+
+1. *This PC* > **Choose keyring folder...** > the same folder.
+2. **Make this PC's key** (tick *may run scans* where scans run). If the PC
+   may write to the keyring, its key lands there and you are done.
+3. Usually it may not (only the administrator may). Then **Save public key
+   to file...** and bring that file to the lab PC (USB stick, e-mail, the
+   share). It holds only the public half, so it is safe to share.
+
+**Adding a PC, on the lab PC:** *Trusted PCs* > **Add a PC from its key
+file...** > the file > check the name and *may run scans* > Add. The window
+writes the file into the keyring *fresh, from the lab PC*. That matters on
+a share that maps Linux permissions, where a file dropped in from another
+PC can be unreadable for everyone else (gotcha #44). A key file that cannot
+be read shows as a red row; adding it again this way fixes it. A file that
+holds a *secret* key is refused.
+
+**Retiring a PC** (a laptop that left, a PC re-installed): *Trusted PCs* >
+select it > **Retire PC...** It can no longer reach any secured module, and
+that includes connections it has open right now: a secured service looks up
+the key of every message, so within a few seconds those are refused too. In
+warn mode they are let through, with one line in the service's log. The key
+file is not deleted but moved to the keyring's `retired/` folder, where it is
+not trusted; **Restore** undoes the retirement. Retiring the PC you are
+sitting at asks twice, because it locks that PC out of the other PCs'
+secured modules.
+
+**Switching the lab on:** *Lab policy* > the mode (*warn* first) and the
+modules (*All modules*, or *Only these*) > **Apply to the whole lab...** The
+confirmation says what will change. Before *enforce* it also lists the PCs
+in the keyring and which may run scans, because any PC that is not listed
+gets no answer. After Apply the window lists the services on this PC that
+still run in their old mode, and **Restart them** stops and starts them the
+way the Stop and Service buttons do. Services on the other PCs need a
+restart there.
+
+### The same from the command line
+
+`tools/keys.py` does the same steps. The window and the script share one
+implementation (`suite-common/src/suite_common/keyadmin.py`).
 
 **Once, for the lab** (on any PC):
 
@@ -415,7 +473,7 @@ as a machine by default.
 python tools/keys.py init \\server\share\aaltoflow-keyring --mode warn --modules "*"
 ```
 
-**For every PC**, this one included (about two minutes):
+**For every PC**, this one included:
 
 ```
 python tools/keys.py use \\server\share\aaltoflow-keyring
@@ -423,27 +481,32 @@ uv run --with pyzmq python tools/keys.py new            # --machine if this PC r
 ```
 
 `new` makes the PC's key pair and copies its public half into the keyring. If
-the keyring is read-only from that PC, `new` leaves the file next to you, and
-the administrator copies it in. That is all. A new module, GUI or script on a
-trusted PC needs nothing, because keys belong to PCs, not to modules.
+the keyring is read-only from that PC, `new` leaves the file next to you; bring
+it to the lab PC and `keys.py add` it there. That is all. A new module, GUI or
+script on a trusted PC needs nothing, because keys belong to PCs, not to
+modules.
 
 **Everyday:**
 
 | | |
 |---|---|
 | `python tools/keys.py status` | this PC: its key, the keyring, the policy, "in the keyring: yes/no" |
-| `python tools/keys.py list` | the trusted PCs |
+| `python tools/keys.py list` | the trusted PCs (and the retired ones) |
+| `python tools/keys.py export my-pc.key` | this PC's public key, to bring to the lab PC |
+| `python tools/keys.py add my-pc.key [--machine yes]` | trust the PC of a key file (written fresh into the keyring) |
 | `python tools/keys.py machine lab-pc-1 yes` | programs on lab-pc-1 may act as a machine (scan-core, the camera) |
-| `python tools/keys.py remove old-laptop` | stop trusting a PC (or just delete its file) |
+| `python tools/keys.py retire old-laptop` | stop trusting a PC (`remove` is the old name); its file goes to `retired/` |
+| `python tools/keys.py restore old-laptop` | trust a retired PC again |
 | `python tools/keys.py policy --mode enforce` | switch the whole lab to enforce |
 
-Adding or removing a PC takes effect within seconds, because the keyring is
+Adding or retiring a PC takes effect within seconds, because the keyring is
 re-read. A change of mode or of the module list takes effect when a module's
 service restarts. Until then the clients still reach it: a request that gets
 no answer is tried once more in the other mode (plain or encrypted), so the
-GUIs, scans and Mission Control's Stop keep working. `keys.py policy` lists
-the services on this PC that still run in their old mode; restart them.
-The policy is lab-wide: services on the other PCs need a restart too.
+GUIs, scans and Mission Control's Stop keep working. `keys.py policy` (and the
+Security window) lists the services on this PC that still run in their old
+mode; restart them. The policy is lab-wide: services on the other PCs need a
+restart too.
 
 ### The policy and the modes
 
@@ -469,7 +532,10 @@ a lab can switch modules on one by one (kim first, piezo later).
 
 - **A client has no key, or its PC's security is off**, while the module is
   secured: the service does not answer at all ("no reply ... within 2000 ms").
-  Run `python tools/keys.py status` on the client PC.
+  Look at Mission Control > Security... > *This PC* on the client PC (or run
+  `python tools/keys.py status`): it says what is missing.
+- **"refused (security): this PC's key is not in the keyring (retired?)"**:
+  the PC was retired while connected. Restore it, or add its key again.
 - **"no key for '10.0.0.7' in the keyring"**: the client reaches that PC by an
   address the keyring does not know. Add it with `tools/keys.py new --address`
   on that PC, or connect by the PC's name.
@@ -477,8 +543,9 @@ a lab can switch modules on one by one (kim first, piezo later).
 - **"N key file(s) could not be read here"** (`keys.py list` / `status`, or
   "security: keyring file skipped" in a service's log): that PC's key file is
   not readable from this PC -- on a share that maps Linux permissions, a
-  file written from one PC can be. A public key may be readable by everyone:
-  write the file from a PC whose files all can read, or `chmod 644` it.
+  file written from one PC can be. Add it again from the lab PC (Security...
+  > Trusted PCs > Add a PC from its key file..., or `keys.py add`): a file
+  written from there is readable everywhere. Or `chmod 644` it.
 - **The consoles** (`scripts/<module>_console.py`) use their module's
   `secure.py` when they sit in their module folder. A console copied elsewhere
   talks plain, so a secured module will not answer it.

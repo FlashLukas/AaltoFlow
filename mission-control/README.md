@@ -34,6 +34,15 @@ remembered after the service stops, marked "last seen".
   `suite_local.json`) and only changes what you see: services still start in
   the order they need (the camera after kim).
 
+## Security (encryption)
+
+**Security...** (next to *Instruments...*) manages this PC's key, the lab
+keyring (the trusted PCs: add one from its key file, may-run-scans, retire /
+restore) and the lab-wide policy, without the command line. The badge next
+to it shows the lab's mode. How it works and the steps: the root README,
+"Encryption and keys". The window is `security_window.py`; the logic is
+`suite_common/keyadmin.py`, shared with `tools/keys.py`.
+
 ## Services on other PCs
 
 **Add remote…** asks for host and ports. **Test connection** asks the service to

@@ -354,6 +354,24 @@ still assumes piezo/zpiezo.
     its services and probes the same way (it tests the contract, not the
     keys). kim-control/tests/test_secure.py builds a three-PC lab in a temp
     folder (the other PCs reach "pc-a" as 127.0.0.2).
+  - Managing keys: `suite-common/src/suite_common/keyadmin.py` is the ONE
+    implementation (2026-10-04) -- status + plain-language advice, use /
+    init keyring, make / export this PC's key, add a PC from its PUBLIC key
+    file (written fresh from this PC, gotcha #44; a file with a secret key
+    is refused), machine flag, retire / restore, policy and
+    `stale_services(new_policy)`. Two thin front ends: Mission Control's
+    Security... window (`mission-control/security_window.py`, no logic of
+    its own: it shows keyadmin's results and its `AdminError` messages) and
+    `tools/keys.py`. Change behaviour in keyadmin, never in a front end.
+    No Qt, no zmq at import (only `make_key` makes a key pair).
+  - Retiring a PC moves its file to `<keyring>/retired/<pc>-<date>.key`
+    (`Keyring` reads only `*.key` at the top, so a retired key is not
+    trusted; `restore` moves it back). CurveZMQ checks a key only at the
+    handshake, so `Guard.check` looks the sender's key up again for EVERY
+    message: a key that left the keyring is refused in enforce (`"this PC's
+    key is not in the keyring (retired?)"`) and logged once in warn. PUB/SUB
+    telemetry has no per-message check: a retired PC's open SUB keeps
+    receiving status until it reconnects (it can no longer command).
   - Known limits: a plain client to a secured module just
     times out (CurveZMQ servers do not answer NULL clients); the keys sit in
     the user's profile, so a second Windows account on the same PC needs its

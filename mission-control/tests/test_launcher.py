@@ -725,3 +725,30 @@ def test_instruments_dialog_shows_probe_and_usb_rows(env, monkeypatch):
         dlg.close()
         mc.set_real("focus", False, root)
         mc.set_address("focus", None, root)
+
+
+def test_security_button_and_badge(env, tmp_path, monkeypatch):
+    """The badge says the lab's mode; the Security window opens non-modal
+    and a change there refreshes the badge at once. (Security folder and
+    keyring in tmp_path, never this PC's.)"""
+    mc, win, root, app = env
+    from suite_common import keyadmin, secure
+    monkeypatch.setenv("AALTOFLOW_SECURITY_DIR", str(tmp_path / "me"))
+    win.refresh_security_badge()
+    assert win.sec_badge.text() == "Security: off"
+    keyadmin.init_keyring(tmp_path / "keyring", "warn", ["*"])
+    dlg = win.show_security()
+    try:
+        assert not dlg.isModal() and dlg.isVisible()
+        assert {"magnet", "lockin", "focus"} <= {dlg.mod_list.item(i).text()
+                                                  for i in range(dlg.mod_list.count())}
+        dlg.confirm = lambda title, text: True
+        dlg.set_choice("enforce", ["magnet", "lockin", "focus"])
+        dlg.apply_policy()
+        assert secure.policy()["mode"] == "enforce"
+        assert win.sec_badge.text() == "Security: enforce (3 modules)"
+        assert win.restart_services(["magnet"]) == []          # not started by the launcher
+        assert "was not started by this launcher" in win.logbox.toPlainText()
+    finally:
+        dlg.close()
+        win._security = None

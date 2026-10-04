@@ -87,6 +87,9 @@ SIZES = {
     "scan-core": (1520, 840),
     "mission-control": (1180, 1150),
     "mission-control-instruments": (1240, 600),
+    "mission-control-security-pc": (900, 600),
+    "mission-control-security-pcs": (900, 600),
+    "mission-control-security-policy": (900, 600),
     "suite-control": (1500, 950),
     "suite-control-dynacool": (1500, 950),
     "suite-scan": (1500, 950),
@@ -754,7 +757,15 @@ def _viewer(tab: str):
     return make
 
 
+def _no_security_setup():
+    """A published picture must not show THIS PC's keys or keyring: point the
+    security folder at an empty one (the badge then says "Security: off")."""
+    import tempfile
+    os.environ["AALTOFLOW_SECURITY_DIR"] = tempfile.mkdtemp(prefix="render-nosec-")
+
+
 def _mission_control(theme):
+    _no_security_setup()
     sys.path.insert(0, str(ROOT / "mission-control"))
     import mission_control
 
@@ -778,6 +789,7 @@ def _mission_control_instruments(theme):
     fixed list (no PC renders this with a GPIB card attached), with invented
     addresses and no serial numbers -- a published picture names no real
     instrument."""
+    _no_security_setup()
     sys.path.insert(0, str(ROOT / "mission-control"))
     import mission_control
     from suite_common.instruments import Found
@@ -848,6 +860,61 @@ def _mission_control_instruments(theme):
         return dlg
 
     return show, warm_up, 1.5
+
+
+def _mission_control_security(tab: int):
+    """The Security window on a made-up lab: lab-pc-1 (this PC, may run
+    scans), office-1, a key file this PC cannot read (laptop-2), a retired
+    old-laptop, policy warn on all modules. Everything lives in a temporary
+    folder; the PC name is made up, so no real name is in the picture."""
+    def make(theme):
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="render-sec-"))
+        os.environ["AALTOFLOW_SECURITY_DIR"] = str(tmp / "me")
+        sys.path.insert(0, str(ROOT / "mission-control"))
+        import mission_control
+        from suite_common import keyadmin, secure
+        secure.this_pc_name = lambda: "lab-pc-1"
+        kr = tmp / "keyring"
+        keyadmin.init_keyring(kr, "warn", ["*"])
+        keyadmin.make_key(machine=True, pc="lab-pc-1", addresses=["10.0.0.5"])
+        for pc, machine, addr in (("office-1", False, "10.0.0.17"),
+                                  ("analysis-pc", False, ""), ("old-laptop", False, "")):
+            pub, _ = secure.new_keypair()
+            meta = {"pc": pc, "machine": "yes" if machine else "no"}
+            if addr:
+                meta["addresses"] = addr
+            secure.write_cert(kr / f"{pc}.key", pub, meta=meta)
+        keyadmin.retire("old-laptop")
+        pub, _ = secure.new_keypair()
+        secure.write_cert(kr / "laptop-2.key", pub, meta={"pc": "laptop-2"})
+        real = secure.read_cert
+
+        def read(path):                         # as on the lab share (2026-09-30)
+            if Path(path).name == "laptop-2.key":
+                raise PermissionError(13, "Access is denied", str(path))
+            return real(path)
+        secure.read_cert = read
+
+        def show():
+            return mission_control.main(["--theme", theme])
+
+        def warm_up(win):
+            box = getattr(win, "logbox", None)
+            if box is not None:
+                box.clear()
+            dlg = win.show_security()
+            dlg.tabs.setCurrentIndex(tab)
+            if tab == 1:
+                dlg.select_pc("office-1")
+            if tab == 2:
+                dlg._show_stale([{"module": "pm16", "mode": "off"},
+                                 {"module": "kim", "mode": "off"}])
+            dlg.say("lab policy is now warn (all modules)", "ok")
+            return dlg
+
+        return show, warm_up, 1.0
+    return make
 
 
 def _pm16(theme):
@@ -1084,6 +1151,9 @@ TARGETS = {
     "scan-core": _scan_core,
     "mission-control": _mission_control,
     "mission-control-instruments": _mission_control_instruments,
+    "mission-control-security-pc": _mission_control_security(0),
+    "mission-control-security-pcs": _mission_control_security(1),
+    "mission-control-security-policy": _mission_control_security(2),
 }
 
 

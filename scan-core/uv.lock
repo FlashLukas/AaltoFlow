@@ -36,7 +36,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -746,7 +746,7 @@ name = "originpro"
 version = "1.1.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "originext", marker = "sys_platform == 'win32'" },
+    { name = "originext" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/70/743589d8d8e24c5cf863d610c50c524c75e87616c8409fbcc30320f996fb/originpro-1.1.15-py3-none-any.whl", hash = "sha256:85f3555a5386af6af5975bc61f96194aacd4f18bf984b579f3c51991143772a5", size = 56108, upload-time = "2026-01-29T02:50:08.4Z" },
@@ -1227,7 +1227,10 @@ source = { editable = "../suite-common" }
 [package.metadata]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8" }]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "pyzmq", specifier = ">=25" },
+]
 
 [[package]]
 name = "tzdata"

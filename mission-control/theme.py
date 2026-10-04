@@ -89,8 +89,19 @@ QPushButton#danger {{ background:{c['danger']}; color:#1a1a1a; border:none; }}
    without these a disabled Stop still looks like a live red button. */
 QPushButton#primary:disabled, QPushButton#danger:disabled {{
     color:{c['muted']}; background:{c['panel']}; border:1px solid {c['border']}; }}
-QCheckBox {{ color:{c['text']}; }}
+QCheckBox, QRadioButton {{ color:{c['text']}; }}
 QScrollArea {{ border:none; }}
+/* tabs and tables (the Security window) */
+QTabWidget::pane {{ border:1px solid {c['border']}; border-radius:8px; top:-1px;
+    background:{c['bg']}; }}
+QTabBar::tab {{ background:{c['panel']}; color:{c['muted']}; border:1px solid {c['border']};
+    border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px;
+    padding:6px 16px; margin-right:2px; font-weight:600; }}
+QTabBar::tab:selected {{ background:{c['panel_hi']}; color:{c['accent']}; }}
+QTableWidget {{ background:{c['code_bg']}; border:1px solid {c['border']}; border-radius:8px;
+    color:{c['text']}; gridline-color:{c['grid']}; }}
+QHeaderView::section {{ background:{c['panel']}; color:{c['muted']}; border:none;
+    border-bottom:1px solid {c['border']}; padding:4px 6px; font-weight:700; }}
 /* the move-up / move-down arrows on each module card: quiet until hovered,
    and clearly dimmer when a card is already at the top or bottom */
 QToolButton#move {{ color:{c['muted']}; background:transparent; border:none;

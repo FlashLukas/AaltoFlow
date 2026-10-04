@@ -65,6 +65,7 @@ from suite_common.modules import (CATEGORIES, LOCAL_FILE, MANIFEST, ManifestErro
 # All colours come from theme.COLORS (aliased C); set_theme() swaps the palette
 # IN PLACE at startup, so every C[...] read follows the active theme.
 from theme import COLORS as C, DARK, set_theme, build_stylesheet, apply_palette  # noqa: E402
+from security_window import SecurityDialog, style_badge  # noqa: E402
 
 DEFAULT_THEME = "dark"
 
@@ -90,6 +91,7 @@ PREFER_VENV_PYTHON = False
 
 PROBE_PERIOD_S = 1.2          # how often every service's port is checked
 RESCAN_PERIOD_MS = 3000       # how often the folder is checked for new modules
+SECURITY_BADGE_MS = 10000    # how often the security badge re-reads the policy
 GUI_WAIT_S = 30.0             # how long "GUI" waits for a just-started service
                               # (a real camera or KIM takes several seconds to open)
 
@@ -2134,8 +2136,19 @@ class MainWindow(QtWidgets.QMainWindow):
         inst.setToolTip("Which instruments this PC can see (GPIB, USB, LAN, COM ports), "
                         "who each one is, and which module it fits")
         inst.clicked.connect(lambda: self.show_instruments())
+        # Encryption (CurveZMQ): this PC's key, the lab keyring and the
+        # lab-wide policy, without the command line (security_window.py).
+        # The badge says the lab's mode at a glance.
+        sec = QtWidgets.QPushButton("Security…")
+        sec.setToolTip("Encryption: this PC's key, the lab keyring (the trusted PCs) "
+                       "and the lab's policy (off / warn / enforce)")
+        sec.clicked.connect(lambda: self.show_security())
+        self.sec_badge = QtWidgets.QLabel()
+        self.sec_badge.setToolTip("The lab's security policy as this PC reads it "
+                                  "(Security… to change it)")
         mrow.addWidget(rescan); mrow.addWidget(inst); mrow.addWidget(add_mod); mrow.addWidget(add)
         mrow.addWidget(exp); mrow.addWidget(imp)
+        mrow.addWidget(sec); mrow.addWidget(self.sec_badge)
         col.addLayout(mrow)
 
         self.problems_lbl = QtWidgets.QLabel(); self.problems_lbl.setWordWrap(True)
@@ -2176,6 +2189,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rescan_timer = QtCore.QTimer(self)
         self.rescan_timer.timeout.connect(lambda: self.rescan(force=False))
         self.rescan_timer.start(RESCAN_PERIOD_MS)
+
+        # The policy file sits in the keyring, often on a network share:
+        # read it every SECURITY_BADGE_MS, not on every tick.
+        self.refresh_security_badge()
+        self.badge_timer = QtCore.QTimer(self)
+        self.badge_timer.timeout.connect(self.refresh_security_badge)
+        self.badge_timer.start(SECURITY_BADGE_MS)
 
     # ---- discovery --------------------------------------------------------
 
@@ -2340,6 +2360,49 @@ class MainWindow(QtWidgets.QMainWindow):
         if scan:
             dlg.scan()
         return dlg
+
+    def show_security(self) -> SecurityDialog:
+        """The Security window (non-modal: it stays open next to the cards)."""
+        dlg = getattr(self, "_security", None)
+        if dlg is None:
+            dlg = self._security = SecurityDialog(
+                self, modules=lambda: sorted({m.key for m in self.found.modules}),
+                restart=self.restart_services, log=self.log,
+                on_change=self.refresh_security_badge)
+        else:
+            dlg.refresh()
+        dlg.show(); dlg.raise_()
+        return dlg
+
+    def refresh_security_badge(self) -> None:
+        try:
+            pol = secure.policy()
+        except Exception:                   # a broken share must not break the window
+            pol = {"mode": "off", "modules": []}
+        style_badge(self.sec_badge, pol)
+
+    def restart_services(self, keys) -> list[str]:
+        """Stop (cleanly, as the Stop button does) and start again the
+        services of these module keys that THIS launcher started -- after a
+        policy change, so they pick up their new mode. A service started
+        elsewhere is only named: close and start it in its own window."""
+        wanted = {str(k).lower() for k in keys}
+        done = []
+        for card in self.local_cards():
+            if card.spec.key.lower() not in wanted:
+                continue
+            if not card.owns_service:
+                self.log(f"[{card.spec.id}] was not started by this launcher: restart it in "
+                         f"its own window to follow the new policy.", "warn")
+                continue
+            self.log(f"[{card.spec.id}] restarting for the new security policy")
+            card.stop_service()
+            QtCore.QTimer.singleShot(800 + 500 * len(done), card.start_service)
+            done.append(card.spec.id)
+        missing = wanted - {c.spec.key.lower() for c in self.local_cards()}
+        for k in sorted(missing):
+            self.log(f"[{k}] runs on this PC but has no card here: restart it by hand.", "warn")
+        return done
 
     def add_remote(self):
         dlg = AddRemoteDialog([m for m in self.found.modules if not m.remote], self)
@@ -2586,6 +2649,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev: QtGui.QCloseEvent):
         self.rescan_timer.stop()
+        self.badge_timer.stop()
         self.prober.stop()
         # Stop owned services PROPERLY: closing the window used to call
         # terminate() and move on, and the QProcess objects then died with the
