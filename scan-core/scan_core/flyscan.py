@@ -314,7 +314,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     from one continuous move. Adds `<det>_n` (samples per pixel) and
     `<det>_std` (their spread) next to every detector.
     """
-    from .engine import PAUSE_POLL_S, _Guard, _to_dataset, _unravel, _zigzag
+    from .engine import (PAUSE_POLL_S, _Guard, _to_dataset, _unravel, _zigzag,
+                         where_of)
 
     # the engine's fault check / pause (engine._Guard): checked after every
     # row, and a faulted row is flown again once the fault is gone
@@ -554,7 +555,11 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             done = (row + 1) * npix
             if on_progress:
                 elapsed = time.monotonic() - t0
-                on_progress(done, total, elapsed / done * (total - done))
+                # WHERE, once per row: the outer index of the row just flown
+                # (zig-zag applied); the fly axis itself has no single value
+                on_progress(done, total, elapsed / done * (total - done),
+                            where=where_of(dims, tuple(oidx), row * npix,
+                                           registry, row=(row + 1, n_rows)))
             if on_point:
                 on_point(done, total, snapshot)
             # each_sweep routines at the END of a sweep

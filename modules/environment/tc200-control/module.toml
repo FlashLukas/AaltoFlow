@@ -18,3 +18,10 @@ pub = 5614
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which instrument the service opens on real hardware: Mission Control's
+# "Instruments on this PC" offers a found serial address to this module and
+# passes it to the service as --port <address> (suite_local.json, this PC).
+[hardware]
+address_arg = "--port"
+bus = "serial"

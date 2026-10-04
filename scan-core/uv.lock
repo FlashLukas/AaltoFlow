@@ -16,7 +16,7 @@ resolution-markers = [
 [[package]]
 name = "aaltoview"
 version = "0.1.0"
-source = { git = "https://github.com/FlashLukas/AaltoView?branch=main#223e9493613b99a8dfe53c73cbf704ead254b9f7" }
+source = { git = "https://github.com/FlashLukas/AaltoView?branch=main#7e4267a44e91afd3128b7abc021b50c3115c88d6" }
 dependencies = [
     { name = "h5netcdf" },
     { name = "h5py" },
@@ -36,7 +36,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -746,7 +746,7 @@ name = "originpro"
 version = "1.1.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "originext" },
+    { name = "originext", marker = "sys_platform == 'win32'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/70/743589d8d8e24c5cf863d610c50c524c75e87616c8409fbcc30320f996fb/originpro-1.1.15-py3-none-any.whl", hash = "sha256:85f3555a5386af6af5975bc61f96194aacd4f18bf984b579f3c51991143772a5", size = 56108, upload-time = "2026-01-29T02:50:08.4Z" },

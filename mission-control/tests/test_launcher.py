@@ -616,3 +616,105 @@ def test_a_long_description_wraps_to_two_lines_and_ends_with_dots(env):
     card.desc.resize(300, 80)
     app.processEvents()
     assert card.desc.shown_text() == "short" and card.desc.toolTip() == ""
+
+
+def test_instruments_dialog_lists_and_assigns_an_address(env, monkeypatch):
+    """Instruments...: the scan's rows, the held one marked, and "Use for
+    module..." writes the address for the module it fits (suite_local.json),
+    which the service then gets with --real."""
+    mc, win, root, app = env
+    toml = root / "modules/other/lockin-control/module.toml"
+    toml.write_text(toml.read_text() + '\n[hardware]\naddress_arg = "--resource"\nbus = "visa"\n')
+    win.rescan(force=True)
+    from suite_common import instruments as I
+    rows = [I.Found("GPIB0::8::INSTR", "gpib", identity="Stanford_Research_Systems,SR830,1,1"),
+            I.Found("GPIB0::6::INSTR", "gpib", held_by="kepco",
+                    detail="held by a running service: not opened"),
+            I.Found("COM5", "serial", identity="USB Serial Port (COM5)", detail="FTDI")]
+    monkeypatch.setattr(mc.finder, "scan", lambda ask_visa=True: (list(rows), ["a note"]))
+    monkeypatch.setattr(mc.finder, "scan_vendor", lambda *a, **k: ([], []))
+    dlg = win.show_instruments()
+    _pump(app, 0.5)
+    try:
+        assert dlg.table.rowCount() == 3
+        # sorted by bus, then address: GPIB0::6 (kepco), GPIB0::8 (SR830), COM5
+        assert dlg.table.item(0, 6).text() == "kepco"
+        assert dlg.notes.text() == "a note"
+        dlg.table.selectRow(2)                         # COM5: only a serial port may be asked
+        assert dlg.ask_btn.isEnabled()
+        # ... and a VISA module can take it under VISA's name for the port
+        assert [a.text() for a in dlg.use_btn.menu().actions()] == \
+            ["lockin module [lockin]: ASRL5::INSTR"]
+        dlg.table.selectRow(1)                         # the SR830
+        assert not dlg.ask_btn.isEnabled()
+        actions = dlg.use_btn.menu().actions()
+        assert [a.text() for a in actions] == ["lockin module [lockin]: GPIB0::8::INSTR"]
+        actions[0].trigger()
+        _pump(app, 0.2)
+        win.rescan(force=True)
+        spec = win.found.get("lockin")
+        assert spec.address == "GPIB0::8::INSTR"
+        mc.set_real("lockin", True, root)
+        spec = mc.discover(root).get("lockin")
+        assert mc.service_args(spec)[-2:] == ["--resource", "GPIB0::8::INSTR"]
+        assert "lockin" in win.logbox.toPlainText() and "GPIB0::8::INSTR" in win.logbox.toPlainText()
+    finally:
+        dlg.close()
+        mc.set_real("lockin", False, root)
+        mc.set_address("lockin", None, root)
+
+
+def test_instruments_dialog_shows_probe_and_usb_rows(env, monkeypatch):
+    """Vendor-only devices: a module probe's row and USB-list rows (made-up
+    serials). An unknown USB device is hidden until 'show every USB device';
+    a probe's device is offered only to the module that found it, and the
+    launcher passes it after --real like any other address."""
+    mc, win, root, app = env
+    d = root / "modules/other/focus-control"
+    (d / "scripts" / "probe.py").write_text("")
+    toml = d / "module.toml"
+    toml.write_text(toml.read_text() + '\n[hardware]\naddress_arg = "--serial"\n'
+                    'bus = "device"\nprobe = "scripts/probe.py"\n')
+    win.rescan(force=True)
+    from suite_common import instruments as I
+    from suite_common import usb_devices as U
+    probe_rows, _ = I.parse_probe(json.dumps({"devices": [
+        {"address": "97000001", "identity": "Thorlabs KIM101", "detail": "Kinesis"}]}), "focus")
+    usb = I.usb_rows([U.UsbDevice(0x0403, 0xFAF0, "APT USB Device", "USB", "97000001"),
+                      U.UsbDevice(0x413C, 0x301A, "USB Input Device", "HIDClass", "")], held={})
+    vendor = I.merge(probe_rows, usb)
+    seen = {}
+
+    def fake_vendor(modules, probes=True, python_for=None):
+        seen["keys"] = sorted(m.key for m in modules if m.probe)
+        return list(vendor), ["focus: a probe note"]
+    monkeypatch.setattr(mc.finder, "scan", lambda ask_visa=True: ([], []))
+    monkeypatch.setattr(mc.finder, "scan_vendor", fake_vendor)
+    dlg = win.show_instruments()
+    _pump(app, 0.6)
+    try:
+        assert seen["keys"] == ["focus"]
+        assert dlg.table.rowCount() == 1                       # the keyboard is hidden
+        assert dlg.table.item(0, 0).text() == "DEVICE"
+        assert dlg.table.item(0, 4).text() == "focus probe + USB list"
+        assert dlg.table.item(0, 5).text() == "focus module [focus]"
+        assert "hidden" in dlg.status.text() and "a probe note" in dlg.notes.text()
+        dlg.all_usb.setChecked(True)
+        assert dlg.table.rowCount() == 2
+        assert "not a known instrument" in dlg.table.item(1, 2).text()
+        dlg.table.selectRow(0)
+        actions = dlg.use_btn.menu().actions()
+        assert [a.text() for a in actions] == ["focus module [focus]: 97000001"]
+        assert not dlg.ask_btn.isEnabled()
+        actions[0].trigger()
+        _pump(app, 0.2)
+        mc.set_real("focus", True, root)
+        spec = mc.discover(root).get("focus")
+        assert mc.service_args(spec)[-3:] == ["--real", "--serial", "97000001"]
+        dlg.table.selectRow(1)                                 # the keyboard: nobody's
+        assert not dlg.use_btn.isEnabled()
+    finally:
+        dlg.all_usb.setChecked(False)
+        dlg.close()
+        mc.set_real("focus", False, root)
+        mc.set_address("focus", None, root)

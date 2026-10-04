@@ -14,6 +14,7 @@ imaging is just two of the dims (from a raster axis).
 
 from __future__ import annotations
 
+import inspect
 import time
 
 import numpy as np
@@ -147,6 +148,58 @@ def _zigzag(idx: tuple[int, ...], shape: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(out)
 
 
+# ───────────────────── progress: HOW FAR, and WHERE (2026-10-02) ─────────────
+#
+# on_progress(done, total, eta_s) said how far a scan was, not where: the GUI
+# could show "25 / 125" but not "frequency 1000 MHz (1/5), scan_ix 24 (25/25)".
+# Working that out in the GUI would mean repeating the visiting ORDER there
+# (zig-zag reverses every other pass), and two copies of an order drift apart.
+# So the engine, which already knows the index it just measured, hands it over
+# as a keyword: on_progress(done, total, eta_s, where={...}). A callback written
+# for the old three arguments is still called with three -- every existing
+# script and test keeps working.
+
+def where_of(dims, idx, flat=None, registry=None, row=None) -> dict:
+    """WHERE a point is: its grid index and every axis's value there.
+
+    `idx` may be shorter than `dims` (a fly scan knows the outer index of a
+    row, not a pixel inside it): those axes get i = value = None.
+    {"index": idx, "flat": flat, "row": row (fly: (row, n_rows)) or None,
+     "axes": [{"name", "params", "i", "n", "value", "unit"}, ...]}
+    """
+    axes = []
+    for k, d in enumerate(dims):
+        i = int(idx[k]) if k < len(idx) else None
+        unit = ""
+        if registry is not None:
+            p = registry.get(d.params[0][0])
+            unit = getattr(p, "unit", "") or ""
+        axes.append({"name": d.name, "params": [q for q, _ in d.params],
+                     "i": i, "n": int(d.size), "unit": unit,
+                     "value": None if i is None else float(d.coord[i])})
+    return {"index": tuple(int(i) for i in idx), "flat": flat, "row": row,
+            "axes": axes}
+
+
+def _progress_reporter(on_progress):
+    """Wrap `on_progress` so the engine can always pass `where=`, and a
+    callback that does not take it is called exactly as before."""
+    if on_progress is None:
+        return None
+    try:
+        params = inspect.signature(on_progress).parameters.values()
+        takes = any(p.name == "where" or p.kind is p.VAR_KEYWORD for p in params)
+    except (TypeError, ValueError):         # a builtin without a signature
+        takes = False
+
+    def report(done, total, eta, where=None):
+        if takes and where is not None:
+            on_progress(done, total, eta, where=where)
+        else:
+            on_progress(done, total, eta)
+    return report
+
+
 def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
@@ -185,7 +238,13 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
          pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
-    on_progress(done, total, eta_s) : optional callback for a GUI/CLI.
+    on_progress(done, total, eta_s) : optional callback for a GUI/CLI. eta_s
+                                      is MEASURED (time so far / points so far
+                                      x points left), so settling and routines
+                                      are in it. If it also takes a `where`
+                                      keyword it gets where_of(...) of the
+                                      point just measured (see above); a fly
+                                      scan reports it once per row.
     should_abort() -> bool          : optional cooperative stop.
     created_iso                     : timestamp string for metadata (time is
                                       injected so runs are reproducible/testable).
@@ -234,6 +293,7 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     errs = recipe.validate(registry)
     if errs:
         raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
+    on_progress = _progress_reporter(on_progress)
 
     t_start = time.monotonic()
     # ctx is what hooks see. `current` = every value the ENGINE has set so far
@@ -453,7 +513,9 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         if on_progress:
             elapsed = time.monotonic() - t0
             eta = elapsed / done * (total - done)
-            on_progress(done, total, eta)
+            # `idx` is the index just MEASURED, zig-zag already applied
+            on_progress(done, total, eta,
+                        where=where_of(dims, idx, flat, registry))
         if on_point:
             # COPY the buffers: an xarray.Dataset wraps the arrays it is given,
             # so a snapshot sharing them would keep changing under whoever holds

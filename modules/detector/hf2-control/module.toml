@@ -18,3 +18,12 @@ pub = 5570
 service = "scripts/run_service.py"
 gui = "scripts/run_gui.py"
 start_after = []
+
+# Which lock-in the service opens on real hardware: Mission Control's
+# "Instruments on this PC" lists device ids with scripts/probe.py (LabOne
+# discovery, no data-server session) and passes the chosen id as --device <id>
+# (suite_local.json, this PC). bus "device" = an id the module takes verbatim.
+[hardware]
+address_arg = "--device"
+bus = "device"
+probe = "scripts/probe.py"

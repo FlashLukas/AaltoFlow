@@ -359,6 +359,62 @@ still assumes piezo/zpiezo.
     own key (`new --pc <pc>-<user>`, with `--address`); the keyring's write
     protection is the whole trust anchor; `scripts/kim_xy_calibration.py`
     (camera) talks plain.
+- **Finding instruments (2026-10-01).** Mission Control's *Instruments…*
+  lists what this PC can reach; the logic is
+  `suite-common/src/suite_common/instruments.py` (no Qt, tested with a fake
+  pyvisa / pyserial), the window is `InstrumentsDialog` in mission_control.py.
+  Rules, and why:
+  - VISA resources ending in `::INSTR` / `::SOCKET` on GPIB, USB or TCPIP are
+    asked `*IDN?` (1.5 s timeout: an empty GPIB address costs that much, so
+    the scan runs in a thread). Interfaces (`::INTFC`, e.g. the Prologix
+    adapter pyvisa-py lists on every serial port) are not listed at all.
+  - A serial port is NEVER written to by the scan -- not even through VISA's
+    `ASRLn::INSTR` -- only described from pyserial (USB description,
+    manufacturer, VID:PID, serial number). `ask_serial` sends `*IDN?` to one
+    port, on a click, at the baud rate the person picked.
+  - An address in `hwlock.held()` is never opened; the row names the holder.
+    VISA's `ASRL5::INSTR` and pyserial's `COM5` are merged into one row
+    (hwlock's normalisation; `ASRL/dev/ttyUSB0::INSTR` = `/dev/ttyUSB0`).
+  - "Use for module…": a module declares `[hardware] address_arg` / `bus`
+    in its module.toml (guide section 11); `instruments.address_for` turns
+    a found address into that module's form, `modules.set_address` stores it
+    in suite_local.json, `service_args` passes it after `--real` (only then:
+    the simulator opens nothing). check_modules checks that the flag exists.
+  - The extra `instruments` of mission-control: pyvisa, pyvisa-py (when no
+    NI / Keysight VISA is installed), pyserial, psutil + zeroconf (pyvisa-py
+    searches the LAN on every network card and finds HiSLIP instruments).
+  - **Vendor probes (2026-10-03).** Instruments that are not VISA / COM come
+    from two list-only sources, run in a second thread next to the VISA scan:
+    (1) `suite_common/usb_devices.py` -- the OS's USB list (Windows: ONE
+    PowerShell `Get-CimInstance Win32_PnPEntity` call for `USB\VID_*` and
+    `FTDIBUS\*`; Linux: /sys/bus/usb/devices), stdlib only, never raises.
+    `KNOWN_USB` names a device and its module; generic FTDI ids (0403:6001,
+    0403:6015) are named "could be ..." with NO module, because every
+    USB-serial cable looks the same. A composite device's interfaces and the
+    FTDIBUS twin of an FTDI device fold into one row; unknown devices are
+    hidden unless "show every USB device". (2) module probes: `[hardware]
+    probe` in module.toml, run with the module's venv python
+    (`instruments.module_python`: `.venv`, then `%LOCALAPPDATA%\uv-venvs`),
+    20 s timeout, all in parallel; the contract is in guide section 11.
+    `instruments.merge` folds a probe row, a USB-list row and a VISA/COM row
+    of one device together (same hwlock key, or the USB serial found in the
+    other row's address/lock/details); "Found by" says who saw it.
+    Bus `device` (a module takes an id verbatim): a probe's row is offered
+    only to the module whose probe found it, a USB-list row only to the
+    module KNOWN_USB names (its serial; a `visa` module gets
+    `USB0::0x<vid>::0x<pid>::<serial>::INSTR`). Lab finding: a device a
+    service has OPEN can be missing from its vendor's list (pylablib's
+    Kinesis list was empty while kim held the KIM101) -- the USB list still
+    shows it, hwlock marks it held, and each probe reports its own module's
+    held addresses, so the row reads "held by the running kim service", not
+    "nothing found". Found on the lab PC the same day: (a) Kinesis' FTDI
+    scan lists the Signal Hound TG44A too ("SignalHoundTG") -- a probe marks
+    such entries `"other": true`, which never suggest its module; (b) TLPMX
+    lists a held meter as `USB0::0x1313::0x807B::::INSTR`, serial "n/a" --
+    folded into the held row; (c) FTDI's channel letter: pyserial / FTDIBUS
+    say `<serial>A`, the `USB\` entry `<serial>` -- the merge compares both
+    spellings; (d) a row a running service HOLDS suggests that service's
+    module (the best evidence there is, also for an ambiguous FTDI cable).
 
 - **Port scheme:** instrument *n* (0-based) → `cmd = 5555 + 2n`, `pub = cmd + 1`.
   Since 2026-09-15 the ports are DECLARED in each module's `module.toml` (the
@@ -895,6 +951,21 @@ zpiezo has no GUI.
     copy (hf2, sr830, sr7230, kim's step-size and leash boxes), and syncing a
     form only on events, never on the poll (camera). A box whose value is sent
     the moment it changes is not affected either.
+46. **A fake stream sampled by a test thread measures the test machine**
+    (2026-10-01, scan-core fly tests). The fly tests failed now and then in
+    full runs ("samples per pixel >= 3") and always passed alone. Their fake
+    streams sampled the world in a Python thread every 1/rate s; under CPU
+    load Windows woke that thread a scheduler quantum late, so a "400 Hz"
+    stream gave one sample per ~35 ms (gaps up to 170 ms) and a pixel meant to
+    hold 10 samples held 0-2 -- while the engine had flown every pixel. The
+    fakes now sample on a fixed TIME GRID, computed at read time from where
+    the stage WAS at each grid time (`scan-core/tests/timed_stream.py`: a
+    stage kept as a history of moves), as a hardware-timed buffer does. The
+    tests still prove what they guard: re-introducing the approach bug or
+    gotcha #35 still empties 24 of 25 pixels. To reproduce load: run a few
+    dozen busy-loop processes next to pytest. Do NOT reproduce it by running
+    the same suite twice in parallel: the fixed test ports then collide, which
+    is a different failure.
 
 ---
 

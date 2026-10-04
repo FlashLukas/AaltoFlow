@@ -45,9 +45,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from suite_common import get_setting, set_setting
 from suite_common import hwlock
 from suite_common import secure
+from suite_common import instruments as finder
 from suite_common import (ENDPOINTS_ENV, PRODUCT, add_remote, default_root,
                           discover, endpoints_json, gui_args, probe,
-                          remove_remote, service_args, set_ports, set_real,
+                          remove_remote, service_args, set_address, set_ports, set_real,
                           setup_name, start_order, title as suite_title)
 from suite_common.catalog import (DEFAULT_CATALOG_URL, CatalogError, InstallPlan,
                                   ModuleSource, asset_url, download, env_steps,
@@ -535,6 +536,274 @@ class PortsDialog(QtWidgets.QDialog):
         default = (cmd, pub) == (self.spec.default_cmd, self.spec.default_pub)
         self.result_ports = (None, None) if default else (cmd, pub)
         self.accept()
+
+
+class InstrumentsDialog(QtWidgets.QDialog):
+    """Instruments on this PC: which addresses it can see, who each one is,
+    which are taken by a running service, and which module each fits.
+
+    The logic is suite_common/instruments.py (tested without Qt); this is the
+    window. The scan runs in a thread: asking every GPIB address *IDN? takes
+    a second or two per absent instrument, and the launcher must not freeze.
+    A COM port is never sent a byte unless "Ask this port" is pressed.
+
+    Instruments that are neither VISA nor COM (Kinesis, IDS cameras, NI DAQ,
+    Signal Hound, Zurich, Thorlabs TLPMX) come from two LIST-ONLY sources run
+    at the same time: each local module's probe (in that module's own venv --
+    the launcher never installs a vendor SDK) and the operating system's USB
+    device list. Neither opens a device.
+    """
+
+    COLS = ("Bus", "Address", "Who it is", "Details", "Found by", "Module", "In use by")
+    #: how the Bus column names each kind of row
+    BUS_LABEL = {"gpib": "GPIB", "usb": "USB", "tcpip": "LAN", "serial": "COM",
+                 "device": "DEVICE", "usb-device": "USB DEV", "other": "OTHER"}
+    _done = QtCore.Signal(object)                 # (rows, notes) from the thread
+    _asked = QtCore.Signal(object)                # one Found from a click
+
+    def __init__(self, modules: list[ModuleSpec], parent=None, log=None):
+        super().__init__(parent)
+        self.modules = [m for m in modules if not m.remote]
+        self.log = log or (lambda msg, level="info": None)
+        self.rows: list = []          # everything the last scan found
+        self.shown: list = []         # the rows in the table (unknown USB devices may be hidden)
+        self.setWindowTitle(suite_title("Instruments on this PC"))
+        self.resize(1240, 580)
+        lay = QtWidgets.QVBoxLayout(self)
+
+        intro = QtWidgets.QLabel(
+            "Every instrument this PC can reach over VISA (GPIB, USB, LAN), every COM "
+            "port, the devices the modules' own vendor libraries list (their <i>probes</i>: "
+            "Kinesis, IDS, NI-DAQmx, Signal Hound, LabOne, TLPMX) and the USB devices "
+            "Windows knows. VISA instruments are asked who they are (*IDN?); everything "
+            "else is only LISTED, and a COM port gets no byte until you press "
+            "<b>Ask this port</b>. An address a running service holds is never opened.")
+        intro.setWordWrap(True); intro.setObjectName("meta")
+        lay.addWidget(intro)
+
+        top = QtWidgets.QHBoxLayout()
+        self.scan_btn = QtWidgets.QPushButton("Scan"); self.scan_btn.setObjectName("primary")
+        self.scan_btn.clicked.connect(self.scan)
+        self.ask_visa = QtWidgets.QCheckBox("ask VISA instruments who they are (*IDN?)")
+        self.ask_visa.setChecked(True)
+        self.run_probes = QtWidgets.QCheckBox("run module probes")
+        self.run_probes.setChecked(True)
+        self.run_probes.setToolTip("Each module that declares a probe (module.toml [hardware]) "
+                                   "lists the devices its vendor library sees, in its own "
+                                   "environment. A probe opens nothing.")
+        self.all_usb = QtWidgets.QCheckBox("show every USB device")
+        self.all_usb.setToolTip("Also list USB devices that are not a known instrument "
+                                "(keyboards, cameras, hubs' children ...)")
+        self.all_usb.toggled.connect(lambda _=False: self._fill())
+        self.status = QtWidgets.QLabel(""); self.status.setObjectName("meta")
+        top.addWidget(self.scan_btn); top.addWidget(self.ask_visa)
+        top.addWidget(self.run_probes); top.addWidget(self.all_usb)
+        top.addStretch(1); top.addWidget(self.status)
+        lay.addLayout(top)
+
+        self.table = QtWidgets.QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
+        hh.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)   # long: full text in the tooltip
+        self.table.itemSelectionChanged.connect(self._selected)
+        lay.addWidget(self.table, 1)
+
+        self.notes = QtWidgets.QLabel(""); self.notes.setWordWrap(True)
+        self.notes.setStyleSheet(f"color:{C['accent_hi']};")
+        self.notes.hide()
+        lay.addWidget(self.notes)
+
+        act = QtWidgets.QHBoxLayout()
+        self.use_btn = QtWidgets.QToolButton(); self.use_btn.setText("Use for module…")
+        self.use_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.use_btn.setMenu(QtWidgets.QMenu(self.use_btn))
+        self.use_btn.setToolTip("Remember this address for a module on this PC: its service "
+                                "gets it at the next start in real-hardware mode. A device "
+                                "only a vendor library knows (a Kinesis serial, Dev1) is "
+                                "offered to the module that found it.")
+        self.copy_btn = QtWidgets.QPushButton("Copy address")
+        self.copy_btn.clicked.connect(self._copy)
+        self.baud = QtWidgets.QComboBox()
+        self.baud.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.baud.setToolTip("baud rate for 'Ask this port' (8 data bits, no parity, 1 stop bit)")
+        self.ask_btn = QtWidgets.QPushButton("Ask this port")
+        self.ask_btn.setToolTip("Send *IDN? to the selected COM port and read one line. "
+                                "Only do this when you know what is connected: some "
+                                "devices do not like unexpected bytes.")
+        self.ask_btn.clicked.connect(self._ask_port)
+        act.addWidget(self.use_btn); act.addWidget(self.copy_btn)
+        act.addSpacing(16); act.addWidget(self.baud); act.addWidget(self.ask_btn)
+        act.addStretch(1)
+        self.manual = QtWidgets.QLineEdit()
+        self.manual.setPlaceholderText("IP, IP:port or VISA address (an instrument that "
+                                       "does not announce itself)")
+        self.manual.setMinimumWidth(320)
+        self.manual.returnPressed.connect(self._test_manual)
+        test = QtWidgets.QPushButton("Test"); test.clicked.connect(self._test_manual)
+        act.addWidget(self.manual); act.addWidget(test)
+        lay.addLayout(act)
+
+        self._done.connect(self._show)
+        self._asked.connect(self._show_one)
+        self._selected()
+
+    # ---- scanning (in a thread) ------------------------------------------------
+
+    def scan(self):
+        self.scan_btn.setEnabled(False)
+        self.status.setText("scanning… (an absent GPIB address takes a second, "
+                            "a module probe a few)")
+        ask = self.ask_visa.isChecked()
+        probes = self.run_probes.isChecked()
+        modules = list(self.modules)
+
+        def run():
+            # VISA + COM in this thread, the list-only sources (probes, USB
+            # list) in a second one: they wait on different things
+            vendor: dict = {}
+
+            def other():
+                try:
+                    vendor["r"] = finder.scan_vendor(modules, probes=probes,
+                                                     python_for=finder.module_python)
+                except Exception as exc:
+                    vendor["r"] = ([], [f"vendor scan failed: {exc}"])
+            t = threading.Thread(target=other, daemon=True, name="instrument-vendor")
+            t.start()
+            try:
+                rows, notes = finder.scan(ask_visa=ask)
+            except Exception as exc:              # never take the launcher down
+                rows, notes = [], [f"scan failed: {exc}"]
+            t.join(finder.PROBE_TIMEOUT_S + 30)
+            extra, more = vendor.get("r", ([], ["the vendor scan did not finish"]))
+            try:
+                rows = finder.merge(rows, extra)
+            except Exception as exc:
+                more = more + [f"merge failed: {exc}"]
+            self._done.emit((rows, list(notes) + list(more)))
+        threading.Thread(target=run, daemon=True, name="instrument-scan").start()
+
+    def _show(self, result):
+        rows, notes = result
+        self.rows = list(rows)
+        self._fill()
+        self.scan_btn.setEnabled(True)
+        n_held = sum(bool(f.held_by) for f in self.shown)
+        hidden = len(self.rows) - len(self.shown)
+        self.status.setText(f"{len(self.shown)} found" + (f", {n_held} in use" if n_held else "")
+                            + (f", {hidden} other USB device(s) hidden" if hidden else ""))
+        self.notes.setText("\n".join(notes)); self.notes.setVisible(bool(notes))
+        for n in notes:
+            self.log(f"instruments: {n}", "warn")
+
+    def _show_one(self, f):
+        """The answer to a click (Ask this port / Test): update or add its row."""
+        for i, old in enumerate(self.rows):
+            if old.key == f.key and old.bus == f.bus:
+                f.aliases = old.aliases
+                if not f.detail:
+                    f.detail = old.detail
+                if f.error and not f.identity:
+                    f.identity = old.identity
+                self.rows[i] = f
+                break
+        else:
+            self.rows.append(f)
+        self._fill()
+        self.status.setText(f"{f.address}: " + (f.identity or f.error or "no answer"))
+
+    def _module_label(self, key: str) -> str:
+        """The suggested module as the cards name it ("Inertia stage 3D [kim]")."""
+        if not key:
+            return ""
+        spec = next((m for m in self.modules if m.key == key), None)
+        return f"{spec.name} [{key}]" if spec is not None else f"{key} (not installed)"
+
+    def _fill(self):
+        # an unrecognised USB device (keyboard, webcam ...) only on request
+        self.shown = [f for f in self.rows if f.known or self.all_usb.isChecked()]
+        self.table.setRowCount(len(self.shown))
+        for r, f in enumerate(self.shown):
+            who = f.identity or (f"({f.error})" if f.error else "")
+            detail = f.detail + (("; VISA: " + ", ".join(f.aliases)) if f.aliases else "")
+            cells = (self.BUS_LABEL.get(f.bus, f.bus.upper()), f.address, who, detail,
+                     f.source, self._module_label(f.suggest), f.held_by)
+            for c, text in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c == 2 and ((f.error and not f.identity) or not f.known):
+                    item.setForeground(QtGui.QColor(C["muted"]))
+                if c == 6 and f.held_by:
+                    item.setForeground(QtGui.QColor(C["accent_hi"]))
+                if c == 3:
+                    item.setToolTip(detail)
+                self.table.setItem(r, c, item)
+        self._selected()
+
+    # ---- the selected row ------------------------------------------------------
+
+    def current(self):
+        r = self.table.currentRow()
+        return self.shown[r] if 0 <= r < len(self.shown) and self.table.selectedItems() else None
+
+    def _selected(self):
+        f = self.current()
+        self.copy_btn.setEnabled(f is not None)
+        self.ask_btn.setEnabled(f is not None and f.bus == "serial" and not f.held_by)
+        menu = self.use_btn.menu(); menu.clear()
+        fits = finder.modules_for(f, self.modules) if f is not None else []
+        for spec, address in fits:
+            now = f"  (now: {spec.address})" if spec.address else ""
+            a = menu.addAction(f"{spec.name} [{spec.key}]: {address}{now}")
+            a.triggered.connect(lambda _=False, s=spec, ad=address: self.use_for(s, ad))
+        self.use_btn.setEnabled(bool(fits))
+
+    def use_for(self, spec: ModuleSpec, address: str):
+        set_address(spec.key, address, ROOT)
+        spec.address = address
+        self.log(f"[{spec.key}] instrument address on this PC: {address} -- used when the "
+                 f"service starts with 'real' ticked ({spec.address_arg} {address})")
+        self.status.setText(f"{spec.key} -> {address}")
+        self._selected()
+
+    def _copy(self):
+        f = self.current()
+        if f is not None:
+            QtWidgets.QApplication.clipboard().setText(f.address)
+            self.status.setText(f"copied {f.address}")
+
+    def _ask_port(self):
+        f = self.current()
+        if f is None or f.bus != "serial":
+            return
+        port, baud = f.address, int(self.baud.currentText())
+        self.status.setText(f"asking {port} at {baud} baud…")
+
+        def run():
+            try:
+                self._asked.emit(finder.ask_serial(port, baud=baud))
+            except Exception as exc:
+                self._asked.emit(finder.Found(address=port, bus="serial", error=str(exc)))
+        threading.Thread(target=run, daemon=True, name="instrument-ask").start()
+
+    def _test_manual(self):
+        text = self.manual.text().strip()
+        if not text:
+            return
+        self.status.setText(f"asking {text}…")
+
+        def run():
+            try:
+                self._asked.emit(finder.ask_address(text))
+            except Exception as exc:
+                self._asked.emit(finder.Found(address=text, bus=finder.bus_of(text),
+                                              error=str(exc)))
+        threading.Thread(target=run, daemon=True, name="instrument-test").start()
 
 
 class AddRemoteDialog(QtWidgets.QDialog):
@@ -1432,6 +1701,14 @@ class ModuleCard(QtWidgets.QFrame):
         self.meta.setText(f"{where}   ·   {ports}{extra}")
         self.real_check.setVisible(not spec.remote)
         self.real_check.setChecked(spec.real)
+        # which instrument it opens on real hardware (Instruments on this PC)
+        tip = ("On: start the service with --real (drives the instrument).\n"
+               "Off: simulated backend. Remembered on this PC.")
+        if spec.address_arg:
+            tip += ("\nInstrument on this PC: " + (spec.address or "from the module's own "
+                    "config") + "  (set it with Instruments…)")
+        self.real_check.setToolTip(tip)
+        self.real_check.setText(f"real: {spec.address}" if spec.address else "real")
         for b in (self.btn_service, self.btn_stop, self.btn_ports):
             b.setVisible(not spec.remote)
         self.btn_remove.setVisible(spec.remote)
@@ -1849,7 +2126,11 @@ class MainWindow(QtWidgets.QMainWindow):
         imp.setToolTip("Read a settings .zip back. Shows what would change first, "
                        "and keeps a backup of every file it replaces.")
         imp.clicked.connect(lambda: self.import_settings())
-        mrow.addWidget(rescan); mrow.addWidget(add_mod); mrow.addWidget(add)
+        inst = QtWidgets.QPushButton("Instruments…")
+        inst.setToolTip("Which instruments this PC can see (GPIB, USB, LAN, COM ports), "
+                        "who each one is, and which module it fits")
+        inst.clicked.connect(lambda: self.show_instruments())
+        mrow.addWidget(rescan); mrow.addWidget(inst); mrow.addWidget(add_mod); mrow.addWidget(add)
         mrow.addWidget(exp); mrow.addWidget(imp)
         col.addLayout(mrow)
 
@@ -2043,6 +2324,17 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg.installed.connect(lambda: self.rescan(force=True))
         dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         dlg.show()
+        return dlg
+
+    def show_instruments(self, scan: bool = True) -> "InstrumentsDialog":
+        """Instruments on this PC (non-modal: it stays open next to the cards)."""
+        dlg = getattr(self, "_instruments", None)
+        if dlg is None:
+            dlg = self._instruments = InstrumentsDialog(self.found.modules, self, log=self.log)
+        dlg.modules = [m for m in self.found.modules if not m.remote]
+        dlg.show(); dlg.raise_()
+        if scan:
+            dlg.scan()
         return dlg
 
     def add_remote(self):

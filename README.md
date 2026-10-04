@@ -537,7 +537,10 @@ what it was taken *under* and *how*, not only what was swept:
 ![scan tab](front-panels/suite-scan.png)
 
 Then watch it run on the Measurement tab. Defining takes a minute; running takes
-an hour, and they want different screens:
+an hour, and they want different screens. While it runs, the header says where
+it is -- point n of N, each axis's value with its position along the axis, the
+measured time left and the routine step in progress (an autofocus, say) -- and
+the live map outlines the point just measured:
 
 ![measurement tab](front-panels/suite-measurement.png)
 
@@ -599,6 +602,35 @@ scan-core installs it as a dependency.
 Mission Control starts every service and opens every GUI from one place:
 
 ![mission control](front-panels/mission-control.png)
+
+**Instruments…** (next to Rescan) shows every instrument this PC can reach and
+at which address: GPIB, USB and LAN instruments through VISA, each asked who it
+is (`*IDN?`), and every COM port with what its USB chip says about it. A COM
+port is sent nothing until you press **Ask this port** (a stray query at the
+wrong baud rate can upset a motor controller or a laser), and an address a
+running service holds is never opened -- the row says which module holds it.
+**Use for module…** offers the selected address to every module it fits and
+remembers the choice on this PC; the service gets it at its next start with
+*real* ticked, and the card's *real* box shows it. An instrument on the network
+that does not announce itself: type its IP and press **Test**.
+
+![instruments on this PC](front-panels/mission-control-instruments.png)
+
+It needs `uv sync --extra instruments` in `mission-control` (pyvisa, pyvisa-py,
+pyserial) and, for GPIB, the VISA library of the GPIB card's maker (NI-VISA or
+Keysight IO Libraries).
+
+Instruments that are neither VISA nor COM -- a Thorlabs Kinesis controller, an
+IDS camera, an NI DAQ card, a Signal Hound, a Zurich lock-in, a Thorlabs power
+meter on its own driver -- show up too, from two sources that only LIST (no
+device is opened, no byte is sent): each module's **probe**, run in that
+module's own environment with its vendor library (so the launcher needs no
+vendor SDK), and the **USB device list** Windows keeps, which names known
+devices and the module that drives them. A device a running service holds may
+be missing from its vendor's list (FTDI does not list an open Kinesis
+controller); the USB list still shows it, marked as held. USB devices that are
+not a known instrument (keyboards, webcams) are hidden until *show every USB
+device* is ticked.
 
 The Scan Builder stacks axes outer-to-inner with no length limit, and runs the
 engine against whichever registry it was given -- simulated here, real

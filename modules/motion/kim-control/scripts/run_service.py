@@ -43,9 +43,16 @@ def main() -> int:
     ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
     ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
     ap.add_argument("--status-hz", type=float, default=8.0)
+    # Which KIM101 (its Kinesis serial, 97xxxxxx). Mission Control passes the one
+    # chosen in "Instruments on this PC" (module.toml [hardware]); without the
+    # flag hardware.serial from the config is used ("" = the one KIM101 found).
+    ap.add_argument("--serial", default=None,
+                    help="Kinesis serial of the KIM101 to open (default: from the config)")
     args = ap.parse_args()
 
     cfg, cfg_path, loaded = load_startup_config(args.config)
+    if args.serial:
+        cfg.hardware.serial = args.serial.strip()
     brain, _backend = (build_real_system if args.real else build_sim_system)(cfg)
     # save_calibration / save_config write back to the file we started from,
     # so what is saved is what the next start loads.
