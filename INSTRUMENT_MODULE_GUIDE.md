@@ -348,20 +348,47 @@ are in `docs/DEVELOPER_NOTES.md` section 4 ("Control"). Every module has it
    still works.
 
 
-### Encryption -- CurveZMQ (2026-09-30, prototype: kim, camera)
+### Encryption -- CurveZMQ (every module, 2026-10-04)
 
-A module can speak CurveZMQ, so that only PCs in the lab keyring reach it and
-every identity it receives is checked against the sender's key (README,
-"Encryption and keys"; developer notes section 4, "Encryption"). To add it:
-copy `suite-common/src/suite_common/secure.py` to `src/<pkg>/secure.py`
-(byte-identical, like control.py); in the service call
-`secure.secure_server(ctx, [rep, pub], "<key>", on_event=...)` before binding,
-receive with `recv(copy=False)` and run `guard.check(req,
-secure.user_id(frame))` before `_dispatch`, and `release_server` in `stop()`;
-in the client call `secure.secure_client(sock, host, "<key>")` before every
-`connect`; in the console load `secure.py` by file path; point
-AALTOFLOW_SECURITY_DIR at an empty folder in `tests/conftest.py`. kim is the
-reference, and `tests/test_secure.py` there shows what to test.
+Every module speaks CurveZMQ when the lab's policy secures it, so that only
+PCs in the lab keyring reach it and every identity it receives is checked
+against the sender's key (README, "Encryption and keys"; developer notes
+section 4, "Encryption", and gotcha #47). With the policy "off" -- the
+default, and every PC that was never set up -- nothing changes. kim is the
+reference implementation; copy its code, do not invent a variant.
+
+1. **Copy, never edit:** `suite-common/src/suite_common/secure.py` ->
+   `src/<pkg>/secure.py` (byte-identical; `check_modules` compares).
+2. **Service** (`net/service.py`, see kim's `start` / `stop` / `_commander`):
+   - before binding: `self._guard = secure.secure_server(ctx, [rep, pub],
+     "<key>", on_event=...)` -- inside a try that closes both sockets on
+     `secure.SecurityError` and re-raises;
+   - every later failure path in `start()` (port taken, brain refused) and
+     `stop()` call `secure.release_server(self._guard)`;
+   - receive with `frame = sock.recv(copy=False)`; before `_dispatch`:
+     `refused = self._guard.check(req, secure.user_id(frame))` when a guard
+     is set, and reply with `refused` if it is not None.
+3. **Client** (`net/client.py`), every REQ socket:
+   - `RCVTIMEO` AND `SNDTIMEO` (a plain socket whose handshake an encrypted
+     service refused blocks forever in `send` -- gotcha #47);
+   - `secure.secure_client(sock, host, "<key>")` before `connect`;
+   - on `zmq.Again`: close, `flipped = secure.no_answer(host, "<key>")`,
+     rebuild, and resend ONCE when it flipped (kim's `_rpc` loop). Safe: a
+     request in the wrong mode never reaches the service.
+   - SUB loop: `secure.secure_client(sub, ...)` before `connect`, and rebuild
+     the SUB socket when `secure.flip_generation()` changes (kim's `_sub_loop`).
+4. **Other clients in the module** (a backend that talks to ANOTHER module,
+   e.g. camera -> kim, vna -> a magnet): the same three points, with the
+   OTHER module's key (`secure.secure_client(sock, host, "kim")`).
+5. **Console** (`scripts/<x>_console.py`): load `secure.py` by file path
+   (kim's `_load_secure`), `SNDTIMEO`, and the same retry on a timeout.
+6. **Tests:** `tests/conftest.py` points `AALTOFLOW_SECURITY_DIR` at an empty
+   temporary folder at import (the PC's own keys must never change a test).
+   `python tools/check_modules.py <key> --live` then proves it end to end:
+   it starts the service with a throw-away keyring in `enforce` and checks
+   that a plain client gets NO answer while a keyed one gets describe, the
+   status stream and shutdown. Module-specific tests are only needed for
+   what the module adds (kim's `tests/test_secure.py` covers the shared code).
 
 ---
 
@@ -895,6 +922,9 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
    did not bring `control.py` + `apps/control_bar.py`, copy them from
    suite-common and wire them in; decide which of X's verbs are SAFETY verbs
    (stop / abort / off -- always allowed, also for a viewer).
+   **Encryption (§6, "Encryption -- CurveZMQ"):** the template brings
+   `secure.py` and the wiring; keep the service, client and console code that
+   calls it when you rewrite them.
 8. Scripts: `run_service.py`, `<x>_console.py`, `run_gui.py`, `smoke_test.py` --
    keeping the command-line contract of section 11.
 9. GUI: `theme.py` came with the copy; build `MainWindow` + a new signature

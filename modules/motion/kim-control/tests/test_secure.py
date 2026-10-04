@@ -368,3 +368,20 @@ def test_a_request_long_after_the_policy_change_does_not_hang(start_kim, client,
     b = client("b", start=False)
     time.sleep(1.0)                         # the plain handshake is refused meanwhile
     assert b.take_control()
+
+
+def test_the_console_follows_a_policy_change(start_kim, lab):
+    """Lab PC, 2026-10-04: kim_console.py timed out against a service running
+    in the other mode than the policy -- it did not retry like the clients."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    start_kim()                             # encrypted
+    lab.policy("off")
+    lab.on("b")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "kim_console.py"
+    r = subprocess.run([sys.executable, str(script), "--host", TO_A, "--port", str(CMD),
+                        "status"], capture_output=True, text=True, timeout=30,
+                       env=dict(os.environ))
+    assert '"ok": true' in r.stdout, r.stdout + r.stderr

@@ -102,12 +102,18 @@ def main() -> None:
     args = ap.parse_args()
 
     ctx = zmq.Context.instance()
-    sock = ctx.socket(zmq.REQ)
-    sock.setsockopt(zmq.RCVTIMEO, 5000)
-    sock.setsockopt(zmq.LINGER, 0)
-    if _SECURE is not None:          # CurveZMQ when the lab's policy secures the camera
-        _SECURE.secure_client(sock, args.host, "camera")
-    sock.connect(f"tcp://{args.host}:{args.port}")
+
+    def make_req():
+        s = ctx.socket(zmq.REQ)
+        s.setsockopt(zmq.RCVTIMEO, 5000)
+        s.setsockopt(zmq.SNDTIMEO, 5000)    # a refused handshake must not block send
+        s.setsockopt(zmq.LINGER, 0)
+        if _SECURE is not None:          # CurveZMQ when the lab's policy secures the camera
+            _SECURE.secure_client(s, args.host, "camera")
+        s.connect(f"tcp://{args.host}:{args.port}")
+        return s
+
+    sock = [make_req()]
 
     def send(line: str) -> None:
         line = line.strip()
@@ -118,13 +124,20 @@ def main() -> None:
         except Exception as exc:
             print(f"! parse error: {exc}")
             return
-        sock.send_json(req)
-        try:
-            reply = sock.recv_json()
-        except zmq.Again:
-            print("! timeout (is the service running?)")
-            sock.close(0)
-            sys.exit(1)
+        for attempt in (1, 2):
+            try:
+                sock[0].send_json(req)
+                reply = sock[0].recv_json()
+                break
+            except zmq.Again:
+                sock[0].close(0)
+                # the camera may run in the other mode than the policy now
+                # says (started before it changed): try that mode once
+                if attempt == 1 and _SECURE is not None and _SECURE.no_answer(args.host, "camera"):
+                    sock[0] = make_req()
+                    continue
+                print("! timeout (is the service running?)")
+                sys.exit(1)
         # Frames are huge base64 blobs -- summarise instead of dumping.
         if isinstance(reply, dict) and "png_b64" in reply:
             reply["png_b64"] = f"<{len(reply['png_b64'])} b64 chars>"

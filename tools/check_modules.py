@@ -448,6 +448,129 @@ def port_taken_check(rep: Report, m, py: Path):
         blocker.close()
 
 
+# Encryption, end to end, with the module's OWN secure.py (argv: the path of
+# secure.py, the security folder to create). Makes this "PC"'s key, a keyring
+# holding it, and the policy enforce ["*"]. Prints nothing.
+_SECURE_SETUP = r"""
+import importlib.util, json, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("check_secure", sys.argv[1])
+S = importlib.util.module_from_spec(spec); sys.modules[spec.name] = S
+spec.loader.exec_module(S)   # registered first: secure.py uses dataclasses
+me = Path(sys.argv[2]); kr = me / "keyring"; kr.mkdir(parents=True)
+pub, sec = S.new_keypair()
+meta = {"pc": "check-pc", "machine": "yes"}
+S.write_cert(me / S.OWN_PUBLIC, pub, meta=meta)
+S.write_cert(me / S.OWN_SECRET, pub, sec, meta=meta)
+S.write_cert(kr / "check-pc.key", pub, meta=meta)
+(me / S.SETTINGS_FILE).write_text(json.dumps({"keyring": str(kr)}), encoding="utf-8")
+(kr / S.POLICY_FILE).write_text(json.dumps({"mode": "enforce", "modules": ["*"]}),
+                                encoding="utf-8")
+"""
+
+# argv: secure.py, module key, cmd port, pub port. One JSON line:
+# plain describe (must get NO answer), CurveZMQ describe, a CurveZMQ status
+# frame on SUB, and the CurveZMQ shutdown reply.
+_SECURE_PROBE = r"""
+import importlib.util, json, sys, time, zmq
+spec = importlib.util.spec_from_file_location("check_secure", sys.argv[1])
+S = importlib.util.module_from_spec(spec); sys.modules[spec.name] = S
+spec.loader.exec_module(S)   # registered first: secure.py uses dataclasses
+key, cmd, pub = sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+ctx = zmq.Context.instance()
+def ask(req, curve, timeout=3000):
+    s = ctx.socket(zmq.REQ)
+    s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, timeout)
+    s.setsockopt(zmq.SNDTIMEO, timeout)
+    if curve:
+        assert S.secure_client(s, "127.0.0.1", key)
+    s.connect(f"tcp://127.0.0.1:{cmd}")
+    try:
+        s.send_json(req); return s.recv_json()
+    except zmq.Again:
+        return None
+    finally:
+        s.close(0)
+out = {}
+out["plain"] = ask({"cmd": "describe"}, False, 1500) is not None
+d = None
+t0 = time.monotonic()
+while d is None and time.monotonic() - t0 < 30:
+    d = ask({"cmd": "describe"}, True)
+out["module"] = (d or {}).get("describe", {}).get("module")
+sub = ctx.socket(zmq.SUB); sub.setsockopt(zmq.LINGER, 0); sub.setsockopt(zmq.RCVTIMEO, 5000)
+S.secure_client(sub, "127.0.0.1", key)
+sub.connect(f"tcp://127.0.0.1:{pub}"); sub.setsockopt(zmq.SUBSCRIBE, b"status")
+try:
+    out["status_frame"] = sub.recv_multipart()[0] == b"status"
+except zmq.Again:
+    out["status_frame"] = False
+sub.close(0)
+r = ask({"cmd": "shutdown"}, True)
+out["shutdown"] = bool(r and r.get("ok"))
+print(json.dumps(out))
+"""
+
+
+def secure_live_check(rep: Report, m, py: Path):
+    """A module with src/<pkg>/secure.py must really speak CurveZMQ when the
+    lab's policy secures it: started with a throw-away keyring in 'enforce',
+    a plain client gets NO answer, a keyed client gets describe and the
+    status stream, and shutdown (encrypted) stops it. One generic check
+    instead of a security test file per module."""
+    import tempfile
+    pkg = package_dir(m.dir)
+    sec = pkg / "secure.py" if pkg is not None else None
+    if sec is None or not sec.is_file():
+        return
+    name = "live: encrypted (CurveZMQ) when the policy secures it"
+    me = Path(tempfile.mkdtemp(prefix="aaltoflow-check-sec-")) / "pc"
+    r = subprocess.run([str(py), "-c", _SECURE_SETUP, str(sec), str(me)],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        rep.add(m.key, name, "FAIL", f"key setup failed: {(r.stderr or '').strip()[-150:]}")
+        return
+    env = dict(os.environ, AALTOFLOW_SECURITY_DIR=str(me))
+    cmd, pub = free_port_pair()
+    proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
+                            cwd=m.dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, env=env)
+    try:
+        r = subprocess.run([str(py), "-c", _SECURE_PROBE, str(sec), m.key, str(cmd), str(pub)],
+                           capture_output=True, text=True, timeout=90, env=env)
+        try:
+            res = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            res = None
+        try:
+            proc.wait(15)
+        except subprocess.TimeoutExpired:
+            pass
+        exited = proc.poll() is not None
+        out = proc.stdout.read() if exited else ""
+        problems = []
+        if res is None:
+            problems.append(f"probe failed: {(r.stderr or r.stdout).strip()[-150:]}")
+        else:
+            if res["plain"]:
+                problems.append("a PLAIN client was answered")
+            if res["module"] != m.key:
+                problems.append(f"keyed describe: {res['module']!r}")
+            if not res["status_frame"]:
+                problems.append("no encrypted status frame on SUB")
+            if not res["shutdown"]:
+                problems.append("encrypted shutdown not accepted")
+        if not exited:
+            problems.append("still running 15 s after shutdown")
+        elif f"security: {m.key} is encrypted" not in out:
+            problems.append("console has no 'security: ... is encrypted' line")
+        rep.add(m.key, name, "FAIL" if problems else "PASS", "; ".join(problems))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(10)
+
+
 def live_check(rep: Report, m, py: Path):
     cmd, pub = free_port_pair()
     proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
@@ -608,6 +731,7 @@ def main(argv=None) -> int:
         if args.live:
             live_check(rep, m, py)
             port_taken_check(rep, m, py)
+            secure_live_check(rep, m, py)
 
     rep.print()
     n_fail = len(rep.failed)
