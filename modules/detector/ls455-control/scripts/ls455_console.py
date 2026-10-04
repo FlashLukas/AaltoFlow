@@ -49,6 +49,34 @@ import uuid
 
 import zmq
 
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured ls455 will not
+    answer it."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "ls455" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("ls455_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
+
+def _secure(sock, host: str) -> None:
+    """Make `sock` a CurveZMQ client when the lab's policy secures ls455."""
+    if _SECURE is not None:
+        _SECURE.secure_client(sock, host, "ls455")
+
 CMD_PORT = 5615
 PUB_PORT = 5616
 TIMEOUT_MS = 3000
@@ -81,19 +109,28 @@ class Console:
     def _new_req(self):
         s = self.ctx.socket(zmq.REQ)
         s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+        s.setsockopt(zmq.SNDTIMEO, TIMEOUT_MS)   # a refused handshake must not block send
         s.setsockopt(zmq.LINGER, 0)
+        _secure(s, self.host)
         s.connect(f"tcp://{self.host}:{self.cmd_port}")
         return s
 
     def send(self, msg: dict) -> dict:
         msg.setdefault("client", IDENTITY)      # say who we are (control)
-        try:
-            self.req.send_json(msg)
-            return self.req.recv_json()
-        except zmq.Again:
-            self.req.close(0)                  # a timed-out REQ socket is stuck: rebuild
-            self.req = self._new_req()
-            return {"ok": False, "error": "no reply (is the service running?)"}
+        for attempt in (1, 2):
+            try:
+                self.req.send_json(msg)
+                return self.req.recv_json()
+            except zmq.Again:
+                # timed out -> REQ socket is stuck; rebuild it so the next call works
+                self.req.close(0)
+                # ls455 may run in the other mode than the policy now says
+                # (started before it changed): try that mode once
+                # (secure.no_answer; a wrong-mode request never reaches ls455)
+                flipped = _SECURE is not None and _SECURE.no_answer(self.host, "ls455")
+                self.req = self._new_req()
+                if not (flipped and attempt == 1):
+                    return {"ok": False, "error": "no reply (is the service running?)"}
 
     def start_heartbeat(self):
         """"Still here" in the background, on its OWN socket (a ZeroMQ socket
@@ -128,6 +165,7 @@ class Console:
 
     def watch(self, seconds: float):
         sub = self.ctx.socket(zmq.SUB)
+        _secure(sub, self.host)              # telemetry too
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         poller = zmq.Poller(); poller.register(sub, zmq.POLLIN)

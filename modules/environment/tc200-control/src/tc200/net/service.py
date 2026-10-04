@@ -21,6 +21,7 @@ import time
 
 import zmq
 
+from .. import secure
 from ..control import ControlLease
 from ..heater import Heater
 from .describe import build_manifest
@@ -51,6 +52,7 @@ class Tc200Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        self._guard = None                   # secure.Guard while secured
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send. For a heater the only
@@ -78,12 +80,26 @@ class Tc200Service:
         # in ZeroMQ; Thread.start() is the memory barrier it asks for.)
         self._pub_sock = self._ctx.socket(zmq.PUB)
         self._rep_sock = self._ctx.socket(zmq.REP)
+        # Encryption and who-is-who (secure.py, README "Encryption and
+        # keys"): when the lab's policy secures tc200, both sockets become
+        # CurveZMQ servers -- only PCs in the keyring can connect, and every
+        # request is checked against the key that sent it. Must happen before
+        # bind. With security off (the default) nothing changes.
+        try:
+            self._guard = secure.secure_server(
+                self._ctx, [self._rep_sock, self._pub_sock], "tc200",
+                on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
+        except secure.SecurityError:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
         try:
             self._pub_sock.bind(self.pub_addr)
             self._rep_sock.bind(self.cmd_addr)
         except zmq.ZMQError as exc:
             self._pub_sock.close(0)
             self._rep_sock.close(0)
+            secure.release_server(self._guard)
             raise PortInUse(
                 f"cannot listen on {self.cmd_addr} / {self.pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
@@ -96,6 +112,7 @@ class Tc200Service:
             # give the ports back before the exception leaves
             self._pub_sock.close(0)
             self._rep_sock.close(0)
+            secure.release_server(self._guard)
             raise
         self._pub_t = threading.Thread(target=self._publisher, name="svc-pub", daemon=True)
         self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
@@ -116,6 +133,8 @@ class Tc200Service:
     def stop(self) -> None:
         self._stop.set()
         time.sleep(self.status_dt + 0.1)
+        secure.release_server(self._guard)
+        self._guard = None
         self.heater.shutdown()
 
     # ---------------------------------------------------------------- threads
@@ -171,8 +190,16 @@ class Tc200Service:
         while not self._stop.is_set():
             if poller.poll(200):
                 try:
-                    msg = rep.recv_json()
-                    rep.send_json(self._dispatch(msg))
+                    # the raw frame, not recv_json(): its metadata carries
+                    # the key that sent it (secure.user_id)
+                    frame = rep.recv(copy=False)
+                    msg = json.loads(frame.bytes.decode("utf-8"))
+                    # security first: does the identity match the key that
+                    # sent it? (None = yes, or security is off)
+                    refused = None
+                    if self._guard is not None and isinstance(msg, dict):
+                        refused = self._guard.check(msg, secure.user_id(frame))
+                    rep.send_json(refused or self._dispatch(msg))
                 except Exception as exc:                       # never let the loop die
                     try:
                         rep.send_json({"ok": False, "error": str(exc)})
