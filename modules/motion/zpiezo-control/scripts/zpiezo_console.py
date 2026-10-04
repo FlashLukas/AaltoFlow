@@ -26,6 +26,33 @@ import uuid
 
 import zmq
 
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured zpiezo will not
+    answer it."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "zpiezo" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("zpiezo_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
+
+def _secure(sock, host: str) -> None:
+    """Make `sock` a CurveZMQ client when the lab's policy secures zpiezo."""
+    if _SECURE is not None:
+        _SECURE.secure_client(sock, host, "zpiezo")
+
 DEFAULT_CMD_PORT = 5565
 
 # Who this console is to the service (the same fields as control.py's
@@ -60,10 +87,17 @@ def main() -> None:
     args = ap.parse_args()
 
     ctx = zmq.Context.instance()
-    sock = ctx.socket(zmq.REQ)
-    sock.setsockopt(zmq.RCVTIMEO, 3000)
-    sock.setsockopt(zmq.LINGER, 0)
-    sock.connect(f"tcp://{args.host}:{args.port}")
+
+    def make_req():
+        s = ctx.socket(zmq.REQ)
+        s.setsockopt(zmq.RCVTIMEO, 3000)
+        s.setsockopt(zmq.SNDTIMEO, 3000)    # a refused handshake must not block send
+        s.setsockopt(zmq.LINGER, 0)
+        _secure(s, args.host)
+        s.connect(f"tcp://{args.host}:{args.port}")
+        return s
+
+    sock = [make_req()]
 
     def send(line: str) -> None:
         line = line.strip()
@@ -75,13 +109,21 @@ def main() -> None:
             print(f"! parse error: {exc}")
             return
         req.setdefault("client", IDENTITY)       # say who we are (control)
-        sock.send_json(req)
-        try:
-            print(json.dumps(sock.recv_json(), indent=2))
-        except zmq.Again:
-            print("! timeout (is the service running?)")
-            sock.close(0)
-            sys.exit(1)
+        for attempt in (1, 2):
+            try:
+                sock[0].send_json(req)
+                print(json.dumps(sock[0].recv_json(), indent=2))
+                return
+            except zmq.Again:
+                sock[0].close(0)
+                # zpiezo may run in the other mode than the policy now says
+                # (started before it changed): try that mode once
+                # (secure.no_answer; a wrong-mode request never reaches zpiezo)
+                if attempt == 1 and _SECURE is not None and _SECURE.no_answer(args.host, "zpiezo"):
+                    sock[0] = make_req()
+                    continue
+                print("! timeout (is the service running?)")
+                sys.exit(1)
 
     if args.oneshot:
         send(" ".join(args.oneshot))
@@ -89,20 +131,14 @@ def main() -> None:
     # "still here" in the background, on its OWN socket (a ZeroMQ socket
     # belongs to one thread): while you think, control stays yours
     def heartbeat() -> None:
-        def make():
-            hb = ctx.socket(zmq.REQ)
-            hb.setsockopt(zmq.RCVTIMEO, 3000)
-            hb.setsockopt(zmq.LINGER, 0)
-            hb.connect(f"tcp://{args.host}:{args.port}")
-            return hb
-        hb = make()
+        hb = make_req()
         while not stop.wait(HEARTBEAT_S):
             try:
                 hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
                 hb.recv_json()
             except zmq.Again:                     # stuck REQ: rebuild it
                 hb.close(0)
-                hb = make()
+                hb = make_req()                   # in the mode send() found working
         hb.close(0)
 
     stop = threading.Event()

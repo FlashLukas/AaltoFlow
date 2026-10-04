@@ -22,6 +22,7 @@ import time
 import zmq
 
 from ..agilis import AgilisStage
+from .. import secure
 from ..control import ControlLease
 from .describe import build_manifest
 from . import protocol as P
@@ -52,6 +53,7 @@ class AgilisService:
         self.status_hz = status_hz
 
         self._ctx = zmq.Context.instance()
+        self._guard = None                   # secure.Guard while secured
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -83,12 +85,26 @@ class AgilisService:
         pub_addr = f"tcp://{self.host}:{self.pub_port}"
         self._pub_sock = self._ctx.socket(zmq.PUB)
         self._rep_sock = self._ctx.socket(zmq.REP)
+        # Encryption and who-is-who (secure.py, README "Encryption and
+        # keys"): when the lab's policy secures agilis, both sockets become
+        # CurveZMQ servers -- only PCs in the keyring can connect, and every
+        # request is checked against the key that sent it. Must happen before
+        # bind. With security off (the default) nothing changes.
+        try:
+            self._guard = secure.secure_server(
+                self._ctx, [self._rep_sock, self._pub_sock], "agilis",
+                on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
+        except secure.SecurityError:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
         try:
             self._pub_sock.bind(pub_addr)
             self._rep_sock.bind(cmd_addr)
         except zmq.ZMQError as exc:
             self._pub_sock.close(0)
             self._rep_sock.close(0)
+            secure.release_server(self._guard)
             raise PortInUse(
                 f"cannot listen on {cmd_addr} / {pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
@@ -103,6 +119,7 @@ class AgilisService:
             # give the ports back before the exception leaves
             self._pub_sock.close(0)
             self._rep_sock.close(0)
+            secure.release_server(self._guard)
             raise
 
         self._stop.clear()
@@ -117,6 +134,8 @@ class AgilisService:
         self._stop.set()
         for t in self._threads:
             t.join(timeout=2.0)
+        secure.release_server(self._guard)
+        self._guard = None
         try:
             self.brain.shutdown()
         except Exception:
@@ -202,7 +221,8 @@ class AgilisService:
             while not self._stop.is_set():
                 if dict(poller.poll(200)):
                     try:
-                        raw = sock.recv()
+                        frame = sock.recv(copy=False)
+                        raw = frame.bytes
                     except Exception:
                         continue
                     # A REP socket that has received MUST send before it can
@@ -214,8 +234,13 @@ class AgilisService:
                     # any other failed command.
                     try:
                         req = _json_mod.loads(raw.decode("utf-8"))
-                        reply = self._dispatch(req) if isinstance(req, dict) else \
-                            {"ok": False, "error": "request must be a JSON object"}
+                        # security first: does the identity match the key
+                        # that sent it? (None = yes, or security is off)
+                        refused = None
+                        if self._guard is not None and isinstance(req, dict):
+                            refused = self._guard.check(req, secure.user_id(frame))
+                        reply = refused or (self._dispatch(req) if isinstance(req, dict) else
+                                            {"ok": False, "error": "request must be a JSON object"})
                     except Exception as exc:  # never die on a bad command
                         reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                     # Serialise BEFORE sending, for the same reason: a reply

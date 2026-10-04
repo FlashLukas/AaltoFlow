@@ -57,6 +57,9 @@ class RemoteZFocus:
     def _make_req(self) -> None:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
         # CurveZMQ once the lab's policy secures zpiezo (secure.py); plain
         # until then
@@ -68,13 +71,22 @@ class RemoteZFocus:
             if self._req is None:
                 self._make_req()
             req.setdefault("client", self.identity)
-            try:
-                self._req.send_json(req)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                self._req.close(0)
-                self._make_req()
-                raise TimeoutError(f"zpiezo service did not answer {req.get('cmd')!r}")
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(req)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # Broken REQ state after a timeout -> rebuild (lazy pirate).
+                    self._req.close(0)
+                    # zpiezo may speak the other mode than the policy now says
+                    # (started before it changed): try that mode once. Safe
+                    # to resend: a wrong-mode request never reaches zpiezo.
+                    flipped = secure.no_answer(self.host, "zpiezo")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        raise TimeoutError(
+                            f"zpiezo service did not answer {req.get('cmd')!r}") from None
         # A refusal ({"ok": false}) must RAISE, like a timeout. It used to be
         # returned as if it were a reply: a refused move looked done (autofocus
         # scored the same Z at every "level"), and a failed status read became
