@@ -39,6 +39,7 @@ from scan_core.preview import preview_axis, step_summary
 from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
 from scan_core import autosave, scan_queue
 from suite_common import title as suite_title
+from suite_common.fileio import replace_retry
 from apps.data_view import DataView
 from apps.theme import DEFAULT_THEME, C, apply, set_theme
 
@@ -1523,7 +1524,7 @@ class ScanWorker(QtCore.QThread):
         try:
             self.save_path.parent.mkdir(parents=True, exist_ok=True)
             ds.to_netcdf(tmp)
-            os.replace(tmp, self.save_path)
+            replace_retry(tmp, self.save_path)   # Windows may refuse it for a moment
             self.saved.emit(str(self.save_path), done, total)
         except Exception as exc:            # a full disk must not kill the scan
             self.save_failed.emit(f"could not save to {self.save_path}: {exc}")

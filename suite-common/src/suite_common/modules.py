@@ -33,6 +33,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .fileio import replace_retry
+
 MANIFEST = "module.toml"
 LOCAL_FILE = "suite_local.json"
 #: The folder that holds the instrument modules, sorted by what they are FOR:
@@ -367,7 +369,7 @@ def save_local(data: dict, root: Path | None = None) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
             fh.write("\n")
-        os.replace(tmp, root / LOCAL_FILE)
+        replace_retry(tmp, root / LOCAL_FILE)   # Windows may refuse it for a moment
     except BaseException:
         try:
             os.unlink(tmp)

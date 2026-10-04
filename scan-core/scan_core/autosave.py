@@ -24,6 +24,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from suite_common.fileio import replace_retry
+
 
 def safe_name(name: str | None) -> str:
     """A scan name made safe for a file name ("map 5 K" -> "map_5_K")."""
@@ -99,5 +101,6 @@ def write_dataset(ds, path) -> Path:
     tmp = path.with_suffix(".writing.nc")
     path.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(tmp)
-    os.replace(tmp, path)
+    # retried: Windows can refuse the rename for a moment (fileio.py)
+    replace_retry(tmp, path)
     return path
