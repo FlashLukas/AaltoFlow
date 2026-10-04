@@ -179,8 +179,21 @@ def _no_reference() -> dict:
             "bin_Hz": _NAN, "points": 0, "age_s": _NAN}
 
 
+#: What the signalhound service reports as `tg_mode` (its spectrum.TG_MODES;
+#: the wire contract both TG client modules were built against). describe
+#: declares `tg_mode` as an ENUM of exactly these: scan-core stores an enum as
+#: a code, so any other value would be lost -- the brain reports None ("not
+#: known") instead of "" or a value it does not recognise.
+TG_MODES = ("unknown", "parked", "cw", "sweep")
+
+
+def _tg_mode(value):
+    """The owner's TG mode if it is one of TG_MODES, else None (not known)."""
+    return value if value in TG_MODES else None
+
+
 def _no_owner() -> dict:
-    return {"address": "", "reachable": False, "tg_attached": False, "tg_mode": "",
+    return {"address": "", "reachable": False, "tg_attached": False, "tg_mode": None,
             "hw_error": ""}
 
 
@@ -1033,6 +1046,8 @@ class Analyzer:
             owner = self.backend.owner_status()
         except Exception as exc:              # never let the sweep thread die
             health, owner = f"{type(exc).__name__}: {exc}", _no_owner()
+        owner = dict(owner)
+        owner["tg_mode"] = _tg_mode(owner.get("tg_mode"))
         with self._lock:
             self._health, self._owner = health, owner
 

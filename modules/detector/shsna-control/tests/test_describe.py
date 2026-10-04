@@ -216,3 +216,66 @@ def test_the_simulation_group_is_present_in_the_simulator(shsna):
     assert params["dut_inserted"]["set"] == {"verb": "set_sim", "arg": "value",
                                              "extra": {"name": "dut_inserted"}}
     assert params["pad"]["unit"] == "dB"
+
+
+# ---- declared types: how scan-core STORES each detector (developer notes 4b) ---
+
+def _fits(d, v):
+    """Does status value `v` fit descriptor `d` the way scan-core stores it?
+    (bool a bool, int a whole number inside an INDICATOR's min/max, enum one
+    of its options; None = not measured always fits.)"""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            return d.get("min", v) <= v <= d.get("max", v)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def test_every_status_value_fits_its_declared_type(shsna):
+    """Idle, mid-acquisition and after one: every indicator/control read from
+    status has the type (and, for an indicator, the range) describe promises."""
+    def check():
+        st = status_to_dict(shsna.status())
+        for d in build_manifest(shsna)["parameters"]:
+            if d.get("read_path") and d["kind"] in ("indicator", "control"):
+                v = read_path(st, d["read_path"])
+                assert _fits(d, v), f"{d['id']}: {v!r} does not fit {d}"
+    check()
+    shsna.acquire()
+    check()
+    _finish(shsna)
+    check()
+
+
+def test_counters_promise_non_negative_ints(shsna):
+    p = _params(shsna)
+    for pid in ("acq_id", "sweeps", "reference_points"):
+        assert p[pid]["type"] == "int" and p[pid]["min"] == 0 and "max" not in p[pid]
+
+
+def test_tg_mode_is_an_enum_of_every_owner_mode(shsna):
+    """The options are the owner's (signalhound) TG modes, and the brain maps
+    anything else -- no owner yet, "", an unknown word -- to None, so no value
+    is ever stored as "not measured" by accident."""
+    from shsna import analyzer
+    d = _params(shsna)["tg_mode"]
+    assert d["type"] == "enum"
+    assert d["options"] == ["unknown", "parked", "cw", "sweep"]
+    for mode in analyzer.TG_MODES:
+        assert analyzer._tg_mode(mode) == mode
+    for other in ("", None, "--", "idle"):
+        assert analyzer._tg_mode(other) is None
+    assert analyzer._no_owner()["tg_mode"] is None

@@ -48,7 +48,7 @@ class RemoteStatus:
         self.reference = {k: (_NAN if v is None else v)
                           for k, v in (d.get("reference") or {"present": False}).items()}
         self.owner = dict(d.get("owner") or {"address": "", "reachable": False,
-                                             "tg_attached": False, "tg_mode": "", "hw_error": ""})
+                                             "tg_attached": False, "tg_mode": None, "hw_error": ""})
         self.describe_rev = d.get("describe_rev")
 
     def __getattr__(self, name):

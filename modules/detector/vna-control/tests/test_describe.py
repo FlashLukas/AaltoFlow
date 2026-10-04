@@ -168,3 +168,69 @@ def test_the_simulated_sample_group_is_absent_on_a_real_analyser():
     assert {"s", "u", "take_reference", "sweep_angle", "field_source"} <= ids
     assert not ids & {"ms_mT", "alpha", "hk_mT", "geometry", "f_res_model"}
     assert build_manifest(real)["label"] == "Keysight PNA-X N5222A"
+
+
+# ---- declared types: how scan-core STORES each detector (developer notes 4b) ---
+
+def _fits(d, v):
+    """Does status value `v` fit descriptor `d` the way scan-core stores it?
+    (bool a bool, int a whole number inside an INDICATOR's min/max, enum one
+    of its options; None = not measured always fits.)"""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            return d.get("min", v) <= v <= d.get("max", v)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def test_every_status_value_fits_its_declared_type(vna):
+    """Every sparam, geometry and field source, plus a reference and an
+    acquisition: each value read from status has the declared type and lies
+    in an indicator's declared range, and every enum value is an option."""
+    from vna.analyzer import GEOMETRIES, SPARAMS
+    from vna.field import FIELD_SOURCES
+
+    def check():
+        st = status_to_dict(vna.status())
+        for d in build_manifest(vna)["parameters"]:
+            if d.get("read_path") and d["kind"] in ("indicator", "control"):
+                v = read_path(st, d["read_path"])
+                assert _fits(d, v), f"{d['id']}: {v!r} does not fit {d}"
+    check()
+    vna.take_reference()
+    while vna.status().acquiring:
+        vna.step()
+    check()
+    for sp in SPARAMS:
+        vna.set_sparam(sp)
+        check()
+    for g in GEOMETRIES:
+        vna.set_geometry(g)
+        check()
+    for src in FIELD_SOURCES:
+        vna.set_field_source(src)
+        check()
+    vna.set_field_source("manual")
+    vna.acquire()
+    while vna.status().acquiring:
+        vna.step()
+    check()
+
+
+def test_counters_promise_non_negative_ints(vna):
+    p = _params(vna)
+    for pid in ("acq_id", "sweeps"):
+        assert p[pid]["type"] == "int" and p[pid]["min"] == 0 and "max" not in p[pid]

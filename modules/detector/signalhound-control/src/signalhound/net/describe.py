@@ -37,6 +37,9 @@ import json
 import math
 import zlib
 
+from ..instruments import DETECTORS
+from ..spectrum import TG_MODES
+
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -160,7 +163,7 @@ def build_manifest(signalhound) -> dict:
              help="Video bandwidth, at most the RBW: smooths the noise, does not "
                   "lower the floor."),
         _p("detector", "Detector", "control", "enum", group="Sweep", order=55,
-           options=["average", "peak"], read_path=["detector"],
+           options=list(DETECTORS), read_path=["detector"],
            set={"verb": "set_detector", "arg": "detector"},
            settle={"policy": "echoes", "key": "detector"},
            help="average: the power in the bin; peak: the largest value in the bin "
@@ -172,7 +175,10 @@ def build_manifest(signalhound) -> dict:
              help="Sweeps averaged (in power) per acquisition."),
         flag("continuous", "Continuous sweep", "continuous", "set_continuous", "Sweep", 80,
              "Sweep on its own between acquisitions, like a front panel."),
-        _p("points", "Bins", "indicator", "int", group="Sweep", order=90,
+        # Counts below: whole numbers that cannot go negative (0 = no grid /
+        # nothing yet). min 0 is the promise scan-core stores them by; no max,
+        # because nothing in the code caps them.
+        _p("points", "Bins", "indicator", "int", group="Sweep", order=90, min=0,
            read_path=["points"], help="Chosen by the analyser from span and RBW."),
         _p("bin_width", "Bin width", "indicator", "float", unit="kHz", group="Sweep",
            order=91, decimals=4, scale=1e3, read_path=["bin_Hz"]),
@@ -207,15 +213,17 @@ def build_manifest(signalhound) -> dict:
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, read_path=["acq_id"]),
+           order=4, min=0, read_path=["acq_id"]),
 
         # -- the tracking generator: what it is doing (indicators only) --------------
         # No controls here on purpose: shsg (CW) and shsna (TG sweeps) drive
         # it through the TG contract and offer the scan controls themselves.
         _p("tg_attached", "TG attached", "indicator", "bool", group="Tracking generator",
            order=1, read_path=["tg_attached"]),
-        _p("tg_mode", "TG mode", "indicator", "string", group="Tracking generator", order=2,
-           read_path=["tg_mode"],
+        # An ENUM of spectrum.TG_MODES (the brain computes exactly one of them
+        # in status()), so scan-core can record it as a code.
+        _p("tg_mode", "TG mode", "indicator", "enum", group="Tracking generator", order=2,
+           options=list(TG_MODES), read_path=["tg_mode"],
            help="unknown (not readable at start; it may be emitting what another program "
                 "left on), parked (the TG44A has no off: parked at the park frequency and "
                 "level), cw (a CW source for shsg) or sweep (a TG sweep for shsna -- "
@@ -247,7 +255,7 @@ def build_manifest(signalhound) -> dict:
            group="Live", order=12, decimals=2, plottable=True, read_path=["floor_dBm"]),
         _p("overload", "Overload (live)", "indicator", "bool", group="Live", order=13,
            read_path=["overload"]),
-        _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=14,
+        _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=14, min=0,
            read_path=["sweeps"]),
 
         # -- status ------------------------------------------------------------------------------

@@ -57,7 +57,7 @@ import json
 import math
 import zlib
 
-from ..analyzer import WINDOW_MIN_BINS
+from ..analyzer import TG_MODES, WINDOW_MIN_BINS
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -210,8 +210,10 @@ def build_manifest(shsna) -> dict:
         _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
+        # A counter that starts at 0 and only counts up: min 0 is a promise
+        # the brain keeps (scan-core stores an int by its declared range).
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, read_path=["acq_id"]),
+           order=4, min=0, read_path=["acq_id"]),
         _p("acq_error", "Acquisition error", "indicator", "string", group="Measurement",
            order=5, read_path=["acq_error"],
            help="Empty when the last acquisition is a measurement; else why not."),
@@ -230,8 +232,9 @@ def build_manifest(shsna) -> dict:
            order=2, wait={"ready": {"policy": "immediate"}}),
         _p("reference_present", "Reference present", "indicator", "bool",
            group="Reference", order=10, read_path=["reference", "present"]),
+        # 0 while there is no reference, else the bins of the trace it holds
         _p("reference_points", "Reference points", "indicator", "int",
-           group="Reference", order=12, read_path=["reference", "points"]),
+           group="Reference", order=12, min=0, read_path=["reference", "points"]),
 
         # -- live ------------------------------------------------------------------------
         _p("live_peak", "Peak measured (live)", "indicator", "float", unit="dB",
@@ -241,7 +244,7 @@ def build_manifest(shsna) -> dict:
            unit="dB", group="Live", order=11, decimals=2, plottable=True,
            read_path=["last_peak_transmission_db"]),
         _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=12,
-           read_path=["sweeps"]),
+           min=0, read_path=["sweeps"], help="Completed sweeps since start."),
 
         # -- the owner of the analyser -----------------------------------------------------
         _p("owner", "Analyser service", "indicator", "string", group="Analyser", order=1,
@@ -251,8 +254,10 @@ def build_manifest(shsna) -> dict:
            order=2, read_path=["owner", "reachable"]),
         _p("tg_attached", "TG attached", "indicator", "bool", group="Analyser",
            order=3, read_path=["owner", "tg_attached"]),
-        _p("tg_mode", "TG mode", "indicator", "string", group="Analyser", order=4,
-           read_path=["owner", "tg_mode"]),
+        # An ENUM of the owner's TG modes (scan-core stores it as a code); the
+        # brain reports None, never "", while the owner has not said one.
+        _p("tg_mode", "TG mode", "indicator", "enum", group="Analyser", order=4,
+           options=list(TG_MODES), read_path=["owner", "tg_mode"]),
 
         # -- status ------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",

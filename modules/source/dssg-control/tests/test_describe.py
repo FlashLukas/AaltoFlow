@@ -152,3 +152,63 @@ def test_echo_tolerances_come_from_config_and_cover_the_synth_grid():
         assert by["phase"]["settle"]["tol"] == 0.25
     finally:
         brain.shutdown()
+
+
+# ---- declared types: how scan-core STORES each detector (developer notes 4b) ---
+
+def _fits(d, v):
+    """Does status value `v` fit descriptor `d` the way scan-core stores it?
+    (bool a bool, int a whole number inside an INDICATOR's min/max, enum one
+    of its options; None = not measured always fits.)"""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            return d.get("min", v) <= v <= d.get("max", v)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def _check_types(brain):
+    """Every indicator/control read from status fits its declared type."""
+    from dssg.net.protocol import status_to_dict
+    st = status_to_dict(brain.status())
+    for d in build_manifest(brain)["parameters"]:
+        if d.get("read_path") and d["kind"] in ("indicator", "control"):
+            v = read_path(st, d["read_path"])
+            assert _fits(d, v), f"{d['id']}: {v!r} does not fit {d}"
+    return st
+
+
+def test_reference_options_cover_every_value_status_reports():
+    """The reference enum's options ARE config.REFERENCES; parse_reference
+    maps ANY *REFMODE? reply onto one of them, and status shows each after it
+    is set -- a value outside the options would be stored as "not measured"."""
+    import time
+    from dssg.backends.dsi_scpi import parse_reference
+    from dssg.config import REFERENCES
+    cfg, brain = _brain()
+    try:
+        d = _by_id(build_manifest(brain))["reference"]
+        assert d["type"] == "enum" and d["options"] == list(REFERENCES)
+        for reply in ("", "0", "1", "2", "AUTO", "EXT", "INT", "garbage"):
+            assert parse_reference(reply) in REFERENCES
+        for mode in REFERENCES:
+            brain.set_reference(mode)
+            deadline = time.monotonic() + 5.0
+            while brain.status().reference != mode and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert _check_types(brain)["reference"] == mode
+    finally:
+        brain.shutdown()
