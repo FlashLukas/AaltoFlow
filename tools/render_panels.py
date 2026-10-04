@@ -100,6 +100,7 @@ SIZES = {
     "suite-queue": (1500, 950),
     "suite-queue-dialog": (760, 430),
     "suite-fly-scan": (1500, 950),
+    "suite-repeat-scan": (1500, 950),
     "suite-fly": (1500, 950),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
@@ -488,6 +489,24 @@ def _navigator_demo(win):
     nav._on_click(*nav.reg.to_stage(550.0, 700.0))
     nav._poll()
     nav.fit_design()
+
+
+def _stack_with_repeats(win):
+    """The Scan tab with REPEAT rows (scan_core/repeat.py): three whole field
+    sweeps kept (one every 10 minutes), every point averaged 10 times. Three
+    rows, so both repeats fit the axis-stack card without scrolling."""
+    win.use_simulator()
+    b = win.builder
+    b.name_edit.setText("field sweep, 3 runs, 10x averaged")
+    b.name_edit.setCursorPosition(0)
+    b.add_repeat(num=3, mode="keep", interval_s=600)
+    b.add_axis("field")
+    row = b.rows[-1]
+    row.start.setValue(0.0); row.stop.setValue(120.0); row.num.setValue(41)
+    b.add_repeat(num=10, mode="average")
+    b.add_fixed("rf_freq", 1500.0)
+    b.add_fixed("rf_power", 8.0)
+    b.per_pt.setValue(0.05)
 
 
 def _scan_then_show_run(win):
@@ -1135,6 +1154,7 @@ TARGETS = {
     "suite-queue": _suite("Measurement", _queue_running, settle=2.5),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),
     "suite-fly-scan": _suite("Scan", _fly(run=False), settle=2.0),
+    "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),
     "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),

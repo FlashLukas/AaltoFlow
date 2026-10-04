@@ -41,6 +41,9 @@ fly    : {type, param, start, stop, num, speed, [speed_param, readback,
           lag_correction, name]}                          -> 1 dim, INNERMOST only:
           one continuous move per row, binned by the measured position
           (flyscan.py). Same coordinates as a linear axis with that start/stop/num.
+repeat : {type, num, [mode: keep|average, interval_s, name]} -> 1 dim that sets
+          NOTHING: everything inside it is done `num` times (repeat.py). `keep`
+          keeps every repeat as a dimension; `average` stores mean/_std/_n.
 
 `compile(registry)` turns the axis list into an ordered list of Dim objects
 (raster expands to two dims), which the engine iterates as an odometer. Keeping
@@ -66,15 +69,23 @@ class Dim:
 
     name   : dimension/coordinate name in the dataset (unique)
     params : list of (settable_id, values[]) advanced together for this dim.
-             len==1 for a normal axis; >1 for a zip (lockstep) axis.
+             len==1 for a normal axis; >1 for a zip (lockstep) axis;
+             EMPTY for a repeat axis, which sets nothing (repeat.py).
+    values : the coordinate of a dim without params (a repeat: 0..N-1)
+    mode, interval_s : a repeat's mode (keep/average) and interval
     """
     name: str
     params: list[tuple[str, np.ndarray]]
     size: int
     kind: str = "linear"
+    values: np.ndarray | None = None
+    mode: str = ""
+    interval_s: float | None = None
 
     @property
     def coord(self) -> np.ndarray:
+        if not self.params:               # a repeat: its own 0..N-1
+            return self.values
         return self.params[0][1]          # primary member is the coordinate
 
 
@@ -238,6 +249,8 @@ class Recipe:
         errs += validate_fly(self, registry)
         from .window import validate as validate_window
         errs += validate_window(self, registry)
+        from .repeat import validate as validate_repeat
+        errs += validate_repeat(self, registry)
         # range check against each settable's limits
         try:
             for dim in self.compile(registry).dims:
@@ -409,6 +422,8 @@ class Recipe:
         dims: list[Dim] = []
         for ax in self.axes:
             dims.extend(_compile_axis(ax))
+        from .repeat import name_dims
+        name_dims(dims)                   # repeat / repeat_1, repeat_2, ...
         return CompiledScan(dims=dims, detectors=list(self.detectors), hooks=list(self.hooks))
 
 
@@ -416,6 +431,8 @@ class Recipe:
 
 def _axis_param_ids(ax: dict) -> list[str]:
     t = ax["type"]
+    if t == "repeat":
+        return []                         # sets nothing
     if t in ("linear", "array", "file"):
         return [ax["param"]]
     if t == "fly":
@@ -432,6 +449,13 @@ def _axis_param_ids(ax: dict) -> list[str]:
 
 def _compile_axis(ax: dict) -> list[Dim]:
     t = ax["type"]
+    if t == "repeat":
+        from .repeat import interval_of, mode_of, num_of
+        n = num_of(ax)
+        # name "" = named by Recipe.compile (repeat, or repeat_1/_2 if several)
+        return [Dim(name=ax.get("name") or "", params=[], size=n, kind="repeat",
+                    values=np.arange(n), mode=mode_of(ax),
+                    interval_s=interval_of(ax))]
     if t in ("linear", "array", "file"):
         vals = _values_from_spec(ax)
         name = ax.get("name") or ax["param"]

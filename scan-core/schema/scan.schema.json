@@ -132,6 +132,21 @@
             "name": {"type": "string"}
           },
           "required": ["type", "param", "start", "stop", "num", "speed"]
+        },
+        {
+          "title": "repeat (sets nothing: everything inside it is done num times; any depth, but not inside a fly axis)",
+          "type": "object",
+          "properties": {
+            "type": {"const": "repeat"},
+            "num": {"type": "integer", "minimum": 1, "description": "how many times"},
+            "mode": {"enum": ["keep", "average"],
+                     "description": "keep (default): a dimension 'repeat' with coordinate 0..num-1, every repeat in the file; average: the dimension is collapsed to <det> (mean, NaN ignored), <det>_std (sample std; of |z| for complex) and <det>_n (finite repeats). At most one average repeat per scan; not with a fly axis or the resonance window; numeric detectors only"},
+            "interval_s": {"type": "number", "minimum": 0,
+                           "description": "repeat k of a pass starts no earlier than t0 + k*interval_s (t0 = start of repeat 0)"},
+            "name": {"type": "string", "description": "dimension name (default 'repeat', or repeat_1, repeat_2, ... when there are several)"}
+          },
+          "required": ["type", "num"],
+          "additionalProperties": false
         }
       ]
     },

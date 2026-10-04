@@ -1,0 +1,10 @@
+name: freq_sweep_every_minute
+comment: A time series -- one frequency sweep at the start of every minute, 30 times, every sweep kept.
+fixed: {field: 60}
+axes:
+  - {type: repeat, num: 30, interval_s: 60, name: run}                # run k starts >= k x 60 s after run 0
+  - {type: linear, param: rf_freq, start: 800, stop: 2500, num: 81}
+detectors: [lockin_r]
+hooks: []
+output: {dir: ., basename: freq_sweep_every_minute, format: netcdf}
+settle: {default_timeout_s: 20.0}

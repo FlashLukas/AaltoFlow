@@ -398,6 +398,134 @@ class AxisRow(QtWidgets.QFrame):
                 "num": self.num.value()}
 
 
+class _RepeatParam:
+    """What an axis row's `param` provides (id, label, unit, limits), for the
+    REPEAT row, which drives no parameter -- so the code that walks the axis
+    stack (tooltips, previews, the summary) needs no special case."""
+    id = "repeat"
+    label = "Repeat"
+    unit = ""
+    limits = (float("-inf"), float("inf"))
+
+
+class RepeatRow(QtWidgets.QFrame):
+    """An axis row that sets NOTHING: everything inside it is done N times
+    (scan_core/repeat.py). Where it sits in the stack decides what repeats:
+    on top = whole scans, at the bottom = every point N times in a row.
+
+    `mode` keep stores every repeat as a dimension (the viewer can show one or
+    average them); average stores only the mean, its spread and the count.
+    `interval` (0 = none) starts repeat k no earlier than k x interval after
+    the first -- a time series.
+    """
+    changed = QtCore.Signal()
+    remove = QtCore.Signal(object)
+    move = QtCore.Signal(object, int)
+    preview = QtCore.Signal(object)        # (never emitted: nothing to preview)
+
+    def __init__(self, level_getter, num: int = 5, mode: str = "keep",
+                 interval_s: float | None = None, name: str | None = None):
+        super().__init__()
+        self.param = _RepeatParam()
+        self.raw = None
+        self.name = name                   # kept from a loaded recipe, else default
+        self._level_getter = level_getter
+        self.setObjectName("axis")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6); lay.setSpacing(8)
+        self.level_lbl = QtWidgets.QLabel("0")
+        self.level_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:800;")
+        self.level_lbl.setFixedWidth(16)
+        lay.addWidget(self.level_lbl)
+
+        namebox = QtWidgets.QVBoxLayout(); namebox.setSpacing(0)
+        title = QtWidgets.QLabel("Repeat")
+        title.setStyleSheet("font-weight:700;"); title.setFixedWidth(164)
+        namebox.addWidget(title)
+        self.what_lbl = QtWidgets.QLabel()
+        self.what_lbl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+        self.what_lbl.setFixedWidth(164)
+        namebox.addWidget(self.what_lbl)
+        lay.addLayout(namebox)
+
+        self.num = QtWidgets.QSpinBox(); self.num.setRange(1, 100000)
+        self.num.setValue(int(num)); self.num.setFixedWidth(84)
+        self.num.setToolTip("how many times everything inside this row is done")
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItem("keep all", "keep")
+        self.mode.addItem("average", "average")
+        self.mode.setCurrentIndex(max(0, self.mode.findData(mode)))
+        self.mode.setToolTip(
+            "keep all: every repeat is in the file (a 'repeat' dimension); the\n"
+            "viewer shows one run, or averages over them. Nothing is lost, so\n"
+            "drift or one spoiled run is still visible afterwards.\n\n"
+            "average: only the mean, its spread (_std) and how many repeats\n"
+            "were averaged (_n) are stored -- a file N times smaller. Numbers\n"
+            "only (not with a state/text detector, a fly axis or the window).")
+        self.interval = QtWidgets.QDoubleSpinBox()
+        self.interval.setRange(0.0, 1e6); self.interval.setDecimals(1)
+        self.interval.setSuffix(" s"); self.interval.setFixedWidth(96)
+        self.interval.setSpecialValueText("none")
+        self.interval.setValue(float(interval_s or 0.0))
+        self.interval.setToolTip(
+            "Optional: repeat k starts no earlier than k x this after the first\n"
+            "(a time series). A repeat that takes longer starts the next at once.")
+        for w, t in ((self.num, "times"), (self.mode, "store"),
+                     (self.interval, "every")):
+            box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
+            tl = QtWidgets.QLabel(t); tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+            box.addWidget(tl); box.addWidget(w); lay.addLayout(box)
+        self.num.valueChanged.connect(lambda *_: self.changed.emit())
+        self.mode.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        self.interval.valueChanged.connect(lambda *_: self.changed.emit())
+
+        lay.addStretch(1)
+        up = QtWidgets.QPushButton("↑"); dn = QtWidgets.QPushButton("↓")
+        rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger")
+        for b in (up, dn, rm):
+            b.setFixedWidth(30)
+        up.clicked.connect(lambda: self.move.emit(self, -1))
+        dn.clicked.connect(lambda: self.move.emit(self, +1))
+        rm.clicked.connect(lambda: self.remove.emit(self))
+        lay.addWidget(up); lay.addWidget(dn); lay.addWidget(rm)
+
+    # the axis-row interface the builder uses
+    def is_fly(self) -> bool:
+        return False
+
+    def refresh_limits(self):
+        pass                               # no parameter, no limits
+
+    def refresh_level(self):
+        level = self._level_getter(self)
+        self.level_lbl.setText(str(level))
+        lay = self.layout()
+        _, top, right, bottom = lay.getContentsMargins()
+        lay.setContentsMargins(10 + AxisRow.INDENT_PX * min(level, AxisRow.INDENT_MAX),
+                               top, right, bottom)
+        getter = getattr(self._level_getter, "__self__", None)
+        rows = list(getattr(getter, "rows", []) or [])
+        inner = rows[level + 1:] if self in rows else []
+        # what is repeated, in words: the thing an operator gets wrong
+        if not inner:
+            what = "each point, N times in a row"
+        elif level == 0:
+            what = "the whole scan, N times"
+        else:
+            what = "each sweep of " + ", ".join(r.param.label for r in inner)
+        self.what_lbl.setText(what)
+        self.setToolTip(f"loop level {level} -- repeats {what}")
+
+    def to_axis(self) -> dict:
+        ax = {"type": "repeat", "num": int(self.num.value()),
+              "mode": self.mode.currentData()}
+        if self.interval.value() > 0:
+            ax["interval_s"] = float(self.interval.value())
+        if self.name:
+            ax["name"] = self.name
+        return ax
+
+
 # ──────────────────────────── one condition row ───────────────────────────────
 
 class FixedRow(QtWidgets.QFrame):
@@ -2271,6 +2399,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         head.addWidget(self._tag("AXIS STACK  ·  outer → inner")); head.addStretch(1)
         self.hint = QtWidgets.QLabel("double-click a parameter, or select and Add")
         self.hint.setStyleSheet(f"color:{C['muted']};"); head.addWidget(self.hint)
+        rep = QtWidgets.QPushButton("＋ Repeat")
+        rep.setToolTip("Add a REPEAT row: everything below it is done N times.\n"
+                       "On top: whole scans; at the bottom: every point N times.\n"
+                       "Keep every repeat, or store only their average.")
+        rep.clicked.connect(lambda: self.add_repeat())
+        head.addWidget(rep)
         v.addLayout(head)
 
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True)
@@ -2661,6 +2795,25 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.stack_lay.insertWidget(self.stack_lay.count() - 1, row)  # before stretch
         self._relevel(); self._rebuild_summary()
 
+    def add_repeat(self, num: int = 5, mode: str = "keep",
+                   interval_s: float | None = None, name: str | None = None,
+                   index: int | None = None) -> RepeatRow:
+        """Add a REPEAT row (scan_core/repeat.py) -- at the bottom of the stack,
+        or at `index` (0 = outermost)."""
+        row = RepeatRow(self._level_of, num=num, mode=mode,
+                        interval_s=interval_s, name=name)
+        row.changed.connect(self._rebuild_summary)
+        row.remove.connect(self._remove_row)
+        row.move.connect(self._move_row)
+        if index is None or not 0 <= index < len(self.rows):
+            self.rows.append(row)
+            self.stack_lay.insertWidget(self.stack_lay.count() - 1, row)
+        else:
+            self.rows.insert(index, row)
+            self.stack_lay.insertWidget(index, row)
+        self._relevel(); self._rebuild_summary()
+        return row
+
     def _add_selected_fixed(self):
         it = self.set_tree.currentItem()
         pid = it.data(0, QtCore.Qt.UserRole) if it is not None else None
@@ -2919,6 +3072,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
             if self.add_fixed(pid, value) is None:
                 missing.append(pid)
         for ax in recipe.axes:
+            if ax.get("type") == "repeat":
+                # drives no parameter, so nothing can be missing
+                try:
+                    num = int(ax.get("num") or 1)
+                except (TypeError, ValueError):
+                    num = 1
+                self.add_repeat(num=num, mode=ax.get("mode") or "keep",
+                                interval_s=ax.get("interval_s"),
+                                name=ax.get("name"))
+                continue
             pid = (ax.get("param") or ax.get("x", {}).get("param")
                    or (ax.get("members") or [{}])[0].get("param"))
             if not pid or self.registry.get(pid) is None:
@@ -3038,6 +3201,19 @@ class ScanBuilder(QtWidgets.QMainWindow):
             eta = n * self.per_pt.value()
             how = f"@ {self.per_pt.value():g}s/pt"
             self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} pts")
+        # REPEATS (repeat.py) are in n already -- every repeat is measured. An
+        # interval can make the scan longer than its dwell: never shorter than
+        # (N-1) x interval per pass.
+        from scan_core.repeat import average_index, min_seconds
+        floor = min_seconds(comp)
+        if floor > eta:
+            eta = floor
+            how += ", paced by the repeat interval"
+        avg = average_index(comp.dims)
+        if avg is not None:
+            kept = n // max(1, comp.dims[avg].size)
+            self.summary.setText(self.summary.text()
+                                 + f"  (average of {comp.dims[avg].size} -> {kept:,} stored)")
         # The pre-run ETA counts only what this window can know -- the dwell
         # per point (or per fly row) -- not settling, not routines such as an
         # autofocus, which on the rig can be most of the time. So it says

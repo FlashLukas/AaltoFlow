@@ -541,6 +541,24 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
 - **Fly scans:** `<det>_n` is uint32 (fill 4294967295 = row not flown),
   `<det>_std` float64, and the binned MEAN is float64 even for an int/bool
   detector (attr `declared_type`). Enum and string detectors cannot be flown.
+- **Repeat axis (2026-10-04, `scan_core/repeat.py`):** `{type: repeat, num,
+  mode: keep|average, interval_s?, name?}` at any depth sets nothing. It
+  compiles to a `Dim` with EMPTY `params` (its coordinate 0..N-1 is
+  `Dim.values`, `kind="repeat"`), so every loop over `d.params` just skips it
+  and the odometer, fault pause, redo and hooks need no special case. `keep`
+  is an ordinary dim (typed storage applies; coord attrs `repeat_mode`,
+  `long_name`, `interval_s`). `average` is recorded in memory exactly like
+  `keep` and collapsed in `_to_dataset` (`repeat.collapse`): `<det>` mean,
+  `<det>_std` (ddof 1; of |z| for complex), `<det>_n`, stored like the fly
+  trio (mean float64 + `declared_type`, `_std` float64, `_n` uint32), dataset
+  attrs `repeat_averaged` / `repeat_num`. Collapsing at build time is what
+  gives the running mean in the live plot and a partial mean on abort for
+  free; the cost is N x the averaged size in memory (not on disk). The
+  interval wait (`repeat.pace`) runs where the repeat dim changes, before the
+  inner dims move, in `_measure_point` and in the fly row loop. Refused by
+  validation: num not a whole number >= 1, two `average` repeats, a repeat
+  inside a fly axis, `average` with a fly axis or the window, enum/string
+  detectors under `average`.
 - **Compression:** zlib level 4 with shuffle on every data variable, including
   the window's mask and record variables; coordinates stay uncompressed;
   strings are not filtered. A 100x100 scan of bool + 12-bit + enum + one float

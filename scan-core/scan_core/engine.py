@@ -22,6 +22,7 @@ import xarray as xr
 
 from .errors import RoutineError, ScanAborted, ScanFault, format_faults
 from .hooks import find_autofocus, routine_steps, run_hooks
+from .repeat import average_index, collapse, pace
 from .storage import COMPRESSION, COUNT, FLOAT, storage_of
 
 
@@ -174,7 +175,7 @@ def where_of(dims, idx, flat=None, registry=None, row=None) -> dict:
     for k, d in enumerate(dims):
         i = int(idx[k]) if k < len(idx) else None
         unit = ""
-        if registry is not None:
+        if registry is not None and d.params:        # a repeat has no parameter
             p = registry.get(d.params[0][0])
             unit = getattr(p, "unit", "") or ""
         axes.append({"name": d.name, "params": [q for q, _ in d.params],
@@ -564,8 +565,14 @@ def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
     # `prev` is the caller's list and is updated IN PLACE, dim by dim, as each
     # dim's hooks run: if this attempt fails half-way (a settle that raises),
     # the next attempt must neither fire an axis hook twice nor skip one.
+    outer_changed = False
     for k, d in enumerate(dims):
         changed = idx[k] != prev[k]
+        if changed and d.kind == "repeat":
+            # a repeat sets nothing; it may WAIT for its interval (repeat.py),
+            # before the dims inside it move to the start of the next run
+            pace(ctx, k, d, int(idx[k]), outer_changed)
+        outer_changed = outer_changed or changed
         if not (changed or redo):
             continue
         if changed and prev[k] is not None:
@@ -759,7 +766,9 @@ def _storage_for(name, g, arr, extra: dict):
     adds itself (the window's mask and record) are compressed and otherwise
     written as xarray always wrote them (a bool mask as a netCDF byte).
     """
-    stat = extra.get("fly_stat")
+    # a fly pixel's statistics, or an AVERAGED repeat's (repeat.py): the same
+    # three variables, the same storage
+    stat = extra.get("fly_stat") or extra.get("repeat_stat")
     if stat == "count":
         return COUNT, COUNT.attrs()
     if stat == "std":
@@ -780,13 +789,35 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
     variable's or coordinate's attributes (a fly scan's per-pixel count and
     spread are not registry parameters, so their units come from here)."""
     dims = compiled.dims
-    dim_names = [d.name for d in dims]
     det_axes = det_axes or {}
     det_coords = det_coords or {}
+    var_attrs = dict(var_attrs or {})
 
-    # index coordinates (one per dim), carrying the driving parameter's units
-    coords = {d.name: (d.name, d.coord, {"units": _units(registry, d.params[0][0]),
-                                         "param": d.params[0][0]}) for d in dims}
+    # An AVERAGED repeat (repeat.py) is a dim of the buffers but not of the
+    # file: collapse it here -- so the live plot shows the running mean and an
+    # aborted scan the mean of the repeats done so far.
+    avg = average_index(dims)
+    averaged = None
+    if avg is not None:
+        averaged = dims[avg]
+        data, det_axes, stat_attrs = collapse(data, avg, set(compiled.detectors),
+                                              det_axes, registry)
+        var_attrs.update(stat_attrs)
+        dims = dims[:avg] + dims[avg + 1:]
+    dim_names = [d.name for d in dims]
+
+    # index coordinates (one per dim), carrying the driving parameter's units.
+    # A repeat dim has no parameter: its coordinate is the repeat number.
+    coords = {}
+    for d in dims:
+        if d.params:
+            coords[d.name] = (d.name, d.coord, {"units": _units(registry, d.params[0][0]),
+                                                "param": d.params[0][0]})
+        else:
+            coords[d.name] = (d.name, d.coord, {
+                "units": "", "long_name": "repeat number (0 = first)",
+                "repeat_mode": d.mode or "keep",
+                **({"interval_s": float(d.interval_s)} if d.interval_s else {})})
     # zip / raster secondary members ride along as extra (non-index) coords
     for d in dims:
         for pid, vals in d.params[1:]:
@@ -801,7 +832,6 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                          "label": getattr(axis, "label", name)})
 
     data_vars = {}
-    var_attrs = var_attrs or {}
     for det, arr in data.items():
         g = registry.get(det)
         names = dim_names + [a.name for a in det_axes.get(det, ())]
@@ -874,4 +904,9 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         seconds=float(seconds),
         dims=",".join(dim_names),
     )
+    if averaged is not None:
+        # said in the header too: a reader must see at once that each value
+        # is a mean (and over how many), not one measurement
+        ds.attrs["repeat_averaged"] = averaged.name
+        ds.attrs["repeat_num"] = int(averaged.size)
     return ds

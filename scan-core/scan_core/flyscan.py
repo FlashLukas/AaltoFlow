@@ -459,8 +459,14 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         ctx["flat"] = row * npix
         ctx["index"] = first_idx
         outer_moved = False
+        outer_changed = False
         for k, d in enumerate(outer):
             changed = oidx[k] != prev[k]
+            if changed and d.kind == "repeat":
+                # a repeat outside the fly axis: may wait for its interval
+                from .repeat import pace
+                pace(ctx, k, d, int(oidx[k]), outer_changed)
+            outer_changed = outer_changed or changed
             if changed or redo:
                 outer_moved = True
                 if changed and prev[k] is not None:
