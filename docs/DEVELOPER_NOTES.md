@@ -693,6 +693,76 @@ Code: `scan-core/scan_core/snapshot.py` (pure), `scan_core/run_info.py`,
   sizes, a stage's "zero here") may not mean the same now -- the dialog says
   so.
 
+### 4e. scan-core routines: the five generic steps (2026-10-04)
+
+A routine (`call` hook, `scan_core/hooks.py`) is an ORDERED list of steps run
+top to bottom, each waited for. Besides `{set: {...}}` and `{action: id}` a
+step can be one of five generic kinds; Lukas chose exactly these and asked to
+keep them simple -- no loops, no if/else, no notify (ROADMAP, "Deliberately
+not built"). Each kind is `{kind: {...}}` alone in its step; the same mapping
+also works as a hook of its own (`action: abort_if, args: {condition: ...}`),
+which runs as a routine of that one step.
+
+| step | keys | effect |
+|---|---|---|
+| `wait_until` | `condition`, `timeout_s` (required), `hold_s` (0), `on_timeout` (stop/continue) | poll every `WAIT_POLL_S` (0.5 s) until the condition has been true for `hold_s` without a break; log every `WAIT_LOG_S` (30 s); Abort ends the wait; timeout + stop = `ScanStopped` |
+| `abort_if` | `condition` | true -> `ScanStopped(reason)`; refused at `after_scan` |
+| `skip_if` | `condition` | true -> `SkipPoint`: the point is stored as not measured; only at `before_point`, `after_point`, `every_n_points`, `each_sweep`; refused in a fly scan |
+| `pause` | `message`, `headless` (fail/continue) | engine `on_pause(message, answer)`; Abort scan = `ScanStopped`; no `on_pause` -> fail (RuntimeError) or log |
+| `comment` | `text` | append `{time, point, index, text}` to dataset attr `comments` (JSON); `{param.id}` filled (`%.6g`), unknown left as text + warning |
+| `compute_set` | `set: {pid: formula}` | evaluate, REFUSE (not clamp) outside the limits, blocking `Settable.set`; restored like a `set` |
+
+- **Expressions** (`scan_core/expr.py`): parsed with `ast` and walked by an
+  allow-list -- numbers, strings, True/False, dotted parameter ids, `+ - * /
+  **`, unary `-`/`+`, `not`, `and`/`or`, comparisons `< <= > >= == !=`
+  (chained), `abs min max round`. Everything else (calls, attribute access
+  beyond an id, subscripts, lambdas, comprehensions, `%`, `//`, f-strings,
+  `:=` ...) raises `ExprError` at PARSE time, and `Recipe.validate()` runs
+  `expr.check()` on every condition and formula -- so a bad expression or an
+  unknown id is a validation error, before anything moves. No `eval`/`exec`
+  anywhere. Arithmetic is float-only (`math.pow`, so `10**400` is an overflow
+  error, not a 400-digit integer; `'a' * 10` is refused). The Scan Builder's
+  red border uses the same `expr.check()`.
+- **What an id reads -- the STATUS CACHE, never an acquisition.**
+  `expr.read_value` calls `Parameter.get()`: on the lab a settable's getter and
+  a scalar gettable's getter read the module's cached status frame
+  (`Instrument.status()`), a detector with an `acquire` block reads its LAST
+  latched sample. Nothing is triggered. Array detectors and complex ones are
+  refused (`expr.param_problem`). The ids a step reads join the scan's
+  fault-check / claim set (`engine._step_ids`).
+- **Stops** are `errors.ScanStopped`, a subclass of `ScanAborted`: every
+  existing Abort path handles it (after-scan routine runs, the measured points
+  ride on `exc.dataset`, the GUI saves them, a queue goes on to the next scan).
+  The engine writes `exc.reason` into the dataset attr `stopped_by` and logs
+  "scan STOPPED: ...". Unlike the operator's Abort, the instruments' settle
+  waits are NOT cut short in the after-scan routine (no abort flag is set), so
+  "field -> 0" is watched to the end.
+- **Skips** are `errors.SkipPoint`, internal to the engine's point loop
+  (`_sweep`): from `before_point` the point is never acquired; from
+  `after_point` the values just committed are put back to what the slot held
+  (the "not measured" value of its storage). after_point routines still run
+  for a point skipped before it (an end-of-sweep routine on the last point of
+  a row must not be lost), and the resonance window does not learn from a
+  skipped point. Attrs `skipped_points` (JSON list of grid indices, capped at
+  10 000) and `skipped_count`. A `skip_if` inside a routine stops the
+  remaining steps but still runs the routine's restore.
+- **on_error** (of the hook) applies to a step's FAILURE (a read that raises,
+  an out-of-limits formula, a headless pause with `fail`). A condition coming
+  true is not a failure: `abort_if` / `skip_if` act whatever `on_error` says.
+  `wait_until`'s timeout is governed by `on_timeout`, not `on_error`.
+- **Dataset attributes** from the steps live in `ctx["ds_attrs"]` and go into
+  every dataset built (`_to_dataset(..., ds_attrs=)`): live snapshots,
+  checkpoints, abort/fault datasets, and -- updated after it ran -- the
+  after-scan routine's comments.
+- **GUI**: `GenericStepRow` in `apps/scan_builder.py` (one small form per
+  kind, live-validated); a second combo "＋ other step ..." beside "＋ run an
+  action ...". THROUGHOUT gained the triggers "before each point" /
+  "after each point"; such a hook loaded without `on_error` is written back
+  without one. Optional keys are written back only when the file had them or
+  they differ from the default, so a definition re-saves unchanged. The
+  `pause` banner (`ScanWorker.ask` signal -> `ScanBuilder._on_ask`) is amber,
+  non-modal, and answered with `answer_pause(True/False)`.
+
 ---
 
 ## 5. Shared code conventions

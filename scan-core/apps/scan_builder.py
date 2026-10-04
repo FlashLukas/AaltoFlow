@@ -770,9 +770,295 @@ class ActionStepRow(QtWidgets.QFrame):
         pass
 
 
+#: The first entry of a routine's "add another kind of step" combo, and the
+#: kinds it offers (hooks.STEP_KINDS): label, kind.
+ADD_STEP = "＋ other step ..."
+STEP_CHOICES = (("wait until ...", "wait_until"),
+                ("abort scan if ...", "abort_if"),
+                ("skip point if ...", "skip_if"),
+                ("pause for the operator", "pause"),
+                ("comment into the file", "comment"),
+                ("set from a formula", "compute_set"))
+
+#: The short word at the left of each generic step (the columns are narrow).
+STEP_TAGS = {"wait_until": "wait until", "abort_if": "abort if", "skip_if": "skip if",
+             "pause": "pause:", "comment": "comment:", "compute_set": "set"}
+
+#: What each generic step does, for its tooltip.
+STEP_HELP = {
+    "wait_until": "Wait until the condition has been TRUE without a break for\n"
+                  "'hold' seconds (0 = true once). Looked at every 0.5 s from\n"
+                  "the status (no new acquisitions). After 'max' seconds: stop\n"
+                  "the scan (data kept, reason in the file) or carry on.",
+    "abort_if": "If the condition is true, STOP the scan here -- like Abort:\n"
+                "the after-scan routine runs, the data so far is saved, and\n"
+                "the file says why (attribute stopped_by).",
+    "skip_if": "If the condition is true, leave THIS point out (stored as not\n"
+               "measured, NaN) and go on with the next one. Before the point:\n"
+               "it is not measured at all; after it: the values are discarded.",
+    "pause": "Wait for you: a banner shows the message with Continue and\n"
+             "Abort scan. A run without this window (a script) fails here,\n"
+             "or -- 'no GUI: carry on' -- only logs the message.",
+    "comment": "Add a timestamped line to the file's comment log (attribute\n"
+               "comments). {parameter.id} is replaced by its current value.",
+    "compute_set": "Set a parameter to the value of a formula (the same blocking\n"
+                   "set as a plain set, and restored the same way). A value\n"
+                   "outside the parameter's limits makes the step FAIL -- it is\n"
+                   "never clamped.",
+}
+
+#: The defaults of the optional keys: a step writes such a key back only when
+#: it was in the file or differs from this, so a recipe round-trips unchanged.
+STEP_DEFAULTS = {"wait_until": {"hold_s": 0.0, "on_timeout": "stop"},
+                 "pause": {"headless": "fail"}}
+
+
+class GenericStepRow(QtWidgets.QFrame):
+    """A routine step of one of the five generic kinds (hooks.STEP_KINDS):
+    wait until / abort if / skip if / pause / comment / set from a formula.
+
+    One small form per kind, in the same compact frame as a set or an action
+    step (number on the left, up / down / remove on the right). A condition or
+    formula is checked AS YOU TYPE with the same function recipe.validate()
+    uses (expr.check, against the registry's ids): a red border and the reason
+    underneath when it would be refused, so a typo is seen in the builder and
+    not when the scan reaches it at 3 a.m.
+    """
+
+    remove = QtCore.Signal(object)
+    move = QtCore.Signal(object, int)
+    changed = QtCore.Signal()
+
+    def __init__(self, kind: str, spec: dict | None, registry):
+        super().__init__()
+        self.kind = kind
+        self.registry = registry
+        self._orig = dict(spec or {})          # what was loaded (key presence)
+        lay = _step_frame(self)
+        body = QtWidgets.QVBoxLayout(); body.setSpacing(2)
+        line1 = QtWidgets.QHBoxLayout(); line1.setSpacing(4)
+        tag = QtWidgets.QLabel(STEP_TAGS[kind])
+        tag.setStyleSheet(f"color:{C['muted']};")
+        tag.setToolTip(STEP_HELP[kind])
+        line1.addWidget(tag)
+        body.addLayout(line1)
+        line2 = QtWidgets.QHBoxLayout(); line2.setSpacing(4)
+        self.cond = self.text_edit = self.param_box = None
+        spec = self._orig
+
+        def edit(text, placeholder, tip):
+            w = QtWidgets.QLineEdit(str(text))
+            w.setPlaceholderText(placeholder)
+            w.setToolTip(tip)
+            # may be narrow, never widens the column (see _step_frame)
+            w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            w.setMinimumWidth(110)
+            w.textChanged.connect(lambda *_: self._changed())
+            return w
+
+        def spin(value, lo, hi, prefix, tip):
+            w = QtWidgets.QDoubleSpinBox()
+            w.setRange(lo, hi); w.setDecimals(1); w.setValue(float(value))
+            w.setPrefix(prefix); w.setSuffix(" s"); w.setFixedWidth(108)
+            w.setToolTip(tip)
+            w.valueChanged.connect(lambda *_: self._changed())
+            return w
+
+        def combo(items, current, tip):
+            w = QtWidgets.QComboBox()
+            for label, data in items:
+                w.addItem(label, data)
+            w.setCurrentIndex(max(0, w.findData(current)))
+            w.setToolTip(tip)
+            w.currentIndexChanged.connect(lambda *_: self._changed())
+            return w
+
+        expr_tip = ("A condition: parameter ids (as in the palette, e.g.\n"
+                    "ppms.temperature), numbers, + - * / **, < <= > >= == !=,\n"
+                    "and / or / not, abs min max round. Values come from the\n"
+                    "status -- no new measurement is taken.")
+        if kind in ("wait_until", "abort_if", "skip_if"):
+            self.cond = edit(spec.get("condition", ""), "condition, e.g. field > 100",
+                             expr_tip)
+            line1.addWidget(self.cond, 1)
+        if kind == "wait_until":
+            self.hold = spin(spec.get("hold_s", 0.0), 0, 1e6, "hold ",
+                             "The condition must stay true this long without a\n"
+                             "break (0 = true once is enough).")
+            self.timeout = spin(spec.get("timeout_s", 3600.0), 0.1, 1e7, "max ",
+                                "Give up after this long (required).")
+            self.on_timeout = combo((("then stop", "stop"), ("then carry on", "continue")),
+                                    spec.get("on_timeout") or "stop",
+                                    "After 'max': stop the scan (the data is kept,\n"
+                                    "the file says why), or log it and carry on.")
+            for w in (self.hold, self.timeout, self.on_timeout):
+                line2.addWidget(w)
+        if kind == "pause":
+            self.text_edit = edit(spec.get("message", ""), "message, e.g. Insert the polariser",
+                                  "What the banner tells you to do before Continue.")
+            line1.addWidget(self.text_edit, 1)
+            self.headless = combo((("no GUI: fail", "fail"), ("no GUI: carry on", "continue")),
+                                  spec.get("headless") or "fail",
+                                  "In a run without this window (a script, the queue\n"
+                                  "headless): fail with a clear message, or only log it.")
+            line2.addWidget(self.headless)
+        if kind == "comment":
+            self.text_edit = edit(spec.get("text", ""), "text; {field} = its value",
+                                  "Written with the time (and the point) into the\n"
+                                  "file's comments. {parameter.id} becomes its value.")
+            line1.addWidget(self.text_edit, 1)
+        if kind == "compute_set":
+            sets = spec.get("set") or {}
+            pid, text = next(iter(sets.items())) if sets else ("", "")
+            self.param_box = QtWidgets.QComboBox()
+            self.param_box.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                         QtWidgets.QSizePolicy.Fixed)
+            self.param_box.setMinimumWidth(90)
+            for p in (registry.settables() if registry is not None else []):
+                self.param_box.addItem(p.label, p.id)
+                self.param_box.setItemData(self.param_box.count() - 1, p.id,
+                                           QtCore.Qt.ToolTipRole)
+            if pid and self.param_box.findData(pid) < 0:
+                self.param_box.addItem(f"{pid} (not here)", pid)
+            if pid:
+                self.param_box.setCurrentIndex(self.param_box.findData(pid))
+            self.param_box.currentIndexChanged.connect(lambda *_: self._changed())
+            line1.addWidget(self.param_box, 1)
+            eq = QtWidgets.QLabel("="); line1.addWidget(eq)
+            self.cond = edit(text, "formula, e.g. 2800 + 28 * field",
+                             expr_tip.replace("A condition", "A formula"))
+            line2.addWidget(self.cond, 1)
+        if line2.count():
+            body.addLayout(line2)
+        self.err_lbl = QtWidgets.QLabel("")
+        self.err_lbl.setWordWrap(True)
+        self.err_lbl.setStyleSheet(f"color:{C['danger']}; font-size:10px;")
+        self.err_lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                   QtWidgets.QSizePolicy.Preferred)
+        self.err_lbl.hide()
+        body.addWidget(self.err_lbl)
+        lay.addLayout(body, 1)
+        _step_buttons(self, lay)
+        self._validate()
+
+    # ---- live check ------------------------------------------------------------
+
+    def problems(self) -> list[str]:
+        """What validate() would say about this step's text ([] = fine)."""
+        from scan_core import expr as _expr
+        if self.cond is None:
+            if self.kind == "pause" and not self.text_edit.text().strip():
+                return ["write the message the banner should show"]
+            return []
+        msgs = _expr.check(self.cond.text(), self.registry)
+        if self.kind == "compute_set" and not self.param_box.currentData():
+            msgs.insert(0, "pick the parameter to set")
+        return msgs
+
+    def _validate(self):
+        msgs = self.problems()
+        if self.cond is not None:
+            self.cond.setStyleSheet(
+                f"QLineEdit {{ border: 1px solid {C['danger']}; }}" if msgs else "")
+        self.err_lbl.setText(msgs[0] if msgs else "")
+        self.err_lbl.setToolTip("\n".join(msgs))
+        self.err_lbl.setVisible(bool(msgs))
+
+    def _changed(self):
+        self._validate()
+        self.changed.emit()
+
+    # ---- the RoutineSection interface -----------------------------------------
+
+    def set_number(self, k: int) -> None:
+        self.marker.setText(str(k))
+
+    def refresh_limits(self) -> None:          # nothing to clamp
+        pass
+
+    def _keep(self, out: dict, key: str, value):
+        """Write an optional key only if the file had it or it is not the
+        default -- so a loaded step is written back exactly as it was."""
+        if key in self._orig or value != STEP_DEFAULTS.get(self.kind, {}).get(key):
+            out[key] = self._back(key, value)
+
+    def _back(self, key: str, value):
+        """The loaded value itself when it is unchanged (600, not 600.0)."""
+        old = self._orig.get(key)
+        if isinstance(value, float) and isinstance(old, (int, float))                 and not isinstance(old, bool) and float(old) == value:
+            return old
+        return value
+
+    def spec(self) -> dict:
+        k = self.kind
+        if k in ("abort_if", "skip_if"):
+            return {"condition": self.cond.text()}
+        if k == "wait_until":
+            out = {"condition": self.cond.text()}
+            self._keep(out, "hold_s", float(self.hold.value()))
+            out["timeout_s"] = self._back("timeout_s", float(self.timeout.value()))
+            self._keep(out, "on_timeout", self.on_timeout.currentData())
+            # the file's own key order, so a loaded step re-saves identically
+            order = [key for key in self._orig if key in out]
+            return {key: out[key] for key in order + [x for x in out if x not in order]}
+        if k == "pause":
+            out = {"message": self.text_edit.text()}
+            self._keep(out, "headless", self.headless.currentData())
+            return out
+        if k == "comment":
+            return {"text": self.text_edit.text()}
+        return {"set": {self.param_box.currentData() or "": self.cond.text()}}
+
+    def to_step(self) -> dict:
+        return {self.kind: self.spec()}
+
+    def text(self) -> str:
+        s = self.spec()
+        if self.kind == "wait_until":
+            hold = f", hold {s.get('hold_s', 0):g} s" if s.get("hold_s") else ""
+            return f"wait until {s['condition']}{hold} (max {s['timeout_s']:g} s)"
+        if self.kind == "abort_if":
+            return f"abort if {s['condition']}"
+        if self.kind == "skip_if":
+            return f"skip point if {s['condition']}"
+        if self.kind == "pause":
+            return f"pause: {s['message']}"
+        if self.kind == "comment":
+            return f"comment: {s['text']}"
+        (pid, text), = s["set"].items()
+        return f"{pid} = {text}"
+
+
+def _generic_missing(kind: str, spec, registry) -> list[str]:
+    """The ids a generic step names that this registry does not have -- so
+    loading flags them like a missing axis (the step itself still loads, with
+    its red border)."""
+    from scan_core import expr as _expr
+    if not isinstance(spec, dict) or registry is None:
+        return []
+    texts = []
+    out = []
+    if kind in ("wait_until", "abort_if", "skip_if"):
+        texts.append(spec.get("condition"))
+    if kind == "compute_set" and isinstance(spec.get("set"), dict):
+        for pid, text in spec["set"].items():
+            p = registry.get(pid)
+            if p is None or getattr(p, "kind", "") != "settable":
+                out.append(pid)
+            texts.append(str(text))
+    for t in texts:
+        try:
+            out += [pid for pid in _expr.parse(t).names if registry.get(pid) is None]
+        except _expr.ExprError:
+            pass
+    return out
+
+
 class RoutineSection(QtWidgets.QFrame):
-    """One routine: an ORDERED list of steps, each "set <param> = value" or
-    "run <action>", run top to bottom, every one waited for.
+    """One routine: an ORDERED list of steps, each "set <param> = value",
+    "run <action>" or one of the five generic steps (GenericStepRow: wait
+    until, abort if, skip point if, pause, comment, set from a formula), run
+    top to bottom, every one waited for.
 
     Before 2026-09-25 a routine was "these sets, then ONE action". Lukas wanted
     several actions at one moment in a given order -- before the scan: find
@@ -830,11 +1116,33 @@ class RoutineSection(QtWidgets.QFrame):
         # entry, ready for the next one. `activated` fires only on a USER pick,
         # so refilling the list never adds a step by itself.
         self.add_combo = QtWidgets.QComboBox()
-        self.add_combo.setMinimumWidth(200)
+        # Both combos share the row's width (3 : 2) instead of each asking for
+        # its longest entry: the columns are ~350 px in the suite, and two
+        # combos sized to "Autofocus (simulated)   (sim_autofocus)" pushed the
+        # row past the THROUGHOUT column's edge.
+        self.add_combo.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                     QtWidgets.QSizePolicy.Fixed)
+        self.add_combo.setMinimumWidth(150)
         self.add_combo.activated.connect(self._picked)
-        act.addWidget(self.add_combo)
-        act.addStretch(1)
+        act.addWidget(self.add_combo, 3)
+        # The five generic steps (2026-10-04) in a combo of their own, so the
+        # action list stays exactly the registry's actions.
+        self.step_combo = QtWidgets.QComboBox()
+        self.step_combo.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                      QtWidgets.QSizePolicy.Fixed)
+        self.step_combo.setMinimumWidth(110)
+        self.step_combo.addItem(ADD_STEP, None)
+        for label, kind in STEP_CHOICES:
+            self.step_combo.addItem(label, kind)
+            self.step_combo.setItemData(self.step_combo.count() - 1, STEP_HELP[kind],
+                                        QtCore.Qt.ToolTipRole)
+        self.step_combo.setToolTip("Adds a wait, a check, a pause, a comment or a\n"
+                                   "computed set as the LAST step.")
+        self.step_combo.activated.connect(self._picked_step)
+        act.addWidget(self.step_combo, 2)
+        act.setContentsMargins(0, 0, 6, 0)      # clear of the scroll bar's edge
         v.addLayout(act)
+        self._registry = None
         self.set_actions([])
 
     # ---- the steps -------------------------------------------------------------
@@ -863,7 +1171,7 @@ class RoutineSection(QtWidgets.QFrame):
     def _insert(self, row, at: int | None = None):
         row.remove.connect(self.remove_step)
         row.move.connect(self.move_step)
-        if isinstance(row, SetStepRow):
+        if isinstance(row, (SetStepRow, GenericStepRow)):
             row.changed.connect(self._changed)
         at = len(self.steps) if at is None else at
         self.steps.insert(at, row)
@@ -883,7 +1191,7 @@ class RoutineSection(QtWidgets.QFrame):
         """
         if merge:
             for row in reversed(self.steps):
-                if isinstance(row, ActionStepRow):
+                if not isinstance(row, SetStepRow):     # an action, a wait, ...
                     break
                 if row.param.id == param.id:
                     if value is not None:
@@ -898,6 +1206,28 @@ class RoutineSection(QtWidgets.QFrame):
         if a is None:
             return None
         return self._insert(ActionStepRow(a))
+
+    def set_registry(self, registry) -> None:
+        """The registry a generic step checks its conditions against (and
+        whose settables "set from a formula" offers)."""
+        self._registry = registry
+        for row in self.steps:
+            if isinstance(row, GenericStepRow):
+                row.registry = registry
+                row._validate()
+
+    def add_generic(self, kind: str, spec: dict | None = None) -> GenericStepRow:
+        """Append one of the five generic steps (hooks.STEP_KINDS)."""
+        return self._insert(GenericStepRow(kind, spec, self._registry))
+
+    def _picked_step(self, index: int) -> None:
+        kind = self.step_combo.itemData(index)
+        self.step_combo.setCurrentIndex(0)
+        if kind:
+            row = self.add_generic(kind)
+            focus = row.cond or row.text_edit
+            if focus is not None:
+                focus.setFocus()
 
     def remove_step(self, row) -> None:
         if row in self.steps:
@@ -1007,11 +1337,14 @@ class RoutineSection(QtWidgets.QFrame):
         """
         if not self.steps:
             return None
-        kinds = ["action" if isinstance(s, ActionStepRow) else "set" for s in self.steps]
+        kinds = ["action" if isinstance(s, ActionStepRow) else
+                 "set" if isinstance(s, SetStepRow) else "generic" for s in self.steps]
         n_act = kinds.count("action")
         pids = [s.param.id for s in self.rows]
+        # a generic step (wait, check, pause, comment, formula) only exists in
+        # the ordered form
         simple = (n_act == 0 or (n_act == 1 and kinds[-1] == "action")) \
-            and len(set(pids)) == len(pids)
+            and len(set(pids)) == len(pids) and "generic" not in kinds
         if simple:
             args = {}
             if pids:
@@ -1037,9 +1370,21 @@ class RoutineSection(QtWidgets.QFrame):
         definition written against the lab must not come back on the simulator
         quietly skipping its reference.
         """
-        from scan_core.hooks import routine_steps
+        from scan_core.hooks import STEP_KINDS, routine_steps
+        if registry is not None:
+            self._registry = registry
         missing = []
         for kind, ident, *value in routine_steps(args):
+            if kind in STEP_KINDS:
+                missing += _generic_missing(kind, ident, registry)
+                if kind == "compute_set" and len(ident.get("set") or {}) > 1:
+                    # one formula per row: {set: {a: .., b: ..}} becomes two
+                    # steps in the same order (it runs the same way)
+                    for pid, text in ident["set"].items():
+                        self.add_generic(kind, {"set": {pid: text}})
+                else:
+                    self.add_generic(kind, ident)
+                continue
             if kind == "action":
                 if self.add_action(ident) is None:
                     missing.append(ident)
@@ -1056,7 +1401,7 @@ class RoutineSection(QtWidgets.QFrame):
         "field = 190 mT, then vna_reference, then field = 0 mT"."""
         text, after_action = "", False
         for s in self.steps:
-            is_action = isinstance(s, ActionStepRow)
+            is_action = not isinstance(s, SetStepRow)
             sep = ", then " if (is_action or after_action) else ", "
             text = (text + sep if text else "") + s.text()
             after_action = is_action
@@ -1066,7 +1411,15 @@ class RoutineSection(QtWidgets.QFrame):
 #: The triggers a THROUGHOUT routine offers: (label, when, edge).
 THROUGHOUT_TRIGGERS = (("start of each sweep of", "each_sweep", "start"),
                        ("end of each sweep of", "each_sweep", "end"),
-                       ("every N points", "every_n_points", None))
+                       ("every N points", "every_n_points", None),
+                       # 2026-10-04, for abort_if / skip_if: "before each
+                       # point" = before it is measured (its values set),
+                       # "after each point" = once its values are in
+                       ("before each point", "before_point", None),
+                       ("after each point", "after_point", None))
+
+#: The THROUGHOUT moments a hook can be loaded into a section from.
+THROUGHOUT_WHENS = ("each_sweep", "every_n_points", "before_point", "after_point")
 
 #: Hook keys a ThroughoutSection can show; a hook with any other key is kept
 #: verbatim instead (see ScanBuilder._load_hooks).
@@ -1165,10 +1518,11 @@ class ThroughoutSection(RoutineSection):
         return self.trigger_combo.currentData() or ("each_sweep", "start")
 
     def _sync_trigger_widgets(self):
-        sweep = self._trigger()[0] == "each_sweep"
+        when = self._trigger()[0]
+        sweep = when == "each_sweep"
         for w in (self.axis_combo, self.every_lbl, self.every_spin, self.every_unit):
             w.setVisible(sweep)
-        self.n_spin.setVisible(not sweep)
+        self.n_spin.setVisible(when == "every_n_points")
         self.n_fill.setVisible(not sweep)
         self.every_unit.setText("sweep  ·" if self.every_spin.value() == 1 else "sweeps  ·")
         # The steps only take room when there are some; up to three show
@@ -1177,7 +1531,7 @@ class ThroughoutSection(RoutineSection):
         shown = self.steps[:3]
         self.rows_scroll.setVisible(bool(shown))
         self.rows_scroll.setFixedHeight(
-            sum(s.sizeHint().height() for s in shown) + 4 * len(shown) if shown else 0)
+            sum(s.sizeHint().height() for s in shown) + 4 * len(shown) + 6 if shown else 0)
 
     def _changed(self):
         if hasattr(self, "trigger_combo"):          # not during the base __init__
@@ -1223,6 +1577,11 @@ class ThroughoutSection(RoutineSection):
         self.every_spin.setValue(int(every or 1))
         if n:
             self.n_spin.setValue(int(n))
+        # A before/after-each-point routine loaded from a file WITHOUT an
+        # on_error is written back without one (it means stop), so an older
+        # definition re-saves unchanged.
+        self._write_on_error = on_error is not None or when not in ("before_point",
+                                                                    "after_point")
         self.carry_on.setChecked(on_error == "continue")
 
     def set_count(self, n) -> None:
@@ -1244,9 +1603,10 @@ class ThroughoutSection(RoutineSection):
         if when == "each_sweep":
             out.update(axis=self.axis_combo.currentData(), edge=edge,
                        every=self.every_spin.value())
-        else:
+        elif when == "every_n_points":
             out["n"] = self.n_spin.value()
-        out["on_error"] = "continue" if self.carry_on.isChecked() else "stop"
+        if getattr(self, "_write_on_error", True) or self.carry_on.isChecked():
+            out["on_error"] = "continue" if self.carry_on.isChecked() else "stop"
         out.update(action="call", args=hook["args"])
         return out
 
@@ -1486,6 +1846,10 @@ class ScanWorker(QtCore.QThread):
     paused = QtCore.Signal(object)
     #: RESONANCE WINDOW readout after every point (dict, see WindowRunner.state)
     window = QtCore.Signal(object)
+    #: A `pause` routine step asks the operator (message, answer); answer is
+    #: None when the question is gone. Emitted from the scan thread, queued to
+    #: the GUI thread; answer(True/False) may be called from there.
+    ask = QtCore.Signal(str, object)
     #: WHERE the scan is: the engine's where_of() of the point just measured
     #: (grid index, zig-zag applied, and each axis's value). Emitted just
     #: BEFORE `progress`, so the progress handler already has it.
@@ -1590,7 +1954,9 @@ class ScanWorker(QtCore.QThread):
                      # (Lukas, 2026-09-28) instead of ending it
                      on_fault=lambda faults: self.paused.emit(list(faults)),
                      on_window=lambda st: self.window.emit(dict(st)),
-                     attrs=self.attrs)
+                     attrs=self.attrs,
+                     # a `pause` step: the banner asks, the scan waits
+                     on_pause=lambda msg, answer: self.ask.emit(msg or "", answer))
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
@@ -2472,6 +2838,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             section = RoutineSection(when, title)
             # Fill BEFORE connecting: the summary it would trigger reads the
             # right-hand pane, which is built after this column.
+            section.set_registry(self.registry)
             section.set_actions(actions)
             section.changed.connect(self._rebuild_summary)
             self.routines[when] = section
@@ -2516,6 +2883,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def add_throughout(self, hook: dict | None = None) -> ThroughoutSection:
         """A new THROUGHOUT routine; `hook` fills its trigger from a recipe."""
         section = ThroughoutSection()
+        section.set_registry(self.registry)
         section.set_actions(self._throughout_actions)
         names = self._dim_names()
         section.set_dims(names, self._dim_labels(names))
@@ -2523,7 +2891,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             section.set_trigger(hook.get("when"), axis=hook.get("axis"),
                                 edge=hook.get("edge"), every=hook.get("every", 1),
                                 n=hook.get("n"),
-                                on_error=hook.get("on_error") or "stop")
+                                on_error=hook.get("on_error"))
         section.changed.connect(self._rebuild_summary)
         section.remove.connect(self.remove_throughout)
         section.activated.connect(self._set_active_throughout)
@@ -2589,9 +2957,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _refresh_routine_actions(self):
         actions = self.registry.actions() if hasattr(self.registry, "actions") else []
         for section in self.routines.values():
+            section.set_registry(self.registry)
             section.set_actions(actions)
         self._throughout_actions = actions
         for section in self.throughout:
+            section.set_registry(self.registry)
             section.set_actions(actions)
 
     def _build_conditions(self) -> QtWidgets.QWidget:
@@ -2713,6 +3083,39 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.clear_fault_btns: dict = {}         # module name -> its button
         self.pause_box.hide()
         v.addWidget(self.pause_box)
+
+        # The OPERATOR banner (2026-10-04): a `pause` step in a routine --
+        # "insert the polariser, then Continue". The scan waits here until it
+        # is answered; Abort scan stops it like abort_if (data kept, the reason
+        # in the file). Amber, not red: nothing is wrong, it is your turn.
+        self.ask_box = QtWidgets.QFrame(); self.ask_box.setObjectName("card")
+        self.ask_box.setStyleSheet(
+            f"QFrame#card {{ border: 2px solid {C['accent']}; border-radius: 6px; }}")
+        ab = QtWidgets.QVBoxLayout(self.ask_box)
+        ab.setContentsMargins(10, 8, 10, 8)
+        ask_title = QtWidgets.QLabel("YOUR TURN -- the scan is waiting for you")
+        ask_title.setStyleSheet(f"color:{C['accent']}; font-weight:800; font-size:14px;")
+        ab.addWidget(ask_title)
+        self.ask_lbl = QtWidgets.QLabel("")
+        self.ask_lbl.setWordWrap(True)
+        self.ask_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.ask_lbl.setStyleSheet("font-size:13px;")
+        ab.addWidget(self.ask_lbl)
+        arow = QtWidgets.QHBoxLayout()
+        arow.addStretch(1)
+        self.ask_continue_btn = QtWidgets.QPushButton("Continue")
+        self.ask_continue_btn.setObjectName("primary")
+        self.ask_continue_btn.clicked.connect(lambda: self.answer_pause(True))
+        self.ask_abort_btn = QtWidgets.QPushButton("Abort scan")
+        self.ask_abort_btn.setObjectName("danger")
+        self.ask_abort_btn.setToolTip("Stop the scan here: the after-scan routine runs, the\n"
+                                      "points so far are saved, the file says why.")
+        self.ask_abort_btn.clicked.connect(lambda: self.answer_pause(False))
+        arow.addWidget(self.ask_continue_btn); arow.addWidget(self.ask_abort_btn)
+        ab.addLayout(arow)
+        self._ask_answer = None
+        self.ask_box.hide()
+        v.addWidget(self.ask_box)
 
         # "Scan 2 of 5 · name" while a QUEUE runs; its summary when it ends.
         self.queue_lbl = QtWidgets.QLabel("")
@@ -3014,7 +3417,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         like a missing axis: a definition written against the lab must not come
         back on the simulator quietly skipping its reference.
         """
-        from scan_core.hooks import routine_steps
+        from scan_core.hooks import STEP_KINDS, routine_steps
         missing: list[str] = []
         for section in self.routines.values():
             section.clear()
@@ -3045,9 +3448,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
                         p = self.registry.get(ident)
                         if p is None or getattr(p, "kind", "") != "settable":
                             missing.append(ident)
+                    elif kind in STEP_KINDS:
+                        missing += _generic_missing(kind, ident, self.registry)
                     elif get_action is None or get_action(ident) is None:
                         missing.append(ident)
-            if (steps is not None and when in ("each_sweep", "every_n_points")
+            if (steps is not None and when in THROUGHOUT_WHENS
                     and set(h) <= THROUGHOUT_KEYS):
                 section = self.add_throughout(h)
                 self._hook_template.append(("throughout", section))
@@ -3375,6 +3780,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.worker.save_failed.connect(self._on_save_failed)
         self.worker.log.connect(self._on_log)
         self.worker.paused.connect(self._on_paused)
+        self.worker.ask.connect(self._on_ask)
         self.worker.window.connect(self.window_card.show_state)
         self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.save_lbl.setText(f"saving to {path}" if path else
@@ -3626,6 +4032,29 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.clear_fault_btns[name] = b
         self.pause_box.show()
 
+    def _on_ask(self, message: str, answer):
+        """Show (answer given) or hide (answer None) the operator banner."""
+        self._ask_answer = answer
+        if answer is None:
+            self.ask_box.hide()
+            return
+        self.ask_lbl.setText(message or "(no message)")
+        self.ask_box.show()
+        self.ask_continue_btn.setFocus()
+        QtWidgets.QApplication.alert(self.window())   # flash the taskbar button
+
+    def answer_pause(self, go_on: bool) -> bool:
+        """The banner's buttons: Continue (True) or Abort scan (False).
+        False if no question is open."""
+        answer, self._ask_answer = self._ask_answer, None
+        self.ask_box.hide()
+        if answer is None:
+            return False
+        answer(bool(go_on))
+        msg = "operator: Continue" if go_on else "operator: Abort scan (at the pause)"
+        self.run_log.append(msg)
+        return True
+
     def clear_fault(self, name: str) -> bool:
         """Send `clear_fault` to one module (the banner's button)."""
         msg = f"clear_fault sent to {name}"
@@ -3798,6 +4227,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def _run_finished(self):
         self._on_paused([])                 # a finished run is never paused
+        self._on_ask("", None)              # ... nor waiting for the operator
         self.progress.setFormat("%p%")
         # Between two scans of a queue Run stays off: the queue is still going.
         self.run_btn.setEnabled(not self.queue_running())

@@ -59,14 +59,60 @@ end).
 `on_error: continue` (any hook): a failure is logged and the scan carries on --
 an autofocus that finds no peak should not throw away a night's map. The
 default is to stop, as before. An Abort is never swallowed.
+
+FIVE GENERIC STEPS (2026-10-04). Lukas chose exactly these, and asked for them
+to stay simple -- no loops, no if/else; a measurement on several dies is a
+QUEUE of scans, not a program inside one. Each is a step of a `call` routine
+(so the Scan Builder shows it in a routine's step list, in order with the sets
+and actions), or -- the same thing written alone -- a hook of its own
+({when: before_point, action: abort_if, args: {condition: ...}}):
+
+    {wait_until: {condition: "abs(ppms.temperature - 10) < 0.05",
+                  hold_s: 600, timeout_s: 7200, on_timeout: stop}}
+    {abort_if:   {condition: "hf2.r1 > 0.9"}}
+    {skip_if:    {condition: "camera.point_settled == False"}}
+    {pause:      {message: "Insert the polariser, then Continue", headless: fail}}
+    {comment:    {text: "sample rotated 90 deg; T = {ppms.temperature}"}}
+    {compute_set: {set: {smb.frequency: "2.8e9 + 28e6 * clMag.field"}}}
+
+* wait_until: polls (every WAIT_POLL_S) until the condition has been TRUE
+  without a break for hold_s seconds (0 = true once). timeout_s is required;
+  on_timeout: stop ends the scan like abort_if, continue logs and goes on.
+  Abort works during the wait; progress is logged every WAIT_LOG_S.
+* abort_if: the condition true -> the scan STOPS like an Abort (after-scan
+  routine runs, data kept and saved), with the reason in the file's
+  `stopped_by` attribute. Not at after_scan (there is nothing left to stop).
+* skip_if: the condition true -> the CURRENT point is stored as not measured
+  (NaN / the storage's fill value) and the scan goes on with the next one.
+  At before_point (and every_n_points, each_sweep start) the point is not
+  measured at all; at after_point (each_sweep end) the values just measured
+  are thrown away. Only at those moments: before or after the scan there is no
+  "current point". Not in a fly scan (a row is one move).
+* pause: waits for the OPERATOR (the GUI shows the message with Continue /
+  Abort scan); "Abort scan" stops like abort_if. In a run without a GUI
+  (engine.run without on_pause) headless: fail (default) makes the step fail
+  with a clear message, headless: continue logs the message and goes on.
+* comment: appends {time, point, index, text} to the file's `comments`
+  attribute (a JSON list); {param.id} in the text is filled with the value.
+* compute_set: evaluates the formula and SETS the parameter (the blocking set,
+  as `set` does), refusing a value outside its limits (the step fails, and
+  on_error decides). Restored afterwards exactly like a `set`.
+
+Conditions and formulas use the restricted evaluator in expr.py (no eval), and
+read parameters from the STATUS CACHE -- never a new acquisition.
+on_error (of the hook) applies to every step's FAILURE (a read that fails, a
+value out of limits); a condition coming true is not a failure, so abort_if
+and skip_if act whatever on_error says.
 """
 
 from __future__ import annotations
 
 import math
+import threading
 import time
+from datetime import datetime
 
-from .errors import ScanAborted
+from .errors import ScanAborted, ScanStopped, SkipPoint
 
 ACTIONS = {}
 
@@ -80,6 +126,40 @@ EDGES = ("start", "end")
 
 #: What a failing hook does to the scan.
 ON_ERROR = ("stop", "continue")
+
+#: The five generic steps (2026-10-04) plus compute_set's sibling `set`.
+STEP_KINDS = ("wait_until", "abort_if", "skip_if", "pause", "comment", "compute_set")
+
+#: The keys each step's mapping may hold, and which of them are required.
+STEP_KEYS = {
+    "wait_until": ({"condition", "timeout_s", "hold_s", "on_timeout"},
+                   {"condition", "timeout_s"}),
+    "abort_if": ({"condition"}, {"condition"}),
+    "skip_if": ({"condition"}, {"condition"}),
+    "pause": ({"message", "headless"}, {"message"}),
+    "comment": ({"text"}, {"text"}),
+    "compute_set": ({"set"}, {"set"}),
+}
+
+#: Where a step makes sense. Not listed = every moment.
+STEP_MOMENTS = {
+    # nothing is left to stop once the scan is over
+    "abort_if": tuple(m for m in MOMENTS if m != "after_scan"),
+    # a "current point" exists only while the points run; before_axis /
+    # after_axis are left out because they fire on the way INTO the next
+    # point, which makes "this point" ambiguous
+    "skip_if": ("before_point", "after_point", "every_n_points", "each_sweep"),
+}
+
+WAIT_ON_TIMEOUT = ("stop", "continue")
+PAUSE_HEADLESS = ("fail", "continue")
+
+#: wait_until: seconds between two looks at the condition (status-cache reads,
+#: cheap), and between two progress lines in the log.
+WAIT_POLL_S = 0.5
+WAIT_LOG_S = 30.0
+#: pause: how often the engine checks for an answer (or Abort) while waiting.
+PAUSE_POLL_S = 0.2
 
 
 def action(name):
@@ -141,7 +221,9 @@ def _fmt(p, value) -> str:
 def routine_steps(args) -> list[tuple]:
     """The steps of a `call` routine, flattened, in the order they run.
 
-    Returns a list of ("set", param_id, value) and ("action", action_id).
+    Returns a list of ("set", param_id, value), ("action", action_id) and,
+    for the five generic steps, (kind, spec) -- e.g. ("wait_until",
+    {"condition": ..., "timeout_s": ...}); see step_problems().
     A routine can be written two ways, and both come out the same here:
 
     * the ORIGINAL form (2026-09-16): {set: {a: 1, b: 2}, action: X} -- every
@@ -171,8 +253,22 @@ def routine_steps(args) -> list[tuple]:
         raw = [args]                      # the original form is ONE step
     out: list[tuple] = []
     for k, st in enumerate(raw, 1):
+        # The five generic steps (2026-10-04): {kind: {...}}, alone in their
+        # step. They come back as (kind, spec); step_problems() checks the spec.
+        kinds = set(st) & set(STEP_KINDS) if isinstance(st, dict) else set()
+        if kinds:
+            kind = next(iter(kinds))
+            if len(st) != 1:
+                raise ValueError(f"step {k}: a {kind} step holds only its own key "
+                                 f"({{{kind}: {{...}}}})")
+            if not isinstance(st[kind], dict):
+                raise ValueError(f"step {k}: {kind} needs a mapping, e.g. "
+                                 f"{{{kind}: {{{sorted(STEP_KEYS[kind][1])[0]}: ...}}}}")
+            out.append((kind, st[kind]))
+            continue
         if not isinstance(st, dict) or not set(st) <= {"set", "action"}:
-            raise ValueError(f"step {k} must be {{set: {{id: value}}}} or {{action: id}}")
+            raise ValueError(f"step {k} must be {{set: {{id: value}}}}, {{action: id}} "
+                             f"or one of {', '.join(STEP_KINDS)}")
         sets = st.get("set") or {}
         if not isinstance(sets, dict):
             raise ValueError(f"step {k}: 'set' must map parameter ids to values")
@@ -180,6 +276,240 @@ def routine_steps(args) -> list[tuple]:
         if st.get("action"):
             out.append(("action", st["action"]))
     return out
+
+
+def _number(spec, key, default=None):
+    v = spec.get(key, default)
+    if isinstance(v, bool):
+        raise ValueError
+    v = float(v)
+    if not math.isfinite(v):
+        raise ValueError
+    return v
+
+
+def step_problems(kind: str, spec: dict, registry=None, moment: str | None = None,
+                  fly: bool = False) -> list[str]:
+    """Everything wrong with one generic step ([] = fine).
+
+    The SAME check for recipe.validate() (before the run, with the routine
+    named) and for _call() (a caller that did not validate). Expressions are
+    parsed here, so a forbidden construct or an unknown parameter id is found
+    before anything moves.
+    """
+    from . import expr as _expr
+    errs: list[str] = []
+    allowed, required = STEP_KEYS[kind]
+    extra = set(spec) - allowed
+    if extra:
+        errs.append(f"{kind}: unknown key(s) {', '.join(sorted(map(str, extra)))} "
+                    f"(allowed: {', '.join(sorted(allowed))})")
+    missing = required - set(spec)
+    if missing:
+        hint = (" -- a wait needs a limit, or a sensor that never gets there "
+                "holds the scan forever" if "timeout_s" in missing else "")
+        errs.append(f"{kind}: needs {', '.join(sorted(missing))}{hint}")
+    if moment is not None and moment in MOMENTS and kind in STEP_MOMENTS \
+            and moment not in STEP_MOMENTS[kind]:
+        why = {"abort_if": "after the scan there is nothing left to stop",
+               "skip_if": "there is no current point to skip there "
+                          "(use before_point or after_point)"}[kind]
+        errs.append(f"{kind} cannot run at {moment}: {why}")
+    if kind == "skip_if" and fly:
+        errs.append("skip_if cannot run in a fly scan: a row is one continuous "
+                    "move, there is no single point to leave out")
+
+    def expression(text, what):
+        for msg in _expr.check(text, registry):
+            errs.append(f"{kind} {what}: {msg}")
+
+    if kind in ("wait_until", "abort_if", "skip_if") and "condition" in spec:
+        expression(spec["condition"], "condition")
+    if kind == "wait_until":
+        for key, positive in (("timeout_s", True), ("hold_s", False)):
+            if key not in spec:
+                continue
+            try:
+                v = _number(spec, key)
+                ok = v > 0 if positive else v >= 0
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                errs.append(f"wait_until: {key} must be a number "
+                            f"{'> 0' if positive else '>= 0'} (seconds)")
+        if (spec.get("on_timeout") or "stop") not in WAIT_ON_TIMEOUT:
+            errs.append(f"wait_until: on_timeout must be one of "
+                        f"{', '.join(WAIT_ON_TIMEOUT)}")
+    if kind == "pause":
+        if "message" in spec and not isinstance(spec["message"], str):
+            errs.append("pause: message must be text")
+        if (spec.get("headless") or "fail") not in PAUSE_HEADLESS:
+            errs.append(f"pause: headless must be one of {', '.join(PAUSE_HEADLESS)}")
+    if kind == "comment" and "text" in spec and not isinstance(spec["text"], str):
+        errs.append("comment: text must be text")
+    if kind == "compute_set" and "set" in spec:
+        sets = spec["set"]
+        if not isinstance(sets, dict) or not sets:
+            errs.append("compute_set: set must map parameter ids to formulas")
+        else:
+            for pid, text in sets.items():
+                p = registry.get(pid) if registry is not None else None
+                if registry is not None and (p is None or getattr(p, "kind", "") != "settable"):
+                    errs.append(f"compute_set: '{pid}' is not a settable parameter here")
+                if isinstance(text, bool) or not isinstance(text, (str, int, float)):
+                    errs.append(f"compute_set {pid}: the formula must be text")
+                    continue
+                expression(str(text), pid)
+    return errs
+
+
+def _cond_text(spec) -> str:
+    return str(spec.get("condition", "")).strip()
+
+
+def _values_text(expr, registry) -> str:
+    """'ppms.temperature = 10.03, ppms.field = 0' -- what a condition sees."""
+    from . import expr as _expr
+    parts = []
+    for pid in expr.names:
+        try:
+            parts.append(f"{pid} = {_expr.format_value(_expr.read_value(registry, pid))}")
+        except Exception as exc:
+            parts.append(f"{pid} = ? ({exc})")
+    return ", ".join(parts)
+
+
+def wait_until(ctx, condition, timeout_s, hold_s=0.0, on_timeout="stop"):
+    """Block until `condition` has been true for `hold_s` s without a break.
+
+    Polled from the status cache every WAIT_POLL_S (no acquisitions). Abort
+    ends the wait at once (ScanAborted). After timeout_s: on_timeout stop
+    raises ScanStopped (a clean stop, the reason in the file), continue logs
+    and returns.
+    """
+    from . import expr as _expr
+    registry = ctx["registry"]
+    say = ctx.get("log_fn") or (lambda msg: None)
+    should_abort = ctx.get("should_abort")
+    expr = _expr.parse(condition)
+    timeout_s, hold_s = float(timeout_s), float(hold_s or 0.0)
+    t0 = time.monotonic()
+    true_since = None
+    last_log = t0
+    while True:
+        if should_abort and should_abort():
+            raise ScanAborted(f"aborted while waiting until {expr.text}")
+        ok = bool(_expr.evaluate(expr, registry))
+        now = time.monotonic()
+        if ok:
+            true_since = now if true_since is None else true_since
+            if now - true_since >= hold_s:
+                held = f", held {hold_s:g} s" if hold_s else ""
+                say(f"wait_until: {expr.text} is true{held} "
+                    f"(after {now - t0:.0f} s)")
+                return
+        else:
+            true_since = None
+        if now - t0 >= timeout_s:
+            msg = (f"wait_until timed out after {timeout_s:g} s: {expr.text} "
+                   f"({_values_text(expr, registry)})")
+            if (on_timeout or "stop") == "continue":
+                say(f"{msg}; carrying on (on_timeout: continue)")
+                return
+            raise ScanStopped(msg)
+        if now - last_log >= WAIT_LOG_S:
+            last_log = now
+            held = 0.0 if true_since is None else now - true_since
+            say(f"waiting: {_values_text(expr, registry)} (want {expr.text}), "
+                f"held {held:.0f}/{hold_s:g} s, {now - t0:.0f}/{timeout_s:g} s")
+        left = timeout_s - (now - t0)
+        if true_since is not None:
+            left = min(left, hold_s - (now - true_since))
+        time.sleep(max(0.0, min(WAIT_POLL_S, left)))
+
+
+def pause_for_operator(ctx, message, headless="fail"):
+    """Wait until the operator answers Continue (return) or Abort scan
+    (ScanStopped). `ctx["on_pause"](message, answer)` shows the question --
+    `answer(True)` = Continue, `answer(False)` = Abort -- and is called with
+    (None, None) when the question is gone. Abort pressed elsewhere ends the
+    wait too. Without on_pause: headless fail -> RuntimeError, continue -> log.
+    """
+    say = ctx.get("log_fn") or (lambda msg: None)
+    on_pause = ctx.get("on_pause")
+    if on_pause is None:
+        if (headless or "fail") == "continue":
+            say(f"pause (no one to ask -- carrying on, headless: continue): {message}")
+            return
+        raise RuntimeError(
+            f"pause step {message!r}: this run has no operator to answer it "
+            f"(no GUI). Run it from the Scan Builder, or give the step "
+            f"headless: continue to only log the message")
+    answered = threading.Event()
+    box = {"go_on": None}
+
+    def answer(go_on: bool):
+        box["go_on"] = bool(go_on)
+        answered.set()
+
+    say(f"PAUSED for the operator: {message}")
+    should_abort = ctx.get("should_abort")
+    on_pause(message, answer)
+    try:
+        while not answered.wait(PAUSE_POLL_S):
+            if should_abort and should_abort():
+                raise ScanAborted(f"aborted while paused ({message})")
+    finally:
+        try:
+            on_pause(None, None)             # the question goes, whatever happened
+        except Exception:
+            pass
+    if not box["go_on"]:
+        raise ScanStopped(f"the operator chose Abort at the pause: {message}")
+    say("operator: Continue")
+
+
+def add_comment(ctx, text):
+    """Append {time, point, index, text} to the run's comments (file attr)."""
+    import json
+    from . import expr as _expr
+    say = ctx.get("log_fn") or (lambda msg: None)
+    filled, bad = _expr.fill_placeholders(str(text), ctx["registry"])
+    for pid in bad:
+        say(f"comment: warning: {{{pid}}} is not a parameter that can be read "
+            f"here -- left as text")
+    inside = ctx.get("moment") not in ("before_scan", "after_scan", None)
+    entry = {"time": datetime.now().isoformat(timespec="seconds"),
+             "point": int(ctx.get("flat", 0)) + 1 if inside else None,
+             "index": [int(i) for i in ctx.get("index", ())] if inside else None,
+             "text": filled}
+    comments = ctx.setdefault("comments", [])
+    comments.append(entry)
+    ctx.setdefault("ds_attrs", {})["comments"] = json.dumps(comments)
+    where = f" (point {entry['point']})" if inside else ""
+    say(f"comment{where}: {filled}")
+
+
+def _computed(p, text, registry) -> float:
+    """compute_set: the formula's value, REFUSED (not clamped) outside limits.
+
+    Settable.set clamps silently -- right for a typed setpoint the builder has
+    already clamped, wrong for a formula: "2.8e9 + 28e6 * field" landing on the
+    instrument's upper limit is a measurement at the wrong frequency that looks
+    fine. So the step fails, and on_error decides.
+    """
+    from . import expr as _expr
+    v = _expr.evaluate(str(text), registry)
+    if isinstance(v, str):
+        raise ValueError(f"{p.id} = {text}: the formula gives text ({v!r}), not a number")
+    v = float(v)
+    if not math.isfinite(v):
+        raise ValueError(f"{p.id} = {text}: the formula gives {v}")
+    lo, hi = getattr(p, "limits", (None, None))
+    if lo is not None and not (lo <= v <= hi):
+        raise ValueError(f"{p.id} = {text} = {v:g} is outside its limits "
+                         f"[{lo:g}, {hi:g}]")
+    return v
 
 
 @action("call")
@@ -245,19 +575,36 @@ def _call(ctx, **args):
                 raise KeyError(f"{label} routine: '{ident}' is not a settable parameter "
                                f"here (is its module connected?)")
             params[ident] = p
-        else:
+        elif kind == "action":
             act = get_action(ident) if get_action else None
             if act is None:
                 raise KeyError(f"{label} routine: no action '{ident}' here "
                                f"(is its module connected?)")
             acts[ident] = act
+        else:
+            # a generic step: `ident` is its spec
+            probs = step_problems(kind, ident, registry, moment)
+            if probs:
+                raise KeyError(f"{label} routine: {probs[0]}")
+            if kind == "compute_set":
+                for pid in ident["set"]:
+                    params[pid] = registry.get(pid)
 
     carry_on = ctx.get("on_error") == "continue"
 
-    def step(what, fn):
-        say(f"{label}: {what} ...")
+    def step(what, fn, quiet=False):
+        # `quiet`: the per-point checks (abort_if, skip_if, comment) say
+        # nothing unless something HAPPENS -- "check ... done" at every point
+        # of a 10 000-point map would bury the log.
+        if not quiet:
+            say(f"{label}: {what} ...")
         try:
             fn()
+        except (SkipPoint, ScanStopped) as exc:
+            if isinstance(exc, ScanStopped) and ctx.get("aborted"):
+                say(f"{label}: {what} -- {exc} (already aborting)")
+                return
+            raise                             # a condition came true: not a failure
         except ScanAborted:
             if not ctx.get("aborted"):
                 raise                         # Abort pressed DURING the routine
@@ -271,31 +618,97 @@ def _call(ctx, **args):
                 raise
             say(f"{label}: {what} FAILED ({exc}); carrying on")
             return
-        say(f"{label}: {what} done")
+        if not quiet:
+            say(f"{label}: {what} done")
+
+    def condition(kind, spec):
+        """abort_if / skip_if: evaluate; act if true."""
+        from . import expr as _expr
+        expr = _expr.parse(spec["condition"])
+        point = int(ctx.get("flat", 0)) + 1
+
+        def check():
+            if not _expr.evaluate(expr, registry):
+                return
+            seen = _values_text(expr, registry)
+            if kind == "abort_if":
+                where = (f" at {moment}" if moment == "before_scan"
+                         else f" at point {point}")
+                raise ScanStopped(f"abort_if {expr.text}{where} ({seen})")
+            say(f"{label}: point {point} skipped -- skip_if {expr.text} ({seen})")
+            raise SkipPoint(expr.text)
+        step(f"{kind} {expr.text}", check, quiet=True)
 
     applied = {}          # param -> the LAST value this routine set it to
-    for kind, ident, *value in steps:
-        if kind == "set":
-            p, v = params[ident], float(value[0])
-            step(f"set {_fmt(p, v)}", lambda p=p, v=v: p.set(v))
-            applied[ident] = v
-        else:
-            act = acts[ident]
-            step(f"run {act.id}", lambda act=act: act.run(context=action_context(ctx)))
+    skipped = None
+    try:
+        for kind, ident, *value in steps:
+            if kind == "set":
+                p, v = params[ident], float(value[0])
+                step(f"set {_fmt(p, v)}", lambda p=p, v=v: p.set(v))
+                applied[ident] = v
+            elif kind == "action":
+                act = acts[ident]
+                step(f"run {act.id}", lambda act=act: act.run(context=action_context(ctx)))
+            elif kind == "compute_set":
+                for pid, text in ident["set"].items():
+                    p, box = params[pid], {}
 
-    if moment == "after_scan":
-        return
-    for pid, value in applied.items():
-        if pid not in current:
-            continue
-        back = current[pid]
-        # Skip a restore that changes nothing: a condition the routine set to
-        # its own value (angle 45 while the scan holds 45) costs a settle wait
-        # for no reason.
-        if math.isclose(float(back), value, rel_tol=0.0, abs_tol=1e-12):
-            continue
-        p = params[pid]
-        step(f"restore {_fmt(p, back)}", lambda p=p, v=back: p.set(float(v)))
+                    def do(p=p, pid=pid, text=text, box=box):
+                        v = _computed(p, text, registry)
+                        say(f"{label}: {pid} = {text} -> {_fmt(p, v)}")
+                        p.set(v)
+                        box["v"] = v
+                    step(f"set {pid} = {text}", do)
+                    if "v" in box:
+                        applied[pid] = box["v"]
+            elif kind == "wait_until":
+                step(f"wait until {_cond_text(ident)}",
+                     lambda s=ident: wait_until(ctx, s["condition"], s["timeout_s"],
+                                                s.get("hold_s", 0.0),
+                                                s.get("on_timeout") or "stop"))
+            elif kind in ("abort_if", "skip_if"):
+                condition(kind, ident)
+            elif kind == "pause":
+                step(f"pause: {ident.get('message', '')}",
+                     lambda s=ident: pause_for_operator(ctx, s.get("message", ""),
+                                                        s.get("headless") or "fail"))
+            elif kind == "comment":
+                step("comment", lambda s=ident: add_comment(ctx, s.get("text", "")),
+                     quiet=True)
+    except SkipPoint as exc:
+        # skip_if: the rest of the routine does not run, but the RESTORE does
+        # -- a routine that moved the field and then skipped the point must not
+        # leave the next point to be measured at the moved field.
+        skipped = exc
+
+    if moment != "after_scan":
+        for pid, value in applied.items():
+            if pid not in current:
+                continue
+            back = current[pid]
+            # Skip a restore that changes nothing: a condition the routine set
+            # to its own value (angle 45 while the scan holds 45) costs a
+            # settle wait for no reason.
+            if math.isclose(float(back), value, rel_tol=0.0, abs_tol=1e-12):
+                continue
+            p = params[pid]
+            step(f"restore {_fmt(p, back)}", lambda p=p, v=back: p.set(float(v)))
+    if skipped is not None:
+        raise skipped
+
+
+def _single_step(kind):
+    """{when: ..., action: abort_if, args: {condition: ...}} = a routine of
+    that ONE step: the same checks, the same logging, the same restore."""
+    def run_one(ctx, **args):
+        _call(ctx, steps=[{kind: args}])
+    run_one.__name__ = f"_{kind}"
+    return run_one
+
+
+for _kind in STEP_KINDS:
+    ACTIONS[_kind] = _single_step(_kind)
 
 
 def action_context(ctx) -> dict:
@@ -408,8 +821,8 @@ def run_hooks(hooks, moment, ctx, axis_name=None):
             ctx["on_error"] = h.get("on_error") or "stop"
             try:
                 fn(ctx, **(h.get("args") or {}))
-            except ScanAborted:
-                raise
+            except (ScanAborted, SkipPoint):
+                raise                    # an Abort / a stop / a skip: not failures
             except Exception as exc:
                 # `call` handles its own steps; this catches the rest (a plain
                 # action that failed, or a routine that could not even start).

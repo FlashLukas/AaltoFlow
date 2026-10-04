@@ -259,3 +259,16 @@ frame (`last_deep()`).
   viewer reaches the lab only after `uv lock --upgrade-package aaltoview` in
   scan-core is committed. A GitHub Action in AaltoView that opens that pull
   request automatically is planned (needs a token).
+
+## Deliberately not built
+
+- **Routine control flow** (2026-10-04). The five generic routine steps are
+  DONE -- `wait_until`, `abort_if`, `skip_if`, `pause`, `comment`,
+  `compute_set` (scan-core README, "Routines"; developer notes 4c). Lukas
+  chose exactly these and asked to keep routines simple, so `repeat_until`
+  (loops), `if` / `else` (branches) and `notify` (e-mail / chat messages)
+  were deliberately NOT built: a routine is a list of steps run top to bottom,
+  not a program. Work on several dies, or "measure until it converges", goes
+  through a QUEUE of scans (one definition per die) or a script around
+  `engine.run`. Revisit only with a concrete measurement that a queue cannot
+  express.
