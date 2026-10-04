@@ -226,6 +226,16 @@ frame (`last_deep()`).
 
 ## Open work
 
+- **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
+  suite's Catalogue tab, `scan_core/catalogue.py`, `python -m
+  scan_core.catalogue`; see the scan-core README and developer notes 4c).
+  Still open: uploading a run (its header + a preview figure, optionally the
+  file) to an electronic lab notebook -- which ELN, and whether the upload
+  happens automatically after each scan or from the Catalogue's context menu.
+  Smaller follow-ups: a `where` over AXIS ranges ("field covers 50"), `or`
+  in `where`, and a scan-status flag in the file (aborted / complete) so the
+  catalogue can show it.
+
 - **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
   `warn` for kim + camera. Next: widen the lab policy to `"*"` (restart the
   services), a week of `warn`, then `enforce` -- before that, make the keyring

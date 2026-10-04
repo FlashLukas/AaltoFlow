@@ -96,6 +96,7 @@ SIZES = {
     "suite-measurement": (1500, 950),
     "suite-data": (1500, 950),
     "suite-settings": (1500, 860),
+    "suite-catalogue": (1500, 760),
     "suite-navigator": (1500, 950),
     "suite-queue": (1500, 950),
     "suite-queue-dialog": (760, 430),
@@ -648,6 +649,61 @@ def _scan_3d_then_show_data(win):
         rows[0].slider.setValue(5)
 
 
+def _catalogue_demo(win):
+    """The Catalogue tab over a small, believable data folder: a week of runs on
+    two samples by two people, with conditions and instrument snapshots, one
+    unreadable file -- and a search typed in, so the picture shows what the tab
+    is FOR (narrowing a folder of files to the few you want).
+
+    The files are written by the real engine on the simulator into their own
+    scratch folder (never the suite's data folder), then indexed synchronously.
+    """
+    import json
+    import shutil
+    from scan_core import Recipe, build_sim_registry, run
+
+    folder = NEUTRAL / "catalogue-demo"
+    shutil.rmtree(folder, ignore_errors=True)
+    runs = [  # (day, time, name, sample, structure, operator, tags, T, field, axes)
+        ("2026-09-28", "101500", "fmr field sweep", "B7", "disc array 2 um", "alice",
+         "fmr", 300.0, 40.0, [("field", 0, 120, 41)]),
+        ("2026-09-29", "143000", "fmr islands", "B7", "disc array 2 um", "alice",
+         "fmr, map", 300.0, 40.0, [("rf_freq", 400, 1500, 12), ("pos_y", -45, 45, 31),
+                                   ("pos_x", -45, 45, 31)]),
+        ("2026-09-30", "091000", "cold fmr", "B7", "disc array 2 um", "bob",
+         "fmr, cryo", 5.0, 50.0, [("rf_freq", 500, 2500, 81)]),
+        ("2026-10-01", "112000", "cold fmr vs field", "B7", "disc array 2 um", "bob",
+         "fmr, cryo", 5.0, 50.0, [("field", 0, 120, 41), ("rf_freq", 500, 2500, 81)]),
+        ("2026-10-02", "160500", "moke loop", "Y12", "YIG film 100 nm", "alice",
+         "moke", 300.0, 0.0, [("field", -80, 80, 161)]),
+        ("2026-10-03", "100000", "kerr map", "Y12", "YIG film 100 nm", "alice",
+         "moke, map", 300.0, 20.0, [("pos_y", -30, 30, 41), ("pos_x", -30, 30, 41)]),
+    ]
+    for day, hms, name, sample, structure, op, tags, temp, field, axes in runs:
+        reg = build_sim_registry()
+        rec = Recipe(name=name, fixed={"rf_power": 8.0},
+                     detectors=["lockin_r", "lockin_x"],
+                     axes=[{"type": "linear", "param": p, "start": a, "stop": b,
+                            "num": n} for p, a, b, n in axes])
+        ds = run(rec, reg, created_iso=f"{day}T{hms[:2]}:{hms[2:4]}:{hms[4:]}")
+        ds.attrs.update(sample=sample, structure=structure, operator=op,
+                        project="magnonics", tags=tags, series="S1",
+                        snapshot_modules="ppms,clMag",
+                        snapshot_ppms=json.dumps({"status": {"temperature": temp}}),
+                        snapshot_clMag=json.dumps({"status": {"field": field}}))
+        path = folder / day / f"{hms}_{name.replace(' ', '_')}.nc"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ds.to_netcdf(path)
+    (folder / "2026-10-03" / "093000_interrupted.nc").write_bytes(b"truncated")
+    cat = win.catalogue
+    cat.set_data_dir(folder)
+    cat.rescan(); cat.wait_scan()
+    cat.sample_edit.setText("B7")
+    cat.refresh()
+    if cat.table.topLevelItemCount():
+        cat.table.setCurrentItem(cat.table.topLevelItem(0))
+
+
 def _dynacool_controls(win):
     """The DynaCool VNA-FMR setup (ppms + vna) on the Control tab: the
     cryostat's own knobs, the "reached" flags a scan waits on, and the field
@@ -1131,6 +1187,7 @@ TARGETS = {
     "suite-measurement": _suite("Measurement", _scan_then_show_run, settle=3.5),
     "suite-data": _suite("Data", _scan_3d_then_show_data, settle=3.5),
     "suite-settings": _suite("Settings", settle=2.0),
+    "suite-catalogue": _suite("Catalogue", _catalogue_demo, settle=1.5),
     "suite-navigator": _suite("Navigator", _navigator_demo, settle=2.0),
     "suite-queue": _suite("Measurement", _queue_running, settle=2.5),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),

@@ -97,6 +97,66 @@ without a screen; `scan_core.view` / `scan_core.data` re-export it. Not yet: Aal
 repetition rate, harmonic, demodulation-frequency folding, correction file,
 phase autocorrect).
 
+## Catalogue: find a run
+
+The suite's **Catalogue** tab searches every run in the data folder -- "the
+scans on sample B7 at 5 K last week" -- and opens the one you double-click in
+the Data tab.
+
+![catalogue tab](../front-panels/suite-catalogue.png)
+
+- **Search bar**: free text over name, sample, structure, comment and tags.
+  Every word must match, case does not matter.
+- **Filters**: sample, operator, project, series ("contains"), instrument (a
+  module key such as `ppms`), tags (`fmr, cryo`: the run must carry all of
+  them), a date range (`YYYY-MM-DD`; the "to" day is included).
+- **where**: conditions of the scan and instrument values from the snapshot
+  the suite stores in every file, joined by `and` or `,`:
+
+  ```
+  ppms.temperature between 4 and 6
+  clMag.field == 50 and rf_power > 0
+  ppms.mode == persistent
+  n_points >= 100
+  ```
+
+  Operators: `== != < <= > >=`, `between A and B` (inclusive), `contains`.
+  A key is a fixed condition (`rf_power`), `n_points` / `duration` / `size`,
+  or `<module>.<value>`: `ppms.temperature` finds `ppms.status.temperature`
+  too, so you do not need to know how the module nests its snapshot. `==`
+  on numbers allows a relative 1e-6, so `field == 50` finds 49.9999999.
+- **Results**: newest first, sortable by any column; a file that could not be
+  read is red, with the reason as its tooltip. Selecting a run shows its
+  comment, duration, instruments, axis ranges and full path underneath.
+- **Rescan folder** brings the index up to date (it also does that by itself
+  whenever the tab is opened). It runs in the background with a progress bar,
+  so the suite stays usable.
+
+**What is indexed**: only the HEADER of each `.nc` file -- its attributes, axis
+names, lengths, ranges and units, detector names, units and stored type, the
+fixed conditions, the run info (sample, structure, operator, comment, project,
+tags, series, setup name, AaltoFlow version) and the instrument snapshots,
+flattened into searchable values. The measured arrays are never loaded, so a
+large folder indexes quickly. Files from before the run info existed are
+indexed too (they just have no sample or operator); their instruments are
+guessed from the parameter ids (`clMag.field` -> `clMag`).
+
+**The index is disposable.** It is one file, `catalogue.sqlite`, in the data
+folder. Everything in it comes from the data files; nothing is written into
+them. Delete it any time -- the next rescan rebuilds it. A rescan only re-reads
+files whose size or date changed, and forgets files that were deleted.
+
+From a script or a terminal:
+
+```bash
+uv run python -m scan_core.catalogue scan  [DATA_DIR]          # default: the suite's data folder
+uv run python -m scan_core.catalogue search [DATA_DIR] --sample B7 \
+    --where "ppms.temperature between 4 and 6" [--paths | --json]
+```
+
+or in Python: `from scan_core import catalogue; catalogue.scan(d);
+rows = catalogue.search(d, sample="B7", tags="fmr")` (each row has `path`).
+
 ## Layout
 
 ```
@@ -110,9 +170,11 @@ scan_core/
   errors.py     # ScanAborted, RoutineError
   view.py       # re-exports aaltoview.view (N-D cube -> map / line)
   data.py       # re-exports aaltoview.data (read measurements back)
+  catalogue.py  # the run catalogue: SQLite index of the data folder + search + CLI
 apps/
   scan_builder.py  # PySide6 cockpit
-  suite.py         # the measurement suite (Control / Scan / Measurement / Data / Settings)
+  suite.py         # the measurement suite (Control / Navigator / Scan / Measurement / Data / Catalogue / Settings)
+  catalogue_view.py # the suite's Catalogue tab
   viewer.py        # starts the data viewer (aaltoview)
   theme.py
 recipes/        # example YAML recipes (2-D, 3-D, XY-raster)
