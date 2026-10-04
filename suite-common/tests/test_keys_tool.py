@@ -113,3 +113,31 @@ def test_policy_names_the_services_still_running_in_the_old_mode(me, capsys):
 def test_no_answer_switches_only_on_a_pc_with_a_key(me):
     assert secure.no_answer("lab-pc", "kim") is False          # no key: nothing to switch to
     assert secure._flipped == {}
+
+
+def test_policy_also_names_plain_services_the_new_policy_secures(me, capsys):
+    """Lab PC, 2026-10-04: after 'policy --modules "*"' the plain pm16,
+    signalhound and dssg were not listed, although they needed a restart --
+    only ENCRYPTED services left a marker. Now a plain service leaves one
+    too, on a PC that has a keyring (one never set up writes nothing)."""
+    kr = me / "keyring"
+    assert K.main(["init", str(kr), "--mode", "warn", "--modules", "kim"]) == 0
+
+    class Ctx:                                   # never touched on the plain path
+        pass
+    assert secure.secure_server(Ctx(), [], "pm16") is None      # plain: pm16 not listed
+    capsys.readouterr()
+    assert K.main(["policy", "--modules", "*"]) == 0
+    out = capsys.readouterr().out
+    assert "restart them" in out and "pm16" in out.split("restart them")[1]
+    assert "mode 'off'" in out
+    capsys.readouterr()
+    assert K.main(["policy", "--modules", "kim"]) == 0          # back: pm16 matches again
+    assert "restart them" not in capsys.readouterr().out
+
+
+def test_a_pc_without_a_keyring_writes_no_marker(me):
+    class Ctx:
+        pass
+    assert secure.secure_server(Ctx(), [], "pm16") is None
+    assert not (secure.security_dir() / secure.RUNNING_DIR).exists()

@@ -585,6 +585,13 @@ def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
     before. Undo with ``release_server(guard)`` when the service stops."""
     pol = policy()
     if not module_secured(module, pol):
+        # a plain service on a PC that HAS a keyring leaves a marker too, so
+        # `keys.py policy` can name it when a new policy secures it (lab PC,
+        # 2026-10-04: the plain pm16 / signalhound / dssg were not listed).
+        # A PC never set up writes nothing. Its marker is never removed by
+        # the service; running_secured() drops it once the process is gone.
+        if keyring_dir() is not None:
+            _write_marker(module, "off")
         return None
     public, secret, pc = own_keys()
     guard = Guard(module, pol["mode"], Keyring(keyring_dir()), public, pc, on_event)
@@ -618,9 +625,10 @@ def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
 # ---------------------------------------------- running encrypted services ---
 #
 # A service fixes its mode when it starts, so a policy change reaches it only
-# on a restart. Each encrypted service leaves a small file in this PC's
-# security folder while it runs; `keys.py policy` lists the ones still alive
-# when the mode is lowered ("restart these").
+# on a restart. Each service leaves a small file in this PC's security folder
+# while it runs (mode "off" for a plain one, on a PC with a keyring);
+# `keys.py policy` lists the ones whose mode the new policy changes
+# ("restart these").
 
 RUNNING_DIR = "running"
 
@@ -663,7 +671,9 @@ def _pid_alive(pid: int) -> bool:
 
 
 def running_secured() -> list[dict]:
-    """The encrypted services running on THIS PC (dead markers are removed)."""
+    """The services running on THIS PC with the mode each started in --
+    "off" = plain (dead markers are removed). The name is historical: plain
+    services are listed too since 2026-10-04."""
     out = []
     d = security_dir() / RUNNING_DIR
     for p in sorted(d.glob("*.json")) if d.is_dir() else []:

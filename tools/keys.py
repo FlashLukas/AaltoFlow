@@ -234,10 +234,14 @@ def cmd_policy(args) -> int:
     # (secure.no_answer: one timeout, then the other mode), but name the
     # ones on this PC so they get restarted. The policy is lab-wide: other
     # PCs' services are not listed here.
+    # the mode each running service SHOULD have now: the policy's mode where
+    # the new list secures it, "off" (plain) everywhere else
     new = {"mode": mode, "modules": mods}
+
+    def wanted(module: str) -> str:
+        return mode if secure.module_secured(module, new) else "off"
     stale = [r for r in secure.running_secured()
-             if not secure.module_secured(r.get("module", ""), new)
-             or r.get("mode") != mode]
+             if r.get("mode") != wanted(r.get("module", ""))]
     if stale:
         print("still running in their old mode on this PC (restart them):")
         for r in stale:
