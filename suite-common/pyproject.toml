@@ -13,7 +13,10 @@ dependencies = []
 where = ["src"]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+# pyzmq only for the TESTS: making real keys and a real CurveZMQ handshake
+# (keyadmin, retiring a PC on an open connection). The package itself stays
+# standard-library only.
+dev = ["pytest>=8", "pyzmq>=25"]
 
 [build-system]
 requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)

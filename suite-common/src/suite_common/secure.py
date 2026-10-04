@@ -446,6 +446,23 @@ class Guard:
     def check(self, req: dict, user_id: str | None) -> dict | None:
         """None when `req` may go on; otherwise the refusal to send back."""
         e = self.entry(user_id or "")
+        if e is None and user_id:
+            # The key was checked when the connection was made (ZAP), but a
+            # connection stays open for hours: a PC RETIRED since then (its
+            # key file moved out of the keyring) would keep working on the
+            # connection it already has. So every message's key is looked up
+            # again (the keyring is re-read every RELOAD_S seconds).
+            if self.mode == "enforce":
+                self._say("gone:" + user_id, "warn",
+                          f"refused a message: key {user_id[:8]}... is not in the keyring "
+                          f"(any more -- retired?)")
+                return {"ok": False, "refused": "security",
+                        "error": "refused (security): this PC's key is not in the keyring "
+                                 "(retired?)"}
+            if "conn:" + user_id not in self._warned:   # not already said at connect
+                self._say("gone:" + user_id, "warn",
+                          f"a message from key {user_id[:8]}..., which is not in the keyring "
+                          f"(any more -- retired?); 'warn' lets it through")
         client = req.get("client") if isinstance(req, dict) else None
         if not isinstance(client, dict):
             return None                        # no identity claimed: control decides

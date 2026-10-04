@@ -20,7 +20,10 @@ Everyday:
     python tools/keys.py list                   # the trusted PCs
     python tools/keys.py machine lab-pc-1 yes   # lab-pc-1 may act as a machine
     python tools/keys.py policy --mode enforce  # after a week of 'warn'
-    python tools/keys.py remove old-laptop      # locks that PC out
+    python tools/keys.py retire old-laptop      # locks that PC out (kept in retired/)
+    python tools/keys.py restore old-laptop     # ... and lets it back in
+    python tools/keys.py export my-pc.key       # this PC's PUBLIC key, to bring along
+    python tools/keys.py add my-pc.key          # trust the PC of a key file brought here
 
 Services read the policy when they start: restart a module after changing
 its mode or module list. Adding or removing a PC works at once (the keyring
@@ -28,107 +31,64 @@ is re-read every few seconds).
 
 `new` makes keys with pyzmq (hence `uv run --with pyzmq`); every other
 command runs with any plain Python.
+
+The same steps without typing: Mission Control > Security... Both are thin
+front ends over suite_common/keyadmin.py, which does the actual work.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
-import socket
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "suite-common" / "src"))
-from suite_common import secure  # noqa: E402
+from suite_common import keyadmin, secure  # noqa: E402
+from suite_common.keyadmin import AdminError  # noqa: E402
 
 
-def _keyring_or_die() -> Path:
-    kr = secure.keyring_dir()
-    if kr is None:
-        raise SystemExit("this PC uses no keyring yet: python tools/keys.py use <folder>")
-    if not kr.is_dir():
-        raise SystemExit(f"the keyring folder {kr} is not reachable from this PC")
-    return kr
-
-
-def _write_settings(keyring: Path) -> None:
-    d = secure.security_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    with open(d / secure.SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"keyring": str(keyring)}, f, indent=2)
-
-
-def _write_policy(keyring: Path, mode: str, modules: list[str]) -> None:
-    with open(keyring / secure.POLICY_FILE, "w", encoding="utf-8") as f:
-        json.dump({"mode": mode, "modules": modules}, f, indent=2)
-
-
-def _modules_arg(text: str) -> list[str]:
-    return [m.strip().lower() for m in text.split(",") if m.strip()]
-
-
-def _find_entry(keyring: Path, pc: str) -> Path:
-    pc = pc.lower()
-    for e in secure.Keyring(keyring).entries():
-        if e.pc == pc or pc in e.names:
-            return keyring / e.file
-    raise SystemExit(f"no PC called '{pc}' in the keyring {keyring}")
+def _say_problems(problems, prefix: str = "") -> None:
+    """Key files this PC could not use -- a PC otherwise just goes missing.
+    On a share that maps Linux permissions, a key file written from ANOTHER PC
+    may be unreadable here: add it again from this PC (keys.py add), or make
+    it readable for all (a public key may be; only WRITING the keyring must
+    be restricted)."""
+    if problems:
+        print(f"{prefix}! {len(problems)} key file(s) could not be read here:")
+        for p in problems:
+            print(f"{prefix}    {p}")
 
 
 # ---------------------------------------------------------------- commands ---
 
-def _say_problems(ring, prefix: str = "") -> None:
-    """Key files this PC could not use -- a PC otherwise just goes missing.
-    On a share that maps Linux permissions, a key file written from ANOTHER PC
-    may be unreadable here: write it from a PC every other PC can read, or
-    make it readable for all (a public key may be; only WRITING the keyring
-    must be restricted)."""
-    ring.entries()                       # reads the folder
-    if ring.problems:
-        print(f"{prefix}! {len(ring.problems)} key file(s) could not be read here:")
-        for p in ring.problems:
-            print(f"{prefix}    {p}")
-
-
 def cmd_status(args) -> int:
-    d = secure.security_dir()
-    print(f"this PC          : {secure.this_pc_name()}")
-    print(f"security folder  : {d}")
-    try:
-        public, _, pc = secure.own_keys()
-        print(f"this PC's key    : {public[:8]}... (as '{pc}')")
-    except secure.SecurityError:
-        public = None
+    st = keyadmin.status()
+    print(f"this PC          : {st.pc}")
+    print(f"security folder  : {st.security_dir}")
+    if st.has_key:
+        print(f"this PC's key    : {st.public_prefix}... (as '{st.key_pc}')")
+    else:
         print("this PC's key    : none yet (uv run --with pyzmq python tools/keys.py new)")
-    kr = secure.keyring_dir()
-    print(f"keyring          : {kr or 'none (python tools/keys.py use <folder>)'}")
-    if kr is not None and not kr.is_dir():
+    print(f"keyring          : {st.keyring or 'none (python tools/keys.py use <folder>)'}")
+    if st.keyring is not None and not st.keyring_reachable:
         print("                   ! not reachable from this PC")
-    pol = secure.policy()
-    mods = ", ".join(pol["modules"]) or "none"
-    print(f"policy           : mode '{pol['mode']}', secured modules: {mods}")
-    if kr is not None and kr.is_dir():
-        _say_problems(secure.Keyring(kr), prefix="                   ")
-    if kr is not None and kr.is_dir() and public:
-        e = secure.Keyring(kr).by_key(public)
-        if e is None:
-            print("in the keyring   : NO -- other PCs will not let this one in"
-                  + (" (warn mode: they will, with a warning)" if pol["mode"] == "warn" else ""))
-        else:
-            print(f"in the keyring   : yes, as '{e.pc}' ({e.file}), "
-                  f"machine = {'yes' if e.machine else 'no'}")
+    mods = ", ".join(st.policy["modules"]) or "none"
+    print(f"policy           : mode '{st.policy['mode']}', secured modules: {mods}")
+    _say_problems(st.problems, prefix="                   ")
+    if st.in_keyring is False:
+        print("in the keyring   : NO -- other PCs will not let this one in"
+              + (" (warn mode: they will, with a warning)" if st.policy["mode"] == "warn"
+                 else ""))
+    elif st.in_keyring:
+        print(f"in the keyring   : yes, as '{st.keyring_name}' ({st.keyring_file}), "
+              f"machine = {'yes' if st.machine else 'no'}")
     return 0
 
 
 def cmd_init(args) -> int:
-    kr = Path(args.folder)
-    kr.mkdir(parents=True, exist_ok=True)
-    if (kr / secure.POLICY_FILE).exists() and not args.force:
-        raise SystemExit(f"{kr} already has a {secure.POLICY_FILE} (use --force to replace it)")
-    _write_policy(kr, args.mode, _modules_arg(args.modules))
-    _write_settings(kr)
+    kr = keyadmin.init_keyring(args.folder, args.mode, keyadmin.modules_arg(args.modules),
+                               force=args.force)
     print(f"keyring created: {kr}")
     print(f"policy: mode '{args.mode}', secured modules: {args.modules or 'none'}")
     print("this PC now uses it. Next, on EVERY lab PC (this one too):")
@@ -140,108 +100,80 @@ def cmd_init(args) -> int:
 
 
 def cmd_use(args) -> int:
-    kr = Path(args.folder)
-    if not (kr / secure.POLICY_FILE).is_file():
-        print(f"warning: {kr} has no {secure.POLICY_FILE} (yet) -- security stays off "
-              f"until it has one (python tools/keys.py init)")
-    _write_settings(kr)
-    print(f"this PC uses the keyring {kr}")
+    for w in keyadmin.use_keyring(args.folder):
+        print(f"warning: {w} (python tools/keys.py init)")
+    print(f"this PC uses the keyring {Path(args.folder)}")
     return 0
 
 
 def cmd_new(args) -> int:
-    d = secure.security_dir()
-    if (d / secure.OWN_SECRET).exists() and not args.force:
-        raise SystemExit(f"this PC already has a key ({d / secure.OWN_PUBLIC}); --force makes "
-                         f"a new one, and the old one stops working everywhere")
-    try:
-        public, secret = secure.new_keypair()
-    except ImportError:
-        raise SystemExit("making a key needs pyzmq: uv run --with pyzmq python tools/keys.py new")
-    pc = (args.pc or secure.this_pc_name()).lower()
-    addresses = list(args.address or [])
-    if not args.address:
-        # this PC's own IPv4 addresses, so that a client that connects by
-        # address (not by name) still finds the key -- best effort
-        try:
-            addresses = [a for a in socket.gethostbyname_ex(socket.gethostname())[2]
-                         if not a.startswith("127.")]
-        except OSError:
-            addresses = []
-    # "host": the name this PC's programs put into their identity (control.py),
-    # so the PC may be called something else in the keyring
-    meta = {"pc": pc, "host": socket.gethostname().strip().lower(),
-            "machine": "yes" if args.machine else "no"}
-    if addresses:
-        meta["addresses"] = " ".join(addresses)
-    secure.write_cert(d / secure.OWN_PUBLIC, public, meta=meta)
-    secure.write_cert(d / secure.OWN_SECRET, public, secret, meta=meta)
-    print(f"this PC's key made, as '{pc}': {d / secure.OWN_PUBLIC}")
-    print(f"(the secret half {d / secure.OWN_SECRET} never leaves this PC)")
-    kr = secure.keyring_dir()
-    target = f"{pc}.key"
-    try:
-        if kr is None or not kr.is_dir():
-            raise OSError("no keyring")
-        shutil.copyfile(d / secure.OWN_PUBLIC, kr / target)
-        print(f"public key added to the keyring: {kr / target}")
-    except OSError:
-        shutil.copyfile(d / secure.OWN_PUBLIC, Path.cwd() / target)
-        print(f"the keyring is not writable from here: copy {Path.cwd() / target}")
+    made = keyadmin.make_key(machine=args.machine, pc=args.pc, force=args.force,
+                             addresses=args.address)
+    print(f"this PC's key made, as '{made.pc}': {made.own_file}")
+    print(f"(the secret half {made.own_file.with_name(secure.OWN_SECRET)} never leaves this PC)")
+    if made.keyring_file is not None:
+        print(f"public key added to the keyring: {made.keyring_file}")
+    else:
+        kr = secure.keyring_dir()
+        src = made.local_file or made.own_file
+        print(f"the keyring is not writable from here: copy {src}")
         print(f"into the keyring folder{f' ({kr})' if kr else ''} -- that is what trusts this PC")
     return 0
 
 
+def cmd_export(args) -> int:
+    path = keyadmin.export_public(args.file)
+    print(f"this PC's public key written to {path} (safe to share; on the lab PC:")
+    print(f"python tools/keys.py add {path.name})")
+    return 0
+
+
+def cmd_add(args) -> int:
+    machine = None if args.machine is None else args.machine == "yes"
+    added = keyadmin.add_from_file(args.file, machine=machine, pc_name=args.pc,
+                                   overwrite=args.force)
+    print(f"{'replaced' if added.replaced else 'added'} '{added.pc}': {added.file}")
+    return 0
+
+
 def cmd_list(args) -> int:
-    kr = _keyring_or_die()
-    ring = secure.Keyring(kr)
-    entries = ring.entries()
-    _say_problems(ring)
+    entries, problems = keyadmin.entries()
+    _say_problems(problems)
+    kr = secure.keyring_dir()
     if not entries:
         print(f"no PCs in {kr} yet")
-        return 0
-    try:
-        own = secure.own_keys()[0]
-    except secure.SecurityError:
-        own = None
-    print(f"{'PC':20s} {'machine':8s} {'key':12s} addresses")
-    for e in entries:
-        mark = "  <- this PC" if e.public == own else ""
-        print(f"{e.pc:20s} {'yes' if e.machine else 'no':8s} {e.public[:8] + '...':12s} "
-              f"{' '.join(e.addresses)}{mark}")
+    else:
+        own = keyadmin.own_public()
+        print(f"{'PC':20s} {'machine':8s} {'key':12s} addresses")
+        for e in entries:
+            mark = "  <- this PC" if e.public == own else ""
+            print(f"{e.pc:20s} {'yes' if e.machine else 'no':8s} {e.public[:8] + '...':12s} "
+                  f"{' '.join(e.addresses)}{mark}")
+    gone = keyadmin.retired()
+    if gone:
+        print("retired (not trusted; python tools/keys.py restore <pc> undoes it):")
+        for r in gone:
+            print(f"  {r.pc:20s} {r.date}")
     return 0
 
 
 def cmd_machine(args) -> int:
-    kr = _keyring_or_die()
-    path = _find_entry(kr, args.pc)
-    public, _, meta = secure.read_cert(path)
-    meta["machine"] = "yes" if args.value == "yes" else "no"
-    secure.write_cert(path, public, meta=meta)
-    print(f"{args.pc}: machine = {meta['machine']}")
+    keyadmin.set_machine(args.pc, args.value == "yes")
+    print(f"{args.pc}: machine = {args.value}")
     return 0
 
 
 def cmd_policy(args) -> int:
-    kr = _keyring_or_die()
-    pol = secure.policy()
-    mode = args.mode or pol["mode"]
-    mods = _modules_arg(args.modules) if args.modules is not None else pol["modules"]
-    _write_policy(kr, mode, mods)
-    print(f"policy: mode '{mode}', secured modules: {', '.join(mods) or 'none'}")
+    mods = keyadmin.modules_arg(args.modules) if args.modules is not None else None
+    new = keyadmin.set_policy(args.mode, mods)
+    print(f"policy: mode '{new['mode']}', secured modules: "
+          f"{', '.join(new['modules']) or 'none'}")
     print("restart the secured modules' services for a change of mode or list")
     # A running service keeps the mode it started with. Clients follow it
     # (secure.no_answer: one timeout, then the other mode), but name the
     # ones on this PC so they get restarted. The policy is lab-wide: other
     # PCs' services are not listed here.
-    # the mode each running service SHOULD have now: the policy's mode where
-    # the new list secures it, "off" (plain) everywhere else
-    new = {"mode": mode, "modules": mods}
-
-    def wanted(module: str) -> str:
-        return mode if secure.module_secured(module, new) else "off"
-    stale = [r for r in secure.running_secured()
-             if r.get("mode") != wanted(r.get("module", ""))]
+    stale = keyadmin.stale_services(new)
     if stale:
         print("still running in their old mode on this PC (restart them):")
         for r in stale:
@@ -249,11 +181,17 @@ def cmd_policy(args) -> int:
     return 0
 
 
-def cmd_remove(args) -> int:
-    kr = _keyring_or_die()
-    path = _find_entry(kr, args.pc)
-    path.unlink()
-    print(f"removed {path.name}: {args.pc} is no longer trusted")
+def cmd_retire(args) -> int:
+    r = keyadmin.retire(args.pc, force=args.force)
+    print(f"retired {r.pc}: it no longer reaches any secured module (open connections "
+          f"included, within a few seconds)")
+    print(f"its key file is kept in {r.file} -- python tools/keys.py restore {r.pc} undoes it")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    path = keyadmin.restore(args.pc)
+    print(f"restored {path.name}: {args.pc} is trusted again")
     return 0
 
 
@@ -295,12 +233,37 @@ def main(argv=None) -> int:
     p.add_argument("--modules", help="comma list of secured modules, or *")
     p.set_defaults(fn=cmd_policy)
 
-    p = sub.add_parser("remove", help="stop trusting a PC")
+    for name in ("retire", "remove"):          # "remove" is the old name
+        p = sub.add_parser(name, help="stop trusting a PC (its key file is kept in "
+                                      "retired/, so it can be restored)")
+        p.add_argument("pc")
+        p.add_argument("--force", action="store_true",
+                       help="also when it is THIS PC (it locks itself out)")
+        p.set_defaults(fn=cmd_retire)
+
+    p = sub.add_parser("restore", help="trust a retired PC again")
     p.add_argument("pc")
-    p.set_defaults(fn=cmd_remove)
+    p.set_defaults(fn=cmd_restore)
+
+    p = sub.add_parser("export", help="write this PC's PUBLIC key to a file, to bring along")
+    p.add_argument("file")
+    p.set_defaults(fn=cmd_export)
+
+    p = sub.add_parser("add", help="trust the PC whose public key file this is "
+                                   "(writes it fresh into the keyring)")
+    p.add_argument("file")
+    p.add_argument("--machine", choices=("yes", "no"),
+                   help="may its programs act as 'machine' (default: what the file says)")
+    p.add_argument("--pc", help="its name in the keyring (default: what the file says)")
+    p.add_argument("--force", action="store_true", help="replace that PC's key if it is there")
+    p.set_defaults(fn=cmd_add)
 
     args = ap.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except AdminError as exc:
+        # keyadmin says what went wrong and what to do; no traceback
+        raise SystemExit(str(exc)) from None
 
 
 if __name__ == "__main__":
