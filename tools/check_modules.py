@@ -128,6 +128,25 @@ except zmq.Again:
     print("null")
 """
 
+# Three `status` replies ~0.4 s apart (a value may only appear once the
+# brain's worker has run): prints a JSON list of status dicts, or null.
+_STATUS = r"""
+import json, sys, time, zmq
+s = zmq.Context.instance().socket(zmq.REQ)
+s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 3000)
+s.connect(f"tcp://127.0.0.1:{sys.argv[1]}")
+out = []
+try:
+    for _ in range(3):
+        s.send_json({"cmd": "status"}); r = s.recv_json()
+        if r.get("ok"):
+            out.append(r.get("status") or {})
+        time.sleep(0.4)
+    print(json.dumps(out))
+except zmq.Again:
+    print("null")
+"""
+
 # Same, for the `shutdown` verb: prints the reply, or null on no answer.
 _SHUTDOWN = r"""
 import json, sys, zmq
@@ -582,6 +601,88 @@ def secure_live_check(rep: Report, m, py: Path):
             proc.wait(10)
 
 
+def _at(status, path):
+    """The value at `read_path` in a status dict, or KeyError."""
+    v = status
+    for k in path:
+        if isinstance(v, list):
+            v = v[int(k)]
+        else:
+            v = v[k]
+    return v
+
+
+def _type_problem(d: dict, v) -> str:
+    """Why value `v` does not fit descriptor `d`'s declared type, or "".
+
+    The same promise scan-core keeps when it STORES a value (scan_core/
+    storage.py, developer notes 4b): a bool is True/False, an int a whole
+    number inside the INDICATOR's min/max or bits, an enum one of its options.
+    None means "no value now" and always fits. A control's min/max are
+    setting limits, not checked here (scan-core does not narrow them either)."""
+    if v is None:
+        return ""
+    t = d.get("type")
+    items = v if (isinstance(v, list) and d.get("dtype") != "complex") else [v]
+    for x in items:
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool) and x not in (0, 1):
+            return f"declared bool, reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or not isinstance(x, (int, float)) or x != int(x):
+                return f"declared int, reads {x!r}"
+            if d.get("kind") == "indicator":
+                lo, hi = d.get("min"), d.get("max")
+                if d.get("bits") is not None:
+                    lo, hi = 0, 2 ** int(d["bits"]) - 1
+                if (lo is not None and x < lo) or (hi is not None and x > hi):
+                    return f"reads {x!r}, outside its declared [{lo}, {hi}]"
+        if t == "enum":
+            opts = d.get("options") or []
+            if x not in opts and str(x) not in [str(o) for o in opts]:
+                return f"reads {x!r}, which is not one of its options {opts}"
+        if t == "float" and (isinstance(x, (str, bool)) or not isinstance(x, (int, float))):
+            if not (isinstance(x, dict) and {"re", "im"} <= set(x)):
+                return f"declared float, reads {x!r}"
+    return ""
+
+
+def types_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
+    """Every value status reports fits the type its describe declares
+    (scan-core stores each detector in that type since 2026-10-04: a wrong
+    int range would stop a scan, an enum value outside its options is lost).
+    Three status snapshots of the simulator -- a first line of defence; the
+    real instrument may report more."""
+    r = subprocess.run([str(py), "-c", _STATUS, str(cmd)], capture_output=True,
+                       text=True, timeout=30)
+    try:
+        snaps = json.loads(r.stdout.strip().splitlines()[-1]) or []
+    except (ValueError, IndexError):
+        snaps = []
+    if not snaps:
+        rep.add(m.key, "live: status values fit their declared types", "SKIP",
+                "no status reply")
+        return
+    problems = []
+    for d in manifest.get("parameters", []):
+        path = d.get("read_path")
+        if not path or d.get("kind") not in ("indicator", "control"):
+            continue
+        for st in snaps:
+            try:
+                v = _at(st, path)
+            except (KeyError, IndexError, TypeError, ValueError):
+                break
+            why = _type_problem(d, v)
+            if why:
+                problems.append(f"{d.get('id')}: {why}")
+                break
+    rep.add(m.key, "live: status values fit their declared types",
+            "FAIL" if problems else "PASS", "; ".join(problems[:6]) +
+            (f" (+{len(problems) - 6} more)" if len(problems) > 6 else ""))
+
+
 def live_check(rep: Report, m, py: Path):
     cmd, pub = free_port_pair()
     proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
@@ -613,6 +714,7 @@ def live_check(rep: Report, m, py: Path):
         n = len(manifest.get("parameters", []))
         rep.add(m.key, "live: describe has parameters", "PASS" if n else "FAIL", f"{n}")
         stream_check(rep, m, py, cmd, manifest)
+        types_check(rep, m, py, cmd, manifest)
         if not malformed_check(rep, m, py, cmd):
             rep.add(m.key, "live: stops cleanly on `shutdown`", "SKIP",
                     "command port dead after the malformed request")
