@@ -219,21 +219,31 @@ def control_check(rep: Report, m):
     """control.py / apps/control_bar.py, where a module has them, are the
     master copies (suite-common/src/suite_common/). A stale copy could let a
     viewer change what the others refuse, or speak an older control protocol.
-    A module without them is not yet part of the rollout: reported as INFO in
-    the detail, not failed."""
+    control.py and secure.py are REQUIRED since every module has them
+    (control 2026-10-03, encryption 2026-10-04): a module without one would
+    ignore the control lock, or be unreachable once the lab's policy secures
+    it. control_bar.py only where the module has a GUI (zpiezo has none)."""
     pkg = package_dir(m.dir)
     if pkg is None:
         return
-    for rel, master in (("control.py", CONTROL_MASTER),
-                        ("apps/control_bar.py", CONTROL_BAR_MASTER),
-                        ("secure.py", SECURE_MASTER)):
+    for rel, master, required in (("control.py", CONTROL_MASTER, True),
+                                  ("apps/control_bar.py", CONTROL_BAR_MASTER, False),
+                                  ("secure.py", SECURE_MASTER, True)):
         copy = pkg / rel
         name = f"{rel} is the master copy"
         if not copy.is_file():
+            if required:
+                rep.add(m.key, name, "FAIL",
+                        f"src/{pkg.name}/{rel} missing: copy suite-common/src/suite_common/"
+                        f"{Path(rel).name} and wire it in (INSTRUMENT_MODULE_GUIDE section 6)")
             continue
         if not master.is_file():
             rep.add(m.key, name, "FAIL", f"master {master} missing")
-        elif copy.read_bytes() != master.read_bytes():
+        # compared without line endings: git stores both normalised, but a
+        # Windows checkout can hold one as CRLF and the other as LF (found
+        # 2026-10-04: 63 false "differs" on identical files)
+        elif (copy.read_bytes().replace(b"\r\n", b"\n")
+              != master.read_bytes().replace(b"\r\n", b"\n")):
             rep.add(m.key, name, "FAIL",
                     f"src/{pkg.name}/{rel} differs: copy suite-common/src/suite_common/"
                     f"{Path(rel).name}")
@@ -251,7 +261,8 @@ def hwlock_check(rep: Report, m, master: bytes | None):
     fix = "copy suite-common/src/suite_common/hwlock.py"
     if not copy.is_file():
         rep.add(m.key, "hwlock.py is the master copy", "FAIL", f"src/{pkg.name}/hwlock.py missing: {fix}")
-    elif master is not None and copy.read_bytes() != master:
+    elif master is not None and (copy.read_bytes().replace(b"\r\n", b"\n")
+                                 != master.replace(b"\r\n", b"\n")):   # CRLF vs LF checkout
         rep.add(m.key, "hwlock.py is the master copy", "FAIL", f"src/{pkg.name}/hwlock.py differs: {fix}")
     else:
         rep.add(m.key, "hwlock.py is the master copy", "PASS")

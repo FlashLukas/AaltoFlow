@@ -304,7 +304,8 @@ still assumes piezo/zpiezo.
     `mark_always(widget)`; dialogs (Settings) are not guarded -- a viewer may
     look, the service refuses the OK. `tools/check_modules.py` checks the
     copies wherever a module has them.
-- **Encryption: CurveZMQ (2026-09-30; prototype in kim + camera).** Why: the
+- **Encryption: CurveZMQ (2026-09-30 in kim + camera; every module since
+  2026-10-04).** Why: the
   control lock trusts what a client says about itself (`kind`, `host`), and
   anybody on the network can read, command or impersonate a service. How to
   use it: README, "Encryption and keys". How it is built:
@@ -353,7 +354,7 @@ still assumes piezo/zpiezo.
     its services and probes the same way (it tests the contract, not the
     keys). kim-control/tests/test_secure.py builds a three-PC lab in a temp
     folder (the other PCs reach "pc-a" as 127.0.0.2).
-  - Known limits of the prototype: a plain client to a secured module just
+  - Known limits: a plain client to a secured module just
     times out (CurveZMQ servers do not answer NULL clients); the keys sit in
     the user's profile, so a second Windows account on the same PC needs its
     own key (`new --pc <pc>-<user>`, with `--address`); the keyring's write

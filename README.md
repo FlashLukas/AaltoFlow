@@ -359,9 +359,9 @@ how to add control to a new module is in
 
 ## Encryption and keys
 
-> **Prototype:** kim and the camera speak it so far (plus the generic clients:
-> scan-core, the launcher, the consoles). The other modules follow the same
-> way Control did. Until the lab switches it on, nothing changes.
+> **Every module speaks it (since 2026-10-04)**, and so do the generic
+> clients (scan-core, the launcher, the consoles). Until the lab switches it
+> on, nothing changes.
 
 Without encryption, anybody on the lab network can read what the modules say,
 send them commands, pretend to be one of them, or claim to be a "machine" and
@@ -412,7 +412,7 @@ as a machine by default.
 **Once, for the lab** (on any PC):
 
 ```
-python tools/keys.py init \\server\share\aaltoflow-keyring --mode warn --modules kim,camera
+python tools/keys.py init \\server\share\aaltoflow-keyring --mode warn --modules "*"
 ```
 
 **For every PC**, this one included (about two minutes):
@@ -460,10 +460,10 @@ The policy is lab-wide: services on the other PCs need a restart too.
   After a week without warnings, switch to enforce.
 - **`enforce`**: unknown keys get no answer, and false identities are refused.
 
-`modules` lists the modules that speak CurveZMQ (`["*"]` when all of them do).
-While the rollout is under way, a module that is not listed keeps talking
+`modules` lists the modules that speak CurveZMQ; `["*"]` = all of them (every
+module can since 2026-10-04). A module that is not listed keeps talking
 plain, and every client -- which reads the same list -- talks plain to it. So
-kim can be encrypted while piezo is not.
+a lab can switch modules on one by one (kim first, piezo later).
 
 ### When something does not connect
 

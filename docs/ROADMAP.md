@@ -278,16 +278,17 @@ frame (`last_deep()`).
 
 ## Open work
 
-- **Control rollout** (PR #2, branch `control-rollout`): review and merge.
-  `curve-security` and `instrument-discovery` both add an import on the same
-  line of `mission_control.py`; when merging, keep both lines.
-- **Encryption (CurveZMQ)**, branch `curve-security`: try it on the lab PCs
-  in `warn` mode, then `enforce`; then roll it out to the other modules the
-  way Control was. The installer does not ship `tools/` yet, so an installed
-  PC has no `tools/keys.py`.
-- **Instruments on this PC**: check against real GPIB and COM hardware on the
-  lab PC; vendor-specific probes later (IDS camera, Zurich HF2, NI DAQ,
-  Signal Hound, Thorlabs Kinesis).
+- **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
+  `warn` for kim + camera. Next: widen the lab policy to `"*"` (restart the
+  services), a week of `warn`, then `enforce` -- before that, make the keyring
+  folder writable only by the lab's admin. The installer does not ship
+  `tools/` yet, so an installed PC has no `tools/keys.py`.
+  `camera-control/scripts/kim_xy_calibration.py` still talks plain.
+- **Control as an option** (off by default; encryption forces it on; one scan
+  at a time per instrument stays always on): agreed, not built yet.
+- **Instruments on this PC**: vendor probes are in (kim, camera, usb6001,
+  signalhound, hf2, pm16, pm400). Not yet run on the lab PC: hf2 and pm400
+  (no environment there); open: how LabOne lists an HF2, the PM400's USB ids.
 - **AaltoView updates**: `scan-core/uv.lock` pins one AaltoView commit; a new
   viewer reaches the lab only after `uv lock --upgrade-package aaltoview` in
   scan-core is committed. A GitHub Action in AaltoView that opens that pull
