@@ -54,6 +54,12 @@ from .config import Config
 
 _NAN = float("nan")
 
+#: How `locked` is judged (status `lock_source`; describe's enum options):
+#: from the slot sensor, or -- with REF OUT on 'target' -- by a timer.
+LOCK_MEASURED = "measured"
+LOCK_TIMER = "timer"
+LOCK_SOURCES = (LOCK_MEASURED, LOCK_TIMER)
+
 
 @dataclass
 class Status:
@@ -607,8 +613,8 @@ class Chopper:
                 target_frequency_Hz=target, frequency_Hz=self._measured,
                 freq_error_Hz=err, refout_frequency_Hz=self._refout,
                 input_frequency_Hz=self._input, locked=self._locked,
-                lock_source=("timer" if self._blade.output_ring(self._output, self._ref)
-                             is None else "measured"),
+                lock_source=(LOCK_TIMER if self._blade.output_ring(self._output, self._ref)
+                             is None else LOCK_MEASURED),
                 lock_gen=self._gen,
                 phase_deg=self._phase, nharmonic=self._nh, dharmonic=self._dh,
                 freq_min_Hz=lo, freq_max_Hz=hi, owned_blades=owned,

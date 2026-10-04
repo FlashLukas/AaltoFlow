@@ -25,6 +25,7 @@ import json
 import math
 import zlib
 
+from ..backends.base import READING_FLAGS
 from ..config import acquire_timeout_s
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
@@ -168,15 +169,18 @@ def build_manifest(meter) -> dict:
         _p("live_power", "Power (live)", "indicator", "float", unit="mW",
            group="Live", order=20, decimals=6, scale=1e-3, plottable=True,
            read_path=["power_W"]),
-        _p("flag", "Reading flag", "indicator", "string", group="Live", order=21,
-           read_path=["flag"], help="'overrange' when the manual range is too small."),
+        # the backend's fixed flag vocabulary ("" = a good reading), so an enum
+        _p("flag", "Reading flag", "indicator", "enum", group="Live", order=21,
+           options=list(READING_FLAGS), read_path=["flag"],
+           help="'overrange' when the manual range is too small."),
 
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1, help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=2, read_path=["acquiring"]),
+        # a counter that starts at 0 and only counts up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"]),
 
         # -- zero ---------------------------------------------------------------------
         _p("zero", "Zero (dark adjust)", "action", "action", group="Zero", order=1,

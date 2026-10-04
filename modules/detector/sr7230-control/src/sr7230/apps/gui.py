@@ -426,6 +426,8 @@ class LockInControls(QtWidgets.QFrame):
 
     @staticmethod
     def _show(combo: QtWidgets.QComboBox, text: str):
+        if text is None:                 # not known (status says None): leave it
+            return
         if combo.currentText() != text and combo.findText(text) >= 0:
             combo.blockSignals(True)
             combo.setCurrentText(text)
@@ -676,7 +678,7 @@ class LockInTab(QtWidgets.QWidget):
             self.ovl.setText(f"OVERLOAD: {what}")
             self.ovl.setStyleSheet(f"color:{COLORS['danger']}; font-weight:700;")
         else:
-            self.ovl.setText(f"no overload  -  R at {100 * live['r_fs']:.1f} % of {s.sensitivity}"
+            self.ovl.setText(f"no overload  -  R at {100 * live['r_fs']:.1f} % of {s.sensitivity or '--'}"
                              if live["r_fs"] is not None and math.isfinite(live["r_fs"])
                              else "no overload")
             self.ovl.setStyleSheet("")
@@ -687,7 +689,7 @@ class LockInTab(QtWidgets.QWidget):
                     ("  UNLOCKED" if smp.get("ref_locked") is False else "")
             self.sample.setText(f"last settled sample #{smp['acq_id']}: R {rv} {ru}, "
                                 f"theta {smp['theta_deg']:+.2f} deg{flags}")
-        self.meter.set_state(live["r_fs"], s.sensitivity, f"{v} {vu}", th,
+        self.meter.set_state(live["r_fs"], s.sensitivity or "--", f"{v} {vu}", th,
                              bool(o.get("input") or o.get("output")), s.ref_locked,
                              s.acquiring)
 
@@ -828,7 +830,7 @@ class InstrumentTab(QtWidgets.QWidget):
                           (f"{hw.host}:{hw.port} (TCP)" if hw.host else "simulator (no address set)"))
         f["range"].setText(f"up to {fmt_hz(s.freq_max_Hz)} for the oscillator"
                            f" ({'250 kHz option' if hw.option_250kHz else '120 kHz standard'})")
-        f["input"].setText(f"{s.input}, {s.coupling}, full scale {s.sensitivity} "
+        f["input"].setText(f"{s.input}, {s.coupling}, full scale {s.sensitivity or '--'} "
                            f"(SEN {s.sensitivity_index})")
         auto = "--" if not s.auto_id else \
             f"#{s.auto_id} {s.auto_op.replace('_', '-')}: " + \

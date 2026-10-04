@@ -845,7 +845,8 @@ class DspLockIn:
             "theta_deg": math.degrees(math.atan2(my, mx)),
             "freq_Hz": a["f"] / n,
             "aux_in": [v / n for v in a["aux"]],
-            "overload": 1 if a["overload"] else 0,
+            # a flag, so a bool (describe declares it bool; scan-core stores 1 byte)
+            "overload": bool(a["overload"]),
             "unit": tables.unit_for(self.cfg.input.source),
             "sensitivity": tables.sens_label(self._rb["sens"], self.cfg.input.source),
             "settle_s": a["settle_s"], "avg_s": a["avg_s"], "n_avg": n,

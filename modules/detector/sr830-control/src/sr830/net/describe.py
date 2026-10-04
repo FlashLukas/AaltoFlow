@@ -130,6 +130,11 @@ def build_manifest(lockin) -> dict:
     i_max = tables.tc_index(lim.tc_max)
     if lockin._detect_hz() > tables.TC_LONG_MAX_FREQ_HZ:
         i_max = min(i_max, tables.TC_LONG_FIRST_INDEX - 1)
+    # ... but ALWAYS up to the one the instrument has now: a value set at the
+    # front panel (or adopted at start) beyond the offered list must still be
+    # one of the options, or a scan recording `time_constant` would store it
+    # as "not measured". A prefix of the table, so option i = OFLT index i.
+    i_max = max(i_max, tables.tc_index(lockin.status_tc_s()))
     tc_options = tables.TC_LABELS[:i_max + 1]
     sens_options = tables.SENS_LABELS_A if tables.is_current(src) else tables.SENS_LABELS_V
 
@@ -267,9 +272,9 @@ def build_manifest(lockin) -> dict:
            acquire=acquire,
            help="The reference frequency averaged over the sample: worth recording "
                 "with an external reference."),
-        _p("overload", "Overload during sample", "indicator", "int", group=G, order=161,
+        _p("overload", "Overload during sample", "indicator", "bool", group=G, order=161,
            read_path=["sample", "overload"], acquire=acquire,
-           help="1 if the input, filter or output overloaded at any time while the "
+           help="True if the input, filter or output overloaded at any time while the "
                 "sample settled or averaged: that point is not to be trusted."),
     ]
 
@@ -283,8 +288,9 @@ def build_manifest(lockin) -> dict:
            help="Wait the settle time, average, and latch one sample."),
         _p("acquiring", "Acquiring", "indicator", "bool", group=G, order=2,
            read_path=["acquiring"]),
+        # counters that start at 0 and only count up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group=G, order=3,
-           read_path=["acq_id"]),
+           min=0, read_path=["acq_id"]),
         _p("auto_gain", "Auto gain", "action", "action", group="Auto", order=1,
            wait=auto_wait,
            help="The SR830 picks the sensitivity. Does nothing above a 1 s time constant."),
@@ -297,7 +303,7 @@ def build_manifest(lockin) -> dict:
         _p("auto_busy", "Auto running", "indicator", "bool", group="Auto", order=10,
            read_path=["auto_busy"]),
         _p("auto_id", "Auto run #", "indicator", "int", group="Auto", order=11,
-           read_path=["auto_id"]),
+           min=0, read_path=["auto_id"]),
         _p("auto_note", "Last auto result", "indicator", "string", group="Auto",
            order=12, read_path=["auto_note"]),
         # the SAFETY verb as a button (control.py: a viewer may always send

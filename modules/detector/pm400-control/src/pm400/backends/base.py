@@ -23,6 +23,9 @@ FLAG_OK = ""
 FLAG_OVERRANGE = "overrange"     # signal above the current range (manual range too low)
 FLAG_UNDERRUN = "underrun"       # signal below what the range can resolve
 FLAG_NAN = "nan"                 # the console had no valid value
+FLAG_NO_SENSOR = "no_sensor"     # set by the brain: no usable head plugged in
+#: every flag status can report (status `flag`; describe's enum options)
+READING_FLAGS = (FLAG_OK, FLAG_OVERRANGE, FLAG_UNDERRUN, FLAG_NAN, FLAG_NO_SENSOR)
 
 #: head kinds, the vocabulary of sensor_info()["kind"]
 HEAD_NONE = "none"               # nothing plugged in

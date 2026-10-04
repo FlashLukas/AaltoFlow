@@ -204,8 +204,9 @@ def build_manifest(ccs200) -> dict:
                 "a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
+        # counters that start at 0 and only count up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, read_path=["acq_id"]),
+           order=4, min=0, read_path=["acq_id"]),
 
         # -- dark -----------------------------------------------------------------------------
         _p("take_dark", "Take dark", "action", "action", group="Dark", order=1,
@@ -242,7 +243,8 @@ def build_manifest(ccs200) -> dict:
         _p("live_saturated", "Saturated (live)", "indicator", "bool", group="Live",
            order=14, read_path=["saturated"]),
         _p("scans", "Scans", "indicator", "int", group="Live", order=15,
-           read_path=["scans"]),
+           min=0, read_path=["scans"],
+           help="Completed CCD scans since the service started (a counter)."),
 
         # -- status ----------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",

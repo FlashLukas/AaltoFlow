@@ -158,3 +158,68 @@ def test_range_settle_survives_float_rounding_at_the_top(meter):
     echoed = meter.status().range_set
     assert abs(echoed - wire) <= r["settle"]["tol"]
     assert r["settle"]["tol"] < r["min"] * r["scale"]  # finer than one step
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(m):
+    man = build_manifest(m)
+    st = status_to_dict(m.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in man["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_enums_cover_every_flag_and_head_the_code_can_produce(meter):
+    """Enumerated from the code: the real driver's warning-code and sensor-
+    type maps (incl. unknown codes) and the brain's own 'no_sensor'."""
+    from pm400.backends import tlpmx
+    from pm400.backends.base import HEAD_KINDS, READING_FLAGS
+    p = _by_id(build_manifest(meter))
+    assert p["flag"]["type"] == "enum" and p["flag"]["options"] == list(READING_FLAGS)
+    assert p["head"]["type"] == "enum" and p["head"]["options"] == list(HEAD_KINDS)
+    for code in (0, tlpmx.WARN_OVERFLOW, tlpmx.WARN_UNDERRUN, tlpmx.WARN_NAN, 12345):
+        assert tlpmx.warning_flag(code) in READING_FLAGS
+    for code in range(-1, 20):
+        assert tlpmx.head_kind(code) in HEAD_KINDS
+    assert p["acq_id"]["min"] == 0
+    assert "store" not in json.dumps(build_manifest(meter))
+
+
+@pytest.mark.parametrize("head", ["photodiode", "thermal", "pyro", "none"])
+def test_status_fits_its_types_for_every_head(meter, head):
+    _swap(meter, head)
+    assert _misfits(meter) == []
+    if head != "none":
+        meter.acquire()
+        for _ in range(60):
+            meter.poll_once()
+        assert _misfits(meter) == []
+    p = _by_id(build_manifest(meter))
+    if "zero_id" in p:
+        assert p["zero_id"]["type"] == "int" and p["zero_id"]["min"] == 0

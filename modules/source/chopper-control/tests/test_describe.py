@@ -149,3 +149,61 @@ def test_describe_over_the_wire_and_both_status_paths_agree():
         if client is not None:
             client.shutdown()
         svc.stop()
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(ch):
+    m = build_manifest(ch)
+    st = status_to_dict(ch.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in m["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_lock_source_is_an_enum_covering_every_blade_and_mode():
+    """Enumerated over every blade x reference mode x output mode the brain
+    can be in (what adopting the controller's state can produce): the status
+    of each fits its declared type, and `lock_source` is one of its options."""
+    from chopper.blades import BLADES
+    from chopper.chopper import LOCK_SOURCES
+    cfg, ch = _brain()
+    try:
+        assert _by_id(build_manifest(ch))["lock_source"]["options"] == list(LOCK_SOURCES)
+        seen = set()
+        for blade in BLADES.values():
+            for ref in blade.ref_modes:
+                for out in blade.output_modes:
+                    with ch._lock:
+                        ch._blade, ch._ref, ch._output = blade, ref, out
+                    assert _misfits(ch) == [], (blade.name, ref, out)
+                    seen.add(ch.status().lock_source)
+        assert seen == set(LOCK_SOURCES)
+        assert "store" not in str(build_manifest(ch))
+    finally:
+        ch.shutdown()

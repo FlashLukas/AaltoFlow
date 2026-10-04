@@ -96,3 +96,64 @@ def test_acquire_timeout_covers_the_longest_allowed_acquisition(meter):
     meter.set_acquisition(5)
     acq = _by_id(build_manifest(meter))["power"]["acquire"]
     assert acq["timeout_s"] == meter.cfg.acquisition.timeout_s
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(m):
+    man = build_manifest(m)
+    st = status_to_dict(m.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in man["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_flag_enum_covers_every_flag_a_backend_can_return(meter):
+    """Enumerated from the code: the real driver's warning-code map (every
+    code, incl. unknown ones) and the simulator's flags are all options."""
+    from pm16.backends import tlpmx
+    from pm16.backends.base import READING_FLAGS
+    p = _by_id(build_manifest(meter))
+    assert p["flag"]["type"] == "enum" and p["flag"]["options"] == list(READING_FLAGS)
+    for code in (0, tlpmx.WARN_OVERFLOW, tlpmx.WARN_UNDERRUN, tlpmx.WARN_NAN, 12345):
+        assert tlpmx.warning_flag(code) in p["flag"]["options"]
+    assert p["acq_id"]["type"] == "int" and p["acq_id"]["min"] == 0
+    assert "store" not in json.dumps(build_manifest(meter))
+
+
+def test_status_fits_its_types_also_when_overranged(meter):
+    assert _misfits(meter) == []
+    meter.acquire()
+    for _ in range(40):
+        meter.poll_once()
+    assert meter.status().acq_id == 1 and _misfits(meter) == []
+    meter.set_auto_range(False)
+    meter.set_range(1e-9)                 # snaps to the smallest: the sim overranges
+    meter.poll_once()
+    assert meter.status().flag == "overrange"
+    assert _misfits(meter) == []

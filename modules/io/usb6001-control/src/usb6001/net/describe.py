@@ -201,8 +201,9 @@ def build_manifest(daq) -> dict:
            help="A fresh reading of the input lines."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=4, read_path=["acquiring"]),
+        # a counter that starts at 0 and only counts up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=5, read_path=["acq_id"]),
+           order=5, min=0, read_path=["acq_id"]),
 
         # -- status ------------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",

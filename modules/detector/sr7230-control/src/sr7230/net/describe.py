@@ -37,7 +37,7 @@ import json
 import zlib
 
 from .. import tables
-from ..config import REF_SOURCES, INPUT_MODES
+from ..config import REF_SOURCES, INPUT_MODES, SLOPES_DB
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -213,7 +213,10 @@ def build_manifest(lockin) -> dict:
            help="Any value is accepted; the instrument uses the nearest of its "
                 "1-2-5 steps. A scan point waits several of these."),
         _p("slope", "Filter slope", "control", "enum", group="Filter", order=20,
-           options=[tables.slope_label(s) for s in tables.allowed_slopes(flt.fast_mode)],
+           # the slopes fast mode allows, plus the one applied now if it is
+           # not among them -- an enum must cover every value status reports
+           options=[tables.slope_label(s) for s in SLOPES_DB
+                    if s in tables.allowed_slopes(flt.fast_mode) or s == flt.slope_db],
            read_path=["slope"], set={"verb": "set_slope", "arg": "slope"},
            help="6 dB/oct per RC stage. Steeper rejects noise better but "
                 "settles more slowly."),
@@ -274,8 +277,9 @@ def build_manifest(lockin) -> dict:
            order=1, help="Wait the settle time, average, and latch one sample."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=2, read_path=["acquiring"]),
+        # a counter that starts at 0 and only counts up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"]),
         _p("auto_phase", "Auto phase", "action", "action", group="Auto", order=1,
            wait=auto_wait,
            help="Rotate the reference phase so the signal lies on +X (AQN)."),

@@ -47,7 +47,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .backends.base import (FLAG_OK, HEAD_NONE, HEAD_PHOTODIODE, HEAD_PYRO,
+from .backends.base import (FLAG_NO_SENSOR, FLAG_OK, HEAD_NONE, HEAD_PHOTODIODE, HEAD_PYRO,
                             HEAD_THERMAL, ConsoleBackend, empty_sensor_info)
 from .config import Config
 
@@ -532,7 +532,7 @@ class Pm400Meter:
             q = self.quantity
             if q == "none":
                 with self._lock:
-                    self._value, self._flag = _NAN, "no_sensor"
+                    self._value, self._flag = _NAN, FLAG_NO_SENSOR
                 return
             with self._hw:
                 t_start = self._clock()

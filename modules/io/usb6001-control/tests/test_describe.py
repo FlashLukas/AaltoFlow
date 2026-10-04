@@ -94,3 +94,56 @@ def test_an_unstarted_brain_describes_its_config():
         for k in ("min", "max"):
             if k in p:
                 assert math.isfinite(p[k])
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(daq):
+    from usb6001.net.protocol import status_to_dict
+    st = status_to_dict(daq.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in build_manifest(daq)["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_declared_types_and_status_fits_before_and_after_a_sample():
+    """Digital lines are bool (None = not known yet: the 6001 cannot read an
+    output back before it is set), the acquisition counter an int >= 0."""
+    daq, m, by = _manifest(demo_config())
+    try:
+        assert by["acq_id"]["type"] == "int" and by["acq_id"]["min"] == 0
+        for k, p in by.items():
+            if k.startswith(("do_", "di_")):
+                assert p["type"] == "bool", k
+        assert "store" not in str(m)
+        assert _misfits(daq) == []            # before anything was read: None
+        daq.fresh_sample(timeout_s=5.0)
+        assert daq.status().acq_id == 1
+        assert _misfits(daq) == []
+    finally:
+        daq.shutdown()

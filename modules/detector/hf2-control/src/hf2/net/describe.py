@@ -38,6 +38,8 @@ from __future__ import annotations
 import json
 import zlib
 
+from ..config import REF_MODES
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -151,7 +153,7 @@ def build_manifest(lockin) -> dict:
 
         params.append(_p(
             f"ref{n}", f"Ch{n} reference", "control", "enum", group=grp,
-            order=5, options=["internal", "external"],
+            order=5, options=list(REF_MODES),
             read_path=["reference", i],
             set={"verb": "set_reference", "arg": "mode", "extra": {"channel": n}},
             help="external: a PLL locks the oscillator to the reference input "
@@ -216,8 +218,10 @@ def build_manifest(lockin) -> dict:
            help="Wait the settle time, average, and latch one sample."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=2, read_path=["acquiring"]),
+        # A counter that starts at 0 and only counts up: it cannot be negative,
+        # so min=0 is a promise the brain keeps (scan-core stores by it).
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"]),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
