@@ -19,6 +19,7 @@ import time
 
 import zmq
 
+from .. import secure
 from ..config import Config
 from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS, TOPIC_EVENT,
@@ -86,13 +87,13 @@ class ClMagClient(ControlClient):
                  name: str = "clMag client"):
         self._control_setup(kind, name)
         self._ctx = zmq.Context.instance()
-        self._req = self._ctx.socket(zmq.REQ)
-        self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        self._req.setsockopt(zmq.LINGER, 0)
-        self._req.connect(f"tcp://{host}:{cmd_port}")
-        self._sub = self._ctx.socket(zmq.SUB)
-        self._sub.connect(f"tcp://{host}:{pub_port}")
-        self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+        self.host = host
+        self.cmd_port = cmd_port
+        self.pub_port = pub_port
+        self.timeout_ms = timeout_ms
+        self._make_req()
+        # the SUB socket is created (and closed) by the listener thread that
+        # uses it: a ZeroMQ socket belongs to one thread
 
         self._latest: dict = {}
         self._lock = threading.Lock()
@@ -297,9 +298,9 @@ class ClMagClient(ControlClient):
         """Close the client. Does NOT stop the remote service."""
         self.stop_heartbeat()
         self._stop.set()
-        time.sleep(0.25)
-        self._req.close(0)
-        self._sub.close(0)
+        time.sleep(0.25)                 # the listener closes its SUB socket
+        with self._req_lock:
+            self._req.close(0)
 
     # ---- internals -------------------------------------------------------
 
@@ -319,13 +320,22 @@ class ClMagClient(ControlClient):
     def _cmd(self, d: dict) -> dict:
         self._with_identity(d)           # say who we are (control.py)
         with self._req_lock:
-            self._req.send_json(d)
-            try:
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # timed out; the REQ socket is now in a bad state -> rebuild it
-                self._reset_req()
-                return {"ok": False, "error": "service did not respond (timeout)"}
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(d)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # timed out; the REQ socket is now in a bad state -> rebuild it.
+                    self._req.close(0)
+                    # The service may speak the other mode than the policy now
+                    # says (it was started before the policy changed): the new
+                    # socket tries that mode, once. Safe to resend: a request
+                    # in the wrong mode never reaches the service.
+                    flipped = secure.no_answer(self.host, "clMag")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        return {"ok": False, "error": "service did not respond (timeout)"}
         # Refused because another PC holds control: RAISE (ControlRefused),
         # never a quiet {"ok": false} -- a script must not believe the magnet
         # went where it asked. Other failures keep their old error-dict shape.
@@ -337,25 +347,46 @@ class ClMagClient(ControlClient):
         """The name control.py's ControlClient calls (heartbeat, take_control)."""
         return self._cmd(req)
 
-    def _reset_req(self):
-        endpoint = self._req.LAST_ENDPOINT
-        self._req.close(0)
+    def _make_req(self):
         self._req = self._ctx.socket(zmq.REQ)
-        self._req.setsockopt(zmq.RCVTIMEO, 3000)
+        self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
-        if endpoint:
-            self._req.connect(endpoint.decode() if isinstance(endpoint, bytes) else endpoint)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures clMag (secure.py); plain otherwise
+        secure.secure_client(self._req, self.host, "clMag")
+        self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
+
+    def _make_sub(self):
+        s = self._ctx.socket(zmq.SUB)
+        secure.secure_client(s, self.host, "clMag")      # telemetry too
+        s.connect(f"tcp://{self.host}:{self.pub_port}")
+        s.setsockopt(zmq.SUBSCRIBE, b"")
+        return s, secure.flip_generation()
 
     def _listen(self):
+        sub, gen = self._make_sub()
         poller = zmq.Poller()
-        poller.register(self._sub, zmq.POLLIN)
-        while not self._stop.is_set():
-            if poller.poll(200):
-                topic, payload = self._sub.recv_multipart()
-                d = json.loads(payload)
-                if topic == TOPIC_STATUS:
-                    with self._lock:
-                        self._latest = d
-                    self._control_from_status(d)
-                elif topic == TOPIC_EVENT:
-                    self._on_event(d.get("level", "info"), d.get("msg", ""))
+        poller.register(sub, zmq.POLLIN)
+        try:
+            while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found the service in the other mode
+                    # (secure.no_answer): telemetry follows
+                    poller.unregister(sub)
+                    sub.close(0)
+                    sub, gen = self._make_sub()
+                    poller.register(sub, zmq.POLLIN)
+                if poller.poll(200):
+                    topic, payload = sub.recv_multipart()
+                    d = json.loads(payload)
+                    if topic == TOPIC_STATUS:
+                        with self._lock:
+                            self._latest = d
+                        self._control_from_status(d)
+                    elif topic == TOPIC_EVENT:
+                        self._on_event(d.get("level", "info"), d.get("msg", ""))
+        finally:
+            sub.close(0)

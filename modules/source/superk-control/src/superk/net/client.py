@@ -32,6 +32,7 @@ import time
 import zmq
 
 from ..config import Config, N_LINES
+from .. import secure
 from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, config_to_dict, apply_config_dict)
@@ -95,13 +96,12 @@ class SuperkClient(ControlClient):
         self._ping_s = float(ping_s)
         self._pinging = False          # True after we switched emission on
         self._ctx = zmq.Context.instance()
-        self._req = self._ctx.socket(zmq.REQ)
-        self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        self._req.setsockopt(zmq.LINGER, 0)
-        self._req.connect(f"tcp://{host}:{cmd_port}")
-        self._sub = self._ctx.socket(zmq.SUB)
-        self._sub.connect(f"tcp://{host}:{pub_port}")
-        self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+        self.host = host
+        self.cmd_port = cmd_port
+        self.pub_port = pub_port
+        self._make_req()
+        # the SUB socket is created (and closed) by the listener thread that
+        # uses it: a ZeroMQ socket belongs to one thread
 
         self._latest: dict = {}
         self._lock = threading.Lock()
@@ -194,9 +194,9 @@ class SuperkClient(ControlClient):
         hardware.client_timeout_s."""
         self.stop_heartbeat()
         self._stop.set()
-        time.sleep(0.25)
-        self._req.close(0)
-        self._sub.close(0)
+        time.sleep(0.25)                 # the listener closes its SUB socket
+        with self._req_lock:
+            self._req.close(0)
 
     # ---- internals -------------------------------------------------------
 
@@ -215,13 +215,22 @@ class SuperkClient(ControlClient):
         # a heartbeat for the lost-client guard (its "id" is client_id)
         d = self._with_identity(dict(d))
         with self._req_lock:
-            self._req.send_json(d)
-            try:
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # timed out; the REQ socket is now in a bad state -> rebuild it
-                self._reset_req()
-                return {"ok": False, "error": "service did not respond (timeout)"}
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(d)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # timed out; the REQ socket is now in a bad state -> rebuild it.
+                    self._req.close(0)
+                    # The service may speak the other mode than the policy now
+                    # says (it was started before the policy changed): the new
+                    # socket tries that mode, once. Safe to resend: a request
+                    # in the wrong mode never reaches the service.
+                    flipped = secure.no_answer(self.host, "superk")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        return {"ok": False, "error": "service did not respond (timeout)"}
         # Refused because another PC holds control: RAISE (ControlRefused), so
         # a script never believes the laser took a setting it refused.
         if not reply.get("ok", False):
@@ -232,36 +241,57 @@ class SuperkClient(ControlClient):
         """The name control.py's ControlClient calls (heartbeat, take_control)."""
         return self._cmd(req)
 
-    def _reset_req(self):
-        endpoint = self._req.LAST_ENDPOINT
-        self._req.close(0)
+    def _make_req(self):
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
-        if endpoint:
-            self._req.connect(endpoint.decode() if isinstance(endpoint, bytes) else endpoint)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures superk (secure.py); plain otherwise
+        secure.secure_client(self._req, self.host, "superk")
+        self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
+
+    def _make_sub(self):
+        s = self._ctx.socket(zmq.SUB)
+        secure.secure_client(s, self.host, "superk")      # telemetry too
+        s.connect(f"tcp://{self.host}:{self.pub_port}")
+        s.setsockopt(zmq.SUBSCRIBE, b"")
+        return s, secure.flip_generation()
 
     def _listen(self):
+        sub, gen = self._make_sub()
         poller = zmq.Poller()
-        poller.register(self._sub, zmq.POLLIN)
-        last_ping = time.monotonic()
-        while not self._stop.is_set():
-            now = time.monotonic()
-            if self._pinging and self._ping_s > 0 and now - last_ping >= self._ping_s:
-                last_ping = now
+        poller.register(sub, zmq.POLLIN)
+        try:
+            last_ping = time.monotonic()
+            while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found the service in the other mode
+                    # (secure.no_answer): telemetry follows
+                    poller.unregister(sub)
+                    sub.close(0)
+                    sub, gen = self._make_sub()
+                    poller.register(sub, zmq.POLLIN)
+                now = time.monotonic()
+                if self._pinging and self._ping_s > 0 and now - last_ping >= self._ping_s:
+                    last_ping = now
+                    try:
+                        self._cmd({"cmd": "ping"})
+                    except Exception:              # the service may be gone; keep trying
+                        pass
                 try:
-                    self._cmd({"cmd": "ping"})
-                except Exception:              # the service may be gone; keep trying
-                    pass
-            try:
-                if poller.poll(200):
-                    topic, payload = self._sub.recv_multipart()
-                    d = json.loads(payload)
-                    if topic == TOPIC_STATUS:
-                        with self._lock:
-                            self._latest = d
-                        self._control_from_status(d)
-                    elif topic == TOPIC_EVENT:
-                        self._on_event(d.get("level", "info"), d.get("msg", ""))
-            except zmq.ZMQError:
-                break
+                    if poller.poll(200):
+                        topic, payload = sub.recv_multipart()
+                        d = json.loads(payload)
+                        if topic == TOPIC_STATUS:
+                            with self._lock:
+                                self._latest = d
+                            self._control_from_status(d)
+                        elif topic == TOPIC_EVENT:
+                            self._on_event(d.get("level", "info"), d.get("msg", ""))
+                except zmq.ZMQError:
+                    break
+        finally:
+            sub.close(0)

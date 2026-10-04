@@ -48,11 +48,39 @@ import argparse
 import getpass
 import json
 import socket
+import sys
 import threading
 import time
 import uuid
 
 import zmq
+
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured gsp818 will
+    not answer it."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "gsp818" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("gsp818_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
+
+def _secure(sock, host: str) -> None:
+    """Make `sock` a CurveZMQ client when the lab's policy secures gsp818."""
+    if _SECURE is not None:
+        _SECURE.secure_client(sock, host, "gsp818")
 
 CMD_PORT = 5585
 PUB_PORT = 5586
@@ -78,19 +106,28 @@ class Console:
     def _new_req(self):
         s = self.ctx.socket(zmq.REQ)
         s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+        s.setsockopt(zmq.SNDTIMEO, TIMEOUT_MS)   # a refused handshake must not block send
         s.setsockopt(zmq.LINGER, 0)
+        _secure(s, self.host)
         s.connect(f"tcp://{self.host}:{self.cmd_port}")
         return s
 
     def cmd(self, **msg) -> dict:
         msg.setdefault("client", IDENTITY)      # say who we are (control)
-        self.req.send_json(msg)
-        try:
-            return self.req.recv_json()
-        except zmq.Again:
-            self.req.close(0)
-            self.req = self._new_req()
-            return {"ok": False, "error": "service did not respond (timeout)"}
+        for attempt in (1, 2):
+            try:
+                self.req.send_json(msg)
+                return self.req.recv_json()
+            except zmq.Again:
+                self.req.close(0)
+                # gsp818 may run in the other mode than the policy now says
+                # (started before it changed): try that mode once
+                # (secure.no_answer; a wrong-mode request never reaches gsp818)
+                flipped = (attempt == 1 and _SECURE is not None
+                           and _SECURE.no_answer(self.host, "gsp818"))
+                self.req = self._new_req()
+                if not flipped:
+                    return {"ok": False, "error": "service did not respond (timeout)"}
 
     def _value_or_auto(self, args, verb, arg, auto_verb, scale=1.0):
         """'rbw auto' -> set_rbw_auto on; 'rbw 30' -> set_rbw 30e3."""
@@ -206,6 +243,7 @@ class Console:
     def watch(self, seconds: float):
         sub = self.ctx.socket(zmq.SUB)
         sub.setsockopt(zmq.LINGER, 0)
+        _secure(sub, self.host)                   # telemetry is encrypted too
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         end = time.monotonic() + seconds

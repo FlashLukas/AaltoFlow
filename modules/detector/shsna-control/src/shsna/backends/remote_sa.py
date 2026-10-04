@@ -48,6 +48,7 @@ import time
 import numpy as np
 import zmq
 
+from .. import secure
 from ..control import make_identity
 from .base import SweepFailed
 
@@ -108,18 +109,33 @@ class OwnerLink:
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
+        # signalhound's key, from the lab keyring, when the policy secures
+        # signalhound (secure.py): this module then drives the analyser over
+        # an encrypted link, and the owner checks that this PC may act as a
+        # "machine". Plain otherwise.
+        secure.secure_client(self._req, self.host, "signalhound")
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _sub_loop(self) -> None:
         # A ZeroMQ socket must stay in the thread that uses it, so the SUB
         # socket is created and closed here.
-        sub = self._ctx.socket(zmq.SUB)
-        sub.setsockopt(zmq.RCVTIMEO, 200)
-        sub.setsockopt(zmq.LINGER, 0)
-        sub.connect(f"tcp://{self.host}:{self.pub_port}")
-        sub.setsockopt(zmq.SUBSCRIBE, b"status")
+        def make_sub():
+            s = self._ctx.socket(zmq.SUB)
+            s.setsockopt(zmq.RCVTIMEO, 200)
+            s.setsockopt(zmq.LINGER, 0)
+            secure.secure_client(s, self.host, "signalhound")
+            s.connect(f"tcp://{self.host}:{self.pub_port}")
+            s.setsockopt(zmq.SUBSCRIBE, b"status")
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         try:
             while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found signalhound in the other mode
+                    # (secure.no_answer): telemetry follows
+                    sub.close(0)
+                    sub, gen = make_sub()
                 try:
                     _topic, payload = sub.recv_multipart()
                     st = json.loads(payload.decode("utf-8"))
@@ -153,16 +169,24 @@ class OwnerLink:
             if self._req is None:
                 self._make_req()
             req.setdefault("client", self.identity)
-            try:
-                self._req.send_json(req)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # A REQ socket that timed out is stuck mid-exchange: rebuild it.
-                self._req.close(0)
-                self._make_req()
-                self._down_until = time.monotonic() + self.retry_s
-                raise ConnectionError(f"signalhound service at {self.address} did not answer "
-                                      f"'{req.get('cmd')}' within {self.timeout_ms} ms")
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(req)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # A REQ socket that timed out is stuck mid-exchange: rebuild it.
+                    self._req.close(0)
+                    # signalhound may speak the other mode than the policy now
+                    # says (started before it changed): try that mode once.
+                    # Safe to resend: a wrong-mode request never reaches it.
+                    flipped = secure.no_answer(self.host, "signalhound")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        self._down_until = time.monotonic() + self.retry_s
+                        raise ConnectionError(
+                            f"signalhound service at {self.address} did not answer "
+                            f"'{req.get('cmd')}' within {self.timeout_ms} ms") from None
         if not isinstance(reply, dict) or not reply.get("ok"):
             err = reply.get("error") if isinstance(reply, dict) else None
             raise SweepFailed(f"signalhound refused {req.get('cmd')}: {err or 'no reason given'}")

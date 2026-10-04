@@ -57,6 +57,34 @@ import uuid
 
 import zmq
 
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured hp8648 will not
+    answer it."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "hp8648" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("hp8648_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
+
+def _secure(sock, host: str) -> None:
+    """Make `sock` a CurveZMQ client when the lab's policy secures hp8648."""
+    if _SECURE is not None:
+        _SECURE.secure_client(sock, host, "hp8648")
+
+
 CMD_PORT = 5619
 PUB_PORT = 5620
 TIMEOUT_MS = 3000
@@ -89,26 +117,35 @@ class Console:
         self.cmd_port = cmd_port
         self.pub_port = pub_port
         self.ctx = zmq.Context.instance()
-        self.req = self.ctx.socket(zmq.REQ)
-        self.req.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
-        self.req.setsockopt(zmq.LINGER, 0)
-        self.req.connect(f"tcp://{host}:{cmd_port}")
+        self.req = self._new_req()
+
+    def _new_req(self):
+        req = self.ctx.socket(zmq.REQ)
+        req.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+        req.setsockopt(zmq.SNDTIMEO, TIMEOUT_MS)  # a refused handshake must not block send
+        req.setsockopt(zmq.LINGER, 0)
+        _secure(req, self.host)                   # encrypted when the policy says so
+        req.connect(f"tcp://{self.host}:{self.cmd_port}")
+        return req
 
     # ---- send one command, get one reply --------------------------------
 
     def send(self, msg: dict) -> dict:
         msg.setdefault("client", IDENTITY)       # say who we are (control)
-        try:
-            self.req.send_json(msg)
-            return self.req.recv_json()
-        except zmq.Again:
-            # timed out -> REQ socket is stuck; rebuild it so the next call works
-            self.req.close(0)
-            self.req = self.ctx.socket(zmq.REQ)
-            self.req.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
-            self.req.setsockopt(zmq.LINGER, 0)
-            self.req.connect(f"tcp://{self.host}:{self.cmd_port}")
-            return {"ok": False, "error": "no reply (is the service running?)"}
+        for attempt in (1, 2):
+            try:
+                self.req.send_json(msg)
+                return self.req.recv_json()
+            except zmq.Again:
+                # timed out -> REQ socket is stuck; rebuild it so the next call works
+                self.req.close(0)
+                # hp8648 may run in the other mode than the policy now says
+                # (started before it changed): try that mode once
+                # (secure.no_answer; a wrong-mode request never reaches hp8648)
+                flipped = _SECURE is not None and _SECURE.no_answer(self.host, "hp8648")
+                self.req = self._new_req()
+                if not (flipped and attempt == 1):
+                    return {"ok": False, "error": "no reply (is the service running?)"}
 
     # ---- pretty printers -------------------------------------------------
 
@@ -135,6 +172,7 @@ class Console:
 
     def watch(self, seconds: float):
         sub = self.ctx.socket(zmq.SUB)
+        _secure(sub, self.host)                  # telemetry too
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         poller = zmq.Poller(); poller.register(sub, zmq.POLLIN)
@@ -212,11 +250,7 @@ class Console:
 
         def beat():
             def make():
-                s = self.ctx.socket(zmq.REQ)
-                s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
-                s.setsockopt(zmq.LINGER, 0)
-                s.connect(f"tcp://{self.host}:{self.cmd_port}")
-                return s
+                return self._new_req()     # same options and mode as send()
             hb = make()
             while not self._hb_stop.wait(HEARTBEAT_S):
                 try:

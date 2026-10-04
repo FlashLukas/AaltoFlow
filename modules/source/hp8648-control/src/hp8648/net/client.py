@@ -18,6 +18,7 @@ import time
 
 import zmq
 
+from .. import secure
 from ..config import Config
 from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -60,12 +61,12 @@ class Hp8648Client(ControlClient):
                  kind: str = "script",
                  name: str = "hp8648 client"):
         self._control_setup(kind, name)
+        self.host = host
+        self._cmd_port = cmd_port
+        self._pub_port = pub_port
         self._timeout_ms = int(timeout_ms)
         self._ctx = zmq.Context.instance()
-        self._req = self._new_req(f"tcp://{host}:{cmd_port}")
-        self._sub = self._ctx.socket(zmq.SUB)
-        self._sub.connect(f"tcp://{host}:{pub_port}")
-        self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+        self._make_req()
 
         self._latest: dict = {}
         self._lock = threading.Lock()
@@ -137,32 +138,44 @@ class Hp8648Client(ControlClient):
         self._sub_t.join(timeout=1.0)
         with self._req_lock:
             self._req.close(0)
-        self._sub.close(0)
+        # (the listener thread owns the SUB socket and closes it on its way out)
 
     # ---- internals -------------------------------------------------------
 
     def info(self) -> dict:
         return self._cmd({"cmd": "info"}).get("info", {})
 
-    def _new_req(self, endpoint: str):
-        s = self._ctx.socket(zmq.REQ)
-        s.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
-        s.setsockopt(zmq.LINGER, 0)
-        s.connect(endpoint)
-        self._endpoint = endpoint
-        return s
+    def _make_req(self) -> None:
+        self._req = self._ctx.socket(zmq.REQ)
+        self._req.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+        self._req.setsockopt(zmq.LINGER, 0)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures hp8648 (secure.py); plain otherwise
+        secure.secure_client(self._req, self.host, "hp8648")
+        self._req.connect(f"tcp://{self.host}:{self._cmd_port}")
 
     def _cmd(self, d: dict) -> dict:
         self._with_identity(d)           # say who we are (control.py)
         with self._req_lock:
-            try:
-                self._req.send_json(d)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # timed out; a REQ socket is now stuck mid-exchange -> rebuild it
-                self._req.close(0)
-                self._req = self._new_req(self._endpoint)
-                return {"ok": False, "error": "service did not respond (timeout)"}
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(d)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # timed out; a REQ socket is now stuck mid-exchange -> rebuild it
+                    self._req.close(0)
+                    # The service may speak the other mode than the policy now
+                    # says (it was started before the policy changed): the new
+                    # socket tries that mode, once. Safe to resend: a request
+                    # in the wrong mode never reaches the service.
+                    flipped = secure.no_answer(self.host, "hp8648")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        return {"ok": False, "error": "service did not respond (timeout)"}
         # Refused because another PC holds control: RAISE (ControlRefused), so
         # a script never believes the generator took a setting it refused.
         # Any other failed reply is returned as before.
@@ -175,21 +188,39 @@ class Hp8648Client(ControlClient):
         return self._cmd(req)
 
     def _listen(self):
+        def make_sub():
+            s = self._ctx.socket(zmq.SUB)
+            secure.secure_client(s, self.host, "hp8648")      # telemetry too
+            s.connect(f"tcp://{self.host}:{self._pub_port}")
+            s.setsockopt(zmq.SUBSCRIBE, b"")
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         poller = zmq.Poller()
-        poller.register(self._sub, zmq.POLLIN)
-        while not self._stop.is_set():
-            if poller.poll(200):
-                try:
-                    topic, payload = self._sub.recv_multipart()
-                    d = json.loads(payload)
-                except Exception:
-                    continue
-                if topic == TOPIC_STATUS:
-                    with self._lock:
-                        self._latest = d
-                    self._control_from_status(d)
-                elif topic == TOPIC_EVENT:
+        poller.register(sub, zmq.POLLIN)
+        try:
+            while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found the service in the other mode
+                    # (secure.no_answer): telemetry follows
+                    poller.unregister(sub)
+                    sub.close(0)
+                    sub, gen = make_sub()
+                    poller.register(sub, zmq.POLLIN)
+                if poller.poll(200):
                     try:
-                        self._on_event(d.get("level", "info"), d.get("msg", ""))
+                        topic, payload = sub.recv_multipart()
+                        d = json.loads(payload)
                     except Exception:
-                        pass
+                        continue
+                    if topic == TOPIC_STATUS:
+                        with self._lock:
+                            self._latest = d
+                        self._control_from_status(d)
+                    elif topic == TOPIC_EVENT:
+                        try:
+                            self._on_event(d.get("level", "info"), d.get("msg", ""))
+                        except Exception:
+                            pass
+        finally:
+            sub.close(0)

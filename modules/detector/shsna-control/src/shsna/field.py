@@ -41,6 +41,8 @@ from dataclasses import dataclass
 
 import zmq
 
+from . import secure
+
 #: the magnets a field can come from (plus "manual"), in the order a GUI lists them
 FIELD_SOURCES = ("mag2d", "mag2dcal", "clMag", "ppms", "manual")
 
@@ -118,6 +120,7 @@ class RemoteField:
             raise ValueError(f"unknown magnet kind {kind!r}; one of {tuple(_PARSERS)}")
         self.name = kind
         self._parse = _PARSERS[kind]
+        self.host = host
         self.endpoint = f"tcp://{host}:{int(pub_port)}"
         self.stale_s = float(stale_s)
         self._fallback = fallback_mT
@@ -148,14 +151,30 @@ class RemoteField:
         self._thread.join(timeout=1.0)
 
     def _listen(self) -> None:
-        sub = zmq.Context.instance().socket(zmq.SUB)
-        sub.setsockopt(zmq.LINGER, 0)
-        sub.connect(self.endpoint)          # connects lazily: fine if the magnet is not up yet
-        sub.setsockopt(zmq.SUBSCRIBE, b"status")
+        def make_sub():
+            s = zmq.Context.instance().socket(zmq.SUB)
+            s.setsockopt(zmq.LINGER, 0)
+            # The magnet's status stream is encrypted when the lab's policy
+            # secures that magnet (secure.py): use the MAGNET's key -- `kind`
+            # is its module key (mag2d, mag2dcal, clMag, ppms). Plain otherwise.
+            secure.secure_client(s, self.host, self.name)
+            s.connect(self.endpoint)        # connects lazily: fine if the magnet is not up yet
+            s.setsockopt(zmq.SUBSCRIBE, b"status")
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         poller = zmq.Poller()
         poller.register(sub, zmq.POLLIN)
         try:
             while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # some request in this process found a service in the
+                    # other mode than the policy says (secure.no_answer):
+                    # rebuild, so the stream follows if it was this magnet
+                    poller.unregister(sub)
+                    sub.close(0)
+                    sub, gen = make_sub()
+                    poller.register(sub, zmq.POLLIN)
                 if not poller.poll(200):
                     continue
                 try:

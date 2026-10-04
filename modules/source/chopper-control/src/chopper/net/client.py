@@ -22,6 +22,7 @@ import time
 
 import zmq
 
+from .. import secure
 from ..config import Config
 from ..control import ControlClient
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -77,13 +78,14 @@ class ChopperClient(ControlClient):
                  name: str = "chopper client"):
         self._control_setup(kind, name)
         self._ctx = zmq.Context.instance()
-        self._req = self._ctx.socket(zmq.REQ)
-        self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        self._req.setsockopt(zmq.LINGER, 0)
-        self._req.connect(f"tcp://{host}:{cmd_port}")
-        self._sub = self._ctx.socket(zmq.SUB)
-        self._sub.connect(f"tcp://{host}:{pub_port}")
-        self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+        # kept: the sockets are REBUILT after a timeout (and in the
+        # other security mode after secure.no_answer)
+        self._host = host
+        self._cmd_endpoint = f"tcp://{host}:{cmd_port}"
+        self._pub_endpoint = f"tcp://{host}:{pub_port}"
+        self._timeout_ms = timeout_ms
+        self._req = self._new_req(self._cmd_endpoint)
+        self._sub, self._sub_gen = self._new_sub()
 
         self._latest: dict = {}
         self._lock = threading.Lock()
@@ -206,13 +208,23 @@ class ChopperClient(ControlClient):
     def _cmd(self, d: dict) -> dict:
         self._with_identity(d)           # say who we are (control.py)
         with self._req_lock:
-            self._req.send_json(d)
-            try:
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # timed out; the REQ socket is now in a bad state -> rebuild it
-                self._reset_req()
-                return {"ok": False, "error": "service did not respond (timeout)"}
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(d)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # timed out: the REQ socket is stuck mid-transaction ->
+                    # rebuild it.
+                    self._req.close(0)
+                    # The service may speak the other mode than the policy now
+                    # says (it was started before the policy changed): the new
+                    # socket tries that mode, once. Safe to resend: a request
+                    # in the wrong mode never reaches the service.
+                    flipped = secure.no_answer(self._host, "chopper")
+                    self._req = self._new_req(self._cmd_endpoint)
+                    if not (flipped and attempt == 1):
+                        return {"ok": False, "error": "service did not respond (timeout)"}
         # Refused because another PC holds control: RAISE (ControlRefused), so
         # a script never believes the chopper took a setting it refused.
         if not reply.get("ok", False):
@@ -223,19 +235,40 @@ class ChopperClient(ControlClient):
         """The name control.py's ControlClient calls (heartbeat, take_control)."""
         return self._cmd(req)
 
-    def _reset_req(self):
-        endpoint = self._req.LAST_ENDPOINT
-        self._req.close(0)
-        self._req = self._ctx.socket(zmq.REQ)
-        self._req.setsockopt(zmq.RCVTIMEO, 3000)
-        self._req.setsockopt(zmq.LINGER, 0)
-        if endpoint:
-            self._req.connect(endpoint.decode() if isinstance(endpoint, bytes) else endpoint)
+    def _new_req(self, endpoint: str):
+        s = self._ctx.socket(zmq.REQ)
+        s.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        s.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+        s.setsockopt(zmq.LINGER, 0)
+        # encrypted, and the service's key checked, when the lab's policy
+        # secures chopper (secure.py); plain otherwise
+        secure.secure_client(s, self._host, "chopper")
+        s.connect(endpoint)
+        return s
+
+    def _new_sub(self):
+        """The telemetry socket, in the mode the policy (or the last flip,
+        secure.no_answer) says; returns it with the flip generation it was
+        built for, so _listen can notice when that changes."""
+        s = self._ctx.socket(zmq.SUB)
+        secure.secure_client(s, self._host, "chopper")      # telemetry too
+        s.connect(self._pub_endpoint)
+        s.setsockopt(zmq.SUBSCRIBE, b"")
+        return s, secure.flip_generation()
 
     def _listen(self):
         poller = zmq.Poller()
         poller.register(self._sub, zmq.POLLIN)
         while not self._stop.is_set():
+            if self._sub_gen != secure.flip_generation():
+                # a request found the service in the other mode
+                # (secure.no_answer): telemetry follows
+                poller.unregister(self._sub)
+                self._sub.close(0)
+                self._sub, self._sub_gen = self._new_sub()
+                poller.register(self._sub, zmq.POLLIN)
             if poller.poll(200):
                 topic, payload = self._sub.recv_multipart()
                 d = json.loads(payload)
