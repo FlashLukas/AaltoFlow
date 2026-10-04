@@ -31,6 +31,8 @@ import json
 import math
 import zlib
 
+from ..backends.base import HEAD_KINDS, READING_FLAGS
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -208,15 +210,17 @@ def build_manifest(meter) -> dict:
         _p(f"live_{word}", f"{Word} (live)", "indicator", "float", unit=su,
            group="Live", order=20, decimals=6, scale=1e-3, plottable=True,
            read_path=["value"]),
-        _p("flag", "Reading flag", "indicator", "string", group="Live", order=21,
-           read_path=["flag"], help="'overrange' when the manual range is too small."),
+        # the fixed flag vocabulary ("" = a good reading), so an enum
+        _p("flag", "Reading flag", "indicator", "enum", group="Live", order=21,
+           options=list(READING_FLAGS), read_path=["flag"], help="'overrange' when the manual range is too small."),
 
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1, help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=2, read_path=["acquiring"]),
+        # counters that start at 0 and only count up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"]),
     ]
 
     # -- zero (photodiode and thermal heads only) ----------------------------------
@@ -240,7 +244,7 @@ def build_manifest(meter) -> dict:
             _p("zeroing", "Zeroing", "indicator", "bool", group="Zero", order=3,
                read_path=["zeroing"]),
             _p("zero_id", "Zero #", "indicator", "int", group="Zero", order=4,
-               read_path=["zero_id"]),
+               min=0, read_path=["zero_id"]),
             _p("dark_offset", "Zero offset", "indicator", "float",
                unit=st.dark_unit, group="Zero", order=5, read_path=["dark_offset"]),
         ]
@@ -251,8 +255,9 @@ def build_manifest(meter) -> dict:
            order=1, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
            read_path=["idn"]),
-        _p("head", "Head type", "indicator", "string", group="Status", order=3,
-           read_path=["head"]),
+        # the backends' head vocabulary (an unknown sensor type is "other")
+        _p("head", "Head type", "indicator", "enum", group="Status", order=3,
+           options=list(HEAD_KINDS), read_path=["head"]),
         _p("sensor", "Sensor head", "indicator", "string", group="Status", order=4,
            read_path=["sensor"]),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",

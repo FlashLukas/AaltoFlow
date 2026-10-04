@@ -352,5 +352,7 @@ class EllSerialBus:
             return
         self._set_velocity_now(address, percent)
 
-    def read_velocity(self, address: str) -> int:
+    def read_velocity(self, address: str) -> "int | None":
+        # None when "gv" failed at open: the status then shows "not measured",
+        # never a guessed number (describe declares velocity an int control)
         return self._axis(address).velocity

@@ -147,3 +147,65 @@ def test_describe_over_the_wire_and_both_status_paths_agree():
         if client is not None:
             client.close()
         svc.stop()
+
+
+# ---- declared types = how scan-core STORES each value (developer notes 4b) ----
+
+def _fits(d, v):
+    """True if status value v fits descriptor d's declared type (None always
+    fits: "not measured"). An indicator's min/max are a promise; a control's
+    are setting limits only and are not checked (scan-core does not narrow)."""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            lo, hi = d.get("min"), d.get("max")
+            return (lo is None or v >= lo) and (hi is None or v <= hi)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def test_every_status_value_fits_its_declared_type():
+    _cfg, brain = _brain("0,1")
+    try:
+        brain.move_abs(0, 90.0)
+        for _ in range(3):
+            m = build_manifest(brain)
+            st = brain.status().__dict__
+            for p in m["parameters"]:
+                if p.get("read_path"):
+                    v = read_path(st, p["read_path"])
+                    assert _fits(p, v), (p["id"], v)
+            time.sleep(0.05)
+    finally:
+        brain.shutdown()
+
+
+@pytest.mark.parametrize("found, shown", [(None, None), (15, 15)])
+def test_velocity_reads_back_as_int_or_none_never_a_guess(found, shown):
+    """A speed the mount does not report is None ("not measured"), not a fake
+    number; one below the configured window (15 < 30) is shown as it is. The
+    control's min/max are setting limits, so they do not have to hold it."""
+    cfg = Config()
+    cfg.axes.addresses = "0"
+    brain, bus = build_sim_system(cfg)
+    bus.read_velocity = lambda address: found
+    brain.start()
+    try:
+        assert brain.status().velocity_pct == [shown]
+        d = _by_id(build_manifest(brain))["velocity_0"]
+        assert d["type"] == "int" and d["kind"] == "control"
+        assert _fits(d, brain.status().velocity_pct[0])
+    finally:
+        brain.shutdown()

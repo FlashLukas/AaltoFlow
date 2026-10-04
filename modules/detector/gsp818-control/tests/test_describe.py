@@ -92,3 +92,67 @@ def test_bench_only_in_simulation(sa):
         simulated = False
     ids = _by_id(build_manifest(SpectrumAnalyzer(Real(), Config())))
     assert "dut" not in ids and "dut_center_Hz" not in ids and "power" in ids
+
+
+# ---- declared types = how scan-core STORES each value (developer notes 4b) ----
+
+def _fits(d, v):
+    """True if status value v fits descriptor d's declared type (None always
+    fits: "not measured"). An indicator's min/max are a promise; a control's
+    are setting limits only (scan-core does not narrow them)."""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            lo, hi = d.get("min"), d.get("max")
+            return (lo is None or v >= lo) and (hi is None or v <= hi)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def test_every_status_value_fits_its_declared_type(sa):
+    from gsp818.model import DETECTORS
+    for det in DETECTORS:
+        sa.set_detector(det)
+        sa.step()
+        m = build_manifest(sa)
+        st = status_to_dict(sa.status())
+        for p in m["parameters"]:
+            if p.get("read_path"):
+                v = read_path(st, p["read_path"])
+                assert _fits(p, v), (det, p["id"], v)
+
+
+def test_detector_in_use_enum_covers_every_resolution(sa):
+    """Enumerated from the model, not from one snapshot: whatever detector is
+    set and whatever the span, effective_detector lands in the options."""
+    from gsp818 import model
+    from gsp818.analyzer import Status
+    d = _by_id(build_manifest(sa))
+    opts = d["detector_in_use"]["options"]
+    assert d["detector_in_use"]["type"] == "enum"
+    for det in model.DETECTORS:
+        for span in (1e3, 1e6, 1e6 + 1, 1e9):
+            assert model.effective_detector(det, span) in opts, (det, span)
+    import dataclasses
+    defaults = {f.name: f.default for f in dataclasses.fields(Status)}
+    assert defaults["detector_in_use"] is None and defaults["dut"] is None, \
+        "'' is not an enum option: report None"
+    assert set(model.DUTS) == set(d["dut"]["options"])
+
+
+def test_counters_are_non_negative_ints(sa):
+    d = _by_id(build_manifest(sa))
+    for pid in ("acq_id", "sweeps"):
+        assert d[pid]["type"] == "int" and d[pid]["min"] == 0 and "max" not in d[pid]

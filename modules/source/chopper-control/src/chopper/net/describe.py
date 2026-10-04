@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 import zlib
 
+from ..chopper import LOCK_SOURCES
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -129,8 +131,10 @@ def build_manifest(ch) -> dict:
            read_path=["locked"],
            help="Measured wheel frequency within tolerance for settle.hold_s -- or, "
                 "with REF OUT on 'target', a timer (see lock_source)."),
-        _p("lock_source", "Lock judged by", "indicator", "string", group="Run",
-           order=14, read_path=["lock_source"]),
+        # a fixed vocabulary (chopper.py status()), so an enum: one byte per
+        # point in a scan file instead of a text string
+        _p("lock_source", "Lock judged by", "indicator", "enum", group="Run",
+           order=14, options=list(LOCK_SOURCES), read_path=["lock_source"]),
     ]
 
     # ---- frequency: a control on internal reference, an indicator on external

@@ -281,7 +281,7 @@ def test_real_mode_hides_the_bench(sa):
         simulated = False
     b = SpectrumAnalyzer(Real(), Config())
     s = b.status()
-    assert s.dut == "" and s.simulated is False
+    assert s.dut is None and s.simulated is False   # None, not "": dut is an enum
 
 
 # ---- review additions ------------------------------------------------------------

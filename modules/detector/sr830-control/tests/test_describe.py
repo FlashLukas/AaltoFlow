@@ -201,3 +201,94 @@ def test_describe_over_the_wire_and_both_status_paths_agree(brain):
         if cli is not None:
             cli.shutdown()
         svc.stop()
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(li):
+    m = build_manifest(li)
+    st = status_to_dict(li.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in m["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_declared_types_and_counters(brain):
+    cfg, li = brain
+    p = _by_id(build_manifest(li))
+    assert p["acq_id"]["type"] == "int" and p["acq_id"]["min"] == 0
+    assert p["auto_id"]["type"] == "int" and p["auto_id"]["min"] == 0
+    assert p["overload"]["type"] == "bool"            # a flag, not a number
+    assert p["harmonic"]["type"] == "int" and p["harmonic"]["kind"] == "control"
+    assert "store" not in str(build_manifest(li))
+    n = li.acquire()
+    deadline = time.monotonic() + 15
+    while li.status().acquiring and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert li.status().acq_id == n
+    assert li.status().sample["overload"] in (True, False)
+    assert _misfits(li) == []
+
+
+def test_every_time_constant_the_instrument_can_report_is_an_option(brain):
+    """A front-panel time constant beyond the offered list (above tc_max, or
+    > 30 s above 200 Hz) is ADOPTED -- so it must be an option, or a scan
+    recording it would lose it. Enumerated over the whole OFLT table, at a
+    detection frequency above 200 Hz (the shortest list) and below."""
+    cfg, li = brain
+    for hz in (1000.0, 50.0):
+        li.set_frequency(hz)
+        for i in range(len(tables.TC_LABELS)):
+            li._rb["tc"] = i                   # what a front-panel change reads back
+            opts = _by_id(build_manifest(li))["time_constant"]["options"]
+            assert li.status().time_constant in opts, (hz, i)
+            assert opts == list(tables.TC_LABELS[:len(opts)])   # code = OFLT index
+    li.set_frequency(1000.0)                   # the cut still applies otherwise
+    li._rb["tc"] = tables.tc_index("30 ms")
+    assert len(_by_id(build_manifest(li))["time_constant"]["options"]) < len(tables.TC_LABELS)
+
+
+@pytest.mark.parametrize("source", tables.INPUT_SOURCES)
+def test_every_enum_readback_is_an_option(brain, source):
+    """Every value the brain's enum readbacks can take (enumerated from the
+    tables, which are also what adopting the front panel picks from)."""
+    cfg, li = brain
+    li.set_input_source(source)
+    for i in range(len(tables.SENS_LABELS_V)):
+        li._rb["sens"] = i
+        assert _misfits(li) == [], i
+    for k, table in (("reserve", tables.RESERVES), ("slope", tables.SLOPES)):
+        for i in range(len(table)):
+            li._rb[k] = i
+            assert _misfits(li) == [], (k, i)
+    p = _by_id(build_manifest(li))
+    for pid, table in (("trigger", tables.TRIGGERS), ("input_ground", tables.GROUNDS),
+                       ("input_coupling", tables.COUPLINGS),
+                       ("line_filter", tables.LINE_FILTERS),
+                       ("input_source", tables.INPUT_SOURCES)):
+        assert set(table) <= set(p[pid]["options"]), pid

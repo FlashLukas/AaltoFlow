@@ -607,7 +607,12 @@ class LockIn:
                 harmonic=ref.harmonic,
                 input=sig.input, unit=tables.unit_for(sig.input),
                 ac_coupled=sig.ac_coupled, coupling="AC" if sig.ac_coupled else "DC",
-                sensitivity=tables.sensitivity_label(sig.sensitivity_index, sig.input),
+                # None (= "not measured") when the SEN index is not in this
+                # input's table (e.g. a voltage index read in a current mode):
+                # a "--" placeholder is not one of describe's options and
+                # would only be stored as "not measured" anyway.
+                sensitivity=(tables.sensitivity_label(sig.sensitivity_index, sig.input)
+                             if sig.sensitivity_index in table else None),
                 sensitivity_index=sig.sensitivity_index,
                 full_scale=table.get(sig.sensitivity_index, math.nan),
                 fast_mode=flt.fast_mode,

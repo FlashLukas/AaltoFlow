@@ -31,7 +31,8 @@ import json
 import math
 import zlib
 
-from ..backends.base import DC_DIGITS, MODES, RMS_BANDS, UNIT_CODES
+from ..backends.base import (DC_DIGITS, MODES, PEAK_DISPLAYS, PEAK_MODES,
+                             RMS_BANDS, UNIT_CODES)
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -132,14 +133,17 @@ def build_manifest(meter) -> dict:
                  "5 = 1 Hz / 10 rdg/s. More digits = less noise, slower settling."))
     elif m.mode == "peak":
         params += [
-            _p("peak_mode", "Peak mode", "indicator", "string", group="Meter",
-               order=20, read_path=["peak_mode"],
+            # ENUMS (scan-core stores an enum as a code + the names, developer
+            # notes 4b): the backend maps the meter's RDGMODE codes onto
+            # exactly these tuples, and falls back to their first entries.
+            _p("peak_mode", "Peak mode", "indicator", "enum", group="Meter",
+               order=20, options=list(PEAK_MODES), read_path=["peak_mode"],
                help="periodic: a repeating signal. pulse: a single event, LATCHED "
                     "until reset on the meter -- then a reading is the largest peak "
                     "since that reset, not since the acquisition started. Set on "
                     "the front panel."),
-            _p("peak_display", "Peak display", "indicator", "string", group="Meter",
-               order=21, read_path=["peak_display"],
+            _p("peak_display", "Peak display", "indicator", "enum", group="Meter",
+               order=21, options=list(PEAK_DISPLAYS), read_path=["peak_display"],
                help="Which peak is reported: positive, negative, or with 'both' "
                     "the larger in magnitude (sign kept)."),
         ]
@@ -235,8 +239,11 @@ def build_manifest(meter) -> dict:
            order=1, help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=2, read_path=["acquiring"]),
+        # A counter from 0 that only goes up: min=0 is a promise the code
+        # keeps (scan-core picks the storage from it, developer notes 4b). No
+        # max: it is unbounded in principle.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"]),
 
         # -- probe zero -----------------------------------------------------------------
         _p("zero", "Zero probe", "action", "action", group="Zero", order=1,

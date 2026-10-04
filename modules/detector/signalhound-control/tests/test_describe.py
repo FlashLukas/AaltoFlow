@@ -159,3 +159,72 @@ def test_rbw_settles_immediately_because_the_analyser_snaps_it():
         assert v.status().rbw_Hz in (100e3, 250e3)
     finally:
         v.shutdown()
+
+
+# ---- declared types: how scan-core STORES each detector (developer notes 4b) ---
+
+def _fits(d, v):
+    """Does status value `v` fit descriptor `d` the way scan-core stores it?
+    (bool a bool, int a whole number inside an INDICATOR's min/max, enum one
+    of its options; None = not measured always fits.)"""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            return d.get("min", v) <= v <= d.get("max", v)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def _check_types(v):
+    st = status_to_dict(v.status())
+    for d in build_manifest(v)["parameters"]:
+        if d.get("read_path") and d["kind"] in ("indicator", "control"):
+            got = read_path(st, d["read_path"])
+            assert _fits(d, got), f"{d['id']}: {got!r} does not fit {d}"
+    return st
+
+
+def test_every_tg_mode_is_an_option_and_every_value_fits(signalhound):
+    """Walk the TG through ALL its modes (unknown at start, cw, parked, sweep)
+    and both detectors: each status value fits its declared type, and tg_mode
+    covers spectrum.TG_MODES exactly -- an enum value outside its options would
+    be stored as "not measured"."""
+    from signalhound.instruments import DETECTORS
+    from signalhound.spectrum import TG_MODES
+    p = _params(signalhound)
+    assert p["tg_mode"]["type"] == "enum" and p["tg_mode"]["options"] == list(TG_MODES)
+    assert p["detector"]["options"] == list(DETECTORS)
+    seen = {_check_types(signalhound)["tg_mode"]}
+    signalhound.tg_cw(True, 1e9, -20.0)
+    seen.add(_check_types(signalhound)["tg_mode"])
+    signalhound.tg_cw(False)
+    seen.add(_check_types(signalhound)["tg_mode"])
+    signalhound.tg_sweep_acquire(500e6, 1500e6, points=101, averages=1)
+    seen.add(_check_types(signalhound)["tg_mode"])
+    while signalhound.status().tg_acquiring:
+        signalhound.step()
+    for det in DETECTORS:
+        signalhound.set_detector(det)
+        signalhound.acquire()
+        while signalhound.status().acquiring:
+            signalhound.step()
+        _check_types(signalhound)
+    assert seen == set(TG_MODES)
+
+
+def test_counters_promise_non_negative_ints(signalhound):
+    p = _params(signalhound)
+    for pid in ("points", "acq_id", "sweeps"):
+        assert p[pid]["type"] == "int" and p[pid]["min"] == 0 and "max" not in p[pid]

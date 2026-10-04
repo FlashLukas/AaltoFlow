@@ -165,3 +165,77 @@ def test_describe_over_the_wire_and_both_status_paths_agree(brain):
         if cli is not None:
             cli.shutdown()
         svc.stop()
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(li):
+    m = build_manifest(li)
+    st = status_to_dict(li.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in m["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_declared_types_and_counter(brain):
+    cfg, li = brain
+    p = _by_id(build_manifest(li))
+    assert p["acq_id"]["type"] == "int" and p["acq_id"]["min"] == 0
+    assert p["harmonic"]["type"] == "int" and p["harmonic"]["kind"] == "control"
+    assert "store" not in str(build_manifest(li))
+    n = li.acquire()
+    deadline = time.monotonic() + 15
+    while li.status().acquiring and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert li.status().acq_id == n
+    assert _misfits(li) == []
+
+
+def test_every_sensitivity_and_slope_readback_fits(brain):
+    """Enumerated from the code, not one snapshot: every SEN index the 7230
+    can report (0..31) in every input mode, and every slope with fast mode on
+    and off (the adopted state can hold one fast mode does not offer). An
+    index outside the mode's table reads None -- never a '--' placeholder,
+    which is not an option and would be lost in a scan."""
+    from sr7230.config import INPUT_MODES, SLOPES_DB, REF_SOURCES
+    cfg, li = brain
+    for mode in INPUT_MODES:
+        cfg.signal.input = mode
+        for i in range(32):
+            cfg.signal.sensitivity_index = i
+            assert _misfits(li) == [], (mode, i)
+            sens = li.status().sensitivity
+            assert sens is None or sens != "--"
+    for fast in (False, True):
+        cfg.filter.fast_mode = fast
+        for db in SLOPES_DB:
+            cfg.filter.slope_db = db
+            assert _misfits(li) == [], (fast, db)
+    for src in REF_SOURCES:                    # ref_locked: bool or None
+        cfg.reference.source = src
+        assert _misfits(li) == [], src

@@ -189,3 +189,53 @@ def test_status_flags_are_described_as_indicators():
         assert "phase" not in m, "the TG has no phase"
     finally:
         brain.shutdown()
+
+
+# ---- declared types: how scan-core STORES each detector (developer notes 4b) ---
+
+def _fits(d, v):
+    """Does status value `v` fit descriptor `d` the way scan-core stores it?
+    (bool a bool, int a whole number inside an INDICATOR's min/max, enum one
+    of its options; None = not measured always fits.)"""
+    if v is None:
+        return True
+    t = d["type"]
+    if t == "bool":
+        return isinstance(v, bool)
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        if d["kind"] == "indicator":
+            return d.get("min", v) <= v <= d.get("max", v)
+        return True
+    if t == "enum":
+        return v in d["options"]
+    if t == "string":
+        return isinstance(v, str)
+    if t == "float":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return True
+
+
+def _check_types(brain):
+    """Every indicator/control read from status fits its declared type."""
+    from shsg.net.protocol import status_to_dict
+    st = status_to_dict(brain.status())
+    for d in build_manifest(brain)["parameters"]:
+        if d.get("read_path") and d["kind"] in ("indicator", "control"):
+            v = read_path(st, d["read_path"])
+            assert _fits(d, v), f"{d['id']}: {v!r} does not fit {d}"
+    return st
+
+
+def test_every_status_value_fits_its_declared_type():
+    """Parked and emitting: flags are bools, hw_error/idn strings."""
+    import time
+    cfg, brain = _brain()
+    try:
+        _check_types(brain)
+        brain.set_rf(True)
+        time.sleep(0.3)
+        _check_types(brain)
+    finally:
+        brain.shutdown()

@@ -323,7 +323,7 @@ class CornerstoneGPIB:
         try:
             step = int(float(self._query("STEP?")))                      # VERIFY
         except ValueError:
-            step = 0
+            step = None     # not understood: "not measured", never a fake 0
         error = None
         stb = self._query("STB?")                                        # VERIFY: "00" / "32" or "20"
         # Any non-zero status byte is an error (manual 16.7: "00 for success or

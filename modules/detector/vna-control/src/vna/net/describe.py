@@ -222,8 +222,10 @@ def build_manifest(vna) -> dict:
         _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
+        # A counter from 0 that only counts up: min 0 is the promise
+        # scan-core stores it by (an int is stored by its declared range).
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, read_path=["acq_id"]),
+           order=4, min=0, read_path=["acq_id"]),
 
         # -- reference -----------------------------------------------------------------
         _p("take_reference", "Take reference", "action", "action", group="Reference",
@@ -250,7 +252,7 @@ def build_manifest(vna) -> dict:
         _p("live_dip_depth", "Dip depth (live)", "indicator", "float", unit="dB",
            group="Live", order=11, decimals=3, plottable=True, read_path=["dip_dB"]),
         _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=12,
-           read_path=["sweeps"]),
+           min=0, read_path=["sweeps"], help="Completed sweeps since start."),
 
         # -- the field (read from a magnet service) ----------------------------------------
         _p("field_source", "Field source", "control", "enum", group="Field",

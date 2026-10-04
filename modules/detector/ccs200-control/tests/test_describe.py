@@ -114,3 +114,54 @@ def test_simulation_group_only_on_the_simulator():
         assert "Thorlabs" in build_manifest(real)["label"]
     finally:
         real.shutdown()
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _misfits(s):
+    st = status_to_dict(s.status())
+    return [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+            for p in build_manifest(s)["parameters"] if p.get("read_path")
+            and _type_problem(p, read_path(st, p["read_path"]))]
+
+
+def test_counters_are_non_negative_ints_and_status_fits(spec):
+    p = _params(spec)
+    for k in ("acq_id", "scans"):
+        assert p[k]["type"] == "int" and p[k]["min"] == 0 and "max" not in p[k]
+    assert p["saturated"]["type"] == "bool"
+    assert "store" not in json.dumps(build_manifest(spec))
+    assert _misfits(spec) == []
+    n = spec.acquire()
+    for _ in range(10000):
+        if not spec.status().acquiring:
+            break
+        spec.step()
+    st = spec.status()
+    assert st.acq_id == n and st.scans > 0
+    assert _misfits(spec) == []

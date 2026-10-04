@@ -190,8 +190,11 @@ def build_manifest(heater) -> dict:
            order=2, read_path=["sensor_alarm"]),
         _p("tmax_alarm", "TMAX alarm", "indicator", "bool", group="Status",
            order=3, read_path=["tmax_alarm"]),
-        _p("mode", "Mode", "indicator", "string", group="Status", order=4,
-           read_path=["mode"]),
+        # An ENUM (scan-core stores it as a code + the names, developer notes
+        # 4b): heater.status() reports exactly these two, from the box's
+        # cycle-mode bit.
+        _p("mode", "Mode", "indicator", "enum", group="Status", order=4,
+           options=["normal", "cycle"], read_path=["mode"]),
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=5, read_path=["connected"]),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=6,

@@ -126,3 +126,72 @@ def test_describe_over_the_wire_and_both_status_paths_agree(brain):
         if cli is not None:
             cli.shutdown()
         svc.stop()
+
+
+# ---- declared types (scan-core STORES each detector in its declared type) ----
+
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d` (the promise scan-core's
+    storage keeps, developer notes 4b), or "". None = not measured, always fits."""
+    if v is None:
+        return ""
+    t = d["type"]
+    for x in (v if isinstance(v, list) else [v]):
+        if x is None:
+            continue
+        if t == "bool" and not isinstance(x, bool):
+            return f"bool reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or x != int(x):
+                return f"int reads {x!r}"
+            if d["kind"] == "indicator" and (x < d.get("min", x) or x > d.get("max", x)):
+                return f"{x!r} outside [{d.get('min')}, {d.get('max')}]"
+        if t == "enum" and x not in d["options"]:
+            return f"{x!r} not in {d['options']}"
+        if t == "string" and not isinstance(x, str):
+            return f"string reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"float reads {x!r}"
+    return ""
+
+
+def _check_status_fits(li):
+    m = build_manifest(li)
+    st = status_to_dict(li.status())
+    bad = [f"{p['id']}: {_type_problem(p, read_path(st, p['read_path']))}"
+           for p in m["parameters"] if p.get("read_path")
+           and _type_problem(p, read_path(st, p["read_path"]))]
+    assert not bad, bad
+
+
+def test_declared_types_and_ranges(brain):
+    from hf2.config import REF_MODES
+    from hf2.lockin import _parse_mode
+    cfg, li = brain
+    p = _by_id(build_manifest(li))
+    # the acquisition counter starts at 0 and only counts up
+    assert p["acq_id"]["type"] == "int" and p["acq_id"]["min"] == 0
+    assert "max" not in p["acq_id"]
+    # the filter order is an int CONTROL: its limits are setting limits only
+    assert p["order1"]["type"] == "int" and p["order1"]["kind"] == "control"
+    # every spelling the brain accepts ends up as one of the enum's options
+    for spelling in ("int", "ext", "internal", "external", " External "):
+        assert _parse_mode(spelling) in p["ref1"]["options"]
+    assert p["ref1"]["options"] == list(REF_MODES)
+    for k in ("connected", "acquiring"):
+        assert p[k]["type"] == "bool"
+    assert "store" not in str(build_manifest(li))
+
+
+def test_status_values_fit_their_types_in_both_reference_modes(brain):
+    import time
+    cfg, li = brain
+    n = li.acquire()
+    deadline = time.monotonic() + 10
+    while li.status().acquiring and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert li.status().acq_id == n
+    _check_status_fits(li)
+    li.set_reference(1, "external")           # locked1 appears (bool or None)
+    time.sleep(0.1)
+    _check_status_fits(li)

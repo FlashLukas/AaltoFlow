@@ -571,7 +571,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # crystal combo + the live wavelength range of every line spin box
         if not self.filter_combo.view().isVisible():
-            i = self.filter_combo.findText(s.filter)
+            i = self.filter_combo.findText(s.filter or "")   # None = no crystal
             if i >= 0 and i != self.filter_combo.currentIndex():
                 self.filter_combo.blockSignals(True)
                 self.filter_combo.setCurrentIndex(i)
@@ -581,7 +581,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._range = rng
             for sp in [self.wl1_spin] + list(self.line_wl.values()):
                 sp.setRange(*rng)
-            self.range_label.setText(f"{s.filter}: {rng[0]:g} - {rng[1]:g} nm")
+            self.range_label.setText(f"{s.filter or '--'}: {rng[0]:g} - {rng[1]:g} nm")
 
         # The input boxes start from the presets; the first time the laser is
         # seen they are filled with what it is REALLY set to (the service
