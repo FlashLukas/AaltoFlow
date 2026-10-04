@@ -27,6 +27,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .. import model
 from ..config import Config
 from ..sim_system import build_sim_system
+from ..control import ControlRefused
+from .control_bar import ALWAYS_PROPERTY, ControlBar, mark_always
 from .settings_dialog import SettingsDialog
 from .theme import COLORS, apply_palette, build_stylesheet, set_theme
 
@@ -273,12 +275,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         root = QtWidgets.QWidget()
         root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its amplifier and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         # brain events -> log
         self.bridge = Bridge()
@@ -299,6 +314,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -316,6 +336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -398,7 +419,8 @@ class MainWindow(QtWidgets.QMainWindow):
         off_btn = QtWidgets.QPushButton("AMPLIFIER OFF")
         off_btn.setObjectName("danger")
         off_btn.setMinimumHeight(38)
-        off_btn.clicked.connect(lambda: self.ctrl.amp_off())
+        off_btn.clicked.connect(lambda: self._safe(self.ctrl.amp_off))
+        mark_always(off_btn)         # the SAFETY verb (net/service.py): a viewer too
         col.addWidget(off_btn)
         return panel
 
@@ -479,15 +501,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- actions ---------------------------------------------------------
 
+    def _safe(self, fn, *args):
+        """Run a command; a refusal because another PC holds control
+        (ControlRefused -- normally the viewer guard stops the click first)
+        goes to the log instead of a traceback."""
+        try:
+            fn(*args)
+        except ControlRefused as exc:
+            self._on_event("error", str(exc))
+
     def _toggle_amp(self):
-        self.ctrl.set_amp(not self._amp_on)
+        if self._amp_on:
+            # OFF = the safety verb amp_off, which a viewer may send too
+            self._safe(self.ctrl.amp_off)
+        else:
+            self._safe(self.ctrl.set_amp, True)
 
     def _set_gain(self):
-        self.ctrl.set_gain(self.gain_spin.value())
+        self._safe(self.ctrl.set_gain, self.gain_spin.value())
 
     def _set_operating_point(self):
-        self.ctrl.set_frequency(self.freq_spin.value() * 1e6)
-        self.ctrl.set_input_power(self.input_spin.value())
+        def both():
+            self.ctrl.set_frequency(self.freq_spin.value() * 1e6)
+            self.ctrl.set_input_power(self.input_spin.value())
+        self._safe(both)
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -512,8 +549,14 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         self._amp_on = bool(s.amp_on)
+        # While it reads "Amplifier Off" the big button sends the safety verb,
+        # so a viewer may press it (control_bar.py); reading "Amplifier On" it
+        # is blocked like every other input.
+        self.amp_btn.setProperty(ALWAYS_PROPERTY, self._amp_on)
 
         self.gain_value.setText(f"{s.gain_dB:.2f}")
         self.est_value.setText(f"{s.est_gain_dB:+.2f}")

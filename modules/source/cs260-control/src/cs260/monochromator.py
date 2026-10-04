@@ -319,6 +319,12 @@ class Monochromator:
             self._urgent.append(("shutter", open_))
         self._emit("info", f"shutter -> {'OPEN' if open_ else 'CLOSED'}")
 
+    def close_shutter(self) -> None:
+        """Close the shutter. Same as set_shutter(False); a name of its own
+        because over the wire it is a SAFETY verb a viewer may always send
+        (net/service.py, control) -- set_shutter can also OPEN it."""
+        self.set_shutter(False)
+
     def set_filter(self, n: int) -> int:
         acc = self.cfg.accessories
         if not acc.filter_wheel:

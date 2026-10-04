@@ -54,6 +54,10 @@ PROJECTS.update({
     "viewer-1d": ("scan-core", True),
     "mission-control": ("mission-control", False),   # PySide6 is a base dep
     "mission-control-instruments": ("mission-control", False),
+    # a GUI connected to a service, with the control bar (holder / viewer);
+    # rendered in smb's project because the pose is an smb window
+    "control-holder": ("modules/source/smb-control", True),
+    "control-viewer": ("modules/source/smb-control", True),
 })
 
 

@@ -216,7 +216,8 @@ still assumes piezo/zpiezo.
   leave the move's wait waiting for an echo that will never come). Why, and the
   ordering rule the module must follow: gotcha #40.
 - **Control: one controller, many viewers (2026-09-29; kim + camera first,
-  the other modules follow).** Many clients can connect to one service: GUIs
+  every module since 2026-09-30 -- the per-module safety verbs are listed in
+  the README, "What counts as safety, per module").** Many clients can connect to one service: GUIs
   on several PCs, scan-core, the camera driving kim, scripts, consoles. Lukas,
   for a lab where several people train on one instrument: the FIRST GUI gets
   control, every later GUI opens as a VIEWER (live readouts, nothing can be

@@ -154,6 +154,12 @@ def build_manifest(ctrl) -> dict:
         # No `wait` block: they are control-panel buttons, not scan routines.
         _p("zero", "Zero field", "action", "action", group="Field", order=5,
            help="Field setpoint 0 mT, angle kept. The loop keeps regulating."),
+        # the SAFETY verbs (zero above, output_off here) are actions so the
+        # suite's Control tab offers them to a viewer too (control.py)
+        _p("output_off", "Ramp down + off", "action", "action", group="Output",
+           order=55,
+           help="Ramp the drive to 0 V, then switch the output off. Allowed for "
+                "anyone, also a viewer: it only makes things safer."),
         _p("clear_fault", "Clear fault", "action", "action", group="Interlock",
            order=220,
            help="Refused while the cause is still present. The output stays off."),

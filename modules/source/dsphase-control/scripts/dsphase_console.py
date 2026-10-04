@@ -24,7 +24,8 @@ or fire a single command and exit (handy for scripts):
 Commands
     phase <deg>            set the phase shift in degrees (rounded to the step)
     att <dB>               set the output attenuator in dB
-    out on|off             turn the RF output on or off
+    out on|off             turn the RF output on or off ('off' = the safety
+                           verb output_off: works also while a GUI has control)
     freq <MHz>             set the carrier frequency (bookkeeping unless configured)
     status                 print one status snapshot
     info                   print static info (limits, step sizes, *IDN?)
@@ -32,18 +33,36 @@ Commands
     watch [seconds]        stream the live status broadcast (default 5 s)
     help                   show this list
     quit / exit            leave
+
+Control (who may change things -- docs/DEVELOPER_NOTES.md, "Control"):
+    take                   take control if nobody has it
+    take!                  take it over from whoever has it (they become a viewer)
+    release                give it back
+    clients                who holds control, who is connected
+  While a GUI on another PC holds control, this console can read and switch
+  the RF output off but change nothing else until it takes control.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import socket
+import threading
+import uuid
 
 import zmq
 
 CMD_PORT = 5589
 PUB_PORT = 5590
 TIMEOUT_MS = 3000
+
+# Who this console is to the service (the same fields as control.py's
+# make_identity, written out here because this file imports no package).
+IDENTITY = {"id": uuid.uuid4().hex, "kind": "script", "name": "dsphase console",
+            "host": f"{getpass.getuser()}@{socket.gethostname()}"}
+HEARTBEAT_S = 2.0          # control.py: a holder silent for 10 s loses control
 
 
 class Console:
@@ -64,6 +83,7 @@ class Console:
     # ---- send one command, get one reply --------------------------------
 
     def send(self, msg: dict) -> dict:
+        msg.setdefault("client", IDENTITY)       # say who we are (control)
         try:
             self.req.send_json(msg)
             return self.req.recv_json()
@@ -130,7 +150,15 @@ class Console:
                 print(self.send({"cmd": "set_attenuation", "attenuation_dB": float(args[0])}))
             elif cmd == "out":
                 on = args[0].lower() in ("on", "1", "true")
-                print(self.send({"cmd": "set_output", "on": on}))
+                # off = the safety verb, allowed also while a GUI has control
+                print(self.send({"cmd": "set_output", "on": True} if on
+                                else {"cmd": "output_off"}))
+            elif cmd in ("take", "take!"):
+                print(self.send({"cmd": "take_control", "force": cmd == "take!"}))
+            elif cmd == "release":
+                print(self.send({"cmd": "release_control"}))
+            elif cmd == "clients":
+                print("  " + json.dumps(self.send({"cmd": "clients"}), indent=2).replace("\n", "\n  "))
             elif cmd == "freq":
                 print(self.send({"cmd": "set_frequency", "frequency_MHz": float(args[0])}))
             elif cmd == "status":
@@ -147,7 +175,26 @@ class Console:
             print(f"  bad arguments for '{cmd}': {exc}  (try 'help')")
         return True
 
+    def start_heartbeat(self):
+        """"Still here" in the background, on its OWN socket (a ZeroMQ socket
+        belongs to one thread): while you think, control stays yours."""
+        self._hb_stop = threading.Event()
+
+        def beat():
+            hb = self._new_req()
+            while not self._hb_stop.wait(HEARTBEAT_S):
+                try:
+                    hb.send_json({"cmd": "heartbeat", "client": IDENTITY})
+                    hb.recv_json()
+                except zmq.Again:                 # stuck REQ: rebuild it
+                    hb.close(0)
+                    hb = self._new_req()
+            hb.close(0)
+        threading.Thread(target=beat, daemon=True).start()
+
     def close(self):
+        if getattr(self, "_hb_stop", None) is not None:
+            self._hb_stop.set()
         self.req.close(0)
 
 
@@ -164,6 +211,7 @@ def main() -> int:
         if args.words:                       # one-shot mode
             con.run_line(" ".join(args.words))
             return 0
+        con.start_heartbeat()            # interactive: keep control while you think
         print(f"connected to tcp://{args.connect}:{args.cmd_port}   (type 'help' or 'quit')")
         while True:
             try:

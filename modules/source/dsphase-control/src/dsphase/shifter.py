@@ -208,6 +208,12 @@ class PhaseShifter:
         self._kick.set()
         self._emit("info", f"RF output {'ON' if on else 'OFF'}")
 
+    def output_off(self) -> None:
+        """RF output OFF. Same as set_output(False); a name of its own because
+        over the wire it is the SAFETY verb a viewer may always send
+        (net/service.py, control) -- set_output can also switch the RF ON."""
+        self.set_output(False)
+
     def set_phase(self, deg: float) -> None:
         value, clamped = self._clamped_phase(deg)
         q = self._round_phase(value)

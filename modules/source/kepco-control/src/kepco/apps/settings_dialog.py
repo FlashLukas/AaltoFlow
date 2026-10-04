@@ -17,6 +17,7 @@ from dataclasses import fields as dataclass_fields
 from PySide6 import QtWidgets
 
 from ..config import Config, MODES
+from ..control import ControlRefused
 
 #: tab title, hint -- per config group, in tab order
 _TABS = {
@@ -151,7 +152,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self._pull_into_cfg()
         try:
             self.ctrl.apply_config()
-        except ValueError as exc:          # a remote refusal comes back as ValueError
+        except (ValueError, ControlRefused) as exc:
+            # a remote refusal comes back as ValueError; ControlRefused = a
+            # viewer's OK (another PC holds control, control.py)
             QtWidgets.QMessageBox.warning(self, "Settings", str(exc))
         self.on_applied()
 

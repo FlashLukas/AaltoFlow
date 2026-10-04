@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from ..config import WRAP_POLICIES, Config
 from . import theme
+from .control_bar import ControlBar, mark_always
 from .settings_dialog import SettingsDialog
 from .theme import repolish
 
@@ -296,6 +297,10 @@ class MainWindow(QWidget):
         self._on_event("info", f"connected: {who}")
         if not self.ctrl.status().homed:
             self._on_event("warn", "not homed: Home once before absolute moves")
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -317,6 +322,15 @@ class MainWindow(QWidget):
         settings_btn.clicked.connect(self._open_settings)
         top.addWidget(settings_btn)
         root.addLayout(top)
+        # a viewer may LOOK at the settings; the service refuses an OK from it
+        mark_always(settings_btn)
+
+        # Control or viewer (control_bar.py), only for a GUI on a service
+        # whose client knows about control; a local GUI owns its brain.
+        self._control_bar = None
+        if self.remote and hasattr(self.ctrl, "take_control"):
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            root.addWidget(self._control_bar)
 
         body = QHBoxLayout()
         body.setSpacing(12)
@@ -393,6 +407,7 @@ class MainWindow(QWidget):
         stop.setObjectName("danger")
         repolish(stop)
         stop.clicked.connect(lambda: self._do(lambda: self.ctrl.stop(False)))
+        mark_always(stop)            # the SAFETY verb: a viewer can always stop the stage
         for b in (home, zero, clear):
             row.addWidget(b)
         row.addStretch(1)
@@ -549,6 +564,8 @@ class MainWindow(QWidget):
     # polling + events
     # ------------------------------------------------------------------ #
     def _refresh(self) -> None:
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         st = self.ctrl.status()
         self._big.setText(_fmt(st.angle_deg))
         self._sub.setText(

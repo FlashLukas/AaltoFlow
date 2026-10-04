@@ -31,6 +31,7 @@ from ..config import (D_GAIN_RANGE, I_GAIN_RANGE, P_GAIN_RANGE, PMAX_MIN_W, TMAX
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
 
 #: seconds of history in the strip chart
 HISTORY_S = 900.0
@@ -241,7 +242,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_hist = -1.0
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
+        # Control or viewer (control_bar.py): a bar above the panels, only for
+        # a GUI on a service whose client knows about control -- a local GUI
+        # owns its heater and has nobody to share it with. (Built before the
+        # panels, which the log needs; its log callback is only used later.)
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(16)
@@ -258,6 +273,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -272,6 +292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -304,7 +325,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_btn = QtWidgets.QPushButton("Heater ON"); self.on_btn.setObjectName("primary")
         self.on_btn.clicked.connect(lambda: self._call(self.ctrl.set_enabled, True))
         self.off_btn = QtWidgets.QPushButton("Heater OFF"); self.off_btn.setObjectName("danger")
-        self.off_btn.clicked.connect(lambda: self._call(self.ctrl.set_enabled, False))
+        # the SAFETY verb (net/service.py): works for a viewer too
+        self.off_btn.clicked.connect(lambda: self._call(self.ctrl.heater_off))
+        mark_always(self.off_btn)
         row.addWidget(self.on_btn, 1); row.addWidget(self.off_btn, 1)
         tlay.addLayout(row)
         col.addWidget(tcard)
@@ -452,6 +475,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
 
         # the boxes start at what the TC200 was ALREADY set to (adopted), so

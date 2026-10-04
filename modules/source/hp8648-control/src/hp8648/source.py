@@ -244,6 +244,12 @@ class SignalSource:
                                "make sure the reverse signal has been removed")
         self._emit("info", f"RF {'ON' if on else 'OFF'}")
 
+    def rf_off(self) -> None:
+        """RF off. Same as set_rf(False); a name of its own because over the
+        wire it is the SAFETY verb a viewer may always send (net/service.py,
+        control)."""
+        self.set_rf(False)
+
     def set_frequency(self, hz: float) -> None:
         f_lo, f_hi = self.freq_limits()
         value, clamped = _clamp(float(hz), f_lo, f_hi)

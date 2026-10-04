@@ -21,6 +21,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..heater import Heater
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -50,6 +51,19 @@ class Tc200Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. For a heater the only
+        #   "make it safe" action is switching the output off, so it is
+        #   `heater_off` (the GUI's "Heater OFF"): a viewer who sees the sample
+        #   run hot must be able to switch it off. `set_enabled` is NOT in the
+        #   list even though it can also switch off -- it can switch ON too.
+        #   READ = nothing extra: every read-only verb here is already
+        #   status / info / describe / get_config.
+        self.control = ControlLease(
+            safety={"heater_off"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -116,6 +130,8 @@ class Tc200Service:
         """
         st = status_to_dict(self.heater.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -169,6 +185,11 @@ class Tc200Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         try:
             if cmd == "set_temperature":
@@ -176,7 +197,9 @@ class Tc200Service:
             elif cmd == "set_enabled":
                 self.heater.set_enabled(_bool(msg["enabled"]))
             elif cmd == "heater_off":
-                self.heater.set_enabled(False)
+                # the SAFETY verb: the same as set_enabled False, but a verb of
+                # its own so a viewer may send it (it can only make things safer)
+                self.heater.heater_off()
             elif cmd == "set_p_gain":
                 self.heater.set_p_gain(int(round(float(msg["p"]))))
             elif cmd == "set_i_gain":

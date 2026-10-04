@@ -40,6 +40,7 @@ from .. import filters, tables
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsPanel
+from .control_bar import ControlBar, mark_always
 
 
 # ------------------------------------------------------------- helpers
@@ -740,6 +741,7 @@ class AuxTab(QtWidgets.QWidget):
         clear = QtWidgets.QPushButton("Clear")
         clear.setToolTip("Forget the recorded history of every plot")
         clear.clicked.connect(win.history.clear)
+        mark_always(clear)       # only clears this window's plot: fine for a viewer
         head.addWidget(clear)
         lay.addLayout(head)
         self.plot = _make_plot("AUX IN", "V")
@@ -875,6 +877,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(root)
         outer = QtWidgets.QVBoxLayout(root)
         outer.setContentsMargins(14, 10, 14, 14); outer.setSpacing(8)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its lock-in and has nobody to share it with. The bar's log is
+        # a lambda because _on_event needs self.log, which exists only below.
+        self._control_bar = None
+        if remote and hasattr(ctrl, "take_control"):
+            self._control_bar = ControlBar(ctrl, self,
+                                           log=lambda lvl, msg: self._on_event(lvl, msg))
+            outer.addWidget(self._control_bar)
         outer.addWidget(self._build_strip())
 
         self.tabs = QtWidgets.QTabWidget()
@@ -889,6 +900,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.controls = self.main_tab.controls
         self.log = self.inst_tab.log
+        # a viewer may save the settings form to a file or re-read the
+        # settings in use; Apply / Load change the instrument and stay guarded
+        mark_always(self.inst_tab.settings.save_btn, self.inst_tab.settings.revert_btn)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -900,6 +914,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- the shared strip -------------------------------------------------------
 
@@ -924,6 +943,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acq_bar = QtWidgets.QProgressBar(); self.acq_bar.setRange(0, 1000)
         self.acq_bar.setTextVisible(False); self.acq_bar.setFixedSize(100, 10)
         h.addWidget(self.acq_bar)
+        # the SAFETY verb (net/service.py): takes the outputs off the sample;
+        # works for a viewer too, so it is exempt from the viewer guard
+        self.off_btn = QtWidgets.QPushButton("Outputs off"); self.off_btn.setObjectName("danger")
+        self.off_btn.setToolTip("SINE OUT to its 4 mV minimum and every AUX OUT to 0 V. "
+                                "Works also for a viewer.")
+        self.off_btn.clicked.connect(lambda: self.call(self.ctrl.output_off))
+        mark_always(self.off_btn)
+        h.addWidget(self.off_btn)
         self.sample_label = QtWidgets.QLabel("no sample yet"); self.sample_label.setObjectName("mono")
         # Ignored: a long sample line must be cut off, not widen the whole window
         self.sample_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
@@ -931,7 +958,8 @@ class MainWindow(QtWidgets.QMainWindow):
         h.addWidget(self.sample_label, 1)
         self.last_msg = QtWidgets.QLabel("")
         self.last_msg.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
-        self.last_msg.setMaximumWidth(420)
+        # 356, not 420: room for "Outputs off" without widening the window
+        self.last_msg.setMaximumWidth(356)
         h.addWidget(self.last_msg)
         return card
 
@@ -941,7 +969,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Run a command and surface a refusal.
 
         A local brain raises ValueError; a remote client returns
-        {"ok": false, "error": ...} (or raises). Both end up in the log.
+        {"ok": false, "error": ...} (or raises -- ControlRefused when another
+        PC holds control; normally the viewer guard stops the click first).
+        All of them end up in the log.
         """
         try:
             r = fn(*args)
@@ -982,6 +1012,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                     + (" font-weight:700;" if level != "info" else ""))
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
 
         if s.hw_error:

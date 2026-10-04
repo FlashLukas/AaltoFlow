@@ -45,7 +45,10 @@ def main() -> None:
         # Config just so the settings dialog shows its values.
         from smaract.net.client import SmaractClient
 
-        client = SmaractClient(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port)
+        # kind "gui": the service counts this window as a viewer, and the first
+        # GUI to connect gets control (control.py / apps/control_bar.py)
+        client = SmaractClient(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port,
+                               kind="gui", name="smaract GUI")
         client.start()
         cfg = Config()
         try:

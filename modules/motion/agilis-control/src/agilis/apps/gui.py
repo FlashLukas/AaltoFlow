@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from ..config import AMPLITUDE_MAX, AMPLITUDE_MIN, Config
 from . import theme
+from .control_bar import ControlBar, mark_always
 from .settings_dialog import SettingsDialog
 from .theme import repolish
 
@@ -355,6 +356,10 @@ class MainWindow(QWidget):
         if writes:
             self._on_event("info", "start-up adopted the controller's counters and "
                                    "amplitudes; it wrote only: " + "; ".join(writes))
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ------------------------------------------------------------------ #
     # UI construction
@@ -375,6 +380,15 @@ class MainWindow(QWidget):
         settings_btn.clicked.connect(self._open_settings)
         top.addWidget(settings_btn)
         root.addLayout(top)
+        # a viewer may LOOK at the settings; the service refuses an OK from it
+        mark_always(settings_btn)
+
+        # Control or viewer (control_bar.py), only for a GUI on a service
+        # whose client knows about control; a local GUI owns its brain.
+        self._control_bar = None
+        if self.remote and hasattr(self.ctrl, "take_control"):
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            root.addWidget(self._control_bar)
 
         body = QWidget()
         cols = QHBoxLayout(body)
@@ -492,6 +506,7 @@ class MainWindow(QWidget):
         repolish(stop)
         stop.clicked.connect(lambda: self._do(self.ctrl.stop_all))
         row.addWidget(stop)
+        mark_always(stop)            # the SAFETY verb: a viewer can always stop the stage
         lay.addLayout(row)
         self._cal_hint = QLabel("")
         self._cal_hint.setObjectName("hint")
@@ -903,6 +918,8 @@ class MainWindow(QWidget):
     # polling + events
     # ------------------------------------------------------------------ #
     def _refresh(self) -> None:
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         st = self.ctrl.status()
         self._live = st
         for a in range(2):

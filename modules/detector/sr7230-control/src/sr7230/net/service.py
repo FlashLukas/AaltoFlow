@@ -18,6 +18,7 @@ import time
 import zmq
 
 from .. import tables
+from ..control import ControlLease
 from ..config import INPUT_MODES, REF_SOURCES
 from ..lockin import LockIn
 from .describe import build_manifest
@@ -48,6 +49,23 @@ class Sr7230Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send. The lock-in drives the
+        #   sample through OSC OUT (a modulation coil, a piezo, a laser
+        #   driver), so the one "make it safe" action is taking the drive away:
+        #   `output_off` (OSC OUT amplitude to 0 V). `set_amplitude` is NOT in
+        #   the list even though it can go to 0 V -- it can turn the drive UP
+        #   as well; that is why `output_off` is a verb of its own. `acquire`,
+        #   `stream_start/stop` and the auto operations are not safety: they
+        #   are triggers, and a new sample (or an auto sensitivity) changes
+        #   what another client -- a running scan -- is waiting on.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `stream_read` only drains the recorded fly-scan readings.
+        self.control = ControlLease(
+            safety={"output_off"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -109,6 +127,8 @@ class Sr7230Service:
         `status` reply, so the two can never drift apart."""
         st = status_to_dict(self.lockin.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -160,6 +180,11 @@ class Sr7230Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         li = self.lockin
         try:
@@ -167,6 +192,10 @@ class Sr7230Service:
                 li.set_reference(msg["source"])
             elif cmd == "set_frequency":
                 li.set_frequency(msg["frequency_Hz"])
+            elif cmd == "output_off":
+                # the SAFETY verb: OSC OUT to 0 V -- a verb of its own so a
+                # viewer may send it (it can only make things safer)
+                li.output_off()
             elif cmd == "set_amplitude":
                 li.set_amplitude(msg["amplitude_V"])
             elif cmd == "set_phase":

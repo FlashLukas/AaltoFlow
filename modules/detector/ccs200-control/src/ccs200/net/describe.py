@@ -198,7 +198,10 @@ def build_manifest(ccs200) -> dict:
                 "intensities are clipped and not to be trusted."),
         _p("acquire", "Acquire spectrum", "action", "action", group="Measurement", order=1,
            help="Average the next fresh scans and latch the result."),
-        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
+        # a SAFETY verb (control.py): a viewer may always cancel an acquisition
+        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2,
+           help="Cancel a running acquisition or dark. Allowed for anyone, also "
+                "a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",

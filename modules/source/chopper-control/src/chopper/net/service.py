@@ -23,6 +23,7 @@ import time
 import zmq
 
 from ..chopper import Chopper
+from ..control import ControlLease
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, status_to_dict, config_to_dict,
@@ -51,6 +52,19 @@ class ChopperService:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send: `stop` (wheel to standby).
+        #   A viewer who sees the chopper spinning when it should not (a hand
+        #   near the wheel, a beam that must stay blocked) must be able to stop
+        #   it. It already is a verb of its own that can ONLY stop; `set_enable`
+        #   is not in the list because the same verb also starts the wheel,
+        #   and `start` obviously is not.
+        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        self.control = ControlLease(
+            safety={"stop"},
+            read=set(),
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -117,6 +131,8 @@ class ChopperService:
         """
         st = status_to_dict(self.ch.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -170,6 +186,11 @@ class ChopperService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         try:
             if cmd == "set_frequency":
@@ -182,7 +203,8 @@ class ChopperService:
             elif cmd == "start":
                 return {"ok": True, "lock_gen": self.ch.set_enable(True)}
             elif cmd == "stop":
-                return {"ok": True, "lock_gen": self.ch.set_enable(False)}
+                # the SAFETY verb (see __init__): it can only stop the wheel
+                return {"ok": True, "lock_gen": self.ch.standby()}
             elif cmd == "set_blade":
                 self.ch.set_blade(str(msg["blade"]))
             elif cmd == "set_ref_mode":

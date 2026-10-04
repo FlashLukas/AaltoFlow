@@ -31,6 +31,8 @@ from ..config import Config
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ALWAYS_PROPERTY, ControlBar, mark_always
+from ..control import ControlRefused
 
 
 # ------------------------------------------------------------- signal bridge
@@ -263,12 +265,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1280, 860)
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its supply and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         # brain events -> log
         self.bridge = Bridge()
@@ -282,6 +297,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
         self._refresh()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- layout ----------------------------------------------------------
 
@@ -311,6 +331,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(title); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         header.addWidget(settings_btn)
@@ -387,6 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         kill.setToolTip("Emergency only. With a coil attached the supply has to "
                         "absorb its stored energy.")
         kill.clicked.connect(lambda: self._safe(self.ctrl.output_off_now))
+        mark_always(kill)            # the SAFETY verb (net/service.py): a viewer too
         col.addWidget(kill)
         return panel
 
@@ -465,10 +487,12 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---- actions ---------------------------------------------------------
 
     def _safe(self, fn, *args):
-        """Run a command; show a refusal (ValueError) in the log instead of crashing."""
+        """Run a command; show a refusal (ValueError) in the log instead of
+        crashing -- and a refusal because another PC holds control
+        (ControlRefused; normally the viewer guard stops the click first)."""
         try:
             fn(*args)
-        except ValueError as exc:
+        except (ValueError, ControlRefused) as exc:
             self._on_event("error", str(exc))
 
     def _apply_setpoint(self):
@@ -491,7 +515,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _toggle_output(self):
         s = self.ctrl.status()
-        self._safe(self.ctrl.set_output, not bool(s.output_request))
+        if s.output_request:
+            # OFF = the safety verb output_off (ramp down, then off), which a
+            # viewer may send too; ON stays set_output(True)
+            self._safe(self.ctrl.output_off)
+        else:
+            self._safe(self.ctrl.set_output, True)
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -512,6 +541,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         if s.mode != self._mode_shown:
             self._apply_mode_widgets(s)
@@ -545,6 +576,9 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.out_btn.setText("Output ON (ramp up)")
             _restyle(self.out_btn, "primary")
+        # While it reads OFF this button sends the safety verb, so a viewer
+        # may press it (control_bar.py); while it reads ON it is blocked.
+        self.out_btn.setProperty(ALWAYS_PROPERTY, bool(s.output_request))
         live = bool(s.output or s.output_request)
         self.btn_cur.setEnabled(not live); self.btn_volt.setEnabled(not live)
 

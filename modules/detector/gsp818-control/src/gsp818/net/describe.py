@@ -207,6 +207,11 @@ def build_manifest(sa) -> dict:
              "Tracking generator", 20, lim.tg_level_min_dBm, lim.tg_level_max_dBm,
              decimals=1, step=1.0, tol=1e-6,
              help="A reference taken at another level no longer normalises."),
+        # the SAFETY verb as a button (control.py: a viewer may always send
+        # it), so the suite's Control tab offers it to a viewer too
+        _p("tg_off", "TG off", "action", "action", group="Tracking generator", order=30,
+           help="Switch the tracking generator output off. Allowed for anyone, "
+                "also a viewer."),
 
         # -- measurement: the scan detectors (one acquisition feeds all of them) ------------
         _p("power", "Spectrum", "indicator", "array", unit="dBm", group="Measurement",
@@ -239,7 +244,10 @@ def build_manifest(sa) -> dict:
                 "are too low. Raise the attenuation or the reference level."),
         _p("acquire", "Acquire trace", "action", "action", group="Measurement", order=1,
            help="Average the next fresh sweeps and latch the result."),
-        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
+        # a SAFETY verb (control.py): a viewer may always cancel an acquisition
+        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2,
+           help="Cancel a running acquisition or reference. Allowed for anyone, "
+                "also a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=3, read_path=["acquiring"]),
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",

@@ -28,6 +28,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
 
 SHOW = ("Latest scan", "Last acquisition", "Dark spectrum")
 _WHICH = ("last", "sample", "dark")
@@ -245,11 +246,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._window = (math.nan, math.nan)
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(16)
         outer.addWidget(self._build_sidebar(), 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its spectrometer and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -269,6 +283,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
 
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
+
     # ---- layout ----------------------------------------------------------
 
     def _build_sidebar(self) -> QtWidgets.QWidget:
@@ -284,6 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(self.kind_label); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         header.addWidget(settings_btn)
         col.addLayout(header)
 
@@ -323,6 +343,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acq_btn.clicked.connect(lambda: self._call(self.ctrl.acquire))
         self.abort_btn = QtWidgets.QPushButton("Abort")
         self.abort_btn.clicked.connect(lambda: self._call(self.ctrl.abort))
+        mark_always(self.abort_btn)  # the SAFETY verb: works for a viewer too
         row.addWidget(self.acq_btn, 1); row.addWidget(self.abort_btn)
         alay.addLayout(row)
         self.acq_bar = QtWidgets.QProgressBar(); self.acq_bar.setRange(0, 100)
@@ -424,6 +445,9 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.show_combo)
         self.log_chk = QtWidgets.QCheckBox("Log scale")
         self.log_chk.toggled.connect(self._set_log)
+        # which trace to show and a log axis change only this window's view:
+        # fine for a viewer
+        mark_always(self.show_combo, self.log_chk)
         bar.addWidget(self.log_chk)
         bar.addStretch(1)
         self.trace_label = QtWidgets.QLabel(""); self.trace_label.setObjectName("hint")
@@ -536,6 +560,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sim_card.setVisible(simulated)
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         now = time.monotonic()
         self._set_simulated(bool(getattr(s, "simulated", True)))

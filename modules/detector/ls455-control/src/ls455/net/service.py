@@ -17,6 +17,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..gaussmeter import Gaussmeter
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -46,6 +47,20 @@ class Ls455Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY: none. A gaussmeter only measures: there is no output to
+        #   switch off and nothing running that could need stopping (an
+        #   acquisition is short and has no abort). `zero` / `clear_zero` /
+        #   `relative_here` change what every client reads, and `acquire` is a
+        #   trigger (it replaces the sample a scan waits on) -- none is safety.
+        #   READ: `reread_probe` only asks the meter which probe is plugged in
+        #   (after a swap) and adopts what it reports; it changes nothing on
+        #   the meter, so a viewer may refresh its picture of the probe.
+        self.control = ControlLease(
+            safety=set(),
+            read={"reread_probe"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -107,6 +122,8 @@ class Ls455Service:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.meter.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -158,6 +175,11 @@ class Ls455Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         m = self.meter
         try:

@@ -473,6 +473,12 @@ class SpectrumAnalyzer:
         self._changed(f"tracking generator {'ON' if on else 'off'} "
                       f"({self.cfg.tracking.level_dBm:g} dBm)", False)
 
+    def tg_off(self) -> None:
+        """Tracking generator output off. Same as set_tg(False); a name of its
+        own because over the wire it is the SAFETY verb a viewer may always
+        send (net/service.py, control) -- set_tg could also switch RF ON."""
+        self.set_tg(False)
+
     def set_tg_level(self, dbm: float) -> None:
         lim = self.cfg.limits
         v, clamped = _clamp(_finite(dbm, "TG level"), lim.tg_level_min_dBm, lim.tg_level_max_dBm)

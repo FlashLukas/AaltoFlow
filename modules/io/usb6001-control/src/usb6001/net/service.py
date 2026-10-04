@@ -21,6 +21,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..daq import Daq
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -50,6 +51,21 @@ class Usb6001Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = none. This is a GENERAL-purpose DAQ: what hangs on its
+        #   outputs is not known here, so no value is "safe" in general (0 V on
+        #   an AO, or a low DO line, can just as well switch something ON).
+        #   Its only output verbs, `set_ao` and `set_do`, can drive anywhere,
+        #   and it runs no task a viewer could stop. The per-line `safe_state`
+        #   in the config is written on a clean shutdown only (daq.py).
+        #   `acquire` is not safety either (guide: acquisition triggers replace
+        #   the sample other clients wait on), nor is `save_config` (it writes
+        #   a file on the service PC).
+        #   READ = none extra: read_ai / read_di / get_sample are already read
+        #   verbs by their prefix.
+        self.control = ControlLease(
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -116,6 +132,8 @@ class Usb6001Service:
         """
         st = status_to_dict(self.gen.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -169,6 +187,11 @@ class Usb6001Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         d = self.gen
         try:

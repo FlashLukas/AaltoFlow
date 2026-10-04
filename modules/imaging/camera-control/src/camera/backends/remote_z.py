@@ -17,6 +17,8 @@ import threading
 
 import zmq
 
+from ..control import make_identity
+
 
 class RemoteZFocus:
     def __init__(self, host: str = "127.0.0.1", cmd_port: int = 5565,
@@ -27,6 +29,12 @@ class RemoteZFocus:
         self._ctx = zmq.Context.instance()
         self._lock = threading.Lock()
         self._req = None
+        # The camera is a MACHINE client of zpiezo (control.py), exactly as it is
+        # of kim (remote_kim.py): autofocus and continuous focus keep setting the focus
+        # while a person's GUI (or the suite's Control tab) on another PC holds
+        # control of zpiezo -- opening a window must not break a running
+        # autofocus (Lukas's choice, 2026-09-29). Sent with every command.
+        self.identity = make_identity("machine", "camera")
         self._range = (0.0, 75.0)   # cached from info() on open
 
     # -- lifecycle --------------------------------------------------------- #
@@ -55,6 +63,7 @@ class RemoteZFocus:
         with self._lock:
             if self._req is None:
                 self._make_req()
+            req.setdefault("client", self.identity)
             try:
                 self._req.send_json(req)
                 reply = self._req.recv_json()

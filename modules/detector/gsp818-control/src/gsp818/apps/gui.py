@@ -32,6 +32,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ..model import DETECTORS, DUTS
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ALWAYS_PROPERTY, ControlBar, mark_always
 
 VIEWS = ("Spectrum (dBm)", "Normalised: trace - thru reference (dB)")
 
@@ -250,7 +251,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_mode = None
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QHBoxLayout(root)
         outer.setContentsMargins(16, 16, 16, 16); outer.setSpacing(16)
         # the sidebar scrolls: it holds every front-panel knob, more than a
@@ -262,6 +262,20 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll.widget().setObjectName("root")
         outer.addWidget(scroll, 0)
         outer.addWidget(self._build_main(), 1)
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its analyser and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event)
@@ -276,6 +290,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- layout ----------------------------------------------------------
 
@@ -293,6 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header.addWidget(self.kind_label); header.addStretch(1)
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         header.addWidget(settings_btn)
         col.addLayout(header)
 
@@ -381,7 +401,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tg_btn = QtWidgets.QPushButton("TG OFF"); self.tg_btn.setCheckable(True)
         self.tg_btn.setToolTip("RF out of GEN OUTPUT, following the sweep. Left as the instrument has it at start; "
                                   "off when the service stops.")
-        self.tg_btn.clicked.connect(lambda on: self._call(self.ctrl.set_tg, on))
+        # Switching OFF goes through the SAFETY verb tg_off (net/service.py),
+        # which a viewer may send too; switching ON is an ordinary change.
+        self.tg_btn.clicked.connect(
+            lambda on: self._call(self.ctrl.set_tg, True) if on else self._call(self.ctrl.tg_off))
         self.tg_level_spin = self._dspin(lim.tg_level_min_dBm, lim.tg_level_max_dBm, 1, "  dBm", 1.0)
         b = QtWidgets.QPushButton("Set level")
         b.clicked.connect(lambda: self._call(self.ctrl.set_tg_level, self.tg_level_spin.value()))
@@ -408,6 +431,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acq_btn.clicked.connect(lambda: self._call(self.ctrl.acquire))
         self.abort_btn = QtWidgets.QPushButton("Abort")
         self.abort_btn.clicked.connect(lambda: self._call(self.ctrl.abort))
+        mark_always(self.abort_btn)  # the SAFETY verb: works for a viewer too
         row.addWidget(self.acq_btn, 1); row.addWidget(self.abort_btn)
         alay.addLayout(row)
         self.acq_bar = QtWidgets.QProgressBar(); self.acq_bar.setRange(0, 100)
@@ -485,6 +509,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.which_combo.addItems(["Latest sweep", "Last acquisition"])
         self.which_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
         bar.addWidget(self.which_combo)
+        # which trace this window shows changes nothing on the analyser: fine
+        # for a viewer
+        mark_always(self.view_combo, self.which_combo)
         bar.addStretch(1)
         self.trace_label = QtWidgets.QLabel(""); self.trace_label.setObjectName("hint")
         bar.addWidget(self.trace_label)
@@ -618,6 +645,10 @@ class MainWindow(QtWidgets.QMainWindow):
             chk.blockSignals(True); chk.setChecked(bool(val)); chk.blockSignals(False)
         self.tg_btn.blockSignals(True)
         self.tg_btn.setChecked(bool(s.tg_on))
+        # While the TG is ON a click can only switch it OFF (tg_off, a safety
+        # verb): a viewer may press it then. While it is off a click would
+        # switch RF ON, so the viewer guard (control_bar.py) covers it.
+        self.tg_btn.setProperty(ALWAYS_PROPERTY, bool(s.tg_on))
         self.tg_btn.setText("TG ON" if s.tg_on else "TG OFF")
         # objectName "danger" = red: RF is leaving the instrument
         name = "danger" if s.tg_on else ""
@@ -644,6 +675,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dut_row.setVisible(simulated)
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         now = time.monotonic()
         self._set_simulated(bool(getattr(s, "simulated", True)))

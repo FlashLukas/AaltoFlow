@@ -21,6 +21,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..cryostat import Cryostat
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -50,6 +51,22 @@ class PpmsService:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = none. Every verb here is a setpoint or a rate/approach
+        #   change, and each of them can send the magnet or the temperature
+        #   ANYWHERE -- including "Go to zero", which is only set_field(0): on a
+        #   DynaCool a field sweep to zero is a deliberate move (it destroys
+        #   whatever state the sample was in), not a way of making things
+        #   safe. The DynaCool protects itself (its magnet supply and
+        #   temperature controller run inside MultiVu), and this module has no
+        #   verb that ONLY stops a ramp. So a viewer can only watch; a person
+        #   who must stop a sweep takes control first (a deliberate, visible
+        #   take-over).
+        #   READ = none: every read-only verb here is already status/info/
+        #   describe/get_config.
+        self.control = ControlLease(
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -116,6 +133,8 @@ class PpmsService:
         """
         st = status_to_dict(self.cryo.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 1.0) -> int:
@@ -169,6 +188,11 @@ class PpmsService:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         try:
             if cmd == "set_field":

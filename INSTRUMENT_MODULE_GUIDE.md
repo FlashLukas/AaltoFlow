@@ -290,8 +290,9 @@ Several clients can connect to one service at once (GUIs on several PCs,
 scan-core, another module, scripts). The first GUI gets **control**; every
 later GUI is a **viewer** that sees everything live and changes nothing; control
 changes hands only by a deliberate "Take control". The rules and the reasons
-are in `docs/DEVELOPER_NOTES.md` section 4 ("Control"). kim and camera have it;
-the other modules are being rolled out. What a module needs:
+are in `docs/DEVELOPER_NOTES.md` section 4 ("Control"). Every module has it
+(kim and camera first, all 38 since 2026-09-30); a module generated with
+`tools/new_module.py` inherits it from its template. What a module needs:
 
 1. **Copy two files, never edit them:** `suite-common/src/suite_common/control.py`
    → `src/<pkg>/control.py`, and `.../control_bar.py` →

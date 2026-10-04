@@ -16,6 +16,7 @@ import time
 
 import zmq
 
+from ..control import ControlLease
 from ..config import parse_bool
 from ..meter import PowerMeter
 from .describe import build_manifest
@@ -46,6 +47,20 @@ class Pm16Service:
         self._stop = threading.Event()
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
+        # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
+        # section 4 "Control"): the gate every command passes.
+        #   SAFETY = verbs a VIEWER may always send: `cancel_zero` (stop a zero
+        #   adjustment that was started by mistake, e.g. with the sensor still
+        #   in the beam -- the old zero stays). It only STOPS something. A
+        #   power meter drives nothing, so there is no output to switch off.
+        #   `zero` and `acquire` are not safety: they are triggers, and a new
+        #   zero or sample replaces what other clients (a running scan) rely on.
+        #   READ = read-only verbs whose names do not start with get_/read_/
+        #   list_: `stream_read` only drains the recorded fly-scan readings.
+        self.control = ControlLease(
+            safety={"cancel_zero"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
 
@@ -107,6 +122,8 @@ class Pm16Service:
         `status` reply -- a field in only one of them vanishes intermittently."""
         st = status_to_dict(self.meter.status())
         st["describe_rev"] = self.describe_rev()
+        # who holds control, who is watching (every control bar reads this)
+        st["control"] = self.control.status()
         return st
 
     def describe_rev(self, max_age_s: float = 0.5) -> int:
@@ -157,6 +174,11 @@ class Pm16Service:
     # -------------------------------------------------------------- dispatch
 
     def _dispatch(self, msg: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(msg)
+        if gate is not None:
+            return gate
         cmd = msg.get("cmd")
         m = self.meter
         try:

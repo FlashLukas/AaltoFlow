@@ -32,6 +32,8 @@ from ..config import Config, REFERENCE_SOURCES
 from ..sim_system import build_sim_system
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
+from .control_bar import ControlBar, mark_always
+from ..control import ControlRefused
 
 _REF_LABELS = {"internal_10MHz": "Internal 10 MHz",
                "internal_27MHz": "Internal 27 MHz",
@@ -261,9 +263,12 @@ _FREQ_UNITS = {"MHz": 1e6, "GHz": 1e9}
 class ChannelCard(QtWidgets.QFrame):
     """The controls and readouts of ONE output channel."""
 
-    def __init__(self, ch: str, ctrl, cfg: Config):
+    def __init__(self, ch: str, ctrl, cfg: Config, safe=None):
         super().__init__()
         self.ch, self.ctrl, self.cfg = ch, ctrl, cfg
+        # how a command is run: the main window's _safe (a refusal because
+        # another PC holds control goes to its log); plain call otherwise
+        self._safe = safe or (lambda fn, *args: fn(*args))
         self.setObjectName("card")
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
@@ -397,16 +402,16 @@ class ChannelCard(QtWidgets.QFrame):
     # ---- actions ---------------------------------------------------------
 
     def _toggle_rf(self):
-        self.ctrl.set_rf(self.ch, not bool(self._rf_on))
+        self._safe(self.ctrl.set_rf, self.ch, not bool(self._rf_on))
 
     def _set_frequency(self):
-        self.ctrl.set_frequency(self.ch, self.current_freq_hz())
+        self._safe(self.ctrl.set_frequency, self.ch, self.current_freq_hz())
 
     def _set_power(self):
-        self.ctrl.set_power(self.ch, self.power_spin.value())
+        self._safe(self.ctrl.set_power, self.ch, self.power_spin.value())
 
     def _set_phase(self):
-        self.ctrl.set_phase(self.ch, self.phase_spin.value())
+        self._safe(self.ctrl.set_phase, self.ch, self.phase_spin.value())
 
     # ---- refresh ---------------------------------------------------------
 
@@ -458,14 +463,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1280, 760)
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
-        self.setCentralWidget(root)
         outer = QtWidgets.QVBoxLayout(root)
         outer.setContentsMargins(16, 14, 16, 16)
         outer.setSpacing(14)
         outer.addLayout(self._build_header())
 
         mid = QtWidgets.QHBoxLayout(); mid.setSpacing(14)
-        self.cards = {ch: ChannelCard(ch, ctrl, cfg) for ch in "ab"}
+        self.cards = {ch: ChannelCard(ch, ctrl, cfg, safe=self._safe) for ch in "ab"}
         for card in self.cards.values():
             card.setFixedWidth(340)
             mid.addWidget(card, 0)
@@ -481,6 +485,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log.setMinimumHeight(110)
         llay.addWidget(self.log)
         outer.addWidget(lcard, 1)
+
+        # Control or viewer (control_bar.py): a bar across the top, only for a
+        # GUI on a service whose client knows about control -- a local GUI
+        # owns its synthesizer and has nobody to share it with.
+        self._control_bar = None
+        if remote and hasattr(self.ctrl, "take_control"):
+            central = QtWidgets.QWidget(); central.setObjectName("root")
+            vbox = QtWidgets.QVBoxLayout(central)
+            vbox.setContentsMargins(0, 0, 0, 0); vbox.setSpacing(0)
+            self._control_bar = ControlBar(self.ctrl, self, log=self._on_event)
+            vbox.addWidget(self._control_bar)
+            vbox.addWidget(root, 1)
+            self.setCentralWidget(central)
+        else:
+            self.setCentralWidget(root)
 
         # synthesizer events -> log
         self.bridge = Bridge()
@@ -499,6 +518,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.setInterval(60)
         self.timer.timeout.connect(self._refresh)
         self.timer.start()
+
+        # The first GUI to connect gets control; a later one opens as a viewer
+        # (control_bar.py). Only once the log exists, so the bar can say so.
+        if self._control_bar is not None:
+            self._control_bar.claim_if_free()
 
     # ---- layout ----------------------------------------------------------
 
@@ -531,7 +555,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ext_spin.setToolTip("Frequency of the signal on REF IN (external reference only)")
         row.addWidget(self.ext_spin)
         self.ext_btn = QtWidgets.QPushButton("Set")
-        self.ext_btn.clicked.connect(lambda: self.ctrl.set_ext_ref(self.ext_spin.value()))
+        self.ext_btn.clicked.connect(
+            lambda: self._safe(self.ctrl.set_ext_ref, self.ext_spin.value()))
         row.addWidget(self.ext_btn)
         self.temp_label = QtWidgets.QLabel("- C")
         self.temp_label.setStyleSheet(f"color:{COLORS['muted']}; font-weight:600;")
@@ -539,11 +564,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         settings_btn = QtWidgets.QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
+        mark_always(settings_btn)    # a viewer may LOOK; the service refuses the OK
         if self._remote:
             settings_btn.setToolTip("Edits the service's settings over the network.")
         row.addWidget(settings_btn)
         off_btn = QtWidgets.QPushButton("All RF off"); off_btn.setObjectName("danger")
-        off_btn.clicked.connect(self.ctrl.all_rf_off)
+        # the SAFETY verb (net/service.py): works for a viewer too
+        off_btn.clicked.connect(lambda: self._safe(self.ctrl.all_rf_off))
+        mark_always(off_btn)
         row.addWidget(off_btn)
         return row
 
@@ -552,7 +580,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_reference(self, index: int):
         source = self.ref_combo.itemData(index)
         ext = self.ext_spin.value() if source == "external" else None
-        self.ctrl.set_reference(source, ext)
+        self._safe(self.ctrl.set_reference, source, ext)
+
+    def _safe(self, fn, *args):
+        """Run a command; a refusal because another PC holds control goes to
+        the log (the service emits no event for that; normally the viewer
+        guard of the control bar stops the click before it gets here)."""
+        try:
+            fn(*args)
+        except ControlRefused as exc:
+            self._on_event("error", str(exc))
 
     def _open_settings(self):
         self.ctrl.get_config()          # no-op locally; fetch over the socket if remote
@@ -575,6 +612,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f'<span style="color:{color}">{msg}</span>')
 
     def _refresh(self):
+        if self._control_bar is not None:
+            self._control_bar.refresh()
         s = self.ctrl.status()
         for card in self.cards.values():
             card.refresh(s)
