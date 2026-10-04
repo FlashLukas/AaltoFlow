@@ -85,3 +85,31 @@ def test_use_warns_about_a_folder_without_a_policy(me, capsys):
     (me / "empty").mkdir()
     assert K.main(["use", str(me / "empty")]) == 0
     assert "no policy.json" in capsys.readouterr().out
+
+
+def test_policy_names_the_services_still_running_in_the_old_mode(me, capsys):
+    """Lab PC, 2026-10-03: the policy went "off" while kim and the camera ran
+    encrypted. A service keeps the mode it started with, so say which ones
+    on this PC need a restart."""
+    import os
+    kr = me / "keyring"
+    assert K.main(["init", str(kr), "--mode", "enforce", "--modules", "kim,camera"]) == 0
+    secure._write_marker("kim", "enforce")                     # this process is "kim"
+    dead = secure._write_marker("camera", "enforce")
+    data = json.loads(dead.read_text(encoding="utf-8"))
+    data["pid"] = 999999999                                    # a camera that has exited
+    dead.write_text(json.dumps(data), encoding="utf-8")
+    capsys.readouterr()
+    assert K.main(["policy", "--mode", "off"]) == 0
+    out = capsys.readouterr().out
+    assert "restart them" in out and f"kim  (pid {os.getpid()}" in out
+    assert "camera" not in out.split("restart them")[1]        # the dead one is not listed
+    assert not dead.exists()                                   # ... and its marker is gone
+    capsys.readouterr()
+    assert K.main(["policy", "--mode", "enforce"]) == 0        # back to its mode: nothing to say
+    assert "restart them" not in capsys.readouterr().out
+
+
+def test_no_answer_switches_only_on_a_pc_with_a_key(me):
+    assert secure.no_answer("lab-pc", "kim") is False          # no key: nothing to switch to
+    assert secure._flipped == {}

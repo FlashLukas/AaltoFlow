@@ -294,23 +294,40 @@ def fetch_describe(host: str, port: int, timeout_ms: int = 1500,
     return manifest
 
 
-def _describe_once(host: str, port: int, timeout_ms: int, module: str) -> dict | None:
+def _ask(host: str, port: int, timeout_ms: int, module: str, req: dict) -> dict | None:
+    """One request on a fresh REQ socket; the reply, or None (no answer).
+
+    With `module`, encrypted when the lab's policy secures it -- and when it
+    gets no answer, once more in the OTHER mode (secure.no_answer): a service
+    started before the policy changed still speaks the old one. The lab test
+    of 2026-10-03 switched the policy off while kim and the camera ran
+    encrypted, and Stop could not reach them any more (it would have killed
+    them, gotcha #25)."""
     import zmq
-    sock = zmq.Context.instance().socket(zmq.REQ)
-    sock.setsockopt(zmq.LINGER, 0)
-    sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-    sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
-    try:
-        if module:
-            secure.secure_client(sock, host, module)
-        sock.connect(f"tcp://{host}:{int(port)}")
-        sock.send_json({"cmd": "describe"})
-        reply = sock.recv_json()
-        return reply.get("describe") if reply.get("ok") else None
-    except Exception:
-        return None
-    finally:
-        sock.close(0)
+    for attempt in (1, 2):
+        sock = zmq.Context.instance().socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
+        try:
+            if module:
+                secure.secure_client(sock, host, module)
+            sock.connect(f"tcp://{host}:{int(port)}")
+            sock.send_json(req)
+            return sock.recv_json()
+        except zmq.Again:
+            if not (module and attempt == 1 and secure.no_answer(host, module)):
+                return None
+        except Exception:
+            return None
+        finally:
+            sock.close(0)
+    return None
+
+
+def _describe_once(host: str, port: int, timeout_ms: int, module: str) -> dict | None:
+    reply = _ask(host, port, timeout_ms, module, {"cmd": "describe"})
+    return reply.get("describe") if reply and reply.get("ok") else None
 
 
 def request_shutdown(host: str, port: int, timeout_ms: int = 1000,
@@ -325,21 +342,8 @@ def request_shutdown(host: str, port: int, timeout_ms: int = 1000,
     `shutdown` verb closes its instrument and exits; one that does not answers
     "unknown command" and is killed as before.
     """
-    import zmq
-    sock = zmq.Context.instance().socket(zmq.REQ)
-    sock.setsockopt(zmq.LINGER, 0)
-    sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-    sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
-    try:
-        if module:                 # encrypted when the policy secures it
-            secure.secure_client(sock, host, module)
-        sock.connect(f"tcp://{host}:{int(port)}")
-        sock.send_json({"cmd": "shutdown"})
-        return bool(sock.recv_json().get("ok"))
-    except Exception:
-        return False
-    finally:
-        sock.close(0)
+    reply = _ask(host, port, timeout_ms, module, {"cmd": "shutdown"})
+    return bool(reply and reply.get("ok"))
 
 
 def _cache_path(module_id: str) -> Path:

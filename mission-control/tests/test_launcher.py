@@ -480,9 +480,16 @@ def test_card_shows_the_address_its_service_holds(env, lockdir):
         assert not lockin.hw.isVisibleTo(lockin)
     finally:
         lock.release()
-    win.prober._round()
-    _pump(app, 0.1)
-    assert not win.cards["magnet"].hw.isVisibleTo(win.cards["magnet"])
+    # A round the prober's own timer started BEFORE the release can still
+    # deliver "holds GPIB0::6" after ours; under load (several suites at once)
+    # it arrived after a single 0.1 s pump and the test failed now and then.
+    # The card must clear within a few rounds, not necessarily the first.
+    card = win.cards["magnet"]
+    deadline = time.monotonic() + 3.0
+    while card.hw.isVisibleTo(card) and time.monotonic() < deadline:
+        win.prober._round()
+        _pump(app, 0.1)
+    assert not card.hw.isVisibleTo(card)
 
 
 def test_holdings_match_by_pid_but_never_for_a_remote_card(env):

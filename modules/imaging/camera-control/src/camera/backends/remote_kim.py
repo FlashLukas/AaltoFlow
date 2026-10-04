@@ -110,6 +110,9 @@ class KimLink:
     def _make_req(self) -> None:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
         # kim's key, from the lab keyring, when the policy secures kim
         # (secure.py): the camera then drives kim over an encrypted link,
@@ -120,14 +123,22 @@ class KimLink:
     def _sub_loop(self) -> None:
         # A ZeroMQ socket must stay in the thread that uses it, so the SUB
         # socket is created and closed here.
-        sub = self._ctx.socket(zmq.SUB)
-        sub.setsockopt(zmq.RCVTIMEO, 200)
-        sub.setsockopt(zmq.LINGER, 0)
-        secure.secure_client(sub, self.host, "kim")
-        sub.connect(f"tcp://{self.host}:{self.pub_port}")
-        sub.setsockopt(zmq.SUBSCRIBE, b"status")
+        def make_sub():
+            s = self._ctx.socket(zmq.SUB)
+            s.setsockopt(zmq.RCVTIMEO, 200)
+            s.setsockopt(zmq.LINGER, 0)
+            secure.secure_client(s, self.host, "kim")
+            s.connect(f"tcp://{self.host}:{self.pub_port}")
+            s.setsockopt(zmq.SUBSCRIBE, b"status")
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         try:
             while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found kim in the other mode (secure.no_answer)
+                    sub.close(0)
+                    sub, gen = make_sub()
                 try:
                     _topic, payload = sub.recv_multipart()
                 except zmq.Again:
@@ -207,15 +218,23 @@ class KimLink:
             if self._req is None:
                 self._make_req()
             req.setdefault("client", self.identity)
-            try:
-                self._req.send_json(req)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # A REQ socket that timed out is stuck mid-exchange: rebuild it.
-                self._req.close(0)
-                self._make_req()
-                self._down_until = time.monotonic() + self.retry_s
-                raise TimeoutError(f"kim service did not answer {req.get('cmd')!r}")
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(req)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # A REQ socket that timed out is stuck mid-exchange: rebuild it.
+                    self._req.close(0)
+                    # kim may speak the other mode than the policy now says
+                    # (started before it changed): try that mode once. Safe
+                    # to resend: a wrong-mode request never reaches kim.
+                    flipped = secure.no_answer(self.host, "kim")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        self._down_until = time.monotonic() + self.retry_s
+                        raise TimeoutError(
+                            f"kim service did not answer {req.get('cmd')!r}") from None
         if not reply.get("ok", False):
             raise RuntimeError(f"kim {req.get('cmd')}: {reply.get('error', 'failed')}")
         return reply

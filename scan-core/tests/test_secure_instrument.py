@@ -30,6 +30,7 @@ def secured(tmp_path, monkeypatch):
     (kr / secure.POLICY_FILE).write_text(json.dumps({"mode": "enforce", "modules": ["kim"]}),
                                          encoding="utf-8")
     monkeypatch.setenv("AALTOFLOW_SECURITY_DIR", str(me))
+    monkeypatch.setattr(secure, "_flipped", {})       # no mode remembered from another test
     return public
 
 
@@ -50,3 +51,49 @@ def test_the_instrument_uses_curve_only_where_the_policy_says(secured, name, cur
 def test_a_secured_module_on_an_unknown_pc_says_what_is_missing(secured):
     with pytest.raises(secure.SecurityError, match="no key for '10.9.9.9'"):
         Instrument("kim", host="10.9.9.9", cmd_port=18965, timeout_ms=200)
+
+
+def test_a_scan_reaches_a_service_after_the_policy_was_switched_off(secured, tmp_path):
+    """Lab PC, 2026-10-03: the policy went "off" while kim ran encrypted.
+    A scan built afterwards speaks plain first, hears nothing, and then
+    (secure.no_answer) talks to kim the way it really runs; the status
+    stream follows."""
+    import threading
+    import time
+    ctx = zmq.Context.instance()
+    rep, pub = ctx.socket(zmq.REP), ctx.socket(zmq.PUB)
+    for s in (rep, pub):
+        s.setsockopt(zmq.LINGER, 0)
+    guard = secure.secure_server(ctx, [rep, pub], "kim")      # encrypted (enforce)
+    rep.bind("tcp://127.0.0.1:18967")
+    pub.bind("tcp://127.0.0.1:18968")
+    stop = threading.Event()
+
+    def serve():
+        poller = zmq.Poller()
+        poller.register(rep, zmq.POLLIN)
+        while not stop.is_set():
+            if poller.poll(50):
+                rep.recv_json()
+                rep.send_json({"ok": True, "status": {"x": 1}})
+            pub.send_multipart([b"status", json.dumps({"x": 2}).encode()])
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    (tmp_path / "keyring" / secure.POLICY_FILE).write_text(
+        json.dumps({"mode": "off", "modules": ["kim"]}), encoding="utf-8")
+    inst = Instrument("kim", host="127.0.0.1", cmd_port=18967, timeout_ms=500)
+    try:
+        assert inst._req.getsockopt(zmq.MECHANISM) == zmq.NULL     # the policy's way
+        assert inst.command("status")["ok"]                        # then the service's
+        assert inst._req.getsockopt(zmq.MECHANISM) == zmq.CURVE
+        t0 = time.monotonic()
+        while inst.latest() is None and time.monotonic() - t0 < 3:
+            time.sleep(0.05)
+        assert inst.latest() == {"x": 2}
+    finally:
+        inst.close()
+        stop.set()
+        t.join(timeout=2)
+        rep.close(0)
+        pub.close(0)
+        secure.release_server(guard)

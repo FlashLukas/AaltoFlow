@@ -61,6 +61,7 @@ def lab(tmp_path, monkeypatch):
         "c": _pc(tmp_path / "pc-c", kr, "pc-c", in_keyring=False),
     }
     monkeypatch.setattr(secure, "RELOAD_S", 0.0)      # see a keyring change at once
+    monkeypatch.setattr(secure, "_flipped", {})       # no mode remembered from another test
 
     class Lab:
         keyring = kr
@@ -290,3 +291,80 @@ def test_the_console_speaks_curve_when_the_policy_asks(start_kim, lab):
                         "status"], capture_output=True, text=True, timeout=20,
                        env=dict(os.environ))
     assert '"ok": true' in r.stdout, r.stdout + r.stderr
+
+
+# ------------------------------------------- the policy changes under a service --
+#
+# Found on the lab PC (2026-10-03): `keys.py policy --mode off` while kim ran
+# encrypted -> every client spoke plain, got no answer, and not even a
+# shutdown reached the service. A service picks its mode when it STARTS; a
+# client that hears nothing now tries the other mode once.
+
+def test_policy_switched_off_while_kim_runs_encrypted(start_kim, client, lab):
+    svc = start_kim()                       # encrypted (enforce)
+    lab.policy("off")
+    b = client("b", start=False)            # a new GUI / script / the launcher's Stop
+    assert b.take_control()                 # one timeout, then encrypted, as the service
+    assert b.take_control()                 # and it stays so (no second timeout)
+    assert svc._guard is not None
+
+
+def test_policy_switched_on_while_kim_runs_plain(start_kim, client, lab):
+    lab.policy("off")
+    svc = start_kim()                       # plain
+    assert svc._guard is None
+    lab.policy("enforce")
+    b = client("b", start=False)
+    assert b.take_control()                 # one timeout, then plain, as the service
+
+
+def test_telemetry_follows_the_mode_a_request_found(start_kim, client, lab):
+    start_kim()
+    lab.policy("off")
+    b = client("b", start=False)
+    b.start()                               # its first request finds the encrypted mode
+    assert b.take_control()
+    assert _wait(lambda: (b.control() or {}).get("holder") is not None)
+
+
+def test_after_a_restart_the_client_follows_back(start_kim, client, lab):
+    svc = start_kim()
+    lab.policy("off")
+    b = client("b", start=False)
+    assert b.take_control()                 # encrypted, against the policy
+    svc.stop()
+    time.sleep(0.3)
+    start_kim()                             # restarted: now plain, as the policy says
+    assert b.take_control()                 # one timeout, then back to plain
+
+
+def test_a_pc_without_a_key_never_switches(start_kim, lab, tmp_path, monkeypatch):
+    start_kim()                             # encrypted
+    monkeypatch.setenv("AALTOFLOW_SECURITY_DIR", str(tmp_path / "nothing"))
+    from kim.net.client import KimClient
+    plain = KimClient(host=TO_A, cmd_port=CMD, pub_port=PUB, timeout_ms=800)
+    try:
+        with pytest.raises(TimeoutError):
+            plain.take_control()
+        assert not secure._flipped          # nothing remembered: it cannot encrypt
+    finally:
+        plain.close()
+
+
+def test_a_running_encrypted_service_is_listed_until_it_stops(start_kim, lab):
+    svc = start_kim()
+    lab.on("a")
+    running = secure.running_secured()
+    assert [r["module"] for r in running] == ["kim"]
+    svc.stop()
+    assert secure.running_secured() == []
+
+
+def test_a_request_long_after_the_policy_change_does_not_hang(start_kim, client, lab):
+    """The socket's handshake was refused (wrong mode) before the first send:
+    the send must time out (SNDTIMEO) and switch, not wait forever."""
+    start_kim()
+    lab.policy("off")
+    b = client("b", start=False)
+    time.sleep(1.0)                         # the plain handshake is refused meanwhile
+    assert b.take_control()

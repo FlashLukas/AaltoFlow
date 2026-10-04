@@ -163,6 +163,9 @@ class KimClient(ControlClient):
     def _make_req(self) -> None:
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
         # encrypted, and the service's key checked, when the lab's policy
         # secures kim (secure.py); plain otherwise
@@ -172,14 +175,23 @@ class KimClient(ControlClient):
     def _rpc(self, **req) -> dict:
         self._with_identity(req)
         with self._lock:
-            try:
-                self._req.send_json(req)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # Timed out: REQ socket is stuck mid-transaction -> rebuild it.
-                self._req.close(0)
-                self._make_req()
-                raise TimeoutError(f"no reply to {req.get('cmd')} within {self.timeout_ms} ms")
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(req)
+                    reply = self._req.recv_json()
+                    break
+                except zmq.Again:
+                    # Timed out: REQ socket is stuck mid-transaction -> rebuild it.
+                    self._req.close(0)
+                    # The service may speak the other mode than the policy now
+                    # says (it was started before the policy changed): the new
+                    # socket tries that mode, once. Safe to resend: a request
+                    # in the wrong mode never reaches the service.
+                    flipped = secure.no_answer(self.host, "kim")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        raise TimeoutError(
+                            f"no reply to {req.get('cmd')} within {self.timeout_ms} ms") from None
         if not reply.get("ok", False):
             self._raise_refusal(reply)       # ControlRefused: another client has control
             raise RuntimeError(reply.get("error", "command failed"))
@@ -189,14 +201,25 @@ class KimClient(ControlClient):
     # SUB caching thread
     # ------------------------------------------------------------------ #
     def _sub_loop(self) -> None:
-        sub = self._ctx.socket(zmq.SUB)
-        secure.secure_client(sub, self.host, "kim")      # telemetry too
-        sub.connect(f"tcp://{self.host}:{self.pub_port}")
-        sub.setsockopt(zmq.SUBSCRIBE, b"")  # all topics
+        def make_sub():
+            s = self._ctx.socket(zmq.SUB)
+            secure.secure_client(s, self.host, "kim")      # telemetry too
+            s.connect(f"tcp://{self.host}:{self.pub_port}")
+            s.setsockopt(zmq.SUBSCRIBE, b"")  # all topics
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         poller = zmq.Poller()
         poller.register(sub, zmq.POLLIN)
         try:
             while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found the service in the other mode
+                    # (secure.no_answer): telemetry follows
+                    poller.unregister(sub)
+                    sub.close(0)
+                    sub, gen = make_sub()
+                    poller.register(sub, zmq.POLLIN)
                 if dict(poller.poll(200)):
                     topic, raw = sub.recv_multipart()
                     import json

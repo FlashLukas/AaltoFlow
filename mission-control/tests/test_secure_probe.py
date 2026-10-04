@@ -36,6 +36,7 @@ def secured_kim(tmp_path, monkeypatch):
     (kr / secure.POLICY_FILE).write_text(json.dumps({"mode": "enforce", "modules": ["kim"]}),
                                          encoding="utf-8")
     monkeypatch.setenv("AALTOFLOW_SECURITY_DIR", str(me))
+    monkeypatch.setattr(secure, "_flipped", {})       # no mode remembered from another test
 
     ctx = zmq.Context.instance()
     rep = ctx.socket(zmq.REP)
@@ -78,6 +79,18 @@ def test_add_a_remote_service_finds_a_secured_module_it_does_not_know(secured_ki
     assert MC.fetch_describe("127.0.0.1", PORT, timeout_ms=500)["module"] == "kim"
 
 
-def test_a_module_the_policy_does_not_secure_is_asked_plain(secured_kim):
+def test_a_module_the_policy_does_not_secure_is_asked_plain_first(secured_kim):
     import mission_control as MC
-    assert MC.fetch_describe("127.0.0.1", PORT, timeout_ms=500, module="piezo") is None
+    # plain gets no answer from this CurveZMQ server; the second try is
+    # encrypted (the service may still run in a mode the policy dropped)
+    assert MC.fetch_describe("127.0.0.1", PORT, timeout_ms=500, module="piezo")["module"] == "kim"
+    assert secure._flipped == {("127.0.0.1", "piezo"): True}
+
+
+def test_stop_reaches_a_service_after_the_policy_was_switched_off(secured_kim, tmp_path):
+    """Lab PC, 2026-10-03: `keys.py policy --mode off` while kim ran
+    encrypted, and Stop could not reach it any more (it would have killed it)."""
+    import mission_control as MC
+    (tmp_path / "keyring" / secure.POLICY_FILE).write_text(
+        json.dumps({"mode": "off", "modules": ["kim"]}), encoding="utf-8")
+    assert MC.request_shutdown("127.0.0.1", PORT, timeout_ms=500, module="kim")

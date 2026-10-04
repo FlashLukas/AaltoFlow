@@ -966,6 +966,21 @@ zpiezo has no GUI.
     dozen busy-loop processes next to pytest. Do NOT reproduce it by running
     the same suite twice in parallel: the fixed test ports then collide, which
     is a different failure.
+47. **A service picks plain or CurveZMQ when it STARTS; the clients read the
+    policy when they CONNECT** (2026-10-03, lab PC). `keys.py policy --mode
+    off` while kim and the camera ran encrypted: every new client spoke
+    plain, got no answer, and not even the launcher's `shutdown` reached them
+    (Stop would have hard-killed them, gotcha #25). Fix: a client that hears
+    nothing calls `secure.no_answer(host, module)` and retries ONCE in the
+    other mode (it remembers the switch; the next silence switches back).
+    Resending is safe: a request in the wrong mode never reaches the service.
+    Only a PC with a key switches; one never set up behaves as before. SUB
+    loops rebuild when `secure.flip_generation()` changes. Second trap found
+    on the way: a plain REQ socket whose handshake a CurveZMQ server refused
+    has no connection, and `send` then BLOCKS FOREVER -- `RCVTIMEO` alone
+    does not cover it. Every REQ socket now sets `SNDTIMEO` as well.
+    Encrypted services leave a marker in the security folder while they run;
+    `keys.py policy` lists the ones whose mode no longer matches.
 
 ---
 

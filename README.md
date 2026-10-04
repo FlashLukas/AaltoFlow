@@ -439,7 +439,11 @@ trusted PC needs nothing, because keys belong to PCs, not to modules.
 
 Adding or removing a PC takes effect within seconds, because the keyring is
 re-read. A change of mode or of the module list takes effect when a module's
-service restarts.
+service restarts. Until then the clients still reach it: a request that gets
+no answer is tried once more in the other mode (plain or encrypted), so the
+GUIs, scans and Mission Control's Stop keep working. `keys.py policy` lists
+the services on this PC that still run in their old mode; restart them.
+The policy is lab-wide: services on the other PCs need a restart too.
 
 ### The policy and the modes
 

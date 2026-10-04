@@ -136,6 +136,9 @@ class Instrument:
         self._timeout_ms = timeout_ms
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
         # encrypted, and the service's key checked, when the lab's policy
         # secures this module (suite_common/secure.py); plain otherwise
@@ -281,18 +284,29 @@ class Instrument:
             if _timeout_ms is not None:
                 self._req.setsockopt(zmq.RCVTIMEO, int(_timeout_ms))
             try:
-                self._req.send_json(msg)
-                reply = self._req.recv_json()
-            except zmq.Again:
-                # A timed-out REQ socket is stuck in the wrong half of its
-                # state machine and will never work again -- rebuild it, or
-                # every later command in the scan fails too.
-                self._reset_req()
-                waited = _timeout_ms if _timeout_ms is not None else self._timeout_ms
-                raise InstrumentError(
-                    f"{self.name}: no reply to {verb!r} within "
-                    f"{waited} ms (is the service running on "
-                    f"{self.host}:{self.cmd_port}?)")
+                for attempt in (1, 2):
+                    try:
+                        self._req.send_json(msg)
+                        reply = self._req.recv_json()
+                        break
+                    except zmq.Again:
+                        # A timed-out REQ socket is stuck in the wrong half of its
+                        # state machine and will never work again -- rebuild it, or
+                        # every later command in the scan fails too.
+                        # The service may also speak the other mode than the
+                        # policy now says (started before it changed): the new
+                        # socket tries that mode, once (secure.no_answer). Safe
+                        # to resend: a wrong-mode request never reaches it.
+                        flipped = secure.no_answer(self.host, self.name)
+                        self._reset_req()
+                        if _timeout_ms is not None:
+                            self._req.setsockopt(zmq.RCVTIMEO, int(_timeout_ms))
+                        if not (flipped and attempt == 1):
+                            waited = _timeout_ms if _timeout_ms is not None else self._timeout_ms
+                            raise InstrumentError(
+                                f"{self.name}: no reply to {verb!r} within "
+                                f"{waited} ms (is the service running on "
+                                f"{self.host}:{self.cmd_port}?)") from None
             finally:
                 if _timeout_ms is not None:
                     # Always put the default back, even on the error path, or
@@ -417,6 +431,9 @@ class Instrument:
         self._req.close(0)
         self._req = self._ctx.socket(zmq.REQ)
         self._req.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
         self._req.setsockopt(zmq.LINGER, 0)
         secure.secure_client(self._req, self.host, self.name)
         if endpoint:
@@ -435,7 +452,25 @@ class Instrument:
         """
         poller = zmq.Poller()
         poller.register(self._sub, zmq.POLLIN)
+        gen = secure.flip_generation()
         while not self._stop.is_set():
+            if gen != secure.flip_generation():
+                # a request found the service in the other mode than the
+                # policy says (secure.no_answer): telemetry follows it
+                gen = secure.flip_generation()
+                try:
+                    poller.unregister(self._sub)
+                    endpoint = self._sub.LAST_ENDPOINT
+                    self._sub.close(0)
+                    self._sub = self._ctx.socket(zmq.SUB)
+                    secure.secure_client(self._sub, self.host, self.name)
+                    self._sub.connect(endpoint.decode() if isinstance(endpoint, bytes)
+                                      else endpoint)
+                    self._sub.setsockopt(zmq.SUBSCRIBE, b"")
+                    poller.register(self._sub, zmq.POLLIN)
+                except zmq.ZMQError:
+                    if self._stop.is_set():
+                        break
             try:
                 if not poller.poll(200):
                     continue

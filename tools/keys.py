@@ -230,6 +230,18 @@ def cmd_policy(args) -> int:
     _write_policy(kr, mode, mods)
     print(f"policy: mode '{mode}', secured modules: {', '.join(mods) or 'none'}")
     print("restart the secured modules' services for a change of mode or list")
+    # A running service keeps the mode it started with. Clients follow it
+    # (secure.no_answer: one timeout, then the other mode), but name the
+    # ones on this PC so they get restarted. The policy is lab-wide: other
+    # PCs' services are not listed here.
+    new = {"mode": mode, "modules": mods}
+    stale = [r for r in secure.running_secured()
+             if not secure.module_secured(r.get("module", ""), new)
+             or r.get("mode") != mode]
+    if stale:
+        print("still running in their old mode on this PC (restart them):")
+        for r in stale:
+            print(f"  {r.get('module')}  (pid {r.get('pid')}, mode '{r.get('mode')}')")
     return 0
 
 

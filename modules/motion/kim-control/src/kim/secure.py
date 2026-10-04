@@ -312,16 +312,69 @@ class Keyring:
 
 # ----------------------------------------------------------------- client ---
 
+#: (host, module) -> True for every service a client of THIS process found
+#: speaking the other mode than the policy says (see no_answer)
+_flipped: dict = {}
+_flip_lock = threading.Lock()
+#: bumped on every flip, so a SUB loop knows to rebuild its socket
+_flip_gen = [0]
+
+
+def _flip_key(host: str, module: str) -> tuple:
+    name = str(module or "").lower()
+    return (str(host).strip().strip("[]").lower(), re.split(r"[_@]", name)[0])
+
+
+def no_answer(host: str, module: str) -> bool:
+    """A request to `module` on `host` got no reply: the next socket made by
+    secure_client for it uses the OTHER mode (plain <-> CurveZMQ). True when
+    it flipped.
+
+    Why: a service decides plain or encrypted ONCE, when it starts. The
+    policy can change while it runs -- the lab test of 2026-10-03 switched
+    the policy to "off" while kim and the camera ran encrypted, after which
+    every client spoke plain, got no answer, and not even a shutdown reached
+    them. A client that heard nothing tries the other mode, so GUIs, scripts
+    and the launcher's Stop keep working until the services restart in the
+    new mode (the next no-answer flips back). It costs one timeout per change.
+
+    Only on a PC that HAS a key: without one, encrypted is impossible and
+    nothing changes (a PC that never set up encryption behaves as before)."""
+    try:
+        own_keys()
+    except SecurityError:
+        return False
+    k = _flip_key(host, module)
+    with _flip_lock:
+        if _flipped.pop(k, False):
+            pass                               # back to the policy's mode
+        else:
+            _flipped[k] = True
+        _flip_gen[0] += 1
+    return True
+
+
+def flip_generation() -> int:
+    """Changes whenever no_answer() flips a mode: a long-lived SUB socket
+    compares it and rebuilds itself (a SUB never times out on its own)."""
+    return _flip_gen[0]
+
+
 def secure_client(sock, host: str, module: str) -> bool:
     """Make `sock` (REQ or SUB, not yet connected) a CurveZMQ client for
-    `module` on `host`, when the lab's policy secures that module.
+    `module` on `host`, when the lab's policy secures that module (or when
+    no_answer() found the running service speaking CurveZMQ anyway).
 
     Returns False (socket untouched: plain, as before) when it does not.
     Raises SecurityError, saying what to do, when it does but this PC has no
     key or the keyring has no key for `host`.
     """
     pol = policy()
-    if not module_secured(module, pol):
+    want = module_secured(module, pol)
+    with _flip_lock:
+        if _flipped.get(_flip_key(host, module)):
+            want = not want
+    if not want:
         return False
     public, secret, pc = own_keys()
     h = str(host).strip().strip("[]").lower()
@@ -558,7 +611,71 @@ def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
     line = f"security: {module} is encrypted (CurveZMQ, mode '{pol['mode']}')"
     _to_console("info", line)
     on_event and on_event("info", line)
+    guard._marker = _write_marker(module, pol["mode"])
     return guard
+
+
+# ---------------------------------------------- running encrypted services ---
+#
+# A service fixes its mode when it starts, so a policy change reaches it only
+# on a restart. Each encrypted service leaves a small file in this PC's
+# security folder while it runs; `keys.py policy` lists the ones still alive
+# when the mode is lowered ("restart these").
+
+RUNNING_DIR = "running"
+
+
+def _write_marker(module: str, mode: str) -> Path | None:
+    try:
+        d = security_dir() / RUNNING_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', module)}-{os.getpid()}.json"
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"module": module, "mode": mode, "pid": os.getpid(),
+                       "started": time.time()}, f)
+        return p
+    except OSError:
+        return None                            # a marker must never stop a service
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is process `pid` still running? (os.kill(pid, 0) would KILL it on
+    Windows, so ask the OS without touching the process.)"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259          # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def running_secured() -> list[dict]:
+    """The encrypted services running on THIS PC (dead markers are removed)."""
+    out = []
+    d = security_dir() / RUNNING_DIR
+    for p in sorted(d.glob("*.json")) if d.is_dir() else []:
+        info = _read_json(p)
+        if info and _pid_alive(int(info.get("pid", 0) or 0)):
+            out.append(info)
+        else:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    return out
 
 
 def _to_console(level: str, msg: str) -> None:
@@ -579,6 +696,13 @@ def release_server(guard: Guard | None) -> None:
     thread once no service in this process needs it)."""
     if guard is None:
         return
+    marker = getattr(guard, "_marker", None)
+    if marker is not None:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        guard._marker = None
     with _auth_lock:
         slot = _auths.get(getattr(guard, "_ctx_id", None))
         if slot is None:

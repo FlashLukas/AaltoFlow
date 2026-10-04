@@ -85,6 +85,9 @@ class CameraClient(ControlClient):
     def _make_req(self) -> None:
         self._req = self._ctx.socket(self._zmq.REQ)
         self._req.setsockopt(self._zmq.RCVTIMEO, self.timeout_ms)
+        # a send that cannot be delivered (no connection: a CurveZMQ handshake
+        # refused in the wrong mode) must time out too, not wait forever
+        self._req.setsockopt(self._zmq.SNDTIMEO, self.timeout_ms)
         self._req.setsockopt(self._zmq.LINGER, 0)
         # encrypted, and the service's key checked, when the lab's policy
         # secures the camera (secure.py); plain otherwise
@@ -94,13 +97,22 @@ class CameraClient(ControlClient):
     def _rpc(self, **req) -> dict:
         self._with_identity(req)
         with self._lock:
-            try:
-                self._req.send_json(req)
-                reply = self._req.recv_json()
-            except self._zmq.Again:
-                self._req.close(0)
-                self._make_req()
-                raise TimeoutError(f"no reply to {req.get('cmd')} within {self.timeout_ms} ms")
+            for attempt in (1, 2):
+                try:
+                    self._req.send_json(req)
+                    reply = self._req.recv_json()
+                    break
+                except self._zmq.Again:
+                    self._req.close(0)
+                    # The service may speak the other mode than the policy now
+                    # says (started before the policy changed): the new socket
+                    # tries that mode, once (secure.no_answer). Safe to resend:
+                    # a request in the wrong mode never reaches the service.
+                    flipped = secure.no_answer(self.host, "camera")
+                    self._make_req()
+                    if not (flipped and attempt == 1):
+                        raise TimeoutError(
+                            f"no reply to {req.get('cmd')} within {self.timeout_ms} ms") from None
         if not reply.get("ok", False):
             self._raise_refusal(reply)       # ControlRefused: another client has control
             raise RuntimeError(reply.get("error", "command failed"))
@@ -108,14 +120,24 @@ class CameraClient(ControlClient):
 
     # -- SUB caching thread ------------------------------------------------ #
     def _sub_loop(self) -> None:
-        sub = self._ctx.socket(self._zmq.SUB)
-        secure.secure_client(sub, self.host, "camera")   # telemetry too
-        sub.connect(f"tcp://{self.host}:{self.pub_port}")
-        sub.setsockopt(self._zmq.SUBSCRIBE, b"")
+        def make_sub():
+            s = self._ctx.socket(self._zmq.SUB)
+            secure.secure_client(s, self.host, "camera")   # telemetry too
+            s.connect(f"tcp://{self.host}:{self.pub_port}")
+            s.setsockopt(self._zmq.SUBSCRIBE, b"")
+            return s, secure.flip_generation()
+
+        sub, gen = make_sub()
         poller = self._zmq.Poller()
         poller.register(sub, self._zmq.POLLIN)
         try:
             while not self._stop.is_set():
+                if gen != secure.flip_generation():
+                    # a request found the service in the other mode: follow it
+                    poller.unregister(sub)
+                    sub.close(0)
+                    sub, gen = make_sub()
+                    poller.register(sub, self._zmq.POLLIN)
                 if dict(poller.poll(200)):
                     # One malformed frame (not two parts, not JSON, not a dict)
                     # must not end this thread: it used to raise out of the
