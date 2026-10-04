@@ -67,6 +67,33 @@ import uuid
 
 import zmq
 
+
+def _load_secure():
+    """The module's secure.py (encryption, README "Encryption and keys"),
+    loaded straight from its file when this console sits in its module folder
+    -- so the console still imports no package and runs anywhere. A copy
+    taken elsewhere has no secure.py and talks plain; a secured mag2dcal will
+    not answer it."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "src" / "mag2dcal" / "secure.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("mag2dcal_console_secure", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod          # its dataclasses look themselves up there
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_SECURE = _load_secure()
+
+
+def _secure(sock, host: str) -> None:
+    """Make `sock` a CurveZMQ client when the lab's policy secures mag2dcal."""
+    if _SECURE is not None:
+        _SECURE.secure_client(sock, host, "mag2dcal")
+
 CMD_PORT = 5577
 PUB_PORT = 5578
 TIMEOUT_MS = 3000
@@ -95,19 +122,29 @@ class Console:
     def _make_req(self):
         self.req = self.ctx.socket(zmq.REQ)
         self.req.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+        self.req.setsockopt(zmq.SNDTIMEO, TIMEOUT_MS)   # a refused handshake must not block send
         self.req.setsockopt(zmq.LINGER, 0)
+        _secure(self.req, self.host)
         self.req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def send(self, msg: dict) -> dict:
         msg.setdefault("client", IDENTITY)       # say who we are (control)
-        try:
-            self.req.send_json(msg)
-            return self.req.recv_json()
-        except zmq.Again:
-            # timed out -> the REQ socket is stuck; rebuild it so the next call works
-            self.req.close(0)
-            self._make_req()
-            return {"ok": False, "error": "no reply (is the service running?)"}
+        for attempt in (1, 2):
+            try:
+                self.req.send_json(msg)
+                return self.req.recv_json()
+            except zmq.Again:
+                # timed out -> the REQ socket is stuck; rebuild it so the next call works
+                self.req.close(0)
+                # mag2dcal may run in the other mode than the policy now says
+                # (started before it changed): try that mode once
+                # (secure.no_answer; a wrong-mode request never reaches mag2dcal)
+                flipped = (attempt == 1 and _SECURE is not None
+                           and _SECURE.no_answer(self.host, "mag2dcal"))
+                self._make_req()
+                if not flipped:
+                    return {"ok": False, "error": "no reply (is the service running?)"}
+        return {"ok": False, "error": "no reply (is the service running?)"}
 
     @staticmethod
     def show_status(s: dict):
@@ -157,6 +194,7 @@ class Console:
 
     def watch(self, seconds: float):
         sub = self.ctx.socket(zmq.SUB)
+        _secure(sub, self.host)                  # telemetry is encrypted too
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         poller = zmq.Poller(); poller.register(sub, zmq.POLLIN)
@@ -269,7 +307,9 @@ class Console:
             def make():
                 s = self.ctx.socket(zmq.REQ)
                 s.setsockopt(zmq.RCVTIMEO, TIMEOUT_MS)
+                s.setsockopt(zmq.SNDTIMEO, TIMEOUT_MS)   # a refused handshake must not block send
                 s.setsockopt(zmq.LINGER, 0)
+                _secure(s, self.host)
                 s.connect(f"tcp://{self.host}:{self.cmd_port}")
                 return s
             hb = make()
