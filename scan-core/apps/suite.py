@@ -104,6 +104,8 @@ class Suite(QtWidgets.QMainWindow):
         self.builder = ScanBuilder(registry=self.registry, embedded=True)
         self.builder.autosave_dir = self.out_dir      # save runs without being asked
         self.builder.on_log = self.log                # routines say what they are doing
+        # the RUN INFO is remembered in THIS root's suite_local.json
+        self.builder.run_info.set_root(self.root)
 
         self.tabs = QtWidgets.QTabWidget()
         self.control = ControlPanel(on_log=self.log)
@@ -238,6 +240,12 @@ class Suite(QtWidgets.QMainWindow):
         self.last_run_btn.setToolTip("The dataset from the most recent scan in this session.")
         self.last_run_btn.clicked.connect(self._show_last_run)
         self.data_view.add_action(self.last_run_btn)     # one toolbar, not two
+        self.recall_btn = QtWidgets.QPushButton("Recall settings…")
+        self.recall_btn.setToolTip(
+            "The instrument settings stored in the file shown here (or one you\n"
+            "pick), next to the instruments' settings now: choose which to set back.")
+        self.recall_btn.clicked.connect(self._recall_from_data)
+        self.data_view.add_action(self.recall_btn)
         g.addWidget(self.data_view, 1)
         v.addWidget(card, 1)
         return page
@@ -257,6 +265,17 @@ class Suite(QtWidgets.QMainWindow):
                 "the file list on the left has every earlier autosave.")
             return
         self.data_view.set_dataset(ds, self.builder.last_saved)
+
+    def _recall_from_data(self):
+        """Recall from the file open in the Data tab, else ask for one."""
+        from apps.recall import open_recall
+        path = getattr(self.data_view, "path", None)
+        ds = getattr(self.data_view, "ds", None)
+        if path:
+            return open_recall(self, self.lab, str(path))
+        if ds is not None:
+            return open_recall(self, self.lab, ds=ds)
+        return open_recall(self, self.lab, start_dir=str(self.out_dir))
 
     def _show_status(self, text: str):
         """The header's WHERE line; the "define the scan" hint when idle."""
@@ -346,6 +365,20 @@ class Suite(QtWidgets.QMainWindow):
         pick.clicked.connect(self._pick_out_dir)
         row2.addWidget(pick)
         o.addLayout(row2)
+        # The instrument SNAPSHOT in every file (scan_core/snapshot.py) holds
+        # each instrument's idn, which may include its serial number. Data
+        # files are the lab's own, so the default is to keep it.
+        self.idn_box = QtWidgets.QCheckBox(
+            "Store each instrument's identity (idn / serial) in the settings snapshot")
+        self.idn_box.setToolTip(
+            "Every scan file records every connected instrument's settings and state\n"
+            "(for 'Recall settings...'). Untick to leave the idn / serial entries out,\n"
+            "e.g. before sharing files. Suite setting: snapshot_include_idn.")
+        from scan_core.snapshot import include_idn_setting
+        self.idn_box.setChecked(include_idn_setting(self.root))
+        self.idn_box.toggled.connect(
+            lambda on: set_setting("snapshot_include_idn", bool(on), root=self.root))
+        o.addWidget(self.idn_box)
         v.addWidget(out)
 
         theme = QtWidgets.QLabel(
@@ -569,6 +602,7 @@ class Suite(QtWidgets.QMainWindow):
 
         if self.lab is not None:
             self.lab.close()
+        reg.settings_root = self.root      # snapshot_include_idn is read there
         self.registry, self.lab = reg, lab
         self.connected_ids = [m.id for m in specs]
         self._failed_set = None
@@ -615,6 +649,8 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.limits_refresher = self._refresh_limits
         # the PAUSED banner's "Clear fault on <module>" buttons
         self.builder.fault_lab = self.lab
+        # "Recall settings..." compares a file with these live instruments
+        self.builder.lab = self.lab
         self.builder.autosave_dir = self.out_dir
         self.control.set_source(registry=self.registry, lab=self.lab, prefix=True)
         self.navigator.set_source(registry=self.registry, lab=self.lab)

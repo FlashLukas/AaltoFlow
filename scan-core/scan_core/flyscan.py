@@ -413,7 +413,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         return _to_dataset(recipe, compiled, registry,
                            {k: v.copy() for k, v in data.items()},
                            created_iso, time.monotonic() - t0,
-                           det_axes, det_coords, var_attrs=ctx.get("var_attrs"))
+                           det_axes, det_coords, var_attrs=ctx.get("var_attrs"),
+                           ds_attrs=ctx.get("ds_attrs"))
 
     def fly_row(row, redo):
         """Fly ONE row (approach, outer dims, the move, binning).
