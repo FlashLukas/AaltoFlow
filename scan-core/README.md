@@ -105,9 +105,11 @@ scan_core/
   registry.py   # Parameter/Settable/Gettable + build_sim_registry (toy physics)
   engine.py     # N-D odometer -> xarray.Dataset
   hooks.py      # named per-level actions (autofocus, wait, call = routines, …)
+                # + the generic steps wait_until/abort_if/skip_if/pause/comment/compute_set
+  expr.py       # the restricted (no-eval) language of their conditions and formulas
   flyscan.py    # the fly axis: continuous rows binned by the measured position
   sim_stream.py # the simulator's streams (a lagging lock-in, a moving stage)
-  errors.py     # ScanAborted, RoutineError
+  errors.py     # ScanAborted, ScanStopped (a step stopped it), RoutineError
   view.py       # re-exports aaltoview.view (N-D cube -> map / line)
   data.py       # re-exports aaltoview.data (read measurements back)
 apps/
@@ -251,6 +253,94 @@ every row, a reference every 100 points.
 - `on_error: continue` ("carry on if it fails", ticked by default for these):
   a failure is logged and the scan goes on. A failed camera autofocus puts Z back
   where it started.
+- THROUGHOUT also offers **before each point** / **after each point**
+  (`before_point` / `after_point`), which is where `abort_if` and `skip_if`
+  usually sit.
+
+### Five generic steps: wait, check, pause, comment, compute
+
+Besides "set" and "run an action", a routine's steps can be one of five
+generic steps (the **＋ other step ...** list under every routine). They are
+deliberately simple -- no loops, no if/else; several dies are a queue of scans.
+Each sits in a routine's `steps` list, in order with the sets and actions (or,
+on its own, as a hook: `{when: before_point, action: abort_if, args: {condition: ...}}`).
+
+**`wait_until`** -- wait until a condition has been TRUE without a break for
+`hold_s` seconds (0 = true once). `timeout_s` is required; then
+`on_timeout: stop` (default) ends the scan cleanly, `continue` logs and goes on.
+Abort works during the wait; the log shows progress every 30 s
+("waiting: ppms.temperature = 10.03 (want ...), held 120/600 s").
+
+```yaml
+  - {when: before_scan, action: call, args: {steps: [
+      {set: {ppms.temperature: 10}},
+      {wait_until: {condition: "abs(ppms.temperature - 10) < 0.05",
+                    hold_s: 600, timeout_s: 7200, on_timeout: stop}}]}}
+```
+
+**`abort_if`** -- stop the scan if the condition is true: like Abort (the
+after-scan routine runs, the points so far are saved), and the file's
+`stopped_by` attribute says why. Anywhere except `after_scan`.
+
+```yaml
+  - {when: before_point, action: call, args: {steps: [
+      {abort_if: {condition: "ppms.temperature > 15"}}]}}
+```
+
+**`skip_if`** -- leave the CURRENT point out: it is stored as not measured
+(NaN) and the scan goes on with the next one. At `before_point` (and
+`every_n_points`, `each_sweep` start) the point is not measured at all; at
+`after_point` (`each_sweep` end) its values are thrown away. Refused before /
+after the scan and in a fly scan. The file lists the skipped grid indices in
+`skipped_points` (and `skipped_count`), so a skipped NaN is not mistaken for an
+unfinished scan.
+
+```yaml
+  - {when: after_point, action: call, args: {steps: [
+      {skip_if: {condition: "hf2.r1 < 1e-6"}}]}}
+```
+
+**`pause`** -- wait for you: the Scan tab shows an amber banner with the
+message and **Continue** / **Abort scan** (Abort scan stops like `abort_if`).
+A run without the GUI (a script) fails at the step with a clear message, or
+with `headless: continue` only logs it.
+
+```yaml
+  - {when: before_scan, action: call, args: {steps: [
+      {pause: {message: "Insert the polariser, then Continue"}}]}}
+```
+
+**`comment`** -- add a timestamped line to the file's comment log (attribute
+`comments`, a JSON list of `{time, point, index, text}`; point is null before /
+after the scan). `{parameter.id}` is filled with the current value (`%.6g`);
+an unknown one is left as written, with a warning in the log.
+
+```yaml
+  - {when: before_scan, action: call, args: {steps: [
+      {comment: {text: "sample rotated 90 deg; T = {ppms.temperature} K"}}]}}
+```
+
+**`compute_set`** -- set a parameter to the value of a formula, with the same
+blocking set (and the same restore) as a plain set. A value outside the
+parameter's limits makes the step FAIL (it is never clamped), and `on_error`
+decides.
+
+```yaml
+  - {when: before_point, action: call, args: {steps: [
+      {compute_set: {set: {smb.frequency: "2800 + 28 * clMag.field"}}}]}}
+```
+
+**Conditions and formulas** use a small restricted language
+(`scan_core/expr.py`, parsed, never `eval`): numbers, `'text'`, `True`/`False`,
+parameter ids as in the palette (`ppms.temperature`), `+ - * / **`, unary `-`,
+`< <= > >= == !=` (chained: `9.95 < ppms.temperature < 10.05`), `and or not`,
+parentheses, `abs min max round`. Anything else (other calls, indexing,
+attributes, lambdas, ...) and unknown ids are refused when the definition is
+VALIDATED -- the builder shows a red border and the reason as you type.
+**A parameter id reads the status cache**: a settable's readback, a detector's
+current value (a lock-in's last acquired sample) -- never a new acquisition.
+Array detectors (a VNA trace) cannot be used. `==` on measured numbers is
+exact: write `abs(a - b) < 0.01`.
 
 ## Navigator: find your way on a large sample
 
