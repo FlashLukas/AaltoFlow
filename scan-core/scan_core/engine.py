@@ -22,6 +22,7 @@ import xarray as xr
 
 from .errors import RoutineError, ScanAborted, ScanFault, format_faults
 from .hooks import find_autofocus, routine_steps, run_hooks
+from .storage import COMPRESSION, COUNT, FLOAT, storage_of
 
 
 # ─────────────────────────── faults and the PAUSE ────────────────────────────
@@ -49,6 +50,8 @@ class _Guard:
         self.on_fault, self.should_abort = on_fault, should_abort
         self.log, self.poll_s = log, poll_s
         self.pauses = 0
+        #: (detector, value) pairs already reported as "not one of its options"
+        self.unknown_warned: set = set()
 
     def faults(self) -> list:
         if self._check is None:
@@ -362,9 +365,12 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
             else:
                 det_coords[ax.name] = vals
             inner.append(len(vals))
-        dtype = np.complex128 if getattr(g, "dtype", "float") == "complex" else float
-        fill = (np.nan + 1j * np.nan) if dtype is np.complex128 else np.nan
-        data[d] = np.full(tuple(shape) + tuple(inner), fill, dtype=dtype)
+        # In memory every NUMBER stays float64 (complex128) with NaN = "not
+        # measured", whatever its declared type: the live plots, the fly
+        # binning and the window all do arithmetic with NaN. Only text is an
+        # object array ("" = not measured). The declared type is applied when
+        # the file is written (storage.py, _to_dataset).
+        data[d] = storage_of(g).allocate(tuple(shape) + tuple(inner))
 
     # One AcquireSpec per distinct group among the selected detectors.
     acquire_groups = []
@@ -611,7 +617,8 @@ def _checked_read(registry, dets, det_axes, data, shape, idx, guard) -> dict:
 
     out = {}
     for det in dets:
-        value = registry.get(det).get()
+        g = registry.get(det)
+        value = g.get()
         if det_axes[det]:
             arr = np.asarray(value)
             expected = data[det].shape[len(shape):]
@@ -625,9 +632,23 @@ def _checked_read(registry, dets, det_axes, data, shape, idx, guard) -> dict:
                     f"{expected}. The instrument's sweep changed mid-scan "
                     f"(a span or point-count change will do it). Re-run "
                     f"without reconfiguring it, or scan it as its own axis.")
-            out[det] = arr
-        else:
-            out[det] = value
+            value = arr
+        # The declared type is a PROMISE (storage.py): an int outside its
+        # min/max or a bool that is not 0/1 STOPS the scan here -- before the value is kept, and
+        # exactly like a trace whose shape changed. Never clipped or wrapped.
+        # An enum becomes its option's code, a bool/int a float holding it.
+        st = storage_of(g)
+        out[det] = st.to_memory(
+            value, what=f"detector '{det}' at grid index {tuple(int(i) for i in idx)}")
+        # an enum value outside its options is stored as "not measured";
+        # say so once per detector and value, not at every point
+        while st.unknown_seen:
+            v = st.unknown_seen.pop()
+            if (det, repr(v)) not in guard.unknown_warned:
+                guard.unknown_warned.add((det, repr(v)))
+                guard.log(f"warning: {det} read {v!r}, which is not one of its "
+                          f"options {st.options} -- stored as 'not measured' "
+                          f"(the module's describe should list it)")
 
     # CHECK 2: did something fail WHILE we read? The values are only committed
     # when this passes too.
@@ -728,6 +749,31 @@ def _units(registry, pid: str) -> str:
     return getattr(p, "unit", "") if p else ""
 
 
+def _storage_for(name, g, arr, extra: dict):
+    """(Storage or None, attrs) for one variable of the dataset.
+
+    A detector: its declared storage. A fly scan's per-pixel MEAN is a float
+    whatever the detector is (the mean of 3 and 4 is 3.5), so it is stored as
+    float64 and keeps the declared type in `declared_type`; the per-pixel
+    count is an unsigned integer, the spread a float. Variables the engine
+    adds itself (the window's mask and record) are compressed and otherwise
+    written as xarray always wrote them (a bool mask as a netCDF byte).
+    """
+    stat = extra.get("fly_stat")
+    if stat == "count":
+        return COUNT, COUNT.attrs()
+    if stat == "std":
+        return FLOAT, FLOAT.attrs()
+    if g is None:
+        if arr.dtype == bool:
+            return None, {"aaltoflow_type": "bool"}
+        return FLOAT, FLOAT.attrs()
+    st = storage_of(g)
+    if stat == "mean" and st.kind not in ("float", "complex"):
+        return FLOAT, {**FLOAT.attrs(), "declared_type": st.kind}
+    return st, st.attrs()
+
+
 def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                 det_axes=None, det_coords=None, var_attrs=None) -> xr.Dataset:
     """Build the Dataset. `var_attrs` = {name: {attr: value}} merged into a
@@ -755,11 +801,19 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                          "label": getattr(axis, "label", name)})
 
     data_vars = {}
+    var_attrs = var_attrs or {}
     for det, arr in data.items():
         g = registry.get(det)
         names = dim_names + [a.name for a in det_axes.get(det, ())]
         attrs = {"units": _units(registry, det),
                  "label": getattr(g, "label", det)}
+        st, extra_attrs = _storage_for(det, g, arr, var_attrs.get(det) or {})
+        attrs.update(extra_attrs)
+        # `encoding` is what to_netcdf applies when the file is written --
+        # dtype, fill value, compression -- whoever writes it (the autosave,
+        # Save data, a script's ds.to_netcdf(path)). The values in memory are
+        # untouched (storage.py).
+        enc = st.encoding() if st is not None else dict(COMPRESSION)
         if np.iscomplexobj(arr):
             # Split complex into two real variables so the file stays
             # CONFORMING netCDF-4. h5netcdf will happily write complex as an
@@ -769,10 +823,10 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             # scan_core.data.as_complex(ds, det) puts it back together.
             data_vars[f"{det}_real"] = (names, arr.real,
                                         {**attrs, "complex_part": "real",
-                                         "complex_pair": det})
+                                         "complex_pair": det}, dict(enc))
             data_vars[f"{det}_imag"] = (names, arr.imag,
                                         {**attrs, "complex_part": "imag",
-                                         "complex_pair": det})
+                                         "complex_pair": det}, dict(enc))
         else:
             # A detector that IS an axis parameter (recording the MEASURED
             # camera y while stepping its setpoint) would share the axis
@@ -781,7 +835,7 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             name = f"{det}_measured" if det in coords else det
             if name != det:
                 attrs["measured_of"] = det
-            data_vars[name] = (names, arr, attrs)
+            data_vars[name] = (names, arr, attrs, enc)
 
     # The CONDITIONS the measurement was taken under, as scalar coordinates:
     # rf power, the field a frequency sweep sat in, the wavelength. They are in
@@ -797,10 +851,10 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         except (TypeError, ValueError):
             continue
 
-    for name, extra in (var_attrs or {}).items():
+    for name, extra in var_attrs.items():
         target = (data_vars.get(name) or data_vars.get(f"{name}_measured")
                   or coords.get(name))
-        if target is not None and len(target) == 3:
+        if target is not None and len(target) >= 3:
             target[2].update(extra)
 
     ds = xr.Dataset(data_vars=data_vars, coords=coords)

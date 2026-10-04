@@ -495,6 +495,71 @@ still assumes piezo/zpiezo.
   `--cmd/--pub` for ports, all others `--cmd-port/--pub-port`. On default ports
   no port flag is needed.
 
+### 4b. How scan data is stored: the type comes from `describe` (2026-10-04)
+
+Until 2026-10-04 every detector went into the `.nc` file as an uncompressed
+float64, whatever it was, and an enum or a string could not be recorded at
+all. Now `scan-core/scan_core/storage.py` picks the storage of each recorded
+quantity from the module's descriptor -- there is no setting and no UI for it:
+
+| declared in describe | on disk | "not measured" |
+|---|---|---|
+| `bool` | uint8 0/1 (+ `flag_values`/`flag_meanings` "false true") | 255 |
+| `int` with `min`/`max` | narrowest integer holding [min, max] (signed tried first at each width) | the type's extreme value OUTSIDE [min, max]; if none is spare, the next wider type |
+| `int` with `bits: N` | narrowest UNSIGNED integer holding 0..2^N-1 (12 bits -> uint16) | the type's maximum |
+| `int`, no bounds | int32 | -2147483648 |
+| `enum` (`options`) | integer code 0..n-1 (int8, int16 above 127 options) + CF `flag_values` / `flag_meanings` (blanks -> "_") + `options_json` (the exact list) | -1 |
+| `string` | netCDF-4 variable-length string | "" |
+| `float` | float64; float32 when the descriptor says `"store": "float32"` | NaN |
+| complex (`dtype`) | `<id>_real` + `<id>_imag`, float64 (or float32 under `store`) | NaN |
+| array detectors | the same rules per element | |
+
+- **In memory nothing changes for numbers.** The engine's arrays stay float64
+  (complex128) with NaN = not measured, so live plots, the Measurement tab,
+  the fly binning and window.py are untouched. The type is applied only when
+  the file is written: `_to_dataset` puts `dtype`, `_FillValue` and the
+  compression into each variable's `.encoding`, which every
+  `ds.to_netcdf(path)` honours. Text is the one exception: an object array,
+  "" = not measured. An enum is held as its code (a float).
+- **The range is a promise.** The engine checks every measured value where it
+  keeps it (`engine._checked_read` -> `Storage.to_memory`): an int outside
+  [min, max] (or beyond int32 without bounds), a non-integer for an int, a
+  bool that is not True/False/0/1, a string where a number is declared --
+  the scan STOPS with
+  `StorageError: detector 'x' at grid index (i,): got ..., outside ...`, like a
+  trace whose length changed. Never clipped, never wrapped. `None`/NaN is
+  "no value at this point" (stored as not measured), as for a float.
+  An ENUM value that is not one of its options does NOT stop (Lukas,
+  2026-10-04: several modules read back "--" or a front-panel setting outside
+  their list): the point is stored as not measured and the scan log says it
+  once per detector and value.
+- **A control read back as a detector** keeps its type (bool -> uint8, int ->
+  int32 or its `bits`), but its min/max do NOT narrow the storage: they are
+  limits on what may be set, not a promise about the readback (sr830's
+  harmonic, hf2's filter order, cs260's filter are adopted from the front panel
+  outside them).
+- **Fly scans:** `<det>_n` is uint32 (fill 4294967295 = row not flown),
+  `<det>_std` float64, and the binned MEAN is float64 even for an int/bool
+  detector (attr `declared_type`). Enum and string detectors cannot be flown.
+- **Compression:** zlib level 4 with shuffle on every data variable, including
+  the window's mask and record variables; coordinates stay uncompressed;
+  strings are not filtered. A 100x100 scan of bool + 12-bit + enum + one float
+  detector: 109 kB against 334 kB as uncompressed float64; the three typed
+  variables shrink from 80 kB each to 0.1-10 kB.
+- **Every variable says its type** in `aaltoflow_type` (bool / int / enum /
+  string / float / complex); ints also carry `declared_min` / `declared_max` /
+  `declared_bits`.
+- **What readers see:** xarray (and `aaltoview.data.load`) turns the fill value
+  back into NaN, so an int/bool/enum variable reads as float (float32 for
+  8/16-bit types, float64 for 32-bit) with NaN where not measured; a string
+  variable reads as str with "" where not measured. The enum names are in the
+  attributes, not in the values: map a code back with
+  `json.loads(var.attrs["options_json"])[int(code)]`. AaltoView shows the
+  CODES (it does not read `flag_meanings` yet), and scan-core's result view
+  hides string variables (nothing to plot). Files written before 2026-10-04
+  load exactly as before; a float-only scan writes the same variables and
+  values as before, only compressed.
+
 ---
 
 ## 5. Shared code conventions

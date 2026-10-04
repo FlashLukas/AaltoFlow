@@ -9,64 +9,12 @@ the result where it belongs (README, developer notes, guide).
 
 ### Data types: recording, storing and processing more than float64 (2026-10-02)
 
-**Today** every detector is stored as a 64-bit float (8 bytes per value),
-in memory (`engine.py`: `np.full(..., np.nan, dtype=float)`) and in the file
-(`to_netcdf` with no encoding: uncompressed float64). Complex detectors are
-complex128 in memory and two float64 variables (`<name>_real`, `<name>_imag`)
-in the file. NaN means "not measured yet".
-
-| type | recorded? | stored as |
-|---|---|---|
-| float | yes | float64 |
-| complex (VNA) | yes | complex128 / two float64 variables |
-| int, bool | yes | float64 (the registry knows the type; storage drops it) |
-| text / enum (a state, a filter name) | no -- refused as a detector | -- |
-| 1D / 2D arrays | yes | float64 / complex128 |
-
-**Options, with a rough effort:**
-
-1. Integers and booleans in their own type (int16, uint16, int32, ...):
-   "not measured" becomes a netCDF `_FillValue` plus a measured mask instead
-   of NaN. xarray turns the fill value back into NaN on reading, so AaltoView
-   and analysis scripts most likely work unchanged (to be tested). Inside
-   scan-core, window.py, the fly-scan binning and the live plots convert to
-   float where they need NaN. ~1-1.5 days.
-2. float32 as an opt-in per detector (half the size, ~7 significant digits).
-   A few hours.
-3. Lossless compression (zlib) for every variable in the file. A few hours.
-4. Text and enums, CF-style: an integer code per point plus `flag_values` /
-   `flag_meanings`, so it stays plottable and the viewer can label it; free
-   text as netCDF-4 variable-length strings. AaltoView needs to show the
-   names. ~1-2 days.
-5. Ragged data (a different length at every point: peak lists, photon
-   events): does not fit the scan grid; would need a separate table per point
-   in the file. Hard -- only when an experiment needs it.
-
-All of 1-4 together: ~3-4 days. Suggested order: 3 + 1 first (the biggest
-saving, and the ground for camera images), then 4, then 5 only if needed.
-
-**The storage type comes from `describe`, not from a setting.** Every
-detector already declares `type` (float / int / bool / enum / string, enums
-with `options`), so the engine can pick the storage itself:
-
-| declared | stored as | "not measured" |
-|---|---|---|
-| bool | uint8 0/1 | 255 |
-| enum | integer code + `flag_values` / `flag_meanings` | -1 |
-| int | narrowest integer that fits `min`/`max` (or `bits`); int32 without bounds | the type's extreme value |
-| float | float64 (float32 when the module says the precision allows) | NaN |
-| string | text | "" |
-
-- `min` / `max` are in the contract but almost only on controls (1 of ~445
-  indicators declares them). Modules add them -- or a new optional
-  `"bits": 12` for cameras and digitisers -- to the detectors where size
-  matters. A backwards-compatible extension of `describe`.
-- The bounds are the module's promise; the engine must never store a wrong
-  value. A value that does not fit stops the scan with a clear message (as a
-  changed array shape does today) -- no wrap-around, no clipping.
-- With the type chosen automatically there is no per-detector setting and
-  no UI for it: items 1 + 4 come to ~2-3 days, plus minutes per module for
-  `bits` / `min` / `max`.
+Items 1-4 (typed storage from describe, float32 opt-in, compression, enums
+and strings) were BUILT on branch `data-types` (2026-10-04, not merged yet):
+see `docs/DEVELOPER_NOTES.md` section 4b and `scan-core/scan_core/storage.py`.
+Still open: AaltoView showing enum NAMES (it shows the codes; the names are in
+`flag_meanings` / `options_json`), modules adding `min`/`max`/`bits` to the
+detectors where size matters, and item 5 (ragged data), only if needed.
 
 ### dssg: show the MEASURED harmonic content in its window (2026-10-03)
 

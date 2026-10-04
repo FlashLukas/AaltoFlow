@@ -461,6 +461,8 @@ constantly and mean nothing.
   "min": ..., "max": ...,          # LIVE bounds; omit if genuinely unbounded
   "step": ..., "decimals": ...,    # display hints
   "options":   [...],              # enum only
+  "bits":      12,                 # optional, int detectors: unsigned 0..2^bits-1
+  "store":     "float32",          # optional, float/complex detectors: halve the file
   "writable":  True,
   "plottable": True,               # a scalar worth graphing over time
   "read_path": ["aux", "ai", "Dev1/ai1"],   # path into the status dict, or None
@@ -475,6 +477,34 @@ constantly and mean nothing.
 
 `read_path` is a **list**, not a dotted string: AUX channel names contain `/` and
 ids may contain `.`, so a dotted path could not be split back apart.
+
+### The type of a detector is how scan-core STORES it (2026-10-04)
+
+scan-core picks the storage of every recorded value from its descriptor
+(full table: `docs/DEVELOPER_NOTES.md` section 4b): `bool` -> uint8, `int` ->
+the narrowest integer its `min`/`max` (or `bits`) allow, `enum` -> an integer
+code with the option names in the file's attributes, `string` -> text,
+`float` -> float64. So declare the type a value really has -- a state name is
+an `enum` or a `string`, not a float -- and both are recordable since then.
+
+- **`min` / `max` on an indicator are a PROMISE.** They choose its storage
+  type, and a measured value outside them STOPS a scan (never clipped). Give
+  them only where the instrument cannot report anything else (a 0..100 %
+  reading, a counter that cannot go negative), and never narrower than the
+  instrument really reports. On a CONTROL they stay setting limits: a control
+  recorded as a detector is never narrowed by them.
+- **`enum` options must cover every value status can report.** A readback that
+  is not one of the options (a "--", an empty string, a front-panel setting
+  outside the offered list) is stored as "not measured", with one warning in
+  the scan log -- the value is lost, so list every value the instrument can
+  report. `None` is stored as "not measured" too.
+- **`bits`** (new, optional): an int detector that is an N-bit count (a 12-bit
+  camera, a 16-bit digitiser) -> stored unsigned, 0..2^N-1 allowed.
+- **`store: "float32"`** (new, optional): a float/complex detector whose
+  precision is ~7 significant digits or worse (most ADCs) may be stored in
+  half the space. Default float64.
+- Both fields are backwards compatible: a client that does not know them
+  ignores them.
 
 Expand multi-axis modules **flat** — `x`, `y`, `z` as three independent
 descriptors each with its own limits, not one descriptor taking an axis

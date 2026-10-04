@@ -280,9 +280,15 @@ def validate_fly(recipe, registry) -> list[str]:
         q = registry.get(det)
         if q is None:
             continue                         # the generic check reports it
+        kind = getattr(getattr(q, "storage", None), "kind", "float")
         if getattr(q, "axes", None):
             errs.append(f"detector '{det}' returns a whole trace; a fly scan "
                         f"records single values only")
+        elif kind in ("enum", "string"):
+            # a pixel of a fly row is the MEAN of the samples that fell in it,
+            # and there is no mean of "IDLE" and "BUSY"
+            errs.append(f"detector '{det}' is {kind}; a fly scan averages the "
+                        f"samples of each pixel, which needs numbers")
         elif getattr(q, "stream", None) is None:
             errs.append(f"detector '{det}' cannot be recorded continuously "
                         f"(its module does not stream it); a fly scan can only "
@@ -353,6 +359,9 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
     params = {det: registry.get(det) for det in dets}
     for det in dets:
+        # NaN = row not flown yet (in memory). On disk the count is a uint32
+        # and the mean a float64 even for an int/bool detector -- the mean of
+        # 3 and 4 is 3.5 (engine._storage_for).
         data[f"{det}_n"] = np.full(shape, np.nan)
         data[f"{det}_std"] = np.full(shape, np.nan)
     ctx["var_attrs"] = _var_attrs(params, fly, ax, rb.id)
