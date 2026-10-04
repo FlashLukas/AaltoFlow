@@ -103,6 +103,16 @@ def build_manifest(brain) -> dict:
         objectives = list(brain.list_objectives() or [])
     except Exception:
         objectives = []
+    # The objective is an ENUM, and scan-core stores an enum as the index of
+    # its option (developer notes 4b): a value that is not an option is lost
+    # as "not measured". Status reports cfg.image.objective_name, which can
+    # name an objective that is NOT in objectives.ini (an .ini written for
+    # another table, a set_config push, an empty objectives file). So the
+    # name the brain reports now is always one of the options. The revision
+    # follows it, so a client re-fetches when it changes.
+    current = str(getattr(brain.cfg.image, "objective_name", "") or "")
+    if current not in objectives:
+        objectives.append(current)
 
     # Unit and bounds come from the LIVE Z / XY backends: volts on the piezo
     # rig, micrometres on the KIM rig, whose range follows kim's leash. When a
@@ -162,7 +172,7 @@ def build_manifest(brain) -> dict:
                 "every frame caused a limit cycle."),
 
         _p("objective", "Objective", "control", "enum", group="Optics",
-           order=50, options=objectives or None,
+           order=50, options=objectives,
            read_path=["objective_name"],
            set={"verb": "set_objective", "arg": "name"},
            settle={"policy": "echoes", "key": "objective_name"},
@@ -365,8 +375,10 @@ def build_manifest(brain) -> dict:
                  "timeout_s": float(brain.cfg.autofocus.scan_timeout_s)},
            help="Finds focus (routine: sweep or one_way, AutoFocus tab) and parks "
                 "there. Tracking and the stabiliser pause while it runs."),
+        # a run counter: starts at 0 and only counts up (min 0 is a promise
+        # the brain keeps; no max -- it is unbounded, int32 holds 2e9 runs)
         _p("af_id", "Autofocus #", "indicator", "int", group="Focus", order=23,
-           read_path=["af_id"]),
+           min=0, read_path=["af_id"]),
         _p("af_hint", "Autofocus warning", "indicator", "string", group="Focus", order=24,
            read_path=["af_hint"],
            help="Empty when fine. Set when spot_area is the metric and the spot is NOT "
@@ -396,8 +408,11 @@ def build_manifest(brain) -> dict:
                 "levels of the width ratios (NaN before one / when refused)."),
         _p("zcal_state", "Z calibration state", "indicator", "string", group="Focus",
            order=26, read_path=["zcal_state"]),
+        # 8, 10, 12, 14 or 16 and nothing else: backends/ids.bit_depth maps
+        # every pixel format onto those, and camera._spot_source reports 8
+        # when there is no deep frame. So [8, 16] is a promise (1 byte stored).
         _p("spot_bit_depth", "Spot size bit depth", "indicator", "int", group="Spot",
-           order=68, read_path=["spot_bit_depth"],
+           order=68, min=8, max=16, read_path=["spot_bit_depth"],
            help="8, or the camera's full depth (e.g. 12) when it delivers one: the "
                 "spot sizes are then measured on that frame (far wings not rounded away)."),
         _p("spot_bit_note", "Why 8-bit spot sizes", "indicator", "string", group="Spot",

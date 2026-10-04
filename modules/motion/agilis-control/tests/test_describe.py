@@ -175,3 +175,74 @@ def test_describe_over_the_wire_and_both_status_paths_agree():
     finally:
         client.close()
         svc.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Declared TYPES (2026-10-04): scan-core STORES every recorded value in the
+# type its descriptor declares (INSTRUMENT_MODULE_GUIDE.md 6b, developer
+# notes 4b). An int outside an indicator's min/max STOPS a scan; an enum
+# value that is not one of the options is lost as "not measured".
+# --------------------------------------------------------------------------- #
+def _type_problem(d, v):
+    """Why status value `v` does not fit descriptor `d`, or "" (the same rule
+    as tools/check_modules.py and scan_core/storage.py). None always fits."""
+    items = v if isinstance(v, list) else [v]
+    for x in items:
+        if x is None:
+            continue
+        t = d["type"]
+        if t == "bool" and not isinstance(x, bool):
+            return f"declared bool, reads {x!r}"
+        if t == "int":
+            if isinstance(x, bool) or not isinstance(x, (int, float)) or x != int(x):
+                return f"declared int, reads {x!r}"
+            if d["kind"] == "indicator":
+                lo, hi = d.get("min"), d.get("max")
+                if d.get("bits") is not None:
+                    lo, hi = 0, 2 ** int(d["bits"]) - 1
+                if (lo is not None and x < lo) or (hi is not None and x > hi):
+                    return f"reads {x!r}, outside [{lo}, {hi}]"
+        if t == "enum" and x not in (d.get("options") or []):
+            return f"reads {x!r}, not one of {d.get('options')}"
+        if t == "string" and not isinstance(x, str):
+            return f"declared string, reads {x!r}"
+        if t == "float" and (isinstance(x, (bool, str)) or not isinstance(x, (int, float))):
+            return f"declared float, reads {x!r}"
+    return ""
+
+
+def _check_types(manifest, status):
+    """Every readable descriptor's status value fits its declared type."""
+    bad = []
+    for d in manifest["parameters"]:
+        if d["kind"] in ("indicator", "control") and d.get("read_path"):
+            why = _type_problem(d, read_path(status, d["read_path"]))
+            if why:
+                bad.append(f"{d['id']}: {why}")
+    assert not bad, bad
+
+
+def test_declared_types_fit_status():
+    from agilis.net.protocol import status_to_dict
+    _cfg, brain = _brain()
+    try:
+        _check_types(build_manifest(brain), status_to_dict(brain.status()))
+        brain.move_to_step(0, 200)
+        time.sleep(0.05)
+        _check_types(build_manifest(brain), status_to_dict(brain.status()))
+    finally:
+        brain.shutdown()
+
+
+def test_step_counter_is_an_unbounded_int():
+    """The AG-UC2's own counter (datum arbitrary, stage movable by hand):
+    a min/max would be a promise the hardware does not keep."""
+    _cfg, brain = _brain()
+    try:
+        params = _by_id(build_manifest(brain))
+        for ax in "xy":
+            d = params[f"steps_{ax}"]
+            assert d["type"] == "int"
+            assert "min" not in d and "max" not in d and "bits" not in d
+    finally:
+        brain.shutdown()

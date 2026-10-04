@@ -173,6 +173,11 @@ def build_manifest(brain) -> dict:
 
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
                group="Status", order=20 + i, read_path=["moving", i]),
+            # NO min/max on purpose: the counter is the KIM101's signed 32-bit
+            # position (Kinesis piezo-motor counter). The datum is arbitrary
+            # and the actuator can be moved beyond our limits by hand or by
+            # another program, so any int32 may be read -- and int32 is what
+            # scan-core stores an int without bounds as.
             _p(f"steps_{low}", f"Step counter {ax}", "indicator", "int",
                group="Position", order=80 + i, read_path=["position_steps", i]),
             _p(f"datum_{low}", f"Datum {ax}", "action", "action",

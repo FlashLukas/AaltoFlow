@@ -154,6 +154,11 @@ def build_manifest(brain) -> dict:
                         "Bounds are the travel limits; arming the leash narrows them."))),
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
                group="Status", order=20 + i, read_path=["moving", i]),
+            # NO min/max on purpose: the counter is the AG-UC2's own signed
+            # step count (TP). The datum is arbitrary and the stage can be
+            # moved beyond our limits by hand or by another program, so any
+            # int32 may be read -- and int32 is what scan-core stores an int
+            # without bounds as.
             _p(f"steps_{low}", f"Step counter {ax}", "indicator", "int",
                group="Position", order=30 + i, read_path=["position_steps", i]),
             _p(f"amplitude_fwd_{low}", f"Step amplitude {ax} +", "control", "int",
