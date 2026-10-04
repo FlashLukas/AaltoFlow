@@ -136,8 +136,12 @@ def build_manifest(brain) -> dict:
         _p("speed", "Measured speed", "indicator", "float", unit="mm/s",
            group="Motion", order=22, decimals=3, plottable=True,
            read_path=["speed_mm_s"]),
+        # read from the SCU as an unsigned int (SA_GetClosedLoopMaxFrequency_S
+        # into a c_uint), so it cannot be negative: min 0 is a promise. No
+        # max: the controller's own ceiling (18.5 kHz) is not confirmed for
+        # an ADOPTED value, and int32 holds anything a SCU can report.
         _p("max_frequency", "Step frequency limit", "indicator", "int",
-           unit="Hz", group="Motion", order=23, read_path=["max_frequency_hz"]),
+           unit="Hz", group="Motion", order=23, min=0, read_path=["max_frequency_hz"]),
 
         # -- state -------------------------------------------------------- #
         _p("connected", "Connected", "indicator", "bool", group="Status",
@@ -147,6 +151,9 @@ def build_manifest(brain) -> dict:
            help="The controller knows the absolute position (reference marks found)."),
         _p("moving", "Moving", "indicator", "bool", group="Status", order=3,
            read_path=["moving"]),
+        # a STRING, not an enum: backends/scu.py reports "code_<n>" for a
+        # status number outside the known CHANNEL_STATES list, so the set of
+        # values is open (an enum would lose those as "not measured").
         _p("channel_state", "Controller state", "indicator", "string",
            group="Status", order=4, read_path=["channel_state"]),
         _p("hw_error", "Hardware error", "indicator", "string",

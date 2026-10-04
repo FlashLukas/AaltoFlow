@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import zlib
 
+from ..config import RAMP_MODES
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -156,7 +158,11 @@ def build_manifest(brain) -> dict:
 
     params += [
         _p("ramp_mode", "Ramp mode", "control", "enum", group="Motion",
-           order=60, options=["hardware", "software", "off"],
+           # ONE list (config.RAMP_MODES): scan-core stores an enum as the
+           # index of its option, so the options must be exactly what the
+           # brain can report -- config and apply_config force ramp_mode
+           # into this list, set_ramp_mode refuses anything else.
+           order=60, options=list(RAMP_MODES),
            read_path=["ramp_mode"],
            set={"verb": "set_ramp_mode", "arg": "mode"},
            settle={"policy": "echoes", "key": "ramp_mode"},
