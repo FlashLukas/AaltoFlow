@@ -23,6 +23,7 @@ import os as _os
 import tempfile as _tempfile
 _os.environ["AALTOFLOW_SECURITY_DIR"] = _tempfile.mkdtemp(prefix="aaltoflow-nosec-")
 
+import copy
 import json
 import threading
 import time
@@ -36,7 +37,8 @@ class FakeService:
     """A clMag-shaped service: closed-loop field, AUX inputs, status at 20 Hz."""
 
     def __init__(self, cmd_port: int, adopt_delay: float = 0.25,
-                 settle_delay: float = 0.25, manifest=None):
+                 settle_delay: float = 0.25, manifest=None, config=None,
+                 config_error: str | None = None, big_status: bool = False):
         #: What `describe` returns. None = this service predates the verb and
         #: answers ok:false, which is how a coordinator finds out it has to fall
         #: back to a hand-written declaration.
@@ -55,6 +57,16 @@ class FakeService:
         self._rf_power = -10.0
 
         self.commands: list[str] = []       # what the client actually sent
+        #: get_config / set_config (snapshot + recall tests): the grouped
+        #: settings, every set_config's `config` as received, and an error
+        #: that get_config answers with when set
+        self.config = copy.deepcopy(config) if config is not None else {
+            "motion": {"speed": 1.5, "preset": "slow", "steps": [1, 2, 3]},
+            "hardware": {"serial": "SN-TEST", "address": "COM9"}}
+        self.config_error = config_error
+        self.set_configs: list[dict] = []
+        self.set_config_error: str | None = None
+        self.big_status = big_status
         self._stop = threading.Event()
         self._ctx = zmq.Context.instance()
         self._threads: list[threading.Thread] = []
@@ -84,18 +96,32 @@ class FakeService:
                     "current_A": self._measured / 40.0,
                     "field_stable": self._stable,
                     "power_dBm": self._rf_power,
-                    "describe_rev": (self.manifest or {}).get("revision")}
+                    "describe_rev": (self.manifest or {}).get("revision"),
+                    **({"trace": list(range(5000))} if self.big_status else {})}
 
     def _handle(self, msg: dict) -> dict:
         cmd = msg.get("cmd")
         self.commands.append(cmd)
         if cmd == "info":
             return {"ok": True, "info": {"field_lo": -95.0, "field_hi": 95.0,
+                                         "idn": "FAKE,MODEL1,SN-TEST,1.0",
                                          "n_points": 50, "tolerance": 0.1,
                                          "power_min_dBm": -145.0,
                                          "power_max_dBm": 18.0}}
         if cmd == "status":
             return {"ok": True, "status": self._status()}
+        if cmd == "get_config":
+            if self.config_error:
+                return {"ok": False, "error": self.config_error}
+            return {"ok": True, "config": copy.deepcopy(self.config)}
+        if cmd == "set_config":
+            if self.set_config_error:
+                return {"ok": False, "error": self.set_config_error}
+            part = msg.get("config", {})
+            self.set_configs.append(part)
+            for group, vals in part.items():      # partial, in place
+                self.config.setdefault(group, {}).update(vals)
+            return {"ok": True}
         if cmd == "describe":
             if self.manifest is None:
                 return {"ok": False, "error": "unknown command: 'describe'"}

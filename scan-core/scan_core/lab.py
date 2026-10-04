@@ -421,8 +421,18 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
         # the instruments THIS scan uses, as for the fault check
         return lab.claim_scan({owner[i] for i in ids if i in owner}, label, on_log)
 
+    def snapshot(**kw):
+        # EVERY connected instrument, not only the ones a scan uses: the
+        # setting that spoils a map is usually on one nobody thought of
+        from .snapshot import include_idn_setting, take_snapshot
+        if "include_idn" not in kw:
+            # the suite setting snapshot_include_idn, in the suite's root
+            kw["include_idn"] = include_idn_setting(getattr(reg, "settings_root", None))
+        return take_snapshot(lab, **kw)
+
     reg.fault_check = fault_check
     reg.scan_claim = scan_claim
+    reg.snapshot = snapshot           # engine.run files it with the data
     reg.owner = owner
     try:
         for name in include:

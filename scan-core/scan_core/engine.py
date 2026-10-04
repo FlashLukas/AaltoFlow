@@ -15,6 +15,7 @@ imaging is just two of the dims (from a raster axis).
 from __future__ import annotations
 
 import inspect
+import json
 import time
 
 import numpy as np
@@ -22,6 +23,8 @@ import xarray as xr
 
 from .errors import RoutineError, ScanAborted, ScanFault, format_faults
 from .hooks import find_autofocus, routine_steps, run_hooks
+from .snapshot import (ATTR_END, MISSING, diff_config, path_text, provenance,
+                       snapshot_attrs)
 from .storage import COMPRESSION, COUNT, FLOAT, storage_of
 
 
@@ -206,7 +209,8 @@ def _progress_reporter(on_progress):
 def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
-        pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
+        pause_poll_s: float = PAUSE_POLL_S, on_window=None,
+        attrs=None) -> xr.Dataset:
     """Execute `recipe` against `registry` -- ONE scan per instrument at a time.
 
     Before anything moves, every instrument the scan uses is claimed for it
@@ -221,7 +225,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     if claim is None:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window)
+                    pause_poll_s, on_window, attrs)
     errs = recipe.validate(registry)
     if errs:
         raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
@@ -230,7 +234,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     try:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window)
+                    pause_poll_s, on_window, attrs)
     finally:
         release()
 
@@ -238,7 +242,8 @@ def run(recipe, registry, on_progress=None, should_abort=None,
 def _run(recipe, registry, on_progress=None, should_abort=None,
          created_iso: str | None = None, on_point=None,
          on_log=None, data_path=None, on_fault=None, fault_check=None,
-         pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
+         pause_poll_s: float = PAUSE_POLL_S, on_window=None,
+         attrs=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_progress(done, total, eta_s) : optional callback for a GUI/CLI. eta_s
@@ -270,6 +275,10 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                       after every point, a dict with the
                                       predicted and fitted f_res, the window,
                                       the Meff in use -- for a live readout.
+    attrs                           : extra FILE attributes {name: str} -- the
+                                      suite's run info (sample, operator,
+                                      project, tags...). Written into every
+                                      dataset this run builds.
     fault_check(ids) -> [Fault]     : default `registry.fault_check` (set by
                                       build_lab_registry; the simulator has
                                       none, so nothing is checked).
@@ -303,7 +312,14 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     # ({param_id: value}), kept up to date as it goes: a routine that moves a
     # parameter mid-scan uses it to put that parameter back (hooks.py, `call`).
     current: dict = {}
+    # FILE attributes beyond the recipe: which software (provenance), the
+    # caller's run info, and -- once the before-scan routines are done -- the
+    # instrument snapshot (snapshot.py). Every dataset built from here on
+    # (live, checkpoint, abort, end) carries them.
+    ds_attrs = {**provenance(), **dict(attrs or {})}
+    start_snap = None
     ctx = {"registry": registry, "recipe": recipe, "current": current,
+           "ds_attrs": ds_attrs,
            "log_fn": on_log or (lambda msg: None), "aborted": False,
            # where the measurement is written: actions that save something of
            # their own (a camera picture, the pattern) put it next to it
@@ -400,6 +416,10 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
             aborted = True                # pressed before anything started
         else:
             run_hooks(compiled.hooks, "before_scan", ctx)
+            # The SNAPSHOT of every connected instrument, taken HERE -- after
+            # the conditions and the before-scan routines, right before the
+            # first point -- so it describes what was measured with.
+            start_snap = _take_snapshot(registry, ds_attrs, ctx["log_fn"])
             # The ETA clock starts AFTER the before-scan routine: a two-minute
             # magnet ramp and reference sweep would otherwise be spread over
             # the points as if every one of them were that slow.
@@ -426,7 +446,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                 exc.dataset = _to_dataset(recipe, compiled, registry, data,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
-                                          var_attrs=ctx.get("var_attrs"))
+                                          var_attrs=ctx.get("var_attrs"),
+                                          ds_attrs=ctx.get("ds_attrs"))
             except Exception as build_exc:
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         raise
@@ -442,14 +463,19 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                 exc.dataset = _to_dataset(recipe, compiled, registry, data,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
-                                          var_attrs=ctx.get("var_attrs"))
+                                          var_attrs=ctx.get("var_attrs"),
+                                          ds_attrs=ctx.get("ds_attrs"))
             except Exception as build_exc:     # say it, but do not hide the abort
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         raise
 
+    # Settings that CHANGED during the scan (a routine, a person at a GUI):
+    # one more get_config per instrument, stored only as the differences.
+    _end_snapshot(registry, start_snap, ds_attrs, ctx["log_fn"])
     ds = _to_dataset(recipe, compiled, registry, data, created_iso,
                      time.monotonic() - t_start, det_axes, det_coords,
-                     var_attrs=ctx.get("var_attrs"))
+                     var_attrs=ctx.get("var_attrs"),
+                     ds_attrs=ctx.get("ds_attrs"))
     try:
         after_scan(aborted=aborted)
     except Exception as exc:
@@ -457,6 +483,48 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
         # "field -> 0" must not throw a finished map away with it.
         raise RoutineError(f"after_scan routine failed: {exc}", dataset=ds) from exc
     return ds
+
+
+def _take_snapshot(registry, ds_attrs, log):
+    """Snapshot every instrument the registry's Lab holds (build_lab_registry
+    sets `registry.snapshot`; the simulator has none). Never raises: a
+    snapshot is a record, and no record is worth a scan."""
+    fn = getattr(registry, "snapshot", None)
+    if fn is None:
+        return None
+    try:
+        snap = fn()
+        ds_attrs.update(snapshot_attrs(snap))
+        bad = [s for s, e in snap.items() if isinstance(e, dict) and e.get("error")]
+        if bad:
+            log("snapshot: could not read everything from " + ", ".join(bad))
+        return snap
+    except Exception as exc:
+        log(f"snapshot not taken: {exc}")
+        return None
+
+
+def _end_snapshot(registry, start_snap, ds_attrs, log):
+    """`snapshot_end`: {slug: [[setting, at start, at end], ...]} for the
+    settings that differ at the end of the scan ({} = nothing changed).
+    Only for a scan that got to its end (or was aborted between points)."""
+    fn = getattr(registry, "snapshot", None)
+    if fn is None or not start_snap:
+        return
+    try:
+        end = fn(include_status=False)
+        changes = {}
+        for slug, e in end.items():
+            s = start_snap.get(slug) or {}
+            if "config" not in e or "config" not in s:
+                continue
+            d = diff_config(s["config"], e["config"])
+            if d:
+                changes[slug] = [[path_text(p), None if a is MISSING else a,
+                                  None if b is MISSING else b] for p, a, b in d]
+        ds_attrs[ATTR_END] = json.dumps(changes, sort_keys=True)
+    except Exception as exc:
+        log(f"end snapshot not taken: {exc}")
 
 
 def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
@@ -533,7 +601,8 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                      lambda: _to_dataset(recipe, compiled, registry,
                                          {k: v.copy() for k, v in data.items()},
                                          created_iso, time.monotonic() - t0,
-                                         det_axes, det_coords))
+                                         det_axes, det_coords,
+                                         ds_attrs=ctx.get("ds_attrs")))
     return False
 
 
@@ -775,10 +844,13 @@ def _storage_for(name, g, arr, extra: dict):
 
 
 def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
-                det_axes=None, det_coords=None, var_attrs=None) -> xr.Dataset:
+                det_axes=None, det_coords=None, var_attrs=None,
+                ds_attrs=None) -> xr.Dataset:
     """Build the Dataset. `var_attrs` = {name: {attr: value}} merged into a
     variable's or coordinate's attributes (a fly scan's per-pixel count and
-    spread are not registry parameters, so their units come from here)."""
+    spread are not registry parameters, so their units come from here).
+    `ds_attrs` = extra FILE attributes: the run info (sample, operator...),
+    the software provenance and the instrument snapshot (snapshot.py)."""
     dims = compiled.dims
     dim_names = [d.name for d in dims]
     det_axes = det_axes or {}
@@ -874,4 +946,12 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         seconds=float(seconds),
         dims=",".join(dim_names),
     )
+    if ds_attrs:
+        # after the fixed ones on purpose: `comment` from the run info is the
+        # same field as the recipe's comment (the builder puts it there), so
+        # nothing here may silently replace name / recipe_json / created
+        for k, v in ds_attrs.items():
+            if k not in ("name", "recipe_json", "created", "n_points",
+                         "seconds", "dims"):
+                ds.attrs[k] = v
     return ds
