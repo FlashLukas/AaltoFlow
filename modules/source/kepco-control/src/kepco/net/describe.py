@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import zlib
 
+from ..config import MODES
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -118,7 +120,8 @@ def build_manifest(supply) -> dict:
 
     params = [
         _p("mode", "Mode", "control", "enum", group="Output", order=5,
-           options=["current", "voltage"], read_path=["mode"],
+           # the supply's own MODES tuple: open() refuses any other mode
+           options=list(MODES), read_path=["mode"],
            set={"verb": "set_mode", "arg": "mode"},
            settle={"policy": "echoes", "key": "mode"},
            help="Refused while the output is on: switch it off first."),
@@ -214,8 +217,11 @@ def build_manifest(supply) -> dict:
            help="Wait the settle time, average fresh readings, latch them."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
            order=2, read_path=["acquiring"]),
+        # A counter from 0 that only goes up: min=0 is a promise the code
+        # keeps (scan-core picks the storage from it, developer notes 4b). No
+        # max: it is unbounded in principle.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"]),
         _p("live_voltage", "Voltage (live)", "indicator", "float", unit="V",
            group="Live", order=10, decimals=4, plottable=True,
            read_path=["voltage_V"]),

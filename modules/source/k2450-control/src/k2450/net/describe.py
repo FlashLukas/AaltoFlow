@@ -40,7 +40,7 @@ import json
 import math
 import zlib
 
-from ..backends.base import other, range_table
+from ..backends.base import FUNCS, other, range_table
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -152,7 +152,8 @@ def build_manifest(smu) -> dict:
 
         # -- source ------------------------------------------------------------------
         _p("source_function", "Source function", "control", "enum", group="Source",
-           order=10, options=["voltage", "current"], read_path=["source_function"],
+           # the backend's FUNCS: the brain adopts nothing else from the 2450
+           order=10, options=list(FUNCS), read_path=["source_function"],
            set={"verb": "set_source_function", "arg": "function"},
            settle={"policy": "echoes", "key": "source_function"},
            help="Switching turns the output OFF first."),
@@ -290,8 +291,11 @@ def build_manifest(smu) -> dict:
            help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Sample", order=2,
            read_path=["acquiring"]),
+        # A counter from 0 that only goes up: min=0 is a promise the code
+        # keeps (scan-core picks the storage from it, developer notes 4b). No
+        # max: it is unbounded in principle.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Sample", order=3,
-           read_path=["acq_id"]),
+           min=0, read_path=["acq_id"]),
 
         # -- live (panels, not scans) -----------------------------------------------------
         _p("live_voltage", "Voltage (live)", "indicator", "float", unit="V",

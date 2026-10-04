@@ -134,7 +134,11 @@ def build_manifest(ctrl) -> dict:
                 "NOT protected against overheating."),
 
         # ---- indicators ----------------------------------------------------
-        _p("state", "State", "indicator", "string", group="Status", order=1,
+        # An ENUM, not a string: scan-core stores an enum as a code plus the
+        # option names (developer notes 4b); a state that is not an option is
+        # stored as "not measured". test_describe_types checks the list
+        # against every state the controller can enter.
+        _p("state", "State", "indicator", "enum", group="Status", order=1,
            read_path=["state"], options=list(STATE_VALUES)),
         _p("field_stable", "Field stable", "indicator", "bool", group="Status",
            order=2, read_path=["field_stable"]),

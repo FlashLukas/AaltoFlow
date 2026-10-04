@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 import zlib
 
+from ..controller import State
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -116,10 +118,13 @@ def build_manifest(ctrl) -> dict:
                 "acts in STABLE/HOLD, outside tolerance/2."),
 
         # ---- indicators ----------------------------------------------------
-        _p("state", "State", "indicator", "string", group="Status", order=1,
-           read_path=["state"],
-           options=["IDLE", "RAMPING", "SEEK", "STABLE", "HOLD", "DEMAG",
-                    "CALIBRATE"]),
+        # An ENUM, not a string: scan-core stores an enum as a small code
+        # plus the option names (developer notes 4b), and a state that is
+        # not an option is stored as "not measured". The options are taken
+        # from the controller's own State enum, so a state added there can
+        # never be missing here.
+        _p("state", "State", "indicator", "enum", group="Status", order=1,
+           read_path=["state"], options=[s.value for s in State]),
         _p("setpoint_field", "Field setpoint", "indicator", "float", unit="mT",
            group="Status", order=2, decimals=3, read_path=["setpoint_field_mT"]),
         _p("measured_field", "Measured field", "indicator", "float", unit="mT",
