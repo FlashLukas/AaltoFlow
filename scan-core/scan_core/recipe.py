@@ -29,6 +29,9 @@ and one with several steps in a given order (2026-09-25):
   {when: before_scan, action: call,
    args: {steps: [{action: sim_autofocus}, {set: {field: 190}},
                   {action: vna_reference}, {set: {field: 0}}]}}
+Five more step kinds (2026-10-04): wait_until, abort_if, skip_if, pause,
+comment, compute_set -- see hooks.py; their conditions and formulas use the
+restricted evaluator in expr.py and are checked by validate().
 
 Axis types (the `type` field discriminates)
 -------------------------------------------
@@ -364,20 +367,36 @@ class Recipe:
                 if find_autofocus(registry) is None:
                     errs.append(f"{describe_trigger(h)}: autofocus, but no module here "
                                 f"offers an autofocus action (is the camera connected?)")
-            if name != "call":
+            from .hooks import STEP_KINDS, routine_steps, step_problems
+            if name in STEP_KINDS:
+                # a generic step written as a hook of its own: the same as a
+                # routine of that one step
+                args = {"steps": [{name: h.get("args") or {}}]}
+            elif name != "call":
                 continue
-            args = h.get("args") or {}
+            else:
+                args = h.get("args") or {}
             where = f"{describe_trigger(h)} routine"
             # One reader for both spellings ({set, action} and {steps: [...]}),
             # the same one the hook runs from -- a checker that read the steps
             # differently from the runner would pass a routine that then fails.
-            from .hooks import routine_steps
             try:
                 steps = routine_steps(args)
             except ValueError as exc:
                 errs.append(f"{where}: {exc}")
                 continue
+            fly = any(isinstance(ax, dict) and ax.get("type") == "fly"
+                      for ax in self.axes or [])
             for kind, pid, *rest in steps:
+                if kind in STEP_KINDS:
+                    # the five generic steps (2026-10-04): every expression is
+                    # parsed and every id checked HERE, before anything moves
+                    if not isinstance(pid, dict):
+                        errs.append(f"{where}: {kind} needs a mapping")
+                        continue
+                    errs += [f"{where}: {msg}" for msg in
+                             step_problems(kind, pid, registry, when, fly=fly)]
+                    continue
                 if kind == "action":
                     get_action = getattr(registry, "get_action", None)
                     if get_action is None or get_action(pid) is None:

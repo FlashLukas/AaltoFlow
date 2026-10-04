@@ -27,6 +27,33 @@ class ScanAborted(RuntimeError):
     dataset = None
 
 
+class ScanStopped(ScanAborted):
+    """A ROUTINE STEP stopped the scan, with a reason (2026-10-04).
+
+    `abort_if` whose condition came true, a `wait_until` that timed out with
+    on_timeout: stop, or the operator choosing "Abort scan" at a `pause`. It is
+    an Abort in every way that matters -- the after-scan routine runs, the
+    points measured so far are kept and saved -- so it IS a ScanAborted, and
+    every caller that already handles an Abort handles this one too. The
+    difference is `reason`, which the engine writes into the data file
+    (attribute `stopped_by`) so that a map that ends half way says WHY.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class SkipPoint(Exception):
+    """Internal: a `skip_if` step asked the engine to leave this point out.
+
+    Raised from inside a routine at before_point / after_point and caught by
+    the engine's point loop, which then stores the point as NOT MEASURED (NaN,
+    or the storage's fill value) and goes on to the next one. Never reaches a
+    caller of engine.run.
+    """
+
+
 class RoutineError(RuntimeError):
     """A routine (a `call` hook) failed AFTER the points were measured.
 

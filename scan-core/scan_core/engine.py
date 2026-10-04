@@ -20,8 +20,9 @@ import time
 import numpy as np
 import xarray as xr
 
-from .errors import RoutineError, ScanAborted, ScanFault, format_faults
-from .hooks import find_autofocus, routine_steps, run_hooks
+from .errors import (RoutineError, ScanAborted, ScanFault, ScanStopped, SkipPoint,
+                     format_faults)
+from .hooks import STEP_KINDS, find_autofocus, routine_steps, run_hooks
 from .storage import COMPRESSION, COUNT, FLOAT, storage_of
 
 
@@ -109,10 +110,16 @@ def _used_ids(recipe, compiled, registry) -> set:
                 if ax.get(key):
                     ids.add(ax[key])
     for h in recipe.hooks or []:
-        if h.get("action") == "call":
+        name = h.get("action")
+        if name == "call" or name in STEP_KINDS:
+            args = (h.get("args") or {}) if name == "call" else \
+                {"steps": [{name: h.get("args") or {}}]}
             try:
-                for step in routine_steps(h.get("args") or {}):
-                    ids.add(step[1])
+                for step in routine_steps(args):
+                    if step[0] in STEP_KINDS:
+                        ids |= _step_ids(step[0], step[1])
+                    else:
+                        ids.add(step[1])
             except ValueError:
                 pass
         elif h.get("action") == "autofocus":
@@ -127,6 +134,30 @@ def _used_ids(recipe, compiled, registry) -> set:
             if isinstance(w.get(key), str):
                 ids.add(w[key])
     return ids
+
+
+def _step_ids(kind: str, spec) -> set:
+    """The parameter ids a generic routine step reads or sets.
+
+    A condition READS (the fault check then covers the instrument a wait is
+    watching); compute_set also SETS its target.
+    """
+    from .expr import ExprError, parse
+    out: set = set()
+    if not isinstance(spec, dict):
+        return out
+    texts = []
+    if kind in ("wait_until", "abort_if", "skip_if"):
+        texts.append(spec.get("condition"))
+    if kind == "compute_set" and isinstance(spec.get("set"), dict):
+        out |= set(spec["set"])
+        texts += [str(t) for t in spec["set"].values()]
+    for t in texts:
+        try:
+            out |= set(parse(t).names)
+        except ExprError:
+            pass
+    return out
 
 
 def _unravel(flat: int, shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -206,7 +237,8 @@ def _progress_reporter(on_progress):
 def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
-        pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
+        pause_poll_s: float = PAUSE_POLL_S, on_window=None,
+        on_pause=None) -> xr.Dataset:
     """Execute `recipe` against `registry` -- ONE scan per instrument at a time.
 
     Before anything moves, every instrument the scan uses is claimed for it
@@ -221,7 +253,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     if claim is None:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window)
+                    pause_poll_s, on_window, on_pause)
     errs = recipe.validate(registry)
     if errs:
         raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
@@ -230,7 +262,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     try:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window)
+                    pause_poll_s, on_window, on_pause)
     finally:
         release()
 
@@ -238,8 +270,18 @@ def run(recipe, registry, on_progress=None, should_abort=None,
 def _run(recipe, registry, on_progress=None, should_abort=None,
          created_iso: str | None = None, on_point=None,
          on_log=None, data_path=None, on_fault=None, fault_check=None,
-         pause_poll_s: float = PAUSE_POLL_S, on_window=None) -> xr.Dataset:
+         pause_poll_s: float = PAUSE_POLL_S, on_window=None,
+         on_pause=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
+
+    on_pause(message, answer)       : for the `pause` routine step (hooks.py):
+                                      show `message` to the operator; call
+                                      answer(True) for Continue, answer(False)
+                                      for Abort scan -- from any thread. Called
+                                      again with (None, None) when the question
+                                      is gone (answered, or Abort pressed).
+                                      Without it a pause step fails, or with
+                                      headless: continue only logs.
 
     on_progress(done, total, eta_s) : optional callback for a GUI/CLI. eta_s
                                       is MEASURED (time so far / points so far
@@ -307,7 +349,16 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
            "log_fn": on_log or (lambda msg: None), "aborted": False,
            # where the measurement is written: actions that save something of
            # their own (a camera picture, the pattern) put it next to it
-           "data_path": str(data_path) if data_path else None}
+           "data_path": str(data_path) if data_path else None,
+           # the routine steps of 2026-10-04 (hooks.py): wait_until and pause
+           # must notice Abort; pause asks the operator through on_pause
+           "should_abort": should_abort, "on_pause": on_pause,
+           # dataset attributes the steps add as the scan goes: `comments`
+           # (comment), `stopped_by` (abort_if, a timed-out wait_until, an
+           # Abort answered at a pause), `skipped_points` (skip_if). Every
+           # dataset built from here on -- live snapshots, checkpoints, the
+           # end -- carries them.
+           "ds_attrs": {}, "comments": [], "skipped": []}
 
     compiled = recipe.compile(registry)
     check = fault_check if fault_check is not None else getattr(registry, "fault_check", None)
@@ -426,11 +477,18 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                 exc.dataset = _to_dataset(recipe, compiled, registry, data,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
-                                          var_attrs=ctx.get("var_attrs"))
+                                          var_attrs=ctx.get("var_attrs"),
+                                          ds_attrs=ctx.get("ds_attrs"))
             except Exception as build_exc:
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         raise
     except ScanAborted as exc:
+        if isinstance(exc, ScanStopped):
+            # a routine step stopped the scan (abort_if, a timed-out
+            # wait_until, Abort answered at a pause): say WHY, in the log and
+            # in the file, before the after-scan routine runs
+            ctx["ds_attrs"]["stopped_by"] = exc.reason
+            ctx["log_fn"](f"scan STOPPED: {exc.reason}")
         after_abort()
         if sweeping:
             # Abort pressed while an instrument was SETTLING -- which is where a
@@ -442,20 +500,26 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                 exc.dataset = _to_dataset(recipe, compiled, registry, data,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
-                                          var_attrs=ctx.get("var_attrs"))
+                                          var_attrs=ctx.get("var_attrs"),
+                                          ds_attrs=ctx.get("ds_attrs"))
             except Exception as build_exc:     # say it, but do not hide the abort
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         raise
 
     ds = _to_dataset(recipe, compiled, registry, data, created_iso,
                      time.monotonic() - t_start, det_axes, det_coords,
-                     var_attrs=ctx.get("var_attrs"))
+                     var_attrs=ctx.get("var_attrs"),
+                     ds_attrs=ctx.get("ds_attrs"))
     try:
         after_scan(aborted=aborted)
     except Exception as exc:
         # The points are measured and the dataset is built; a failing
         # "field -> 0" must not throw a finished map away with it.
+        ds.attrs.update(ctx.get("ds_attrs") or {})
         raise RoutineError(f"after_scan routine failed: {exc}", dataset=ds) from exc
+    # a comment written BY the after-scan routine ("done at 0 mT") belongs in
+    # the file too: the dataset was built before that routine ran
+    ds.attrs.update(ctx.get("ds_attrs") or {})
     return ds
 
 
@@ -476,11 +540,18 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         ctx["index"] = idx
 
         redo = False
+        values = None             # None = not measured (a skip_if before it)
         while True:
             try:
                 values = _measure_point(registry, compiled, dims, shape, dets,
                                         det_axes, data, acquire_groups, prev,
                                         ctx, idx, current, guard, redo)
+                break
+            except SkipPoint:
+                # skip_if at before_point: the point is left NOT MEASURED --
+                # its slot keeps the "not measured" value it was allocated
+                # with (NaN, or the storage's fill), nothing is acquired
+                ctx.pop("window_pending", None)
                 break
             except _Redo as r:
                 guard.hold(r.faults, f"point {flat + 1} {idx}")
@@ -502,18 +573,37 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                     raise
                 guard.hold(faults, f"point {flat + 1} {idx}", cause=exc)
             redo = True
-        for det, value in values.items():
-            data[det][idx] = value
+        skipped = values is None
+        before = {}
+        if values is not None:
+            for det, value in values.items():
+                # what the slot held before (the "not measured" value), so a
+                # skip_if AFTER the point can put it back
+                old = data[det][idx]
+                before[det] = old.copy() if isinstance(old, np.ndarray) else old
+                data[det][idx] = value
         pending = ctx.pop("window_pending", None)
+        # after_point routines run for a skipped point too: the scan still
+        # VISITED it, and an end-of-sweep routine on the last point of a row
+        # must not be lost because that point was left out
+        try:
+            run_hooks(compiled.hooks, "after_point", ctx)
+        except SkipPoint:
+            # skip_if at after_point: throw the values just measured away
+            for det, old in before.items():
+                data[det][idx] = old
+            pending = None
+            skipped = True
         if pending is not None:
             # only now, with the point kept, does the window learn from it
             # (Meff, baseline, counters) -- a paused and redone point must not
-            # teach it twice
+            # teach it twice, and a skipped one not at all
             runner = ctx["window"]
             runner.commit(pending)
             if ctx.get("on_window"):
                 ctx["on_window"](runner.state())
-        run_hooks(compiled.hooks, "after_point", ctx)
+        if skipped:
+            _note_skip(ctx, idx)
 
         done = flat + 1
         if on_progress:
@@ -533,8 +623,30 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                      lambda: _to_dataset(recipe, compiled, registry,
                                          {k: v.copy() for k, v in data.items()},
                                          created_iso, time.monotonic() - t0,
-                                         det_axes, det_coords))
+                                         det_axes, det_coords,
+                                         ds_attrs=dict(ctx.get("ds_attrs") or {})))
     return False
+
+
+#: At most this many skipped grid indices are listed in the file attribute
+#: `skipped_points`; beyond it only the count (`skipped_count`) grows.
+SKIP_LIST_MAX = 10_000
+
+
+def _note_skip(ctx, idx) -> None:
+    """Record a point left out by skip_if in the dataset attributes.
+
+    `skipped_points` = JSON list of grid indices, `skipped_count` = how many.
+    A NaN in a file can mean "never reached" (an Abort) or "left out on
+    purpose"; these attributes tell the two apart.
+    """
+    import json
+    skipped = ctx.setdefault("skipped", [])
+    attrs = ctx.setdefault("ds_attrs", {})
+    if len(skipped) < SKIP_LIST_MAX:
+        skipped.append([int(i) for i in idx])
+        attrs["skipped_points"] = json.dumps(skipped)
+    attrs["skipped_count"] = int(attrs.get("skipped_count", 0)) + 1
 
 
 class _Redo(Exception):
@@ -775,7 +887,8 @@ def _storage_for(name, g, arr, extra: dict):
 
 
 def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
-                det_axes=None, det_coords=None, var_attrs=None) -> xr.Dataset:
+                det_axes=None, det_coords=None, var_attrs=None,
+                ds_attrs=None) -> xr.Dataset:
     """Build the Dataset. `var_attrs` = {name: {attr: value}} merged into a
     variable's or coordinate's attributes (a fly scan's per-pixel count and
     spread are not registry parameters, so their units come from here)."""
@@ -874,4 +987,8 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         seconds=float(seconds),
         dims=",".join(dim_names),
     )
+    # what the routine steps recorded (comments, why it stopped, the skipped
+    # points): plain text / JSON attributes, readable in ncdump and MATLAB
+    for key, value in (ds_attrs or {}).items():
+        ds.attrs[key] = value
     return ds

@@ -154,7 +154,7 @@
         "on_error": {"enum": ["stop", "continue"],
                      "description": "continue = log the failure and carry on (e.g. an autofocus that finds no peak); default stop"},
         "action": {"type": "string",
-                   "description": "a name registered in scan_core/hooks.py: call, wait_ms, autofocus, settle_extra"},
+                   "description": "a name registered in scan_core/hooks.py: call, wait_ms, autofocus, settle_extra -- or one generic step on its own: wait_until, abort_if, skip_if, pause, comment, compute_set (args = that step's mapping)"},
         "args": {"type": "object"}
       },
       "required": ["when", "action"],
@@ -162,7 +162,17 @@
         {
           "if": {"properties": {"action": {"const": "call"}}, "required": ["action"]},
           "then": {"properties": {"args": {"$ref": "#/$defs/call_args"}}}
-        }
+        },
+        {"if": {"properties": {"action": {"const": "wait_until"}}, "required": ["action"]},
+         "then": {"properties": {"args": {"$ref": "#/$defs/wait_until"}}}},
+        {"if": {"properties": {"action": {"enum": ["abort_if", "skip_if"]}}, "required": ["action"]},
+         "then": {"properties": {"args": {"$ref": "#/$defs/condition_step"}}}},
+        {"if": {"properties": {"action": {"const": "pause"}}, "required": ["action"]},
+         "then": {"properties": {"args": {"$ref": "#/$defs/pause"}}}},
+        {"if": {"properties": {"action": {"const": "comment"}}, "required": ["action"]},
+         "then": {"properties": {"args": {"$ref": "#/$defs/comment"}}}},
+        {"if": {"properties": {"action": {"const": "compute_set"}}, "required": ["action"]},
+         "then": {"properties": {"args": {"$ref": "#/$defs/compute_set"}}}}
       ]
     },
     "call_args": {
@@ -178,7 +188,7 @@
                    "description": "a registry action id, e.g. vna.take_reference"},
         "steps": {
           "type": "array",
-          "description": "the ordered form: each step sets parameters or runs an action, in the order written; the restore runs once, after the last step",
+          "description": "the ordered form: each step sets parameters, runs an action, or is one of wait_until / abort_if / skip_if / pause / comment / compute_set, in the order written; the restore runs once, after the last step",
           "items": {"$ref": "#/$defs/call_step"}
         }
       },
@@ -210,12 +220,78 @@
       "additionalProperties": false
     },
     "call_step": {
-      "title": "one step of a routine: sets (in order), then an optional action",
+      "title": "one step of a routine: sets (in order) then an optional action, or one of the five generic steps",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "set": {"type": "object", "additionalProperties": {"type": "number"}},
+            "action": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        {"type": "object", "required": ["wait_until"], "additionalProperties": false,
+         "properties": {"wait_until": {"$ref": "#/$defs/wait_until"}}},
+        {"type": "object", "required": ["abort_if"], "additionalProperties": false,
+         "properties": {"abort_if": {"$ref": "#/$defs/condition_step"}}},
+        {"type": "object", "required": ["skip_if"], "additionalProperties": false,
+         "properties": {"skip_if": {"$ref": "#/$defs/condition_step"}}},
+        {"type": "object", "required": ["pause"], "additionalProperties": false,
+         "properties": {"pause": {"$ref": "#/$defs/pause"}}},
+        {"type": "object", "required": ["comment"], "additionalProperties": false,
+         "properties": {"comment": {"$ref": "#/$defs/comment"}}},
+        {"type": "object", "required": ["compute_set"], "additionalProperties": false,
+         "properties": {"compute_set": {"$ref": "#/$defs/compute_set"}}}
+      ]
+    },
+    "expression": {
+      "type": "string",
+      "description": "restricted expression (scan_core/expr.py): numbers, 'text', True/False, parameter ids (dotted, read from the status cache -- never a new acquisition), + - * / ** unary -, < <= > >= == != (chained), and or not, ( ), abs min max round. Checked when the recipe is validated."
+    },
+    "wait_until": {
+      "title": "wait until the condition has been true for hold_s without a break",
       "type": "object",
       "properties": {
-        "set": {"type": "object", "additionalProperties": {"type": "number"}},
-        "action": {"type": "string"}
+        "condition": {"$ref": "#/$defs/expression"},
+        "hold_s": {"type": "number", "minimum": 0, "description": "0 = true once is enough"},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0, "description": "required: a sensor that never gets there must not hold the scan forever"},
+        "on_timeout": {"enum": ["stop", "continue"], "description": "stop (default) = end the scan cleanly (data kept, reason in attr stopped_by); continue = log and go on"}
       },
+      "required": ["condition", "timeout_s"],
+      "additionalProperties": false
+    },
+    "condition_step": {
+      "title": "abort_if (stop the scan cleanly) / skip_if (store the current point as not measured)",
+      "type": "object",
+      "properties": {"condition": {"$ref": "#/$defs/expression"}},
+      "required": ["condition"],
+      "additionalProperties": false
+    },
+    "pause": {
+      "title": "wait for the operator: Continue / Abort scan",
+      "type": "object",
+      "properties": {
+        "message": {"type": "string"},
+        "headless": {"enum": ["fail", "continue"], "description": "a run with no GUI: fail (default) or only log the message"}
+      },
+      "required": ["message"],
+      "additionalProperties": false
+    },
+    "comment": {
+      "title": "append a timestamped line to the file's comments attribute; {param.id} is filled with its value",
+      "type": "object",
+      "properties": {"text": {"type": "string"}},
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "compute_set": {
+      "title": "set parameters to the value of a formula (blocking set; out of limits = the step fails)",
+      "type": "object",
+      "properties": {
+        "set": {"type": "object", "minProperties": 1,
+                "additionalProperties": {"$ref": "#/$defs/expression"}}
+      },
+      "required": ["set"],
       "additionalProperties": false
     }
   }
