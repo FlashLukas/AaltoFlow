@@ -37,7 +37,7 @@ from scan_core import Recipe, build_sim_registry, run
 from scan_core.errors import RoutineError, ScanAborted, ScanFault
 from scan_core.preview import preview_axis, step_summary
 from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
-from scan_core import scan_queue
+from scan_core import autosave, scan_queue
 from suite_common import title as suite_title
 from apps.data_view import DataView
 from apps.theme import DEFAULT_THEME, C, apply, set_theme
@@ -3310,16 +3310,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """
         if not self.autosave_dir:
             return None
-        now = datetime.now()
-        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", recipe.name or "scan")
-        path = (Path(self.autosave_dir) / now.strftime("%Y-%m-%d")
-                / f"{now.strftime('%H%M%S')}_{safe}.nc")
-        # Two scans of a queue can start within one second (a short scan, or
-        # one aborted at once): a counter, never an overwrite.
-        k = 2
-        while path.exists():
-            path = path.with_name(f"{now.strftime('%H%M%S')}_{safe}_{k}.nc"); k += 1
-        return path
+        # The rule lives in scan_core/autosave.py, shared with the scripting
+        # API (scan_core/api.py), so a script saves exactly like this tab.
+        return autosave.autosave_path(self.autosave_dir, recipe.name)
 
     def check_save_target(self) -> tuple[bool, str]:
         """Can the next scan actually be written? Returns (ok, message).
@@ -3335,21 +3328,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """
         if not self.autosave_dir:
             return False, "no data directory set — this run will not be saved"
-        folder = Path(self.autosave_dir) / datetime.now().strftime("%Y-%m-%d")
-        # Probe the dated folder if it is already there, otherwise the nearest
-        # parent that exists -- being allowed to write in the parent is what
-        # "we can create the dated folder" means. Deliberately NOT mkdir here:
-        # this runs whenever the name is edited, and it must not leave an empty
-        # dated folder behind on a day when nothing was measured.
-        target = folder
-        while not target.exists() and target.parent != target:
-            target = target.parent
-        probe = target / f".write_test_{os.getpid()}"
-        try:
-            probe.write_bytes(b"aaltoflow")
-            probe.unlink()
-        except OSError as exc:
-            return False, f"CANNOT SAVE in {target}: {exc.strerror or exc}"
+        # The probe (write a file where the data will go, no mkdir) is shared
+        # with the scripting API: scan_core/autosave.py.
+        ok, msg = autosave.probe_save_target(self.autosave_dir)
+        if not ok:
+            return False, msg
         return True, f"will save to {self.preview_path()}"
 
     def preview_path(self) -> str:

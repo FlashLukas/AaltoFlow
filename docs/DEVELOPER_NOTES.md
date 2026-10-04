@@ -296,6 +296,20 @@ still assumes piezo/zpiezo.
     control it can read and stop, and must `take_control(force=True)` to
     change anything -- visible to the GUI it took it from. The consoles have
     `take` / `take!` / `release` / `clients`.
+  - **scan-core's scripting API (`scan_core/api.py`, 2026-10-04; guide
+    docs/SCRIPTING.md) is NOT such a script: it is treated like a SCAN.**
+    It keeps the scan engine's identity (machine, role scan) and claims
+    (`claim_scan`) every instrument before its first changing command
+    (set, run, scan, get of an acquiring detector), so it is refused while
+    another PC holds control or another scan holds the claim
+    (`ControlRefused`) -- a bare machine identity would bypass the lock.
+    The claims last until the script's `with` block ends: `Lab` replaces
+    `registry.scan_claim`, so `engine.run` claims through the script and
+    does not release between two scans. Values outside the limits are
+    refused, not clamped. Ctrl+C in `scan()` = Abort (a SIGINT handler
+    sets should_abort + Lab.set_abort; data saved, then KeyboardInterrupt).
+    The file naming moved to `scan_core/autosave.py` (shared with
+    apps/scan_builder.py).
   - GUI side: `apps/control_bar.py` (master in suite-common, copied like
     control.py) -- a bar under the title ("You have control" + who else is
     connected / "VIEWER -- <who> has control since hh:mm" + Take control, which

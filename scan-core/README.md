@@ -168,6 +168,8 @@ scan_core/
   flyscan.py    # the fly axis: continuous rows binned by the measured position
   sim_stream.py # the simulator's streams (a lagging lock-in, a moving stage)
   errors.py     # ScanAborted, RoutineError
+  api.py        # the scripting API: connect / set / get / run / wait_until / scan
+  autosave.py   # where a scan's file goes (<dir>/<date>/<time>_<name>.nc), atomic write
   view.py       # re-exports aaltoview.view (N-D cube -> map / line)
   data.py       # re-exports aaltoview.data (read measurements back)
   catalogue.py  # the run catalogue: SQLite index of the data folder + search + CLI
@@ -178,6 +180,7 @@ apps/
   viewer.py        # starts the data viewer (aaltoview)
   theme.py
 recipes/        # example YAML recipes (2-D, 3-D, XY-raster)
+examples/       # scripts using scan_core.api (run on the simulator as delivered)
 schema/scan.schema.json
 run_demo.py
 run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + pm16 or hf2)
@@ -423,6 +426,34 @@ when the camera sees the far edge, and the direction is learned on the first
 row (logged). A stage axis that does not move the camera coordinate stops the
 scan with "does not move ... the other axis?" -- on the KIM rig the camera is
 mounted 90 deg to the stage, so camera x is kim Y.
+
+## Scripts: set, wait, scan in a loop
+
+For what a fixed recipe cannot say -- "at each temperature, wait until it has
+been stable for ten minutes, focus, then map" -- there is a Python API,
+`scan_core.api`. Full guide: [docs/SCRIPTING.md](../docs/SCRIPTING.md).
+
+```python
+from scan_core import api
+
+with api.connect() as lab:                  # the services Mission Control runs
+    for t in [5, 10, 20, 50]:
+        lab.set("ppms.temperature", t)      # blocks until settled
+        lab.wait_until("ppms.temperature_stable", hold_s=600, timeout_s=7200)
+        lab.run("camera.autofocus")         # raises if the focus failed
+        lab.scan("recipes/field_map.yaml", name=f"map_{t}K", temperature_K=t)
+```
+
+```bash
+uv run python examples/temperature_series.py   # runs on the simulator as delivered
+uv run python examples/wait_then_scan.py
+uv run python examples/sample_positions.py     # one scan per die
+```
+
+A script is treated like a scan: it claims every instrument it changes (refused
+while another PC holds control, or another scan uses it), its scans are saved
+with the suite's names in the suite's data folder, and Ctrl+C aborts a scan
+cleanly with the measured points saved.
 
 ## A queue of scans
 

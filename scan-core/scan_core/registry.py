@@ -291,17 +291,29 @@ class Action:
         self._run = run_fn
         import inspect
         try:
-            self._takes_context = "context" in inspect.signature(run_fn).parameters
+            params = inspect.signature(run_fn).parameters
         except (TypeError, ValueError):
-            self._takes_context = False
+            params = {}
+        self._takes_context = "context" in params
+        #: True when the action accepts ARGUMENTS other than its defaults (a
+        #: module action built from describe does; a script passes them,
+        #: scan_core/api.py `Lab.run(action, **args)`)
+        self.takes_args = "args" in params
 
-    def run(self, context: dict | None = None):
+    def run(self, context: dict | None = None, args: dict | None = None):
         """Run it. `context` = where the scan is ({data_dir, data_stem,
         moment}); passed on only to actions that ask for it (a module's
-        action whose text arguments contain placeholders)."""
+        action whose text arguments contain placeholders). `args` = values
+        that replace the declared defaults (a routine never passes any)."""
+        kw = {}
         if self._takes_context:
-            return self._run(context=context)
-        return self._run()
+            kw["context"] = context
+        if args:
+            if not self.takes_args:
+                raise TypeError(f"{self.id} takes no arguments "
+                                f"(got {', '.join(sorted(args))})")
+            kw["args"] = dict(args)
+        return self._run(**kw)
 
 
 class Registry:
