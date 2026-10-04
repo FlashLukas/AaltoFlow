@@ -25,6 +25,7 @@ from .instrument import (Instrument, InstrumentError, adopt_then_flag, echoes,
                          flag_only, immediate)
 from .registry import (AcquireSpec, Action, AxisSpec, Gettable, Registry,
                        Settable, StreamSpec)
+from .storage import Storage
 
 #: How a manifest's `settle` block maps onto a policy factory. Anything not
 #: listed falls back to `immediate()` with a warning, so an unknown policy from
@@ -245,9 +246,11 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 if on_warn:
                     on_warn(f"{pid}: {dtype} controls are not scannable; "
                             f"registered as an indicator")
-                # dtype "text": recipe.validate refuses it as a detector (the
-                # data arrays hold numbers; "internal" crashed the first point)
-                reg.add(Gettable(pid, label, unit, getter, dtype="text"))
+                # Recordable since 2026-10-04 (storage.py): an enum as its
+                # option's code, a string as text. Not an AXIS: it is a
+                # Gettable, and recipe.validate wants a settable there.
+                reg.add(Gettable(pid, label, unit, getter, dtype=dtype,
+                                 storage=Storage.from_descriptor(d, use_bounds=False)))
                 added.append(pid)
                 continue
 
@@ -311,6 +314,11 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # a filter order). The builder reads this to offer whole points
             # rather than 21 samples across 0..19.
             param.integer = bool(_int_dtype(dtype))
+            # Recorded as a detector (the readback of a knob being driven), a
+            # bool is stored as 0/1 and an int as an integer. Its min/max are
+            # SETTING limits, not a promise about the readback, so they do not
+            # narrow the storage (storage.py, from_descriptor).
+            param.storage = Storage.from_descriptor(d, use_bounds=False)
             added.append(pid)
 
         elif kind == "indicator" or (kind == "control" and not d.get("set")):
@@ -322,13 +330,17 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             axes = _axes_from(d, inst, prefix, module, on_warn)
             if d.get("read"):
                 getter = _command_reader(d, inst)
-            # A string/enum indicator (a state name) is TEXT: offered in the
-            # palette, refused as a detector by recipe.validate.
+            # A string/enum indicator (a state name, a filter) is recordable
+            # since 2026-10-04: dtype names it, and its STORAGE -- like every
+            # indicator's -- comes from the descriptor (storage.py): type,
+            # min/max (a promise: a value outside stops the scan), bits,
+            # options, store.
             text = dtype in ("enum", "string") and not d.get("dtype")
             param = reg.add(Gettable(pid, label, unit, getter, axes=axes,
-                                     dtype="text" if text else d.get("dtype", "float"),
+                                     dtype=dtype if text else d.get("dtype", "float"),
                                      acquire=_acquire_from(d, inst, module, on_warn),
-                                     window=_window_from(d, axes, on_warn)))
+                                     window=_window_from(d, axes, on_warn),
+                                     storage=Storage.from_descriptor(d)))
             _attach_stream(param, d, inst, module, streams, on_warn)
             added.append(pid)
 

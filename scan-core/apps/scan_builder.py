@@ -2198,7 +2198,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # pm16.power) -- the first in the list was pm16.range, a setting.
         default = next((p.id for p in gettables if p.id == "lockin_r"), None) \
             or next((p.id for p in gettables if getattr(p, "acquire", None)), None) \
-            or next((p.id for p in gettables if getattr(p, "dtype", "") != "text"), None)
+            or next((p.id for p in gettables
+                     if getattr(p, "dtype", "") not in ("text", "enum", "string")), None)
         for module, params in group_by_module(gettables).items():
             group = self._group_item(self.det_tree, module, len(params))
             for p in params:

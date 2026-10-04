@@ -218,8 +218,11 @@ class DataView(QtWidgets.QWidget):
         self.path = Path(path) if path else None
         if ds is None:
             return
-        names = V.detector_names(ds)
-        listed = [self.det_combo.itemText(i) for i in range(self.det_combo.count())]
+        # A TEXT variable (a string detector, 2026-10-04) has nothing to draw:
+        # it is in the file, not in the plot. An enum is drawn as its code.
+        names = [n for n in V.detector_names(ds)
+                 if not (n in ds.data_vars and ds[n].dtype.kind in "OSU")]
+        listed =[self.det_combo.itemText(i) for i in range(self.det_combo.count())]
         if names != listed:
             self._fill(self.det_combo, names, keep=self.det_combo.currentText())
         self._default_drawing()

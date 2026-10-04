@@ -274,18 +274,37 @@ def test_the_same_parameter_on_two_axes_is_refused():
 
 # ---- 6. text detectors ---------------------------------------------------------
 
-def test_a_text_detector_is_refused_by_validate():
+def test_typed_text_detectors_are_recorded_but_not_scanned():
+    """Until 2026-10-04 a string/enum detector was refused ("text, not a
+    number"). Since data-type-aware storage (storage.py) a TYPED one is
+    recorded -- an enum as its option's code, a string as text -- and the
+    scan runs; it is still refused as an axis (it is not a settable)."""
     inst = _StubInst({"state": "IDLE", "mode": "fast"})
     reg = build_sim_registry()
     register_manifest(reg, inst, {"module": "m", "parameters": [
         {"id": "state", "kind": "indicator", "type": "string", "read_path": ["state"]},
         {"id": "mode", "kind": "control", "type": "enum", "options": ["fast", "slow"],
          "read_path": ["mode"], "set": {"verb": "set_mode", "arg": "mode"}}]})
+    r = _recipe(2)
+    r.detectors = ["lockin_r", "state", "mode"]
+    assert r.validate(reg) == []
+    ds = run(r, reg)
+    assert list(ds["state"].values) == ["IDLE", "IDLE"]
+    assert list(ds["mode"].values) == [0.0, 0.0]          # "fast" = option 0
+    assert ds["mode"].attrs["flag_meanings"] == "fast slow"
     for det in ("state", "mode"):
-        r = _recipe(2)
-        r.detectors = ["lockin_r", det]
-        errs = r.validate(reg)
-        assert any(det in e and "text" in e for e in errs), errs
+        r = Recipe(name="t", axes=[{"type": "array", "param": det, "values": [0, 1]}],
+                   detectors=["lockin_r"])
+        assert any(det in e and "not settable" in e for e in r.validate(reg))
+
+
+def test_an_untyped_text_detector_is_still_refused():
+    from scan_core.registry import Gettable
+    reg = build_sim_registry()
+    reg.add(Gettable("legacy", "legacy", "", lambda: "x", dtype="text"))
+    r = _recipe(2)
+    r.detectors = ["lockin_r", "legacy"]
+    assert any("legacy" in e and "text" in e for e in r.validate(reg))
 
 
 # ---- 7. the suite must not swap the instruments under a running scan ---------

@@ -224,9 +224,12 @@ class Recipe:
                 # to read it at all -- a write-only control, or an action.
                 errs.append(f"detector '{det}' cannot be read")
             elif getattr(p, "dtype", "float") == "text":
-                # A state name or an enum setting ("IDLE", "internal"): the data
-                # arrays are numbers, and the first point would crash the scan
-                # -- after the before-scan routine had already moved things.
+                # An UNTYPED text value (the old marker, before 2026-10-04):
+                # the engine has no storage for it, and the first point would
+                # crash the scan after the before-scan routine had moved
+                # things. Enum and string detectors -- typed by describe --
+                # ARE recorded since then (storage.py); they stay refused as
+                # axes, because they are not settables.
                 errs.append(f"detector '{det}' is text, not a number; it cannot "
                             f"be recorded in the data")
         errs += self._validate_names(registry)

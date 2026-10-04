@@ -31,6 +31,10 @@ class Parameter:
     #: wire value = value in `unit` x stream_scale (a module's descriptor
     #: `scale`): the fly scan divides streamed values by it
     stream_scale = 1.0
+    #: How a recorded value is STORED in the data file (storage.py): a
+    #: Storage built from the module's describe (type, min/max, bits, options,
+    #: store). None = undeclared, stored as a float64 as it always was.
+    storage = None
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
@@ -223,18 +227,29 @@ class Gettable(Parameter):
     after the scan's own, and several detectors sharing an axis name share one
     coordinate (s11, s21, s12 and s22 all hang off the same vna_freq).
 
-    `dtype` may be "float", "int" or "complex". Complex is carried natively in
-    memory and SPLIT into <id>_real and <id>_imag when the dataset is built, so
-    the file stays conforming netCDF-4 and every other tool in the lab can read
-    it. `scan_core.data.as_complex(ds, "s21")` puts it back together.
+    `dtype` may be "float", "int", "complex", "bool", "enum" or "string".
+    Complex is carried natively in memory and SPLIT into <id>_real and
+    <id>_imag when the dataset is built, so the file stays conforming netCDF-4
+    and every other tool in the lab can read it.
+    `scan_core.data.as_complex(ds, "s21")` puts it back together.
+
+    `storage` (storage.Storage) says how the value is stored in the FILE and
+    what range it promises (2026-10-04); without one it follows `dtype`
+    (complex -> complex, int -> int32, bool/enum/string as named, else
+    float64). Enum and string detectors are recordable since then: an enum as
+    its option's integer code, a string as text.
     """
 
     def __init__(self, id, label, unit, get_fn, axes=None, dtype="float",
-                 acquire=None, window=None):
+                 acquire=None, window=None, storage=None):
         super().__init__(id, label, unit, "gettable")
         self._get = get_fn
         self.axes = list(axes or [])          # [AxisSpec, ...]; empty = scalar
         self.dtype = dtype
+        if storage is None:
+            from .storage import Storage
+            storage = Storage.from_dtype(dtype)
+        self.storage = storage
         #: AcquireSpec for detectors that must be triggered and waited on.
         #: None = a plain read is already fresh (an NI sample, a status field).
         self.acquire = acquire
@@ -681,6 +696,24 @@ def build_sim_registry() -> Registry:
     reg.add(Gettable("lockin_y",   "Lock-in Y",   "V",   lambda: s.lockin()["y"]))
     reg.add(Gettable("lockin_phi", "Lock-in phase", "deg", lambda: s.lockin()["phi"]))
     reg.add(Gettable("aux_in",     "Aux in",      "V",   lambda: s.lockin()["aux"]))
+
+    # Detectors that are NOT floats (2026-10-04), so a simulated scan -- and
+    # the tests -- exercise the storage types a module's describe declares
+    # (storage.py): a bool, a 12-bit count, an enum and free text. Each is
+    # what a real module might publish next to its numbers.
+    from .storage import Storage
+    reg.add(Gettable("overload", "Lock-in overload", "",
+                     lambda: bool(s.lockin()["R"] > 0.25), dtype="bool",
+                     storage=Storage("bool")))
+    reg.add(Gettable("photon_counts", "Photon counts (12-bit)", "counts",
+                     lambda: int(min(4095, s._rng.poisson(200 + 3000 * s._amp()))),
+                     dtype="int", storage=Storage("int", bits=12)))
+    reg.add(Gettable("lockin_state", "Lock-in state", "",
+                     lambda: "overload" if s.lockin()["R"] > 0.25 else "ok",
+                     dtype="enum", storage=Storage("enum", options=["ok", "overload"])))
+    reg.add(Gettable("sample_region", "Sample region", "",
+                     lambda: "island" if s._pattern()[0] > 0 else "film",
+                     dtype="string", storage=Storage("string")))
 
     # An ARRAY detector, the VNA case: one read returns a whole trace, because
     # the frequency sweep happens in the instrument rather than in the odometer.
