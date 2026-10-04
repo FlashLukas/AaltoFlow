@@ -1,0 +1,9 @@
+name: field_sweep_x5
+comment: Five whole field sweeps, every run kept -- drift between runs stays visible; hold or average the repeat dim in the viewer.
+axes:
+  - {type: repeat, num: 5}                                            # outermost: whole runs
+  - {type: linear, param: field, start: 0, stop: 120, num: 41}
+detectors: [lockin_r, lockin_phi]
+hooks: []
+output: {dir: ., basename: field_sweep_x5, format: netcdf}
+settle: {default_timeout_s: 20.0}

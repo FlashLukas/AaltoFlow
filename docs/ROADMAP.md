@@ -236,6 +236,14 @@ frame (`last_deep()`).
   in `where`, and a scan-status flag in the file (aborted / complete) so the
   catalogue can show it.
 
+- **Repeat / time in scans**: DONE 2026-10-04 (branch `repeat-axis`) -- the
+  `repeat` axis (keep every repeat or store the average, optional
+  `interval_s` for a time series; scan-core README, "Repeating and
+  averaging"). Still open: a real TIME axis / a per-point timestamp recorded
+  with every point (today only the interval pacing exists, the time each
+  point was measured is not stored), and averaging with a fly axis (refused
+  with `average`; `keep` + the viewer works).
+
 - **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
   `warn` for kim + camera. Next: widen the lab policy to `"*"` (restart the
   services), a week of `warn`, then `enforce` -- before that, make the keyring

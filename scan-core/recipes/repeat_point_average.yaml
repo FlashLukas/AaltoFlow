@@ -1,0 +1,10 @@
+name: field_freq_avg10
+comment: Field x frequency map, every point measured 10 times in a row; only the mean (+ _std, _n) is stored.
+axes:
+  - {type: linear, param: field,   start: 0,   stop: 120,  num: 21}
+  - {type: linear, param: rf_freq, start: 800, stop: 2500, num: 41}
+  - {type: repeat, num: 10, mode: average}                            # innermost: each point x10
+detectors: [lockin_r, lockin_x, lockin_y]
+hooks: []
+output: {dir: ., basename: field_freq_avg10, format: netcdf}
+settle: {default_timeout_s: 20.0}

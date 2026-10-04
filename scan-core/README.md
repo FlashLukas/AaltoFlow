@@ -166,6 +166,7 @@ scan_core/
   engine.py     # N-D odometer -> xarray.Dataset
   hooks.py      # named per-level actions (autofocus, wait, call = routines, …)
   flyscan.py    # the fly axis: continuous rows binned by the measured position
+  repeat.py     # the repeat axis: N times, keep every repeat or store the average
   sim_stream.py # the simulator's streams (a lagging lock-in, a moving stage)
   errors.py     # ScanAborted, RoutineError
   api.py        # the scripting API: connect / set / get / run / wait_until / scan
@@ -179,7 +180,7 @@ apps/
   catalogue_view.py # the suite's Catalogue tab
   viewer.py        # starts the data viewer (aaltoview)
   theme.py
-recipes/        # example YAML recipes (2-D, 3-D, XY-raster)
+recipes/        # example YAML recipes (2-D, 3-D, XY-raster, repeat)
 examples/       # scripts using scan_core.api (run on the simulator as delivered)
 schema/scan.schema.json
 run_demo.py
@@ -455,6 +456,58 @@ while another PC holds control, or another scan uses it), its scans are saved
 with the suite's names in the suite's data folder, and Ctrl+C aborts a scan
 cleanly with the measured points saved.
 
+## Repeating and averaging: the `repeat` axis
+
+A `repeat` axis sets nothing: everything INSIDE it is done N times. Where it
+sits in the axis stack decides what is repeated (in the Scan Builder:
+**＋ Repeat** in the axis-stack header, then move the row up or down -- its
+caption says what it repeats):
+
+| stack (outer -> inner) | repeats |
+|---|---|
+| `repeat`, field, freq | the whole scan N times ("runs") |
+| field, `repeat`, freq | every frequency sweep N times |
+| field, freq, `repeat` | every point N times in a row (the stage does not move) |
+
+![repeat rows in the axis stack](../front-panels/suite-repeat-scan.png)
+
+```yaml
+- {type: repeat, num: 5}                       # keep (default)
+- {type: repeat, num: 10, mode: average}       # only mean, _std, _n stored
+- {type: repeat, num: 30, interval_s: 60}      # a run at most once a minute
+- {type: repeat, num: 3, name: run}            # own dimension name
+```
+
+**keep** (the default) makes the repeat a real dimension `repeat` (or
+`repeat_1`, `repeat_2`, ... with several), coordinate 0..N-1. Every run is in
+the file; the viewer shows one run (hold the repeat slider) or their average
+(average over it). **Use it whenever in doubt**: drift between runs, one run
+spoiled by a bump in the lab, a sample that changes -- all still visible.
+
+**average** collapses the dimension while measuring and stores, per
+detector, `<det>` = the mean (float64, NaN ignored), `<det>_std` = the sample
+standard deviation over the repeats (NaN with fewer than 2) and `<det>_n` =
+how many repeats gave a value (uint32) -- the same trio as a fly pixel. Use it
+for long averaging runs where the individual repeats are of no interest and
+would make the file N times bigger. The live plot shows the running mean; an
+aborted scan keeps the mean of the repeats done so far (`_n` says how many).
+Details: the mean of a bool is the fraction of True and of an int a float
+(attr `declared_type` keeps the declared type); a complex detector (a VNA
+trace) is averaged coherently and its `_std` is the spread of |z|; traces
+average element-wise. Not allowed with `average`: enum/string detectors
+(there is no mean of two states), a fly axis, the resonance window -- use
+`keep` there. Only one `average` repeat per scan.
+
+**interval_s** (optional) paces the repeats: repeat k of a pass starts no
+earlier than k x interval after repeat 0 began -- a time series ("a sweep
+every 10 minutes"). A pass that takes longer starts the next one at once; the
+wait can be aborted. The builder's ETA counts the repeats and the interval.
+
+A repeat may sit OUTSIDE a fly axis (N fly images), never inside it. Routines
+see it like any axis: "start of each sweep of field" with the repeat outermost
+runs once per run. Examples: `recipes/repeat_runs_keep.yaml`,
+`recipes/repeat_point_average.yaml`, `recipes/repeat_time_series.yaml`.
+
 ## A queue of scans
 
 **Load scan…** with several files selected (recipes, `.nc` files, or a saved
@@ -472,7 +525,7 @@ starts; **Stop queue** ends all of it; an error stops the queue.
 ## Tests
 
 ```bash
-uv run pytest -q        # 456 pass + 2 skipped (2026-10-03), all offline
+uv run pytest -q        # 547 pass + 2 skipped (2026-10-04), all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so
