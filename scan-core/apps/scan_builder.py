@@ -40,6 +40,7 @@ from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
 from scan_core import scan_queue
 from suite_common import title as suite_title
 from apps.data_view import DataView
+from apps.run_info_card import RunInfoCard
 from apps.theme import DEFAULT_THEME, C, apply, set_theme
 
 pg.setConfigOptions(antialias=True, imageAxisOrder="row-major", background=C["code_bg"])
@@ -1369,9 +1370,11 @@ class ScanWorker(QtCore.QThread):
     #: 20-point scan costs more than re-running it.
     CHECKPOINT_ABOVE = 100
 
-    def __init__(self, recipe, registry, save_path=None):
+    def __init__(self, recipe, registry, save_path=None, attrs=None):
         super().__init__()
         self.recipe, self.registry = recipe, registry
+        #: extra file attributes: the run info (sample, operator, ...)
+        self.attrs = dict(attrs or {})
         self.save_path = Path(save_path) if save_path else None
         self._abort = False
         self._last_live = 0.0
@@ -1457,7 +1460,8 @@ class ScanWorker(QtCore.QThread):
                      # a fault PAUSES the scan and waits for the operator
                      # (Lukas, 2026-09-28) instead of ending it
                      on_fault=lambda faults: self.paused.emit(list(faults)),
-                     on_window=lambda st: self.window.emit(dict(st)))
+                     on_window=lambda st: self.window.emit(dict(st)),
+                     attrs=self.attrs)
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
@@ -1995,6 +1999,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: buttons of the PAUSED banner (`can_clear_fault(name)`,
         #: `clear_fault(name)`). None = no buttons (simulator, standalone).
         self.fault_lab = None
+        #: Set by the suite to its Lab (None = simulator): "Recall settings..."
+        #: compares a file's instrument snapshot with these live instruments.
+        self.lab = None
         #: The faults the running scan is paused on ([] = not paused).
         self.paused_faults: list = []
         #: Where finished (and part-finished) scans are written without being
@@ -2507,6 +2514,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         nrow.addStretch(1)
         v.addLayout(nrow)
 
+        # RUN INFO: sample, operator, project ... -- remembered on this PC and
+        # written into every file (scan_core/run_info.py). Collapsed to one
+        # line so the run pane stays as it was.
+        self.run_info = RunInfoCard()
+        v.addWidget(self.run_info)
+
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("per-point (s)"))
         self.per_pt = QtWidgets.QDoubleSpinBox(); self.per_pt.setRange(0.0, 100); self.per_pt.setDecimals(3)
@@ -2607,7 +2620,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
         save = QtWidgets.QPushButton("Save scan…"); save.clicked.connect(self._save_dialog)
         save.setToolTip("Write the axis stack and ticked detectors to a .yaml recipe.")
         savd = QtWidgets.QPushButton("Save data (.nc)…"); savd.clicked.connect(self._save_data_dialog)
-        brow.addWidget(load); brow.addWidget(save); brow.addStretch(1); brow.addWidget(savd)
+        recall = QtWidgets.QPushButton("Recall settings…")
+        recall.clicked.connect(self._recall_dialog)
+        recall.setToolTip("Compare the instrument settings stored in a measured .nc\n"
+                          "with the instruments' settings NOW, and set chosen ones\n"
+                          "back. Nothing is sent before you confirm.")
+        self.recall_btn = recall
+        brow.addWidget(load); brow.addWidget(save); brow.addWidget(recall)
+        brow.addStretch(1); brow.addWidget(savd)
         v.addLayout(brow)
         return card
 
@@ -2777,6 +2797,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       axes=[r.to_axis() for r in self.rows],
                       detectors=dets,
                       hooks=self._compose_hooks(),
+                      # ONE comment: the run info's is the recipe's
+                      comment=self.run_info.values()["comment"],
                       zigzag=self.zigzag_box.isChecked(),
                       window=(self.window_card.to_block()
                               if hasattr(self, "window_card") else None))
@@ -2907,6 +2929,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.zigzag_box.blockSignals(False)
         if getattr(recipe, "name", ""):
             self.name_edit.setText(recipe.name)
+        if getattr(recipe, "comment", ""):
+            self.run_info.set_comment(recipe.comment)
         for r in list(self.rows):
             self._remove_row(r)
         for r in list(self.fixed_rows):
@@ -3139,7 +3163,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if block:                                   # synchronous path (tests/render)
             try:
                 ds = run(recipe, self.registry, created_iso="live", on_log=self._on_log,
-                         on_window=self.window_card.show_state)
+                         on_window=self.window_card.show_state,
+                         attrs=self.run_info.attrs())
             except RoutineError as exc:
                 if exc.dataset is not None:
                     self._on_done(exc.dataset)
@@ -3161,7 +3186,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """Start one scan in its thread; the run pane follows it."""
         self.run_btn.setEnabled(False); self.abort_btn.setEnabled(True)
         path = self.autosave_path(recipe)
-        self.worker = ScanWorker(recipe, self.registry, save_path=path)
+        self.worker = ScanWorker(recipe, self.registry, save_path=path,
+                                 attrs=self.run_info.attrs())
         self._run_started()
         self.worker.where.connect(self._on_where)
         self.worker.progress.connect(self._on_progress)
@@ -3632,6 +3658,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.view.refresh()
 
     # ---- dialogs ----------------------------------------------------------
+    def _recall_dialog(self, path=None):
+        """Pick a measured .nc and open the recall dialog (apps/recall.py)."""
+        from apps.recall import open_recall
+        return open_recall(self, self.lab, path,
+                           start_dir=str(self.autosave_dir or ""))
+
     def _load_dialog(self):
         fns, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self, "Load scan definition(s)", "",

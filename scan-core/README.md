@@ -108,11 +108,15 @@ scan_core/
   flyscan.py    # the fly axis: continuous rows binned by the measured position
   sim_stream.py # the simulator's streams (a lagging lock-in, a moving stage)
   errors.py     # ScanAborted, RoutineError
+  snapshot.py   # instrument snapshots in every file + diff / recall helpers
+  run_info.py   # sample, operator, project ... remembered and written to files
   view.py       # re-exports aaltoview.view (N-D cube -> map / line)
   data.py       # re-exports aaltoview.data (read measurements back)
 apps/
   scan_builder.py  # PySide6 cockpit
   suite.py         # the measurement suite (Control / Scan / Measurement / Data / Settings)
+  recall.py        # "Recall settings...": file snapshot vs instruments now
+  run_info_card.py # the RUN INFO card of the run pane
   viewer.py        # starts the data viewer (aaltoview)
   theme.py
 recipes/        # example YAML recipes (2-D, 3-D, XY-raster)
@@ -375,6 +379,53 @@ Each scan gets its own file. **Abort** ends the current scan and the next one
 starts; **Stop queue** ends all of it; an error stops the queue.
 
 ![a queue running](../front-panels/suite-queue.png)
+
+## Run info, instrument snapshots, and recalling settings
+
+**Run info.** The **RUN INFO** line under the scan name (click the arrow to
+open it) holds sample, structure, operator, project, series, tags
+(comma-separated keywords) and comment. They are remembered on this PC between
+scans and launches, and written into every data file as attributes with
+exactly those names (empty ones are left out; the comment is the scan
+definition's comment, one field). `setup_name`, `aaltoflow_version` (the git
+commit), `software_scan_core`, `software_python` and `created` are added by
+themselves.
+
+**Snapshots.** Right before the first point, every instrument the suite is
+connected to -- not only the ones the scan uses -- is asked for its settings
+(`get_config`), its state (`status`) and its `info`. Each lands in the file as
+one JSON attribute, `snapshot_<prefix>` (`snapshot_kim`, `snapshot_hf2_lab2`),
+with `snapshot_modules` and `snapshot_time`. Big arrays in a status (a trace,
+a frame) are stored as `"<array n=...>"`. At the end, `snapshot_end` lists
+the settings that changed during the scan (`{}` = none). An instrument that
+does not answer gets an `"error"` entry; the scan never stops for it.
+Reading it back in Python:
+
+```python
+from scan_core.snapshot import read_snapshot
+snap = read_snapshot("101205_fmr map.nc")     # {prefix: {...}}
+snap["kim"]["config"]["motion"]               # what kim was set to
+```
+
+The instrument's idn may contain its serial number. Data files are the lab's
+own, so it is kept; untick *Store each instrument's identity* on the Settings
+tab (suite setting `snapshot_include_idn`) to leave idn / serial out, e.g.
+before sharing files.
+
+**Recall settings...** (Measurement tab, next to Load scan, and on the Data
+tab for the file shown there): pick a measured `.nc`; the dialog lists, per
+instrument in the file, every setting whose value NOW differs from the file
+(*Show all settings* for the rest). Nothing is ticked by default: tick what
+you want back, or *Select all differences of this instrument*. *Apply
+selected* lists the changes, asks, then sends each instrument ONE
+`set_config` with only the ticked keys. Instruments that are not connected,
+or are a different module under the same name, are greyed out; the state at
+scan time is shown for information and cannot be ticked. If another PC holds
+control of an instrument the change is refused and reported -- take control
+on the Control tab first; the dialog never forces. Settings that depend on a
+calibration or on the hardware's state (camera spot calibration, kim step
+sizes, a stage's zero) are sent as plain values: check the instrument after
+recalling.
 
 ## Tests
 

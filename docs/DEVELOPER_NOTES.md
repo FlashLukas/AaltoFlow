@@ -560,6 +560,57 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
   load exactly as before; a float-only scan writes the same variables and
   values as before, only compressed.
 
+### 4c. Snapshots and recall (2026-10-04)
+
+Every scan file records what EVERY connected instrument was set to, and the
+suite can set chosen settings back (Lukas: "available settings of each
+instrument saved with data ... and a way how to set it back").
+Code: `scan-core/scan_core/snapshot.py` (pure), `scan_core/run_info.py`,
+`apps/recall.py`, `apps/run_info_card.py`.
+
+- **When:** `engine._run` calls `registry.snapshot()` (set by
+  `build_lab_registry`; the simulator has none) AFTER the fixed conditions and
+  the before-scan routines, right before the first point -- so it describes
+  what was measured with. At the end of a scan that got there (or was aborted
+  between points) a second, config-only read gives `snapshot_end` = the
+  settings that changed during the scan, `{"slug": [["group.key", start,
+  end], ...]}`, `{}` when none. Every dataset built after the snapshot (live
+  view, checkpoints, abort, end) carries it (`ds_attrs` in `_to_dataset`).
+- **What:** per instrument, `snapshot_<slug>` = JSON `{"module", "revision",
+  "label", "slug", "config" (get_config), "status", "info"}`; slug = the
+  registry prefix (`kim`, `hf2_lab2`). Plus `snapshot_modules`
+  (comma-separated -- a one-element list attribute reads back as a plain
+  string) and `snapshot_time`. Lists with > 1000 leaves -> `"<array n=N>"`,
+  text > 4000 chars -> `"<text n=N>"`, NaN/inf -> `"nan"`/`"inf"` (strict
+  JSON). The status keys `control` / `clients` (PC and user names of
+  connected clients) are NEVER stored. A failing request -> `"error"` in that
+  entry; the scan never stops for a snapshot.
+- **idn / serial:** kept by default (data files are private). Suite setting
+  `snapshot_include_idn` = false (Settings tab checkbox) drops the keys
+  `idn, serial, serial_number, identity, device_id` everywhere in the entry.
+- **Provenance + run info (file attributes, names are a CONTRACT -- a run
+  catalogue indexes them):** `aaltoflow_version` (git commit of the
+  checkout; an installed copy has no .git and no version file yet, so it is
+  then absent), `software_scan_core`, `software_python`, `setup_name`, and the
+  run info `sample, structure, operator, project, series, tags` (tags
+  normalised to "a, b, c"). EMPTY run-info fields are OMITTED. `comment` is
+  the recipe's comment (the run info's comment field is put into the recipe:
+  one comment, not two) and is always written, as before. Run info is
+  remembered in suite_local.json under `settings.run_info`.
+- **Recall:** `diff_config(saved, live)` walks nested dicts; a list is ONE
+  setting (sent whole); floats equal within 1e-12 relative; bool vs number,
+  number vs text = a difference; a key on one side only is shown but cannot
+  be recalled. Only `config` is recallable (status is information).
+  `partial_config(ticked, saved)` builds the nested dict for ONE
+  `set_config` per instrument with only the ticked keys (gotcha #5). Sent with
+  `gui_command` (a PERSON): refused while another PC holds control, and
+  reported, never forced. Not sent to an instrument whose describe `module`
+  differs from the snapshot's. Default: nothing ticked.
+- **Limits of a recall:** values are applied as plain values. Settings tied
+  to a calibration or the hardware's state (camera spot calibration, kim step
+  sizes, a stage's "zero here") may not mean the same now -- the dialog says
+  so.
+
 ---
 
 ## 5. Shared code conventions
