@@ -670,6 +670,8 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
     verb = d["id"]
     args = {a["name"]: a["default"] for a in (d.get("args") or [])
             if isinstance(a, dict) and "name" in a and "default" in a}
+    _declared = [a["name"] for a in (d.get("args") or [])
+                 if isinstance(a, dict) and "name" in a]
     target_key = wait.get("target_key")
     # Optional OUTCOME check (2026-09-24, camera autofocus): "finished" is not
     # "succeeded". {"key": "af_error", "equals": "OK"} -> after the wait the
@@ -682,8 +684,18 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
     label = d.get("label", d["id"])
 
     def run_fn(_i=inst, _v=verb, _a=args, _key=target_key, _p=policy,
-               _t=timeout, _id=aid, _check=check, context=None):
-        reply = _i.command(_v, **fill_placeholders(_a, context))
+               _t=timeout, _id=aid, _check=check, context=None, args=None):
+        # `args` (a script, scan_core/api.py) replaces declared defaults; a
+        # name the module did not declare is refused here, before anything is
+        # sent -- a typo must not be silently dropped
+        merged = dict(_a)
+        if args:
+            unknown = sorted(set(args) - set(_declared))
+            if unknown:
+                raise ValueError(f"{_id}: no argument called {', '.join(unknown)}"
+                                 f" (it takes: {', '.join(_declared) or 'none'})")
+            merged.update(args)
+        reply = _i.command(_v, **fill_placeholders(merged, context))
         target = None
         if _key is not None:
             if _key not in reply:
