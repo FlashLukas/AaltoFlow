@@ -140,7 +140,7 @@ class Console:
     @staticmethod
     def show_status(s: dict):
         sp = s.get("setpoint_field_mT")
-        sp_txt = "—" if sp is None else f"{sp:.3f} mT"
+        sp_txt = "--" if sp is None else f"{sp:.3f} mT"
         print(f"  state={s.get('state','?'):9}  field={s.get('measured_field_mT',0):8.3f} mT"
               f"  current={s.get('current_A',0):7.3f} A  setpoint={sp_txt}"
               f"  stable={s.get('field_stable')}  locked={s.get('locked')}")
@@ -158,7 +158,7 @@ class Console:
         sub.connect(f"tcp://{self.host}:{self.pub_port}")
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         poller = zmq.Poller(); poller.register(sub, zmq.POLLIN)
-        print(f"  watching for {seconds:.0f} s (Ctrl-C to stop early) …")
+        print(f"  watching for {seconds:.0f} s (Ctrl-C to stop early) ...")
         # we can't use wall-clock timing portably here, so count poll ticks
         ticks = int(seconds / 0.2)
         try:
