@@ -67,7 +67,8 @@ def _tick(panel, pid) -> bool:
 
 def test_the_tabs_exist_and_start_on_the_simulator(suite):
     assert [suite.tabs.tabText(i) for i in range(suite.tabs.count())] == \
-        ["Control", "Navigator", "Scan", "Measurement", "Data", "Settings"]
+        ["Control", "Navigator", "Scan", "Measurement", "Data", "Catalogue",
+         "Settings"]
     assert suite.lab is None, "should not reach for hardware on startup"
     assert suite.registry is not None
     assert "simulator" in suite.source_lbl.text()

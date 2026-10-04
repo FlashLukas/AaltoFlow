@@ -1,9 +1,12 @@
-"""suite.py -- the AaltoFlow measurement suite: one window, four tabs.
+"""suite.py -- the AaltoFlow measurement suite: one window, seven tabs.
 
     Control      raw control of every connected module, built from `describe`
     Navigator    a design file (GDS / image) registered to the stage: click, go
     Scan         define a recipe (the Scan Builder's palette + axis stack)
     Measurement  run it and watch it
+    Data         open and plot any .nc file (the AaltoView viewer)
+    Catalogue    search every run in the data folder (sample, operator, tags,
+                 conditions, instrument values); double-click opens it in Data
     Settings     which modules to use, and where data goes
 
 The split between Scan and Measurement is deliberate. Defining a scan is a
@@ -44,6 +47,7 @@ from suite_common import discover, get_setting, probe, set_setting
 from suite_common import title as suite_title
 from scan_core import build_sim_registry
 from scan_core.lab import build_lab_registry
+from apps.catalogue_view import CatalogueWidget
 from apps.control_panel import ControlPanel
 from apps.navigator import NavigatorWidget
 from aaltoview.apps.viewer import ViewerWidget
@@ -109,6 +113,13 @@ class Suite(QtWidgets.QMainWindow):
         self.tabs.addTab(self._wrap(self.builder.centralWidget()), "Scan")
         self.tabs.addTab(self._build_measurement(), "Measurement")
         self.tabs.addTab(self._build_data(), "Data")
+        # The run catalogue: an index of the data folder, searchable by sample,
+        # operator, tags, conditions and instrument values. A tab of its own
+        # rather than a pane in Data: the viewer already has its file list on
+        # the left, and a search over a year of runs wants the full width.
+        self.catalogue = CatalogueWidget(self.out_dir, open_file=self.open_in_viewer,
+                                         on_log=self.log)
+        self.tabs.addTab(self.catalogue, "Catalogue")
         self.tabs.addTab(self._build_settings(follow), "Settings")
         # Opening the Scan tab re-reads the live limits: the ranges you are
         # about to type into should be the instrument's current ones.
@@ -230,6 +241,13 @@ class Suite(QtWidgets.QMainWindow):
         g.addWidget(self.data_view, 1)
         v.addWidget(card, 1)
         return page
+
+    def open_in_viewer(self, path) -> None:
+        """Open a file in the Data tab (the Catalogue's double-click)."""
+        names = [self.tabs.tabText(i) for i in range(self.tabs.count())]
+        self.tabs.setCurrentIndex(names.index("Data"))
+        self.data_view.load_file(Path(path))
+        self.log(f"opened {Path(path).name}")
 
     def _show_last_run(self):
         ds = self.builder.dataset
@@ -368,6 +386,7 @@ class Suite(QtWidgets.QMainWindow):
         self.out_edit.setText(str(self.out_dir))
         self.builder.autosave_dir = self.out_dir      # every run lands here from now on
         self.data_view.default_dir = self.out_dir     # ...and the Data tab lists it
+        self.catalogue.set_data_dir(self.out_dir)     # ...and the Catalogue indexes it
         self.builder._refresh_save_target()           # ...and say so, having tried it
         try:
             set_setting("data_dir", str(self.out_dir), root=self.root)
@@ -610,6 +629,7 @@ class Suite(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self._avail_stop.set()
+        self.catalogue.cancel_scan()     # stops between two files
         # A running scan is ABORTED and waited for BEFORE the connections are
         # closed: its thread must not be left using sockets closed under it,
         # and the after-scan routine must get to run (2026-09-28).

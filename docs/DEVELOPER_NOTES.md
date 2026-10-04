@@ -560,6 +560,56 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
   load exactly as before; a float-only scan writes the same variables and
   values as before, only compressed.
 
+### 4c. The run catalogue: an index rebuilt from the files (2026-10-04)
+
+`scan-core/scan_core/catalogue.py` (no Qt) + the suite's Catalogue tab
+(`scan-core/apps/catalogue_view.py`). User side: scan-core README, "Catalogue".
+
+- **The files are the truth, the index is disposable.** One SQLite file,
+  `<data dir>/catalogue.sqlite`, filled ONLY from the `.nc` files; nothing is
+  written into a data file and nothing exists only in the index. A schema
+  change bumps `SCHEMA_VERSION` and an index of another version (or a file of
+  that name that is not SQLite) is dropped and rebuilt -- no migrations.
+  Paths are stored relative to the data folder, so the folder can move.
+- **Headers only.** `read_entry` opens with xarray/h5netcdf (`decode_times`
+  and `mask_and_scale` off, `cache=False`) inside `with`, reads attributes,
+  dims, variable names/attrs, the 1-D index coordinates (for ranges) and the
+  0-d coordinates (the fixed conditions) -- never a data variable's values.
+  The `with` matters on Windows: an open handle would stop the scan builder's
+  `os.replace` of the next checkpoint.
+- **Incremental by (size, mtime_ns)**; deleted files are forgotten; a failing
+  file is stored with `error` set (the tab shows it red) and never stops the
+  scan. `*.writing.nc` (a checkpoint in progress, scan_builder `_write`) is
+  skipped. Commits every 50 files so a cancelled scan keeps its progress.
+- **Tables**: `files` (one row per file: run columns + the run-info attrs the
+  snapshots branch writes, all optional), `detectors`, `tags` (lower case),
+  `instruments` (`source` = snapshot, or `recipe` = guessed from a `slug.` id
+  prefix in an older file), `conditions` (0-d coords) and
+  `snapshot_values(file_id, key, num_value, text_value)`: each
+  `snapshot_<slug>` JSON flattened to dotted keys (`ppms.status.temperature`),
+  lists of up to 32 scalars element by element, at most 2000 values per
+  module; a value is numeric where it reads as one (bools as 1/0 + "true").
+- **`where` is parsed, never pasted.** A tokenizer + a tiny grammar (terms
+  joined by `and`/`,`; `== != < <= > >=`, `between A and B`, `contains`/`~`)
+  produce SQL from FIXED fragments; keys must match a name pattern and every
+  value is a bound parameter; LIKE patterns escape `% _ \`. Anything else is a
+  `WhereError`. Column names that are interpolated (the filter fields,
+  `distinct`) come from whitelists in the code. Tests throw injection strings
+  at every filter.
+- **Key lookup**: run columns (`n_points`, `duration`, `size`), then a
+  condition by exact id, then a snapshot key exactly OR as
+  `slug.<anything>.rest` -- so `ppms.temperature` matches
+  `ppms.status.temperature`; if a module had the same leaf under settings and
+  status, either matching is enough. `==` on numbers: relative 1e-6.
+- **Threads**: one connection per call (SQLite connections must not cross
+  threads); the tab scans in a `threading.Thread` and reports through Qt
+  signals (queued into the GUI thread), searches in the GUI thread (ms). The
+  tab rescans when shown and when the data folder changes while it is
+  visible; the suite cancels a scan on close.
+- **Run status**: no attribute says "aborted" today; the catalogue reads
+  `outcome` / `run_status` / `status` / `aborted` / `complete` if a later
+  writer adds one, else leaves it empty.
+
 ---
 
 ## 5. Shared code conventions
