@@ -985,13 +985,23 @@ reported as a problem. Because a module sits three folders below the root, its
 README links back up with `../../../` (e.g. `../../../front-panels/kim.png`), and
 the tools are `python ../../../tools/check_modules.py <key>` from inside it.
 
+**One deliberate exception (2026-10-05): `scan-core/module.toml`**, the SCAN
+SERVER (key `scanserver`, category `coordination`). It is not an instrument but
+a service that runs scans over the instruments, and it IS scan-core (same
+environment), so its manifest sits in that suite project. Discovery marks it
+`suite_project` (`suite_common.modules.SUITE_PROJECTS`): it is not moved by
+migrate_layout, not packed, not in catalog.json, installed with scan-core;
+`is_instrument` is False, so no scan engine builds parameters from it. Do not
+copy this for an instrument module. Developer notes, section 4f.
+
 ```toml
 [module]
 key = "hf2"            # unique; letters/digits/_; must equal "module" in describe
 name = "Lock-in"       # launcher card title
 description = "Zurich HF2LI 50 MHz - 2 demodulator channels + aux inputs"
 category = "detector"  # what it is FOR: motion | field | source | detector |
-                       # imaging | environment | io | other  (a typo is an error)
+                       # imaging | environment | io | coordination | other
+                       # (a typo is an error; coordination = scan servers)
 tags = ["lock-in", "Zurich Instruments", "HF2LI"]   # search words
 icon = "icon.svg"      # 40x40 viewBox; accent colours are swapped for the theme
 order = 80             # position in lists
