@@ -124,7 +124,10 @@ def build_catalog(modules: list[ModuleSpec]) -> dict:
     Deliberately WITHOUT a timestamp, so regenerating an unchanged suite gives
     a byte-identical file and check_modules.py can tell whether it is stale.
     """
-    mods = sorted((m for m in modules if not m.remote and m.dir is not None),
+    # not a SUITE PROJECT's module.toml (scan-core's scan server): it ships
+    # with its project and is never downloaded as a module of its own
+    mods = sorted((m for m in modules if not m.remote and m.dir is not None
+                   and not getattr(m, "suite_project", False)),
                   key=lambda m: (m.order, m.key))
     return {
         "format": CATALOG_FORMAT, "product": PRODUCT,

@@ -15,7 +15,11 @@ Static checks, per module:
   * it sits where it belongs, modules/<category>/<folder> with the category of
     its module.toml (WARN, not FAIL: discovery still finds a module in the old
     flat place or under another category folder -- it is just harder to find
-    for a person). A key found twice is a WARN naming both folders.
+    for a person). A key found twice is a WARN naming both folders. A SUITE
+    PROJECT's module.toml (scan-core's scan server) stays in the root on
+    purpose: PASS, and no hwlock / copied control.py / secure.py are asked of
+    it (it owns no hardware and imports the suite-common masters; the
+    encryption check runs with the master secure.py).
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
   * src/<pkg>/control.py and src/<pkg>/apps/control_bar.py (one controller,
@@ -241,7 +245,25 @@ def control_check(rep: Report, m):
     control.py and secure.py are REQUIRED since every module has them
     (control 2026-10-03, encryption 2026-10-04): a module without one would
     ignore the control lock, or be unreachable once the lab's policy secures
-    it. control_bar.py only where the module has a GUI (zpiezo has none)."""
+    it. control_bar.py only where the module has a GUI (zpiezo has none).
+
+    A SUITE PROJECT (scan-core's scan server) carries no copies: it depends on
+    suite-common and imports the masters themselves -- checked here by text."""
+    if m.suite_project:
+        text = ""
+        for f in m.dir.rglob("*.py"):
+            if ".venv" in f.parts or "tests" in f.parts:
+                continue
+            try:
+                text += f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        for mod in ("control", "secure"):
+            ok = f"suite_common.{mod}" in text or f"from suite_common import {mod}" in text
+            rep.add(m.key, f"{mod}.py: uses the suite-common master", "PASS" if ok else "FAIL",
+                    "a suite project imports suite_common." + mod if ok else
+                    f"no import of suite_common.{mod} in {m.dir.name}")
+        return
     pkg = package_dir(m.dir)
     if pkg is None:
         return
@@ -272,6 +294,12 @@ def control_check(rep: Report, m):
 
 def hwlock_check(rep: Report, m, master: bytes | None):
     """The module's hwlock.py is the master copy, and its real backends claim."""
+    if m.suite_project:
+        # scan-core's scan server opens no instrument: it is a CLIENT of the
+        # modules, and each of them holds its own address lock
+        rep.add(m.key, "hwlock.py is the master copy", "SKIP",
+                "a suite project: owns no hardware (it drives the modules)")
+        return
     pkg = package_dir(m.dir)
     if pkg is None:
         rep.add(m.key, "hwlock.py is the master copy", "FAIL", "no single package under src/")
@@ -551,6 +579,8 @@ def secure_live_check(rep: Report, m, py: Path):
     import tempfile
     pkg = package_dir(m.dir)
     sec = pkg / "secure.py" if pkg is not None else None
+    if m.suite_project:
+        sec = SECURE_MASTER         # it imports the master (no copy of its own)
     if sec is None or not sec.is_file():
         return
     name = "live: encrypted (CurveZMQ) when the policy secures it"
@@ -789,7 +819,12 @@ def main(argv=None) -> int:
         where = rel_to_root(args.root, m.dir)
         rep.add(m.key, f"{MANIFEST} parses", "PASS", f"{where}, ports {m.cmd}/{m.pub}")
         home = f"{MODULES_DIR}/{m.category}/{m.dir.name}"
-        if is_legacy_location(args.root, m.dir):
+        if m.suite_project:
+            # deliberate: the scan server IS scan-core (one environment, one
+            # lock file); suite_common.modules.SUITE_PROJECTS
+            rep.add(m.key, "sits in modules/<category>/", "PASS",
+                    f"{where}: a suite project, stays in the root on purpose")
+        elif is_legacy_location(args.root, m.dir):
             rep.add(m.key, "sits in modules/<category>/", "WARN",
                     f"{where} is the old flat place; it belongs in {home} "
                     "(git mv it, or run tools/migrate_layout.py)")

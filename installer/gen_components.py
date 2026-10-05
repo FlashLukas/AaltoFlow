@@ -132,11 +132,15 @@ def main() -> int:
     # The SAME search the launcher does (suite_common.modules.manifest_paths):
     # modules/<category>/<folder> first, then any legacy flat folder.
     _suite_common(stage)
-    from suite_common.modules import MODULES_DIR, manifest_paths
+    from suite_common.modules import MODULES_DIR, SUITE_PROJECTS, manifest_paths
 
     modules, seen = [], set()
     for toml in manifest_paths(stage):
         rel = toml.parent.relative_to(stage)
+        if len(rel.parts) == 1 and rel.parts[0] in SUITE_PROJECTS:
+            # scan-core's module.toml (the scan server): installed with its
+            # own project -- the "scan" component -- never as a module of its own
+            continue
         try:
             man = tomllib.loads(toml.read_text("utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:

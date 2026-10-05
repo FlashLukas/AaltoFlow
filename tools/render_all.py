@@ -33,7 +33,8 @@ from suite_common.modules import discover_local, rel_to_root  # noqa: E402
 
 #: target name -> (project directory relative to the root, e.g.
 #: "modules/motion/kim-control", does it need the `gui` extra?)
-PROJECTS = {m.key: (rel_to_root(ROOT, m.dir), True) for m in discover_local(ROOT)[0] if m.gui}
+PROJECTS = {m.key: (rel_to_root(ROOT, m.dir), True) for m in discover_local(ROOT)[0]
+            if m.gui and not m.suite_project}   # scan-core's scan server: suite-watch
 PROJECTS.update({
     # the windows that are not instrument modules
     "scan-core": ("scan-core", True),
@@ -43,6 +44,9 @@ PROJECTS.update({
     "suite-control": ("scan-core", True),
     "suite-scan": ("scan-core", True),
     "suite-measurement": ("scan-core", True),
+    # the Measurement tab WATCHING a scan server (a scan running in another
+    # process -- here an in-process server on the simulator)
+    "suite-watch": ("scan-core", True),
     "suite-data": ("scan-core", True),
     "suite-settings": ("scan-core", True),
     "suite-catalogue": ("scan-core", True),

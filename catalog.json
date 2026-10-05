@@ -30,6 +30,10 @@
       "label": "General I/O",
       "hint": "DAQ cards, analog / digital lines, relays, triggers"
     },
+    "coordination": {
+      "label": "Coordination",
+      "hint": "scan servers and other services that drive the modules"
+    },
     "other": {
       "label": "Other",
       "hint": "anything else"

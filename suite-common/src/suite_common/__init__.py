@@ -10,8 +10,9 @@ Used by mission-control (the launcher) and scan-core. Standard library only.
 
 from .catalog import (InstallPlan, ModuleSource, build_catalog, catalog_text,
                       env_steps, install, is_lab_data, plan_install, search)
-from .modules import (CATEGORIES, ENDPOINTS_ENV, MODULES_DIR, PRODUCT, ROOT_ENV, getenv,
-                      is_legacy_location, manifest_paths, module_home, rel_to_root,
+from .modules import (CATEGORIES, COORDINATOR_KEYS, ENDPOINTS_ENV, MODULES_DIR, PRODUCT,
+                      ROOT_ENV, SUITE_PROJECTS, getenv, is_legacy_location,
+                      is_suite_project, manifest_paths, module_home, rel_to_root,
                       set_setup_name, setup_name, title)
 from .modules import (Discovery, ManifestError, ModuleSpec, add_remote,
                       default_root, discover, endpoints_json, get_setting,
@@ -28,7 +29,8 @@ __all__ = [
     "set_address", "set_ports", "set_real", "set_setting", "start_order",
     "ENDPOINTS_ENV", "PRODUCT", "ROOT_ENV", "getenv", "set_setup_name",
     "setup_name", "title", "MODULES_DIR", "manifest_paths", "module_home",
-    "is_legacy_location", "rel_to_root",
+    "is_legacy_location", "rel_to_root", "is_suite_project", "SUITE_PROJECTS",
+    "COORDINATOR_KEYS",
     "CATEGORIES", "InstallPlan", "ModuleSource", "build_catalog", "catalog_text",
     "env_steps", "install", "is_lab_data", "plan_install", "search",
     "ImportPlan", "apply_import", "export_bundle", "read_bundle",

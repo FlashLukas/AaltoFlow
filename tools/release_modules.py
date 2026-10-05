@@ -60,7 +60,8 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=REPO)
     args = ap.parse_args(argv)
 
-    mods = {m.key: m for m in discover_local(ROOT)[0]}
+    # not a suite project (scan-core's scan server): it ships with its project
+    mods = {m.key: m for m in discover_local(ROOT)[0] if not m.suite_project}
     keys = args.keys or list(mods)
     unknown = [k for k in keys if k not in mods]
     if unknown:

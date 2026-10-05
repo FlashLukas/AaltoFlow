@@ -42,6 +42,22 @@ LOCAL_FILE = "suite_local.json"
 #: (mission-control, scan-core, suite-common) stay directly in <root>.
 MODULES_DIR = "modules"
 
+#: The suite's own projects. They live directly in <root>, never under
+#: modules/. One of them may still carry a module.toml: scan-core does since
+#: 2026-10-05 -- its SCAN SERVER (scan_core/scan_server.py) is a service with
+#: the suite's wire contract, so Mission Control shows it as a card and another
+#: PC can "Add remote..." it. Such a module is a SUITE PROJECT: it stays where
+#: it is (tools/migrate_layout.py must never move scan-core), it is installed
+#: with its project (not as a module of its own) and it is never packed or
+#: published as a module (see ModuleSpec.suite_project).
+SUITE_PROJECTS = ("mission-control", "scan-core", "suite-common")
+
+#: Module keys that are NOT instruments: services that DRIVE the instruments.
+#: A scan engine following the launcher must not connect to them as if they
+#: were one (the scan server would otherwise appear as parameters "scanserver.*"
+#: on the Scan tab), see ModuleSpec.is_instrument.
+COORDINATOR_KEYS = frozenset({"scanserver"})
+
 #: The product. A PC can add the name of the SETUP it drives ("TR-MOKE",
 #: "VNA-FMR rig") with set_setup_name(); titles then lead with that, so a lab
 #: with several rigs sees at a glance which one a window belongs to.
@@ -83,6 +99,9 @@ CATEGORIES: dict[str, tuple[str, str]] = {
     # 2026-09-29, for the NI USB-6001: a general DAQ's purpose depends on what is
     # wired to it (inputs, outputs, digital lines), so it fits none of the above
     "io":          ("General I/O", "DAQ cards, analog / digital lines, relays, triggers"),
+    # 2026-10-05, for the scan server: not an instrument but a service that
+    # drives the instruments (scan engines, schedulers)
+    "coordination": ("Coordination", "scan servers and other services that drive the modules"),
     "other":       ("Other", "anything else"),
 }
 DEFAULT_CATEGORY = "other"
@@ -151,6 +170,15 @@ class ModuleSpec:
     #: "hf2@lab2:5569" is fine for a settings file, but '@' and ':' do not
     #: belong in a recipe's parameter id or a netCDF variable name.
     slug: str = ""
+    #: True for a module.toml in one of the suite's own projects (SUITE_PROJECTS,
+    #: directly in the root): scan-core's scan server. Set by discover_local.
+    suite_project: bool = False
+
+    @property
+    def is_instrument(self) -> bool:
+        """False for a service that DRIVES instruments (COORDINATOR_KEYS): a
+        scan engine that follows the launcher connects to instruments only."""
+        return self.key not in COORDINATOR_KEYS
 
     @property
     def can_start(self) -> bool:
@@ -284,10 +312,23 @@ def module_home(root: Path, category: str, folder: str) -> Path:
     return Path(root) / MODULES_DIR / category / folder
 
 
-def is_legacy_location(root: Path, folder: Path) -> bool:
-    """True for a module folder sitting directly in the root (the old layout)."""
+def is_suite_project(root: Path, folder: Path) -> bool:
+    """True for one of the suite's own projects (SUITE_PROJECTS) in `root`."""
     try:
-        return Path(folder).resolve().parent == Path(root).resolve()
+        f = Path(folder).resolve()
+        return f.parent == Path(root).resolve() and f.name in SUITE_PROJECTS
+    except OSError:
+        return False
+
+
+def is_legacy_location(root: Path, folder: Path) -> bool:
+    """True for a module folder sitting directly in the root (the old layout).
+
+    Not for a suite project (scan-core): that one belongs in the root -- a
+    deliberate exception, not a module waiting to be moved."""
+    try:
+        return (Path(folder).resolve().parent == Path(root).resolve()
+                and not is_suite_project(root, folder))
     except OSError:
         return False
 
@@ -326,6 +367,7 @@ def discover_local(root: Path) -> tuple[list[ModuleSpec], list[str]]:
                             f"{where}; using {seen[spec.key]}, ignoring {where}{hint}")
             continue
         seen[spec.key] = where
+        spec.suite_project = is_suite_project(root, path.parent)
         specs.append(spec)
     return specs, problems
 
