@@ -365,20 +365,32 @@ def check(text, registry=None) -> list[str]:
             if (msg := param_problem(registry, pid)) is not None]
 
 
-def read_value(registry, pid: str):
+def read_value(registry, pid: str, setpoints=None):
     """The CURRENT value of a parameter (the readback / the cached status
-    value -- never a new acquisition; see the module docstring)."""
+    value -- never a new acquisition; see the module docstring).
+
+    `setpoints` ({pid: value}, the engine's ctx["current"]): a parameter the
+    SCAN has set for this point is read as that setpoint. Why (lab PC,
+    2026-10-05): "abort_if pm16.wavelength > 612" at before_point read the
+    status cache, whose last published frame still held the PREVIOUS point's
+    wavelength -- it stopped one point late, and at point 1 after a scan that
+    had left the meter elsewhere. The setpoint is what "this point" means."""
+    if setpoints and pid in setpoints:
+        return setpoints[pid]
     p = registry.get(pid)
     if p is None:
         raise ExprError(f"unknown parameter '{pid}'")
     return p.get()
 
 
-def evaluate(expr, registry):
-    """Parse (if text) and compute `expr`, reading parameters from `registry`."""
+def evaluate(expr, registry, setpoints=None):
+    """Parse (if text) and compute `expr`, reading parameters from `registry`
+    (a parameter in `setpoints` -- set by the scan for this point -- is read as
+    that setpoint; see read_value). wait_until passes no setpoints: it waits
+    for what the instrument REALLY reports."""
     if not isinstance(expr, Expression):
         expr = parse(expr)
-    return expr.evaluate(lambda pid: read_value(registry, pid))
+    return expr.evaluate(lambda pid: read_value(registry, pid, setpoints))
 
 
 def format_value(v) -> str:
@@ -397,7 +409,7 @@ def format_value(v) -> str:
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}")
 
 
-def fill_placeholders(text: str, registry) -> tuple[str, list[str]]:
+def fill_placeholders(text: str, registry, setpoints=None) -> tuple[str, list[str]]:
     """Replace each {param.id} in `text` by that parameter's current value.
 
     Returns (filled text, [ids that could not be filled]). An unknown id, or a
@@ -412,7 +424,7 @@ def fill_placeholders(text: str, registry) -> tuple[str, list[str]]:
             bad.append(pid)
             return m.group(0)
         try:
-            return format_value(_as_value(read_value(registry, pid), pid))
+            return format_value(_as_value(read_value(registry, pid, setpoints), pid))
         except Exception:
             bad.append(pid)
             return m.group(0)

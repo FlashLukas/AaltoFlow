@@ -131,8 +131,8 @@ trace = lab.get("vna.s")       # a complex array, one value per frequency
 
 Returns the **current** value from the status stream. It starts no
 acquisition and claims no instrument. Use it to watch a value. For a slow
-detector, `read` returns its *last* acquisition, so use `get` when you
-measure.
+detector, `read` returns its *last* acquisition (NaN if there has been none
+since the module started), so use `get` when you measure.
 
 ```python
 lab.log(f"T = {lab.read('ppms.temperature'):.2f} K")
@@ -214,8 +214,19 @@ so far are saved, and then `KeyboardInterrupt` ends the script. A second
 Ctrl+C stops at once. What was measured is still saved, but the after-scan
 routine does not run.
 
-`lab.scan_queue("my_queue.yaml")` runs a queue saved from the Scan tab one
-scan after another and returns the datasets.
+**A routine in the recipe can stop the scan** (`abort_if`, a `wait_until`
+that times out, Abort at a pause). That is not Ctrl+C:
+
+- **Abort scan** (the default): `scan()` RETURNS the measured part, and
+  `ds.attrs["stopped_by"]` says why. The script carries on.
+- **Abort all** (`scope: all`, `on_timeout: stop_all`): `scan()` raises
+  `api.ScanStoppedAll` (data saved; `.dataset`, `.path`), so a loop over many
+  scans stops too. Catch it only to clean up.
+
+`lab.scan_queue(...)` runs scans one after another and returns the datasets:
+a queue file saved from the Scan tab, or a list of recipes (`.yaml` paths,
+dicts, `Recipe` objects, queue entries). Abort scan goes on with the next one;
+Abort all ends the queue (`exc.datasets` = the scans that ran).
 
 ### `lab.parameters(kind=None)`, `lab.describe(pid)`, `lab.summary()`
 
@@ -248,6 +259,7 @@ Every error the API raises on purpose is an `api.ScriptError`:
 | `RecipeInvalid` | the recipe names unknown parameters or sweeps outside the limits; nothing was moved |
 | `CannotSave` | the data folder cannot be written (checked before the scan starts) |
 | `NoInstruments` | `connect()` found no running service |
+| `ScanStoppedAll` | a routine chose "Abort all"; the measured points are saved (`.dataset`, `.path`) |
 
 An instrument fault during a scan (a dead service, a failed hardware read, a
 camera that lost its pattern) **stops** a scripted scan with `ScanFault`. The

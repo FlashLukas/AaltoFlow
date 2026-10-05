@@ -372,13 +372,13 @@ def _cond_text(spec) -> str:
     return str(spec.get("condition", "")).strip()
 
 
-def _values_text(expr, registry) -> str:
+def _values_text(expr, registry, setpoints=None) -> str:
     """'ppms.temperature = 10.03, ppms.field = 0' -- what a condition sees."""
     from . import expr as _expr
     parts = []
     for pid in expr.names:
         try:
-            parts.append(f"{pid} = {_expr.format_value(_expr.read_value(registry, pid))}")
+            parts.append(f"{pid} = {_expr.format_value(_expr.read_value(registry, pid, setpoints))}")
         except Exception as exc:
             parts.append(f"{pid} = ? ({exc})")
     return ", ".join(parts)
@@ -483,7 +483,7 @@ def add_comment(ctx, text):
     import json
     from . import expr as _expr
     say = ctx.get("log_fn") or (lambda msg: None)
-    filled, bad = _expr.fill_placeholders(str(text), ctx["registry"])
+    filled, bad = _expr.fill_placeholders(str(text), ctx["registry"], ctx.get("current"))
     for pid in bad:
         say(f"comment: warning: {{{pid}}} is not a parameter that can be read "
             f"here -- left as text")
@@ -499,7 +499,7 @@ def add_comment(ctx, text):
     say(f"comment{where}: {filled}")
 
 
-def _computed(p, text, registry) -> float:
+def _computed(p, text, registry, setpoints=None) -> float:
     """compute_set: the formula's value, REFUSED (not clamped) outside limits.
 
     Settable.set clamps silently -- right for a typed setpoint the builder has
@@ -508,7 +508,7 @@ def _computed(p, text, registry) -> float:
     fine. So the step fails, and on_error decides.
     """
     from . import expr as _expr
-    v = _expr.evaluate(str(text), registry)
+    v = _expr.evaluate(str(text), registry, setpoints)
     if isinstance(v, str):
         raise ValueError(f"{p.id} = {text}: the formula gives text ({v!r}), not a number")
     v = float(v)
@@ -637,9 +637,12 @@ def _call(ctx, **args):
         point = int(ctx.get("flat", 0)) + 1
 
         def check():
-            if not _expr.evaluate(expr, registry):
+            # a parameter the scan set for this point is read as its setpoint
+            # (expr.read_value): "this point", not the instrument's last frame
+            setpoints = ctx.get("current")
+            if not _expr.evaluate(expr, registry, setpoints):
                 return
-            seen = _values_text(expr, registry)
+            seen = _values_text(expr, registry, setpoints)
             if kind == "abort_if":
                 where = (f" at {moment}" if moment == "before_scan"
                          else f" at point {point}")
@@ -667,7 +670,7 @@ def _call(ctx, **args):
                     p, box = params[pid], {}
 
                     def do(p=p, pid=pid, text=text, box=box):
-                        v = _computed(p, text, registry)
+                        v = _computed(p, text, registry, ctx.get("current"))
                         say(f"{label}: {pid} = {text} -> {_fmt(p, v)}")
                         p.set(v)
                         box["v"] = v

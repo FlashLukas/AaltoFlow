@@ -428,7 +428,9 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
         if "include_idn" not in kw:
             # the suite setting snapshot_include_idn, in the suite's root
             kw["include_idn"] = include_idn_setting(getattr(reg, "settings_root", None))
-        return take_snapshot(lab, **kw)
+        snap = take_snapshot(lab, **kw)
+        _add_parameter_values(snap, reg, owner, lab)
+        return snap
 
     reg.fault_check = fault_check
     reg.scan_claim = scan_claim
@@ -580,3 +582,40 @@ _BUILDERS = {
     "clMag": _build_clMag,
     "smb": _build_smb,
 }
+
+
+def _add_parameter_values(snap, reg, owner, lab):
+    """Add `values` = {parameter id: value} to each instrument's snapshot entry.
+
+    Why (lab PC, 2026-10-05): the snapshot holds a module's raw get_config /
+    status, whose keys (`sensor.wavelength_nm`) are not the names a person
+    scans with (`pm16.wavelength`), so the catalogue's `where pm16.wavelength
+    > 600` found nothing. Each scalar parameter's current value (the readback
+    or cached status, never a new acquisition) under its SCAN name fixes that.
+    Never raises; arrays and unreadable values are skipped.
+    """
+    import math
+    slug_of = {}
+    for name, inst in getattr(lab, "instruments", {}).items():
+        try:
+            slug_of[name] = module_prefix(inst)
+        except Exception:
+            slug_of[name] = name
+    for pid, name in dict(owner or {}).items():
+        slug = slug_of.get(name)
+        entry = snap.get(slug)
+        p = reg.get(pid)
+        if entry is None or p is None or getattr(p, "axes", None):
+            continue
+        try:
+            v = p.get()
+        except Exception:
+            continue
+        if isinstance(v, bool) or (isinstance(v, (int, float)) and math.isfinite(v)):
+            pass
+        elif isinstance(v, str) and len(v) <= 200:
+            pass
+        else:
+            continue
+        short = pid[len(slug) + 1:] if pid.startswith(slug + ".") else pid
+        entry.setdefault("values", {})[short] = v

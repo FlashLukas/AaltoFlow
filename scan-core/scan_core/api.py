@@ -78,7 +78,7 @@ import numpy as np
 
 from . import autosave
 from .engine import run as _engine_run
-from .errors import RoutineError, ScanAborted, ScanFault
+from .errors import RoutineError, ScanAborted, ScanFault, ScanStopped
 from .recipe import Recipe
 
 
@@ -121,6 +121,16 @@ class CannotSave(ScriptError, OSError):
     """The data cannot be written where it should go."""
 
     dataset = None
+
+
+class ScanStoppedAll(ScriptError):
+    """A routine step chose "Abort all" (abort_if with scope all, a wait_until
+    with on_timeout stop_all, Abort all at a pause): the scan stopped, its
+    measured points are saved (`.dataset`, `.path`), and a script running
+    several scans should stop too -- catch it only to clean up. "Abort scan"
+    does NOT raise: scan() returns the partial dataset, the reason in its
+    attribute `stopped_by` (lab PC, 2026-10-05: both used to arrive as a
+    KeyboardInterrupt "aborted by Ctrl+C", which was wrong twice)."""
 
 
 class NoInstruments(ScriptError):
@@ -682,6 +692,21 @@ class Lab:
         except RoutineError as exc:
             keep(exc.dataset, "the after-scan routine failed")
             raise
+        except ScanStopped as exc:
+            # a ROUTINE stopped it (abort_if, a timed-out wait_until, Abort at
+            # a pause) -- not Ctrl+C. Abort scan: hand back the measured part;
+            # Abort all: ScanStoppedAll, so a script's loop / queue stops too.
+            ds = getattr(exc, "dataset", None)
+            keep(ds, f"stopped by a routine ({exc.reason})")
+            if ds is not None and path is not None:
+                ds.encoding["source"] = str(path)
+                self.last_path = path
+            if exc.whole_queue:
+                err = ScanStoppedAll(f"scan '{r.name}' stopped -- ABORT ALL: {exc.reason}")
+                err.dataset, err.path = ds, path
+                raise err from None
+            self._log(f"scan '{r.name}' stopped by a routine: {exc.reason}")
+            return ds
         except ScanAborted as exc:
             keep(getattr(exc, "dataset", None), "aborted")
             raise self._interrupted(r.name, path, getattr(exc, "dataset", None)) from None
@@ -726,21 +751,51 @@ class Lab:
             self.last_path = path
         if self._aborting:
             raise self._interrupted(r.name, path, ds)
+        if ds.attrs.get("stopped_by"):
+            # a routine stopped it between two points (the engine returned
+            # normally): the same two outcomes as above
+            if ds.attrs.get("stopped_scope") == "all":
+                err = ScanStoppedAll(f"scan '{r.name}' stopped -- ABORT ALL: "
+                                     f"{ds.attrs['stopped_by']}")
+                err.dataset, err.path = ds, path
+                raise err
+            self._log(f"scan '{r.name}' stopped by a routine: {ds.attrs['stopped_by']}"
+                      + (f", saved to {path}" if path else ""))
+            return ds
         self._log(f"scan '{r.name}' done" + (f", saved to {path}" if path else ""))
         return ds
 
     def scan_queue(self, queue) -> list:
-        """Run a saved scan QUEUE (.yaml from the Scan tab) scan after scan.
+        """Run scans one after another: a saved queue file (.yaml from the
+        Scan tab), or a list whose items are queue entries, Recipes, recipe
+        dicts or recipe file paths.
 
-        Returns the datasets. Unlike the GUI queue, Ctrl+C stops the WHOLE
-        queue (it ends the script), and an error stops it too.
+        Returns the datasets of the scans that ran. Like the GUI queue: a
+        routine's "Abort scan" goes on with the next scan, "Abort all"
+        (ScanStoppedAll) ends the queue -- the datasets so far are on the
+        exception as `.datasets`. Ctrl+C and an error also end it.
         """
         from . import scan_queue
-        entries = scan_queue.load_queue_file(queue) if not isinstance(queue, list) else queue
+        if not isinstance(queue, (list, tuple)):
+            entries = scan_queue.load_queue_file(queue)
+        else:
+            entries = list(queue)
         out = []
         for k, e in enumerate(entries):
-            self._log(f"queue: scan {k + 1} of {len(entries)} '{e.name}'")
-            out.append(self.scan(e.named_recipe()))
+            if isinstance(e, scan_queue.QueueEntry):
+                name, recipe = e.name, e.named_recipe()
+            else:                                  # Recipe, dict or path: scan() reads it
+                recipe = e
+                name = getattr(e, "name", None) or (e.get("name") if isinstance(e, dict)
+                                                    else str(e))
+            self._log(f"queue: scan {k + 1} of {len(entries)} '{name}'")
+            try:
+                out.append(self.scan(recipe))
+            except ScanStoppedAll as exc:
+                exc.datasets = out + [exc.dataset]
+                self._log(f"queue: ABORT ALL after scan {k + 1} -- "
+                          f"{len(entries) - k - 1} scan(s) not run")
+                raise
         return out
 
     # ---- internals ---------------------------------------------------------

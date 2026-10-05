@@ -376,3 +376,41 @@ def test_the_examples_run_in_simulation(script, tmp_path, monkeypatch):
         **{**kw, "data_dir": tmp_path, "log": None}))
     runpy.run_path(str(ex / script), run_name="__main__")
     assert list(tmp_path.rglob("*.nc"))
+
+
+# ───── a routine's Abort scan / Abort all, from a script (lab PC, 2026-10-05) ─────
+
+def _stop_recipe(name, scope):
+    return {"name": name,
+            "axes": [{"type": "array", "param": "field", "values": [0, 5, 10, 15]}],
+            "detectors": ["lockin_r"],
+            "hooks": [{"when": "before_point", "action": "abort_if",
+                       "args": {"condition": "field > 7", "scope": scope}}]}
+
+
+def test_abort_scan_returns_the_partial_data_not_a_keyboard_interrupt(tmp_path):
+    with api.connect(simulate=True, data_dir=tmp_path, log=lambda m: None) as lab:
+        ds = lab.scan(_stop_recipe("half", "scan"))
+    assert "field > 7" in ds.attrs["stopped_by"] and ds.attrs["stopped_scope"] == "scan"
+    import numpy as _np
+    assert int(_np.isfinite(ds["lockin_r"].values).sum()) == 2      # 0 and 5 measured
+    assert api.path_of(ds) is not None
+
+
+def test_abort_all_raises_scan_stopped_all_with_the_data(tmp_path):
+    with api.connect(simulate=True, data_dir=tmp_path, log=lambda m: None) as lab:
+        with pytest.raises(api.ScanStoppedAll) as e:
+            lab.scan(_stop_recipe("stop", "all"))
+    assert e.value.dataset is not None and e.value.path is not None
+    assert not isinstance(e.value, KeyboardInterrupt)
+
+
+def test_scan_queue_goes_on_after_abort_scan_and_stops_after_abort_all(tmp_path):
+    plain = {"name": "plain", "axes": [{"type": "array", "param": "field",
+                                        "values": [1, 2]}], "detectors": ["lockin_r"]}
+    with api.connect(simulate=True, data_dir=tmp_path, log=lambda m: None) as lab:
+        out = lab.scan_queue([_stop_recipe("a", "scan"), plain])     # plain dicts accepted
+        assert [d.attrs["name"] for d in out] == ["a", "plain"]
+        with pytest.raises(api.ScanStoppedAll) as e:
+            lab.scan_queue([_stop_recipe("b", "all"), plain])
+        assert [d.attrs["name"] for d in e.value.datasets] == ["b"]   # plain never ran

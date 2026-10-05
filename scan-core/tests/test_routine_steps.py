@@ -545,3 +545,29 @@ def test_an_unknown_scope_is_refused_at_validation():
                hooks=[{"when": "before_point", "action": "abort_if",
                        "args": {"condition": "field > 4", "scope": "everything"}}])
     assert any("scope" in e for e in r.validate(reg))
+
+
+def test_a_condition_on_the_scanned_axis_sees_this_points_setpoint():
+    """Lab PC, 2026-10-05: abort_if on the scanned axis read the instrument's
+    last published status, which still held the PREVIOUS point -- it stopped
+    one point late (and at point 1 after a scan that left the axis elsewhere).
+    Here the axis' readback is deliberately one point behind."""
+    from scan_core.registry import Gettable, Registry, Settable
+    state = {"set": 0.0, "shown": 614.0}          # left at 614 by a previous scan
+
+    def setter(v):
+        state["shown"], state["set"] = state["set"], v   # readback lags one point
+    reg = Registry()
+    reg.add(Settable("wl", "WL", "nm", (0, 1000), setter, lambda: state["shown"]))
+    reg.add(Gettable("d", "D", "", lambda: state["set"]))
+    r = Recipe(name="t", axes=[{"type": "array", "param": "wl",
+                                "values": [610, 611, 612, 613, 614]}],
+               detectors=["d"],
+               hooks=[{"when": "before_point", "action": "abort_if",
+                       "args": {"condition": "wl > 612"}}])
+    try:
+        ds = run(r, reg)
+    except ScanStopped as exc:
+        ds = exc.dataset
+    measured = [v for v in ds["d"].values if not np.isnan(v)]
+    assert measured == [610, 611, 612]             # stops AT 613, not at 614 or 610
