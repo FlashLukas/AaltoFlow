@@ -129,3 +129,29 @@ def test_choosing_the_simulator_stops_following(qapp, tmp_path, monkeypatch, fas
         assert win.lab is None
     finally:
         win.close()
+
+
+def test_a_refused_module_does_not_keep_the_others_out(qapp, fake_service, tmp_path,
+                                                       monkeypatch, fast):
+    """Lab PC 2026-10-05: the scan server on sr830's ports was (rightly) refused
+    as sr830, and that one refusal failed 'Connect all running' for every
+    module. The good ones connect; the bad one is named in the log; following
+    the launcher does not then rebuild the same thing over and over."""
+    import apps.control_panel as cp
+    monkeypatch.setattr(cp, "LAYOUTS_PATH", tmp_path / "layouts.json")
+    good = fake_service(15960, manifest=DEMO_MANIFEST)
+    fake_service(15968, manifest=dict(DEMO_MANIFEST, module="scanserver"))
+    _module(tmp_path, "magnet", good.cmd_port)
+    _module(tmp_path, "lockin", 15968, order=20)
+    win = Suite(root=tmp_path, follow=True)
+    try:
+        assert _pump(qapp, lambda: win.lab is not None), "never connected"
+        assert win.connected_ids == ["magnet"]
+        assert "could not connect lockin" in win.logbox.toPlainText()
+        lab = win.lab
+        _pump(qapp, lambda: False, timeout=1.5)          # a few follow rounds
+        assert win.lab is lab                            # not rebuilt in a loop
+        win.connect_modules(["magnet", "lockin"])        # "Connect all running"
+        assert win.connected_ids == ["magnet"]
+    finally:
+        win.close()

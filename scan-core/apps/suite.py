@@ -889,23 +889,49 @@ class Suite(QtWidgets.QMainWindow):
             endpoints[m.slug] = (host, m.cmd, m.pub)
         label = ", ".join(m.slug for m in specs)
         self.log(("following the launcher: " if auto else "") + f"connecting to {label} ...")
+        def build(slugs):
+            return build_lab_registry(include=tuple(slugs),
+                                      endpoints={s: endpoints[s] for s in slugs},
+                                      prefix=True, on_warn=self.log)
         try:
-            reg, lab = build_lab_registry(include=tuple(endpoints), endpoints=endpoints,
-                                          prefix=True, on_warn=self.log)
+            reg, lab = build(list(endpoints))
         except Exception as exc:
-            # A service that is not running is the overwhelmingly common case,
-            # so say which and stay where we are rather than dying.
-            self.log(f"connect failed: {exc}")
-            if auto:
-                self._failed_set = frozenset(m.id for m in specs)
-            return
+            # One bad service (not running, or -- found on the lab PC
+            # 2026-10-05 -- another service on its port) must not keep the
+            # good ones out: try each alone, then connect the ones that work.
+            good = []
+            for s in endpoints:
+                try:
+                    _r, _l = build([s])
+                    _l.close()
+                    good.append(s)
+                except Exception as one:
+                    self.log(f"could not connect {s}: {one}")
+            if not good or len(endpoints) == 1:
+                self.log(f"connect failed: {exc}")
+                if auto:
+                    self._failed_set = frozenset(m.id for m in specs)
+                return
+            try:
+                reg, lab = build(good)
+            except Exception as exc2:
+                self.log(f"connect failed: {exc2}")
+                if auto:
+                    self._failed_set = frozenset(m.id for m in specs)
+                return
+            tried = frozenset(m.id for m in specs)
+            specs = [m for m in specs if m.slug in good]
+        else:
+            tried = None
 
         if self.lab is not None:
             self.lab.close()
         reg.settings_root = self.root      # snapshot_include_idn is read there
         self.registry, self.lab = reg, lab
         self.connected_ids = [m.id for m in specs]
-        self._failed_set = None
+        # connected only PART of what was asked: remember the whole set, so
+        # following the launcher does not rebuild this every few seconds
+        self._failed_set = tried
         self._last_note = ""
         self._adopt_source()
         self._refresh_module_tree()
