@@ -226,6 +226,23 @@ frame (`last_deep()`).
 
 ## Open work
 
+- **Scan server, phase 2** (phase 1 DONE 2026-10-05, branch `scan-server`:
+  the scan engine as a service, `scan_core/scan_server.py`; start a scan on
+  the lab PC, watch / abort / answer it from any PC -- scan-core README "The
+  scan server", developer notes 4f). Phase 2: (a) DEFINE and SUBMIT scans
+  from the office: the Scan tab must then build against the SERVER's
+  registry (its parameters and live limits, not this PC's), the submit
+  rule "same PC only" is replaced by control, and the run info comes from
+  the submitting PC; (b) EDIT a running queue: add, remove and reorder the
+  scans not yet started (verbs like `queue_add` / `queue_remove` /
+  `queue_move` against the server's queue); (c) maybe: fetch a finished
+  file from the server (today only its path on the server's PC is shown);
+  (d) the run info card and per-point box are still shown while watching,
+  though they only matter when submitting -- hide them in watch-only mode.
+  Also not on hardware yet: the first lab test = start the card on the lab
+  PC, tick "Run scans on this PC's scan server", run a short kim + hf2 scan,
+  watch it from the office (Add remote... lab PC, port 5631).
+
 - **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
   suite's Catalogue tab, `scan_core/catalogue.py`, `python -m
   scan_core.catalogue`; see the scan-core README and developer notes 4c).

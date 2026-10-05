@@ -28,8 +28,16 @@ the result plot -- unparented, and the Measurement tab adopts those same
 widgets. One implementation, driven by the same tested code, shown in two
 places.
 
+THE SCAN SERVER (2026-10-05, scan_core/scan_server.py): scans can also run in
+a service of their own instead of in this window. Settings tab: "Run scans on
+this PC's scan server" sends Run there, and "Watch scan server" shows any
+server's scan -- this PC's, or the lab PC's from the office -- on the
+Measurement tab (apps/scan_server_view.py). Off by default: then everything is
+exactly as before.
+
 Run it:
     uv run python apps/suite.py [--theme light] [--no-follow] [--modules clMag,smb]
+    uv run python apps/suite.py --scan-server lab-pc:5631     # watch that server
 """
 
 from __future__ import annotations
@@ -52,7 +60,11 @@ from apps.control_panel import ControlPanel
 from apps.navigator import NavigatorWidget
 from aaltoview.apps.viewer import ViewerWidget
 from apps.scan_builder import ScanBuilder
+from apps.scan_server_view import ServerWatch, parse_target
 from apps.theme import C, DEFAULT_THEME, apply, set_theme
+
+#: suite_local.json setting: Run sends scans to THIS PC's scan server
+SETTING_RUN_ON_SERVER = "run_on_scan_server"
 
 AVAILABILITY_PERIOD_S = 2.0
 
@@ -64,7 +76,8 @@ class _Availability(QtCore.QObject):
 
 class Suite(QtWidgets.QMainWindow):
     def __init__(self, host: str = "localhost", modules=(), out_dir: Path | None = None,
-                 root: Path | None = None, follow: bool = False):
+                 root: Path | None = None, follow: bool = False,
+                 scan_server: str | None = None):
         super().__init__()
         self.host = host
         self.root = root
@@ -72,6 +85,11 @@ class Suite(QtWidgets.QMainWindow):
         self.connected_ids: list[str] = []
         self.found = None
         self.available: set[str] = set()
+        #: the SCAN SERVER the Measurement tab is watching (ServerWatch), or None
+        self.watch: ServerWatch | None = None
+        #: scan servers discovery knows ("this PC" and the ones added with
+        #: Add remote... in Mission Control): [(label, "host:cmd:pub")]
+        self.server_choices: list[tuple[str, str]] = []
         self._last_note = ""
         self._failed_set: frozenset | None = None
         self.registry = build_sim_registry()
@@ -123,7 +141,14 @@ class Suite(QtWidgets.QMainWindow):
         self.catalogue = CatalogueWidget(self.out_dir, open_file=self.open_in_viewer,
                                          on_log=self.log)
         self.tabs.addTab(self.catalogue, "Catalogue")
-        self.tabs.addTab(self._build_settings(follow), "Settings")
+        # in a scroll area: with the SCAN SERVER card (2026-10-05) the page no
+        # longer fits a short window, and a squeezed page draws the module
+        # list's buttons over the list
+        settings_scroll = QtWidgets.QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        settings_scroll.setWidget(self._build_settings(follow))
+        self.tabs.addTab(settings_scroll, "Settings")
         # Opening the Scan tab re-reads the live limits: the ranges you are
         # about to type into should be the instrument's current ones.
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -146,6 +171,14 @@ class Suite(QtWidgets.QMainWindow):
 
         if modules:
             QtCore.QTimer.singleShot(200, lambda: self.connect_modules(modules))
+        if scan_server:
+            # opened from the "Scan server" card: watch it, on the Measurement tab
+            self.watch_server(scan_server)
+            self.tabs.setCurrentIndex(
+                [self.tabs.tabText(i) for i in range(self.tabs.count())].index("Measurement"))
+        elif self.run_on_server_box.isChecked():
+            # this PC runs its scans on its scan server: show that one
+            QtCore.QTimer.singleShot(0, self._watch_local_server)
 
         self.clock = QtCore.QTimer(self)
         self.clock.timeout.connect(self._tick)
@@ -176,7 +209,9 @@ class Suite(QtWidgets.QMainWindow):
 
     def scan_running(self) -> bool:
         # A queue counts between its scans too: following the launcher then
-        # would swap the registry under the next scan.
+        # would swap the registry under the next scan. (A scan on a SCAN SERVER
+        # does not count: it runs on the server's own connections, and this
+        # window's registry can change under it without harm.)
         return (self.builder.worker is not None and self.builder.worker.isRunning()
                 or self.builder.queue_running())
 
@@ -211,6 +246,36 @@ class Suite(QtWidgets.QMainWindow):
         h.addWidget(self.hint)
         v.addWidget(strip)
         self.builder.on_status = self._show_status
+
+        # WATCHING A SCAN SERVER: whose scan this tab shows, who has control of
+        # the server, and the way back to running scans in this window. Hidden
+        # unless a server is watched (Settings tab, or the Scan server card).
+        self.server_strip = QtWidgets.QFrame(); self.server_strip.setObjectName("card")
+        self.server_strip.setStyleSheet(
+            f"QFrame#card {{ border: 1px solid {C['accent']}; border-radius: 6px; }}")
+        sh = QtWidgets.QHBoxLayout(self.server_strip); sh.setContentsMargins(14, 6, 14, 6)
+        self.server_lbl = QtWidgets.QLabel("")
+        self.server_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:700;")
+        self.server_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        sh.addWidget(self.server_lbl)
+        sh.addSpacing(16)
+        self.server_ctrl_lbl = QtWidgets.QLabel("")
+        self.server_ctrl_lbl.setStyleSheet(f"color:{C['muted']};")
+        sh.addWidget(self.server_ctrl_lbl, 1)
+        self.server_ctrl_btn = QtWidgets.QPushButton("Take control")
+        self.server_ctrl_btn.setToolTip(
+            "Control of the scan server: who may answer its pause questions, clear\n"
+            "faults and start scans. Abort and Stop queue are always allowed, for\n"
+            "every PC. Nobody holding control = everyone may act.")
+        self.server_ctrl_btn.clicked.connect(self._server_control_clicked)
+        sh.addWidget(self.server_ctrl_btn)
+        unwatch = QtWidgets.QPushButton("Stop watching")
+        unwatch.setToolTip("Back to running scans in this window. The server's scan\n"
+                           "goes on: closing a window never stops it.")
+        unwatch.clicked.connect(self.stop_watching)
+        sh.addWidget(unwatch)
+        self.server_strip.hide()
+        v.addWidget(self.server_strip)
 
         # The builder's own run pane, adopted rather than reimplemented.
         v.addWidget(self.builder.right_pane, 1)
@@ -284,6 +349,9 @@ class Suite(QtWidgets.QMainWindow):
         self.hint.setVisible(not text)
 
     def _tick(self):
+        if self.watch is not None and self.builder.worker is None:
+            self._tick_server()
+            return
         if self.scan_running():
             if getattr(self, "_t0", None) is None:
                 self._t0 = time.monotonic()
@@ -297,6 +365,164 @@ class Suite(QtWidgets.QMainWindow):
                 self.log("scan finished")
                 self._t0 = None
             self.run_state.setText("idle")
+
+    # ---- the SCAN SERVER (scan_core/scan_server.py) ------------------------
+    #
+    # A scan server runs scans in its own process on the lab PC; this window
+    # can WATCH one (phase 1): its Measurement tab then shows the server's
+    # scan with the same widgets as a scan of its own. On the server's own PC,
+    # with "Run scans on this PC's scan server" ticked, Run submits there.
+
+    def watch_server(self, target: str) -> ServerWatch | None:
+        """Show the scan of the server at 'host[:cmd[:pub]]' on the Measurement tab."""
+        if self.builder.worker is not None or self.builder.queue_running():
+            self.log("a scan is running in this window -- let it end (or Abort it) "
+                     "before watching a scan server")
+            return None
+        if self.watch is not None:
+            self.stop_watching(quiet=True)
+        host, cmd, pub = parse_target(target)
+        w = ServerWatch(host, cmd, pub, parent=self)
+        w.status.connect(self._on_server_status)
+        w.log_lines.connect(self._on_server_log)
+        w.live.connect(self.builder.show_server_dataset)
+        w.connection.connect(self._on_server_connection)
+        self.watch = w
+        self.builder.attach_server(w, can_submit=self._may_submit(w))
+        self.server_strip.show()
+        self._sync_server_header()
+        if hasattr(self, "watch_edit"):
+            self.watch_edit.setText(f"{host}:{cmd}" + (f":{pub}" if pub else ""))
+        self.log(f"watching the scan server on {host}:{cmd}")
+        return w
+
+    def stop_watching(self, quiet: bool = False) -> None:
+        """Back to running scans in this window; the server's scan goes on."""
+        w, self.watch = self.watch, None
+        if w is None:
+            return
+        self.builder.detach_server()
+        w.close()
+        w.deleteLater()
+        self.server_strip.hide()
+        if not quiet:
+            self.log(f"stopped watching the scan server on {w.label} "
+                     f"(its scan, if any, goes on)")
+
+    def _may_submit(self, w) -> bool:
+        return bool(self.run_on_server_box.isChecked() and w is not None and w.is_local())
+
+    def _local_server_target(self) -> str | None:
+        found = self.found or discover(self.root)
+        m = next((m for m in found.modules if m.key == "scanserver" and not m.remote), None)
+        return f"localhost:{m.cmd}:{m.pub}" if m is not None else None
+
+    def _watch_local_server(self) -> None:
+        target = self._local_server_target()
+        if target is None:
+            self.log("no scan server on this PC (scan-core/module.toml missing?)")
+            return
+        if self.watch is not None and self.watch.is_local():
+            self.builder.server_submit = self._may_submit(self.watch)
+            self.builder.attach_server(self.watch, can_submit=self.builder.server_submit)
+            return
+        self.watch_server(target)
+
+    def _run_on_server_toggled(self, on: bool) -> None:
+        try:
+            set_setting(SETTING_RUN_ON_SERVER, bool(on) or None, root=self.root)
+        except OSError as exc:
+            self.log(f"setting not remembered: {exc}")
+        if on:
+            self.log("Run now starts scans on this PC's scan server (start its card in "
+                     "Mission Control if it is not running)")
+            self._watch_local_server()
+        elif self.watch is not None:
+            self.builder.attach_server(self.watch, can_submit=False)
+            self.log("Run no longer goes to the scan server (still watching it; "
+                     "'Stop watching' to run scans in this window)")
+
+    def _watch_clicked(self) -> None:
+        text = self.watch_edit.text().strip()
+        if not text:
+            self.log("type host:port of a scan server, or pick one from the list")
+            return
+        self.watch_server(text)
+
+    def _on_server_status(self, st: dict) -> None:
+        if self.watch is None:
+            return
+        self.builder.server_submit = self._may_submit(self.watch)
+        self.builder.show_server_status(st)
+        self._sync_server_header()
+
+    def _on_server_log(self, lines) -> None:
+        for line in lines:
+            stamp, sep, msg = str(line).partition("  ")
+            self.log(f"[server {stamp}] {msg}" if sep else f"[server] {line}")
+
+    def _on_server_connection(self, ok: bool, why: str) -> None:
+        if self.watch is None:
+            return
+        if ok:
+            self.log(f"scan server {self.watch.label} answers")
+        else:
+            self.log(f"scan server {self.watch.label} NOT answering ({why}) -- "
+                     f"its scan, if any, is not affected; retrying")
+        self._sync_server_header()
+
+    def _sync_server_header(self) -> None:
+        w = self.watch
+        if w is None:
+            return
+        st = w.last or {}
+        where = "this PC" if w.is_local() and st else (st.get("pc") or w.host)
+        setup = st.get("setup_name") or ""
+        text = f"watching scan server on {where}" + (f" (setup {setup})" if setup else "")
+        if not w.answering:
+            text += "  --  NOT ANSWERING"
+        self.server_lbl.setText(text)
+        state, ctrl = w.control_text()
+        mode = ("Run starts scans on it" if self.builder.server_submit else
+                "watch only: starting scans from here is phase 2")
+        self.server_ctrl_lbl.setText(f"{ctrl}   ·   {mode}")
+        self.server_ctrl_btn.setText("Release control" if state == "you" else "Take control")
+
+    def _server_control_clicked(self) -> None:
+        w = self.watch
+        if w is None:
+            return
+        state, text = w.control_text()
+        if state == "you":
+            ok, why = w.release_control()
+            self.log("scan server: control released" if ok else f"release failed: {why}")
+        else:
+            force = False
+            if state == "other":
+                ans = QtWidgets.QMessageBox.question(
+                    self, "Take control of the scan server",
+                    f"{text}.\n\nTake control from them? They become a viewer "
+                    "(Abort and Stop queue stay allowed for everyone).")
+                if ans != QtWidgets.QMessageBox.Yes:
+                    return
+                force = True
+            ok, why = w.take_control(force=force)
+            self.log("scan server: you have control" if ok else
+                     f"scan server: control not taken {why}".rstrip())
+        self._sync_server_header()
+
+    def _tick_server(self) -> None:
+        w = self.watch
+        st = w.last or {}
+        if not w.answering:
+            self.run_state.setText("NOT ANSWERING")
+        else:
+            self.run_state.setText({"running": "RUNNING", "paused": "PAUSED",
+                                    "waiting_operator": "YOUR TURN"}.get(
+                                        st.get("state"), "idle"))
+        secs = int(st.get("elapsed_s") or 0)
+        self.elapsed_lbl.setText(f"elapsed {secs // 60}:{secs % 60:02d}")
+        self._show_status(st.get("where") or "" if st.get("busy") else "")
 
     # ---- Settings --------------------------------------------------------
 
@@ -381,6 +607,52 @@ class Suite(QtWidgets.QMainWindow):
             lambda on: set_setting("snapshot_include_idn", bool(on), root=self.root))
         o.addWidget(self.idn_box)
         v.addWidget(out)
+
+        # THE SCAN SERVER: run scans in a service instead of this window, and
+        # watch a server's scan (this PC's, or the lab PC's from the office)
+        srv = QtWidgets.QFrame(); srv.setObjectName("card")
+        s = QtWidgets.QVBoxLayout(srv); s.setContentsMargins(14, 14, 14, 14); s.setSpacing(8)
+        s.addWidget(self._tag("SCAN SERVER"))
+        note3 = QtWidgets.QLabel(
+            "A scan server runs scans in its own process (Mission Control: the 'Scan "
+            "server' card). A scan there keeps running when this window closes, and any "
+            "PC can watch it: progress, the live map, the log, the pause banners, Abort. "
+            "Starting scans works from the server's own PC (watching works from anywhere). "
+            "To watch the lab PC from the office: Mission Control > Add remote... with the "
+            "lab PC's name and port 5631, then pick it below.")
+        note3.setWordWrap(True); note3.setStyleSheet(f"color:{C['muted']};")
+        s.addWidget(note3)
+        self.run_on_server_box = QtWidgets.QCheckBox(
+            "Run scans on this PC's scan server (instead of in this window)")
+        self.run_on_server_box.setToolTip(
+            "Run and a loaded queue go to the scan server of this PC; the Measurement\n"
+            "tab shows its scan. Off (the default): scans run in this window, as always.\n"
+            "Remembered on this PC (suite setting run_on_scan_server).")
+        self.run_on_server_box.setChecked(bool(get_setting(SETTING_RUN_ON_SERVER, False,
+                                                           root=self.root)))
+        self.run_on_server_box.toggled.connect(self._run_on_server_toggled)
+        s.addWidget(self.run_on_server_box)
+        wrow = QtWidgets.QHBoxLayout()
+        wrow.addWidget(QtWidgets.QLabel("Watch scan server"))
+        self.watch_combo = QtWidgets.QComboBox()
+        self.watch_combo.setMinimumWidth(240)
+        self.watch_combo.setToolTip("Scan servers the launcher knows: this PC's, and the ones\n"
+                                    "added with Add remote... in Mission Control.")
+        self.watch_combo.activated.connect(
+            lambda i: self.watch_edit.setText(self.watch_combo.itemData(i) or ""))
+        wrow.addWidget(self.watch_combo)
+        self.watch_edit = QtWidgets.QLineEdit("")
+        self.watch_edit.setPlaceholderText("host:port, e.g. lab-pc:5631")
+        self.watch_edit.returnPressed.connect(self._watch_clicked)
+        wrow.addWidget(self.watch_edit, 1)
+        wb = QtWidgets.QPushButton("Watch"); wb.setObjectName("primary")
+        wb.clicked.connect(self._watch_clicked)
+        wrow.addWidget(wb)
+        sb = QtWidgets.QPushButton("Stop watching")
+        sb.clicked.connect(self.stop_watching)
+        wrow.addWidget(sb)
+        s.addLayout(wrow)
+        v.addWidget(srv)
 
         theme = QtWidgets.QLabel(
             "Theme is chosen at launch: apps/suite.py --theme light. "
@@ -484,7 +756,12 @@ class Suite(QtWidgets.QMainWindow):
                 return
 
     def _on_availability(self, found, up):
-        self.found, self.available = found, set(up)
+        # Only INSTRUMENTS are connected: a scan server (a service that drives
+        # instruments, suite_common COORDINATOR_KEYS) is watched, not built
+        # into the registry -- it goes into the Watch list instead.
+        instruments = {m.id for m in found.modules if m.is_instrument}
+        self.found, self.available = found, set(up) & instruments
+        self._refresh_server_choices(found, set(up))
         self._refresh_module_tree()
 
         connected = set(self.connected_ids)
@@ -509,6 +786,25 @@ class Suite(QtWidgets.QMainWindow):
             return
         self.connect_modules(sorted(wanted), auto=True)
 
+    def _refresh_server_choices(self, found, up: set) -> None:
+        """The Watch list: every scan server discovery knows, answering or not."""
+        choices = []
+        for m in found.modules:
+            if m.is_instrument:
+                continue
+            where = f"{m.host}" if m.remote else "this PC"
+            state = "running" if m.id in up else "down"
+            host = m.host if m.remote else "localhost"
+            choices.append((f"{m.name} - {where} ({state})", f"{host}:{m.cmd}:{m.pub}"))
+        if choices == self.server_choices:
+            return
+        self.server_choices = choices
+        self.watch_combo.clear()
+        for label, target in choices:
+            self.watch_combo.addItem(label, target)
+        if choices and not self.watch_edit.text().strip():
+            self.watch_edit.setText(choices[0][1])
+
     def _note(self, msg: str):
         """Log a message once, not every availability tick."""
         if msg != self._last_note:
@@ -521,6 +817,8 @@ class Suite(QtWidgets.QMainWindow):
         if self.found is None:
             return
         for m in self.found.modules:
+            if not m.is_instrument:
+                continue                   # the scan server: Watch list, below
             up = m.id in self.available
             where = f"remote {m.host}" if m.remote else (m.dir.name if m.dir else "")
             item = QtWidgets.QTreeWidgetItem(
@@ -673,6 +971,10 @@ class Suite(QtWidgets.QMainWindow):
         # and the after-scan routine must get to run (2026-09-28).
         if not self.builder.stop_for_close():
             self.log("the scan did not stop within 30 s; closing anyway")
+        # A scan on a SCAN SERVER is NOT stopped: only our connection closes.
+        # That the scan outlives the window is the whole point of the server.
+        if self.watch is not None:
+            self.watch.close()
         if self.lab is not None:
             self.lab.close()
         super().closeEvent(event)
@@ -690,6 +992,9 @@ def main(argv=None) -> int:
                          "set on the Settings tab, is left as it is)")
     ap.add_argument("--no-follow", action="store_true",
                     help="do not connect automatically to what the launcher is running")
+    ap.add_argument("--scan-server", default=None, metavar="HOST[:CMD[:PUB]]",
+                    help="watch the scan server there on the Measurement tab "
+                         "(what the 'Scan server' card opens)")
     args = ap.parse_args(argv)
 
     set_theme(args.theme or DEFAULT_THEME)      # BEFORE any widget is built
@@ -707,7 +1012,8 @@ def main(argv=None) -> int:
     # An explicit --modules list is a choice; following would override it.
     win = Suite(host=args.connect, modules=modules,
                 out_dir=Path(args.out_dir) if args.out_dir else None,
-                follow=not args.no_follow and not modules)
+                follow=not args.no_follow and not modules,
+                scan_server=args.scan_server)
     win.show()
     return app.exec()
 

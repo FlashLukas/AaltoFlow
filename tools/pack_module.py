@@ -114,7 +114,8 @@ def make_pack(keys: list[str], wheels: bool = False, python: str | None = None,
               out_dir: Path = ROOT / "dist" / "modules", say=print) -> Path:
     """Build one pack of the given modules; returns the .zip. (Also used by
     tools/release_modules.py, once per module.)"""
-    mods = {m.key: m for m in discover_local(ROOT)[0]}
+    # not a suite project (scan-core's scan server): it ships with its project
+    mods = {m.key: m for m in discover_local(ROOT)[0] if not m.suite_project}
     missing = [k for k in keys if k not in mods]
     if missing:
         raise PackError(f"unknown module(s): {', '.join(missing)} -- known: {', '.join(mods)}")

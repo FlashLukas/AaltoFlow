@@ -492,7 +492,11 @@ still assumes piezo/zpiezo.
   | 32 | hp8648-control | `hp8648` | 5619 | 5620 | set-and-forget (SignalSource) |
   | 33 | sr7230-control | `sr7230` | 5621 | 5622 | set-and-forget + settle-aware acquire (lock-in) |
   | 34 | k2450-control | `k2450` | 5623 | 5624 | set-and-forget + fresh-reading acquire (SourceMeter) |
-  | 35 | *next module* |          | 5625 | 5626 | |
+  | 35 | shsg-control | `shsg` | 5625 | 5626 | (see its module.toml) |
+  | 36 | shsna-control | `shsna` | 5627 | 5628 | (see its module.toml) |
+  | 37 | usb6001-control | `usb6001` | 5629 | 5630 | (see its module.toml) |
+  | 38 | scan-core (scan server) | `scanserver` | 5631 | 5632 | coordination: runs scans as a service (section 4f) |
+  | 39 | *next module* |          | 5633 | 5634 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander
   (owns REP, `poll(200)`). The loop must never be allowed to die: catch the
@@ -762,6 +766,115 @@ which runs as a routine of that one step.
   they differ from the default, so a definition re-saves unchanged. The
   `pause` banner (`ScanWorker.ask` signal -> `ScanBuilder._on_ask`) is amber,
   non-modal, and answered with `answer_pause(True/False)`.
+
+### 4f. The scan server: start on the lab PC, watch from anywhere (2026-10-05)
+
+**Why.** Lukas: "you can connect to a gui of any running instrument as this
+is a service... but scan core runs on a single computer so this cannot be
+controlled remotely.... I would like to set a measurement on a lab pc but
+then observe/set on my office pc". Until now the engine ran inside the
+measurement suite's window: close it and the scan stops, sit elsewhere and you
+see nothing. `scan_core/scan_server.py` puts the engine into a SERVICE with
+the wire contract of section 4; every measurement suite is a client.
+
+**Phase 1 (built): WATCH.** A suite on the server's PC submits a scan or a
+queue; any suite watches it live and can Abort / Continue / Abort all / Stop
+queue / clear a fault. The scan does not depend on any window. **Phase 2
+(open):** define and submit scans from another PC (the recipe validated
+against the SERVER's registry, the run info from the submitting PC), and edit
+a running queue (add / remove / reorder the scans not yet started). ROADMAP.
+
+**What it reuses.** `engine.run` with the same callbacks the suite's
+`ScanWorker` passes (abort flag + `Lab.set_abort`, `on_fault` = pause,
+`on_pause` = operator question, `on_point` snapshots); `autosave` for file
+names, checkpoints (every 1/10 of a scan over 100 points) and atomic writes;
+the run info a client sends as attributes; provenance (setup_name of the
+SERVER's PC) and the snapshot from the engine. Instruments: the suite's
+"follow the launcher" on its own PC (discover + probe every 3 s while idle,
+`build_lab_registry(prefix=True)`; a module that answers TCP but fails is
+dropped alone, not with the others). A submitted recipe that does not
+validate triggers one forced re-follow (a module started a second ago), then
+is refused.
+
+**Wire.** Key `scanserver` (describe "module", module.toml, security policy),
+ports 5631/5632. PUB: `status` ~2 Hz, `event` {level, msg, n} per log line,
+`live` {live_rev} -- only a NOTICE; the data is fetched with `get_live`, so a
+large map never rides the PUB socket.
+
+| verb | args | needs control | notes |
+|---|---|---|---|
+| `status`, `info`, `describe`, `get_config` | | no | universal |
+| `get_log` | `since` | no | `{lines, first, next}` (5000 kept) |
+| `get_live` | `have_rev` | no | `{live_rev, data}` = netCDF bytes, zlib, base64 (`dataset_to_text`); `unchanged` when not newer |
+| `submit` | `recipe` (dict), `name`, `attrs`, `allow_unsaved` | yes* | phase 1: from THIS PC only; refused while busy, when invalid, when the data folder cannot be written (unless allow_unsaved) |
+| `submit_queue` | `entries` [{name, recipe, attrs}], `attrs` | yes* | all validated before anything runs |
+| `abort` | | **never** (safety) | the current scan; a queue goes on (the suite's Abort) |
+| `stop_queue` | | **never** (safety) | this scan AND the rest |
+| `answer_pause` | `answer` true / false / "all" | yes* | the `pause` step's Continue / Abort scan / Abort all |
+| `clear_fault` | `module` | yes* | forwarded to that module (`Lab.clear_fault`) |
+| `set_config` | `{server: {live_every_s}}` | yes* | `data_dir` is shown, never set over the wire |
+| `shutdown` | | never | while a scan runs: ABORT it and the queue, wait for the after-scan routine and the save, then exit |
+
+\* "needs control" = refused when ANOTHER PC holds control of the server
+(`suite_common.control`, used directly: scan-core depends on suite-common, so
+no copy). Nobody holding control = allowed, as for every module.
+
+Status keys: `state` (idle / running / paused / waiting_operator), `busy`,
+`scan`, `started_by`, `queue` {pos, n, names, results [[name, outcome, path]],
+stop_reason, summary}, `done`, `total`, `progress`, `eta_s`, `queue_eta_s`,
+`elapsed_s`, `scan_elapsed_s`, `where` (the suite's status line) +
+`where_axes`, `now`, `faults` [{module, message, can_clear}], `pause_message`,
+`save_path`, `last_saved`, `save_error`, `live_rev`, `log_tail`, `log_n`,
+`error`, `pc`, `setup_name`, `data_dir`, `modules`, `phase`, `control`,
+`describe_rev`. Deliberately NO `fault` / `hw_error` key: those mean "do not
+trust my readings" to a scan engine, and the server is not an instrument.
+
+**Decisions and why.**
+- *Abort is a safety verb.* Whoever sees a scan going wrong must be able to
+  stop it, and above all the PC that started a scan must never be locked out
+  of its Abort because somebody else took control. `stop_queue` likewise (the
+  "Abort all" of a queue). Answers and clear_fault change what the scan does
+  next, so they follow control.
+- *"Same PC" for submit* = the PC part of the request's client identity
+  (`control.pc_of`, "user@PC") equals the server's hostname. With encryption
+  on, `secure.Guard.check` has already checked that name against the key that
+  sent the request; with it off it is self-declared -- like all of control, a
+  guard against mistakes, not security. A request without an identity is
+  refused.
+- *Shutdown aborts instead of refusing.* Mission Control kills a service
+  whose shutdown is refused; a kill would lose the after-scan routine and the
+  final save. Mission Control asks before stopping a busy scan server and
+  waits up to 30 s (not 8) for it to exit.
+- *The server is not an instrument.* `suite_common.modules.COORDINATOR_KEYS`
+  / `ModuleSpec.is_instrument`: the suite's follow-the-launcher, the server's
+  own follow and `scan_core.api` never build parameters from it; the suite
+  lists it under Settings > SCAN SERVER instead.
+- *Where the module.toml lives:* `scan-core/module.toml` (service
+  `scripts/run_scan_server.py`, GUI `scripts/run_gui.py` = the suite with
+  `--scan-server HOST:PORT`). The scan server IS scan-core: one environment,
+  one lock file, started by Mission Control with scan-core's own .venv python.
+  A thin `modules/coordination/scanserver-control` folder would have needed a
+  second environment of all of scan-core (and a second AaltoView pin, gotcha
+  #33). The exception is written once: `suite_common.modules.SUITE_PROJECTS`
+  / `ModuleSpec.suite_project` -- not a legacy flat folder (migrate_layout
+  never moves it), installed with the "scan" component (installer), never in
+  catalog.json or a module pack, and check_modules skips the copies check
+  (it imports the masters) and hwlock (it owns no hardware). Category
+  `coordination` was added for it.
+
+**Suite side** (`apps/scan_server_view.py`, `ScanBuilder.attach_server`):
+`ServerWatch` keeps TWO connections -- a poll client (status, log, live data
+off the GUI thread) and a command client (Abort, answers, control), so an
+Abort never waits behind a large live-map transfer. The Measurement tab shows
+the server's scan in its usual widgets (progress, DataView fed with the
+datasets from `get_live`, the PAUSED and YOUR TURN banners, queue line, Stop
+queue) plus a header "watching scan server on <host> (setup <name>)" with
+Take control / Release and Stop watching. Settings > SCAN SERVER: "Run scans
+on this PC's scan server" (setting `run_on_scan_server`, default OFF = the
+old in-process behaviour, untouched) and "Watch scan server" (discovered
+servers, local and Add remote... ones, or host:port). The data files stay on
+the server's PC: the pane shows their path there (no file transfer in phase
+1). Closing the suite closes its connections only.
 
 ---
 

@@ -20,6 +20,8 @@ from suite_common.modules import discover_local               # noqa: E402
 
 def main() -> int:
     mods, problems = discover_local(ROOT)
+    # a suite project (scan-core's scan server) is not a downloadable module
+    mods = [m for m in mods if not m.suite_project]
     for p in problems:
         print("problem:", p)
     out = ROOT / CATALOG_FILE

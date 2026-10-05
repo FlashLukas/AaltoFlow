@@ -625,6 +625,56 @@ starts; **Stop queue** ends all of it; an error stops the queue.
 
 ![a queue running](../front-panels/suite-queue.png)
 
+## The scan server: start on the lab PC, watch from the office
+
+Normally a scan runs inside the measurement suite's window: close the window
+and it stops, sit at another PC and you see nothing. The **scan server** runs
+scans in a service of their own (`scan_core/scan_server.py`), with the same
+wire contract as an instrument module, and every suite -- on the lab PC or in
+the office -- becomes a client of it. Closing a suite never stops its scan.
+
+**On the lab PC**
+
+1. Mission Control: start the **Scan server** card (ports 5631/5632). It
+   connects to the instrument modules running on that PC by itself (as the
+   suite's "Follow the launcher" does) and reconnects when that changes and
+   no scan runs.
+2. Measurement suite, Settings tab, **SCAN SERVER**: tick *Run scans on this
+   PC's scan server*. From now on **Run** (and a loaded queue) go to the
+   server; the Measurement tab shows the server's scan. Files go to the data
+   folder of that PC, named and checkpointed exactly as before, with the run
+   info you typed.
+
+**In the office**
+
+1. Mission Control, **Add remote...**: the lab PC's name, port 5631 (pub
+   5632). A "Scan server" card for the lab PC appears; its **GUI** button
+   opens the measurement suite watching it. (Or: Settings tab > *Watch scan
+   server* > pick it, or type `lab-pc:5631`.) The lab PC's firewall must let
+   the office reach ports 5631-5632.
+2. The Measurement tab then says *watching scan server on lab-pc (setup ...)*
+   and shows the scan live: progress, ETA, where it is, the live map, the
+   server's log (lines marked `[server ...]`), the PAUSED fault banner with
+   *Clear fault on ...*, the operator banner (*Continue / Abort scan / Abort
+   all*), **Abort** and **Stop queue**. The data stays on the lab PC: the pane
+   shows the file's path there.
+
+![the Measurement tab watching a scan server](../front-panels/suite-watch.png)
+
+**Who may do what.** Watching is free for everyone. **Abort** and **Stop
+queue** are always allowed, from every PC (safety -- like a stage's STOP).
+Answering a pause, clearing a fault and starting scans follow control: when
+another PC holds control of the server they are refused; the header's
+**Take control** takes it (asking first if someone else has it). Starting a
+scan is possible from the server's own PC only -- that is phase 2 (see
+docs/ROADMAP.md), as is editing a running queue. Stopping the Scan server card
+while it runs a scan asks first, then aborts the scan (the points so far are
+saved, the after-scan routine runs) and exits.
+
+From a script or a console the same works with
+`scan_core.scan_server_client.ScanServerClient` (`submit`, `status`,
+`get_live`, `abort`, ...). Details: docs/DEVELOPER_NOTES.md, section 4f.
+
 ## Run info, instrument snapshots, and recalling settings
 
 **Run info.** The **RUN INFO** line under the scan name (click the arrow to
@@ -675,7 +725,7 @@ recalling.
 ## Tests
 
 ```bash
-uv run pytest -q        # 547 pass + 2 skipped (2026-10-04), all offline
+uv run pytest -q        # 819 pass + 3 skipped (2026-10-05), all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so

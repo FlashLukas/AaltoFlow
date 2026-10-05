@@ -849,6 +849,16 @@ uv run python examples/temperature_series.py   # a scripted experiment (sim)
 
 Scripts (set, wait, scan in a loop): [docs/SCRIPTING.md](docs/SCRIPTING.md).
 
+**Start a scan on the lab PC, watch it from the office.** Start the **Scan
+server** card in Mission Control on the lab PC and tick *Run scans on this
+PC's scan server* on the measurement suite's Settings tab: scans then run in
+that service, not in the window, and keep running when a window closes. In
+the office, **Add remote...** the lab PC (port 5631) and press the new card's
+**GUI** button: the Measurement tab shows the lab's scan live -- progress,
+live map, log, pause banners -- with Abort (always allowed) and the pause
+answers (with control). Starting scans from the office is the next phase.
+Details: [scan-core/README.md](scan-core/README.md), "The scan server".
+
 ## Installing on a lab PC
 
 The quick start above assumes a developer's machine — git, `uv`, a terminal. For
