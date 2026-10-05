@@ -449,6 +449,40 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
     return reg, lab
 
 
+def _suite_keys() -> set[str]:
+    """The module keys this suite knows (discovery), lower case."""
+    keys = {"scanserver"}
+    try:
+        from suite_common import discover
+        keys |= {m.key.lower() for m in discover().modules}
+    except Exception:
+        pass
+    return keys
+
+
+def _check_identity(name: str, manifest: dict) -> None:
+    """Refuse a service that is not the module we came for.
+
+    A port that answers is not proof of WHO answers: on 2026-10-05 the lab's
+    scan server, moved for a test onto sr830's default ports, was found by
+    "follow the launcher" as sr830 and connected as 14 phantom detectors. The
+    module's own `describe` says who it is; `name` is the module key or its
+    discovery slug "<key>_<host>[_<port>]", so it must start with that key.
+
+    Only a service naming ANOTHER module of this suite (or the scan server) is
+    refused: a service the suite does not know (a test's fake, a module from
+    elsewhere) is taken as what it was asked to be, as before."""
+    mod = str(manifest.get("module") or "").lower()
+    want = name.lower()
+    if not mod or want == mod or want.startswith(mod + "_"):
+        return
+    if mod in _suite_keys():
+        raise RuntimeError(
+            f"{name}: the service on that port is '{manifest.get('module')}', "
+            f"not {name} -- two services share a port number (check the "
+            f"Ports of both cards in Mission Control)")
+
+
 def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
                  force_builtin, prefix, warn, aux_ai_channels):
     """Connect one service and register its parameters (build_lab_registry)."""
@@ -469,6 +503,7 @@ def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
     # keeping a second copy here that can disagree with it.
     manifest = None if force_builtin else describe_or_none(inst)
     if manifest is not None:
+        _check_identity(name, manifest)
         inst.manifest = manifest
         register_manifest(reg, inst, manifest, prefix=prefix,
                           on_warn=warn, module_name=inst.alias)

@@ -474,3 +474,24 @@ def test_the_server_follows_the_launcher_and_skips_itself(tmp_path, fake_service
         assert st["modules"] == ["magnet"]
     finally:
         srv.stop()
+
+
+def test_a_module_port_answered_by_the_scan_server_is_refused(server):
+    """Found on the lab PC 2026-10-05: the scan server, moved onto sr830's
+    default ports, was followed as 'sr830' (14 phantom detectors). A service
+    whose describe names another module must not be connected."""
+    from scan_core.lab import build_lab_registry
+    srv = server()
+    with pytest.raises(RuntimeError, match="scanserver"):
+        build_lab_registry(include=("sr830",), prefix=True,
+                           endpoints={"sr830": ("127.0.0.1", srv.cmd_port, srv.pub_port)})
+
+
+def test_identity_accepts_the_key_and_its_discovery_slugs():
+    from scan_core.lab import _check_identity
+    for name in ("hf2", "HF2", "hf2_labpc", "hf2_labpc_5569"):
+        _check_identity(name, {"module": "hf2"})
+    _check_identity("anything", {})                 # no module named: nothing to check
+    _check_identity("clMag", {"module": "fake"})    # unknown to the suite: allowed
+    with pytest.raises(RuntimeError):
+        _check_identity("clMag", {"module": "scanserver"})

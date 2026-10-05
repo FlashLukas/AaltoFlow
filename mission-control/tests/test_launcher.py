@@ -615,6 +615,34 @@ def test_a_stale_or_partial_order_never_breaks_the_list(env):
     win.reset_card_order()
 
 
+def test_the_scan_server_is_pinned_above_the_instruments(env):
+    """Lukas 2026-10-05: the scan server "always up there", slightly separated,
+    without move arrows or a "real" box (it drives no hardware of its own)."""
+    import shutil
+    mc, win, root, app = env
+    _module(root, "modules/other/scanner-x", "scanserver", 16130, order=99)
+    try:
+        win.rescan(force=True)
+        win.move_card("magnet", "top")                # a custom order must not move it
+        shown = _shown(mc, win)
+        assert shown[0] == "scanserver"
+        assert win.vlist.indexOf(win.instr_tag) == 1 and not win.instr_tag.isHidden()
+        card = win.cards["scanserver"]
+        assert card.btn_up.isHidden() and card.btn_down.isHidden()
+        assert card.real_check.isHidden()
+        assert "scanserver" not in [m.id for m in win.ordered_modules()]
+        win.move_card("scanserver", "bottom")         # ignored: not in the order
+        assert _shown(mc, win)[0] == "scanserver"
+        win._set_all_real(True)                       # "Real hardware: all"
+        assert not win.cards["scanserver"].spec.real and win.real_check.isChecked()
+        win._set_all_real(False)
+    finally:
+        shutil.rmtree(root / "modules/other/scanner-x")
+        win.reset_card_order()
+        win.rescan(force=True)
+    assert win.instr_tag.isHidden()                   # nothing pinned: no label
+
+
 def test_a_long_description_wraps_to_two_lines_and_ends_with_dots(env):
     """Lukas 2026-09-29: long module descriptions pushed the card's buttons off
     the window. The description wraps to at most TWO lines, then '...'; the full

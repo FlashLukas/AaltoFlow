@@ -1671,6 +1671,8 @@ class ModuleCard(QtWidgets.QFrame):
     def contextMenuEvent(self, event):
         """Right-click on a card: move it to the top / bottom, or forget the
         custom order and go back to the modules' own order."""
+        if not self.spec.is_instrument:
+            return                      # pinned at the top: nothing to move
         menu = QtWidgets.QMenu(self)
         top = menu.addAction("Move to top")
         bottom = menu.addAction("Move to bottom")
@@ -1706,7 +1708,11 @@ class ModuleCard(QtWidgets.QFrame):
         extra = "" if spec.has_gui else ("  ·  no GUI (headless)" if spec.dir else
                                          "  ·  not installed on this PC (no GUI)")
         self.meta.setText(f"{where}   ·   {ports}{extra}")
-        self.real_check.setVisible(not spec.remote)
+        # a coordinator (the scan server) drives no hardware of its own: no
+        # "real" box, and it is pinned at the top, so no move arrows either
+        self.real_check.setVisible(not spec.remote and spec.is_instrument)
+        self.btn_up.setVisible(spec.is_instrument)
+        self.btn_down.setVisible(spec.is_instrument)
         self.real_check.setChecked(spec.real)
         # which instrument it opens on real hardware (Instruments on this PC)
         tip = ("On: start the service with --real (drives the instrument).\n"
@@ -2197,6 +2203,12 @@ class MainWindow(QtWidgets.QMainWindow):
         holder = QtWidgets.QWidget(); holder.setObjectName("root")
         self.vlist = QtWidgets.QVBoxLayout(holder)
         self.vlist.setContentsMargins(0, 0, 0, 0); self.vlist.setSpacing(10)
+        # The scan server (and any other service that DRIVES the instruments)
+        # sits above the instrument cards, pinned, under a label of its own
+        # (Lukas, 2026-10-05: "always up there, visually slightly separated")
+        self.instr_tag = QtWidgets.QLabel("INSTRUMENTS"); self.instr_tag.setObjectName("sectiontag")
+        self.instr_tag.setContentsMargins(0, 8, 0, 0)
+        self.vlist.addWidget(self.instr_tag)
         self.vlist.addStretch(1)
         scroll.setWidget(holder)
         col.addWidget(scroll, 1)
@@ -2323,20 +2335,36 @@ class MainWindow(QtWidgets.QMainWindow):
         return bool(self.custom_order())
 
     def ordered_modules(self) -> list:
+        """INSTRUMENT modules in this PC's display order. The scan server and
+        other coordinators are not in it: they are pinned above
+        (pinned_modules) and never move."""
         rank = {mid: i for i, mid in enumerate(self.custom_order())}
         own = {m.id: i for i, m in enumerate(self.found.modules)}
-        return sorted(self.found.modules,
+        return sorted([m for m in self.found.modules if m.is_instrument],
                       key=lambda m: (0, rank[m.id]) if m.id in rank else (1, own[m.id]))
 
+    def pinned_modules(self) -> list:
+        """The coordinators (scan server), local first, in the modules' own order."""
+        return [m for m in self.found.modules if not m.is_instrument]
+
     def layout_cards(self):
-        """Put the cards in the list in display order and grey out the arrow
-        that would move a card past either end."""
+        """Pinned cards, the INSTRUMENTS label, then the instrument cards in
+        display order; grey out the arrow that would move a card past either end."""
+        pinned = [m for m in self.pinned_modules() if m.id in self.cards]
         shown = [m for m in self.ordered_modules() if m.id in self.cards]
-        for i, spec in enumerate(shown):
+        for spec in pinned + shown:
+            self.vlist.removeWidget(self.cards[spec.id])
+        self.vlist.removeWidget(self.instr_tag)
+        i = 0
+        for spec in pinned:
+            self.vlist.insertWidget(i, self.cards[spec.id]); i += 1
+        # the label only when there is something above it to be separated from
+        self.vlist.insertWidget(i, self.instr_tag); i += 1
+        self.instr_tag.setVisible(bool(pinned))
+        for k, spec in enumerate(shown):
             card = self.cards[spec.id]
-            self.vlist.removeWidget(card)
-            self.vlist.insertWidget(i, card)
-            card.set_move_enabled(i > 0, i < len(shown) - 1)
+            self.vlist.insertWidget(i + k, card)
+            card.set_move_enabled(k > 0, k < len(shown) - 1)
 
     def move_card(self, mid: str, where: str):
         """where: 'up', 'down', 'top' or 'bottom'. Saves the whole resulting
@@ -2563,6 +2591,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_all_real(self, on: bool):
         for card in self.local_cards():
+            if not card.spec.is_instrument:
+                continue                # the scan server has no "real" mode
             set_real(card.spec.key, on, ROOT)
             card.spec.real = on
             card.real_check.setChecked(on)
@@ -2571,6 +2601,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def sync_all_box(self):
         cards = self.local_cards()
         self.real_check.blockSignals(True)
+        cards = [c for c in cards if c.spec.is_instrument]
         self.real_check.setChecked(bool(cards) and all(c.spec.real for c in cards))
         self.real_check.blockSignals(False)
 
