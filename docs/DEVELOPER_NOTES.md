@@ -495,7 +495,7 @@ still assumes piezo/zpiezo.
   | 35 | shsg-control | `shsg` | 5625 | 5626 | (see its module.toml) |
   | 36 | shsna-control | `shsna` | 5627 | 5628 | (see its module.toml) |
   | 37 | usb6001-control | `usb6001` | 5629 | 5630 | (see its module.toml) |
-  | 38 | scan-core (scan server) | `scanserver` | 5631 | 5632 | coordination: runs scans as a service (section 4f) |
+  | 38 | scan-core (scan server) | `scanserver` | 5551 | 5552 | coordination: runs scans as a service (section 4f) |
   | 39 | *next module* |          | 5633 | 5634 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander
@@ -797,7 +797,7 @@ validate triggers one forced re-follow (a module started a second ago), then
 is refused.
 
 **Wire.** Key `scanserver` (describe "module", module.toml, security policy),
-ports 5631/5632. PUB: `status` ~2 Hz, `event` {level, msg, n} per log line,
+ports 5551/5552. PUB: `status` ~2 Hz, `event` {level, msg, n} per log line,
 `live` {live_rev} -- only a NOTICE; the data is fetched with `get_live`, so a
 large map never rides the PUB socket.
 

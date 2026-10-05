@@ -635,7 +635,7 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
 
 **On the lab PC**
 
-1. Mission Control: start the **Scan server** card (ports 5631/5632). It
+1. Mission Control: start the **Scan server** card (ports 5551/5552). It
    connects to the instrument modules running on that PC by itself (as the
    suite's "Follow the launcher" does) and reconnects when that changes and
    no scan runs.
@@ -647,11 +647,11 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
 
 **In the office**
 
-1. Mission Control, **Add remote...**: the lab PC's name, port 5631 (pub
-   5632). A "Scan server" card for the lab PC appears; its **GUI** button
+1. Mission Control, **Add remote...**: the lab PC's name, port 5551 (pub
+   5552). A "Scan server" card for the lab PC appears; its **GUI** button
    opens the measurement suite watching it. (Or: Settings tab > *Watch scan
-   server* > pick it, or type `lab-pc:5631`.) The lab PC's firewall must let
-   the office reach ports 5631-5632.
+   server* > pick it, or type `lab-pc:5551`.) The ports are inside the 5550-5600 range
+   a lab network usually opens for AaltoFlow (the instruments start at 5555).
 2. The Measurement tab then says *watching scan server on lab-pc (setup ...)*
    and shows the scan live: progress, ETA, where it is, the live map, the
    server's log (lines marked `[server ...]`), the PAUSED fault banner with

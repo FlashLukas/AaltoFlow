@@ -122,7 +122,7 @@ def test_a_suite_project_module_stays_in_the_root_and_is_no_instrument(tmp_path)
     Found by discovery (Mission Control shows its card), but NOT an old flat
     folder waiting to be moved, and NOT an instrument a scan engine connects."""
     make_module(tmp_path, "modules/motion/kim-control", "kim", 5567)
-    make_module(tmp_path, "scan-core", "scanserver", 5631)
+    make_module(tmp_path, "scan-core", "scanserver", 5551)
     found = M.discover(tmp_path)
     srv, kim = found.get("scanserver"), found.get("kim")
     assert srv is not None and srv.suite_project and not kim.suite_project
@@ -130,7 +130,7 @@ def test_a_suite_project_module_stays_in_the_root_and_is_no_instrument(tmp_path)
     assert not M.is_legacy_location(tmp_path, srv.dir)
     assert not srv.is_instrument and kim.is_instrument
     # a remote scan server (Add remote... on the office PC) is no instrument either
-    M.add_remote("lab-pc", 5631, 5632, "scanserver", root=tmp_path)
+    M.add_remote("lab-pc", 5551, 5552, "scanserver", root=tmp_path)
     remote = next(m for m in M.discover(tmp_path).modules if m.remote)
     assert not remote.is_instrument and remote.has_gui     # opens the local suite
     # ... and it is not listed in the downloadable catalog

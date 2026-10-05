@@ -853,7 +853,7 @@ Scripts (set, wait, scan in a loop): [docs/SCRIPTING.md](docs/SCRIPTING.md).
 server** card in Mission Control on the lab PC and tick *Run scans on this
 PC's scan server* on the measurement suite's Settings tab: scans then run in
 that service, not in the window, and keep running when a window closes. In
-the office, **Add remote...** the lab PC (port 5631) and press the new card's
+the office, **Add remote...** the lab PC (port 5551) and press the new card's
 **GUI** button: the Measurement tab shows the lab's scan live -- progress,
 live map, log, pause banners -- with Abort (always allowed) and the pause
 answers (with control). Starting scans from the office is the next phase.

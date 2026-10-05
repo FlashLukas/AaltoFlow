@@ -90,8 +90,8 @@ from .recipe import Recipe
 #: The module key: describe's "module", module.toml's key, the policy name.
 SERVER_KEY = "scanserver"
 #: The next free pair of the suite's port scheme on 2026-10-05.
-DEFAULT_CMD_PORT = 5631
-DEFAULT_PUB_PORT = 5632
+DEFAULT_CMD_PORT = 5551
+DEFAULT_PUB_PORT = 5552
 
 TOPIC_STATUS = b"status"
 TOPIC_EVENT = b"event"

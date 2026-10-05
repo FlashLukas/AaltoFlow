@@ -241,7 +241,7 @@ frame (`last_deep()`).
   though they only matter when submitting -- hide them in watch-only mode.
   Also not on hardware yet: the first lab test = start the card on the lab
   PC, tick "Run scans on this PC's scan server", run a short kim + hf2 scan,
-  watch it from the office (Add remote... lab PC, port 5631).
+  watch it from the office (Add remote... lab PC, port 5551).
 
 - **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
   suite's Catalogue tab, `scan_core/catalogue.py`, `python -m

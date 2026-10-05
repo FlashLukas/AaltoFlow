@@ -24,8 +24,8 @@ icon = "scan_server.svg"
 order = 5
 
 [ports]
-cmd = 5631
-pub = 5632
+cmd = 5551
+pub = 5552
 
 [run]
 service = "scripts/run_scan_server.py"

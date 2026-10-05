@@ -33,7 +33,7 @@ _LOCAL = {"localhost", "127.0.0.1", "::1", ""}
 
 
 def parse_target(text: str) -> tuple[str, int, int | None]:
-    """'lab-pc', 'lab-pc:5631' or 'lab-pc:5631:5632' -> (host, cmd, pub|None)."""
+    """'lab-pc', 'lab-pc:5551' or 'lab-pc:5551:5552' -> (host, cmd, pub|None)."""
     parts = [p.strip() for p in str(text or "").strip().split(":")]
     host = parts[0] or "localhost"
     cmd = int(parts[1]) if len(parts) > 1 and parts[1] else DEFAULT_CMD_PORT

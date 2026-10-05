@@ -2,7 +2,7 @@
 
     uv run --extra gui scripts/run_gui.py                       # this PC's scan server
     uv run --extra gui scripts/run_gui.py --connect lab-pc      # another PC's
-    uv run --extra gui scripts/run_gui.py --connect lab-pc --cmd-port 5631 --pub-port 5632
+    uv run --extra gui scripts/run_gui.py --connect lab-pc --cmd-port 5551 --pub-port 5552
 
 Mission Control passes --connect/--cmd-port/--pub-port (the card's contract,
 INSTRUMENT_MODULE_GUIDE section 11): a card added with "Add remote..." on the

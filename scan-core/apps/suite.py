@@ -37,7 +37,7 @@ exactly as before.
 
 Run it:
     uv run python apps/suite.py [--theme light] [--no-follow] [--modules clMag,smb]
-    uv run python apps/suite.py --scan-server lab-pc:5631     # watch that server
+    uv run python apps/suite.py --scan-server lab-pc:5551     # watch that server
 """
 
 from __future__ import annotations
@@ -619,7 +619,7 @@ class Suite(QtWidgets.QMainWindow):
             "PC can watch it: progress, the live map, the log, the pause banners, Abort. "
             "Starting scans works from the server's own PC (watching works from anywhere). "
             "To watch the lab PC from the office: Mission Control > Add remote... with the "
-            "lab PC's name and port 5631, then pick it below.")
+            "lab PC's name and port 5551, then pick it below.")
         note3.setWordWrap(True); note3.setStyleSheet(f"color:{C['muted']};")
         s.addWidget(note3)
         self.run_on_server_box = QtWidgets.QCheckBox(
@@ -642,7 +642,7 @@ class Suite(QtWidgets.QMainWindow):
             lambda i: self.watch_edit.setText(self.watch_combo.itemData(i) or ""))
         wrow.addWidget(self.watch_combo)
         self.watch_edit = QtWidgets.QLineEdit("")
-        self.watch_edit.setPlaceholderText("host:port, e.g. lab-pc:5631")
+        self.watch_edit.setPlaceholderText("host:port, e.g. lab-pc:5551")
         self.watch_edit.returnPressed.connect(self._watch_clicked)
         wrow.addWidget(self.watch_edit, 1)
         wb = QtWidgets.QPushButton("Watch"); wb.setObjectName("primary")

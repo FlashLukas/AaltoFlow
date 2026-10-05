@@ -1,6 +1,6 @@
 """Start the SCAN SERVER: scans run in this process, any measurement suite watches.
 
-    python scripts/run_scan_server.py                  # on 5631/5632, following the launcher
+    python scripts/run_scan_server.py                  # on 5551/5552, following the launcher
     python scripts/run_scan_server.py --sim            # on scan-core's simulated registry
     python scripts/run_scan_server.py --cmd-port 27000 --pub-port 27001
 

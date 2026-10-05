@@ -2,7 +2,7 @@
 measurement suite, a script or a test. No Qt.
 
     from scan_core.scan_server_client import ScanServerClient
-    c = ScanServerClient("lab-pc")            # default ports 5631/5632
+    c = ScanServerClient("lab-pc")            # default ports 5551/5552
     c.start()
     print(c.status()["where"])                # "point 25 / 125   field 40 mT ..."
     ds = c.get_live()                         # the dataset so far, or None if unchanged
