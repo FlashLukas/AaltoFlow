@@ -134,7 +134,7 @@ STEP_KINDS = ("wait_until", "abort_if", "skip_if", "pause", "comment", "compute_
 STEP_KEYS = {
     "wait_until": ({"condition", "timeout_s", "hold_s", "on_timeout"},
                    {"condition", "timeout_s"}),
-    "abort_if": ({"condition"}, {"condition"}),
+    "abort_if": ({"condition", "scope"}, {"condition"}),
     "skip_if": ({"condition"}, {"condition"}),
     "pause": ({"message", "headless"}, {"message"}),
     "comment": ({"text"}, {"text"}),
@@ -151,7 +151,10 @@ STEP_MOMENTS = {
     "skip_if": ("before_point", "after_point", "every_n_points", "each_sweep"),
 }
 
-WAIT_ON_TIMEOUT = ("stop", "continue")
+#: stop = end this scan, stop_all = end this scan AND the queue (2026-10-05)
+WAIT_ON_TIMEOUT = ("stop", "stop_all", "continue")
+#: abort_if: "scan" ends this scan (a queue goes on), "all" ends the queue too
+ABORT_SCOPES = ("scan", "all")
 PAUSE_HEADLESS = ("fail", "continue")
 
 #: wait_until: seconds between two looks at the condition (status-cache reads,
@@ -340,6 +343,8 @@ def step_problems(kind: str, spec: dict, registry=None, moment: str | None = Non
         if (spec.get("on_timeout") or "stop") not in WAIT_ON_TIMEOUT:
             errs.append(f"wait_until: on_timeout must be one of "
                         f"{', '.join(WAIT_ON_TIMEOUT)}")
+    if kind == "abort_if" and (spec.get("scope") or "scan") not in ABORT_SCOPES:
+        errs.append(f"abort_if: scope must be one of {', '.join(ABORT_SCOPES)}")
     if kind == "pause":
         if "message" in spec and not isinstance(spec["message"], str):
             errs.append("pause: message must be text")
@@ -416,7 +421,7 @@ def wait_until(ctx, condition, timeout_s, hold_s=0.0, on_timeout="stop"):
             if (on_timeout or "stop") == "continue":
                 say(f"{msg}; carrying on (on_timeout: continue)")
                 return
-            raise ScanStopped(msg)
+            raise ScanStopped(msg, whole_queue=(on_timeout == "stop_all"))
         if now - last_log >= WAIT_LOG_S:
             last_log = now
             held = 0.0 if true_since is None else now - true_since
@@ -448,8 +453,9 @@ def pause_for_operator(ctx, message, headless="fail"):
     answered = threading.Event()
     box = {"go_on": None}
 
-    def answer(go_on: bool):
-        box["go_on"] = bool(go_on)
+    def answer(go_on):
+        # True = Continue, False = Abort scan, "all" = Abort all (the queue too)
+        box["go_on"] = go_on
         answered.set()
 
     say(f"PAUSED for the operator: {message}")
@@ -464,6 +470,9 @@ def pause_for_operator(ctx, message, headless="fail"):
             on_pause(None, None)             # the question goes, whatever happened
         except Exception:
             pass
+    if box["go_on"] == "all":
+        raise ScanStopped(f"the operator chose Abort ALL at the pause: {message}",
+                          whole_queue=True)
     if not box["go_on"]:
         raise ScanStopped(f"the operator chose Abort at the pause: {message}")
     say("operator: Continue")
@@ -634,7 +643,10 @@ def _call(ctx, **args):
             if kind == "abort_if":
                 where = (f" at {moment}" if moment == "before_scan"
                          else f" at point {point}")
-                raise ScanStopped(f"abort_if {expr.text}{where} ({seen})")
+                scope = spec.get("scope") or "scan"
+                raise ScanStopped(f"abort_if {expr.text}{where} ({seen})"
+                                  + (" -- abort ALL" if scope == "all" else ""),
+                                  whole_queue=(scope == "all"))
             say(f"{label}: point {point} skipped -- skip_if {expr.text} ({seen})")
             raise SkipPoint(expr.text)
         step(f"{kind} {expr.text}", check, quiet=True)

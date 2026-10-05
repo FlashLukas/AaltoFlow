@@ -229,3 +229,28 @@ def test_dialog_refuses_an_invalid_entry(qbuilder):
     assert "gone" in dlg.detail.text()
     dlg._delete()
     assert dlg.run_btn.isEnabled()
+
+
+# ─────────────── Abort scan vs Abort all (Lukas, 2026-10-05) ───────────────
+
+def _abort_if_entry(name, values, scope):
+    r = Recipe(name=name, axes=[{"type": "array", "param": "a", "values": values}],
+               detectors=["d"],
+               hooks=[{"when": "after_point", "action": "abort_if",
+                       "args": {"condition": "d > 50", "scope": scope}}])
+    return scan_queue.QueueEntry(name, r)
+
+
+def test_abort_if_scope_scan_lets_the_queue_go_on(qbuilder):
+    qbuilder.run_queue([_abort_if_entry("hot", [1, 60, 2], "scan"),
+                        scan_queue.QueueEntry("next", _recipe("x", [7]))])
+    _wait(qbuilder)
+    assert qbuilder.queue_results == [("hot", "aborted"), ("next", "done")]
+
+
+def test_abort_if_scope_all_ends_the_queue(qbuilder):
+    qbuilder.run_queue([_abort_if_entry("hot", [1, 60, 2], "all"),
+                        scan_queue.QueueEntry("never", _recipe("x", [7]))])
+    _wait(qbuilder)
+    assert qbuilder.queue_results == [("hot", "aborted")]
+    assert 7 not in qbuilder.seen

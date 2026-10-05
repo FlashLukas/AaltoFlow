@@ -39,9 +39,13 @@ class ScanStopped(ScanAborted):
     (attribute `stopped_by`) so that a map that ends half way says WHY.
     """
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, whole_queue: bool = False):
         super().__init__(reason)
         self.reason = reason
+        #: "Abort all" (Lukas, 2026-10-05): stop this scan AND the queue it
+        #: runs in -- a safety stop must not let the next scan start. False =
+        #: "Abort scan": only this scan, a queue goes on with the next one.
+        self.whole_queue = bool(whole_queue)
 
 
 class SkipPoint(Exception):

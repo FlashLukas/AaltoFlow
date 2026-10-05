@@ -489,3 +489,59 @@ def test_the_schema_accepts_all_five():
     bad["hooks"][0]["args"]["steps"][0]["wait_until"].pop("timeout_s")
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad, schema)
+
+
+# ─────────────── Abort scan vs Abort all (Lukas, 2026-10-05) ───────────────
+
+def _scope_run(hook, on_pause=None):
+    import pytest as _pt
+    from scan_core.errors import ScanStopped as _SS
+    reg = build_sim_registry()
+    r = Recipe(name="t", axes=[{"type": "linear", "param": "field",
+                                "start": 0, "stop": 10, "num": 3}],
+               detectors=["lockin_r"], hooks=[hook])
+    try:
+        ds = run(r, reg, on_pause=on_pause)
+    except _SS as exc:
+        return exc, getattr(exc, "dataset", None)
+    return None, ds
+
+
+def test_abort_if_scope_all_is_recorded_and_flags_the_queue():
+    exc, ds = _scope_run({"when": "before_point", "action": "abort_if",
+                          "args": {"condition": "field > 4", "scope": "all"}})
+    assert (exc is None or exc.whole_queue)
+    assert ds is not None and ds.attrs["stopped_scope"] == "all"
+    assert "abort ALL" in ds.attrs["stopped_by"]
+
+
+def test_abort_if_default_scope_is_this_scan_only():
+    exc, ds = _scope_run({"when": "before_point", "action": "abort_if",
+                          "args": {"condition": "field > 4"}})
+    assert ds.attrs["stopped_scope"] == "scan"
+
+
+def test_wait_until_stop_all_and_pause_abort_all():
+    exc, ds = _scope_run({"when": "before_scan", "action": "wait_until",
+                          "args": {"condition": "field > 1000", "timeout_s": 0.2,
+                                   "on_timeout": "stop_all"}})
+    assert ds is None or ds.attrs.get("stopped_scope") == "all"
+    assert exc is None or exc.whole_queue
+
+    def answer_all(msg, answer):
+        if answer is not None:
+            answer("all")
+    exc, ds = _scope_run({"when": "before_scan", "action": "pause",
+                          "args": {"message": "check"}}, on_pause=answer_all)
+    assert exc is None or exc.whole_queue
+    assert ds is None or ds.attrs.get("stopped_scope") == "all"
+
+
+def test_an_unknown_scope_is_refused_at_validation():
+    reg = build_sim_registry()
+    r = Recipe(name="t", axes=[{"type": "linear", "param": "field",
+                                "start": 0, "stop": 10, "num": 3}],
+               detectors=["lockin_r"],
+               hooks=[{"when": "before_point", "action": "abort_if",
+                       "args": {"condition": "field > 4", "scope": "everything"}}])
+    assert any("scope" in e for e in r.validate(reg))

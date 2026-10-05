@@ -810,6 +810,7 @@ STEP_HELP = {
 #: The defaults of the optional keys: a step writes such a key back only when
 #: it was in the file or differs from this, so a recipe round-trips unchanged.
 STEP_DEFAULTS = {"wait_until": {"hold_s": 0.0, "on_timeout": "stop"},
+                 "abort_if": {"scope": "scan"},
                  "pause": {"headless": "fail"}}
 
 
@@ -881,16 +882,25 @@ class GenericStepRow(QtWidgets.QFrame):
             self.cond = edit(spec.get("condition", ""), "condition, e.g. field > 100",
                              expr_tip)
             line1.addWidget(self.cond, 1)
+        if kind == "abort_if":
+            self.scope = combo((("abort scan", "scan"), ("abort all", "all")),
+                               spec.get("scope") or "scan",
+                               "abort scan: only this scan stops (a queue goes on\n"
+                               "with the next one). abort all: this scan AND the rest\n"
+                               "of the queue -- for a safety condition.")
+            line1.addWidget(self.scope)
         if kind == "wait_until":
             self.hold = spin(spec.get("hold_s", 0.0), 0, 1e6, "hold ",
                              "The condition must stay true this long without a\n"
                              "break (0 = true once is enough).")
             self.timeout = spin(spec.get("timeout_s", 3600.0), 0.1, 1e7, "max ",
                                 "Give up after this long (required).")
-            self.on_timeout = combo((("then stop", "stop"), ("then carry on", "continue")),
+            self.on_timeout = combo((("then abort scan", "stop"), ("then abort all", "stop_all"),
+                                     ("then carry on", "continue")),
                                     spec.get("on_timeout") or "stop",
-                                    "After 'max': stop the scan (the data is kept,\n"
-                                    "the file says why), or log it and carry on.")
+                                    "After 'max': abort this scan (the data is kept, the\n"
+                                    "file says why), abort all (this scan AND the rest of\n"
+                                    "the queue), or log it and carry on.")
             for w in (self.hold, self.timeout, self.on_timeout):
                 line2.addWidget(w)
         if kind == "pause":
@@ -991,7 +1001,11 @@ class GenericStepRow(QtWidgets.QFrame):
 
     def spec(self) -> dict:
         k = self.kind
-        if k in ("abort_if", "skip_if"):
+        if k == "abort_if":
+            out = {"condition": self.cond.text()}
+            self._keep(out, "scope", self.scope.currentData())
+            return out
+        if k == "skip_if":
             return {"condition": self.cond.text()}
         if k == "wait_until":
             out = {"condition": self.cond.text()}
@@ -1876,6 +1890,10 @@ class ScanWorker(QtCore.QThread):
         #: How the run ended, for a QUEUE deciding what comes next:
         #: "done", "aborted" (go on with the next scan) or "error" (stop).
         self.outcome: str | None = None
+        #: "Abort all" (a step with scope all / stop_all, or the pause banner's
+        #: Abort all): the queue must not start another scan after this one
+        self.stop_all = False
+        self.stop_reason = ""
         self.error = ""
 
     def _write(self, ds, done, total):
@@ -1961,7 +1979,9 @@ class ScanWorker(QtCore.QThread):
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
             # measured part; it is still an abort.
-            self.outcome = "aborted" if self._abort else "done"
+            self.outcome = "aborted" if (self._abort or ds.attrs.get("stopped_by")) else "done"
+            self.stop_all = ds.attrs.get("stopped_scope") == "all"
+            self.stop_reason = str(ds.attrs.get("stopped_by", ""))
             self.done.emit(ds)
         except RoutineError as exc:
             # The AFTER-scan routine failed, but every point was measured: save
@@ -1978,6 +1998,8 @@ class ScanWorker(QtCore.QThread):
             # Abort pressed while an instrument was still settling: a normal
             # stop, not a failure -- nothing went wrong with the hardware.
             self.outcome = "aborted"
+            self.stop_all = bool(getattr(exc, "whole_queue", False))
+            self.stop_reason = str(getattr(exc, "reason", "") or "")
             # The points measured before it: save and show them, as an abort
             # between two points does (the engine attaches them; None when
             # nothing had been measured yet).
@@ -3111,7 +3133,13 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.ask_abort_btn.setToolTip("Stop the scan here: the after-scan routine runs, the\n"
                                       "points so far are saved, the file says why.")
         self.ask_abort_btn.clicked.connect(lambda: self.answer_pause(False))
+        self.ask_abort_all_btn = QtWidgets.QPushButton("Abort all")
+        self.ask_abort_all_btn.setObjectName("danger")
+        self.ask_abort_all_btn.setToolTip("Stop this scan AND the rest of the queue: the "
+                                          "after-scan routine runs, the points so far are saved.")
+        self.ask_abort_all_btn.clicked.connect(lambda: self.answer_pause("all"))
         arow.addWidget(self.ask_continue_btn); arow.addWidget(self.ask_abort_btn)
+        arow.addWidget(self.ask_abort_all_btn)
         ab.addLayout(arow)
         self._ask_answer = None
         self.ask_box.hide()
@@ -3884,6 +3912,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self._queue_stop = self._queue_stop or f"'{entry.name}' failed: {worker.error}"
             self._qlog(f"queue: scan {self._queue_i + 1} '{entry.name}' FAILED "
                        f"({worker.error}); queue stopped")
+        elif getattr(worker, "stop_all", False):
+            # "Abort all": this scan stopped AND the queue ends here
+            self._queue_stop = self._queue_stop or f"abort all: {worker.stop_reason}"
+            self._qlog(f"queue: scan {self._queue_i + 1} '{entry.name}' {outcome} "
+                       f"-- ABORT ALL, queue stopped")
         else:
             self._qlog(f"queue: scan {self._queue_i + 1} '{entry.name}' {outcome}")
         # Next scan from the event loop, not from inside this signal: the old
@@ -4043,15 +4076,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.ask_continue_btn.setFocus()
         QtWidgets.QApplication.alert(self.window())   # flash the taskbar button
 
-    def answer_pause(self, go_on: bool) -> bool:
+    def answer_pause(self, go_on) -> bool:
         """The banner's buttons: Continue (True) or Abort scan (False).
         False if no question is open."""
         answer, self._ask_answer = self._ask_answer, None
         self.ask_box.hide()
         if answer is None:
             return False
-        answer(bool(go_on))
-        msg = "operator: Continue" if go_on else "operator: Abort scan (at the pause)"
+        # True = Continue, False = Abort scan, "all" = Abort all (the queue too)
+        answer(go_on if go_on == "all" else bool(go_on))
+        msg = ("operator: Abort ALL (at the pause)" if go_on == "all" else
+               "operator: Continue" if go_on else "operator: Abort scan (at the pause)")
         self.run_log.append(msg)
         return True
 

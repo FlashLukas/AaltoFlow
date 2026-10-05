@@ -354,10 +354,16 @@ Abort works during the wait; the log shows progress every 30 s
 **`abort_if`** -- stop the scan if the condition is true: like Abort (the
 after-scan routine runs, the points so far are saved), and the file's
 `stopped_by` attribute says why. Anywhere except `after_scan`.
+`scope: scan` (default, "abort scan") ends only this scan -- a queue goes on
+with the next one; `scope: all` ("abort all") ends this scan AND the rest of
+the queue, the choice for a safety condition. The file's `stopped_scope`
+says which. The same two choices exist for a `wait_until` that times out
+(`on_timeout: stop` / `stop_all`) and on the pause banner (Abort scan / Abort
+all); the queue's own buttons are Abort and Stop queue.
 
 ```yaml
   - {when: before_point, action: call, args: {steps: [
-      {abort_if: {condition: "ppms.temperature > 15"}}]}}
+      {abort_if: {condition: "ppms.temperature > 15", scope: all}}]}}
 ```
 
 **`skip_if`** -- leave the CURRENT point out: it is stored as not measured

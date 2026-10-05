@@ -162,7 +162,7 @@ def test_new_steps_write_their_defaults_only_where_needed(builder):
     w.cond.setText("rf_power < 0")
     w.timeout.setValue(120)
     assert w.to_step() == {"wait_until": {"condition": "rf_power < 0", "timeout_s": 120.0}}
-    w.hold.setValue(5); w.on_timeout.setCurrentIndex(1)
+    w.hold.setValue(5); w.on_timeout.setCurrentIndex(w.on_timeout.findData("continue"))
     assert w.to_step() == {"wait_until": {"condition": "rf_power < 0", "hold_s": 5.0,
                                           "timeout_s": 120.0, "on_timeout": "continue"}}
     c = section.add_generic("compute_set")

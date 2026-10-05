@@ -270,7 +270,7 @@
         "condition": {"$ref": "#/$defs/expression"},
         "hold_s": {"type": "number", "minimum": 0, "description": "0 = true once is enough"},
         "timeout_s": {"type": "number", "exclusiveMinimum": 0, "description": "required: a sensor that never gets there must not hold the scan forever"},
-        "on_timeout": {"enum": ["stop", "continue"], "description": "stop (default) = end the scan cleanly (data kept, reason in attr stopped_by); continue = log and go on"}
+        "on_timeout": {"enum": ["stop", "stop_all", "continue"], "description": "stop (default) = end this scan cleanly (data kept, reason in attr stopped_by); stop_all = end this scan AND the queue it runs in; continue = log and go on"}
       },
       "required": ["condition", "timeout_s"],
       "additionalProperties": false
@@ -278,12 +278,13 @@
     "condition_step": {
       "title": "abort_if (stop the scan cleanly) / skip_if (store the current point as not measured)",
       "type": "object",
-      "properties": {"condition": {"$ref": "#/$defs/expression"}},
+      "properties": {"condition": {"$ref": "#/$defs/expression"},
+                     "scope": {"enum": ["scan", "all"], "description": "abort_if only: scan (default) = end this scan, a queue goes on; all = end the queue too"}},
       "required": ["condition"],
       "additionalProperties": false
     },
     "pause": {
-      "title": "wait for the operator: Continue / Abort scan",
+      "title": "wait for the operator: Continue / Abort scan / Abort all",
       "type": "object",
       "properties": {
         "message": {"type": "string"},

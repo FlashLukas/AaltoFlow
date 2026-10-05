@@ -507,6 +507,7 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
             # wait_until, Abort answered at a pause): say WHY, in the log and
             # in the file, before the after-scan routine runs
             ctx["ds_attrs"]["stopped_by"] = exc.reason
+            ctx["ds_attrs"]["stopped_scope"] = "all" if exc.whole_queue else "scan"
             ctx["log_fn"](f"scan STOPPED: {exc.reason}")
         after_abort()
         if sweeping:
