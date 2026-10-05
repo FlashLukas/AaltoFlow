@@ -241,7 +241,8 @@ def _discover_endpoints(host, include, root, logger) -> dict:
                                         f"Control's list (known: {known})")
             out[m.slug] = (where(m), m.cmd, m.pub)
         return out
-    mods = list(found.modules)
+    # instruments only: a scan server drives instruments, it is not one
+    mods = [m for m in found.modules if m.is_instrument]
     if not mods:
         return {}
     with ThreadPoolExecutor(max_workers=min(16, len(mods))) as pool:

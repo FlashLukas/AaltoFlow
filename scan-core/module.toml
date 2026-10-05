@@ -1,0 +1,33 @@
+# module.toml -- the SCAN SERVER, so Mission Control shows it as a card
+# (INSTRUMENT_MODULE_GUIDE.md section 11).
+#
+# Not an instrument: a service that RUNS SCANS over the instrument modules of
+# its PC (scan_core/scan_server.py), so a scan started on the lab PC can be
+# watched -- and aborted, and answered -- from the office. Its GUI is the
+# measurement suite watching it.
+#
+# Why this file sits in scan-core (a suite project in the root) and not in a
+# folder of its own under modules/: the scan server IS scan-core -- the same
+# engine, the same environment, the same lock file. A separate module folder
+# would need a second environment of all of scan-core, kept in step with the
+# first. The exception is written down once, in suite_common.modules
+# (SUITE_PROJECTS): discovery shows the card, migrate_layout never moves it,
+# the installer installs it with scan-core, and it is never packed as a module.
+
+[module]
+key = "scanserver"
+name = "Scan server"
+description = "Runs scans as a service - start on this PC, watch from any PC"
+category = "coordination"
+tags = ["scan", "remote", "watch", "queue"]
+icon = "scan_server.svg"
+order = 5
+
+[ports]
+cmd = 5631
+pub = 5632
+
+[run]
+service = "scripts/run_scan_server.py"
+gui = "scripts/run_gui.py"
+start_after = []

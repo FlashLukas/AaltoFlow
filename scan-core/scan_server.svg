@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- scan server: the measurement suite's raster path inside a server box,
+       with two arcs for "watched from elsewhere". Grey chassis, amber for
+       what is live, as in the modules. -->
+  <rect x="6" y="9" width="22" height="24" rx="3" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <polyline points="10,28 17,28 17,23 10,23 10,18 17,18 17,14 23,14"
+            stroke="#ff9e2c" stroke-width="2" fill="none"
+            stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="23" cy="14" r="2.4" fill="#ffb454"/>
+  <path d="M31 13 a6 6 0 0 1 0 8" stroke="#e8eaed" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <path d="M34 10 a10 10 0 0 1 0 14" stroke="#e8eaed" stroke-width="2" fill="none" stroke-linecap="round"/>
+</svg>
