@@ -2481,6 +2481,10 @@ class WindowCard(QtWidgets.QFrame):
             f"   ·   {100 * st.get('fraction_measured', float('nan')):.0f} % of the bins measured")
 
 
+#: the ON THE SCAN SERVER card's queue/definition tree never grows past this
+SERVER_TREE_MAX = 230
+
+
 class ScanBuilder(QtWidgets.QMainWindow):
     """Define a scan, and (standalone) run it.
 
@@ -3021,6 +3025,51 @@ class ScanBuilder(QtWidgets.QMainWindow):
         v.addWidget(scroll, 1)
         return card
 
+    def _build_server_box(self) -> QtWidgets.QWidget:
+        """WATCHING a scan server on another PC (Lukas 2026-10-06: "a 1:1 copy
+        of what i see on the lab pc"): the submitted queue with each scan's
+        definition and run info, read-only; the lab's plot choice followed on
+        request; a definition copied into this PC's Scan tab on request."""
+        box = QtWidgets.QFrame(); box.setObjectName("card")
+        v = QtWidgets.QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(4)
+        head = QtWidgets.QHBoxLayout()
+        head.addWidget(self._tag("ON THE SCAN SERVER"))
+        head.addStretch(1)
+        self.follow_view_box = QtWidgets.QCheckBox("show what the lab shows")
+        self.follow_view_box.setChecked(True)
+        self.follow_view_box.setToolTip(
+            "On: the plot below follows the choice made in the measurement suite\n"
+            "on the scan server's PC (detector, X / Y, held slices, colour range).\n"
+            "Off: choose your own view here; the lab's screen is not affected\n"
+            "either way.")
+        self.follow_view_box.toggled.connect(self._follow_view_toggled)
+        head.addWidget(self.follow_view_box)
+        self.copy_def_btn = QtWidgets.QPushButton("Copy to Scan tab")
+        self.copy_def_btn.setToolTip(
+            "Load the selected scan's definition into this PC's Scan tab, to\n"
+            "reuse or adapt it here. Parameters of modules this PC is not\n"
+            "connected to are named, as with Load scan...")
+        self.copy_def_btn.clicked.connect(self._copy_server_definition)
+        self.copy_def_btn.setEnabled(False)
+        head.addWidget(self.copy_def_btn)
+        v.addLayout(head)
+        self.server_tree = QtWidgets.QTreeWidget()
+        self.server_tree.setHeaderHidden(True)
+        self.server_tree.setRootIsDecorated(True)
+        self.server_tree.itemExpanded.connect(lambda *_: self._size_server_tree())
+        self.server_tree.itemCollapsed.connect(lambda *_: self._size_server_tree())
+        self.server_tree.setToolTip("Every scan the server was given, in order. Open one\n"
+                                    "(the arrow) to read its run info and definition.")
+        self.server_tree.currentItemChanged.connect(
+            lambda *_: self.copy_def_btn.setEnabled(self._selected_server_entry() is not None))
+        v.addWidget(self.server_tree)
+        box.hide()
+        self.server_box = box
+        self._server_scan: dict = {}
+        self._server_tree_key = None
+        self._view_published = False      # view_changed -> _publish_view connected
+        return box
+
     def _build_right(self) -> QtWidgets.QWidget:
         card = QtWidgets.QFrame(); card.setObjectName("card")
         # Fixed width only makes sense as the third column of the standalone
@@ -3040,7 +3089,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # discover afterwards in the log. It goes into the file name and into the
         # scan definition the file carries.
         nrow = QtWidgets.QHBoxLayout()
-        nrow.addWidget(QtWidgets.QLabel("name"))
+        self.name_lbl = QtWidgets.QLabel("name")
+        nrow.addWidget(self.name_lbl)
         self.name_edit = QtWidgets.QLineEdit("scan")
         self.name_edit.setToolTip(
             "Goes into the file name: <data dir>\\<date>\\<time>_<name>.nc\n"
@@ -3178,6 +3228,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.save_lbl.setWordWrap(True)
         v.addWidget(self.save_lbl)
+        v.addWidget(self._build_server_box())
 
         # Result: the general N-D viewer, not a fixed pair of axes. The same
         # widget serves the Data tab, so what you watch during a run behaves
@@ -3982,9 +4033,37 @@ class ScanBuilder(QtWidgets.QMainWindow):
             "or tick 'Run scans on this PC's scan server' on the scan server's PC.")
         self.abort_btn.setEnabled(False)
         self.save_lbl.setText(f"watching the scan server on {watch.label}")
+        # phase 2 of watching: the definitions and the lab's view
+        self._server_scan = dict(getattr(watch, "scan", {}) or {})
+        self._server_tree_key = None
+        watch.scan_info.connect(self._on_server_scan)
+        watch.view.connect(self._on_server_view)
+        self.server_box.setVisible(not self.server_submit)
+        # this PC's own name and run info belong to scans run HERE; next to a
+        # scan of the lab they would read as its name and sample. The lab's own
+        # are in the ON THE SCAN SERVER card.
+        for w in (self.name_lbl, self.name_edit, self.run_info):
+            w.setVisible(self.server_submit)
+        self._fill_server_tree()
+        if self.server_submit:
+            # the suite ON the server's PC tells watchers what it shows
+            if not self._view_published:
+                self.view.view_changed.connect(self._publish_view)
+                self._view_published = True
+            self._publish_view()
+        elif self.follow_view_box.isChecked() and getattr(watch, "last_view", None):
+            self._on_server_view(watch.last_view)
 
     def detach_server(self) -> None:
         """Back to running scans in this window."""
+        if self._view_published:
+            self.view.view_changed.disconnect(self._publish_view)
+            self._view_published = False
+        self.server_box.hide()
+        for w in (self.name_lbl, self.name_edit, self.run_info):
+            w.show()
+        self._server_scan = {}
+        self.server_tree.clear()
         self.server = None
         self.server_submit = False
         self._server_faults = None
@@ -4114,6 +4193,131 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.view.set_marker(coords or None)
         if self.on_status is not None:
             self.on_status(st.get("where") or "")
+        self._fill_server_tree(st)
+
+    # ---- phase 2 of watching: definitions, view ------------------------------
+    def _publish_view(self):
+        if self.server is not None and self.server_submit and self.view.ds is not None:
+            self.server.set_view(self.view.view_state())
+
+    def _on_server_view(self, reply):
+        if self.server is None or self.server_submit or not self.follow_view_box.isChecked():
+            return
+        view = (reply or {}).get("view") if isinstance(reply, dict) else None
+        if view:
+            self.view.apply_view_state(view)
+
+    def _follow_view_toggled(self, on: bool):
+        if on and self.server is not None:
+            self._on_server_view(getattr(self.server, "last_view", None))
+
+    def _on_server_scan(self, reply):
+        self._server_scan = dict(reply or {})
+        self._server_tree_key = None
+        self._fill_server_tree()
+
+    def _fill_server_tree(self, st: dict | None = None):
+        """The queue (one line per scan, marked done / running / aborted /
+        waiting) with each scan's definition under it. Rebuilt only when the
+        queue or a result changes, so an expanded entry stays expanded."""
+        from apps.scan_server_view import definition_lines
+        if self.server is None:
+            return
+        st = st if st is not None else (self.server.last or {})
+        entries = self._server_scan.get("entries") or []
+        q = st.get("queue") or {}
+        results = {i: r for i, r in enumerate(q.get("results") or [])}
+        busy = bool(st.get("busy"))
+        pos = int(q.get("pos") or 0) - 1 if busy else -1
+        key = (self._server_scan.get("scan_rev"), pos, busy,
+               tuple(tuple(r) for r in (q.get("results") or [])))
+        if key == self._server_tree_key:
+            return
+        self._server_tree_key = key
+        keep = self._selected_server_entry()
+        expanded = {self.server_tree.topLevelItem(k).data(0, QtCore.Qt.UserRole)
+                    for k in range(self.server_tree.topLevelItemCount())
+                    if self.server_tree.topLevelItem(k).isExpanded()}
+        if self._server_scan.get("scan_rev") != getattr(self, "_server_tree_rev", None):
+            expanded = set()                 # a new submission: start closed
+        self._server_tree_rev = self._server_scan.get("scan_rev")
+        self.server_tree.clear()
+        if not entries:
+            QtWidgets.QTreeWidgetItem(self.server_tree, ["nothing submitted yet"])
+            self.copy_def_btn.setEnabled(False)
+            self._size_server_tree()
+            return
+        by = self._server_scan.get("started_by") or ""
+        for i, e in enumerate(entries):
+            res = results.get(i)
+            mark = ("running" if i == pos else
+                    (res[1] if res else ("waiting" if busy and i > pos else "")))
+            n = f"{e.get('n_points')} pts" if e.get("n_points") else ""
+            label = "  ·  ".join(x for x in (f"{i + 1}. {e.get('name', 'scan')}", mark, n) if x)
+            top = QtWidgets.QTreeWidgetItem(self.server_tree, [label])
+            top.setData(0, QtCore.Qt.UserRole, i)
+            if i == pos:
+                top.setForeground(0, QtGui.QBrush(QtGui.QColor(C["accent"])))
+            section = None
+            for sec, text in definition_lines(e.get("recipe") or {}, e.get("attrs") or {}):
+                if sec != section:
+                    section = sec
+                    head = QtWidgets.QTreeWidgetItem(top, [sec.upper()])
+                    head.setForeground(0, QtGui.QBrush(QtGui.QColor(C["muted"])))
+                    head.setData(0, QtCore.Qt.UserRole, i)
+                it = QtWidgets.QTreeWidgetItem(top, ["    " + text])
+                it.setData(0, QtCore.Qt.UserRole, i)
+            if by and i == 0:
+                it = QtWidgets.QTreeWidgetItem(top, [f"started by {by}"])
+                it.setData(0, QtCore.Qt.UserRole, i)
+            if i in expanded:
+                top.setExpanded(True)       # what the operator opened stays open
+            if keep is not None and keep == i:
+                self.server_tree.setCurrentItem(top)
+        self.copy_def_btn.setEnabled(self._selected_server_entry() is not None)
+        self._size_server_tree()
+
+    def _size_server_tree(self):
+        """As tall as the lines that are open, at most SERVER_TREE_MAX px: the
+        queue is a line per scan, and the live plot below keeps its room
+        until somebody opens a definition to read it."""
+        tree = self.server_tree
+        rows, it = 0, tree.topLevelItem(0)
+        while it is not None:
+            rows += 1
+            it = tree.itemBelow(it)
+        h = tree.sizeHintForRow(0) if tree.topLevelItemCount() else 18
+        tree.setFixedHeight(min(SERVER_TREE_MAX, max(1, rows) * max(h, 16) + 6))
+
+    def _selected_server_entry(self) -> int | None:
+        it = self.server_tree.currentItem()
+        if it is None:
+            entries = (self._server_scan or {}).get("entries") or []
+            return 0 if len(entries) == 1 else None
+        i = it.data(0, QtCore.Qt.UserRole)
+        return int(i) if isinstance(i, int) else None
+
+    def _copy_server_definition(self) -> list[str] | None:
+        """Load the selected server scan's definition into this Scan tab."""
+        i = self._selected_server_entry()
+        entries = (self._server_scan or {}).get("entries") or []
+        if i is None or not 0 <= i < len(entries):
+            return None
+        e = entries[i]
+        try:
+            recipe = Recipe.from_dict(e.get("recipe") or {})
+        except Exception as exc:
+            self.detail.setText(f"could not read that definition: {exc}")
+            return None
+        recipe.name = e.get("name") or recipe.name
+        missing = self.load_recipe(recipe)
+        msg = (f"copied '{recipe.name}' from the scan server"
+               + (f" -- not available on this PC: {', '.join(missing)}" if missing else ""))
+        self.detail.setText(msg)
+        self.run_log.append(msg)
+        if self.on_log is not None:
+            self.on_log(msg)
+        return missing
 
     def show_server_dataset(self, ds) -> None:
         """A live (or the final) dataset from the server."""

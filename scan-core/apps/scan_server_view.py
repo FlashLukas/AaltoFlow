@@ -48,6 +48,8 @@ class ServerWatch(QtCore.QObject):
     log_lines = QtCore.Signal(object)       # [str, ...] new lines, in order
     live = QtCore.Signal(object)            # an xarray.Dataset
     connection = QtCore.Signal(bool, str)   # answering?, why not
+    scan_info = QtCore.Signal(object)       # get_scan: the submitted definitions
+    view = QtCore.Signal(object)            # get_view: the server PC's plot choice
 
     def __init__(self, host: str = "localhost", cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int | None = None, parent=None, poll_s: float = POLL_S):
@@ -59,12 +61,20 @@ class ServerWatch(QtCore.QObject):
         self.answering = False
         self.why = "connecting ..."
         self._log_next = None                # None = only the tail on the first poll
+        self._scan_rev = -1                  # what get_scan / get_view were last
+        self._view_rev = -1                  # fetched at (-1: fetch on first contact)
+        self.scan: dict = {}                 # the last get_scan reply
+        self.last_view: dict = {}            # the last get_view reply
         self._stop = threading.Event()
         self._poll = ScanServerClient(host, self.cmd_port, self.pub_port, timeout_ms=4000,
                                       kind="gui", name="measurement suite (watching)")
         self.client = ScanServerClient(host, self.cmd_port, self.pub_port, timeout_ms=4000,
                                        kind="gui", name="measurement suite")
         self._started = False
+        # the plot choice to publish (set_view), sent from the poll thread so
+        # dragging a slider never waits on the network; newest one wins
+        self._view_out: dict | None = None
+        self._view_lock = threading.Lock()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="scanserver-watch")
         self._thread.start()
@@ -105,7 +115,9 @@ class ServerWatch(QtCore.QObject):
                     self.connection.emit(True, "")
                 self.last = st
                 self.status.emit(st)
+                self._send_view()
                 self._fetch_log(st)
+                self._fetch_scan_and_view(st)
                 if int(st.get("live_rev") or 0) > self._poll.live_rev \
                         or self._poll.live_notice > self._poll.live_rev:
                     ds = self._poll.get_live()
@@ -122,6 +134,22 @@ class ServerWatch(QtCore.QObject):
                     except Exception:
                         pass
             self._stop.wait(self.poll_s)
+
+    def _fetch_scan_and_view(self, st: dict):
+        """Definitions and view are fetched only when their revision moved:
+        a definition is a few kB, not something to send twice a second."""
+        rev = st.get("scan_rev")
+        if rev is not None and int(rev) != self._scan_rev:
+            r = self._poll.get_scan()
+            self._scan_rev = int(r.get("scan_rev", rev))
+            self.scan = r
+            self.scan_info.emit(r)
+        rev = st.get("view_rev")
+        if rev is not None and int(rev) != self._view_rev:
+            r = self._poll.get_view()
+            self._view_rev = int(r.get("view_rev", rev))
+            self.last_view = r
+            self.view.emit(r)
 
     def _fetch_log(self, st: dict):
         n = int(st.get("log_n") or 0)
@@ -166,6 +194,21 @@ class ServerWatch(QtCore.QObject):
     def submit_queue(self, entries, attrs=None):
         return self._do(self.client.submit_queue, entries, attrs=attrs)
 
+    def set_view(self, view: dict) -> None:
+        """Publish this suite's plot choice (sent at the next poll; only the
+        suite on the server's own PC is allowed to)."""
+        with self._view_lock:
+            self._view_out = dict(view)
+
+    def _send_view(self):
+        with self._view_lock:
+            v, self._view_out = self._view_out, None
+        if v is not None:
+            try:
+                self._poll.set_view(v)            # the poll connection: never delays an Abort
+            except Exception:
+                pass                      # a view is a convenience, never an error
+
     def take_control(self, force: bool = False):
         try:
             return (self.client.take_control(force=force), "")
@@ -207,3 +250,96 @@ class ServerFaults:
         if not ok:
             raise RuntimeError(why)
         return {"ok": True}
+
+
+# ───────────────── a submitted definition, as lines to read ──────────────────
+
+#: run info attributes shown under a watched scan, in this order
+RUN_INFO_KEYS = ("sample", "structure", "operator", "project", "series", "tags", "comment")
+
+
+def _num(v) -> str:
+    try:
+        return f"{float(v):g}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _axis_text(ax: dict) -> str:
+    """One axis of a recipe dict, the way the Scan tab would say it."""
+    t = ax.get("type", "linear")
+    if t == "raster":
+        x, y = ax.get("x") or {}, ax.get("y") or {}
+        return (f"raster  {x.get('param', '?')} {_num(x.get('start'))} -> "
+                f"{_num(x.get('stop'))} ({x.get('num', '?')})  x  {y.get('param', '?')} "
+                f"{_num(y.get('start'))} -> {_num(y.get('stop'))} ({y.get('num', '?')})")
+    if t == "zip":
+        parts = [f"{m.get('param', '?')} {_num(m.get('start'))} -> {_num(m.get('stop'))}"
+                 for m in ax.get("params") or ax.get("members") or []]
+        return f"together ({ax.get('num', '?')} pts):  " + ",  ".join(parts)
+    if t == "repeat":
+        how = "averaged" if ax.get("mode") == "average" else "every run kept"
+        every = f", every {_num(ax['interval_s'])} s" if ax.get("interval_s") else ""
+        return f"repeat x{ax.get('num', '?')} ({how}{every})"
+    if t == "array":
+        return f"{ax.get('param', '?')}: {len(ax.get('values') or [])} listed values"
+    if t == "file":
+        return f"{ax.get('param', '?')}: values from {ax.get('path') or ax.get('file', '?')}"
+    text = (f"{ax.get('param', '?')}  {_num(ax.get('start'))} -> {_num(ax.get('stop'))}, "
+            f"{ax.get('num', '?')} pts")
+    if t == "fly":
+        text += f"  (fly at {_num(ax.get('speed'))}/s" + (
+            f", moving {ax['move']}" if ax.get("move") else "") + ")"
+    return text
+
+
+def _routine_text(hook: dict) -> str:
+    """One hook: when, and what it does."""
+    when = hook.get("when", "?")
+    if when == "each_sweep":
+        when = f"{hook.get('edge', 'start')} of each {hook.get('axis', '?')} sweep"
+        if int(hook.get("every") or 1) > 1:
+            when += f" (every {hook['every']})"
+    elif when == "every_n_points":
+        when = f"every {hook.get('n', '?')} points"
+    else:
+        when = when.replace("_", " ")
+    action = hook.get("action", "?")
+    if action != "call":
+        return f"{when}: {action}"
+    from scan_core.hooks import routine_steps
+    try:
+        steps = routine_steps(hook.get("args") or {})
+    except Exception:
+        steps = []
+    parts = []
+    for s in steps:                      # ("set", id, v) / ("action", id) / (kind, spec)
+        if s[0] == "set":
+            parts.append(f"{s[1]} = {_num(s[2])}")
+        elif s[0] == "action":
+            parts.append(f"run {s[1]}")
+        else:
+            parts.append(str(s[0]).replace("_", " "))
+    return f"{when}: " + ("; ".join(parts) if parts else "(routine)")
+
+
+def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str, str]]:
+    """(section, text) lines describing a submitted scan: run info, axes
+    (outer first), conditions, routines, detectors. Plain data -> testable."""
+    out: list[tuple[str, str]] = []
+    attrs = attrs or {}
+    for k in RUN_INFO_KEYS:
+        if attrs.get(k):
+            out.append(("run info", f"{k}: {attrs[k]}"))
+    for i, ax in enumerate(recipe.get("axes") or []):
+        out.append(("axes", f"{i + 1}. " + _axis_text(ax)))
+    for k, v in (recipe.get("fixed") or {}).items():
+        out.append(("conditions", f"{k} = {_num(v)}"))
+    for h in recipe.get("hooks") or []:
+        out.append(("routines", _routine_text(h)))
+    dets = recipe.get("detectors") or []
+    if dets:
+        out.append(("detectors", ", ".join(dets)))
+    if recipe.get("zigzag"):
+        out.append(("axes", "zig-zag"))
+    return out

@@ -229,7 +229,9 @@ frame (`last_deep()`).
 - **Scan server, phase 2** (phase 1 DONE 2026-10-05, branch `scan-server`:
   the scan engine as a service, `scan_core/scan_server.py`; start a scan on
   the lab PC, watch / abort / answer it from any PC -- scan-core README "The
-  scan server", developer notes 4f). Phase 2: (a) DEFINE and SUBMIT scans
+  scan server", developer notes 4f). MIRROR DONE 2026-10-06: a watcher sees
+  the queue, every scan's run info and definition (copy to its Scan tab) and
+  follows the lab's plot choice. Phase 2: (a) DEFINE and SUBMIT scans
   from the office: the Scan tab must then build against the SERVER's
   registry (its parameters and live limits, not this PC's), the submit
   rule "same PC only" is replaced by control, and the run info comes from

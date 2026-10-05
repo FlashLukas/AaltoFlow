@@ -44,8 +44,16 @@ NONE_TEXT = "— none —"
 class DataView(QtWidgets.QWidget):
     """Detector + two image axes + one row per leftover dimension + the plot."""
 
+    #: the operator changed what is shown (detector, axes, held slices, colour
+    #: range, drawing) -- NOT emitted for live redraws or apply_view_state.
+    #: The suite on the scan server's PC publishes view_state() on it, so a PC
+    #: watching that server can show the same view (Lukas 2026-10-06).
+    view_changed = QtCore.Signal()
+
     def __init__(self, allow_open: bool = False, title: str = "RESULT"):
         super().__init__()
+        self._applying = False             # inside apply_view_state: no view_changed
+        self._pending_view: dict | None = None
         self.ds: xr.Dataset | None = None
         self.path: Path | None = None
         #: Where "Open measurement…" starts looking. The suite points it at the
@@ -95,6 +103,8 @@ class DataView(QtWidgets.QWidget):
         self.part_combo.currentIndexChanged.connect(lambda *_: self.refresh())
         top.addWidget(self.part_combo)
         v.addLayout(top)
+        for combo in (self.det_combo, self.part_combo):
+            combo.currentIndexChanged.connect(self._user_changed)
 
         axr = QtWidgets.QHBoxLayout()
         axr.addWidget(QtWidgets.QLabel("X"))
@@ -137,6 +147,8 @@ class DataView(QtWidgets.QWidget):
         self.reduce_combo = self._build_drawing_combo()
         axr.addWidget(self.reduce_combo)
         v.addLayout(axr)
+        for combo in (self.x_combo, self.y_combo, self.reduce_combo):
+            combo.currentIndexChanged.connect(self._user_changed)
 
         self.rows_box = QtWidgets.QVBoxLayout()
         self.rows_box.setSpacing(3)
@@ -227,7 +239,74 @@ class DataView(QtWidgets.QWidget):
             self._fill(self.det_combo, names, keep=self.det_combo.currentText())
         self._default_drawing()
         self._rebuild_controls()
+        if self._pending_view is not None:
+            # a view that arrived before the data it is about
+            pending, self._pending_view = self._pending_view, None
+            self.apply_view_state(pending)
+            return
         self.refresh()
+
+    # ---- the view as data (scan server watchers follow it) ----------------
+    def _user_changed(self, *_):
+        if not self._applying and self.ds is not None:
+            self.view_changed.emit()
+
+    def view_state(self) -> dict:
+        """What is shown, as plain JSON: detector, part, X, Y, every other
+        dimension's row (hold/average and where), colour range, drawing."""
+        return {"detector": self.det_combo.currentText(),
+                "part": self.part_combo.currentText(),
+                "x": self.x_combo.currentText(),
+                "y": self.y_combo.currentText(),
+                "rows": {r.dim: list(r.state()) for r in self._rows},
+                "z": list(self._z_manual) if self._z_manual else None,
+                "drawing": self.reduce_combo.currentData()}
+
+    def apply_view_state(self, st: dict) -> None:
+        """Show `st` (from view_state(), possibly another PC's). What does not
+        fit this data -- a detector or dimension it does not have -- is left
+        as it is; a view that comes before any data is kept until data comes."""
+        if not isinstance(st, dict):
+            return
+        if self.ds is None:
+            self._pending_view = dict(st)
+            return
+        self._applying = True
+        try:
+            det = st.get("detector")
+            if det and self.det_combo.findText(det) >= 0 and det != self.det_combo.currentText():
+                self.det_combo.blockSignals(True)
+                self.det_combo.setCurrentText(det)
+                self.det_combo.blockSignals(False)
+                self._default_drawing()
+                self._rebuild_controls()
+            for combo, key in ((self.x_combo, "x"), (self.y_combo, "y")):
+                val = st.get(key)
+                if val and combo.findText(val) >= 0:
+                    combo.blockSignals(True)
+                    combo.setCurrentText(val)
+                    combo.blockSignals(False)
+            self._rebuild_controls()
+            rows = st.get("rows") or {}
+            for r in self._rows:
+                s = rows.get(r.dim)
+                if isinstance(s, (list, tuple)) and len(s) == 4:
+                    r.restore(tuple(s))
+            part = st.get("part")
+            if part and self.part_combo.findText(part) >= 0:
+                self.part_combo.blockSignals(True)
+                self.part_combo.setCurrentText(part)
+                self.part_combo.blockSignals(False)
+            i = self.reduce_combo.findData(st.get("drawing"))
+            if i >= 0:
+                self.reduce_combo.setCurrentIndex(i)
+            z = st.get("z")
+            if isinstance(z, (list, tuple)) and len(z) == 2:
+                self.set_z_range(z[0], z[1])
+            else:
+                self.set_z_range(None)
+        finally:
+            self._applying = False
 
     def load_file(self, path: str | Path) -> None:
         from scan_core.data import load
@@ -310,6 +389,7 @@ class DataView(QtWidgets.QWidget):
             if d in keep_rows:
                 row.restore(keep_rows[d])
             row.changed.connect(self.refresh)
+            row.changed.connect(self._user_changed)
             self.rows_box.addWidget(row)
             self._rows.append(row)
 
@@ -630,6 +710,7 @@ class DataView(QtWidgets.QWidget):
         self.z_auto.setChecked(self._z_manual is None)
         self.z_auto.blockSignals(False)
         self.refresh()
+        self._user_changed()
 
     def _z_auto_toggled(self, on: bool):
         if on:

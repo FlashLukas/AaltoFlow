@@ -380,8 +380,20 @@ class ScanServer:
         self._log: list[str] = []
         self._log_base = 0                   # index of self._log[0]
 
+        # the scan as SUBMITTED (phase 2 of watching, Lukas 2026-10-06: "a 1:1
+        # copy of what i see on the lab pc"): a watcher fetches the definitions
+        # and run info with get_scan when scan_rev moves, and the plot choice of
+        # the suite on this PC with get_view when view_rev moves
+        self._scan_rev = 0
+        self._view: dict = {}
+        self._view_rev = 0
+        self._view_by = ""
+
         self.control = ControlLease(
             safety={"abort", "stop_queue"},
+            # set_view changes nothing on an instrument: not behind the control
+            # lease, but only from this PC (_set_view)
+            read={"set_view"},
             on_event=lambda level, msg: self.log(msg, level))
 
     def _reset_scan_state(self):
@@ -691,6 +703,8 @@ class ScanServer:
                 "modules": list(self.connected),
                 "follow": self.follow,
                 "phase": 1,
+                "scan_rev": self._scan_rev,
+                "view_rev": self._view_rev,
             }
         st["describe_rev"] = build_manifest()["revision"]
         st["control"] = self.control.status()
@@ -807,7 +821,56 @@ class ScanServer:
             return self._answer(req.get("answer", True), req)
         if cmd == "clear_fault":
             return self._clear_fault(str(req.get("module") or ""), req)
+        if cmd == "get_scan":
+            return self._get_scan()
+        if cmd == "get_view":
+            with self._lock:
+                return {"ok": True, "view": dict(self._view), "view_rev": self._view_rev,
+                        "by": self._view_by}
+        if cmd == "set_view":
+            return self._set_view(req)
         return {"ok": False, "error": f"unknown command {cmd!r}"}
+
+    # ---- what was submitted, and how the suite on this PC shows it ------
+    def _get_scan(self) -> dict:
+        """The submitted queue as it is: every entry's definition, run info and
+        result, which one runs, who started it. A watcher shows this read-only
+        (and can copy a definition into its own Scan tab)."""
+        with self._lock:
+            entries = [{"name": e.name,
+                        "recipe": json.loads(e.recipe.to_json()),
+                        "attrs": dict(e.attrs),
+                        "n_points": int(e.n_points),
+                        "result": e.result, "path": e.path, "error": e.error}
+                       for e in self._entries]
+            return {"ok": True, "scan_rev": self._scan_rev, "entries": entries,
+                    "current": self._qi if self._busy else -1, "busy": self._busy,
+                    "started_by": self._started_by}
+
+    def _set_view(self, req) -> dict:
+        """The plot choice of the measurement suite on THIS PC (detector, X/Y,
+        held slices, colour range). Only this PC's suite sets it -- a watcher
+        follows it; a second PC must not steer what the lab sees."""
+        ident = ControlLease._identity(req)
+        if ident is None or pc_of(ident) != self.pc:
+            return {"ok": False, "refused": "not_this_pc",
+                    "error": "the shown view is set by the measurement suite on the "
+                             "scan server's own PC"}
+        view = req.get("view")
+        if not isinstance(view, dict):
+            return {"ok": False, "error": "'view' must be a JSON object"}
+        try:
+            if len(json.dumps(view)) > 20000:
+                return {"ok": False, "error": "view too large"}
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "view must be plain JSON"}
+        with self._lock:
+            if view != self._view:
+                self._view = view
+                self._view_rev += 1
+                self._view_by = describe_holder(ident)
+            rev = self._view_rev
+        return {"ok": True, "view_rev": rev}
 
     # ---- config --------------------------------------------------------
     def _config(self) -> dict:
@@ -917,6 +980,7 @@ class ScanServer:
                 return {"ok": False, "refused": "busy", "error": "a scan started meanwhile"}
             self._busy = True
             self._entries = entries
+            self._scan_rev += 1
             self._qi = -1
             self._stop_reason = ""
             self._abort = False

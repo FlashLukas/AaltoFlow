@@ -650,14 +650,22 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
 1. Mission Control, **Add remote...**: the lab PC's name, port 5551 (pub
    5552). A "Scan server" card for the lab PC appears; its **GUI** button
    opens the measurement suite watching it. (Or: Settings tab > *Watch scan
-   server* > pick it, or type `lab-pc:5551`.) The ports are inside the 5550-5600 range
-   a lab network usually opens for AaltoFlow (the instruments start at 5555).
+   server* > pick it, or type `lab-pc:5551`.) The instruments start at port 5555;
+   if your network opens only the instruments' range, either have 5551-5552
+   opened too or give the server a free pair inside it (its card's **Ports**).
 2. The Measurement tab then says *watching scan server on lab-pc (setup ...)*
    and shows the scan live: progress, ETA, where it is, the live map, the
    server's log (lines marked `[server ...]`), the PAUSED fault banner with
    *Clear fault on ...*, the operator banner (*Continue / Abort scan / Abort
    all*), **Abort** and **Stop queue**. The data stays on the lab PC: the pane
    shows the file's path there.
+3. The card **ON THE SCAN SERVER** lists the queue (running / waiting / done
+   / aborted); open a scan to read its run info (sample, operator, ...) and
+   its definition (axes, conditions, routines, detectors). **Copy to Scan
+   tab** loads it here to reuse. With **show what the lab shows** ticked the
+   plot follows the lab's choice of detector, X / Y, held slices and colour
+   range; untick it to look at something else -- the lab's screen never
+   changes either way.
 
 ![the Measurement tab watching a scan server](../front-panels/suite-watch.png)
 

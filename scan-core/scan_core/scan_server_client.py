@@ -247,6 +247,19 @@ class ScanServerClient(ControlClient):
     def get_log(self, since: int = 0) -> dict:
         return self.command("get_log", since=int(since))
 
+    def get_scan(self) -> dict:
+        """The submitted queue: every entry's definition (a recipe dict), run
+        info and result, `current` (index running, -1 when idle)."""
+        return self.command("get_scan")
+
+    def get_view(self) -> dict:
+        """{view, view_rev, by}: the plot choice of the suite on the server's PC."""
+        return self.command("get_view")
+
+    def set_view(self, view: dict) -> dict:
+        """Publish this suite's plot choice (only from the server's own PC)."""
+        return self.command("set_view", view=view)
+
     def get_live(self, force: bool = False):
         """The live dataset when it is newer than the last one fetched (None
         when unchanged or when the server has none yet)."""

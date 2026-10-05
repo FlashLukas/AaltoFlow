@@ -779,8 +779,16 @@ the wire contract of section 4; every measurement suite is a client.
 
 **Phase 1 (built): WATCH.** A suite on the server's PC submits a scan or a
 queue; any suite watches it live and can Abort / Continue / Abort all / Stop
-queue / clear a fault. The scan does not depend on any window. **Phase 2
-(open):** define and submit scans from another PC (the recipe validated
+queue / clear a fault. The scan does not depend on any window.
+**Mirror (built 2026-10-06; Lukas: "a 1:1 copy of what i see on the lab
+pc"):** a watching suite also shows the submitted queue with every scan's
+run info and definition (`get_scan`, fetched when `scan_rev` moves), can copy
+a definition into its own Scan tab, and follows the plot choice of the suite
+on the server's PC while "show what the lab shows" is ticked (`set_view` /
+`get_view`, `view_rev`; DataView `view_state()` / `apply_view_state()`). The
+lab's suite must run its scans ON the server (setting `run_on_scan_server`),
+or there is nothing to mirror. Not mirrored on purpose: which tab is open,
+plot zoom. **Phase 2 (open):** define and submit scans from another PC (the recipe validated
 against the SERVER's registry, the run info from the submitting PC), and edit
 a running queue (add / remove / reorder the scans not yet started). ROADMAP.
 
@@ -813,6 +821,9 @@ large map never rides the PUB socket.
 | `answer_pause` | `answer` true / false / "all" | yes* | the `pause` step's Continue / Abort scan / Abort all |
 | `clear_fault` | `module` | yes* | forwarded to that module (`Lab.clear_fault`) |
 | `set_config` | `{server: {live_every_s}}` | yes* | `data_dir` is shown, never set over the wire |
+| `get_scan` | | no | `{scan_rev, entries [{name, recipe, attrs, n_points, result, path, error}], current, busy, started_by}` |
+| `get_view` | | no | `{view, view_rev, by}`: the plot choice of the suite on the server's PC |
+| `set_view` | `view` (JSON object, <= 20 kB) | no, but THIS PC only | refused `not_this_pc` from anywhere else: a watcher never steers the lab's screen |
 | `shutdown` | | never | while a scan runs: ABORT it and the queue, wait for the after-scan routine and the save, then exit |
 
 \* "needs control" = refused when ANOTHER PC holds control of the server
@@ -826,7 +837,7 @@ stop_reason, summary}, `done`, `total`, `progress`, `eta_s`, `queue_eta_s`,
 `where_axes`, `now`, `faults` [{module, message, can_clear}], `pause_message`,
 `save_path`, `last_saved`, `save_error`, `live_rev`, `log_tail`, `log_n`,
 `error`, `pc`, `setup_name`, `data_dir`, `modules`, `phase`, `control`,
-`describe_rev`. Deliberately NO `fault` / `hw_error` key: those mean "do not
+`describe_rev`, `scan_rev`, `view_rev`. Deliberately NO `fault` / `hw_error` key: those mean "do not
 trust my readings" to a scan engine, and the server is not an instrument.
 
 **Decisions and why.**
