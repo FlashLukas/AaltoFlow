@@ -136,3 +136,38 @@ def test_the_suite_tab_opens_a_run_in_the_data_viewer(qapp, folder, tmp_path, mo
         assert cat_w.data_dir == other and cat_w.table.topLevelItemCount() == 0
     finally:
         win.close()
+
+
+def test_setup_sample_operator_are_pick_lists_of_the_values_present(tmp_path):
+    """Lukas, 2026-10-05: the catalogue offers Setup, User and Sample as lists."""
+    from scan_core import catalogue
+    from scan_core.autosave import write_dataset
+    from scan_core.engine import run
+    from scan_core.recipe import Recipe
+    from scan_core.registry import build_sim_registry
+    reg = build_sim_registry()
+    for k, (setup, sample, op) in enumerate([("TR-MOKE", "B7", "anna"),
+                                             ("VNA-FMR", "Y12", "ben"),
+                                             ("TR-MOKE", "B8", "anna")]):
+        r = Recipe(name=f"s{k}", axes=[{"type": "linear", "param": "field",
+                                        "start": 0, "stop": 1, "num": 2}],
+                   detectors=["lockin_r"])
+        ds = run(r, reg, attrs={"setup_name": setup, "sample": sample, "operator": op})
+        write_dataset(ds, tmp_path / "2026-10-05" / "sub" / f"12000{k}_s{k}.nc")  # a subfolder
+    catalogue.scan(tmp_path)
+    assert catalogue.distinct(tmp_path, "setup") == ["TR-MOKE", "VNA-FMR"]
+    assert len(catalogue.search(tmp_path, setup="tr-moke")) == 2
+
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from apps.catalogue_view import CatalogueWidget
+    w = CatalogueWidget(data_dir=tmp_path)
+    w.fill_picks()
+    box = w._picks["setup"]
+    assert [box.itemText(i) for i in range(box.count())] == ["", "TR-MOKE", "VNA-FMR"]
+    assert [w._picks["operator"].itemText(i) for i in range(w._picks["operator"].count())] == ["", "anna", "ben"]
+    box.setCurrentIndex(2)                       # choose VNA-FMR
+    w.refresh()
+    assert w.query()["setup"] == "VNA-FMR"
+    assert w.table.topLevelItemCount() == 1

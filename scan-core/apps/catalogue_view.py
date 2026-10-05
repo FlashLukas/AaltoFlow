@@ -37,10 +37,14 @@ from apps.theme import C
 COLUMNS = [("date", "created"), ("name", "name"), ("sample", "sample"),
            ("structure", "structure"), ("axes", "dims_text"),
            ("detectors", "detectors_text"), ("operator", "operator"),
-           ("tags", "tags_text")]
+           ("tags", "tags_text"), ("setup", "setup_name")]
+
+#: filters offered as a drop-down of the values the catalogue holds
+PICK_FIELDS = ("setup", "sample", "operator", "project", "series")
 
 #: the filter fields in the second row: (attribute, placeholder, search kwarg)
-FILTERS = [("sample_edit", "sample", "sample"),
+FILTERS = [("setup_edit", "setup", "setup"),
+           ("sample_edit", "sample", "sample"),
            ("operator_edit", "operator", "operator"),
            ("project_edit", "project", "project"),
            ("series_edit", "series", "series"),
@@ -97,12 +101,30 @@ class CatalogueWidget(QtWidgets.QWidget):
 
         # row 2: field filters + the date range
         r2 = QtWidgets.QHBoxLayout(); r2.setSpacing(6)
-        for attr, placeholder, _kw in FILTERS:
-            edit = QtWidgets.QLineEdit()
+        # setup / sample / operator / project / series are PICK LISTS of the
+        # values the files really hold (Lukas, 2026-10-05: "offer the Setup,
+        # User, Sample in a list"), still typeable to narrow. The attribute
+        # is the combo's line edit, so typing, clearing and the debounce work
+        # exactly as for the plain fields.
+        self._picks = {}
+        for attr, placeholder, kw in FILTERS:
+            if kw in PICK_FIELDS:
+                box = QtWidgets.QComboBox()
+                box.setEditable(True)
+                box.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+                box.setMinimumContentsLength(8)
+                box.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                edit = box.lineEdit()
+                box.setToolTip(f"{placeholder}: pick one of the values in your files, "
+                               f"or type part of one")
+                self._picks[kw] = box
+                widget = box
+            else:
+                edit = widget = QtWidgets.QLineEdit()
             edit.setPlaceholderText(placeholder)
             edit.setClearButtonEnabled(True)
             setattr(self, attr, edit)
-            r2.addWidget(edit, 1)
+            r2.addWidget(widget, 1)
         self.from_edit = QtWidgets.QLineEdit(); self.from_edit.setPlaceholderText("from YYYY-MM-DD")
         self.to_edit = QtWidgets.QLineEdit(); self.to_edit.setPlaceholderText("to YYYY-MM-DD")
         for e in (self.from_edit, self.to_edit):
@@ -269,7 +291,24 @@ class CatalogueWidget(QtWidgets.QWidget):
         if result["read"] or result["removed"]:
             self.on_log(f"catalogue: {result['files']} files, {result['read']} read, "
                         f"{result['removed']} removed, {result['errors']} unreadable")
+        self.fill_picks()
         self.refresh()
+
+    def fill_picks(self) -> None:
+        """Refill the drop-downs with the values the catalogue holds now,
+        keeping what is typed or chosen. The first entry is empty = any."""
+        for kw, box in self._picks.items():
+            try:
+                values = cat.distinct(self.data_dir, kw)
+            except Exception:
+                continue
+            keep = box.lineEdit().text()
+            box.blockSignals(True)
+            box.clear()
+            box.addItem("")
+            box.addItems(values)
+            box.lineEdit().setText(keep)
+            box.blockSignals(False)
 
     # ---- searching ---------------------------------------------------------
 

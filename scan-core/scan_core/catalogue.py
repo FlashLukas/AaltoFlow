@@ -702,7 +702,7 @@ def _day(v, end: bool = False) -> str | None:
 
 
 def search(data_dir, text=None, sample=None, operator=None, project=None,
-           tags=None, series=None, instrument=None, detector=None,
+           tags=None, series=None, instrument=None, detector=None, setup=None,
            date_from=None, date_to=None, where=None, limit: int | None = None,
            include_errors: bool = True) -> list[dict]:
     """Find runs in the index of `data_dir`, newest first.
@@ -710,6 +710,8 @@ def search(data_dir, text=None, sample=None, operator=None, project=None,
     text      : words; EVERY word must appear somewhere in name, sample,
                 structure, comment, tags or the file name (case-insensitive)
     sample, operator, project, series : "contains", case-insensitive
+    setup     : the SETUP the file was measured on (attribute setup_name, set by
+                the installer: "TR-MOKE", "VNA-FMR" ...); "contains", any case
     tags      : a list or "a, b": the run must carry EVERY tag (exact, any case)
     instrument: a module slug (from the snapshot, or from the parameter ids of
                 an older file)
@@ -730,7 +732,8 @@ def search(data_dir, text=None, sample=None, operator=None, project=None,
                       "relpath")) + ")")
         params += [like] * 6
     for col, val in (("sample", sample), ("operator", operator),
-                     ("project", project), ("series", series)):
+                     ("project", project), ("series", series),
+                     ("setup_name", setup)):
         if val:
             sql.append(f"AND COALESCE({col},'') LIKE ? ESCAPE '\\'")
             params.append(f"%{_like_escape(str(val).strip())}%")
@@ -800,7 +803,9 @@ def snapshot_of(data_dir, path) -> dict:
 
 def distinct(data_dir, column: str) -> list[str]:
     """The values a filter field has across the catalogue (for completers)."""
-    allowed = {"sample", "operator", "project", "series", "structure"}
+    allowed = {"sample", "operator", "project", "series", "structure", "setup_name"}
+    if column == "setup":
+        column = "setup_name"
     root = Path(data_dir)
     if column == "instrument":
         q = "SELECT DISTINCT slug FROM instruments ORDER BY slug COLLATE NOCASE"

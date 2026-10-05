@@ -119,6 +119,20 @@ def test_measurement_suite_button_is_not_a_module_card(env):
     win.open_viewer()                      # the data viewer lives in scan-core too
     assert win.viewer_proc is None
     assert "no data viewer at" in win.logbox.toPlainText()
+    win.open_catalogue()                   # the run catalogue too (Lukas, 2026-10-05)
+    assert win.catalogue_proc is None
+    assert "no catalogue at" in win.logbox.toPlainText()
+
+
+def test_the_setup_name_is_set_from_the_window(env):
+    """Lukas, 2026-10-05: the Catalogue filters by setup, so it must be easy to
+    set -- not only by the installer."""
+    mc, win, root, app = env
+    assert win.edit_setup_name("VNA-FMR") == "VNA-FMR"
+    assert mc.setup_name() == "VNA-FMR"
+    assert win.title_lbl.text().startswith("VNA-FMR")
+    win.edit_setup_name("")
+    assert not mc.setup_name()                 # cleared ("" or None)
 
 
 def test_a_new_module_folder_appears_on_rescan(env):

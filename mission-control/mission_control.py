@@ -42,7 +42,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from suite_common import get_setting, set_setting
+from suite_common import get_setting, set_setting, set_setup_name
 from suite_common import hwlock
 from suite_common import secure
 from suite_common import instruments as finder
@@ -258,6 +258,7 @@ SUITE_SCRIPT = "apps/suite.py"
 #: The data viewer (AaltoView's successor) lives in scan-core too. It reads files
 #: and talks to no instrument, so it can be open while nothing else runs.
 VIEWER_SCRIPT = "apps/viewer.py"
+CATALOGUE_SCRIPT = "apps/catalogue.py"
 
 
 def build_command(project_dir: Path, script: str, extra: list[str], gui: bool,
@@ -2042,13 +2043,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prober = Prober(self.bridge)
         self.suite_proc: QtCore.QProcess | None = None   # scan-core, opened at most once
         self.viewer_proc: QtCore.QProcess | None = None  # the data viewer, likewise
+        self.catalogue_proc: QtCore.QProcess | None = None  # the run catalogue, likewise
 
         # header
         header = QtWidgets.QHBoxLayout()
         tbox = QtWidgets.QVBoxLayout(); tbox.setSpacing(2)
         title = QtWidgets.QLabel(suite_title("Mission Control").upper()); title.setObjectName("title")
-        title.setToolTip("The setup name comes from the installer (re-run Setup to change it,\n"
-                         "or edit settings.setup_name in suite_local.json).")
+        title.setToolTip("The setup name (e.g. TR-MOKE, VNA-FMR): set it with 'Setup name...'.\n"
+                         "Every data file records it, and the Catalogue can filter by it.")
+        self.title_lbl = title
         # the product name moves to the subtitle once a setup name leads the title
         lead = f"{PRODUCT} · " if setup_name() else ""
         sub = QtWidgets.QLabel(lead + "finds the modules · starts services · opens GUIs")
@@ -2080,11 +2083,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.viewer_btn.setToolTip("scan-core: look at saved measurements -- maps, 1-D "
                                    "overlays, export to files, Origin and Jupyter.")
         self.viewer_btn.clicked.connect(self.open_viewer)
+        self.catalogue_btn = QtWidgets.QPushButton("  Catalogue")
+        self.catalogue_btn.setIcon(self.style().standardIcon(
+            QtWidgets.QStyle.SP_FileDialogContentsView))
+        self.catalogue_btn.setToolTip("scan-core: search every saved run -- by setup, sample, "
+                                      "operator, project, tags, date or instrument values "
+                                      "(e.g. ppms.temperature between 4 and 6).")
+        self.catalogue_btn.clicked.connect(self.open_catalogue)
         stop_all = QtWidgets.QPushButton("  Stop all"); stop_all.setObjectName("danger")
         stop_all.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaStop))
         stop_all.clicked.connect(self.stop_all)
         bar.addWidget(start_all); bar.addWidget(guis_all); bar.addWidget(self.suite_btn)
-        bar.addWidget(self.viewer_btn)
+        bar.addWidget(self.viewer_btn); bar.addWidget(self.catalogue_btn)
         bar.addStretch(1); bar.addWidget(stop_all)
         col.addLayout(bar)
 
@@ -2147,7 +2157,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sec_badge.setToolTip("The lab's security policy as this PC reads it "
                                   "(Security… to change it)")
         mrow.addWidget(rescan); mrow.addWidget(inst); mrow.addWidget(add_mod); mrow.addWidget(add)
-        mrow.addWidget(exp); mrow.addWidget(imp)
+        setup_btn = QtWidgets.QPushButton("Setup name…")
+        setup_btn.setToolTip("Name this setup (TR-MOKE, VNA-FMR ...). Every scan file records it,\n"
+                             "and the Catalogue can search by it.")
+        setup_btn.clicked.connect(lambda: self.edit_setup_name())
+        mrow.addWidget(exp); mrow.addWidget(imp); mrow.addWidget(setup_btn)
         mrow.addWidget(sec); mrow.addWidget(self.sec_badge)
         col.addLayout(mrow)
 
@@ -2415,6 +2429,30 @@ class MainWindow(QtWidgets.QMainWindow):
     # suite_common.settings_bundle, where it is tested without Qt. Here there are
     # only file dialogs, a confirmation and log lines.
 
+    def edit_setup_name(self, name: str | None = None) -> str | None:
+        """Ask for (or set, in tests) this setup's name; '' clears it.
+
+        Why a button (Lukas, 2026-10-05): the Catalogue filters runs by setup,
+        and a PC set up from a git checkout never ran the installer that asks
+        for it -- its files carried no setup at all. The measurement suite and
+        the other windows read the new name when they next start."""
+        if name is None:
+            text, ok = QtWidgets.QInputDialog.getText(
+                self, "Setup name",
+                "Name of this setup (e.g. TR-MOKE, VNA-FMR).\n"
+                "Every scan file records it; the Catalogue filters by it.\n"
+                "Empty = no setup name.",
+                text=setup_name() or "")
+            if not ok:
+                return None
+            name = text
+        name = (name or "").strip()
+        set_setup_name(name or None, ROOT)
+        self.title_lbl.setText(suite_title("Mission Control").upper())
+        self.setWindowTitle(suite_title("Mission Control"))
+        self.log(f"setup name: {name or '(none)'} -- open windows pick it up when they restart")
+        return name
+
     def export_settings(self, path: str | None = None) -> Path | None:
         """Write this PC's settings into one .zip. `path` skips the file dialog."""
         if path is None:
@@ -2605,6 +2643,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Open the data viewer (one instance). It needs no running service."""
         self.viewer_proc = self._open_app(VIEWER_SCRIPT, "viewer", "data viewer",
                                           self.viewer_proc)
+
+    def open_catalogue(self):
+        """Open the run catalogue (one instance): search saved runs; a
+        double-click opens one in the data viewer. Needs no running service."""
+        self.catalogue_proc = self._open_app(CATALOGUE_SCRIPT, "catalogue", "catalogue",
+                                             self.catalogue_proc)
 
     def _open_app(self, script: str, tag: str, what: str,
                   running: QtCore.QProcess | None) -> QtCore.QProcess | None:
