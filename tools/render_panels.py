@@ -95,10 +95,11 @@ SIZES = {
     "suite-scan": (1500, 950),
     "suite-measurement": (1500, 950),
     "suite-data": (1500, 950),
-    "suite-settings": (1500, 860),
+    "suite-settings": (1500, 1080),     # + the SCAN SERVER card (2026-10-05)
     "suite-catalogue": (1500, 760),
     "suite-navigator": (1500, 950),
     "suite-queue": (1500, 950),
+    "suite-watch": (1500, 990),
     "suite-queue-dialog": (760, 430),
     "suite-fly-scan": (1500, 950),
     "suite-repeat-scan": (1500, 950),
@@ -595,6 +596,61 @@ def _queue_running(win):
     b.run_queue([fmr("FMR map 0 dBm", 12, 20, 0.0),
                  fmr("FMR map 8 dBm", 41, 61, 8.0),
                  fmr("FMR map 14 dBm", 41, 61, 14.0)])
+
+
+def _watch_server(win):
+    """The Measurement tab WATCHING a scan server: a server in this process
+    (on the simulator, scratch ports) runs a 2-scan queue submitted by "the
+    lab PC", and the suite shows it -- header, progress, queue line, live map,
+    the server's log. The PC and user names are neutral ("lab-pc", "operator"):
+    a screenshot is a tracked file (CLAUDE.md, private names)."""
+    import random
+    import socket as _socket
+    import tempfile
+
+    # security off for the picture: this PC's keys (and their PC name, which a
+    # 'warn' line would print into the log pane) are not what is shown here
+    os.environ["AALTOFLOW_SECURITY_DIR"] = tempfile.mkdtemp(prefix="render-nosec-")
+    from scan_core import Recipe, build_sim_registry
+    from scan_core.scan_server import ScanServer
+    from scan_core.scan_server_client import ScanServerClient
+
+    while True:
+        cmd = random.randrange(20000, 40000)
+        with _socket.socket() as a, _socket.socket() as b_:
+            try:
+                a.bind(("127.0.0.1", cmd)); b_.bind(("127.0.0.1", cmd + 1))
+                break
+            except OSError:
+                continue
+    srv = ScanServer(host="127.0.0.1", cmd_port=cmd, pub_port=cmd + 1,
+                     registry=build_sim_registry(), data_dir=NEUTRAL / "data",
+                     echo=False, live_every_s=0.3, status_hz=6.0)
+    srv.pc = "lab-pc"
+    srv.start()
+    c = ScanServerClient("127.0.0.1", cmd, cmd + 1)
+    c.identity["host"] = "operator@lab-pc"
+    c.start()
+    wait = [{"when": "before_point", "action": "wait_ms", "args": {"ms": 4}}]
+
+    def fmr(name, power):
+        return Recipe(name=name, fixed={"rf_power": power},
+                      axes=[{"type": "linear", "param": "field", "start": 0, "stop": 120,
+                             "num": 41},
+                            {"type": "linear", "param": "rf_freq", "start": 500,
+                             "stop": 2500, "num": 61}],
+                      detectors=["lockin_r"], hooks=wait)
+    c.submit_queue([("FMR map 0 dBm", fmr("FMR map 0 dBm", 0.0)),
+                    ("FMR map 8 dBm", fmr("FMR map 8 dBm", 8.0))],
+                   attrs={"sample": "YIG islands", "operator": "operator"})
+    win.watch_server(f"127.0.0.1:{cmd}:{cmd + 1}")
+
+    def cleanup():
+        if win.watch is not None:
+            win.watch.close()
+        c.close()
+        srv.stop()                          # aborts the queue, saves, stops
+    win._render_cleanup = cleanup
 
 
 def _fly(run: bool):
@@ -1209,6 +1265,7 @@ TARGETS = {
     "suite-catalogue": _suite("Catalogue", _catalogue_demo, settle=1.5),
     "suite-navigator": _suite("Navigator", _navigator_demo, settle=2.0),
     "suite-queue": _suite("Measurement", _queue_running, settle=2.5),
+    "suite-watch": _suite("Measurement", _watch_server, settle=4.0),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),
     "suite-fly-scan": _suite("Scan", _fly(run=False), settle=2.0),
     "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),

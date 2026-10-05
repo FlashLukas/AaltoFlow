@@ -1811,9 +1811,31 @@ class ModuleCard(QtWidgets.QFrame):
         self.set_up(self.up)
         self.win.prober.probe_now()
 
+    def _confirm_stop_scan_server(self) -> bool:
+        """True to go on stopping the scan server: it is idle, does not answer,
+        or the person says yes to aborting the scan it is running."""
+        reply = _ask(self.spec.host, self.spec.cmd, 1500, self.spec.id, {"cmd": "status"})
+        st = (reply or {}).get("status") or {}
+        if not st.get("busy"):
+            return True
+        ans = QtWidgets.QMessageBox.question(
+            self.win, "Stop the scan server?",
+            f"The scan server is running '{st.get('scan', '')}' "
+            f"({st.get('done', 0)} of {st.get('total', 0)} points).\n\n"
+            "Stopping it ABORTS that scan (and the rest of its queue): the points so "
+            "far are saved and the after-scan routine runs. Stop it anyway?")
+        return ans == QtWidgets.QMessageBox.Yes
+
     def stop_service(self, graceful_wait_ms: int = 8000):
         proc = self.service_proc
         if proc and proc.state() != QtCore.QProcess.NotRunning:
+            if self.spec.key == "scanserver":
+                # Stopping a scan server ABORTS the scan it runs (its points are
+                # saved, the after-scan routine runs) -- ask first, and give it
+                # time to save before a kill (scan_core/scan_server.py)
+                if not self._confirm_stop_scan_server():
+                    return
+                graceful_wait_ms = max(graceful_wait_ms, 30000)
             self._stopping = True
             pid = int(proc.processId() or 0)
             self.win.log(f"[{self.spec.id}] stopping service…")

@@ -2564,6 +2564,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: save, in their own place -- a definition must not lose part of itself
         #: by passing through the UI.
         self._hook_template: list = []
+        #: A SCAN SERVER this run pane is showing (apps/scan_server_view.py,
+        #: ServerWatch), or None: scans run in this window, exactly as before.
+        #: While one is attached, the pane shows the SERVER's scan -- progress,
+        #: live map, banners -- and Abort / Stop queue / the banners' buttons go
+        #: to the server. Run submits there only when `server_submit` is True
+        #: (the scan server of THIS PC, and the suite's "Run scans on the scan
+        #: server" setting on): starting scans from another PC is phase 2.
+        self.server = None
+        self.server_submit = False
+        self._server_faults = None
+        self._server_answered: tuple[str, float] = ("", 0.0)
 
         self.setWindowTitle(suite_title("Scan Builder"))   # "TR-MOKE · Scan Builder"
         self.resize(1280, 820)
@@ -3761,6 +3772,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         errs = recipe.validate(self.registry)
         if errs or not self.rows:
             self._rebuild_summary(); return
+        if self.server is not None and not block:
+            # the run pane shows a SCAN SERVER: the scan runs THERE
+            self._server_submit(recipe=recipe)
+            return
         # One scan at a time. Starting a second while the first is still
         # unwinding puts TWO engines on the same instruments: they interleave
         # setpoints, and the run looks stuck for reasons nothing reports.
@@ -3839,6 +3854,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if not entries or bad:
             self.detail.setText("queue NOT started -- " + (" | ".join(bad) or "it is empty"))
             return False
+        if self.server is not None:
+            # the whole queue goes to the scan server, which runs it there
+            return self._server_submit(entries=entries)
         ok, msg = self.check_save_target()
         if not ok and not self._confirm_unsaved(msg):
             return False
@@ -3853,6 +3871,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def stop_queue(self):
         """Abort the running scan and do not start another."""
+        if self.server is not None:
+            self._server_cmd("stop queue", self.server.stop_queue)
+            return
         if self.queue_running():
             self._queue_stop = "stopped by the operator"
             self._abort()
@@ -3942,6 +3963,161 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._run_finished()
         self._rebuild_summary()                 # back to the editor's definition
         self.queue_lbl.setText(text)
+
+    # ---- a SCAN SERVER (scan_core/scan_server.py) ------------------------------
+    def attach_server(self, watch, can_submit: bool = False) -> None:
+        """Show the scan of a scan server (apps/scan_server_view.ServerWatch)
+        in this run pane. `can_submit`: Run (and a loaded queue) go to it."""
+        from apps.scan_server_view import ServerFaults
+        self.server = watch
+        self.server_submit = bool(can_submit)
+        self._server_faults = ServerFaults(watch)
+        self._server_answered = ("", 0.0)
+        self.run_btn.setEnabled(self.server_submit)
+        self.run_btn.setToolTip(
+            "Run this scan ON THE SCAN SERVER of this PC: it keeps running when\n"
+            "this window closes, and any PC can watch it." if self.server_submit else
+            "This pane is watching a scan server. Starting scans from here is\n"
+            "phase 2: stop watching (Settings tab) to run scans in this window,\n"
+            "or tick 'Run scans on this PC's scan server' on the scan server's PC.")
+        self.abort_btn.setEnabled(False)
+        self.save_lbl.setText(f"watching the scan server on {watch.label}")
+
+    def detach_server(self) -> None:
+        """Back to running scans in this window."""
+        self.server = None
+        self.server_submit = False
+        self._server_faults = None
+        self._on_paused([])
+        self._on_ask("", None)
+        self.run_btn.setToolTip("")
+        self.run_btn.setEnabled(self.worker is None)
+        self.abort_btn.setEnabled(self.worker is not None)
+        self.stop_queue_btn.setVisible(self.queue_running())
+        self.queue_lbl.setVisible(self.queue_running())
+        self.progress.setFormat("%p%")
+        self.view.set_marker(None)
+        self._server_was_busy = False
+        self._show_where()
+        self._refresh_save_target()
+        self._rebuild_summary()
+
+    def _server_cmd(self, what: str, fn, *args) -> bool:
+        ok, why = fn(*args)
+        msg = f"scan server: {what} sent" if ok else f"scan server: {what} REFUSED -- {why}"
+        self.run_log.append(msg)
+        if self.on_log is not None:
+            self.on_log(msg)
+        if not ok:
+            self.detail.setText(msg)
+        return ok
+
+    def _server_submit(self, recipe=None, entries=None) -> bool:
+        """Run on the server (phase 1: the scan server of this PC only)."""
+        if not self.server_submit:
+            self.detail.setText(
+                "this pane is watching a scan server on another PC -- starting scans "
+                "there is phase 2. Stop watching (Settings tab) to run in this window.")
+            return False
+        if (self.server.last or {}).get("busy"):
+            self.detail.setText("the scan server is already running a scan -- wait for it, "
+                                "or Abort it first")
+            return False
+        attrs = self.run_info.attrs()
+        if entries is not None:
+            ok = self._server_cmd(f"queue of {len(entries)} scans",
+                                  self.server.submit_queue, entries, attrs)
+        else:
+            ok = self._server_cmd(f"scan '{recipe.name}'", self.server.submit, recipe, attrs)
+        if ok:
+            self.progress.setValue(0)
+            self.run_btn.setEnabled(False)
+            self.abort_btn.setEnabled(True)
+        return ok
+
+    def _server_answer(self, value) -> None:
+        """The operator banner's buttons, for a question the SERVER asks."""
+        self._server_answered = (self.ask_lbl.text(), time.monotonic())
+        self._server_cmd("Continue" if value is True else
+                         "Abort ALL" if value == "all" else "Abort scan",
+                         self.server.answer, value)
+
+    def show_server_status(self, st: dict) -> None:
+        """Draw the server's status in this pane: progress, banners, buttons,
+        the queue line, where the file goes. Called at every status frame."""
+        if self.server is None or not isinstance(st, dict):
+            return
+        busy = bool(st.get("busy"))
+        done, total = int(st.get("done") or 0), int(st.get("total") or 0)
+        if total:
+            self.progress.setMaximum(total)
+            self.progress.setValue(done)
+        # PAUSED on a fault (the server knows which can be cleared)
+        faults = [(f.get("module", "?"), f.get("message", "")) for f in st.get("faults") or []]
+        if faults != list(self.paused_faults):
+            self._on_paused(faults)
+        # YOUR TURN: a pause step on the server waits for an answer
+        msg = st.get("pause_message") or ""
+        answered, t = self._server_answered
+        if msg and not (msg == answered and time.monotonic() - t < 3.0):
+            if self._ask_answer is None or self.ask_lbl.text() != msg:
+                self._on_ask(msg, self._server_answer)
+        elif not msg and self.ask_box.isVisible():
+            self._on_ask("", None)
+        # the queue
+        q = st.get("queue") or {}
+        n, pos = int(q.get("n") or 0), int(q.get("pos") or 0)
+        if busy and n > 1:
+            left = st.get("queue_eta_s")
+            from scan_core.scan_server import fmt_duration
+            self.queue_lbl.setText(f"Scan {pos} of {n}  ·  {st.get('scan', '')}"
+                                   + (f"   ·   queue ≈ {fmt_duration(left)} left"
+                                      if left is not None else ""))
+            self.queue_lbl.show()
+        elif not busy and q.get("summary"):
+            self.queue_lbl.setText(q["summary"])
+            self.queue_lbl.show()
+        else:
+            self.queue_lbl.hide()
+        self.stop_queue_btn.setVisible(busy and n > 1)
+        self.stop_queue_btn.setEnabled(busy)
+        # where the data goes: a path ON THE SERVER'S PC (no file transfer)
+        err = st.get("save_error") or ""
+        path = st.get("last_saved") or st.get("save_path") or ""
+        pc = st.get("pc") or "?"
+        if err:
+            self.save_lbl.setText(err)
+            self.save_lbl.setStyleSheet(f"color:{C['danger']}; font-size:11px;")
+        else:
+            self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
+            self.save_lbl.setText((f"the server saves to {path} (on {pc})" if path else
+                                   f"data folder on {pc}: {st.get('data_dir', '?')}"))
+        if path:
+            self.last_saved = Path(path)
+        # buttons: Abort while anything runs; Run only when we may submit
+        self.abort_btn.setEnabled(busy)
+        self.run_btn.setEnabled(self.server_submit and not busy)
+        if busy:
+            self.summary.setStyleSheet("")
+            self.summary.setText(f"on the scan server:  {st.get('scan', '')}")
+        elif getattr(self, "_server_was_busy", False):
+            # the server's scan ended: back to this tab's own definition
+            self._rebuild_summary()
+            if st.get("error"):
+                self.detail.setText(f"scan server: {st['error']}")
+        self._server_was_busy = busy
+        # where it is, marked on the live map; the suite's header line
+        where = st.get("where_axes") if busy else None
+        self.run_where = where
+        coords = {a["name"]: a["value"] for a in (where or {}).get("axes", ())
+                  if a.get("value") is not None}
+        self.view.set_marker(coords or None)
+        if self.on_status is not None:
+            self.on_status(st.get("where") or "")
+
+    def show_server_dataset(self, ds) -> None:
+        """A live (or the final) dataset from the server."""
+        self._on_partial(ds)
 
     def autosave_path(self, recipe) -> Path | None:
         """One file per run: <data dir>/<date>/<time>_<name>.nc.
@@ -4046,7 +4222,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
             return
         self.pause_lbl.setText("\n".join(f"{name}: {msg}" for name, msg in self.paused_faults))
         self.progress.setFormat("PAUSED -- %p%")
-        lab = self.fault_lab
+        # a scan on a SCAN SERVER: the server knows which faults can be
+        # cleared, and the button sends clear_fault through it
+        lab = self._server_faults if self.server is not None else self.fault_lab
         for name, _ in self.paused_faults:
             if name in self.clear_fault_btns or lab is None:
                 continue
@@ -4094,8 +4272,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """Send `clear_fault` to one module (the banner's button)."""
         msg = f"clear_fault sent to {name}"
         ok = True
+        lab = self._server_faults if self.server is not None else self.fault_lab
         try:
-            self.fault_lab.clear_fault(name)
+            lab.clear_fault(name)
         except Exception as exc:
             # a module refuses while the cause is still there -- say so
             msg, ok = f"clear_fault on {name} refused: {exc}", False
@@ -4202,6 +4381,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.on_log(msg)
 
     def _abort(self):
+        if self.server is not None and self.worker is None:
+            # Abort is a SAFETY verb on the server: allowed from every PC
+            self._server_cmd("abort", self.server.abort)
+            return
         if self.worker:
             self.worker.abort()
 
