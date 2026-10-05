@@ -106,6 +106,7 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.on_log = self.log                # routines say what they are doing
         # the RUN INFO is remembered in THIS root's suite_local.json
         self.builder.run_info.set_root(self.root)
+        self.builder.run_info.set_data_dir(self.out_dir)   # its lists come from these files
 
         self.tabs = QtWidgets.QTabWidget()
         self.control = ControlPanel(on_log=self.log)
@@ -420,6 +421,7 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.autosave_dir = self.out_dir      # every run lands here from now on
         self.data_view.default_dir = self.out_dir     # ...and the Data tab lists it
         self.catalogue.set_data_dir(self.out_dir)     # ...and the Catalogue indexes it
+        self.builder.run_info.set_data_dir(self.out_dir)   # ...and RUN INFO lists its values
         self.builder._refresh_save_target()           # ...and say so, having tried it
         try:
             set_setting("data_dir", str(self.out_dir), root=self.root)

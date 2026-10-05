@@ -311,3 +311,36 @@ def test_run_info_persists_across_a_suite_restart_and_lands_in_the_file(
             assert empty not in attrs                     # omitted when empty
     finally:
         win.close()
+
+
+def test_run_info_fields_list_the_values_in_the_data_folder(tmp_path):
+    """Lukas, 2026-10-05: sample / structure / operator / project / series as
+    lists filled from the files in the folder; tags via a '+' menu."""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from apps.run_info_card import RunInfoCard
+    from scan_core.autosave import write_dataset
+    from scan_core.engine import run
+    from scan_core.recipe import Recipe
+    from scan_core.registry import build_sim_registry
+    reg = build_sim_registry()
+    for k, (sample, op, tags) in enumerate([("B7", "anna", "fmr, cryo"), ("Y12", "ben", "map")]):
+        r = Recipe(name=f"s{k}", axes=[{"type": "linear", "param": "field",
+                                        "start": 0, "stop": 1, "num": 2}],
+                   detectors=["lockin_r"])
+        ds = run(r, reg, attrs={"sample": sample, "operator": op, "tags": tags})
+        write_dataset(ds, tmp_path / "data" / "2026-10-05" / f"12000{k}_s{k}.nc")
+    card = RunInfoCard(root=tmp_path)
+    card.edits["sample"].setText("typed")
+    card.set_data_dir(tmp_path / "data")
+    card.refresh_suggestions(wait=True)
+    box = card.boxes["sample"]
+    assert [box.itemText(i) for i in range(box.count())] == ["B7", "Y12"]
+    assert card.edits["sample"].text() == "typed"          # typing is kept
+    box.setCurrentIndex(1); box.activated.emit(1)
+    assert card.values()["sample"] == "Y12"
+    assert card.known_tags == ["cryo", "fmr", "map"]
+    card.edits["tags"].setText("fmr")
+    card.add_tag("map"); card.add_tag("FMR")               # appended once, not twice
+    assert card.values()["tags"] == "fmr, map"
