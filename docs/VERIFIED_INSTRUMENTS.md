@@ -355,7 +355,7 @@ before/after routines.
 ## Simulation only (no hardware pass yet)
 
 afg, agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, dssg, elliptec,
-gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms,
+gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms, scope,
 smaract, smb, sr7230, sr830, stage, superk, tc200, usb6001, vna,
 windfreak, zpiezo. The per-module hardware checklists are in
 [`DEVELOPER_NOTES.md`](DEVELOPER_NOTES.md) section 11 and each module's README.

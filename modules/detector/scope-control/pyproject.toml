@@ -1,0 +1,33 @@
+[project]
+name = "scope-control"
+version = "0.2.0"
+license = "MIT"
+description = "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+, or a simulated MOKE bench): averaged traces, zero-phase filter, hysteresis-loop analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "pyzmq>=25",    # the control service + client
+    "numpy>=1.26",  # spectra, averaging, and the simulator's model
+]
+
+# Optional parts, each asked for by name:
+#   uv sync --extra gui                  the GUI (the headless core installs light)
+#   uv sync --extra gui --extra real     + pyvisa for the real scope
+# (name BOTH: `uv sync` removes every extra you do not name, gotcha #29)
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",   # the Y-t and XY plots
+]
+real = [
+    "pyvisa>=1.13",      # USB-TMC / GPIB through NI-VISA
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"

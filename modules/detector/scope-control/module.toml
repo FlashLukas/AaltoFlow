@@ -1,0 +1,27 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "scope"
+name = "Oscilloscope"
+description = "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+): traces, averaging, zero-phase filter, hysteresis-loop analysis"
+category = "detector"
+tags = ["oscilloscope", "scope", "hysteresis loop", "MOKE", "Siglent", "RS PRO"]
+icon = "icon.svg"
+order = 400
+
+[ports]
+cmd = 5633
+pub = 5634
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []
+
+# Which instrument the service opens on real hardware: Mission Control's
+# "Instruments on this PC" offers a found visa address to this module and
+# passes it to the service as --visa <address> (suite_local.json, this PC).
+[hardware]
+address_arg = "--visa"
+bus = "visa"

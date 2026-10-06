@@ -66,6 +66,7 @@ SIZES = {
     "clMag": (1320, 900),
     "smb": (1280, 620),
     "afg": (1320, 820),
+    "scope": (1560, 960),
     "control-holder": (1280, 660),
     "control-viewer": (1280, 660),
     "stage": (1280, 800),
@@ -1268,6 +1269,26 @@ def _afg(theme):
     return lambda: gui.run_app(gen, cfg), warm_up, 2.0
 
 
+def _scope(theme):
+    from scope.config import Config
+    from scope.sim_system import build_sim_system
+    from scope.apps import gui
+
+    cfg = Config()
+    cfg.ui.theme = theme
+    scope, _ = build_sim_system(cfg, seed=3)
+
+    def warm_up(win):
+        # The MOKE bench: CH1 a Hall probe shown in mT, CH2 the intensity;
+        # a light low-pass, and one latched acquisition for the numbers.
+        win.ctrl.set_physical("ch1", scale=50.0, unit="mT", label="Field")
+        win.ctrl.set_physical("ch2", label="Intensity")
+        win.ctrl.set_filter(lowpass_Hz=2000.0)
+        win.ctrl.set_averages(16)
+
+    return lambda: gui.run_app(scope, cfg), warm_up, 3.5
+
+
 TARGETS = {
     "control-holder": _control(as_viewer=False),
     "control-viewer": _control(as_viewer=True),
@@ -1296,6 +1317,7 @@ TARGETS = {
     "clMag": _clMag,
     "smb": _smb,
     "afg": _afg,
+    "scope": _scope,
     "stage": _stage,
     "piezo": _piezo,
     "camera": _camera,

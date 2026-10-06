@@ -496,8 +496,9 @@ still assumes piezo/zpiezo.
   | 36 | shsna-control | `shsna` | 5627 | 5628 | (see its module.toml) |
   | 37 | usb6001-control | `usb6001` | 5629 | 5630 | (see its module.toml) |
   | 38 | afg-control | `afg` | 5631 | 5632 | set-and-forget + read-back settle (Generator, 2 channels) |
+  | 39 | scope-control | `scope` | 5633 | 5634 | trace detector + averaged acquire (Scope, loop analysis) |
   | -- | scan-core (scan server) | `scanserver` | 5551 | 5552 | coordination: runs scans as a service (section 4f) |
-  | 39 | *next module* |          | 5633 | 5634 | |
+  | 40 | *next module* |          | 5635 | 5636 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander
   (owns REP, `poll(200)`). The loop must never be allowed to die: catch the

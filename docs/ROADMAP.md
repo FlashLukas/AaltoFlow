@@ -82,6 +82,12 @@ original point; Z changed; a failing autofocus still returns; Kill AF).
 
 ### Oscilloscope module (first: Digilent Analog Discovery 3) for MOKE hysteresis loops (2026-10-03, spec agreed)
 
+**BUILT 2026-10-06** as `scope-control` (simulation + the Siglent SDS1000CML+
+backend, untested on the instrument). Still open from this spec: the AD3
+backend with its Generator / Supplies (copy afg-control's generator brain),
+the drift number, trigger holdoff, the live map of traces against a scan axis.
+The spec's open points were decided as written in the module's README.
+
 **Purpose.** Classical laser MOKE hysteresis loops: the magnet is driven
 continuously (~30 Hz); one scope channel measures the field (Hall probe) or
 the magnet current, the other the light intensity; the loop is channel 2

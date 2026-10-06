@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Oscilloscope: a graticule screen showing what this module is for, a
+       hysteresis loop (two switching branches of one loop). Colours: #ff9e2c
+       accent, #ffb454 accent_hi, #e8eaed text, #5a626e metal; the launcher
+       swaps the first three per theme. -->
+  <rect x="4" y="6" width="32" height="27" rx="4" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <g stroke="#5a626e" stroke-width="0.8" stroke-dasharray="1.2 1.6">
+    <line x1="20" y1="9" x2="20" y2="30"/>
+    <line x1="7" y1="19.5" x2="33" y2="19.5"/>
+  </g>
+  <!-- the loop: lower branch switches right, upper branch switches left -->
+  <path d="M8 26 H21 C23 26 23 13 25 13 H32" fill="none" stroke="#ff9e2c"
+        stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 13 H19 C17 13 17 26 15 26 H8" fill="none" stroke="#ffb454"
+        stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+  <!-- the two inputs -->
+  <circle cx="12" cy="36" r="1.8" fill="#ff9e2c"/>
+  <circle cx="28" cy="36" r="1.8" fill="#e8eaed"/>
+</svg>

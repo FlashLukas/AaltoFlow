@@ -902,6 +902,29 @@
       },
       "gui": true,
       "start_after": []
+    },
+    {
+      "key": "scope",
+      "name": "Oscilloscope",
+      "description": "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+): traces, averaging, zero-phase filter, hysteresis-loop analysis",
+      "category": "detector",
+      "category_label": "Detectors & analyzers",
+      "tags": [
+        "oscilloscope",
+        "scope",
+        "hysteresis loop",
+        "MOKE",
+        "Siglent",
+        "RS PRO"
+      ],
+      "folder": "scope-control",
+      "version": "0.2.0",
+      "ports": {
+        "cmd": 5633,
+        "pub": 5634
+      },
+      "gui": true,
+      "start_after": []
     }
   ]
 }
