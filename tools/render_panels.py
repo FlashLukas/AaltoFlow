@@ -65,6 +65,7 @@ NEUTRAL = (Path(r"C:\Users\Public\Documents\AaltoFlow") if sys.platform == "win3
 SIZES = {
     "clMag": (1320, 900),
     "smb": (1280, 620),
+    "afg": (1320, 820),
     "control-holder": (1280, 660),
     "control-viewer": (1280, 660),
     "stage": (1280, 800),
@@ -1247,6 +1248,26 @@ def _control(as_viewer: bool):
     return make
 
 
+def _afg(theme):
+    from afg.config import Config
+    from afg.sim_system import build_sim_system
+    from afg.apps import gui
+
+    cfg = Config()
+    cfg.ui.theme = theme
+    gen, _ = build_sim_system(cfg)
+
+    def warm_up(win):
+        # The bench use: CH1 a 30 Hz sine (the drive), CH2 a square locked to
+        # it a quarter period later (the scope's trigger), both on.
+        win.ctrl.set_offset("ch2", 0.0)
+        win.ctrl.set_amplitude("ch2", 1.0)
+        win.ctrl.set_follow(True, 90.0)
+        win.ctrl.set_output("ch2", True)
+
+    return lambda: gui.run_app(gen, cfg), warm_up, 2.0
+
+
 TARGETS = {
     "control-holder": _control(as_viewer=False),
     "control-viewer": _control(as_viewer=True),
@@ -1274,6 +1295,7 @@ TARGETS = {
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,
     "smb": _smb,
+    "afg": _afg,
     "stage": _stage,
     "piezo": _piezo,
     "camera": _camera,

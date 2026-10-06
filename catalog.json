@@ -879,6 +879,29 @@
       },
       "gui": true,
       "start_after": []
+    },
+    {
+      "key": "afg",
+      "name": "Function generator",
+      "description": "Tektronix AFG1062 two-channel arbitrary function generator, 60 MHz (USB)",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "function generator",
+        "waveform generator",
+        "AWG",
+        "arbitrary",
+        "two-channel",
+        "Tektronix"
+      ],
+      "folder": "afg-control",
+      "version": "0.2.0",
+      "ports": {
+        "cmd": 5631,
+        "pub": 5632
+      },
+      "gui": true,
+      "start_after": []
     }
   ]
 }

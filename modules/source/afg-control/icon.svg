@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- Function generator: a screen showing the two outputs as they are used on
+       the bench: CH1 a sine (the drive), CH2 a square locked to it (the
+       trigger). Colours: #ff9e2c accent, #ffb454 accent_hi, #e8eaed text,
+       #5a626e metal; the launcher swaps the first three per theme. -->
+  <rect x="4" y="6" width="32" height="27" rx="4" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <!-- CH1: one period of a sine -->
+  <path d="M8 15 C10.5 7.5 13.5 7.5 16 15 S21.5 22.5 24 15 S29.5 7.5 32 15"
+        fill="none" stroke="#ff9e2c" stroke-width="2.4" stroke-linecap="round"/>
+  <!-- CH2: the square at the same frequency -->
+  <path d="M8 28 V23 H16 V28 H24 V23 H32"
+        fill="none" stroke="#e8eaed" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- the output connectors -->
+  <circle cx="12" cy="36" r="1.8" fill="#ffb454"/>
+  <circle cx="28" cy="36" r="1.8" fill="#5a626e"/>
+</svg>

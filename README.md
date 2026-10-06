@@ -339,6 +339,7 @@ sends heartbeats while it is open.
 | sr7230 | `output_off` (oscillator to 0 V) | `stream_read` |
 | smb, hp8648, dssg, shsg | `rf_off` | |
 | windfreak | `all_rf_off` | |
+| afg | `outputs_off` | |
 | superk | `emission_off` | `ping` |
 | dsamp | `amp_off` | |
 | tc200 | `heater_off` | |
@@ -798,6 +799,7 @@ python tools/render_all.py clMag       # or just one
 | 32 | `hp8648-control` | `hp8648` | 5619/5620 | HP / Agilent 8648D RF generator (GPIB) (simulation; untested on the instrument) |
 | 33 | `sr7230-control` | `sr7230` | 5621/5622 | Ametek Signal Recovery 7230 DSP lock-in (simulation; untested on the instrument) |
 | 34 | `k2450-control` | `k2450` | 5623/5624 | Keithley 2450 SourceMeter (simulation; untested on the instrument) |
+| 38 | `afg-control` | `afg` | 5631/5632 | Tektronix AFG1062 two-channel function generator, CH2 can follow CH1 as a synchronous trigger (simulation; untested on the instrument) |
 
 Each project folder lives in `modules/<category>/` (the links above go there).
 Instrument *n* gets `cmd = 5555 + 2n` and `pub = cmd + 1` by default, declared in

@@ -495,7 +495,8 @@ still assumes piezo/zpiezo.
   | 35 | shsg-control | `shsg` | 5625 | 5626 | (see its module.toml) |
   | 36 | shsna-control | `shsna` | 5627 | 5628 | (see its module.toml) |
   | 37 | usb6001-control | `usb6001` | 5629 | 5630 | (see its module.toml) |
-  | 38 | scan-core (scan server) | `scanserver` | 5551 | 5552 | coordination: runs scans as a service (section 4f) |
+  | 38 | afg-control | `afg` | 5631 | 5632 | set-and-forget + read-back settle (Generator, 2 channels) |
+  | -- | scan-core (scan server) | `scanserver` | 5551 | 5552 | coordination: runs scans as a service (section 4f) |
   | 39 | *next module* |          | 5633 | 5634 | |
 
 - `service.py` runs 2 daemon threads: a publisher (owns PUB) and a commander

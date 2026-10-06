@@ -89,6 +89,13 @@ against channel 1 (XY). A scan point = one averaged loop, so loops can be
 recorded against anything else in a scan (position on the sample via the
 camera's scan points -> spatially resolved loops, temperature, angle, ...).
 
+**Waveform generator first (2026-10-06):** `afg-control` (Tektronix AFG1062,
+simulation only) has a GENERIC generator brain (`generator.py`, backend
+`capabilities()` + `envelope()`), written so this scope module can copy it
+for the AD3's W1/W2. Bench wiring then: AFG CH1 -> scope CH1, AFG CH2 ->
+scope CH2 and EXT TRIG. The scope on that bench is an RS PRO RSDS1102CML+
+(a rebranded Siglent SDS1102CML+): the SCPI-over-VISA backend below.
+
 **A generic N-channel scope, not a Digilent module.** Key e.g. `scope`,
 category detector. The brain asks its backend for CAPABILITIES and builds
 everything from them: number of scope channels, buffer size and sample-rate
