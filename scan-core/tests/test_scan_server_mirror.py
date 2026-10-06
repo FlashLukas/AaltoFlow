@@ -10,6 +10,7 @@ view while "show what the lab shows" is ticked.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -219,3 +220,61 @@ def test_watching_another_pc_shows_its_instruments_layouts_and_panel(
     assert win.control._foreign is None and win.control.save_btn.isEnabled()
     assert win.registry.get("magnet.field") is None
     assert "watching" not in win.windowTitle()
+
+
+def test_watching_another_pc_follows_its_scan_definition_and_navigator(
+        qapp, rig, fake_service, monkeypatch, tmp_path):
+    """Lukas 2026-10-06, the Navigator and Scan tabs side by side: the lab
+    had S2.gds registered and a definition half-built; the office showed
+    neither. The design FILE travels through the server (it exists only on
+    the lab PC); the registration, selected point and the definition come
+    with the view."""
+    gdstk = pytest.importorskip("gdstk")
+    from conftest import DEMO_MANIFEST
+    import apps.scan_server_view as SV
+    monkeypatch.setattr(SV.ServerWatch, "is_local", lambda self: False)
+    fake = fake_service(16890, manifest=DEMO_MANIFEST)
+    srv, win, c = rig()
+    srv.instruments = {"magnet": {"host": "", "cmd": fake.cmd_port, "pub": fake.cmd_port + 1,
+                                  "name": "Magnet field"}}
+    pump(qapp, lambda: win.registry.get("magnet.field") is not None, timeout=20)
+    assert win._group_names() == {"magnet": "Magnet field"}     # the lab's names
+
+    lib = gdstk.Library()
+    cell = lib.new_cell("CHIP")
+    cell.add(gdstk.rectangle((-50, -50), (50, 50), layer=1))
+    gds = tmp_path / "chip.gds"
+    lib.write_gds(str(gds))
+    # what the lab suite sends: the file, then its view
+    assert c.set_design(gds, "gds", "CHIP")["ok"]
+    reg = {"rotation_deg": 30.0, "mirror": False, "model": "auto", "shift": [0, 0],
+           "points": [{"design": [0, 0], "stage": [100, 200]}]}
+    definition = json.loads(Recipe(
+        name="lab def", axes=[{"type": "linear", "param": "magnet.field",
+                               "start": 0, "stop": 5, "num": 6}],
+        detectors=[]).to_json())
+    c.set_view({"plot": None, "panel": {"pids": [], "hidden": []}, "scan": definition,
+                "nav": {"design": {"kind": "gds", "name": "chip.gds", "cell": "CHIP",
+                                   "width_um": 0, "hidden_layers": []},
+                        "registration": reg, "pick": [10.0, 5.0],
+                        "fov_um": [80, 60], "approach_um": 2.0, "stage": ""}})
+    nav = win.navigator
+    pump(qapp, lambda: nav.design is not None and len(nav.reg.points) == 1, timeout=20)
+    assert nav.reg.rotation_deg == 30.0 and nav.pick == (10.0, 5.0)
+    assert (nav.fov_w.value(), nav.fov_h.value()) == (80, 60)
+    pump(qapp, lambda: win.builder.name_edit.text() == "lab def")
+    assert win.builder.build_recipe().axes[0]["num"] == 6
+    # the shared file is the lab's bytes, not a path on the lab PC
+    assert Path(nav.design.path).read_bytes() == gds.read_bytes()
+
+
+def test_the_design_is_shared_by_the_servers_own_pc_only(server, client, tmp_path):
+    from test_scan_server import OTHER_PC
+    srv = server()
+    c = client(srv)
+    p = tmp_path / "x.gds"
+    p.write_bytes(b"GDS")
+    assert c.set_design(p)["ok"]
+    assert c.get_design()["design"]["name"] == "x.gds"
+    r = raw(srv, {"cmd": "set_design", "data": "AAAA", "client": OTHER_PC})
+    assert not r["ok"] and r["refused"] == "not_this_pc"

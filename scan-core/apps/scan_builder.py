@@ -296,7 +296,9 @@ class AxisRow(QtWidgets.QFrame):
         # alone does not say whose stage it is.
         module = split_id(self.param.id)[0]
         owner = f"{module} · " if module else ""
-        if math.isfinite(lo) and math.isfinite(hi):
+        if is_bool_param(self.param):
+            self.limits_lbl.setText(f"{owner}on / off")
+        elif math.isfinite(lo) and math.isfinite(hi):
             self.limits_lbl.setText(f"{owner}{lo:g} to {hi:g}{unit}")
         else:
             self.limits_lbl.setText(f"{owner}no limits advertised")
@@ -530,6 +532,50 @@ class RepeatRow(QtWidgets.QFrame):
 
 # ──────────────────────────── one condition row ───────────────────────────────
 
+def is_bool_param(param) -> bool:
+    """A switch (RF output, an enable line): declared bool in its describe."""
+    st = getattr(param, "storage", None)
+    return getattr(st, "kind", "") == "bool"
+
+
+class BoolBox(QtWidgets.QCheckBox):
+    """An on/off box with the number box's interface (setValue / value /
+    valueChanged / setRange ...), so a condition or routine step on a SWITCH
+    reads "on" / "off" instead of 1.000 / 0.000 (Lukas 2026-10-06: "why do i
+    have 1 and 0 for rf generator state?"). The value stays 1 / 0 in the
+    definition; the module receives a real true / false (manifest.py)."""
+
+    valueChanged = QtCore.Signal(float)
+
+    def __init__(self):
+        super().__init__("off")
+        self.toggled.connect(self._toggled)
+
+    def _toggled(self, on: bool):
+        self.setText("on" if on else "off")
+        self.valueChanged.emit(1.0 if on else 0.0)
+
+    def setValue(self, v) -> None:                  # noqa: N802 (Qt names)
+        self.setChecked(float(v) >= 0.5)
+
+    def value(self) -> float:
+        return 1.0 if self.isChecked() else 0.0
+
+    # the number box's knobs, meaningless for a switch
+    def setRange(self, *_):                         # noqa: N802
+        pass
+
+    def setDecimals(self, *_):                      # noqa: N802
+        pass
+
+    def setSuffix(self, *_):                        # noqa: N802
+        pass
+
+
+def _value_box(param):
+    return BoolBox() if is_bool_param(param) else QtWidgets.QDoubleSpinBox()
+
+
 class FixedRow(QtWidgets.QFrame):
     """A parameter held at ONE value for the whole scan: a measurement condition.
 
@@ -575,7 +621,7 @@ class FixedRow(QtWidgets.QFrame):
 
         self.integer = bool(getattr(param, "integer", False))
         lo, hi = self._finite_limits()
-        self.value_box = QtWidgets.QDoubleSpinBox()
+        self.value_box = _value_box(param)
         self.value_box.setRange(lo, hi)
         self.value_box.setDecimals(0 if self.integer else 3)
         self.value_box.setFixedWidth(104)
@@ -610,6 +656,8 @@ class FixedRow(QtWidgets.QFrame):
 
     def value(self) -> float:
         v = self.value_box.value()
+        if is_bool_param(self.param):
+            return int(v)                  # 0 / 1, as the definition has always held it
         return int(round(v)) if self.integer else v
 
 
@@ -696,7 +744,7 @@ class SetStepRow(FixedRow):
 
         self.integer = bool(getattr(param, "integer", False))
         lo, hi = self._finite_limits()
-        self.value_box = QtWidgets.QDoubleSpinBox()
+        self.value_box = _value_box(param)
         self.value_box.setRange(lo, hi)
         self.value_box.setDecimals(0 if self.integer else 3)
         if param.unit:
@@ -721,6 +769,8 @@ class SetStepRow(FixedRow):
         return {"set": {self.param.id: self.value()}}
 
     def text(self) -> str:
+        if is_bool_param(self.param):
+            return f"{self.param.label} {'on' if self.value() else 'off'}"
         unit = f" {self.param.unit}" if self.param.unit else ""
         return f"{self.param.label} = {self.value():g}{unit}"
 
@@ -2500,6 +2550,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
     `self.detail` and `self.per_pt`.
     """
 
+    #: the definition on the Scan tab was edited (not emitted while a watched
+    #: lab's definition is being shown -- apply_definition)
+    definition_changed = QtCore.Signal()
+
     def __init__(self, registry=None, embedded: bool = False):
         super().__init__()
         self.registry = registry or build_sim_registry()
@@ -3668,6 +3722,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # so the recipe below is built from what they now offer.
         if not hasattr(self, "summary"):          # right pane not built yet
             return
+        # every edit of the definition passes here: a scan server's watchers
+        # are told (the suite publishes it with the view; Lukas 2026-10-06)
+        if not getattr(self, "_applying_definition", False):
+            self.definition_changed.emit()
         if self.queue_running():
             # The pane describes the scan that is RUNNING, not the editor's.
             return
@@ -4312,6 +4370,26 @@ class ScanBuilder(QtWidgets.QMainWindow):
             return 0 if len(entries) == 1 else None
         i = it.data(0, QtCore.Qt.UserRole)
         return int(i) if isinstance(i, int) else None
+
+    def definition_state(self) -> dict | None:
+        """The Scan tab's definition as a plain recipe dict, or None when it
+        cannot be built (an empty stack is still a definition)."""
+        try:
+            return json.loads(self.build_recipe().to_json())
+        except Exception:
+            return None
+
+    def apply_definition(self, d: dict) -> list[str]:
+        """Show another PC's Scan tab definition here (a watched lab's)."""
+        if not isinstance(d, dict) or d == self.definition_state():
+            return []
+        self._applying_definition = True
+        try:
+            return self.load_recipe(Recipe.from_dict(d))
+        except Exception:
+            return []
+        finally:
+            self._applying_definition = False
 
     def _copy_server_definition(self) -> list[str] | None:
         """Load the selected server scan's definition into this Scan tab."""

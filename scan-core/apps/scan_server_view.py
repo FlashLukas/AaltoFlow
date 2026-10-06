@@ -50,6 +50,7 @@ class ServerWatch(QtCore.QObject):
     connection = QtCore.Signal(bool, str)   # answering?, why not
     scan_info = QtCore.Signal(object)       # get_scan: the submitted definitions
     view = QtCore.Signal(object)            # get_view: the server PC's plot choice
+    design = QtCore.Signal(object)          # the server PC's Navigator design, as a local copy
 
     def __init__(self, host: str = "localhost", cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int | None = None, parent=None, poll_s: float = POLL_S):
@@ -63,6 +64,8 @@ class ServerWatch(QtCore.QObject):
         self._log_next = None                # None = only the tail on the first poll
         self._scan_rev = -1                  # what get_scan / get_view were last
         self._view_rev = -1                  # fetched at (-1: fetch on first contact)
+        self._design_rev = 0                 # 0 = none shared yet
+        self.design_meta: dict | None = None  # the last design fetched (+ "path" here)
         self.scan: dict = {}                 # the last get_scan reply
         self.last_view: dict = {}            # the last get_view reply
         self._stop = threading.Event()
@@ -74,6 +77,7 @@ class ServerWatch(QtCore.QObject):
         # the plot choice to publish (set_view), sent from the poll thread so
         # dragging a slider never waits on the network; newest one wins
         self._view_out: dict | None = None
+        self._design_out: tuple | None = None   # (path, kind, cell, width_um) to upload
         self._view_lock = threading.Lock()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="scanserver-watch")
@@ -144,12 +148,39 @@ class ServerWatch(QtCore.QObject):
             self._scan_rev = int(r.get("scan_rev", rev))
             self.scan = r
             self.scan_info.emit(r)
+        rev = st.get("design_rev")
+        if rev and int(rev) != self._design_rev:
+            self._fetch_design(int(rev))
         rev = st.get("view_rev")
         if rev is not None and int(rev) != self._view_rev:
             r = self._poll.get_view()
             self._view_rev = int(r.get("view_rev", rev))
             self.last_view = r
             self.view.emit(r)
+
+    def _fetch_design(self, rev: int):
+        """The server PC's design file, written to a local cache folder (the
+        Navigator opens files), then announced with its kind / cell / width."""
+        import base64
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        r = self._poll.get_design()
+        self._design_rev = int(r.get("design_rev") or rev)
+        d = r.get("design")
+        if not d or not d.get("data"):
+            return
+        raw = base64.b64decode(d["data"])
+        folder = Path(tempfile.gettempdir()) / "aaltoflow-watched-designs"
+        folder.mkdir(parents=True, exist_ok=True)
+        name = Path(str(d.get("name") or "design")).name           # a name, never a path
+        path = folder / f"{hashlib.sha1(raw).hexdigest()[:12]}_{name}"
+        if not path.exists():
+            path.write_bytes(raw)
+        meta = {k: d.get(k) for k in ("name", "kind", "cell", "width_um")}
+        meta["path"] = str(path)
+        self.design_meta = meta
+        self.design.emit(meta)
 
     def _fetch_log(self, st: dict):
         n = int(st.get("log_n") or 0)
@@ -200,7 +231,21 @@ class ServerWatch(QtCore.QObject):
         with self._view_lock:
             self._view_out = dict(view)
 
+    def set_design(self, path, kind: str = "gds", cell: str = "",
+                   width_um: float = 0.0) -> None:
+        """Share the Navigator's design file (uploaded at the next poll; only
+        the suite on the server's own PC is allowed to)."""
+        with self._view_lock:
+            self._design_out = (str(path), kind, cell, float(width_um))
+
     def _send_view(self):
+        with self._view_lock:
+            up, self._design_out = self._design_out, None
+        if up is not None:
+            try:
+                self._poll.set_design(*up)
+            except Exception:
+                pass                      # sharing a drawing is never an error
         with self._view_lock:
             v, self._view_out = self._view_out, None
         if v is not None:

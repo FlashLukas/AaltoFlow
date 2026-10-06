@@ -95,6 +95,10 @@ class Suite(QtWidgets.QMainWindow):
         #: the watched lab's instruments, while this suite shows them (None:
         #: this PC's own) -- see _mirror_lab
         self._mirror_key: frozenset | None = None
+        self._mirror_names: dict = {}             # slug -> module name, of the lab
+        self._shared_design: str | None = None    # design path last shared (lab side)
+        self._mirror_design: str | None = None    # design name shown here (watching)
+        self._pending_nav: dict | None = None     # nav state waiting for its design
         self.registry = build_sim_registry()
         # Where measurements land, most specific first: --out-dir for this
         # launch, then what was chosen on this PC last time, then the project's
@@ -135,11 +139,17 @@ class Suite(QtWidgets.QMainWindow):
         self.tabs.addTab(self._wrap(self.control), "Control")
         # on a scan server's PC the Control tab's panel goes out with the plot
         # choice; on a PC watching another lab's server it is followed
-        self.builder.view_extra = lambda: {"panel": self.control.panel_state()}
+        self.builder.view_extra = lambda: {"panel": self.control.panel_state(),
+                                           "scan": self.builder.definition_state(),
+                                           "nav": self.navigator.nav_state()}
         self.builder.on_server_view = self._on_server_view_extra
         self.control.panel_changed.connect(self.builder._publish_view)
+        self.builder.definition_changed.connect(self.builder._publish_view)
         self.navigator = NavigatorWidget(on_log=self.log, is_busy=self.scan_running)
         self.tabs.addTab(self._wrap(self.navigator), "Navigator")
+        self.navigator.nav_changed.connect(lambda: self.builder._publish_view())
+        # a new design file: shared again at the next server status
+        self.navigator.design_opened.connect(lambda _p: setattr(self, "_shared_design", None))
         self.tabs.addTab(self._wrap(self.builder.centralWidget()), "Scan")
         self.tabs.addTab(self._build_measurement(), "Measurement")
         self.tabs.addTab(self._build_data(), "Data")
@@ -396,6 +406,7 @@ class Suite(QtWidgets.QMainWindow):
         w.log_lines.connect(self._on_server_log)
         w.live.connect(self.builder.show_server_dataset)
         w.connection.connect(self._on_server_connection)
+        w.design.connect(self._on_server_design)
         self.watch = w
         self.builder.attach_server(w, can_submit=self._may_submit(w))
         self.server_strip.show()
@@ -467,6 +478,12 @@ class Suite(QtWidgets.QMainWindow):
         self._sync_server_header()
         if not self.watch.is_local():
             self._mirror_lab(st)
+        elif self.builder.server_submit:
+            d = self.navigator.design
+            if d is not None and self._shared_design != d.path:
+                # the server's PC shares its Navigator design with watchers
+                self._shared_design = d.path
+                self.watch.set_design(d.path, d.kind, d.cell, d.width_um)
 
     # ---- watching a server on ANOTHER PC: show that lab as the lab sees it ----
     #
@@ -487,6 +504,8 @@ class Suite(QtWidgets.QMainWindow):
                      for slug, e in inst.items() if isinstance(e, dict) and "cmd" in e}
         key = frozenset((s, ep) for s, ep in endpoints.items())
         first = self._mirror_key is None
+        self._mirror_names = {s: e.get("name") or s for s, e in inst.items()
+                              if isinstance(e, dict)}
         if key == self._mirror_key or self.scan_running():
             return
         self._mirror_key = key
@@ -516,6 +535,9 @@ class Suite(QtWidgets.QMainWindow):
         if self._mirror_key is None:
             return
         self._mirror_key = None
+        self._mirror_names = {}
+        self._mirror_design = None
+        self._pending_nav = None
         self.control.use_layouts_of(None)
         self._set_title(None)
         if self.lab is not None:
@@ -540,9 +562,49 @@ class Suite(QtWidgets.QMainWindow):
         self.setWindowTitle(text + (f"  ({note})" if note else ""))
 
     def _on_server_view_extra(self, view: dict) -> None:
-        """The lab's Control-tab panel, followed while mirroring."""
-        if self._mirror_key is not None and isinstance(view.get("panel"), dict):
+        """The lab's Control-tab panel, Scan-tab definition and Navigator,
+        followed while mirroring ("show what the lab shows")."""
+        if self._mirror_key is None:
+            return
+        if isinstance(view.get("panel"), dict):
             self.control.apply_panel_state(view["panel"])
+        if isinstance(view.get("scan"), dict) and not self.scan_running():
+            missing = self.builder.apply_definition(view["scan"])
+            if missing:
+                self._note("the lab's scan names parameters not connected here: "
+                           + ", ".join(missing))
+        nav = view.get("nav")
+        if isinstance(nav, dict):
+            want = (nav.get("design") or {}).get("name")
+            if want and want != self._mirror_design:
+                self._pending_nav = nav          # its design file is still coming
+            else:
+                self.navigator.apply_nav_state(nav)
+
+    def _on_server_design(self, meta: dict) -> None:
+        """The lab's Navigator design, as a local copy: open it, then apply
+        the navigator state that was waiting for it."""
+        if self._mirror_key is None or not isinstance(meta, dict):
+            return
+        nav = self.navigator
+        nav._applying = True                     # opening it here is not news for the lab
+        try:
+            if meta.get("kind") == "image":
+                ok = nav.open_image(meta["path"], float(meta.get("width_um") or 1000.0))
+            else:
+                ok = nav.open_gds(meta["path"], meta.get("cell") or None)
+        finally:
+            nav._applying = False
+        if not ok:
+            return
+        self._mirror_design = meta.get("name")
+        self.log(f"navigator: showing the lab's design {meta.get('name')}")
+        pending, self._pending_nav = self._pending_nav, None
+        if pending is None:
+            view = (getattr(self.watch, "last_view", None) or {}).get("view") or {}
+            pending = view.get("nav")
+        if pending and self.builder.follow_view_box.isChecked():
+            self.navigator.apply_nav_state(pending)
 
     def _on_server_log(self, lines) -> None:
         for line in lines:
@@ -949,6 +1011,8 @@ class Suite(QtWidgets.QMainWindow):
     def _group_names(self) -> dict[str, str]:
         """Parameter prefix -> the launcher's name for that module, so the Scan
         tab's palette shows "Power meter · pm16" rather than a bare prefix."""
+        if self._mirror_key is not None:
+            return dict(self._mirror_names)       # the watched lab's names
         if not self.connected_ids:
             return {}
         found = self.found or discover(self.root)

@@ -170,9 +170,18 @@ class _Bridge(QtCore.QObject):
 # the tab
 # --------------------------------------------------------------------------- #
 class NavigatorWidget(QtWidgets.QWidget):
+    #: the operator changed what the navigator shows (registration, the
+    #: selected point, layers, camera view) -- published to PCs watching
+    #: this PC's scan server (Lukas 2026-10-06), never for apply_nav_state
+    nav_changed = QtCore.Signal()
+    #: a design FILE was opened (path): the suite uploads it to the scan
+    #: server, so a watching PC can draw the same design
+    design_opened = QtCore.Signal(str)
+
     def __init__(self, on_log=None, is_busy=None, parent=None):
         super().__init__(parent)
         self.on_log = on_log or (lambda msg: None)
+        self._applying = False
         # The suite passes "is a scan running?": the navigator must not move a
         # stage that a scan is driving.
         self.is_busy = is_busy or (lambda: False)
@@ -286,6 +295,7 @@ class NavigatorWidget(QtWidgets.QWidget):
         v.addLayout(grid)
         for s in (self.fov_w, self.fov_h):
             s.valueChanged.connect(lambda _v: self._update_stage_marks())
+            s.valueChanged.connect(lambda _v: self._announce())
         row = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton("Fit design"); b.clicked.connect(self.fit_design); row.addWidget(b)
         b = QtWidgets.QPushButton("Centre on stage"); b.clicked.connect(self._centre_on_stage)
@@ -468,6 +478,8 @@ class NavigatorWidget(QtWidgets.QWidget):
         self._set_design(d)
         n = sum(len(L.polygons) for L in d.layers.values())
         self.on_log(f"navigator: {Path(path).name}, cell {d.cell}, {n} polygons")
+        if not self._applying:
+            self.design_opened.emit(str(path))
         return True
 
     def open_image(self, path, width_um) -> bool:
@@ -481,6 +493,8 @@ class NavigatorWidget(QtWidgets.QWidget):
         self._set_design(image_design(path, img.width(), img.height(), width_um))
         self.on_log(f"navigator: {Path(path).name}, {img.width()} x {img.height()} px, "
                     f"{self.design.um_per_px:.3g} um/px")
+        if not self._applying:
+            self.design_opened.emit(str(path))
         return True
 
     def _set_design(self, d: Design) -> None:
@@ -545,6 +559,64 @@ class NavigatorWidget(QtWidgets.QWidget):
         on = item.checkState() == QtCore.Qt.Checked
         self.design.layers[key].visible = on
         self._layer_items[key].setVisible(on)
+        self._announce()
+
+    def _announce(self):
+        if not self._applying:
+            self.nav_changed.emit()
+
+    # ---- the navigator as data (scan server watchers follow it) ----------
+    def nav_state(self) -> dict:
+        """Design (by name, not contents), registration, selected point,
+        camera view and approach, as plain JSON."""
+        d = self.design
+        return {
+            "design": None if d is None else {
+                "kind": d.kind, "name": Path(d.path).name, "cell": d.cell,
+                "width_um": d.width_um,
+                "hidden_layers": [k for k, L in d.layers.items() if not L.visible]},
+            "registration": self.reg.to_dict(),
+            "pick": list(self.pick) if self.pick is not None else None,
+            "fov_um": [self.fov_w.value(), self.fov_h.value()],
+            "approach_um": self.approach.value(),
+            "stage": self.pair.label if self.pair else ""}
+
+    def apply_nav_state(self, st: dict) -> None:
+        """Show another PC's navigator state over the design already open here
+        (the design itself comes as a file: open_gds / open_image first)."""
+        if not isinstance(st, dict):
+            return
+        self._applying = True
+        try:
+            d = st.get("design") or {}
+            if self.design is not None and self.design.kind == "gds":
+                hidden = set(d.get("hidden_layers") or [])
+                for key, L in self.design.layers.items():
+                    L.visible = key not in hidden
+                    if key in self._layer_items:
+                        self._layer_items[key].setVisible(L.visible)
+                self._fill_layers()
+            self.reg = Registration.from_dict(st.get("registration") or {})
+            self.rot_spin.blockSignals(True); self.rot_spin.setValue(self.reg.rotation_deg)
+            self.rot_spin.blockSignals(False)
+            self.mirror_box.blockSignals(True); self.mirror_box.setChecked(self.reg.mirror)
+            self.mirror_box.blockSignals(False)
+            self.model_combo.blockSignals(True); self.model_combo.setCurrentText(self.reg.model)
+            self.model_combo.blockSignals(False)
+            pick = st.get("pick")
+            self.pick = tuple(pick) if isinstance(pick, (list, tuple)) and len(pick) == 2 else None
+            fov = st.get("fov_um") or [0, 0]
+            for spin, val in ((self.fov_w, fov[0]), (self.fov_h, fov[1]),
+                              (self.approach, st.get("approach_um", 0.0))):
+                spin.blockSignals(True); spin.setValue(float(val)); spin.blockSignals(False)
+            i = self.stage_combo.findText(st.get("stage") or "")
+            if i >= 0 and i != self.stage_combo.currentIndex():
+                self.stage_combo.setCurrentIndex(i)
+            self._refresh_all()
+            self._refresh_pick()
+            self._update_stage_marks()
+        finally:
+            self._applying = False
 
     def _width_changed(self, w):
         d = self.design
@@ -741,6 +813,10 @@ class NavigatorWidget(QtWidgets.QWidget):
             self._fov_item.hide()
 
     def _refresh_all(self):
+        self._announce()
+        self._refresh_all_now()
+
+    def _refresh_all_now(self):
         # rotation / mirror boxes show the FITTED values once points decide them
         n = len(self.reg.points)
         try:
@@ -818,6 +894,10 @@ class NavigatorWidget(QtWidgets.QWidget):
         return txt + "."
 
     def _refresh_pick(self):
+        self._announce()
+        self._refresh_pick_now()
+
+    def _refresh_pick_now(self):
         tgt = self.target_um()
         if tgt is None:
             self._target_mark.hide()

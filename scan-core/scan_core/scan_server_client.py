@@ -256,6 +256,21 @@ class ScanServerClient(ControlClient):
         """{view, view_rev, by}: the plot choice of the suite on the server's PC."""
         return self.command("get_view")
 
+    def set_design(self, path, kind: str = "gds", cell: str = "",
+                   width_um: float = 0.0) -> dict:
+        """Share the Navigator's design file (only from the server's own PC)."""
+        import base64
+        from pathlib import Path
+        p = Path(path)
+        return self.command("set_design", name=p.name, kind=kind, cell=cell,
+                            width_um=float(width_um),
+                            data=base64.b64encode(p.read_bytes()).decode("ascii"),
+                            _timeout_ms=30000)
+
+    def get_design(self) -> dict:
+        """{design_rev, design: {name, kind, cell, width_um, data(base64)} | None}"""
+        return self.command("get_design", _timeout_ms=30000)
+
     def get_layouts(self) -> dict:
         """The Control tab layouts saved on the server's PC: {name: entry}."""
         return self.command("get_layouts").get("layouts") or {}

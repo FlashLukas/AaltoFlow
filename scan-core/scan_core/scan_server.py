@@ -286,6 +286,8 @@ def build_manifest() -> dict:
 
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+#: the largest Navigator design file a suite may share through the server
+DESIGN_MAX_BYTES = 32 * 2**20
 
 
 # ──────────────────────────────────── a scan ──────────────────────────────────
@@ -396,12 +398,16 @@ class ScanServer:
         self._view: dict = {}
         self._view_rev = 0
         self._view_by = ""
+        # the Navigator's design FILE of the suite on this PC (it exists only
+        # here): held in memory for watchers, replaced by the next one
+        self._design: dict | None = None       # {name, kind, cell, width_um, data}
+        self._design_rev = 0
 
         self.control = ControlLease(
             safety={"abort", "stop_queue"},
             # set_view changes nothing on an instrument: not behind the control
             # lease, but only from this PC (_set_view)
-            read={"set_view"},
+            read={"set_view", "set_design"},
             on_event=lambda level, msg: self.log(msg, level))
 
     def _reset_scan_state(self):
@@ -551,6 +557,7 @@ class ScanServer:
             return {}
         with ThreadPoolExecutor(max_workers=min(16, len(mods))) as pool:
             ups = list(pool.map(lambda m: probe(m.host, m.cmd, 0.3), mods))
+        self._names = {m.slug: m.name for m in mods}
         return {m.slug: (m.host, m.cmd, m.pub) for m, up in zip(mods, ups) if up}
 
     def follow_once(self, force: bool = False) -> bool:
@@ -579,7 +586,8 @@ class ScanServer:
             self.connected = sorted(good)
             self.instruments = {
                 n: {"host": "" if str(wanted[n][0]).lower() in _LOCAL_HOSTS else wanted[n][0],
-                    "cmd": int(wanted[n][1]), "pub": int(wanted[n][2])}
+                    "cmd": int(wanted[n][1]), "pub": int(wanted[n][2]),
+                    "name": getattr(self, "_names", {}).get(n, n)}
                 for n in good}
             self._connected_key = key
             self._failed_key = key if bad else None
@@ -718,6 +726,7 @@ class ScanServer:
                 "scan_rev": self._scan_rev,
                 "view_rev": self._view_rev,
                 "instruments": dict(self.instruments),
+                "design_rev": self._design_rev,
             }
         st["describe_rev"] = build_manifest()["revision"]
         st["control"] = self.control.status()
@@ -842,6 +851,13 @@ class ScanServer:
                         "by": self._view_by}
         if cmd == "set_view":
             return self._set_view(req)
+        if cmd == "set_design":
+            return self._set_design(req)
+        if cmd == "get_design":
+            with self._lock:
+                d = dict(self._design) if self._design else None
+                rev = self._design_rev
+            return {"ok": True, "design_rev": rev, "design": d}
         if cmd == "get_layouts":
             # the Control tab layouts saved on this PC, so a watcher offers the
             # lab's panels ("CamKimP1") instead of its own, different list
@@ -870,6 +886,30 @@ class ScanServer:
             return {"ok": True, "scan_rev": self._scan_rev, "entries": entries,
                     "current": self._qi if self._busy else -1, "busy": self._busy,
                     "started_by": self._started_by}
+
+    def _set_design(self, req) -> dict:
+        """The Navigator's design file, from the suite on THIS PC (base64 in
+        `data`), so a watcher can draw it. At most DESIGN_MAX_BYTES."""
+        ident = ControlLease._identity(req)
+        if ident is None or pc_of(ident) != self.pc:
+            return {"ok": False, "refused": "not_this_pc",
+                    "error": "the design is shared by the measurement suite on the "
+                             "scan server's own PC"}
+        data = req.get("data")
+        if not isinstance(data, str) or len(data) > DESIGN_MAX_BYTES * 4 // 3 + 8:
+            return {"ok": False, "error": f"no design data, or larger than "
+                                          f"{DESIGN_MAX_BYTES // 2**20} MB"}
+        design = {"name": str(req.get("name") or "design"),
+                  "kind": str(req.get("kind") or "gds"),
+                  "cell": str(req.get("cell") or ""),
+                  "width_um": float(req.get("width_um") or 0.0),
+                  "data": data}
+        with self._lock:
+            if self._design != design:
+                self._design = design
+                self._design_rev += 1
+            rev = self._design_rev
+        return {"ok": True, "design_rev": rev}
 
     def _set_view(self, req) -> dict:
         """The plot choice of the measurement suite on THIS PC (detector, X/Y,
