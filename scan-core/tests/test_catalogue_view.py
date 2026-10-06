@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6 import QtCore, QtWidgets                                  # noqa: E402
 
-from apps.catalogue_view import CatalogueWidget                         # noqa: E402
+from apps.catalogue_view import NAME_COL, CatalogueWidget               # noqa: E402
 from test_catalogue import folder, _write                              # noqa: E402,F401
 
 
@@ -47,7 +47,7 @@ def _scanned(widget):
 
 
 def _names(widget):
-    return sorted(widget.table.topLevelItem(i).text(1)
+    return sorted(widget.table.topLevelItem(i).text(NAME_COL)
                   for i in range(widget.table.topLevelItemCount()))
 
 
@@ -171,3 +171,21 @@ def test_setup_sample_operator_are_pick_lists_of_the_values_present(tmp_path):
     w.refresh()
     assert w.query()["setup"] == "VNA-FMR"
     assert w.table.topLevelItemCount() == 1
+
+
+def test_columns_and_filters_share_one_order(qapp, folder):
+    # Lukas, 2026-10-06: date, setup, operator, sample, structure, name --
+    # and the filter fields under them in the same order
+    from apps.catalogue_view import COLUMNS, FILTERS
+    heads = [h for h, _k in COLUMNS]
+    assert heads[:6] == ["date", "setup", "operator", "sample", "structure", "name"]
+    assert [p for _a, p, _k in FILTERS][:5] == heads[1:6]
+    w = CatalogueWidget(folder)
+    w.rescan(); w.wait_scan()
+    w.structure_edit.setText("film"); w.refresh()
+    assert _names(w) == ["other sample"]
+    w.structure_edit.clear(); w.axis_edit.setText("rf_freq"); w.refresh()
+    assert _names(w) == ["cold sweep"]
+    w.axis_edit.clear(); w.where_edit.setText("ppms"); w.refresh()
+    assert _names(w) == ["cold sweep", "fmr map"]
+    assert not w.status.text().startswith("where:")

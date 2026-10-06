@@ -234,6 +234,32 @@ def test_where_on_fixed_conditions_and_run_columns(folder):
     assert _names(both) == ["fmr map"]
 
 
+def test_a_name_alone_in_where_means_the_run_has_it(folder):
+    # typing a module's name was the first thing tried, and it was an error
+    cat.scan(folder)
+    assert _names(cat.search(folder, where="ppms")) == ["cold sweep", "fmr map"]
+    assert _names(cat.search(folder, where="clMag")) == ["fmr map"]
+    assert _names(cat.search(folder, where="ppms.temperature")) == ["cold sweep", "fmr map"]
+    assert _names(cat.search(folder, where="rf_power")) == ["cold sweep", "fmr map"]
+    assert _names(cat.search(folder, where="ppms and rf_power < 0")) == ["cold sweep"]
+    assert _names(cat.search(folder, where="rf_power > 0, clMag")) == ["fmr map"]
+    assert cat.search(folder, where="nosuchmodule") == []
+    assert cat.parse_where("kim") == [("kim", "exists")]
+
+
+def test_filter_by_structure_name_and_axis(folder):
+    cat.scan(folder)
+    assert _names(cat.search(folder, structure="disc")) == ["fmr map"]
+    assert _names(cat.search(folder, structure="FILM")) == ["other sample"]
+    assert _names(cat.search(folder, name="sweep")) == ["cold sweep"]
+    assert _names(cat.search(folder, axis="rf_freq")) == ["cold sweep"]
+    assert _names(cat.search(folder, axis="freq")) == ["cold sweep"]
+    assert _names(cat.search(folder, axis="field")) == ["fmr map", "old run", "other sample"]
+    # the point counts in "field(3)" are not names
+    assert cat.search(folder, axis="3") == []
+    assert _names(cat.search(folder, axis="field", structure="film")) == ["other sample"]
+
+
 def test_where_combines_with_the_other_filters(folder):
     cat.scan(folder)
     assert cat.search(folder, sample="Y12", where="ppms.temperature < 10") == []

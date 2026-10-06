@@ -3,11 +3,11 @@
 A view over scan_core/catalogue.py (the index; no Qt there). What it adds:
 
   * a search bar (free text over name, sample, structure, comment, tags) and
-    filter fields (sample, operator, project, series, instrument, tags, a date
-    range) plus a `where` line for conditions and snapshot values
+    filter fields (a date range, setup, operator, sample, structure, name,
+    axis; project, series, instrument, tags) plus a `where` line for conditions and snapshot values
     ("ppms.temperature between 4 and 6");
-  * the results, newest first: date, name, sample, structure, axes, detectors,
-    operator, tags; a file that could not be read is listed in red with the
+  * the results, newest first: date, setup, operator, sample, structure,
+    name, axes, detectors, tags (the filter fields sit in the same order); a file that could not be read is listed in red with the
     reason as its tooltip;
   * a details line for the selected run (comment, conditions, instruments,
     the full path);
@@ -33,23 +33,33 @@ from PySide6 import QtCore, QtWidgets
 from scan_core import catalogue as cat
 from apps.theme import C
 
-#: results columns: (header, row key)
-COLUMNS = [("date", "created"), ("name", "name"), ("sample", "sample"),
-           ("structure", "structure"), ("axes", "dims_text"),
-           ("detectors", "detectors_text"), ("operator", "operator"),
-           ("tags", "tags_text"), ("setup", "setup_name")]
+#: results columns: (header, row key). The order is the order a run is
+#: thought of in (Lukas, 2026-10-06): when, on which setup, by whom, which
+#: sample and structure, then what the run was.
+COLUMNS = [("date", "created"), ("setup", "setup_name"), ("operator", "operator"),
+           ("sample", "sample"), ("structure", "structure"), ("name", "name"),
+           ("axes", "dims_text"), ("detectors", "detectors_text"),
+           ("tags", "tags_text")]
+NAME_COL = [k for _h, k in COLUMNS].index("name")
 
 #: filters offered as a drop-down of the values the catalogue holds
-PICK_FIELDS = ("setup", "sample", "operator", "project", "series")
+PICK_FIELDS = ("setup", "operator", "sample", "structure", "project", "series")
 
-#: the filter fields in the second row: (attribute, placeholder, search kwarg)
+#: the filter fields: (attribute, placeholder, search kwarg). FILTERS sits
+#: under the columns in THE SAME ORDER (after the date range), so the field
+#: for a column is found where the column is; MORE_FILTERS are the fields
+#: that have no column of their own.
 FILTERS = [("setup_edit", "setup", "setup"),
-           ("sample_edit", "sample", "sample"),
            ("operator_edit", "operator", "operator"),
-           ("project_edit", "project", "project"),
-           ("series_edit", "series", "series"),
-           ("instrument_edit", "instrument", "instrument"),
-           ("tags_edit", "tags (a, b)", "tags")]
+           ("sample_edit", "sample", "sample"),
+           ("structure_edit", "structure", "structure"),
+           ("name_edit", "name", "name"),
+           ("axis_edit", "axis", "axis")]
+MORE_FILTERS = [("project_edit", "project", "project"),
+                ("series_edit", "series", "series"),
+                ("instrument_edit", "instrument", "instrument"),
+                ("tags_edit", "tags (a, b)", "tags")]
+ALL_FILTERS = FILTERS + MORE_FILTERS
 
 
 class _ScanSignals(QtCore.QObject):
@@ -99,15 +109,24 @@ class CatalogueWidget(QtWidgets.QWidget):
         r1.addWidget(self.rescan_btn)
         g.addLayout(r1)
 
-        # row 2: field filters + the date range
+        # row 2: the date range, then one field per column in column order;
+        # row 2b: the filters without a column
         r2 = QtWidgets.QHBoxLayout(); r2.setSpacing(6)
+        r2b = QtWidgets.QHBoxLayout(); r2b.setSpacing(6)
+        self.from_edit = QtWidgets.QLineEdit(); self.from_edit.setPlaceholderText("from YYYY-MM-DD")
+        self.to_edit = QtWidgets.QLineEdit(); self.to_edit.setPlaceholderText("to YYYY-MM-DD")
+        for e in (self.from_edit, self.to_edit):
+            e.setClearButtonEnabled(True); e.setMinimumWidth(130); e.setMaximumWidth(150)
+            e.setToolTip("YYYY-MM-DD; the 'to' day is included")
+            r2.addWidget(e)
         # setup / sample / operator / project / series are PICK LISTS of the
         # values the files really hold (Lukas, 2026-10-05: "offer the Setup,
         # User, Sample in a list"), still typeable to narrow. The attribute
         # is the combo's line edit, so typing, clearing and the debounce work
         # exactly as for the plain fields.
         self._picks = {}
-        for attr, placeholder, kw in FILTERS:
+        for attr, placeholder, kw in ALL_FILTERS:
+            row = r2 if (attr, placeholder, kw) in FILTERS else r2b
             if kw in PICK_FIELDS:
                 box = QtWidgets.QComboBox()
                 box.setEditable(True)
@@ -124,14 +143,13 @@ class CatalogueWidget(QtWidgets.QWidget):
             edit.setPlaceholderText(placeholder)
             edit.setClearButtonEnabled(True)
             setattr(self, attr, edit)
-            r2.addWidget(widget, 1)
-        self.from_edit = QtWidgets.QLineEdit(); self.from_edit.setPlaceholderText("from YYYY-MM-DD")
-        self.to_edit = QtWidgets.QLineEdit(); self.to_edit.setPlaceholderText("to YYYY-MM-DD")
-        for e in (self.from_edit, self.to_edit):
-            e.setClearButtonEnabled(True); e.setMinimumWidth(150); e.setMaximumWidth(170)
-            e.setToolTip("YYYY-MM-DD; the 'to' day is included")
-            r2.addWidget(e)
+            if kw == "axis":
+                edit.setToolTip("a scan axis whose name contains this, e.g. field, "
+                                "kim.position")
+            row.addWidget(widget, 1)
+        r2b.addStretch(1)
         g.addLayout(r2)
+        g.addLayout(r2b)
 
         # row 3: conditions / snapshot values
         r3 = QtWidgets.QHBoxLayout()
@@ -141,10 +159,11 @@ class CatalogueWidget(QtWidgets.QWidget):
         self.where_edit = QtWidgets.QLineEdit()
         self.where_edit.setPlaceholderText(
             "conditions and instrument values, e.g.  ppms.temperature between 4 and 6"
-            "  and  clMag.field == 50")
+            "  and  clMag.field == 50   (a name alone, e.g.  kim, = the run has it)")
         self.where_edit.setToolTip(
             "Terms joined by 'and' or ',':\n"
             "  key == value   != < <= > >=   key between A and B   key contains text\n"
+            "  a name alone = the run has it (kim -> every run that used kim)\n"
             "A key is a fixed condition of the scan (rf_power), a run column\n"
             "(n_points, duration) or an instrument value from the snapshot:\n"
             "'ppms.temperature' finds ppms.status.temperature as well.")
@@ -171,10 +190,13 @@ class CatalogueWidget(QtWidgets.QWidget):
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(0, QtCore.Qt.DescendingOrder)
         self.table.itemActivated.connect(self._activated)        # double-click / Enter
+        self.table.setToolTip("double-click a run (or Enter) to open it in the data viewer")
+        self.table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.currentItemChanged.connect(self._show_details)
         hdr = self.table.header()
         hdr.setStretchLastSection(True)
-        for i, w in enumerate((130, 200, 90, 130, 170, 200, 80)):
+        for i, w in enumerate((130, 90, 90, 90, 130, 200, 200, 200)):
             self.table.setColumnWidth(i, w)
         g.addWidget(self.table, 1)
 
@@ -201,7 +223,7 @@ class CatalogueWidget(QtWidgets.QWidget):
 
     def _edits(self):
         return [self.text_edit, self.where_edit, self.from_edit, self.to_edit] + \
-            [getattr(self, a) for a, _p, _k in FILTERS]
+            [getattr(self, a) for a, _p, _k in ALL_FILTERS]
 
     def set_data_dir(self, path) -> None:
         """The suite's data folder changed: show THAT folder's runs."""
@@ -318,7 +340,7 @@ class CatalogueWidget(QtWidgets.QWidget):
               "where": self.where_edit.text().strip() or None,
               "date_from": self.from_edit.text().strip() or None,
               "date_to": self.to_edit.text().strip() or None}
-        for attr, _p, key in FILTERS:
+        for attr, _p, key in ALL_FILTERS:
             kw[key] = getattr(self, attr).text().strip() or None
         return kw
 
@@ -379,7 +401,7 @@ class CatalogueWidget(QtWidgets.QWidget):
                     item.setForeground(i, QtGui.QBrush(QtGui.QColor(C["danger"])))
                     item.setToolTip(i, f"could not be read: {r['error']}")
             else:
-                item.setToolTip(1, r["path"])
+                item.setToolTip(NAME_COL, r["path"])
             self.table.addTopLevelItem(item)
         self.table.setSortingEnabled(True)
 
@@ -415,6 +437,19 @@ class CatalogueWidget(QtWidgets.QWidget):
         if ranges:
             bits.append("; ".join(ranges))
         self.details.setText("   |   ".join(bits) + f"\n{r['path']}")
+
+    def _context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        r = self._row_of(item)
+        if r is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        act = menu.addAction("Open in data viewer")
+        act.setEnabled(not r.get("error"))
+        act.triggered.connect(lambda: self._activated(item))
+        menu.addAction("Copy path").triggered.connect(
+            lambda: QtWidgets.QApplication.clipboard().setText(r["path"]))
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _activated(self, item, _col=0):
         r = self._row_of(item)

@@ -574,7 +574,11 @@ def parse_where(text: str) -> list[tuple]:
     """'a.b between 1 and 2, c == x' -> [("a.b", "between", 1.0, 2.0),
     ("c", "==", "x")]. Terms are joined by `and` or a comma (all must hold).
     Operators: == = != < <= > >= , `between A and B` (inclusive), and
-    `contains` / `~` (text contains, case-insensitive)."""
+    `contains` / `~` (text contains, case-insensitive).
+    A NAME ALONE ("kim", "ppms.temperature", "rf_power") -> (key, "exists"):
+    the run has a condition, a snapshot value or an instrument of that name.
+    Typing a module's name to find its runs is the first thing people try,
+    and "expected an operator" helped nobody (Lukas, 2026-10-06)."""
     toks = _tokens(text or "")
     terms, i = [], 0
 
@@ -592,10 +596,16 @@ def parse_where(text: str) -> list[tuple]:
     while i < len(toks):
         need(toks[i][0] == "word" and _KEY.match(toks[i][1]), "a name")
         key = toks[i][1]; i += 1
-        need(i < len(toks), "an operator")
-        kind, op = toks[i]
-        low = op.lower()
-        if kind == "word" and low == "between":
+        if i == len(toks) or toks[i][0] == "comma" or toks[i][1].lower() == "and":
+            # a NAME ALONE: "the run has it" (see the docstring)
+            terms.append((key, "exists"))
+            kind = low = None
+        else:
+            kind, op = toks[i]
+            low = op.lower()
+        if kind is None:
+            pass
+        elif kind == "word" and low == "between":
             i += 1
             lo = value()
             need(i < len(toks) and toks[i][1].lower() == "and", "'and' (between A and B)")
@@ -667,6 +677,8 @@ def _term_sql(term: tuple) -> tuple[str, list]:
     """
     key, op, *args = term
     args = tuple(args)
+    if op == "exists":
+        return _exists_sql(key)
     if key.lower() in _RUN_COLUMNS:
         col = _RUN_COLUMNS[key.lower()]
         sql, p = _value_sql(op, args, f"files.{col}", f"CAST(files.{col} AS TEXT)")
@@ -680,6 +692,27 @@ def _term_sql(term: tuple) -> tuple[str, list]:
         parts.append("SELECT file_id FROM snapshot_values WHERE "
                      f"(key = ? COLLATE NOCASE OR key LIKE ? ESCAPE '\\') AND {c_sql}")
         params += [key, deep] + c_p
+    return "files.id IN (" + " UNION ".join(parts) + ")", params
+
+
+def _exists_sql(key: str) -> tuple[str, list]:
+    """A bare name in `where`: the run HAS it. Matches a run column that is
+    filled in, an instrument slug ("kim"), a condition, or a snapshot key --
+    exactly, as a prefix ("kim" -> "kim.status.position_x") or with a path in
+    between ("ppms.temperature" -> "ppms.status.temperature")."""
+    if key.lower() in _RUN_COLUMNS:
+        return f"files.{_RUN_COLUMNS[key.lower()]} IS NOT NULL", []
+    prefix = f"{_like_escape(key)}.%"
+    parts = ["SELECT file_id FROM instruments WHERE slug = ? COLLATE NOCASE",
+             "SELECT file_id FROM conditions WHERE key = ? COLLATE NOCASE "
+             "OR key LIKE ? ESCAPE '\\'",
+             "SELECT file_id FROM snapshot_values WHERE key = ? COLLATE NOCASE "
+             "OR key LIKE ? ESCAPE '\\'"]
+    params = [key, key, prefix, key, prefix]
+    if "." in key:
+        slug, rest = key.split(".", 1)
+        parts.append("SELECT file_id FROM snapshot_values WHERE key LIKE ? ESCAPE '\\'")
+        params.append(f"{_like_escape(slug)}.%.{_like_escape(rest)}")
     return "files.id IN (" + " UNION ".join(parts) + ")", params
 
 
@@ -703,13 +736,16 @@ def _day(v, end: bool = False) -> str | None:
 
 def search(data_dir, text=None, sample=None, operator=None, project=None,
            tags=None, series=None, instrument=None, detector=None, setup=None,
+           structure=None, name=None, axis=None,
            date_from=None, date_to=None, where=None, limit: int | None = None,
            include_errors: bool = True) -> list[dict]:
     """Find runs in the index of `data_dir`, newest first.
 
     text      : words; EVERY word must appear somewhere in name, sample,
                 structure, comment, tags or the file name (case-insensitive)
-    sample, operator, project, series : "contains", case-insensitive
+    sample, operator, project, series, structure, name : "contains", any case
+    axis      : a scan axis (dimension) name contains this text ("field"
+                finds field and field_x; "kim" finds kim.position_x)
     setup     : the SETUP the file was measured on (attribute setup_name, set by
                 the installer: "TR-MOKE", "VNA-FMR" ...); "contains", any case
     tags      : a list or "a, b": the run must carry EVERY tag (exact, any case)
@@ -733,10 +769,17 @@ def search(data_dir, text=None, sample=None, operator=None, project=None,
         params += [like] * 6
     for col, val in (("sample", sample), ("operator", operator),
                      ("project", project), ("series", series),
-                     ("setup_name", setup)):
+                     ("setup_name", setup), ("structure", structure),
+                     ("name", name)):
         if val:
             sql.append(f"AND COALESCE({col},'') LIKE ? ESCAPE '\\'")
             params.append(f"%{_like_escape(str(val).strip())}%")
+    if axis:
+        # dims_text is "field(41) x rf_freq(81)": match inside a NAME only,
+        # never in the "(41)" counts (an axis filter "4" must not find them)
+        sql.append("AND EXISTS (SELECT 1 FROM json_each(files.dims_json) "
+                   "WHERE json_extract(value, '$.name') LIKE ? ESCAPE '\\')")
+        params.append(f"%{_like_escape(str(axis).strip())}%")
     for tag in _as_list(tags):
         sql.append("AND files.id IN (SELECT file_id FROM tags WHERE tag = ?)")
         params.append(tag.lower())
