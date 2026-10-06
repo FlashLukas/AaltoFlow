@@ -532,6 +532,32 @@ class RepeatRow(QtWidgets.QFrame):
 
 # ──────────────────────────── one condition row ───────────────────────────────
 
+def detector_shape(p) -> tuple[str, str]:
+    """("0D" | "1D · 11101" | "2D" ..., tooltip): what ONE scan point of
+    detector `p` records. The inner axes are the ones the INSTRUMENT sweeps
+    itself (a spectrum's frequencies, a camera image's pixels); each becomes
+    a dimension of the data on top of the scan's own."""
+    axes = list(getattr(p, "axes", ()) or ())
+    kind = getattr(p, "dtype", "float")
+    what = {"complex": "complex numbers", "bool": "on / off", "enum": "one of a list",
+            "string": "text", "text": "text", "int": "whole numbers"}.get(kind, "numbers")
+    if not axes:
+        return "0D", f"0D: one value per scan point ({what})"
+    lens = [getattr(a, "length", None) for a in axes]
+    tag = f"{len(axes)}D"
+    if all(lens):
+        tag += " · " + " x ".join(str(n) for n in lens)
+    names = ", ".join(
+        f"{getattr(a, 'label', '') or a.name}"
+        + (f" [{a.unit}]" if getattr(a, "unit", "") else "")
+        + (f" ({n} points)" if n else "")
+        for a, n in zip(axes, lens))
+    return tag, (f"{len(axes)}D: the instrument records a whole "
+                 f"{'trace' if len(axes) == 1 else 'array'} at every scan point "
+                 f"({what}) along {names}. The data gets these axes on top of "
+                 f"the scan's own.")
+
+
 def is_bool_param(param) -> bool:
     """A switch (RF output, an enable line): declared bool in its describe."""
     st = getattr(param, "storage", None)
@@ -2746,6 +2772,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
         v.addSpacing(6)          # the detectors are a different list, not a fourth button
         v.addWidget(self._tag("DETECTORS  ·  record"))
         self.det_tree = self._make_tree()
+        # a second, narrow column: what ONE scan point records -- 0D (a number),
+        # 1D (a trace: a spectrum, a VNA sweep), 2D (an image). Lukas
+        # 2026-10-06: "0D, 1D, 2D to visualize what is acquired"
+        self.det_tree.setColumnCount(2)
+        hdr = self.det_tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.det_tree.itemChanged.connect(lambda *_: self._rebuild_summary())
         v.addWidget(self.det_tree, 1)
         self._reload_palette()
@@ -2807,9 +2841,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
         for module, params in group_by_module(gettables).items():
             group = self._group_item(self.det_tree, module, len(params))
             for p in params:
-                it = QtWidgets.QTreeWidgetItem(group, [self._param_text(p)])
+                tag, tip = detector_shape(p)
+                it = QtWidgets.QTreeWidgetItem(group, [self._param_text(p), tag])
                 it.setData(0, QtCore.Qt.UserRole, p.id)
                 it.setToolTip(0, p.id)
+                it.setToolTip(1, tip)
+                it.setForeground(1, QtGui.QBrush(QtGui.QColor(
+                    C["accent"] if tag != "0D" else C["muted"])))
+                it.setTextAlignment(1, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
                 it.setCheckState(0, QtCore.Qt.Checked if p.id == default
                                  else QtCore.Qt.Unchecked)

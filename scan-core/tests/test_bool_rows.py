@@ -71,3 +71,24 @@ def test_routine_with_a_switch_round_trips_through_the_builder(qapp):
     rows = b.routines["before_scan"].rows
     assert rows[0].value_box.isChecked()
     b.close()
+
+
+def test_the_detector_list_says_what_one_point_records(qapp):
+    """Lukas 2026-10-06: "0D, 1D, 2D to visualize what is acquired"."""
+    from apps.scan_builder import ScanBuilder, detector_shape
+    from scan_core.registry import AxisSpec, Gettable
+    reg = build_sim_registry()
+    reg.add(Gettable("sa.trace", "Spectrum", "dBm", lambda: None,
+                     axes=[AxisSpec("sa_freq", "Frequency", "Hz", length=11101)]))
+    b = ScanBuilder(registry=reg)
+    tags = {}
+    for g in range(b.det_tree.topLevelItemCount()):
+        group = b.det_tree.topLevelItem(g)
+        for k in range(group.childCount()):
+            it = group.child(k)
+            tags[it.data(0, 0x0100)] = it.text(1)
+    assert tags["lockin_r"] == "0D"
+    assert tags["s21"] == "1D"                          # length known only at scan start
+    assert tags["sa.trace"] == "1D · 11101"
+    assert "11101 points" in detector_shape(reg.get("sa.trace"))[1]
+    b.close()
