@@ -274,3 +274,27 @@ def test_failed_start_closes_the_port_again():
     assert backend._open is False
     assert backend.read_output() is True        # untouched
     assert s.status().connected is False
+
+
+def test_an_off_step_power_is_rounded_before_it_is_sent(synth, monkeypatch):
+    """Lab PC 2026-10-06: the SG12000L IGNORES "POWER -13.75" (off the 0.5 dB
+    attenuator grid) and stayed at -20 dBm; a scan waited 60 s for it. Only
+    on-step values are sent now, and the log says when a request moved."""
+    sent = []
+    real = synth.backend.set_power
+    monkeypatch.setattr(synth.backend, "set_power", lambda v: (sent.append(v), real(v)))
+    synth.set_power(-13.75)
+    assert sent[-1] == -14.0                          # nearest step (half -> even)
+    synth.set_power(-7.3)
+    assert sent[-1] == -7.5
+    synth.set_power(-12.5)
+    assert sent[-1] == -12.5                          # on the grid: unchanged
+    assert any("asked -7.3" in m for _l, m in synth.events)
+
+
+def test_describe_declares_the_power_resolution():
+    from dssg.net.describe import build_manifest
+    from dssg.sim_system import build_sim_system
+    s, _b = build_sim_system(Config())
+    d = next(p for p in build_manifest(s)["parameters"] if p["id"] == "power")
+    assert d["resolution"] == 0.5

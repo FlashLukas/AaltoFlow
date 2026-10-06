@@ -297,7 +297,10 @@ hooks:
 
 - `before_scan` runs after the conditions (`fixed`) are applied, before the
   first point. `after_scan` runs after the last point, **also after Abort**
-  (commands are still sent, but not waited for), and not after an error.
+  (commands are still sent, but not waited for), and **also after an error**
+  (every step is tried, a failing one is logged, and the original error is
+  still reported) -- it is what switches the RF off. An error also keeps the
+  points measured before it: they are saved like an aborted scan's.
 - A routine puts back every parameter it moved that the scan already holds (a
   condition, an axis at its value), so a reference at 150 mT cannot leave the
   scan at 150 mT. Not at `after_scan` -- field -> 0 at the end stays at 0.

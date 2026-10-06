@@ -35,7 +35,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help=""):
+       settle=None, args=None, danger=False, help="", resolution=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -45,6 +45,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
         "read_path": read_path,      # keys/indices into the status dict, or None
     }
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
+                 ("resolution", resolution),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
                  ("help", help)):
@@ -129,13 +130,17 @@ def build_manifest(synth) -> dict:
 
         _p("power", "Power", "control", "float", unit="dBm", group="Signal",
            order=30, decimals=2, plottable=True, step=float(hw.power_step_dB),
+           # the attenuator realises ONLY multiples of this (`step` is just the
+           # GUI increment): scan-core rounds a setpoint to it before sending
+           resolution=float(hw.power_step_dB) or None,
            min=lim["power_min_dBm"], max=lim["power_max_dBm"],
            read_path=["power_dBm"],
            set={"verb": "set_power", "arg": "power_dBm"},
            settle={"policy": "echoes", "key": "power_dBm", "tol": power_tol},
            help="Calibrated output level. The step attenuator moves in "
-                f"{hw.power_step_dB:g} dB steps, so the read-back may differ "
-                "from the request by up to half a step."),
+                f"{hw.power_step_dB:g} dB steps: a request between two steps is "
+                "rounded to the nearest one (the unit itself ignores an "
+                "off-step value)."),
     ]
     if synth.has_phase() or not synth.status().connected:
         # Offered before connect (we do not know yet) and on units that have

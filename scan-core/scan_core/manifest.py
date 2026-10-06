@@ -277,9 +277,16 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # older wait: the knob is now the newer command's business.
             gen = [0, threading.Lock()]
 
+            # RESOLUTION: the instrument realises only multiples of it (the
+            # DS generator's 0.5 dB attenuator, which IGNORES an off-step
+            # request -- lab PC 2026-10-06). Not `step`, which is only the
+            # GUI's increment (clMag's field step is 2 mT and is no such
+            # thing). In the module's own unit, i.e. on the WIRE value.
+            res = _resolution(d)
+
             def setter(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
                        _id=pid, _u=unit, _bool=(dtype == "bool"), _scale=scale,
-                       _int=(dtype == "int"), timeout_s=None, _gen=gen, _d=d):
+                       _int=(dtype == "int"), timeout_s=None, _gen=gen, _d=d, _res=res):
                 extra = dict(_s.get("extra") or {})
                 scale = _scale
                 # Send a bool as a bool. Settable hands us 0.0/1.0 after its
@@ -295,6 +302,10 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 wire = bool(value) if _bool else value * scale
                 if _int and not _bool:
                     wire = int(round(wire))
+                elif _res and not _bool:
+                    # ... and settle on the ROUNDED value, as for an int: the
+                    # echo will be -14.0, never the -13.75 that was asked
+                    wire = round(round(wire / _res) * _res, 9)
                 with _gen[1]:
                     _gen[0] += 1
                     mine = _gen[0]
@@ -314,6 +325,8 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # a filter order). The builder reads this to offer whole points
             # rather than 21 samples across 0..19.
             param.integer = bool(_int_dtype(dtype))
+            # in SCAN units, for the axis preview (value * scale is the wire)
+            param.resolution = (res / scale) if (res and scale) else None
             # Recorded as a detector (the readback of a knob being driven), a
             # bool is stored as 0/1 and an int as an integer. Its min/max are
             # SETTING limits, not a promise about the readback, so they do not
@@ -345,6 +358,15 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             added.append(pid)
 
     return added
+
+
+def _resolution(d: dict) -> float | None:
+    """A descriptor's `resolution` (> 0), or None."""
+    try:
+        r = float(d.get("resolution") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return r if r > 0 else None
 
 
 def _int_dtype(dtype: str) -> bool:

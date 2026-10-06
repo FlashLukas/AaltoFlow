@@ -197,8 +197,10 @@ def test_after_scan_after_an_abort_sends_every_command_but_does_not_wait():
     assert any("not waited for (aborted)" in m for m in logs)
 
 
-def test_after_scan_does_not_run_after_an_error():
-    """An exception means something is broken; drive nothing more."""
+def test_after_scan_runs_after_an_error_and_the_error_surfaces():
+    """Lukas 2026-10-06 ("yes, always"): after an error the after-scan
+    routine still runs -- it is what makes the setup safe (RF off) -- and the
+    original error is raised unchanged. (Until then: drive nothing more.)"""
     reg, events, _ = _diary_registry()
 
     def broken():
@@ -209,7 +211,7 @@ def test_after_scan_does_not_run_after_an_error():
                     detectors=["broken"], hooks=[_hook("after_scan", {"c": 0.0})])
     with pytest.raises(RuntimeError, match="fell over"):
         run(recipe, reg, created_iso="t")
-    assert ("set", "c", 0.0) not in events
+    assert ("set", "c", 0.0) in events
 
 
 def test_a_failing_after_scan_routine_keeps_the_measured_data():

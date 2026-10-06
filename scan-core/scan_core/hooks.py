@@ -599,7 +599,9 @@ def _call(ctx, **args):
                 for pid in ident["set"]:
                     params[pid] = registry.get(pid)
 
-    carry_on = ctx.get("on_error") == "continue"
+    # after the scan ended on an ERROR (engine.after_error), every step is
+    # tried: "RF off" must still run when "field -> 0" failed before it
+    carry_on = ctx.get("on_error") == "continue" or bool(ctx.get("after_error"))
 
     def step(what, fn, quiet=False):
         # `quiet`: the per-point checks (abort_if, skip_if, comment) say

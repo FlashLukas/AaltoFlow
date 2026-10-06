@@ -549,7 +549,7 @@ def test_without_a_pause_handler_a_fault_stops_the_scan_and_keeps_the_rest():
     assert vals[:2].tolist() == [0.0, 10.0]
     assert np.all(np.isnan(vals[2:]))        # NOT the poisoned 999
     assert ei.value.faults == [("cam", "pattern lost")]
-    assert ran_after == []                   # an error: no after-scan routine
+    assert ran_after == [1]                  # an error: the after-scan routine runs (2026-10-06)
 
 
 def test_abort_while_paused_is_an_ordinary_abort():

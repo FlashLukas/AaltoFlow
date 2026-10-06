@@ -265,11 +265,27 @@ class Synthesizer:
     def set_power(self, dBm: float) -> None:
         lim = self.limits()
         value, clamped = _clamp(float(dBm), lim["power_min_dBm"], lim["power_max_dBm"])
+        # ROUND to the attenuator step. The SG12000L (firmware V7.84) IGNORES
+        # an off-step request -- "POWER -13.75" left it at -20 dBm, and a scan
+        # then waited 60 s for a level that never came (lab PC, 2026-10-06).
+        # So only values it can make are sent, and the log says when a request
+        # was moved.
+        asked = value
+        step = float(getattr(self.cfg.hardware, "power_step_dB", 0.0) or 0.0)
+        if step > 0:
+            value = round(round(value / step) * step, 6)
+            if value < lim["power_min_dBm"] - 1e-9:     # rounding must not leave the
+                value += step                           # safety limits
+            elif value > lim["power_max_dBm"] + 1e-9:
+                value -= step
         self._power = value
         self._push(self.backend.set_power, value)
         if clamped:
             self._emit("warn", f"power clamped to {value:g} dBm "
                                f"(limit {lim['power_min_dBm']:g}..{lim['power_max_dBm']:g})")
+        elif abs(value - asked) > 1e-9:
+            self._emit("info", f"power = {value:g} dBm (asked {asked:g}: the attenuator "
+                               f"moves in {step:g} dB steps)")
         else:
             self._emit("info", f"power = {value:g} dBm")
 

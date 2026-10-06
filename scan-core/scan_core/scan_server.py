@@ -1278,6 +1278,9 @@ class ScanServer:
             self._last_error = str(exc)
             self.log(f"scan '{e.name}' FAILED: {exc}", "error")
         except Exception as exc:
+            # the engine hands over the points measured before the error
+            if getattr(exc, "dataset", None) is not None:
+                self._final(exc.dataset, path)
             e.result, e.error = "error", f"{exc}"
             self._last_error = str(exc)
             self.log(f"scan '{e.name}' FAILED: {exc}", "error")

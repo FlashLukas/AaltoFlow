@@ -459,7 +459,13 @@ constantly and mean nothing.
   "group":     "Field",            # layout hint for a panel
   "order":     10,                 # ordering hint within the group
   "min": ..., "max": ...,          # LIVE bounds; omit if genuinely unbounded
-  "step": ..., "decimals": ...,    # display hints
+  "step": ..., "decimals": ...,    # display hints (a GUI increment, NOT a quantisation)
+  "resolution": 0.5,               # optional, float controls: the instrument only
+                                   # realises multiples of this (an attenuator's
+                                   # step). scan-core rounds a setpoint to it and
+                                   # settles on the rounded value; the axis preview
+                                   # shows it. Declare it when the hardware IGNORES
+                                   # or rejects an off-grid value (DS SG12000L, 2026-10-06)
   "options":   [...],              # enum only
   "bits":      12,                 # optional, int detectors: unsigned 0..2^bits-1
   "store":     "float32",          # optional, float/complex detectors: halve the file

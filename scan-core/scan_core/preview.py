@@ -72,6 +72,14 @@ def _member(pid: str, values: np.ndarray, registry) -> MemberPreview:
         for i in np.flatnonzero(rounded != sent):
             notes[i] = (notes[i] + "; " if notes[i] else "") + f"rounded from {sent[i]:g}"
         sent = rounded
+    res = getattr(p, "resolution", None) if p is not None else None
+    if res and not getattr(p, "integer", False):
+        # manifest.py rounds to the module's declared resolution
+        rounded = np.round(np.round(sent / res) * res, 9)
+        for i in np.flatnonzero(np.abs(rounded - sent) > 1e-9 * max(1.0, abs(res))):
+            notes[i] = (notes[i] + "; " if notes[i] else "") + \
+                f"rounded from {sent[i]:g} (resolution {res:g})"
+        sent = rounded
     return MemberPreview(pid=pid,
                          label=getattr(p, "label", pid) if p is not None else pid,
                          unit=getattr(p, "unit", "") if p is not None else "",

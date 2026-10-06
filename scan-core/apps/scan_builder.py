@@ -2071,6 +2071,13 @@ class ScanWorker(QtCore.QThread):
             self.outcome, self.error = "error", str(exc)
             self.failed.emit(str(exc))
         except Exception as exc:                 # surface validation/compile errors
+            # An error DURING the sweep (a settle that timed out): the engine
+            # attaches the points measured before it -- save and show them.
+            ds = getattr(exc, "dataset", None)
+            if ds is not None:
+                n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
+                self._write(ds, n, n)
+                self.done.emit(ds)
             self.outcome, self.error = "error", str(exc)
             self.failed.emit(str(exc))
 

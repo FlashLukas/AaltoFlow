@@ -339,9 +339,10 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     Routines: hooks at `before_scan` fire after the conditions are applied and
     before the first point; hooks at `after_scan` fire after the last point --
     and ALSO after an Abort, because "put the magnet back to 0" is exactly what
-    you want when you stop a scan early. NOT after an exception: something is
-    broken then, the error must surface unchanged, and driving more hardware
-    from an unknown state is how a small fault becomes a bigger one.
+    you want when you stop a scan early -- and, since 2026-10-06, ALSO after an
+    ERROR (Lukas, after a settle timeout left an RF generator on: "yes,
+    always"). After an error every step is sent and a failing step is only
+    logged; the error itself still surfaces unchanged.
     """
     errs = recipe.validate(registry)
     if errs:
@@ -393,12 +394,29 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
         except Exception as exc:          # say it, but do not hide the abort
             ctx["log_fn"](f"after_scan routine failed after abort: {exc}")
 
+    def after_error(err):
+        # The scan ends on an ERROR. The after-scan routine runs anyway, as
+        # after an Abort -- every step is sent, a step that fails is logged and
+        # the next one still runs -- because it is usually what makes the
+        # setup safe ("RF output off", "field -> 0"). Lukas 2026-10-06, after a
+        # settle timeout left the RF generator on: "yes, always". The error
+        # itself is re-raised unchanged by the caller.
+        ctx["log_fn"](f"scan ended on an error ({err}); running the after-scan routine")
+        ctx["after_error"] = True
+        try:
+            after_scan(aborted=True)
+        except Exception as exc:
+            ctx["log_fn"](f"after_scan routine failed after the error: {exc}")
+
     # establish the constant context before sweeping (rf power, unswept freq, …)
     try:
         for pid, val in recipe.fixed.items():
             current[pid] = registry.get(pid).set(float(val))
     except ScanAborted:
         after_abort()
+        raise
+    except Exception as exc:
+        after_error(exc)
         raise
 
     dims = compiled.dims
@@ -487,10 +505,9 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                             prev, ctx, t0, on_progress, should_abort, on_point,
                             created_iso)
     except ScanFault as exc:
-        # A fault with nobody to pause for. It is an ERROR, so -- as for any
-        # other error -- the after-scan routine does NOT run (an instrument is
-        # in a state nobody has looked at). The points measured before it are
-        # handed over, exactly as an Abort's are.
+        # A fault with nobody to pause for: an ERROR. The after-scan routine
+        # runs (after_error, since 2026-10-06), and the points measured before
+        # it are handed over, exactly as an Abort's are.
         if sweeping and exc.dataset is None:
             try:
                 exc.dataset = _to_dataset(recipe, compiled, registry, data,
@@ -500,6 +517,7 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                           ds_attrs=ctx.get("ds_attrs"))
             except Exception as build_exc:
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
+        after_error(exc)
         raise
     except ScanAborted as exc:
         if isinstance(exc, ScanStopped):
@@ -524,6 +542,25 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                           ds_attrs=ctx.get("ds_attrs"))
             except Exception as build_exc:     # say it, but do not hide the abort
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
+        raise
+    except Exception as exc:
+        # ANY other error during the sweep -- a settle that timed out, a module
+        # that refused a setpoint. The points measured before it are handed
+        # over as for an Abort (unmeasured ones NaN), and the file says why it
+        # ends early. Found on the lab PC 2026-10-06: a settle timeout at
+        # point 6 of 25, and the five good points were never saved.
+        if sweeping and getattr(exc, "dataset", None) is None:
+            try:
+                ctx["ds_attrs"]["stopped_by"] = f"error: {exc}"
+                ctx["ds_attrs"]["stopped_scope"] = "all"
+                exc.dataset = _to_dataset(recipe, compiled, registry, data,
+                                          created_iso, time.monotonic() - t_start,
+                                          det_axes, det_coords,
+                                          var_attrs=ctx.get("var_attrs"),
+                                          ds_attrs=ctx.get("ds_attrs"))
+            except Exception as build_exc:     # say it, but do not hide the error
+                ctx["log_fn"](f"could not keep the measured points: {build_exc}")
+        after_error(exc)
         raise
 
     # Settings that CHANGED during the scan (a routine, a person at a GUI):
