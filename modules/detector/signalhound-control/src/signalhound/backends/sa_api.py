@@ -118,15 +118,25 @@ LOCK_MODULE = "signalhound"
 #: the lab PC 2026-09-28, where the service could not start without this.
 DLL_SEARCH = [r"C:\Program Files\Signal Hound\Spike\sa_api.dll"]
 
-# Sweep time of the SA44B in spectrum mode, fitted to sweeps measured on the
-# lab's analyser (2026-09-28, sa_api 3.2.4): ~135 MHz of span per second,
-# almost independent of the RBW down to 10 Hz, plus a cost per output bin (the
-# FFT work of a narrow RBW shows up as MORE BINS, not as a slower span rate)
-# and a fixed overhead. Within ~2x of every measurement (e.g. 4.3 GHz: 32 s;
-# RBW 10 Hz over 100 kHz: 0.68 s); the rule it replaces was off by up to 1000x.
-_SPAN_RATE_HZ_PER_S = 135e6
-_TIME_PER_BIN_S = 1.0e-5
-_SWEEP_OVERHEAD_S = 0.05
+# A-PRIORI sweep time in spectrum mode, per model: (span rate in Hz of span
+# per second, cost per output bin in s, fixed overhead in s). It is only the
+# guess for settings nothing has timed yet -- the brain replaces it with what
+# real sweeps took (sweeptime.py) after the first one.
+#   SA44B: fitted to sweeps measured on the lab's analyser (2026-09-28, sa_api
+#     3.2.4): ~135 MHz of span per second, almost independent of the RBW down
+#     to 10 Hz, plus a cost per output bin (the FFT work of a narrow RBW shows
+#     up as MORE BINS, not as a slower span rate) and a fixed overhead. Within
+#     ~2x of every measurement (e.g. 4.3 GHz: 32 s; RBW 10 Hz over 100 kHz:
+#     0.68 s); the rule it replaces was off by up to 1000x.
+#   SA124B: ONE measured point (lab PC 2026-10-06, sa_api 3.2.4): 0.9-12 GHz,
+#     RBW 6 MHz, 11101 points in 4.65-4.68 s, i.e. ~2.4 GHz/s -- 18x the
+#     SA44B, whose constants it used to borrow (estimate 82 s). # VERIFY the
+#     RBW dependence (and the per-bin cost) on the SA124B: nothing below
+#     6 MHz has been timed; the bin and overhead terms are the SA44B's.
+_SPECTRUM_TIMING = {
+    "SA44B": (135e6, 1.0e-5, 0.05),
+    "SA124B": (2.4e9, 1.0e-5, 0.05),          # VERIFY: one point, RBW 6 MHz
+}
 
 
 def lock_address(serial: int) -> str:
@@ -402,14 +412,17 @@ class SaApiAnalyzer:
         return self._grid
 
     def sweep_time_s(self, settings: SweepSettings, points: int) -> float:
-        """An estimate for the progress bar; never talks to the instrument
-        (status() asks ten times a second). Spectrum mode uses the model
-        measured on the SA44B (constants above); TG mode is not measured yet
-        and keeps the generic estimate."""
+        """The A-PRIORI estimate for the progress bar; never talks to the
+        instrument (status() asks ten times a second). Spectrum mode uses the
+        constants of the connected model (above; before open, the configured
+        model, else the SA44B's -- the slower, so a guess errs long); TG mode
+        is not measured per model yet and keeps the generic estimate. The
+        brain prefers what a real sweep with these settings took."""
         if settings.tg_on:
             return estimate_sweep_time_s(settings, points)
-        t = (_SWEEP_OVERHEAD_S + settings.span_Hz / _SPAN_RATE_HZ_PER_S
-             + _TIME_PER_BIN_S * max(int(points), 0))
+        model = self._model or self.cfg.hardware.model
+        rate, per_bin, overhead = _SPECTRUM_TIMING.get(model, _SPECTRUM_TIMING["SA44B"])
+        t = overhead + settings.span_Hz / rate + per_bin * max(int(points), 0)
         return float(min(t, 600.0))
 
     def start_sweep(self) -> None:

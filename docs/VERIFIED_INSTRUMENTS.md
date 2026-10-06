@@ -269,6 +269,11 @@ before/after routines.
   carry the cost of a narrow RBW); within ~2x of every measured sweep, e.g. 50 MHz
   -- 4.35 GHz in 32 s, RBW 10 Hz over 100 kHz in 0.68 s. The first estimate was off
   by up to 1000x.
+- (2026-10-06, an SA124B) 0.9 -- 12 GHz at RBW 6 MHz, 11101 points, took 4.65 s
+  (~2.4 GHz/s, 18x the SA44B); the estimate, still on SA44B constants, said 82 s.
+  Now each model has its own a-priori constants (the SA124B's from this one
+  point) and the estimate LEARNS: after one sweep at a setting it reports what that
+  sweep took. The data were never affected -- a sweep ends when the API returns it.
 - **The TG44A has no "off".** It keeps emitting its last frequency and level after
   an abort, a close and even the program exiting; only a new setting or unplugging
   changes it. The suite's plan is to "switch it off" by PARKING it at 10 kHz,

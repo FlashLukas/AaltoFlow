@@ -101,6 +101,7 @@ from . import physics
 from .config import Config, Scene
 from .instruments import (DETECTORS, Grid, SweepSettings, TG_LEVEL_DBM, TG_RANGE_HZ,
                           model_range, sim_grid, snap_rbw)
+from .sweeptime import SweepTimeLearner
 
 _NAN = float("nan")
 
@@ -264,6 +265,9 @@ class SpectrumAnalyzer:
         self._sweeping = False
         self._sweep_t0 = 0.0
         self._sweep_dt = 0.0
+        # how long sweeps REALLY took, per setting: the sweep_time_s estimate
+        # (readout, progress bar, scan ETA) learns from it -- see sweeptime.py
+        self._sweep_times = SweepTimeLearner()
         self._sweeps = 0
         self._trace_id = 0
         self._last: dict | None = None      # latest trace
@@ -952,7 +956,7 @@ class SpectrumAnalyzer:
                 configured=self._configured is not None,
                 points=int(points), bin_Hz=g.bin_Hz if g else _NAN,
                 grid_start_Hz=g.start_Hz if g else _NAN,
-                sweep_time_s=self.backend.sweep_time_s(settings, max(points, 2)),
+                sweep_time_s=self._sweep_time_locked(settings, max(points, 2)),
                 sweeping=self._sweeping, sweep_progress=progress,
                 spectrum_paused=self._pause_reason_locked(),
                 sweeps=self._sweeps, trace_id=self._trace_id,
@@ -970,6 +974,15 @@ class SpectrumAnalyzer:
                 scene=({f.name: getattr(c.scene, f.name) for f in fields(Scene)}
                        if self.simulated else {}),
             )
+
+    def _sweep_time_locked(self, s: SweepSettings, points: int) -> float:
+        """How long a sweep with these settings takes: what one really took
+        (learned), else the backend's a-priori estimate. Only for the readout
+        and the progress bar -- never for how long to WAIT (that stays the
+        backend's own number, or a simulated sweep would grow by its own
+        overhead every time). Called with _lock held; never touches hardware."""
+        t = self._sweep_times.estimate(self._model, s, points)
+        return self.backend.sweep_time_s(s, points) if t is None else t
 
     def _pause_reason_locked(self) -> str:
         """Why spectrum sweeping is on hold ("" = it is not). Called with _lock held."""
@@ -1057,15 +1070,17 @@ class SpectrumAnalyzer:
             self._ensure_configured()
             with self._lock:
                 settings, grid, gen0 = self._configured, self._grid, self._gen
+            t_sweep = self._clock()           # timed from here (configure excluded)
             self.backend.start_sweep()
-            dt = self.backend.sweep_time_s(settings, grid.points)
+            hw_dt = self.backend.sweep_time_s(settings, grid.points)
         with self._lock:
+            dt = self._sweep_time_locked(settings, grid.points)
             self._sweeping, self._sweep_t0, self._sweep_dt = True, t0, dt
         # A backend that TAKES the sweep inside finish_sweep (the real Signal
         # Hound: saGetSweep sweeps on request) must not be kept waiting here:
         # idling for dt first would double every sweep. dt still drives the
         # progress bar, since `_sweeping` stays True through finish_sweep.
-        wait_dt = 0.0 if getattr(self.backend, "sweeps_in_finish", False) else dt
+        wait_dt = 0.0 if getattr(self.backend, "sweeps_in_finish", False) else hw_dt
 
         # Wait out the sweep WITHOUT the hardware lock. Abandon it the moment
         # it can no longer count: settings changed, a new trigger arrived, a
@@ -1095,6 +1110,7 @@ class SpectrumAnalyzer:
                     self._sweeping = False
                 return False
             db, meta = self.backend.finish_sweep()
+        swept_s = self._clock() - t_sweep
         db = np.asarray(db, dtype=float)
         if db.size != grid.points:
             raise RuntimeError(f"sweep returned {db.size} bins, the grid has {grid.points}")
@@ -1110,6 +1126,8 @@ class SpectrumAnalyzer:
         latched = None
         with self._lock:
             self._sweeping = False
+            # the sweep really ran with `settings`, whatever happens next
+            self._sweep_times.record(self._model, settings, grid.points, swept_s)
             if self._rev != rev0:
                 return False                  # changed during the final read-out
             self._hw_error = ""
@@ -1242,10 +1260,10 @@ class SpectrumAnalyzer:
             t0 = self._clock()
             with self._hw:
                 self.backend.start_sweep()
-                dt = self.backend.sweep_time_s(s, grid.points)
+                hw_dt = self.backend.sweep_time_s(s, grid.points)
             with self._lock:
-                req["t0"], req["dt"] = t0, dt
-            wait_dt = 0.0 if getattr(self.backend, "sweeps_in_finish", False) else dt
+                req["t0"], req["dt"] = t0, self._sweep_time_locked(s, grid.points)
+            wait_dt = 0.0 if getattr(self.backend, "sweeps_in_finish", False) else hw_dt
             while True:                       # the wait, WITHOUT the hardware lock
                 if self._tg_abandoned(req):
                     with self._hw:
@@ -1257,10 +1275,13 @@ class SpectrumAnalyzer:
                 self._stop.wait(min(0.02, left))
             with self._hw:
                 db, meta = self.backend.finish_sweep()
+            swept_s = self._clock() - t0
             db = np.asarray(db, dtype=float)
             if db.size != grid.points:
                 raise RuntimeError(f"TG sweep returned {db.size} bins, the grid has "
                                    f"{grid.points}")
+            with self._lock:
+                self._sweep_times.record(self._model, s, grid.points, swept_s)
             p = physics.dbm_to_mw(db)
             total = p if total is None else total + p
             n += 1
