@@ -55,6 +55,30 @@ def test_start_stop_becomes_center_span(sa):
         sa.set_start_stop(2e9, 1e9)
 
 
+def test_start_or_stop_alone_keeps_the_other_end(sa):
+    """Lukas 2026-10-06: start and stop as scan parameters, not only centre
+    and span. Moving one end must leave the other where it is."""
+    sa.set_start_stop(0.5e9, 1.5e9)
+    sa.set_start(0.9e9)
+    st = sa.status()
+    assert st.start_Hz == pytest.approx(0.9e9) and st.stop_Hz == pytest.approx(1.5e9)
+    sa.set_stop(2.0e9)
+    st = sa.status()
+    assert st.start_Hz == pytest.approx(0.9e9) and st.stop_Hz == pytest.approx(2.0e9)
+    with pytest.raises(ValueError):
+        sa.set_start(2.5e9)                                # above the stop: refused
+
+
+def test_describe_offers_start_and_stop():
+    from signalhound.net.describe import build_manifest
+    from signalhound.sim_system import build_sim_system
+    from signalhound.config import Config
+    s, _b = build_sim_system(Config())
+    ids = {p["id"]: p for p in build_manifest(s)["parameters"]}
+    assert ids["start"]["set"]["verb"] == "set_start" and ids["start"]["unit"] == "GHz"
+    assert ids["stop"]["read_path"] == ["stop_Hz"]
+
+
 def test_rbw_snaps_vbw_follows_and_cannot_exceed(sa):
     sa.set_rbw(1e6)                                        # SA44B: widest is 250 kHz
     assert sa.status().rbw_Hz == 250e3 and _warned(sa, "RBW")

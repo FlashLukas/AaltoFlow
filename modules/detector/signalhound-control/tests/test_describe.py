@@ -116,7 +116,10 @@ def _probe_value(p):
     if p["type"] == "bool":
         return True
     lo, hi = p.get("min", 0.0), p.get("max", 1.0)
-    return ((lo + hi) / 2) * p.get("scale", 1.0)
+    # start / stop are the two ENDS of one sweep: probing both at the middle
+    # would ask for stop == start, which the analyser rightly refuses
+    frac = {"start": 0.25, "stop": 0.75}.get(p["id"], 0.5)
+    return (lo + (hi - lo) * frac) * p.get("scale", 1.0)
 
 
 def test_revision_ignores_values_but_follows_limits(signalhound):

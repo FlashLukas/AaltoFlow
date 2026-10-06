@@ -104,6 +104,7 @@ def build_manifest(signalhound) -> dict:
     st = v.status()
     clo, chi = v.center_limits()
     slo, shi = v.span_limits()
+    flo, fhi = v.freq_range()          # start / stop live in the whole range
     simulated = bool(getattr(v, "simulated", True))
 
     acquire = {
@@ -136,6 +137,15 @@ def build_manifest(signalhound) -> dict:
         ctrl("center", "Centre", "GHz", "center_Hz", "set_center", "center_Hz", 10,
              clo / 1e9, chi / 1e9, scale=1e9, decimals=9, step=0.001, tol=1.0,
              help="Moving it may narrow the span to stay inside the analyser's range."),
+        # start / stop: the same sweep said by its ends (the other end is held)
+        ctrl("start", "Start", "GHz", "start_Hz", "set_start", "start_Hz", 12,
+             flo / 1e9, fhi / 1e9, scale=1e9, decimals=9, step=0.001, tol=1.0,
+             help="The low end of the sweep; the stop frequency stays where it is. "
+                  "Must stay below the stop."),
+        ctrl("stop", "Stop", "GHz", "stop_Hz", "set_stop", "stop_Hz", 14,
+             flo / 1e9, fhi / 1e9, scale=1e9, decimals=9, step=0.001, tol=1.0,
+             help="The high end of the sweep; the start frequency stays where it is. "
+                  "Must stay above the start."),
         ctrl("span", "Span", "MHz", "span_Hz", "set_span", "span_Hz", 20,
              slo / 1e6, shi / 1e6, scale=1e6, decimals=6, step=1.0, tol=1.0,
              help="The widest span depends on the centre. The number of bins "

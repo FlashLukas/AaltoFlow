@@ -432,6 +432,19 @@ class SpectrumAnalyzer:
         self.cfg.sweep.span_Hz = _clamp(b2 - a2, *self.span_limits())[0]
         self._changed(f"{a2 / 1e9:.9g} - {b2 / 1e9:.9g} GHz", clamped)
 
+    # START or STOP alone, the other end held: what a scan axis over the
+    # start (or stop) frequency needs -- Lukas 2026-10-06 wanted them as scan
+    # parameters next to centre and span. Stored as centre + span like the pair.
+    def _ends(self) -> tuple[float, float]:
+        sw = self.cfg.sweep
+        return sw.center_Hz - sw.span_Hz / 2, sw.center_Hz + sw.span_Hz / 2
+
+    def set_start(self, hz: float) -> None:
+        self.set_start_stop(_finite(hz, "start"), self._ends()[1])
+
+    def set_stop(self, hz: float) -> None:
+        self.set_start_stop(self._ends()[0], _finite(hz, "stop"))
+
     def set_ref_level(self, dbm: float) -> None:
         lim = self.cfg.limits
         v, clamped = _clamp(_finite(dbm, "reference level"), lim.ref_min_dBm, lim.ref_max_dBm)

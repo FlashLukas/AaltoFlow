@@ -331,6 +331,14 @@ class Suite(QtWidgets.QMainWindow):
             "pick), next to the instruments' settings now: choose which to set back.")
         self.recall_btn.clicked.connect(self._recall_from_data)
         self.data_view.add_action(self.recall_btn)
+        # watching a scan server on ANOTHER PC: its saved measurements, as copies
+        self.lab_files_btn = QtWidgets.QPushButton("Lab files…")
+        self.lab_files_btn.setToolTip(
+            "The measurements saved on the watched scan server's PC. Double-click\n"
+            "one: a copy comes to this PC and opens here.")
+        self.lab_files_btn.clicked.connect(self.open_lab_files)
+        self.lab_files_btn.hide()
+        self.data_view.add_action(self.lab_files_btn)
         g.addWidget(self.data_view, 1)
         v.addWidget(card, 1)
         return page
@@ -341,6 +349,17 @@ class Suite(QtWidgets.QMainWindow):
         self.tabs.setCurrentIndex(names.index("Data"))
         self.data_view.load_file(Path(path))
         self.log(f"opened {Path(path).name}")
+
+    def open_lab_files(self):
+        """The watched server PC's measurements (apps/lab_files.py)."""
+        if self.watch is None:
+            return None
+        from apps.lab_files import LabFilesDialog
+        dlg = LabFilesDialog(self.watch, self.open_in_viewer, parent=self)
+        dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        dlg.show()
+        self._lab_files_dlg = dlg
+        return dlg
 
     def _show_last_run(self):
         ds = self.builder.dataset
@@ -509,6 +528,7 @@ class Suite(QtWidgets.QMainWindow):
         if key == self._mirror_key or self.scan_running():
             return
         self._mirror_key = key
+        self.lab_files_btn.show()
         where = st.get("pc") or host
         if first:
             self.log(f"showing the instruments of {where} as its suite does "
@@ -535,6 +555,7 @@ class Suite(QtWidgets.QMainWindow):
         if self._mirror_key is None:
             return
         self._mirror_key = None
+        self.lab_files_btn.hide()
         self._mirror_names = {}
         self._mirror_design = None
         self._pending_nav = None

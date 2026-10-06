@@ -132,6 +132,13 @@ class SignalhoundClient(ControlClient):
         return self._checked({"cmd": "set_start_stop", "start_Hz": float(start_hz),
                               "stop_Hz": float(stop_hz)})
 
+    # one end alone, the other held (the brain's set_start / set_stop)
+    def set_start(self, hz):
+        return self._checked({"cmd": "set_start", "start_Hz": float(hz)})
+
+    def set_stop(self, hz):
+        return self._checked({"cmd": "set_stop", "stop_Hz": float(hz)})
+
     def set_scene(self, name: str, value):
         return self._checked({"cmd": "set_scene", "name": str(name), "value": value})
 

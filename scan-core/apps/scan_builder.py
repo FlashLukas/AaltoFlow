@@ -3200,7 +3200,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
             "Goes into the file name: <data dir>\\<date>\\<time>_<name>.nc\n"
             "The time is always there, so repeating a scan never overwrites the\n"
             "one before it. Characters a file name cannot hold become '_'.")
-        self.name_edit.setMaximumWidth(260)
+        # wide enough for a real name ("Harmonics12GHz_vernier_series") without
+        # scrolling inside the box (Lukas 2026-10-06: "wider")
+        self.name_edit.setMinimumWidth(420)
+        self.name_edit.setMaximumWidth(700)
         self.name_edit.textChanged.connect(lambda *_: self._refresh_save_target())
         nrow.addWidget(self.name_edit)
         nrow.addStretch(1)

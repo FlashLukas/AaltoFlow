@@ -288,6 +288,9 @@ def build_manifest() -> dict:
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
 #: the largest Navigator design file a suite may share through the server
 DESIGN_MAX_BYTES = 32 * 2**20
+#: bytes per get_file reply: a big measurement comes in pieces, so no single
+#: request holds the server's command thread (and an Abort) for long
+FILE_CHUNK = 4 * 2**20
 
 
 # ──────────────────────────────────── a scan ──────────────────────────────────
@@ -402,6 +405,10 @@ class ScanServer:
         # here): held in memory for watchers, replaced by the next one
         self._design: dict | None = None       # {name, kind, cell, width_um, data}
         self._design_rev = 0
+        # the data folder's catalogue, brought up to date in a thread of its
+        # own: the first indexing of a big folder takes a while, and this
+        # server answers every request -- an Abort above all -- from ONE thread
+        self._indexer: threading.Thread | None = None
 
         self.control = ControlLease(
             safety={"abort", "stop_queue"},
@@ -858,6 +865,10 @@ class ScanServer:
                 d = dict(self._design) if self._design else None
                 rev = self._design_rev
             return {"ok": True, "design_rev": rev, "design": d}
+        if cmd == "list_files":
+            return self._list_files(req)
+        if cmd == "get_file":
+            return self._get_file(req)
         if cmd == "get_layouts":
             # the Control tab layouts saved on this PC, so a watcher offers the
             # lab's panels ("CamKimP1") instead of its own, different list
@@ -886,6 +897,87 @@ class ScanServer:
             return {"ok": True, "scan_rev": self._scan_rev, "entries": entries,
                     "current": self._qi if self._busy else -1, "busy": self._busy,
                     "started_by": self._started_by}
+
+    # ---- the saved measurements, for a watcher's Data tab -----------------
+    #
+    # Lukas 2026-10-06, watching from the office: "would there be a
+    # possibility to view the actually measured file in the data viewer?" The
+    # files stay on this PC; a watcher lists them and fetches a COPY of one.
+    # Only .nc files inside the data folder, never a path a client chose.
+
+    def _index_now(self, ddir: Path) -> None:
+        if self._indexer is not None and self._indexer.is_alive():
+            return
+
+        def work():
+            from . import catalogue
+            try:
+                catalogue.scan(ddir)
+            except Exception as exc:
+                self.log(f"indexing the data folder failed: {exc}", "warn")
+        self._indexer = threading.Thread(target=work, name="scanserver-index", daemon=True)
+        self._indexer.start()
+
+    def _list_files(self, req) -> dict:
+        """What the catalogue knows of the data folder, newest first, paths
+        RELATIVE to it. Starts a re-index in the background; `indexing` says
+        whether one is running (the list may grow on the next call)."""
+        from . import catalogue
+        ddir = self._data_dir()
+        self._index_now(ddir)
+        try:
+            limit = max(1, min(int(req.get("limit") or 500), 5000))
+            rows = catalogue.search(ddir, text=req.get("text") or None, limit=limit)
+        except Exception as exc:
+            rows, err = [], str(exc)
+        else:
+            err = ""
+        out = []
+        for r in rows:
+            try:
+                rel = Path(r["path"]).resolve().relative_to(ddir.resolve())
+            except (KeyError, ValueError, OSError):
+                continue                       # not under the data folder: never offered
+            try:
+                size = (ddir / rel).stat().st_size
+            except OSError:
+                continue
+            out.append({"path": rel.as_posix(), "name": r.get("name") or rel.stem,
+                        # the catalogue keeps each axis as {name, size, ...}: say
+                        # it as "field (41)", outer first
+                        "measured": r.get("created") or r.get("measured") or "",
+                        "dims": [f"{d.get('name', '?')} ({d.get('size', '?')})"
+                                 if isinstance(d, dict) else str(d)
+                                 for d in (r.get("dims") or [])],
+                        "detectors": r.get("detectors") or [],
+                        "n_points": r.get("n_points"), "sample": r.get("sample") or "",
+                        "operator": r.get("operator") or "", "bytes": size})
+        return {"ok": True, "files": out, "data_dir": str(ddir), "pc": self.pc,
+                "indexing": bool(self._indexer and self._indexer.is_alive()),
+                **({"warning": err} if err else {})}
+
+    def _get_file(self, req) -> dict:
+        """One chunk of a saved measurement: {data (base64), offset, total}."""
+        import base64
+        ddir = self._data_dir().resolve()
+        rel = str(req.get("path") or "")
+        try:
+            path = (ddir / rel).resolve()
+            path.relative_to(ddir)              # inside the data folder, or refused
+        except (ValueError, OSError):
+            return {"ok": False, "error": "not a file of this server's data folder"}
+        if path.suffix.lower() != ".nc" or path.name.endswith(".writing.nc") \
+                or not path.is_file():
+            return {"ok": False, "error": f"no measurement {rel!r} here"}
+        offset = max(0, int(req.get("offset") or 0))
+        size = max(1, min(int(req.get("size") or FILE_CHUNK), FILE_CHUNK))
+        total = path.stat().st_size
+        with open(path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read(size)
+        return {"ok": True, "offset": offset, "total": total,
+                "mtime": path.stat().st_mtime,
+                "data": base64.b64encode(chunk).decode("ascii")}
 
     def _set_design(self, req) -> dict:
         """The Navigator's design file, from the suite on THIS PC (base64 in

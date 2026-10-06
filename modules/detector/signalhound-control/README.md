@@ -94,6 +94,7 @@ and `points`, and the frequency axis is rebuilt from them exactly.
 | control | verb | note |
 |---|---|---|
 | centre, span | `set_center`, `set_span` (or `set_start_stop`) | kept inside the model's range |
+| start, stop | `set_start`, `set_stop` (the other end held) | scan parameters too; start must stay below stop |
 | reference level | `set_ref_level` | the API chooses gain / attenuation from it; too low = **OVERLOAD** |
 | RBW | `set_rbw` | continuous to 100 kHz, then 250 kHz (and 6 MHz on the SA124B) -- snapped |
 | VBW | `set_vbw` | at most the RBW (a narrower RBW drags it down) |

@@ -278,3 +278,81 @@ def test_the_design_is_shared_by_the_servers_own_pc_only(server, client, tmp_pat
     assert c.get_design()["design"]["name"] == "x.gds"
     r = raw(srv, {"cmd": "set_design", "data": "AAAA", "client": OTHER_PC})
     assert not r["ok"] and r["refused"] == "not_this_pc"
+
+
+# ─────────────── the lab's saved files, copied to the watcher ───────────────
+
+def test_the_server_lists_its_files_and_hands_out_copies(server, client, tmp_path):
+    """Lukas 2026-10-06: "view the actually measured file in the data viewer"
+    from the office. Only .nc files under the data folder, in chunks."""
+    from scan_core.scan_server import FILE_CHUNK
+    srv = server()
+    c = client(srv)
+    c.submit(recipe(name="lab map", num=6))
+    wait_for(lambda: srv._entries and srv._entries[0].result == "done")
+    r = {}
+
+    def listed():
+        r.update(c.list_files())
+        return any(f["name"] == "lab map" for f in r["files"])
+    wait_for(listed)
+    f = next(f for f in r["files"] if f["name"] == "lab map")
+    assert not Path(f["path"]).is_absolute() and f["bytes"] > 0
+    assert f["dims"] == ["field (6)"] and f["measured"]
+    dest = c.download(f["path"], tmp_path / "copy" / "x.nc")
+    original = next((tmp_path / "data").rglob("*lab_map*.nc"))
+    assert dest.read_bytes() == original.read_bytes()
+    assert FILE_CHUNK >= 2**20
+    # nothing outside the data folder, nothing that is not a measurement
+    outside = tmp_path / "outside.nc"
+    outside.write_bytes(b"secret")
+    for bad in ("../outside.nc", str(outside), "x.txt", "2026-01-01/none.nc"):
+        rr = raw(srv, {"cmd": "get_file", "path": bad})
+        assert not rr["ok"], bad
+
+
+def test_a_big_file_comes_in_chunks(server, client, tmp_path, monkeypatch):
+    from scan_core import scan_server as SS
+    monkeypatch.setattr(SS, "FILE_CHUNK", 1000)
+    srv = server()
+    c = client(srv)
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    blob = bytes(range(256)) * 20                      # 5120 bytes -> 6 chunks
+    (tmp_path / "data" / "big.nc").write_bytes(blob)
+    seen = []
+    dest = c.download("big.nc", tmp_path / "big_copy.nc",
+                      progress=lambda d, t: seen.append((d, t)))
+    assert dest.read_bytes() == blob
+    assert len(seen) == 6 and seen[-1] == (5120, 5120)
+
+
+def test_the_lab_files_dialog_opens_a_copy_in_the_data_tab(
+        qapp, rig, fake_service, monkeypatch):
+    from conftest import DEMO_MANIFEST
+    import apps.scan_server_view as SV
+    monkeypatch.setattr(SV.ServerWatch, "is_local", lambda self: False)
+    fake = fake_service(16896, manifest=DEMO_MANIFEST)
+    srv, win, c = rig()
+    srv.instruments = {"magnet": {"host": "", "cmd": fake.cmd_port, "pub": fake.cmd_port + 1}}
+    pump(qapp, lambda: not win.lab_files_btn.isHidden(), timeout=20)
+    c.submit(recipe(name="office view", num=5))
+    try:
+        pump(qapp, lambda: srv._entries and srv._entries[0].result is not None, timeout=20)
+    except AssertionError:
+        print("SERVERLOG", "\n".join(srv._log[-15:]), srv.status_payload().get("state"))
+        raise
+    assert srv._entries[0].result == "done", srv._entries[0].error
+    dlg = win.open_lab_files()
+    try:
+        pump(qapp, lambda: dlg.tree.topLevelItemCount() > 0
+             and any(dlg.tree.topLevelItem(i).text(0) == "office view"
+                     for i in range(dlg.tree.topLevelItemCount())), timeout=20)
+    except AssertionError:
+        raise AssertionError(dlg.status.text()) from None
+    it = next(dlg.tree.topLevelItem(i) for i in range(dlg.tree.topLevelItemCount())
+              if dlg.tree.topLevelItem(i).text(0) == "office view")
+    dlg.open_item(it)
+    pump(qapp, lambda: win.data_view.ds is not None and "lockin_r" in win.data_view.ds,
+         timeout=20)
+    assert "aaltoflow-lab-data" in str(win.data_view.path)
+    dlg.close()

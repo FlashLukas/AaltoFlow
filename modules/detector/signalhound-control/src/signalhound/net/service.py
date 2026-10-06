@@ -218,6 +218,10 @@ class SignalhoundService:
                 v.set_span(float(msg["span_Hz"]))
             elif cmd == "set_start_stop":
                 v.set_start_stop(float(msg["start_Hz"]), float(msg["stop_Hz"]))
+            elif cmd == "set_start":
+                v.set_start(float(msg["start_Hz"]))
+            elif cmd == "set_stop":
+                v.set_stop(float(msg["stop_Hz"]))
             elif cmd == "set_ref_level":
                 v.set_ref_level(float(msg["ref_level_dBm"]))
             elif cmd == "set_rbw":

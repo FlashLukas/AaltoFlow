@@ -271,6 +271,45 @@ class ScanServerClient(ControlClient):
         """{design_rev, design: {name, kind, cell, width_um, data(base64)} | None}"""
         return self.command("get_design", _timeout_ms=30000)
 
+    def list_files(self, text: str = "", limit: int = 500) -> dict:
+        """The server PC's saved measurements: {files: [{path (relative),
+        name, measured, dims, detectors, n_points, sample, operator, bytes}],
+        data_dir, pc, indexing}."""
+        return self.command("list_files", text=text, limit=int(limit),
+                            _timeout_ms=max(self.timeout_ms, 15000))
+
+    def download(self, rel_path: str, dest, progress=None, cancel=None) -> "Path":
+        """Copy one measurement of the server's data folder to `dest` (a local
+        file path), in chunks. `progress(done, total)`; `cancel()` -> True
+        stops it (the partial file is removed). Written to dest + ".part"
+        first, so `dest` is only ever a complete file."""
+        import base64
+        from pathlib import Path
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        offset, total = 0, None
+        try:
+            with open(part, "wb") as f:
+                while total is None or offset < total:
+                    if cancel is not None and cancel():
+                        raise InterruptedError("download cancelled")
+                    r = self.command("get_file", path=rel_path, offset=offset,
+                                     _timeout_ms=max(self.timeout_ms, 30000))
+                    chunk = base64.b64decode(r["data"])
+                    total = int(r["total"])
+                    if not chunk and offset < total:
+                        raise IOError("the file got shorter while it was copied")
+                    f.write(chunk)
+                    offset += len(chunk)
+                    if progress is not None:
+                        progress(offset, total)
+            part.replace(dest)
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+        return dest
+
     def get_layouts(self) -> dict:
         """The Control tab layouts saved on the server's PC: {name: entry}."""
         return self.command("get_layouts").get("layouts") or {}
