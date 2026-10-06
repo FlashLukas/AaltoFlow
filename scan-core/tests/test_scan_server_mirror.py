@@ -185,6 +185,37 @@ def test_the_suite_on_the_servers_pc_publishes_its_view(qapp, rig):
     pump(qapp, lambda: b.view.ds is not None and b.det_combo.count() >= 2)
     want = "slow" if b.det_combo.currentText() != "slow" else "lockin_r"
     b.det_combo.setCurrentText(want)                     # the lab operator's choice
-    pump(qapp, lambda: srv._view.get("detector") == want)
+    pump(qapp, lambda: (srv._view.get("plot") or {}).get("detector") == want)
+    assert "pids" in srv._view["panel"]              # the Control tab's panel goes too
     b.abort_btn.click()
     pump(qapp, lambda: not srv.running)
+
+
+# ─────────── a server on ANOTHER PC: its instruments, layouts, title ────────
+
+def test_watching_another_pc_shows_its_instruments_layouts_and_panel(
+        qapp, rig, fake_service, monkeypatch):
+    """Lukas 2026-10-06, office and lab suites side by side: "they are very
+    different". Watching a server on another PC, the suite takes THAT
+    server's instruments under the same names, the lab's layouts (read-only)
+    and title, follows the lab's Control-tab panel, and gives it all back on
+    Stop watching."""
+    from conftest import DEMO_MANIFEST
+    import apps.scan_server_view as SV
+    monkeypatch.setattr(SV.ServerWatch, "is_local", lambda self: False)   # "the lab PC"
+    fake = fake_service(16880, manifest=DEMO_MANIFEST)
+    srv, win, c = rig()
+    srv.instruments = {"magnet": {"host": "", "cmd": fake.cmd_port, "pub": fake.cmd_port + 1}}
+    pump(qapp, lambda: win.registry.get("magnet.field") is not None, timeout=20)
+    assert win.control._foreign == srv.pc                     # the lab's layouts
+    assert not win.control.save_btn.isEnabled()
+    assert f"watching {srv.pc}" in win.windowTitle()
+    pid = next(p for p in win.control.items if p.startswith("magnet."))
+    # the lab ticks a parameter on its Control tab -> this suite follows
+    c.set_view({"plot": None, "panel": {"pids": [pid], "hidden": []}})
+    pump(qapp, lambda: win.control.selected_pids() == [pid])
+    # and back to this PC's own
+    win.stop_watching()
+    assert win.control._foreign is None and win.control.save_btn.isEnabled()
+    assert win.registry.get("magnet.field") is None
+    assert "watching" not in win.windowTitle()

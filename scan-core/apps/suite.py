@@ -92,6 +92,9 @@ class Suite(QtWidgets.QMainWindow):
         self.server_choices: list[tuple[str, str]] = []
         self._last_note = ""
         self._failed_set: frozenset | None = None
+        #: the watched lab's instruments, while this suite shows them (None:
+        #: this PC's own) -- see _mirror_lab
+        self._mirror_key: frozenset | None = None
         self.registry = build_sim_registry()
         # Where measurements land, most specific first: --out-dir for this
         # launch, then what was chosen on this PC last time, then the project's
@@ -110,6 +113,7 @@ class Suite(QtWidgets.QMainWindow):
 
         head = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel(suite_title("Measurement suite", self.root).upper()); title.setObjectName("title")
+        self.title_lbl = title
         head.addWidget(title)
         head.addStretch(1)
         self.source_lbl = QtWidgets.QLabel()
@@ -129,6 +133,11 @@ class Suite(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.control = ControlPanel(on_log=self.log)
         self.tabs.addTab(self._wrap(self.control), "Control")
+        # on a scan server's PC the Control tab's panel goes out with the plot
+        # choice; on a PC watching another lab's server it is followed
+        self.builder.view_extra = lambda: {"panel": self.control.panel_state()}
+        self.builder.on_server_view = self._on_server_view_extra
+        self.control.panel_changed.connect(self.builder._publish_view)
         self.navigator = NavigatorWidget(on_log=self.log, is_busy=self.scan_running)
         self.tabs.addTab(self._wrap(self.navigator), "Navigator")
         self.tabs.addTab(self._wrap(self.builder.centralWidget()), "Scan")
@@ -404,6 +413,7 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.detach_server()
         w.close()
         w.deleteLater()
+        self._end_mirror()
         self.server_strip.hide()
         if not quiet:
             self.log(f"stopped watching the scan server on {w.label} "
@@ -455,6 +465,84 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.server_submit = self._may_submit(self.watch)
         self.builder.show_server_status(st)
         self._sync_server_header()
+        if not self.watch.is_local():
+            self._mirror_lab(st)
+
+    # ---- watching a server on ANOTHER PC: show that lab as the lab sees it ----
+    #
+    # Lukas 2026-10-06, the office and lab suites side by side: "they are very
+    # different". The office suite had its own instruments (the remotes added
+    # on the office PC, under long names like kim_130_233_203_119), its own
+    # layouts and its own title. While it watches a scan server on another PC
+    # it now uses THAT server's instruments -- the same services, under the
+    # same names -- the lab's Control-tab layouts, follows the lab's panel,
+    # and wears the lab's setup name. Stop watching gives it all back.
+
+    def _mirror_lab(self, st: dict) -> None:
+        inst = st.get("instruments")
+        if not isinstance(inst, dict):
+            return                          # a server from before this change
+        host = self.watch.host
+        endpoints = {slug: ((e.get("host") or host), int(e["cmd"]), int(e["pub"]))
+                     for slug, e in inst.items() if isinstance(e, dict) and "cmd" in e}
+        key = frozenset((s, ep) for s, ep in endpoints.items())
+        first = self._mirror_key is None
+        if key == self._mirror_key or self.scan_running():
+            return
+        self._mirror_key = key
+        where = st.get("pc") or host
+        if first:
+            self.log(f"showing the instruments of {where} as its suite does "
+                     f"(this PC's own come back with 'Stop watching')")
+            try:
+                layouts = self.watch.client.get_layouts()
+            except Exception as exc:
+                layouts = {}
+                self.log(f"layouts of {where} not available: {exc}")
+            self.control.use_layouts_of(layouts, where)
+        self._set_title(st.get("setup_name") or where, f"watching {where}")
+        if endpoints:
+            self.log(f"connecting to the instruments of {where}: "
+                     f"{', '.join(sorted(endpoints))} ...")
+            self._connect_endpoints(endpoints, {})
+        else:
+            self.log(f"the scan server on {where} has no instrument connected")
+        # the lab's panel, if one was already published
+        view = (getattr(self.watch, "last_view", None) or {}).get("view") or {}
+        if self.builder.follow_view_box.isChecked() and view.get("panel"):
+            self.control.apply_panel_state(view["panel"])
+
+    def _end_mirror(self) -> None:
+        if self._mirror_key is None:
+            return
+        self._mirror_key = None
+        self.control.use_layouts_of(None)
+        self._set_title(None)
+        if self.lab is not None:
+            self.lab.close()
+            self.lab = None
+        self.connected_ids = []
+        self._failed_set = None
+        self.registry = build_sim_registry()
+        self._adopt_source()
+        self._refresh_module_tree()
+        self.log("back to this PC's own instruments"
+                 + (" (following the launcher)" if self.follow_box.isChecked() else
+                    " -- connect them on the Settings tab"))
+
+    def _set_title(self, setup: str | None, note: str = "") -> None:
+        """The header and window title: this PC's setup, or a watched lab's."""
+        if setup:
+            text = f"{setup} · Measurement suite"
+        else:
+            text = suite_title("Measurement suite", self.root)
+        self.title_lbl.setText(text.upper())
+        self.setWindowTitle(text + (f"  ({note})" if note else ""))
+
+    def _on_server_view_extra(self, view: dict) -> None:
+        """The lab's Control-tab panel, followed while mirroring."""
+        if self._mirror_key is not None and isinstance(view.get("panel"), dict):
+            self.control.apply_panel_state(view["panel"])
 
     def _on_server_log(self, lines) -> None:
         for line in lines:
@@ -772,6 +860,8 @@ class Suite(QtWidgets.QMainWindow):
 
         if not self.follow_box.isChecked() or self.scan_running():
             return
+        if self._mirror_key is not None:
+            return                         # the watched lab's instruments, not this PC's
         wanted = set(self.available)
         if not wanted or wanted == connected:
             return
@@ -889,6 +979,13 @@ class Suite(QtWidgets.QMainWindow):
             endpoints[m.slug] = (host, m.cmd, m.pub)
         label = ", ".join(m.slug for m in specs)
         self.log(("following the launcher: " if auto else "") + f"connecting to {label} ...")
+        ids = {m.slug: m.id for m in specs}
+        self._connect_endpoints(endpoints, ids, auto)
+
+    def _connect_endpoints(self, endpoints: dict, ids: dict, auto: bool = False) -> bool:
+        """Build the registry from {slug: (host, cmd, pub)} and adopt it in
+        every tab. `ids` {slug: id} is what connected_ids records (discovery
+        ids; empty for a mirrored lab). True when anything was connected."""
         def build(slugs):
             return build_lab_registry(include=tuple(slugs),
                                       endpoints={s: endpoints[s] for s in slugs},
@@ -910,17 +1007,17 @@ class Suite(QtWidgets.QMainWindow):
             if not good or len(endpoints) == 1:
                 self.log(f"connect failed: {exc}")
                 if auto:
-                    self._failed_set = frozenset(m.id for m in specs)
-                return
+                    self._failed_set = frozenset(ids.values())
+                return False
             try:
                 reg, lab = build(good)
             except Exception as exc2:
                 self.log(f"connect failed: {exc2}")
                 if auto:
-                    self._failed_set = frozenset(m.id for m in specs)
-                return
-            tried = frozenset(m.id for m in specs)
-            specs = [m for m in specs if m.slug in good]
+                    self._failed_set = frozenset(ids.values())
+                return False
+            tried = frozenset(ids.values())
+            ids = {s: i for s, i in ids.items() if s in good}
         else:
             tried = None
 
@@ -928,7 +1025,7 @@ class Suite(QtWidgets.QMainWindow):
             self.lab.close()
         reg.settings_root = self.root      # snapshot_include_idn is read there
         self.registry, self.lab = reg, lab
-        self.connected_ids = [m.id for m in specs]
+        self.connected_ids = list(ids.values())
         # connected only PART of what was asked: remember the whole set, so
         # following the launcher does not rebuild this every few seconds
         self._failed_set = tried
@@ -937,6 +1034,7 @@ class Suite(QtWidgets.QMainWindow):
         self._refresh_module_tree()
         self.log(f"connected: {len(reg.settables())} settables, "
                  f"{len(reg.gettables())} detectors")
+        return True
 
     def _refuse_while_scanning(self) -> bool:
         """True (and says so) while a scan or a queue is running.

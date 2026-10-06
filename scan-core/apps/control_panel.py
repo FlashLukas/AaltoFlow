@@ -590,8 +590,17 @@ class ActionDialog(QtWidgets.QDialog):
 class ControlPanel(QtWidgets.QWidget):
     """Pick parameters from whatever is connected; drive them; watch them."""
 
+    #: the operator changed what the panel shows (ticks, a layout loaded) --
+    #: the suite on a scan server's PC publishes panel_state() on it, so a PC
+    #: watching that server can show the same panel (Lukas 2026-10-06)
+    panel_changed = QtCore.Signal()
+
     def __init__(self, on_log=None):
         super().__init__()
+        self._applying = False                  # inside apply_panel_state
+        #: the layouts of ANOTHER PC (a watched lab), shown instead of this
+        #: PC's own and read-only; None = this PC's own
+        self._foreign: str | None = None
         self.on_log = on_log or (lambda msg: None)
         self.items: dict[str, dict] = {}        # pid -> descriptor
         self.widgets: dict[str, ItemWidget] = {}
@@ -646,12 +655,14 @@ class ControlPanel(QtWidgets.QWidget):
         save = QtWidgets.QPushButton("Save"); save.setObjectName("primary")
         save.clicked.connect(self._save_layout)
         drop = QtWidgets.QPushButton("Delete"); drop.clicked.connect(self._delete_layout)
+        self.save_btn, self.delete_btn = save, drop
         for b in (load, save, drop):
             btns.addWidget(b)
         v.addLayout(btns)
 
         hint = QtWidgets.QLabel("Layouts are per setup: an alignment panel and "
                                 "an FMR panel want different knobs.")
+        self.layout_hint = hint
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
         v.addWidget(hint)
@@ -787,6 +798,60 @@ class ControlPanel(QtWidgets.QWidget):
 
     def _on_tick(self, *_):
         self._rebuild_panel()
+        if not self._applying:
+            self.panel_changed.emit()
+
+    # ---- the panel as data (scan server watchers follow it) --------------
+
+    def panel_state(self) -> dict:
+        """What is ticked and which traces are hidden, as plain JSON."""
+        return {"pids": self.selected_pids(), "hidden": self.hidden_traces()}
+
+    def apply_panel_state(self, st: dict) -> None:
+        """Tick exactly st["pids"] (those that exist here), hide st["hidden"]."""
+        if not isinstance(st, dict):
+            return
+        pids = set(st.get("pids") or [])
+        if set(self.selected_pids()) == pids and \
+                set(self.hidden_traces()) == set(st.get("hidden") or []):
+            return                         # nothing to do: no rebuild, no flicker
+        self._applying = True
+        try:
+            self._tick_exactly(pids)
+            self._rebuild_panel(hidden=set(st.get("hidden") or []))
+        finally:
+            self._applying = False
+
+    def _tick_exactly(self, pids: set) -> None:
+        self.tree.blockSignals(True)
+        it = QtWidgets.QTreeWidgetItemIterator(self.tree)
+        while it.value():
+            node = it.value()
+            pid = node.data(0, QtCore.Qt.UserRole)
+            if pid:
+                node.setCheckState(0, QtCore.Qt.Checked if pid in pids
+                                   else QtCore.Qt.Unchecked)
+            it += 1
+        self.tree.blockSignals(False)
+
+    def use_layouts_of(self, layouts: dict | None, where: str = "") -> None:
+        """Offer ANOTHER PC's layouts (read-only: Save and Delete off), or,
+        with None, this PC's own again."""
+        self._foreign = where if layouts is not None else None
+        self.layouts = dict(layouts) if layouts is not None else _load_layouts()
+        keep = self.layout_combo.currentText()
+        self.layout_combo.clear()
+        self.layout_combo.addItems(sorted(self.layouts))
+        if keep in self.layouts:
+            self.layout_combo.setCurrentText(keep)
+        own = self._foreign is None
+        for b in (self.save_btn, self.delete_btn):
+            b.setEnabled(own)
+            b.setToolTip("" if own else f"These are the layouts saved on {where}; "
+                         f"they are changed there.")
+        self.layout_hint.setText(
+            "Layouts are per setup: an alignment panel and an FMR panel want "
+            "different knobs." if own else f"Layouts of {where} (read-only here).")
 
     def _sync_hidden(self):
         """Read the legend's on/off state off the curves into `self.hidden`.
@@ -1117,19 +1182,11 @@ class ControlPanel(QtWidgets.QWidget):
         if not pids:
             self.on_log("layout '" + name + "' is empty or unknown")
             return
-        self.tree.blockSignals(True)
-        it = QtWidgets.QTreeWidgetItemIterator(self.tree)
-        while it.value():
-            node = it.value()
-            pid = node.data(0, QtCore.Qt.UserRole)
-            if pid:
-                node.setCheckState(0, QtCore.Qt.Checked if pid in pids
-                                   else QtCore.Qt.Unchecked)
-            it += 1
-        self.tree.blockSignals(False)
+        self._tick_exactly(pids)
         # The layout's hidden traces replace whatever was hidden before; an old
         # layout without the field shows every trace, as it always did.
         self._rebuild_panel(hidden=set(layout_hidden(entry)))
+        self.panel_changed.emit()
 
         missing = pids - set(self.items)
         if missing:
@@ -1141,6 +1198,9 @@ class ControlPanel(QtWidgets.QWidget):
         self.on_log("layout '" + name + "' loaded")
 
     def _save_layout(self):
+        if self._foreign is not None:
+            self.on_log(f"these are the layouts of {self._foreign}: save them there")
+            return
         name = self.layout_combo.currentText().strip()
         if not name:
             self.on_log("give the layout a name first")
@@ -1155,6 +1215,8 @@ class ControlPanel(QtWidgets.QWidget):
         self.on_log(f"layout '{name}' saved ({len(pids)} items{extra})")
 
     def _delete_layout(self):
+        if self._foreign is not None:
+            return
         name = self.layout_combo.currentText().strip()
         if name in self.layouts:
             del self.layouts[name]

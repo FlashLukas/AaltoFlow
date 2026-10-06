@@ -256,6 +256,10 @@ class ScanServerClient(ControlClient):
         """{view, view_rev, by}: the plot choice of the suite on the server's PC."""
         return self.command("get_view")
 
+    def get_layouts(self) -> dict:
+        """The Control tab layouts saved on the server's PC: {name: entry}."""
+        return self.command("get_layouts").get("layouts") or {}
+
     def set_view(self, view: dict) -> dict:
         """Publish this suite's plot choice (only from the server's own PC)."""
         return self.command("set_view", view=view)

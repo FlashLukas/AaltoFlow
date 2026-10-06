@@ -2579,6 +2579,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.server_submit = False
         self._server_faults = None
         self._server_answered: tuple[str, float] = ("", 0.0)
+        #: the host's part of a published view (suite: the Control tab's panel)
+        #: and its handler for a watched one -- None in the standalone builder
+        self.view_extra = None
+        self.on_server_view = None
 
         self.setWindowTitle(suite_title("Scan Builder"))   # "TR-MOKE · Scan Builder"
         self.resize(1280, 820)
@@ -4197,15 +4201,27 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     # ---- phase 2 of watching: definitions, view ------------------------------
     def _publish_view(self):
-        if self.server is not None and self.server_submit and self.view.ds is not None:
-            self.server.set_view(self.view.view_state())
+        """What this PC shows -- the plot, plus whatever the host adds
+        (`view_extra`: the suite adds its Control tab's panel) -- to the
+        scan server, for the PCs watching it."""
+        if self.server is None or not self.server_submit:
+            return
+        view = {"plot": self.view.view_state() if self.view.ds is not None else None}
+        if self.view_extra is not None:
+            view.update(self.view_extra() or {})
+        self.server.set_view(view)
 
     def _on_server_view(self, reply):
         if self.server is None or self.server_submit or not self.follow_view_box.isChecked():
             return
         view = (reply or {}).get("view") if isinstance(reply, dict) else None
-        if view:
-            self.view.apply_view_state(view)
+        if not view:
+            return
+        plot = view.get("plot") if "plot" in view else view   # b430e5e sent it flat
+        if plot:
+            self.view.apply_view_state(plot)
+        if self.on_server_view is not None:
+            self.on_server_view(view)
 
     def _follow_view_toggled(self, on: bool):
         if on and self.server is not None:

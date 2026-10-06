@@ -285,6 +285,9 @@ def build_manifest() -> dict:
     return manifest
 
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+
+
 # ──────────────────────────────────── a scan ──────────────────────────────────
 
 class _Entry:
@@ -356,6 +359,11 @@ class ScanServer:
         self.registry = registry if registry is not None else Registry()
         self.lab = None
         self.connected: list[str] = []
+        #: {slug: {"host", "cmd", "pub"}} of the connected instruments; host ""
+        #: = this PC. A watcher on another PC connects its own Control tab to
+        #: the SAME services under the SAME names (Lukas 2026-10-06: the office
+        #: suite looked "very different" from the lab's)
+        self.instruments: dict = {}
         self._connected_key: frozenset | None = None
         self._failed_key: frozenset | None = None
 
@@ -569,6 +577,10 @@ class ScanServer:
             old, self.lab = self.lab, lab
             self.registry = reg
             self.connected = sorted(good)
+            self.instruments = {
+                n: {"host": "" if str(wanted[n][0]).lower() in _LOCAL_HOSTS else wanted[n][0],
+                    "cmd": int(wanted[n][1]), "pub": int(wanted[n][2])}
+                for n in good}
             self._connected_key = key
             self._failed_key = key if bad else None
         if old is not None:
@@ -705,6 +717,7 @@ class ScanServer:
                 "phase": 1,
                 "scan_rev": self._scan_rev,
                 "view_rev": self._view_rev,
+                "instruments": dict(self.instruments),
             }
         st["describe_rev"] = build_manifest()["revision"]
         st["control"] = self.control.status()
@@ -829,6 +842,17 @@ class ScanServer:
                         "by": self._view_by}
         if cmd == "set_view":
             return self._set_view(req)
+        if cmd == "get_layouts":
+            # the Control tab layouts saved on this PC, so a watcher offers the
+            # lab's panels ("CamKimP1") instead of its own, different list
+            try:
+                # the file apps/control_panel.py keeps them in (LAYOUTS_PATH),
+                # named here so the server need not import Qt for a path
+                path = Path(__file__).resolve().parent.parent / "suite_layouts.json"
+                layouts = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                layouts = {}
+            return {"ok": True, "layouts": layouts if isinstance(layouts, dict) else {}}
         return {"ok": False, "error": f"unknown command {cmd!r}"}
 
     # ---- what was submitted, and how the suite on this PC shows it ------
