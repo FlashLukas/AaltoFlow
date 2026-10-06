@@ -897,8 +897,22 @@ def _no_security_setup():
     os.environ["AALTOFLOW_SECURITY_DIR"] = tempfile.mkdtemp(prefix="render-nosec-")
 
 
+def _neutral_local_settings():
+    """This PC's suite_local.json holds its REMOTE services (a lab PC's
+    address, its name) and its own setup name: never in a published picture.
+    The render sees the modules of the folder and nothing of this PC's own
+    settings (2026-10-06: a remote scan server card showed a lab IP)."""
+    from suite_common import modules as _m
+    real = _m.load_local
+    _m.load_local = lambda root=None: {**real(root), "remote": [], "settings": {}}
+    # ... and the render WRITES nothing: a setting saved meanwhile would write
+    # the stripped copy back over this PC's real file and lose its remotes
+    _m.save_local = lambda data, root=None: None
+
+
 def _mission_control(theme):
     _no_security_setup()
+    _neutral_local_settings()
     sys.path.insert(0, str(ROOT / "mission-control"))
     import mission_control
 

@@ -188,7 +188,8 @@ Required surface (both families expose this so the net + GUI layers are identica
 
 ```
 start()                      # open backend, push start-up state
-shutdown()                   # safe state (output off), close backend; idempotent
+shutdown(keep_outputs=False) # safe state (output off), close backend; idempotent
+                             # keep_outputs=True: a RESTART -- close, change nothing
 status() -> Status           # snapshot dataclass; must NEVER throw
 get_config() -> Config
 apply_config()               # re-clamp/re-tune after cfg edited in place
@@ -234,6 +235,14 @@ console program any other way than a hard kill -- and a killed service never
 closes its instrument (a USB power meter was left answering "I/O error" until it
 was unplugged). Close the REP socket with `linger` (not `close(0)`), or the reply
 can be dropped. `tools/check_modules.py --live` checks the service really exits.
+
+`shutdown{keep_outputs: true}` (since 2026-10-06) is a RESTART for a code update:
+close the instrument, the hwlock claim and the sockets exactly as usual, but skip
+every step that changes what the instrument outputs (RF off, output off, ramp to
+zero, emission off, a park position). The next start adopts the state. Stopping a
+running MOVE is not an output change: do it anyway. Parse the flag tolerantly
+(`"false"` is False, gotcha #3) and reply `kept_outputs` so a caller can tell an
+old service (which ignores it and switches off) from a new one.
 
 `protocol.py` holds the port constants, topic bytes, and the
 `status_to_dict` / `config_to_dict` / `apply_config_dict` helpers — one file so

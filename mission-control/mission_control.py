@@ -341,7 +341,7 @@ def _describe_once(host: str, port: int, timeout_ms: int, module: str) -> dict |
 
 
 def request_shutdown(host: str, port: int, timeout_ms: int = 1000,
-                     module: str = "") -> bool:
+                     module: str = "", keep_outputs: bool = False) -> bool:
     """Ask a service to stop ITSELF; True if it agreed.
 
     Why not just kill it: on Windows QProcess.terminate() cannot reach a console
@@ -351,8 +351,17 @@ def request_shutdown(host: str, port: int, timeout_ms: int = 1000,
     error" until it was unplugged (2026-09-15). A service that knows the
     `shutdown` verb closes its instrument and exits; one that does not answers
     "unknown command" and is killed as before.
+
+    `keep_outputs` (a RESTART, Lukas 2026-10-06): the service closes cleanly
+    but leaves what the instrument outputs as it is -- RF, a field, a
+    waveform -- and the next start ADOPTS it. A plain Stop still makes a
+    source safe. A service from before this option ignores it and switches
+    off as it always did (the safe side).
     """
-    reply = _ask(host, port, timeout_ms, module, {"cmd": "shutdown"})
+    req = {"cmd": "shutdown"}
+    if keep_outputs:
+        req["keep_outputs"] = True
+    reply = _ask(host, port, timeout_ms, module, req)
     return bool(reply and reply.get("ok"))
 
 
@@ -1675,10 +1684,20 @@ class ModuleCard(QtWidgets.QFrame):
         self.btn_stop = QtWidgets.QPushButton("  Stop"); self.btn_stop.setObjectName("danger")
         self.btn_stop.setIcon(st.standardIcon(QtWidgets.QStyle.SP_MediaStop))
         self.btn_stop.clicked.connect(self.stop_service)
+        # RESTART = stop WITHOUT switching the instrument off, then start again:
+        # what a code update needs (Lukas 2026-10-06: an update restart of the
+        # AFG switched off outputs he was using). Stop stays the safe stop.
+        self.btn_restart = QtWidgets.QPushButton("  Restart")
+        self.btn_restart.setIcon(st.standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+        self.btn_restart.setToolTip(
+            "Stop this service and start it again, LEAVING THE INSTRUMENT AS IT IS\n"
+            "(RF, outputs, field stay on); the new service reads its state at start.\n"
+            "For a code update. 'Stop' switches sources off as before.")
+        self.btn_restart.clicked.connect(self.restart_service)
         self.btn_gui = QtWidgets.QPushButton("  GUI")
         self.btn_gui.setIcon(st.standardIcon(QtWidgets.QStyle.SP_ComputerIcon))
         self.btn_gui.clicked.connect(self.open_gui)
-        for b in (self.btn_service, self.btn_stop, self.btn_gui):
+        for b in (self.btn_service, self.btn_stop, self.btn_restart, self.btn_gui):
             b.setFixedWidth(92)
             row.addWidget(b)
 
@@ -1770,7 +1789,7 @@ class ModuleCard(QtWidgets.QFrame):
                     "config") + "  (set it with Instruments…)")
         self.real_check.setToolTip(tip)
         self.real_check.setText(f"real: {spec.address}" if spec.address else "real")
-        for b in (self.btn_service, self.btn_stop, self.btn_ports):
+        for b in (self.btn_service, self.btn_stop, self.btn_restart, self.btn_ports):
             b.setVisible(not spec.remote)
         self.btn_remove.setVisible(spec.remote)
         self.btn_gui.setEnabled(spec.has_gui)
@@ -1880,7 +1899,22 @@ class ModuleCard(QtWidgets.QFrame):
             "far are saved and the after-scan routine runs. Stop it anyway?")
         return ans == QtWidgets.QMessageBox.Yes
 
-    def stop_service(self, graceful_wait_ms: int = 8000):
+    def restart_service(self) -> bool:
+        """Stop (keeping the instrument's outputs) and start again. True when
+        the service was stopped and a new one started."""
+        if not self.owns_service:
+            return False
+        self.win.log(f"[{self.spec.id}] restarting (outputs left as they are)…")
+        if not self.stop_service(keep_outputs=True):
+            self.win.log(f"[{self.spec.id}] restart: the service did not stop by itself; "
+                         f"not started again", "warn")
+            return False
+        self.start_service()
+        return True
+
+    def stop_service(self, graceful_wait_ms: int = 8000, keep_outputs: bool = False) -> bool:
+        """True when the service stopped BY ITSELF (the shutdown verb), False
+        when it had to be killed or nothing ran."""
         proc = self.service_proc
         if proc and proc.state() != QtCore.QProcess.NotRunning:
             if self.spec.key == "scanserver":
@@ -1888,16 +1922,17 @@ class ModuleCard(QtWidgets.QFrame):
                 # saved, the after-scan routine runs) -- ask first, and give it
                 # time to save before a kill (scan_core/scan_server.py)
                 if not self._confirm_stop_scan_server():
-                    return
+                    return False
                 graceful_wait_ms = max(graceful_wait_ms, 30000)
             self._stopping = True
             pid = int(proc.processId() or 0)
             self.win.log(f"[{self.spec.id}] stopping service…")
             # First ask it to stop itself, so it can close its hardware.
-            if request_shutdown(self.spec.host, self.spec.cmd, module=self.spec.id) and \
+            if request_shutdown(self.spec.host, self.spec.cmd, module=self.spec.id,
+                                keep_outputs=keep_outputs) and \
                     proc.waitForFinished(graceful_wait_ms):
                 self.win.prober.probe_now()
-                return
+                return True
             proc.terminate()
             if not proc.waitForFinished(2000):
                 proc.kill()
@@ -1907,9 +1942,11 @@ class ModuleCard(QtWidgets.QFrame):
                                capture_output=True,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.win.prober.probe_now()
+            return False
         elif not self.spec.remote:
             self.win.log(f"[{self.spec.id}] no launcher-owned service to stop "
                          f"(if it is up, it was started elsewhere -- close it in its own window).", "warn")
+        return False
 
     def open_gui(self):
         if not self.spec.has_gui:
@@ -2044,6 +2081,7 @@ class ModuleCard(QtWidgets.QFrame):
             self.status_dot.setPixmap(dot(C["muted"])); self.status_txt.setText("down")
         self.btn_service.setEnabled(self.spec.can_start and not up and not self.owns_service)
         self.btn_stop.setEnabled(self.owns_service)
+        self.btn_restart.setEnabled(self.owns_service)
         if up and not was:
             # just came up: ask what it can do (a restarted service may have changed)
             self.win.prober.describe(self.spec.id, self.spec.host, self.spec.cmd)

@@ -144,7 +144,14 @@ still assumes piezo/zpiezo.
   (5–10 Hz) and `b"event"` (`{"level", "msg"}`).
 - **Universal verbs** that every module has: `status`, `info`, `get_config`,
   `set_config`, **`describe`**, **`shutdown`** (2026-09-15: stop cleanly and exit,
-  see gotcha #25), plus one verb per setter.
+  see gotcha #25), plus one verb per setter. `shutdown{keep_outputs: true}`
+  (2026-10-06, Lukas) is a RESTART: close cleanly but leave what the instrument
+  outputs as it is (RF, field, waveform, laser emission, a park) -- the next start
+  ADOPTS it. A plain shutdown still makes sources safe. A motion module still
+  STOPS a running move (an unsupervised move must not outlive its service), but
+  moves nothing back. Reply `kept_outputs: true|false`. Mission Control's card
+  button **Restart** sends it; a service that predates it ignores the argument
+  and switches off (the safe side).
 - **`describe` (added 2026-09-10) is how a client builds a UI for a module it has
   never heard of.** It returns a manifest of controls / indicators / actions with
   LIVE limits, units, types, the verb that sets each one, the status path that

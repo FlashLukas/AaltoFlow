@@ -821,3 +821,54 @@ def test_security_button_and_badge(env, tmp_path, monkeypatch):
     finally:
         dlg.close()
         win._security = None
+
+
+_SHUTDOWN_SERVICE = r"""
+import json, sys, zmq
+port, out = int(sys.argv[1]), sys.argv[2]
+rep = zmq.Context.instance().socket(zmq.REP)
+rep.setsockopt(zmq.LINGER, 1000)
+rep.bind(f"tcp://127.0.0.1:{port}")
+while True:
+    msg = rep.recv_json()
+    if msg.get("cmd") == "shutdown":
+        open(out, "w").write(json.dumps(msg))
+        rep.send_json({"ok": True})
+        break
+    rep.send_json({"ok": False, "error": "unknown"})
+rep.close(linger=1000)
+"""
+
+
+def _shutdown_proc(app, port, out):
+    from PySide6 import QtCore
+    p = QtCore.QProcess()
+    p.start(sys.executable, ["-c", _SHUTDOWN_SERVICE, str(port), str(out)])
+    assert p.waitForStarted(5000)
+    time.sleep(0.8)                              # let it bind
+    return p
+
+
+def test_restart_keeps_the_outputs_and_stop_does_not(env, tmp_path, monkeypatch):
+    """Lukas 2026-10-06: an update restart of the AFG switched off outputs he
+    was using. Restart asks the service to stop WITH keep_outputs, then starts
+    it again; a plain Stop still asks for the safe stop."""
+    mc, win, root, app = env
+    card = win.cards["magnet"]
+    started = []
+    monkeypatch.setattr(card, "start_service", lambda: started.append(1))
+    out = tmp_path / "restart.json"
+    card.service_proc = _shutdown_proc(app, 16100, out)
+    try:
+        assert card.restart_service()
+        assert json.loads(out.read_text())["keep_outputs"] is True
+        assert started == [1]
+        out2 = tmp_path / "stop.json"
+        card.service_proc = _shutdown_proc(app, 16100, out2)
+        assert card.stop_service() is True
+        assert "keep_outputs" not in json.loads(out2.read_text())
+        assert started == [1]                    # Stop does not start again
+    finally:
+        if card.service_proc is not None:
+            card.service_proc.kill(); card.service_proc.waitForFinished(3000)
+        card.service_proc = None
