@@ -19,7 +19,12 @@ from aaltoview.apps.theme import (C, COLORS, DARK, DEFAULT_THEME, LIGHT,  # noqa
 ICON_FILE = Path(__file__).resolve().parents[1] / "icon.svg"
 
 
-def apply_window_icon(app) -> None:
+#: the run catalogue's own drawing: a window of its own deserves its own
+#: taskbar button, not the measurement suite's (Lukas 2026-10-06)
+CATALOGUE_ICON = ICON_FILE.parent / "catalogue.svg"
+
+
+def apply_window_icon(app, icon_file: Path | None = None, app_id: str | None = None) -> None:
     """Give the application its module icon, in the title bar and the taskbar.
 
     Two steps, and on Windows BOTH are needed:
@@ -37,14 +42,19 @@ def apply_window_icon(app) -> None:
     once. So: no icon file, no ID.
 
     Never fatal: a platform without that shell call simply keeps the default.
+
+    `icon_file` / `app_id`: another window of scan-core with its OWN icon and
+    taskbar button (the run catalogue). A NEW id for it, never the suite's:
+    the cache is per id (above).
     """
-    if not ICON_FILE.exists():
+    icon = Path(icon_file) if icon_file else ICON_FILE
+    if not icon.exists():
         return
     from PySide6 import QtGui
-    app.setWindowIcon(QtGui.QIcon(str(ICON_FILE)))
+    app.setWindowIcon(QtGui.QIcon(str(icon)))
     try:
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            f"Aalto.AaltoFlow.{ICON_FILE.parent.name}")
+            app_id or f"Aalto.AaltoFlow.{ICON_FILE.parent.name}")
     except Exception:          # not Windows, or the call is unavailable
         pass
