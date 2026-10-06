@@ -126,6 +126,12 @@ class Generator:
         self._readback = {ch: None for ch in self.channels}  # what it last reported
         self._read_gen = {ch: -1 for ch in self.channels}    # gen the read-back belongs to
         self._mismatch = {ch: "" for ch in self.channels}
+        #: (mismatch text, read-backs in a row with it) -- see _read_back
+        self._mismatch_seen: dict = {}
+        #: what the backend learned about the firmware at open (queries it
+        #: lacks), kept in status: as a start-up event alone it was gone for
+        #: anyone who subscribed a few seconds late (lab PC 2026-10-06)
+        self._probe_lines: list[str] = []
         # knobs the instrument CANNOT report (a firmware without the query,
         # e.g. ramp symmetry on the AFG1062 FV:V1.0.2): their value is the one
         # last set from here (the config's at start), and status says so
@@ -173,7 +179,8 @@ class Generator:
         # firmware when it opened (queries it lacks); the simulator has none
         report = getattr(self.backend, "probe_report", None)
         if callable(report):
-            notes = [("info", f"instrument: {line}") for line in report()] + notes
+            self._probe_lines = list(report())
+            notes = [("info", f"instrument: {line}") for line in self._probe_lines] + notes
         self._connected = True
         self._stop.clear()
         snap = self._build_snapshot("")
@@ -733,9 +740,16 @@ class Generator:
             self._readback[ch] = dict(got)
             self._read_gen[ch] = gen
             text = ", ".join(f"{k}: asked {want[k]}, instrument {got[k]}" for k in bad)
-            new_text = text != self._mismatch[ch]
+            # The channel is unsettled AT ONCE (a scan never measures on a
+            # mismatch), but the WARNING waits for the same mismatch on the
+            # next read-back too: right after a fast output toggle the read can
+            # come before the AFG has applied OUTP:STAT (lab PC 2026-10-06:
+            # "asked True, instrument False", then fine).
+            seen = self._mismatch_seen.get(ch, ("", 0))
+            count = seen[1] + 1 if (text and text == seen[0]) else (1 if text else 0)
+            self._mismatch_seen[ch] = (text, count)
             self._mismatch[ch] = text
-        if text and new_text:
+        if text and count == 2:
             self._emit("warn", f"{ch.upper()}: instrument does not hold the request -- {text}")
 
     # ---- snapshot --------------------------------------------------------
@@ -787,6 +801,8 @@ class Generator:
             if not (applied_now and not w["output"] and rb.get("output") is False):
                 all_off = False
         snap["all_off"] = bool(all_off)
+        # the firmware probe at open, readable any time (not only as a start-up event)
+        snap["probe_report"] = list(self._probe_lines)
         return snap
 
     @staticmethod

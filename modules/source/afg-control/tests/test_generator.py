@@ -250,7 +250,32 @@ def test_settled_needs_the_read_back(system):
     gen.set_amplitude("ch1", 1.0)
     s = wait(gen, lambda s: s["ch1_mismatch"] != "")
     assert not s["ch1_settled"] and "amplitude_Vpp" in s["ch1_mismatch"]
-    assert any("does not hold" in m for _, m in events)
+    # warned once the SAME mismatch is read back a second time
+    wait(gen, lambda s: any("does not hold" in m for _, m in events))
+
+
+def test_a_mismatch_seen_once_is_not_warned(system):
+    """Lab PC 2026-10-06: fast output toggles gave "instrument does not hold
+    the request -- output: asked True, instrument False", then all was fine:
+    the read came before the AFG had applied it. One stale read-back keeps
+    the channel unsettled (safe for a scan) but no longer warns."""
+    gen, sim, cfg, events = system
+    gen.set_output("ch1", False)                   # the sim boots with CH1 on
+    wait(gen, lambda s: s["ch1_settled"] and not s["ch1_output"])
+    real_read = sim.read_channel
+    stale = {"left": 1}
+
+    def lagging(n):
+        got = real_read(n)
+        if stale["left"] and got.get("output"):
+            stale["left"] -= 1
+            got = dict(got, output=False)          # the AFG has not applied it yet
+        return got
+    sim.read_channel = lagging
+    gen.set_output("ch1", True)
+    s = wait(gen, lambda s: s["ch1_settled"] and s["ch1_output"])
+    assert stale["left"] == 0                      # the stale read DID happen
+    assert not any("does not hold" in m for _, m in events), events
 
 
 def test_a_front_panel_change_is_adopted(system):

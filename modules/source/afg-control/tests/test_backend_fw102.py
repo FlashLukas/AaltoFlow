@@ -138,6 +138,9 @@ def test_the_brain_polls_without_errors(fake_visa_v102):
         assert s["ch1_not_read_back"] == "duty_pct, symmetry_pct"
         assert s["idn"].startswith("TEKTRONIX,AFG1062")
         assert s["ch1_settled"] and s["ch1_mismatch"] == ""
+        # the probe result stays readable in status (lab PC: a late
+        # subscriber missed the start-up events)
+        assert s["probe_report"] and any("RAMP:SYMM" in line for line in s["probe_report"])
 
         # a duty change: sent, not read back, and still SETTLES (the
         # unreadable knob is not compared) -- and the poll stays error-free
