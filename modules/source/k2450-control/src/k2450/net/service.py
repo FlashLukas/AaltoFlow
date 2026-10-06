@@ -51,6 +51,9 @@ class K2450Service:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send. For a SourceMeter the one
@@ -133,8 +136,13 @@ class K2450Service:
         time.sleep(self.status_dt + 0.1)
         secure.release_server(self._guard)
         self._guard = None
-        self.smu.shutdown()                  # output OFF, then disconnect
-        print("k2450 service stopped, output off, instrument closed")
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        # output OFF, then disconnect -- unless this is a restart
+        self.smu.shutdown(keep_outputs=self._keep_outputs)
+        print("k2450 service stopped, "
+              + ("output left as it is" if self._keep_outputs else "output off")
+              + ", instrument closed")
 
     # ---------------------------------------------------------------- threads
 
@@ -267,8 +275,12 @@ class K2450Service:
                 # Setting _stop ends serve_forever, whose finally: stop() turns
                 # the output off and closes the instrument; the reply still goes
                 # out, because the commander sends it before it checks _stop.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the output as it is.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}
@@ -287,6 +299,14 @@ class K2450Service:
             "nplc_min": lim.nplc_min, "nplc_max": lim.nplc_max,
             "line_freq_Hz": self.smu.cfg.hardware.line_freq_Hz,
         }
+
+
+def _as_bool(v) -> bool:
+    """A JSON bool, or text such as "false" from a hand-typed console command.
+    bool("false") would be True -- the same trap as gotcha #3."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _json(d: dict) -> bytes:

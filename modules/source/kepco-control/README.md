@@ -38,6 +38,9 @@ loop; nothing here knows about fields or calibrations.
   The same happens when the service stops (Ctrl-C, the launcher's Stop, the
   `shutdown` verb) -- sped up to finish within `safety.shutdown_ramp_s` --
   and, if you enable it, when no client has spoken for `safety.watchdog_s`.
+  Exception: `shutdown{keep_outputs: true}` (a restart for a code update) does
+  not ramp and sends no `OUTP OFF` -- the output stays as it is (a ramp in
+  progress stops where it is) and the next start adopts it.
 - **Changes nothing at start.** The service READS the BOP -- mode, setpoint,
   limit, output on/off (`FUNC:MODE?`, `VOLT?`, `CURR?`, `OUTP?`) -- and adopts
   it; the only write is `*CLS` (clears the error queue). A live output stays

@@ -98,7 +98,9 @@ tests/                   pytest: config, brain, real backend vs a fake link, net
 
 `set_rf{on}`, `set_frequency{frequency_Hz}`, `set_power{power_dBm}`,
 `set_phase{phase_deg}`, `set_vernier{vernier}`, `set_reference{mode: internal|external|auto}`, plus the
-universal `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
+universal `status`, `info`, `get_config`, `set_config`, `describe`,
+`shutdown{keep_outputs?}` (plain: RF off; `keep_outputs: true` = a restart for a
+code update, RF left as it is and adopted by the next start).
 A reply means *accepted*; the read-back in `status` means *done*.
 
 Status keys: `rf_on, frequency_Hz, power_dBm, phase_deg, vernier, reference,

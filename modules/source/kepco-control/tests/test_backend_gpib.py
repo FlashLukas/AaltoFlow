@@ -84,6 +84,15 @@ def test_close_switches_the_output_off():
     assert b._inst is None
 
 
+def test_close_keeping_outputs_writes_nothing():
+    # shutdown{keep_outputs}: a restart lets go without OUTP OFF
+    b = _bop()
+    inst = b._inst
+    b.close(output_off=False)
+    assert inst.writes == []
+    assert b._inst is None
+
+
 def test_backend_module_does_not_import_pyvisa_at_import_time():
     import kepco.backends.bop_gpib  # noqa: F401  (already imported above)
     src = open(kepco.backends.bop_gpib.__file__, encoding="utf-8").read()

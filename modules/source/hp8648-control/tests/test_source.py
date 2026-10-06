@@ -364,6 +364,18 @@ def test_shutdown_turns_rf_off_and_is_idempotent():
     src.shutdown()                      # a second call must not raise
 
 
+def test_shutdown_keep_outputs_leaves_rf_as_it_is():
+    src, sim = build_sim_system(Config())
+    src.start()
+    src.set_rf(True)
+    assert src.wait_idle()
+    calls = []
+    sim.set_output = lambda on: calls.append(on)     # spy: any RF switch
+    src.shutdown(keep_outputs=True)
+    assert calls == [] and sim.read_output() is True
+    assert sim._open is False and src.status().connected is False
+
+
 def test_apply_config_reclamps_to_new_limits(rig):
     src, _, _ = rig
     src.set_frequency(1e9)

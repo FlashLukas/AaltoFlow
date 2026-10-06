@@ -53,6 +53,9 @@ class SmbService:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not switch the RF off; the next start adopts it
+        self._keep_outputs = False
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send. For a signal generator the
@@ -138,7 +141,9 @@ class SmbService:
         time.sleep(self.status_dt + 0.1)
         secure.release_server(self._guard)   # authenticator + marker go too
         self._guard = None
-        self.gen.shutdown()
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        self.gen.shutdown(keep_outputs=self._keep_outputs)
 
     # ---------------------------------------------------------------- threads
 
@@ -250,8 +255,12 @@ class SmbService:
                 # hard kill gives the brain no chance to close its hardware (it wedged
                 # the PM16 until replugged, docs/DEVELOPER_NOTES.md gotcha #25). Setting _stop
                 # ends serve_forever, whose finally: stop() shuts the brain down.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the RF output as it is.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}
@@ -270,6 +279,14 @@ class SmbService:
             "phase_min_deg": lim.phase_min_deg,
             "phase_max_deg": lim.phase_max_deg,
         }
+
+
+def _as_bool(v) -> bool:
+    """A JSON bool, or text such as "false" from a hand-typed console command.
+    bool("false") would be True -- the same trap as gotcha #3."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _json(d: dict) -> bytes:

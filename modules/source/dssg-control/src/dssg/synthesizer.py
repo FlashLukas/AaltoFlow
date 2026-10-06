@@ -225,29 +225,36 @@ class Synthesizer:
                                    f"your limits {lo:g}..{hi:g} {unit}: left as "
                                    f"it is (the next set_{name} is clamped)")
 
-    def shutdown(self) -> None:
-        """RF off, disconnect. Safe to call more than once / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """RF off, disconnect. Safe to call more than once / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the port the same, but leave the RF output as
+        it is -- the next start adopts it."""
         self._stop.set()
         t, self._poll_t = self._poll_t, None
         if t is not None and t is not threading.current_thread():
             t.join(timeout=2.0)
         was = self._connected
         try:
-            if was:
+            if was and not keep_outputs:
                 with self._io:
                     self.backend.set_output(False)
         except Exception as exc:
             self._emit("error", f"RF off failed on shutdown: {exc}")
         finally:
-            self._rf_on = False
+            if not keep_outputs:
+                self._rf_on = False
             try:
                 with self._io:
-                    self.backend.close()        # rf_off=True: the backend also sends RF off
+                    # rf_off=True: the backend also sends RF off (not on a restart)
+                    self.backend.close(rf_off=not keep_outputs)
             finally:
                 self._connected = False
                 self._status = self._offline_snapshot()
                 if was:
-                    self._emit("info", "disconnected (RF off)")
+                    self._emit("info", "disconnected (RF left as it is)"
+                               if keep_outputs else "disconnected (RF off)")
 
     # ---- commands (each clamps, then pushes) -----------------------------
 

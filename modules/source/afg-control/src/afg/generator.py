@@ -237,10 +237,15 @@ class Generator:
                                   f"-- kept; it cannot be selected from here"))
         return notes
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Every output OFF, disconnect. Safe to call more than once / on a crash.
         (Not part of the read-only start rule: a stopping service leaves no
-        output driving anything.)"""
+        output driving anything.)
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06: a
+        restart switched off outputs he was using): close the instrument and
+        release its address exactly the same, but change no output -- the
+        next start adopts the state, as every start does."""
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
@@ -248,7 +253,7 @@ class Generator:
             self._thread = None
         was_connected = self._connected
         try:
-            if self._connected:
+            if self._connected and not keep_outputs:
                 for ch in self.channels:
                     try:
                         self.backend.set_output(_index(ch), False)
@@ -256,16 +261,18 @@ class Generator:
                         pass
         finally:
             try:
-                self.backend.close()
+                self.backend.close(outputs_off=not keep_outputs)
             finally:
                 self._connected = False
                 with self._lock:
                     for ch in self.channels:
-                        self._want[ch]["output"] = False
+                        if not keep_outputs:
+                            self._want[ch]["output"] = False
                         self._applied[ch] = None
                     self._snapshot = self._build_snapshot("")
                 if was_connected:
-                    self._emit("info", "disconnected (outputs off)")
+                    self._emit("info", "disconnected (outputs left as they are)"
+                               if keep_outputs else "disconnected (outputs off)")
 
     # ---- the envelope: lab ceiling AND instrument range --------------------
 

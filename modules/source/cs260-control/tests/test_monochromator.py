@@ -248,6 +248,17 @@ def test_shutdown_closes_the_shutter_and_is_idempotent():
         mono.set_wavelength(500.0)
 
 
+def test_shutdown_keep_outputs_leaves_the_shutter_open():
+    # a restart for a code update: no shutter write despite close_on_shutdown
+    cfg, mono, sim, clock, _ = make()
+    assert sim._shutter is True and cfg.shutter.close_on_shutdown
+    calls = []
+    sim.set_shutter = lambda open_: calls.append(open_)   # spy
+    mono.shutdown(keep_outputs=True)
+    assert calls == [] and sim._shutter is True
+    assert mono.status().connected is False
+
+
 class NoWritesAtStart:
     """Wraps the sim and FAILS on any call that would change the instrument
     while `armed` -- i.e. during start()."""

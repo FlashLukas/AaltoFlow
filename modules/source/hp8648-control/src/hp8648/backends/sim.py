@@ -62,8 +62,9 @@ class SimulatedHP8648:
         # Connecting changes NOTHING -- exactly like the real backend now.
         self._open = True
 
-    def close(self) -> None:
-        self._output = False
+    def close(self, rf_off: bool = True) -> None:
+        if rf_off:                    # not on a restart (keep_outputs)
+            self._output = False
         self._open = False
 
     # ---- output ----------------------------------------------------------

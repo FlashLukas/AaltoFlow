@@ -160,13 +160,15 @@ class NktpSuperK:
             self._release()
             raise
 
-    def close(self) -> None:
+    def close(self, outputs_off: bool = True) -> None:
         if self._dll is None:
             self._release()               # e.g. never opened: nothing to send
             return
         # emission OFF and RF OFF first; each guarded so one failure cannot
-        # stop the other or the port from closing.
-        for fn in (lambda: self.set_emission(False), lambda: self.set_rf(False)):
+        # stop the other or the port from closing. Not on a restart
+        # (outputs_off=False, shutdown{keep_outputs}): then nothing is sent.
+        offs = (lambda: self.set_emission(False), lambda: self.set_rf(False))
+        for fn in (offs if outputs_off else ()):
             try:
                 fn()
             except Exception:

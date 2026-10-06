@@ -112,3 +112,46 @@ def test_shutdown_verb_ramps_down_and_stops():
         assert supply.status().connected is False
     finally:
         cli.shutdown()
+
+
+def test_shutdown_verb_keep_outputs_is_a_restart():
+    cfg = Config()
+    cfg.ramp.rate_A_per_s = 5.0
+    supply, sim = build_sim_system(cfg, seed=0)
+    svc = KepcoService(supply, host="127.0.0.1", cmd_port=CMD_PORT + 2,
+                       pub_port=PUB_PORT + 2, status_hz=20.0)
+    svc.start()
+    cli = KepcoClient(host="127.0.0.1", cmd_port=CMD_PORT + 2, pub_port=PUB_PORT + 2)
+    try:
+        cli.set_current(2.0)
+        cli.set_output(True)
+        assert wait_for(lambda: not cli.status().ramping and cli.status().output)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+        assert r["ok"] is True and r["kept_outputs"] is True
+        n = len(sim.writes)
+        svc.stop()
+        assert sim.writes[n:] == []               # no ramp, no OUTP OFF
+        assert sim.output_on is True
+        assert supply.status().connected is False
+    finally:
+        cli.shutdown()
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false():
+    cfg = Config()
+    cfg.ramp.rate_A_per_s = 5.0
+    supply, sim = build_sim_system(cfg, seed=0)
+    svc = KepcoService(supply, host="127.0.0.1", cmd_port=CMD_PORT + 2,
+                       pub_port=PUB_PORT + 2, status_hz=20.0)
+    svc.start()
+    cli = KepcoClient(host="127.0.0.1", cmd_port=CMD_PORT + 2, pub_port=PUB_PORT + 2)
+    try:
+        cli.set_current(2.0)
+        cli.set_output(True)
+        assert wait_for(lambda: not cli.status().ramping and cli.status().output)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+        assert r["kept_outputs"] is False
+        svc.stop()
+        assert sim.output_on is False
+    finally:
+        cli.shutdown()

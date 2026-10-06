@@ -130,10 +130,17 @@ class Generator:
                 self._emit("warn", f"TG {name} {value:g} {unit} is outside the limits "
                                    f"{lo:g}..{hi:g}; left as is (not clamped)")
 
-    def shutdown(self) -> None:
-        """Clean stop: CW off (if configured and on), disconnect. Safe to repeat."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Clean stop: CW off (if configured and on), disconnect. Safe to repeat.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect the same, but leave the TG as it is whatever
+        off_on_shutdown says -- the next start adopts it."""
+        if keep_outputs and self._connected:
+            self._emit("info", "TG left as it is (restart)")
         try:
-            if self._connected and self.cfg.hardware.off_on_shutdown:
+            if (self._connected and self.cfg.hardware.off_on_shutdown
+                    and not keep_outputs):
                 st = self.backend.read_state()
                 # "unknown" counts as possibly on: off is the safe direction
                 if (st.get("rf_on") or st.get("tg_unknown")) and st.get("reachable"):

@@ -25,7 +25,10 @@ colour, as tall as the model says it is bright.*
 > `Emission ON` asks for confirmation (GUI, console) or is flagged `danger`
 > (describe), and is **refused while the interlock is not OK**. Stopping the
 > service switches RF and emission off; the laser's own watchdog switches
-> emission off if the service is killed.
+> emission off if the service is killed. `shutdown{keep_outputs: true}` (a
+> restart for a code update) leaves emission and RF as they are for the next
+> start to adopt -- the laser's watchdog still cuts emission if that start
+> takes longer than `hardware.watchdog_s` (10 s).
 
 ## The lab system
 
@@ -67,7 +70,8 @@ gitignored: it holds this PC's COM port).
 
 ## Verbs
 
-Universal: `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
+Universal: `status`, `info`, `get_config`, `set_config`, `describe`,
+`shutdown{keep_outputs?}`.
 
 | verb | arguments | notes |
 |---|---|---|

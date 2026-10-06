@@ -114,5 +114,28 @@ def test_set_config_over_wire(service_and_client):
 def test_shutdown_verb(service_and_client):
     svc, cli = service_and_client
     r = cli._cmd({"cmd": "shutdown"})
-    assert r == {"ok": True, "stopping": True}
+    assert r == {"ok": True, "stopping": True, "kept_outputs": False}
     assert svc._stop.is_set()
+    svc.stop()                      # what serve_forever's finally does
+    assert svc.mono.backend._shutter is False      # close_on_shutdown (default)
+
+
+def test_shutdown_verb_keep_outputs_leaves_the_shutter(service_and_client):
+    svc, cli = service_and_client
+    sim = svc.mono.backend
+    assert sim._shutter is True
+    calls = []
+    sim.set_shutter = lambda open_: calls.append(open_)   # spy: any shutter write
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r == {"ok": True, "stopping": True, "kept_outputs": True}
+    svc.stop()
+    assert calls == [] and sim._shutter is True
+    assert svc.mono.status().connected is False
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false(service_and_client):
+    svc, cli = service_and_client
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert svc.mono.backend._shutter is False

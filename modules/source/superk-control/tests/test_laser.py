@@ -332,6 +332,21 @@ def test_shutdown_switches_everything_off():
     laser.shutdown()                           # twice is safe
 
 
+def test_shutdown_keep_outputs_leaves_emission_and_rf():
+    # a restart for a code update: disconnect, but not a single write
+    cfg = Config()
+    cfg.hardware.sim_warmup_s = 0.0
+    laser, backend = build_sim_system(cfg)
+    laser.start()
+    laser.set_rf(True)
+    laser.set_emission(True)
+    n = len(backend.writes)
+    laser.shutdown(keep_outputs=True)
+    assert backend.writes[n:] == []
+    assert backend.read_emission() and backend.read_rf()
+    assert backend._open is False and laser.status().connected is False
+
+
 def test_emission_refused_when_not_connected():
     laser, _ = build_sim_system(Config())
     with pytest.raises(SafetyError, match="not connected"):

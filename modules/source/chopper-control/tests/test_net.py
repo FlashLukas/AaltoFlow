@@ -43,6 +43,29 @@ def service_and_client():
     time.sleep(0.2)
 
 
+def test_shutdown_verb_keep_outputs(service_and_client):
+    # stop_on_exit on, so a PLAIN shutdown would stop the wheel; a restart not
+    svc, cli = service_and_client
+    svc.ch.cfg.hardware.stop_on_exit = True
+    be = svc.ch.backend
+    be.set_enable(True)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    svc.stop()                      # what serve_forever's finally does
+    assert be.get_enable() is True and svc.ch.status().connected is False
+
+
+def test_shutdown_verb_text_false_is_false(service_and_client):
+    svc, cli = service_and_client
+    svc.ch.cfg.hardware.stop_on_exit = True
+    be = svc.ch.backend
+    be.set_enable(True)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert be.get_enable() is False
+
+
 def test_info_and_config(service_and_client):
     _, cli = service_and_client
     info = cli.start()

@@ -105,6 +105,27 @@ def test_shutdown_verb_turns_output_off(service_and_client):
     assert sim.get_output() is False
 
 
+def test_shutdown_verb_keep_outputs_is_a_restart(service_and_client):
+    svc, cli, sim = service_and_client
+    cli.set_output(True)
+    _wait(cli, lambda s: s.output)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    svc.stop()
+    assert ("output", False) not in sim.writes   # never switched off
+    assert sim.get_output() is True and sim._open is False
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false(service_and_client):
+    svc, cli, sim = service_and_client
+    cli.set_output(True)
+    _wait(cli, lambda s: s.output)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert sim.get_output() is False
+
+
 def test_unknown_and_bad_requests_answer_errors(service_and_client):
     _, cli, _ = service_and_client
     assert cli._cmd({"cmd": "fly_to_the_moon"})["ok"] is False

@@ -15,6 +15,7 @@ Ports **5589 / 5590**.
 | Phase | `set_phase{phase_deg}` -- rounded to the device step, wrapped into -180..+180, reported back in *your* branch (ask 270, the unit holds -90, status says 270) |
 | Output attenuator | `set_attenuation{attenuation_dB}` -- 0..30 dB, 0.25 dB steps |
 | RF output | `set_output{on}` -- left as found at start (read, never written), OFF on shutdown |
+| shutdown | `shutdown{keep_outputs?}` -- plain: RF output off; `keep_outputs: true` = a restart for a code update, output left as it is (the next start adopts it) |
 | Carrier | `set_frequency{frequency_MHz}` -- bookkeeping (the V3 command list has no frequency command); selects the datasheet accuracy band |
 
 **Start-up reads, never writes.** When the service starts it only asks the

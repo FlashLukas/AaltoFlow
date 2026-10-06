@@ -171,6 +171,19 @@ def test_shutdown_turns_both_outputs_off():
     synth.shutdown()                           # twice is harmless
 
 
+def test_shutdown_keep_outputs_changes_nothing():
+    # a restart for a code update: disconnect, but not a single write
+    synth, backend = build_sim_system(Config())
+    synth.start()
+    synth.set_rf("a", True); synth.set_rf("b", True)
+    wait_for(lambda s: s["a_rf_on"] and s["b_rf_on"], synth)
+    n = len(backend.writes)
+    synth.shutdown(keep_outputs=True)
+    assert backend.writes[n:] == []
+    assert backend.output_on(0) and backend.output_on(1)
+    assert synth.status()["connected"] is False and not backend._open
+
+
 def test_all_rf_off(rig):
     synth, backend, _ = rig
     synth.set_rf("a", True); synth.set_rf("b", True)

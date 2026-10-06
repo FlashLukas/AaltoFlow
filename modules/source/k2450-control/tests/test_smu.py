@@ -72,6 +72,17 @@ def test_shutdown_turns_output_off():
     smu.shutdown()                          # twice is harmless
 
 
+def test_shutdown_keep_outputs_writes_nothing():
+    # a restart for a code update: disconnect, but not a single write
+    smu, sim = make()
+    smu.set_output(True)
+    n = len(sim.writes)
+    smu.shutdown(keep_outputs=True)
+    assert sim.writes[n:] == []
+    assert sim.get_output() is True and sim._open is False
+    assert smu.status().connected is False
+
+
 def test_compliance_is_written_before_the_level_and_before_output_on():
     smu, sim = make()
     calls = []

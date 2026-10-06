@@ -60,7 +60,9 @@ tests/                   pytest: config, brain (fake clock), describe, network, 
 `target_nm`), `set_grating{grating}`, `set_shutter{open}`, `set_filter{filter}`,
 `set_port{port}`, `step{steps}`, `abort`, `calibrate{wavelength_nm}` (danger:
 rewrites the stored offset) + the universal `status`, `info`, `get_config`,
-`set_config`, `describe`, `shutdown`.
+`set_config`, `describe`, `shutdown{keep_outputs?}` (a plain shutdown closes the
+shutter if `shutter.close_on_shutdown`; `keep_outputs: true` = a restart for a
+code update, shutter left as it is for the next start to adopt).
 
 What a grating change does: close the shutter (the drive sweeps past zero
 order -- white light), `GRAT n`, go back to the wavelength you had (clamped to

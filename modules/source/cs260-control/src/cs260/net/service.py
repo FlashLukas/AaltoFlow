@@ -54,6 +54,9 @@ class Cs260Service:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send:
@@ -138,7 +141,9 @@ class Cs260Service:
         # the service is gone: drop its guard (and its "running encrypted" marker)
         secure.release_server(self._guard)
         self._guard = None
-        self.mono.shutdown()
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        self.mono.shutdown(keep_outputs=self._keep_outputs)
 
     # ---------------------------------------------------------------- threads
 
@@ -262,8 +267,12 @@ class Cs260Service:
                 # hard kill gives the brain no chance to close its hardware (it wedged
                 # the PM16 until replugged, docs/DEVELOPER_NOTES.md gotcha #25). Setting _stop
                 # ends serve_forever, whose finally: stop() shuts the brain down.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the shutter as it is.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}
@@ -297,6 +306,14 @@ def _bool(v) -> bool:
     (bool("false") would be True -- gotcha #3)."""
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "on", "open", "o")
+    return bool(v)
+
+
+def _as_bool(v) -> bool:
+    """A JSON bool, or text such as "false" from a hand-typed console command.
+    bool("false") would be True -- the same trap as gotcha #3."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
     return bool(v)
 
 

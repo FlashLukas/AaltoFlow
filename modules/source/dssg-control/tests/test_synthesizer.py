@@ -251,6 +251,17 @@ def test_shutdown_turns_rf_off_and_is_idempotent():
     s.shutdown()                            # a second call must not raise
 
 
+def test_shutdown_keep_outputs_leaves_rf_as_it_is():
+    s, backend = build_sim_system(Config())
+    s.start()
+    s.set_rf(True)
+    calls = []
+    backend.set_output = lambda on: calls.append(on)   # spy: any RF switch
+    s.shutdown(keep_outputs=True)
+    assert calls == [] and backend.read_output() is True
+    assert backend._open is False and s.status().connected is False
+
+
 def test_apply_config_reclamps_to_new_limits(synth):
     synth.set_power(4.0)
     synth.cfg.limits.power_max_dBm = 0.0

@@ -263,33 +263,41 @@ class BipolarSupply:
                                    f"envelope {lo:g}..{hi:g} {unit}; left as it "
                                    f"is (the next setpoint is clamped)")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Ramp to zero, output off, disconnect. Safe to call more than once and
         from a crash handler. The ramp is sped up (never slowed) so it ends
         within `safety.shutdown_ramp_s` -- the launcher kills a service that
         takes more than 8 s to exit, and a kill mid-ramp would leave the output
-        live."""
+        live.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        no ramp, no OUTP OFF -- the worker stops (so a ramp in progress stops
+        where it is) and the BOP is disconnected and its address released; the
+        next start adopts the output as it is."""
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
         self._thread = None
         was = self._connected
         try:
-            if was:
+            if was and not keep_outputs:
                 self._ramp_down_blocking()
         finally:
             try:
                 with self._hw:
-                    self.backend.close()
+                    self.backend.close(output_off=not keep_outputs)
             finally:
                 self._connected = False
-                self._out_hw = False
+                if not keep_outputs:
+                    self._out_hw = False
                 with self._lock:
-                    self._out_req = False
+                    if not keep_outputs:
+                        self._out_req = False
                     self._acq = None
                     self._snapshot = self._build_snapshot()
                 if was:
-                    self._emit("info", "output off, disconnected")
+                    self._emit("info", "disconnected, output left as it is (restart)"
+                               if keep_outputs else "output off, disconnected")
 
     # ---- limits (live, also used by describe) ---------------------------------
 

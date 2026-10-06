@@ -123,6 +123,23 @@ def test_start_adopts_the_real_instrument_state(fake_visa):
     assert fake_visa["inst"].writes[-1] == "OUTP:STAT OFF"
 
 
+def test_shutdown_keep_outputs_sends_no_rf_command(fake_visa):
+    """shutdown{keep_outputs}: a restart closes the session but writes
+    nothing that changes the output."""
+    from hp8648.backends.visa_8648 import Visa8648
+    fake_visa["state"] = _busy_state()
+    cfg = Config()
+    cfg.hardware.poll_s = 0.02
+    src = SignalSource(Visa8648("GPIB0::19::INSTR"), cfg)
+    src.start()
+    time.sleep(0.1)
+    inst = fake_visa["inst"]
+    n = len(inst.writes)
+    src.shutdown(keep_outputs=True)
+    assert not [w for w in inst.writes[n:] if w.startswith("OUTP")]
+    assert src.status().connected is False
+
+
 def test_power_reference_mode_is_read_and_converted_not_switched_off(fake_visa):
     """A unit meter-style setting is converted in software, never changed:
     with POW:REF:STAT ON the box talks dB relative to POW:REF."""

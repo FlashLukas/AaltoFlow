@@ -216,26 +216,31 @@ class Synthesizer:
                                   " -- showing the config value there (NOT written)"))
         return notes
 
-    def shutdown(self) -> None:
-        """Both outputs off, disconnect. Safe to call more than once / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Both outputs off, disconnect. Safe to call more than once / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the port the same, but leave both RF outputs
+        as they are -- the next start adopts them."""
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
-        with self._lock:
-            for ch in CHANNELS:
-                self._want[ch]["rf_on"] = False
+        if not keep_outputs:
+            with self._lock:
+                for ch in CHANNELS:
+                    self._want[ch]["rf_on"] = False
         was_connected = self._connected
         try:
-            if self._connected:
+            if self._connected and not keep_outputs:
                 # shutdown is NOT part of the read-only start rule: RF off on
                 # the way out stays (a service that stops leaves nothing on)
                 for ch in CHANNELS:
                     self.backend.set_output(_INDEX[ch], False)
         finally:
             try:
-                self.backend.close()
+                self.backend.close(rf_off=not keep_outputs)
             finally:
                 self._connected = False
                 with self._lock:
@@ -243,7 +248,8 @@ class Synthesizer:
                     self._pll_on_hw = {"a": False, "b": False}
                     self._snapshot = self._build_snapshot({}, "", float("nan"))
                 if was_connected:
-                    self._emit("info", "disconnected (RF off)")
+                    self._emit("info", "disconnected (RF left as it is)"
+                               if keep_outputs else "disconnected (RF off)")
 
     # ---- commands (each clamps, stores, wakes the worker) ------------------
 

@@ -136,6 +136,19 @@ def test_shutdown_leaves_cw_on_when_configured():
     assert backend.read_state()["rf_on"] is True
 
 
+def test_shutdown_keep_outputs_sends_no_command():
+    """A restart (shutdown{keep_outputs}) parks nothing even with
+    off_on_shutdown on (the default) -- and still disconnects."""
+    g, backend = build_sim_system(Config())
+    g.start()
+    g.set_rf(True)
+    n = len(backend.commands)
+    g.shutdown(keep_outputs=True)
+    assert backend.commands[n:] == []
+    assert backend.read_state()["rf_on"] is True
+    assert g.status().connected is False
+
+
 def test_shutdown_switches_off_an_unknown_state():
     """Unknown may mean emitting: off is the safe direction on a clean stop."""
     g, backend = build_sim_system(Config(signal=Signal(rf_on=True)))

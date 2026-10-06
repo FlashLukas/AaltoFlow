@@ -47,7 +47,9 @@ signalhound service restores the CW afterwards.
   adopted and the GUI says "TG state unknown -- it may be emitting"; set
   frequency, level and CW (or park) explicitly.
 - **Stop:** a clean stop (launcher Stop, `shutdown` verb, closing the local
-  GUI) **parks** the TG (`[hardware] off_on_shutdown`, default on). A killed
+  GUI) **parks** the TG (`[hardware] off_on_shutdown`, default on);
+  `shutdown{keep_outputs: true}` (a restart for a code update) leaves the TG as
+  it is whatever that setting says, and the next start adopts it. A killed
   service leaves the TG as it is; the signalhound service parks it when it
   stops itself.
 - **signalhound not running:** shsg still starts; status `hw_error` says

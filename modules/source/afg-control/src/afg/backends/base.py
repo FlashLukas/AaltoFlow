@@ -34,11 +34,15 @@ class WaveGen(Protocol):
         start and adopts it; a restart of the PC or of the service must never
         switch an output or change a waveform)."""
 
-    def close(self) -> None:
+    def close(self, outputs_off: bool = True) -> None:
         """Every output OFF, then disconnect. Safe on shutdown / crash, and
         after a failed open (then it sends nothing). Shutdown is NOT covered
         by the read-only start rule: outputs off on the way out, deliberately
-        (CH1 may drive a magnet)."""
+        (CH1 may drive a magnet).
+
+        outputs_off=False is a RESTART (shutdown{keep_outputs: true}, e.g. for
+        a code update): disconnect and release the address, but send nothing
+        that changes an output -- the next start adopts what is there."""
 
     def capabilities(self) -> dict:
         """What this instrument offers::

@@ -118,14 +118,15 @@ class DsiSerialAmp:
         except Exception:
             self._idn = ""
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         if self._ser is None:
             # Never opened (or already closed): nothing is sent -- we do not
             # own the device -- but a claim left from a half-done open goes.
             self._release()
             return
         try:
-            self._write("OUTP:STAT OFF")                 # stage off on the way out
+            if output_off:                               # not on a restart (keep_outputs)
+                self._write("OUTP:STAT OFF")             # stage off on the way out
             if self._buttons_on_exit:
                 self._write("*BUTTONS ON")               # VERIFY [CL]: give the panel back
         finally:

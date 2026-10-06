@@ -102,6 +102,21 @@ def test_close_switches_off_and_hands_back_the_panel(fake_visa):
     assert inst.ren_calls == [6] and inst.closed
 
 
+def test_close_keeping_outputs_sends_no_output_command(fake_visa):
+    # shutdown{keep_outputs}: a restart must not touch the outputs, but the
+    # session closes and the address is given back (a second open works).
+    b = TekAFG(RES)
+    b.open()
+    inst = fake_visa[0]
+    n = len(inst.writes)
+    b.close(outputs_off=False)
+    assert not [w for w in inst.writes[n:] if w.startswith("OUTP")]
+    assert inst.closed
+    b2 = TekAFG(RES)
+    b2.open()
+    b2.close()
+
+
 def test_errors_are_drained(fake_visa):
     b = TekAFG(RES)
     b.open()

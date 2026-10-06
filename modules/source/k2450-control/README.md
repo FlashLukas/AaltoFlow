@@ -30,7 +30,8 @@ An SMU is two instruments in one box, and the module treats it that way:
   `.ini` source/measure values are defaults applied only when you set them.
 * The output is switched **OFF** on shutdown (also on the launcher's
   `shutdown` verb) and before a source-function change. The module never
-  switches it ON by itself.
+  switches it ON by itself. `shutdown{keep_outputs: true}` (a restart for a
+  code update) leaves the output as it is; the next start adopts it.
 * The **compliance limit is always written before the level** and re-sent
   before `OUTP ON`.
 * The 2450's output is two boxes, **21 V x 1.05 A** and **210 V x 105 mA**.
@@ -81,7 +82,7 @@ tests/                   pytest: config, brain + physics, describe, network, GUI
 `set_measure_auto_range{on}`, `set_measure_range{range}`, `set_nplc{nplc}`,
 `set_four_wire{on}`, `set_acquisition{readings}`, `acquire` (-> `acq_id`),
 `get_sample`, plus the universal `status`, `info`, `get_config`, `set_config`,
-`describe`, `shutdown`.
+`describe`, `shutdown{keep_outputs?}`.
 
 ## In a scan
 

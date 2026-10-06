@@ -32,8 +32,10 @@ class SigGenBackend(Protocol):
         status/error queue (*CLS) is allowed -- it changes nothing the sample
         can feel. The brain then reads the state back and adopts it."""
 
-    def close(self) -> None:
-        """Turn RF off and disconnect. Safe to call on shutdown/crash."""
+    def close(self, rf_off: bool = True) -> None:
+        """Turn RF off and disconnect. Safe to call on shutdown/crash.
+        rf_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the address, but leave the RF output as it is."""
 
     def set_output(self, on: bool) -> None:
         """RF output on/off (OUTP:STAT ON|OFF). Turning it ON also re-arms a

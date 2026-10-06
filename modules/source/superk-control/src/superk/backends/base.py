@@ -32,8 +32,11 @@ class SupercontinuumBackend(Protocol):
         emission / RF / power / crystal / line writes). The brain reads the
         state afterwards and adopts it."""
 
-    def close(self) -> None:
-        """Emission off, RF off, disconnect. Safe to call on shutdown/crash."""
+    def close(self, outputs_off: bool = True) -> None:
+        """Emission off, RF off, disconnect. Safe to call on shutdown/crash.
+        outputs_off=False: a restart (shutdown{keep_outputs}) -- close the port
+        and release it, but leave emission and RF as they are. (The laser's own
+        watchdog still cuts emission if no service talks to it in time.)"""
 
     def identify(self) -> str:
         """Human-readable identification (module types / firmware). '' if unknown."""

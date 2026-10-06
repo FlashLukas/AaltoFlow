@@ -28,8 +28,10 @@ class AmpBackend(Protocol):
     def open(self) -> None:
         """Connect. Queries only -- must NOT change the output or the gain."""
 
-    def close(self) -> None:
-        """Switch the amplifier off and disconnect. Safe on shutdown/crash."""
+    def close(self, output_off: bool = True) -> None:
+        """Switch the amplifier off and disconnect. Safe on shutdown/crash.
+        output_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the port, but leave the stage as it is."""
 
     # ---- amplifier output on/off ---------------------------------------
     def set_output(self, on: bool) -> None:

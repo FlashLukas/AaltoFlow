@@ -188,9 +188,10 @@ class SerialSynthHD:
         return {"channels": channels, "reference": ref, "ext_MHz": ext,
                 "unread": sorted(set(unread))}
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         try:
-            if self._ser is not None:
+            # rf_off=False is a restart (shutdown{keep_outputs}): send nothing
+            if self._ser is not None and rf_off:
                 for ch in (0, 1):
                     self.set_output(ch, False)           # RF off on the way out
         finally:

@@ -123,6 +123,28 @@ def test_outputs_off_and_shutdown_verb(service_and_client):
     assert not backend.ch[1]["output"]
 
 
+def test_shutdown_keep_outputs_is_a_restart(service_and_client):
+    svc, cli, backend = service_and_client
+    cli.set_output("ch2", True)
+    wait_for(lambda s: s["ch1_output"] and s["ch2_output"] and s["ch2_settled"], cli)
+    n = len(backend.writes)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    svc.stop()
+    assert backend.writes[n:] == []              # no output-changing command
+    assert backend.ch[0]["output"] and backend.ch[1]["output"]
+    assert not backend._open                     # but closed all the same
+
+
+def test_shutdown_keep_outputs_text_false_is_false(service_and_client):
+    # gotcha #3: the string "false" from a hand-typed console must not keep
+    svc, cli, backend = service_and_client
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})
+    assert r["ok"] and r["kept_outputs"] is False
+    svc.stop()
+    assert not backend.ch[0]["output"] and not backend.ch[1]["output"]
+
+
 def test_pub_stream_delivers_status(service_and_client):
     _, cli, _ = service_and_client
     t_end = time.monotonic() + 2.0

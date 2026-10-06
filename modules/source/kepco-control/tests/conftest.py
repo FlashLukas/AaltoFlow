@@ -52,9 +52,10 @@ class Spy:
         if not callable(attr):
             return attr
 
-        def wrapped(*a):
-            self.calls.append((name,) + a)
-            return attr(*a)
+        def wrapped(*a, **kw):
+            # keyword arguments (close(output_off=...)) recorded as a dict
+            self.calls.append((name,) + a + ((kw,) if kw else ()))
+            return attr(*a, **kw)
         return wrapped
 
 

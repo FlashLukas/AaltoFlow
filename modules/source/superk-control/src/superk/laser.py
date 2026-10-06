@@ -262,15 +262,22 @@ class SuperK:
             self._emit("info", f"laser watchdog {have if have is not None else '?'} s "
                                f"-> {want} s (safety against a killed service)")
 
-    def shutdown(self) -> None:
-        """RF off, emission off, disconnect. Safe to call more than once / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """RF off, emission off, disconnect. Safe to call more than once / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the port the same, but leave emission and RF
+        as they are -- the next start adopts them. The laser's own watchdog
+        (hardware.watchdog_s) is NOT touched: if the new service is not
+        talking to the laser within that time, the laser cuts emission
+        itself, as after a killed service."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
         with self._lock:
             try:
-                if self._connected:
+                if self._connected and not keep_outputs:
                     for fn in (lambda: self.backend.set_rf(False),
                                lambda: self.backend.set_emission(False)):
                         try:
@@ -281,7 +288,7 @@ class SuperK:
                     self._emission = False
             finally:
                 try:
-                    self.backend.close()
+                    self.backend.close(outputs_off=not keep_outputs)
                 finally:
                     was = self._connected
                     self._connected = False
@@ -289,7 +296,9 @@ class SuperK:
                     st.connected = False
                     self._status = st
                     if was:
-                        self._emit("info", "emission off, RF off, disconnected")
+                        self._emit("info", "disconnected, emission and RF left as "
+                                           "they are (restart)" if keep_outputs else
+                                           "emission off, RF off, disconnected")
 
     # ============================================================== commands
 

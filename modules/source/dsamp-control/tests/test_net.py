@@ -139,3 +139,35 @@ def test_shutdown_verb_switches_the_stage_off():
         cli.shutdown()
         svc.stop()                  # what serve_forever's finally does
     assert backend._output is False
+
+
+def test_shutdown_verb_keep_outputs_is_a_restart():
+    amp, backend = build_sim_system(Config())
+    svc = DsampService(amp, host="127.0.0.1", cmd_port=17142, pub_port=17143)
+    svc.start()
+    cli = DsampClient(host="127.0.0.1", cmd_port=17142, pub_port=17143, timeout_ms=2000)
+    calls = []
+    try:
+        cli.set_amp(True)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+        assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+        backend.set_output = lambda on: calls.append(on)    # spy: any switch
+    finally:
+        cli.shutdown()
+        svc.stop()                  # what serve_forever's finally does
+    assert calls == [] and backend._output is True and backend._open is False
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false():
+    amp, backend = build_sim_system(Config())
+    svc = DsampService(amp, host="127.0.0.1", cmd_port=17142, pub_port=17143)
+    svc.start()
+    cli = DsampClient(host="127.0.0.1", cmd_port=17142, pub_port=17143, timeout_ms=2000)
+    try:
+        cli.set_amp(True)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+        assert r["kept_outputs"] is False
+    finally:
+        cli.shutdown()
+        svc.stop()
+    assert backend._output is False

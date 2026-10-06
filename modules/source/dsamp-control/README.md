@@ -28,7 +28,9 @@ sample is how they get destroyed. So the module is built around three rules:
    says so; the next gain you set is clamped). Nothing is written, so
    restarting the software never disturbs a running experiment. On shutdown,
    Ctrl-C, the launcher's Stop or the `shutdown` verb the stage is switched off
-   and the gain goes back to the minimum.
+   and the gain goes back to the minimum -- except `shutdown{keep_outputs: true}`
+   (a restart for a code update), which leaves stage and gain as they are for
+   the next start to adopt.
 3. **Turning it on is a dangerous action.** `amp_on` is flagged `danger` in
    `describe`, and switching on logs a reminder: the vendor manual warns that a
    power amplifier driving an unterminated port can die within seconds.
@@ -98,7 +100,7 @@ tests/                   pytest, all offline: config, brain, describe, net, GUI,
 | `set_input_power` | `input_dBm`            | operating point, for the estimate only |
 
 plus the universal `status`, `info`, `get_config`, `set_config`, `describe`,
-`shutdown`. A reply means **accepted**: the new gain appears in `status` after
+`shutdown{keep_outputs?}`. A reply means **accepted**: the new gain appears in `status` after
 the brain's next hardware poll (4 Hz), and the `gain` control declares an
 `echoes` settle on the read-back `gain_dB` (tolerance half a step) so scan-core
 waits for the device to confirm it. Gain is therefore a scan axis like any other.

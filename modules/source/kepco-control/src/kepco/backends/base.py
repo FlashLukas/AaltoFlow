@@ -37,9 +37,11 @@ class BipolarSupplyBackend(Protocol):
          "voltage_V": programmed VOLT, "current_A": programmed CURR}.
         The brain adopts it at start (main channel + limit channel + output)."""
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         """Output off and disconnect. Safe to call on shutdown/crash. The brain
-        ramps to zero BEFORE calling this; close() itself does not ramp."""
+        ramps to zero BEFORE calling this; close() itself does not ramp.
+        output_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the address, writing nothing; the output stays as it is."""
 
     def set_mode(self, mode: str) -> None:
         """'voltage' or 'current' (SCPI FUNC:MODE VOLT|CURR)."""

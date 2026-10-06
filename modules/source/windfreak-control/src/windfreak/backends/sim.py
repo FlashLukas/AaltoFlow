@@ -123,9 +123,10 @@ class SimulatedSynthHD:
         return {"channels": chans, "reference": self.ref_source,
                 "ext_MHz": self.ref_ext_MHz, "unread": []}
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         # shutdown is not part of the read-only rule: RF off on the way out
-        for i in (0, 1):
+        # (but not on a restart, rf_off=False)
+        for i in ((0, 1) if rf_off else ()):
             self.set_output(i, False)
         self._open = False
 

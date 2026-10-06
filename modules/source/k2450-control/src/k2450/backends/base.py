@@ -142,8 +142,10 @@ class SourceMeterBackend(Protocol):
     def read_state(self) -> InstrumentState:
         """Read the instrument's present settings (queries only)."""
 
-    def close(self) -> None:
-        """Output off and disconnect. Safe to call on shutdown/crash, twice."""
+    def close(self, output_off: bool = True) -> None:
+        """Output off and disconnect. Safe to call on shutdown/crash, twice.
+        output_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the address, but leave the output as it is."""
 
     def idn(self) -> str:
         """Instrument identification string (*IDN?). '' if unknown."""

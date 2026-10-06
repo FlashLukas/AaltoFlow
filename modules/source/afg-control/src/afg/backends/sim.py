@@ -57,8 +57,8 @@ class SimulatedAFG:
     def open(self) -> None:
         self._open = True                 # connect, change nothing
 
-    def close(self) -> None:
-        if self._open:
+    def close(self, outputs_off: bool = True) -> None:
+        if self._open and outputs_off:
             for i in range(len(self.ch)):
                 self.set_output(i, False)
         self._open = False

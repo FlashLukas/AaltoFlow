@@ -231,6 +231,18 @@ def test_shutdown_switches_output_off():
     brain.shutdown()                             # twice is harmless
 
 
+def test_shutdown_keep_outputs_writes_nothing():
+    # a restart for a code update: disconnect, but no write at all
+    brain, backend = build_sim_system(Config())
+    brain.start()
+    brain.set_output(True)
+    n = len(backend.write_log)
+    brain.shutdown(keep_outputs=True)
+    assert backend.write_log[n:] == []
+    assert backend._output is True and backend._open is False
+    assert brain.status().connected is False
+
+
 def test_apply_config_rerounds_to_a_new_step(rig):
     brain, _ = rig
     brain.set_phase(10.0)

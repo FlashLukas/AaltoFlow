@@ -79,6 +79,19 @@ def test_shutdown_turns_rf_off():
     assert g.status().connected is False
 
 
+def test_shutdown_keep_outputs_leaves_rf_on():
+    # a restart for a code update: close, but send no output command
+    g, backend = build_sim_system(Config())
+    g.start()
+    g.set_rf(True)
+    calls = []
+    backend.set_output = lambda on: calls.append(on)   # spy: any RF switch
+    g.shutdown(keep_outputs=True)
+    assert calls == []
+    assert backend.read_output() is True and backend._open is False
+    assert g.status().connected is False
+
+
 def test_apply_config_reclamps_to_new_limits(gen):
     gen.set_power(15.0)              # in range under the default max (18)
     assert gen.status().power_dBm == 15.0

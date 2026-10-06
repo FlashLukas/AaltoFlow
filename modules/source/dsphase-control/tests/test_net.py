@@ -112,8 +112,41 @@ def test_shutdown_verb_stops_and_switches_output_off():
     try:
         cli.set_output(True)
         r = cli._cmd({"cmd": "shutdown"})
-        assert r == {"ok": True, "stopping": True}
+        assert r == {"ok": True, "stopping": True, "kept_outputs": False}
         assert svc._stop.is_set()
+    finally:
+        cli.shutdown()
+        svc.stop()
+    assert backend._output is False
+
+
+def test_shutdown_verb_keep_outputs_is_a_restart():
+    # shutdown{keep_outputs: true}: everything closed, no output command sent
+    brain, backend = build_sim_system(Config())
+    svc = DsphaseService(brain, host="127.0.0.1", cmd_port=17104, pub_port=17105)
+    svc.start()
+    cli = DsphaseClient(host="127.0.0.1", cmd_port=17104, pub_port=17105, timeout_ms=2000)
+    try:
+        cli.set_output(True)
+        n = len(backend.write_log)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+        assert r == {"ok": True, "stopping": True, "kept_outputs": True}
+    finally:
+        cli.shutdown()
+        svc.stop()
+    assert backend.write_log[n:] == []
+    assert backend._output is True and backend._open is False
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false():
+    brain, backend = build_sim_system(Config())
+    svc = DsphaseService(brain, host="127.0.0.1", cmd_port=17104, pub_port=17105)
+    svc.start()
+    cli = DsphaseClient(host="127.0.0.1", cmd_port=17104, pub_port=17105, timeout_ms=2000)
+    try:
+        cli.set_output(True)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+        assert r["kept_outputs"] is False
     finally:
         cli.shutdown()
         svc.stop()

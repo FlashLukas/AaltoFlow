@@ -214,9 +214,13 @@ class Chopper:
                                             name="chopper-poll", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop polling and disconnect. The wheel is LEFT RUNNING unless
-        hardware.stop_on_exit is set. Safe to call more than once / on a crash."""
+        hardware.stop_on_exit is set. Safe to call more than once / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        the wheel is left as it is even with stop_on_exit set -- the next start
+        adopts it."""
         self._stop.set()
         t = self._thread
         if t is not None and t is not threading.current_thread():
@@ -224,7 +228,7 @@ class Chopper:
         self._thread = None
         was = self._connected
         try:
-            if was and bool(self.cfg.hardware.stop_on_exit):
+            if was and bool(self.cfg.hardware.stop_on_exit) and not keep_outputs:
                 with self._hw:
                     self.backend.set_enable(False)
                 self._emit("info", "chopper disabled on exit (hardware.stop_on_exit)")

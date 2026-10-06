@@ -72,6 +72,9 @@ class SuperkService:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send. For a class 4 laser the
@@ -162,7 +165,10 @@ class SuperkService:
         time.sleep(self.status_dt + 0.1)
         secure.release_server(self._guard)
         self._guard = None
-        self.laser.shutdown()            # RF off, emission off, disconnect
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        # RF off, emission off, disconnect -- unless this is a restart
+        self.laser.shutdown(keep_outputs=self._keep_outputs)
 
     # ---------------------------------------------------------------- threads
 
@@ -284,8 +290,12 @@ class SuperkService:
                 # A CLEAN stop, asked for by the launcher before it would kill
                 # us (gotcha #25). serve_forever's finally: stop() then switches
                 # RF and emission off and closes the port.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave emission and RF as it is.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             if cmd in ("set_filter",):
@@ -326,6 +336,14 @@ def _client_id(msg: dict) -> str | None:
     if isinstance(c, dict):
         return str(c.get("id") or "") or None
     return c if isinstance(c, str) and c else None
+
+
+def _as_bool(v) -> bool:
+    """A JSON bool, or text such as "false" from a hand-typed console command.
+    bool("false") would be True -- the same trap as gotcha #3."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _json(d: dict) -> bytes:

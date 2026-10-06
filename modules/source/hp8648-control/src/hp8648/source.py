@@ -202,33 +202,42 @@ class SignalSource:
                                         daemon=True)
         self._thread.start()
 
-    def shutdown(self) -> None:
-        """RF off, disconnect. Safe to call more than once / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """RF off, disconnect. Safe to call more than once / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the address the same, but leave the RF output
+        as it is -- the next start adopts it."""
         self._stop.set()
         self._wake.set()
         t = self._thread
         if t is not None and t is not threading.current_thread():
             t.join(timeout=5.0)
         self._thread = None
-        with self._lock:
-            self._rf = False
+        if not keep_outputs:
+            with self._lock:
+                self._rf = False
         was = self._connected
         with self._hw_lock:
             try:
-                if self._connected:
+                if self._connected and not keep_outputs:
                     self.backend.set_output(False)
             except Exception as exc:
                 self._emit("error", f"RF off at shutdown failed: {exc}")
             finally:
                 try:
-                    self.backend.close()
+                    self.backend.close(rf_off=not keep_outputs)
                 finally:
                     self._connected = False
         old = self._status
-        self._status = Status(**{**old.__dict__, "connected": False,
-                                 "rf_on": False, "rf_set": False})
+        if keep_outputs:
+            self._status = Status(**{**old.__dict__, "connected": False})
+        else:
+            self._status = Status(**{**old.__dict__, "connected": False,
+                                     "rf_on": False, "rf_set": False})
         if was:
-            self._emit("info", "disconnected (RF off)")
+            self._emit("info", "disconnected (RF left as it is)"
+                       if keep_outputs else "disconnected (RF off)")
 
     # ---- commands: clamp, remember, wake the worker ----------------------
 

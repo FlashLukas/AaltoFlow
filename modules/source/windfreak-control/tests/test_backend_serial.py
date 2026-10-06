@@ -98,6 +98,16 @@ def test_open_and_read_state_send_queries_only(fake_serial):
     assert port.writes[-2:] == ["C0h0r0E0", "C1h0r0E0"] and port.closed
 
 
+def test_close_keeping_outputs_sends_nothing(fake_serial):
+    """shutdown{keep_outputs}: a restart closes the port, writes nothing."""
+    b = SerialSynthHD("COM7", pll_off_when_rf_off=True)
+    b.open()
+    port = fake_serial[0]
+    n = len(port.writes)
+    b.close(rf_off=False)
+    assert port.writes[n:] == [] and port.closed
+
+
 def test_read_state_parses_what_the_instrument_holds(fake_serial):
     b = SerialSynthHD("COM7")
     b.open()

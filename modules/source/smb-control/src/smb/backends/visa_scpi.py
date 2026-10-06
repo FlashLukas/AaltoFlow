@@ -80,10 +80,12 @@ class VisaSMB100A:
             self._drop_session()
             raise
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         try:
-            if self._inst is not None:
-                self._inst.write("OUTP:STAT OFF")       # RF off on the way out
+            # RF off on the way out -- not on a restart (rf_off=False), whose
+            # next start adopts the output as it is
+            if self._inst is not None and rf_off:
+                self._inst.write("OUTP:STAT OFF")
         finally:
             self._drop_session()
 

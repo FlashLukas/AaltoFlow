@@ -58,9 +58,10 @@ class SimulatedGB6000L:
     def open(self) -> None:
         self._open = True             # connect only: output and gain stay as found
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         self._update_temp()
-        self._output = False          # OFF on the way out
+        if output_off:                # OFF on the way out (not on a restart)
+            self._output = False
         self._open = False
 
     # ---- output ----------------------------------------------------------

@@ -98,9 +98,10 @@ class SimulatedBOP:
         return {"mode": self._mode, "output": self._output,
                 "voltage_V": self._prog_v, "current_A": self._prog_i}
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         self._advance()
-        self._output = False
+        if output_off:                # not on a restart (keep_outputs)
+            self._output = False
         self._open = False
 
     # ---- programming -----------------------------------------------------

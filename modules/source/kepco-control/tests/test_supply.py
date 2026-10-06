@@ -103,6 +103,23 @@ def test_shutdown_ramps_down_within_the_budget():
     assert supply.status().connected is False
 
 
+def test_shutdown_keep_outputs_neither_ramps_nor_switches_off():
+    # a restart for a code update: the coil keeps its current
+    cfg = Config()
+    supply, sim = build_sim_system(cfg, seed=0)
+    supply.start(poll=False)
+    supply.set_current(2.0)
+    supply.cfg.ramp.enabled = False
+    supply.set_output(True)
+    supply.step()
+    assert supply.status().programmed == 2.0
+    n = len(sim.writes)
+    supply.shutdown(keep_outputs=True)
+    assert sim.writes[n:] == []                    # no program_*, no OUTP
+    assert sim.output_on is True
+    assert supply.status().connected is False
+
+
 def test_output_off_now_skips_the_ramp(rig):
     supply, spy, clock, events = rig
     supply.set_current(1.0)

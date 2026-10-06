@@ -162,6 +162,17 @@ def test_close_switches_output_off(fake_serial):
     dev.close()                                        # twice is harmless
 
 
+def test_close_keeping_outputs_sends_nothing(fake_serial):
+    # shutdown{keep_outputs}: a restart closes the port and writes nothing
+    dev = PS6000L("COM5")
+    dev.open()
+    dev.set_output(True)
+    ser = FakeSerial.last
+    n = len(ser.lines)
+    dev.close(rf_off=False)
+    assert ser.lines[n:] == [] and ser.closed
+
+
 def test_no_pong_refuses_to_open(fake_serial):
     class Mute(FakeSerial):
         def readline(self):

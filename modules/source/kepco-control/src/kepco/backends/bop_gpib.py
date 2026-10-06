@@ -137,9 +137,11 @@ class VisaBOP:
         return {"mode": mode, "output": output, "voltage_V": volts,
                 "current_A": amps}
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
+        # output_off=False is a restart (shutdown{keep_outputs}): no OUTP OFF,
+        # the coil keeps its current and the next start adopts it
         try:
-            if self._inst is not None:
+            if self._inst is not None and output_off:
                 self._write("OUTP OFF")                     # VERIFY B.20
         finally:
             self._disconnect()

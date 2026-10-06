@@ -114,6 +114,30 @@ def test_shutdown_verb_turns_rf_off(service_and_client):
     assert backend.read_output() is False
 
 
+def test_shutdown_verb_keep_outputs_leaves_rf_on(service_and_client):
+    # a restart for a code update: everything closed, no RF command sent
+    svc, cli, backend = service_and_client
+    cli.set_rf(True)
+    _wait(cli, lambda s: s.rf_on)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] is True and r["kept_outputs"] is True
+    calls = []
+    backend.set_output = lambda on: calls.append(on)   # spy: any RF switch
+    svc.stop()
+    assert calls == [] and backend.read_output() is True
+    assert backend._open is False
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false(service_and_client):
+    svc, cli, backend = service_and_client
+    cli.set_rf(True)
+    _wait(cli, lambda s: s.rf_on)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert backend.read_output() is False
+
+
 def test_vernier_over_the_wire(service_and_client):
     _, cli, backend = service_and_client
     cli.start()

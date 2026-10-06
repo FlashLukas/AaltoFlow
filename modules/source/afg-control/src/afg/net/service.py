@@ -70,6 +70,9 @@ class AfgService:
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
         self._stopped = False
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not switch off what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send. For a function generator
@@ -160,7 +163,10 @@ class AfgService:
                 t.join(timeout=2.0)
         secure.release_server(self._guard)   # authenticator + marker go too
         self._guard = None
-        self.gen.shutdown()               # every output OFF, then disconnect
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        # every output OFF, then disconnect -- unless this is a restart
+        self.gen.shutdown(keep_outputs=self._keep_outputs)
 
     # ---------------------------------------------------------------- threads
 
@@ -290,8 +296,12 @@ class AfgService:
                 # hard kill gives the brain no chance to switch the outputs off
                 # (docs/DEVELOPER_NOTES.md gotcha #25). Setting _stop ends
                 # serve_forever, whose finally: stop() shuts the brain down.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the outputs as they are.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             if cmd in ("set_waveform", "set_load", "set_follow"):

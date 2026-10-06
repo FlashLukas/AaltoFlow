@@ -107,18 +107,23 @@ class Generator:
                 self._emit("warn", f"instrument {name} {value:g} {unit} is outside the "
                                    f"limits {lo:g}..{hi:g}; left as is (not clamped)")
 
-    def shutdown(self) -> None:
-        """RF off, disconnect. Safe to call more than once / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """RF off, disconnect. Safe to call more than once / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the address the same, but leave the RF output
+        as it is -- the next start adopts it."""
         try:
-            if self._connected:
+            if self._connected and not keep_outputs:
                 self.backend.set_output(False)
                 self._rf_on = False
         finally:
             try:
-                self.backend.close()
+                self.backend.close(rf_off=not keep_outputs)
             finally:
                 self._connected = False
-                self._emit("info", "disconnected")
+                self._emit("info", "disconnected (RF left as it is)"
+                           if keep_outputs else "disconnected")
 
     # ---- commands (each clamps, then pushes) -----------------------------
 

@@ -124,12 +124,13 @@ class PS6000L:
         if lock is not None:
             lock.release()
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         if self._ser is None:
             self._release_lock()                # harmless if nothing is held
             return
         try:
-            self.set_output(False)              # RF off on the way out
+            if rf_off:                          # not on a restart (keep_outputs)
+                self.set_output(False)          # RF off on the way out
         finally:
             try:
                 self._ser.close()

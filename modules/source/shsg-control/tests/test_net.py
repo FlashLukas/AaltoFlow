@@ -29,6 +29,27 @@ def service_and_client():
     time.sleep(0.2)
 
 
+def test_shutdown_verb_keep_outputs(service_and_client):
+    svc, cli = service_and_client
+    cli.set_rf(True)
+    sim = svc.gen.sim
+    n = len(sim.commands)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    svc.stop()                       # what serve_forever's finally does
+    assert sim.commands[n:] == [] and sim.read_state()["rf_on"] is True
+    assert svc.gen.status().connected is False
+
+
+def test_shutdown_verb_plain_and_text_false_park(service_and_client):
+    svc, cli = service_and_client
+    cli.set_rf(True)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert svc.gen.sim.read_state()["rf_on"] is False
+
+
 def test_info_and_config(service_and_client):
     _, cli = service_and_client
     info = cli.start()

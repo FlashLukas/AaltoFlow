@@ -24,8 +24,10 @@ class PhaseShifterBackend(Protocol):
         no output off, no phase/attenuation write) -- the brain reads the
         state back and adopts it (the suite's adopt-on-start rule)."""
 
-    def close(self) -> None:
-        """Turn the RF output off and disconnect. Safe to call twice / on a crash."""
+    def close(self, rf_off: bool = True) -> None:
+        """Turn the RF output off and disconnect. Safe to call twice / on a crash.
+        rf_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the port, but leave the RF output as it is."""
 
     # ---- phase -----------------------------------------------------------
     def set_phase(self, deg: float) -> None:

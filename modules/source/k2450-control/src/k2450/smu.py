@@ -317,10 +317,14 @@ class SourceMeter:
             self._emit("warn", f"the instrument's NPLC {m.nplc:g} is outside "
                                f"{L.nplc_min:g}..{L.nplc_max:g}; left as found")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Output OFF, stop polling, disconnect. Safe to call more than once and
         on a crash: the output-off attempt comes first and its failure does not
-        stop the close."""
+        stop the close.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        stop polling and disconnect the same, but leave the output as it is --
+        the next start adopts it."""
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)
@@ -328,20 +332,22 @@ class SourceMeter:
         was = self._connected
         try:
             with self._hw:
-                if was:
+                if was and not keep_outputs:
                     try:
                         self.backend.set_output(False)
                     except Exception as exc:     # still close the connection
                         self._emit("error", f"output off on shutdown failed: {exc}")
-                self.backend.close()
+                self.backend.close(output_off=not keep_outputs)
         finally:
             self._connected = False
             with self._lock:
-                self._output = False
+                if not keep_outputs:
+                    self._output = False
                 self._abort_acquisition("shutdown")
                 self._clear_live()
             if was:
-                self._emit("info", "output OFF, disconnected")
+                self._emit("info", "disconnected, output left as it is (restart)"
+                           if keep_outputs else "output OFF, disconnected")
 
     # ---- the envelope ----------------------------------------------------------
 

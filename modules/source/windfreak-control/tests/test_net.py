@@ -105,6 +105,28 @@ def test_all_rf_off_and_shutdown_verb(service_and_client):
     assert not backend.output_on(1)
 
 
+def test_shutdown_keep_outputs_is_a_restart(service_and_client):
+    svc, cli, backend = service_and_client
+    cli.set_rf("a", True); cli.set_rf("b", True)
+    wait_for(lambda s: s["a_rf_on"] and s["b_rf_on"], cli)
+    n = len(backend.writes)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    svc.stop()
+    assert not [w for w in backend.writes[n:] if w[0] == "set_output"]
+    assert backend.output_on(0) and backend.output_on(1) and not backend._open
+
+
+def test_shutdown_keep_outputs_text_false_is_false(service_and_client):
+    svc, cli, backend = service_and_client
+    cli.set_rf("b", True)
+    wait_for(lambda s: s["b_rf_on"], cli)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert not backend.output_on(1)
+
+
 def test_pub_stream_delivers_status(service_and_client):
     _, cli, _ = service_and_client
     t_end = time.monotonic() + 2.0

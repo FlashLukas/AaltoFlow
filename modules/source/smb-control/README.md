@@ -64,6 +64,12 @@ On connect the backend sends `*CLS`, `UNIT:ANGL DEG` (so phase is always in
 degrees), and `OUTP:STAT OFF`. The default GPIB address is `GPIB0::28::INSTR`
 (the SMB100A’s factory address) — change it in the `.ini` or with `--visa`.
 
+Verbs: `set_rf`, `rf_off`, `set_power`, `set_frequency`, `set_phase`, plus the
+universal `status`, `info`, `get_config`, `set_config`, `describe`,
+`shutdown{keep_outputs?}` — a plain shutdown switches the RF off; with
+`keep_outputs: true` (a restart for a code update) the RF is left as it is and
+the next start adopts it.
+
 ## Setup
 
 Uses [uv](https://docs.astral.sh/uv/). From this folder:

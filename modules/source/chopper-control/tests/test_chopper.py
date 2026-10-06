@@ -85,6 +85,19 @@ def test_stop_on_exit_puts_it_in_standby():
     assert be.get_enable() is False
 
 
+def test_restart_keeps_the_wheel_running_even_with_stop_on_exit():
+    # shutdown{keep_outputs}: a restart for a code update stops nothing
+    ch, be, clock = make()
+    ch.cfg.hardware.stop_on_exit = True
+    be.set_enable(True)
+    ch.start(poll=False)
+    calls = []
+    be.set_enable = lambda on: calls.append(on)      # spy: any enable write
+    ch.shutdown(keep_outputs=True)
+    assert calls == [] and be.get_enable() is True
+    assert ch.status().connected is False
+
+
 def test_unowned_blade_at_start_is_warned_about():
     ch, be, clock = make(blade="MC1F30", ref_mode="internal", output_mode="actual")
     ch.start(poll=False)

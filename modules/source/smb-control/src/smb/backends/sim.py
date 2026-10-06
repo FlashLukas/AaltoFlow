@@ -34,8 +34,9 @@ class SimulatedSMB100A:
         # they are (adopt-on-start rule).
         self._open = True
 
-    def close(self) -> None:
-        self._output = False          # RF off on the way out
+    def close(self, rf_off: bool = True) -> None:
+        if rf_off:
+            self._output = False      # RF off on the way out (not on a restart)
         self._open = False
 
     # ---- RF output on/off ------------------------------------------------

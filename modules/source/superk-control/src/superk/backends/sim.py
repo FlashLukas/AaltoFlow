@@ -100,10 +100,11 @@ class SimulatedSuperK:
     def open(self) -> None:
         self._open = True
 
-    def close(self) -> None:
-        with self._lock:
-            self._emission_cmd = False
-            self._rf = False
+    def close(self, outputs_off: bool = True) -> None:
+        if outputs_off:                    # not on a restart (keep_outputs)
+            with self._lock:
+                self._emission_cmd = False
+                self._rf = False
         self._open = False
 
     def identify(self) -> str:

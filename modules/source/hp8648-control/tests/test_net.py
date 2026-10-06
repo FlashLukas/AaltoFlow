@@ -117,3 +117,25 @@ def test_shutdown_verb_stops_the_service_and_rf(service_and_client):
     assert r["ok"] and r["stopping"]
     svc.stop()                      # what serve_forever's finally does
     assert sim.read_output() is False
+
+
+def test_shutdown_verb_keep_outputs_is_a_restart(service_and_client):
+    svc, cli, sim = service_and_client
+    cli.set_rf(True)
+    _until(cli, lambda s: s.rf_on)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    calls = []
+    sim.set_output = lambda on: calls.append(on)     # spy: any RF switch
+    svc.stop()
+    assert calls == [] and sim.read_output() is True and sim._open is False
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false(service_and_client):
+    svc, cli, sim = service_and_client
+    cli.set_rf(True)
+    _until(cli, lambda s: s.rf_on)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+    assert r["kept_outputs"] is False
+    svc.stop()
+    assert sim.read_output() is False

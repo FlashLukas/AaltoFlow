@@ -117,8 +117,9 @@ class SimulatedK2450:
             nplc=dict(self._nplc), four_wire={f: self._four_wire for f in FUNCS},
             output=self._output, terminals=self._terminals, readback=True)
 
-    def close(self) -> None:
-        self._output = False            # output off on the way out
+    def close(self, output_off: bool = True) -> None:
+        if output_off:                  # output off on the way out (not on a restart)
+            self._output = False
         self._open = False
 
     def idn(self) -> str:

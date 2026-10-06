@@ -24,8 +24,10 @@ class RFSource(Protocol):
         """Connect. Must NOT change the instrument's state (no RF off, no
         unit/level/frequency writes): the Generator adopts what it finds."""
 
-    def close(self) -> None:
-        """Turn RF off and disconnect. Safe to call on shutdown/crash."""
+    def close(self, rf_off: bool = True) -> None:
+        """Turn RF off and disconnect. Safe to call on shutdown/crash.
+        rf_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the address, but leave the RF output as it is."""
 
     # ---- RF output on/off ------------------------------------------------
     def set_output(self, on: bool) -> None:

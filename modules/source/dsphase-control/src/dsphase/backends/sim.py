@@ -46,8 +46,9 @@ class SimulatedPS6000L:
     def open(self) -> None:
         self._open = True              # a query-only connect: the state is untouched
 
-    def close(self) -> None:
-        self._output = False           # RF off on the way out
+    def close(self, rf_off: bool = True) -> None:
+        if rf_off:                     # RF off on the way out (not on a restart)
+            self._output = False
         self._open = False
 
     def _check_read(self):

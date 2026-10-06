@@ -53,6 +53,9 @@ class Hp8648Service:
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
         #   SAFETY = verbs a VIEWER may always send. For a signal generator the
@@ -144,7 +147,9 @@ class Hp8648Service:
                 t.join(timeout=2.0)
         secure.release_server(self._guard)   # authenticator + marker go too
         self._guard = None
-        self.src.shutdown()
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        self.src.shutdown(keep_outputs=self._keep_outputs)
 
     # ---------------------------------------------------------------- threads
 
@@ -251,8 +256,12 @@ class Hp8648Service:
                 # A CLEAN stop, asked for by the launcher before it would kill
                 # us (gotcha #25): serve_forever's finally: stop() switches the
                 # RF off and closes the instrument.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the RF output as it is.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}
@@ -282,6 +291,14 @@ class Hp8648Service:
 
 def _bool(v) -> bool:
     """A bool from JSON, or from a hand-typed "off" (gotcha #3)."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
+def _as_bool(v) -> bool:
+    """A JSON bool, or text such as "false" from a hand-typed console command.
+    bool("false") would be True -- the same trap as gotcha #3."""
     if isinstance(v, str):
         return v.strip().lower() in ("1", "true", "yes", "on")
     return bool(v)

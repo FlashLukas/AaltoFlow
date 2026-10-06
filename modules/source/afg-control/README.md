@@ -73,7 +73,9 @@ tests/               offline; fake_visa.py is a fake SCPI instrument
   scan waiting on it times out with that reason instead of recording at a
   setting nobody chose. A change made at the front panel is noticed and adopted.
 - **Stop = outputs off.** Shutdown (window close, `shutdown` verb, Ctrl-C)
-  switches both outputs off. `outputs_off` is the safety verb: a viewer may
+  switches both outputs off. `shutdown{keep_outputs: true}` is a restart (a
+  code update): the service closes and exits but leaves the outputs as they
+  are, and the next start adopts them. `outputs_off` is the safety verb: a viewer may
   always send it.
 
 ## Volts and the load setting
@@ -114,7 +116,7 @@ doubles at high-Z; the lab limits (Settings) stay where they are.
 | `outputs_off` | -- | reply `op_id`; the safety verb |
 
 Plus the universal `status`, `info`, `get_config`, `set_config`, `describe`,
-`shutdown`.
+`shutdown{keep_outputs?}` (true = restart, outputs left as they are).
 
 ## What a scan sees (`describe`)
 

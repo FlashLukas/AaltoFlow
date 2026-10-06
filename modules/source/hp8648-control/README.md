@@ -78,6 +78,7 @@ tests/                   pytest: config, brain, describe, network, GUI (all offl
 | `set_frequency` | `frequency_Hz` | CW frequency, clamped to the envelope |
 | `set_power` | `power_dBm` | level, clamped to the live ceiling |
 | `status` `info` `get_config` `set_config` `describe` `shutdown` | | the universal verbs |
+| `shutdown` | `keep_outputs?` (bool) | plain: RF off; `true` = a restart for a code update, RF left as it is (the next start adopts it) |
 
 A reply means **accepted**, not done. Status carries the read-back values
 (`rf_on`, `frequency_Hz`, `power_dBm`), the setpoints (`*_set`),

@@ -123,6 +123,54 @@ def test_shutdown_verb_switches_the_laser_off():
         cli.shutdown()
 
 
+def _serve(cfg):
+    import threading
+    laser, backend = build_sim_system(cfg)
+    svc = SuperkService(laser, host="127.0.0.1", cmd_port=17344, pub_port=17345)
+    t = threading.Thread(target=svc.serve_forever, daemon=True)
+    t.start()
+    cli = SuperkClient(host="127.0.0.1", cmd_port=17344, pub_port=17345, timeout_ms=2000)
+    return backend, t, cli
+
+
+def test_shutdown_verb_keep_outputs_is_a_restart():
+    cfg = Config()
+    cfg.hardware.sim_warmup_s = 0.0
+    backend, t, cli = _serve(cfg)
+    try:
+        assert wait_for(lambda: cli._cmd({"cmd": "status"}).get("ok"))
+        cli.set_rf(True)
+        cli.set_emission(True)
+        assert wait_for(backend.read_emission)
+        n = len(backend.writes)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+        assert r["ok"] and r["kept_outputs"] is True
+        t.join(10)
+        assert not t.is_alive()
+        assert not [w for w in backend.writes[n:] if w[0] in ("set_emission", "set_rf")]
+        assert backend.read_emission() is True and backend.read_rf() is True
+        assert backend._open is False
+    finally:
+        cli.shutdown()
+
+
+def test_shutdown_verb_keep_outputs_text_false_is_false():
+    cfg = Config()
+    cfg.hardware.sim_warmup_s = 0.0
+    backend, t, cli = _serve(cfg)
+    try:
+        assert wait_for(lambda: cli._cmd({"cmd": "status"}).get("ok"))
+        cli.set_rf(True)
+        cli.set_emission(True)
+        assert wait_for(backend.read_emission)
+        r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # gotcha #3
+        assert r["kept_outputs"] is False
+        t.join(10)
+        assert backend.read_emission() is False and backend.read_rf() is False
+    finally:
+        cli.shutdown()
+
+
 def test_lost_client_guard_over_the_wire():
     """A remote GUI's client owns the emission it switched on and pings; when
     it goes away, the service switches emission off. A raw client (like

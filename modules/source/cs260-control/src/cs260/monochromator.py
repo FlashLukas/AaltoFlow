@@ -215,9 +215,14 @@ class Monochromator:
                                             daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop the worker, optionally close the shutter, disconnect. The drive
-        is left where it is. Safe to call more than once."""
+        is left where it is. Safe to call more than once.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        the shutter is left as it is even with close_on_shutdown set -- the
+        next start adopts it. An ABORT already filed is still sent (stopping a
+        move is safety, not an output change)."""
         self._stop.set()
         t = self._thread
         if t is not None and t is not threading.current_thread():
@@ -232,7 +237,7 @@ class Monochromator:
             self._run_urgent()
         try:
             with self._hw:
-                if was and self.cfg.shutter.close_on_shutdown:
+                if was and self.cfg.shutter.close_on_shutdown and not keep_outputs:
                     try:
                         self.backend.set_shutter(False)
                     except Exception as exc:        # still disconnect
@@ -243,8 +248,11 @@ class Monochromator:
                 self._connected = False
                 self._busy = False
             if was:
-                self._emit("info", "disconnected" + (" (shutter closed)"
-                                   if self.cfg.shutter.close_on_shutdown else ""))
+                if keep_outputs:
+                    self._emit("info", "disconnected (shutter left as it is)")
+                else:
+                    self._emit("info", "disconnected" + (" (shutter closed)"
+                                       if self.cfg.shutter.close_on_shutdown else ""))
 
     # ---- commands --------------------------------------------------------------------
 

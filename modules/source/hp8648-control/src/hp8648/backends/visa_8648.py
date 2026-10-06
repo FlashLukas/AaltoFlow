@@ -171,12 +171,13 @@ class Visa8648:
     def startup_notes(self) -> list[str]:
         return list(self._notes)
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         # RF OFF only if we actually have a session -- i.e. only to a generator
         # we claimed and opened. After a refused claim or a failed open there
-        # is no session and this sends nothing.
+        # is no session and this sends nothing. rf_off=False is a restart
+        # (shutdown{keep_outputs}): the RF is left as it is.
         try:
-            if self._inst is not None:
+            if self._inst is not None and rf_off:
                 self._inst.write("OUTP:STAT OFF")       # RF off on the way out
         finally:
             try:

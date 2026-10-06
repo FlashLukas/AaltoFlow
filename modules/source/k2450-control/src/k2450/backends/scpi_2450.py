@@ -144,14 +144,15 @@ class VisaK2450:
                 self._claim.release()
                 self._claim = None
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         if self._inst is None:
             # never opened (or already closed): nothing to switch off, but a
             # half-finished open may still hold the claim -- let it go
             self._drop_connection()
             return
         try:
-            self._w(":OUTP OFF")                              # VERIFY
+            if output_off:                                    # not on a restart
+                self._w(":OUTP OFF")                          # VERIFY
         finally:
             # the address is released only AFTER the output-off went out, so
             # no other service can grab the 2450 while it is still sourcing

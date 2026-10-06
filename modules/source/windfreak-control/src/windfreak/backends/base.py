@@ -48,10 +48,12 @@ class DualSynth(Protocol):
         Any value that could not be read is None and named in `unread`; the
         brain then shows its config value and says so in a warn event."""
 
-    def close(self) -> None:
+    def close(self, rf_off: bool = True) -> None:
         """Both outputs off, then disconnect. Safe to call on shutdown/crash.
         (Shutdown is NOT covered by the read-only start rule: switching the
-        RF off on the way out stays, deliberately.)"""
+        RF off on the way out stays, deliberately.)
+        rf_off=False: a restart (shutdown{keep_outputs}) -- disconnect and
+        release the port, but leave both outputs as they are."""
 
     # ---- per channel ------------------------------------------------------
     def set_output(self, ch: int, on: bool) -> None:

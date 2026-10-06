@@ -62,7 +62,9 @@ The module **adopts** the controller's state: blade, modes, frequency, phase and
 whether the wheel runs. Nothing is commanded or written at start (queries only;
 even a value outside the config safety envelope is adopted, not clamped) -- a spinning chopper is
 harmless and somebody's lock-in may be using it. At shutdown the wheel is left
-as it is, unless `hardware.stop_on_exit = True`.
+as it is, unless `hardware.stop_on_exit = True`. The verb is
+`shutdown{keep_outputs?}`: `keep_outputs: true` (a restart for a code update)
+leaves the wheel running even with `stop_on_exit` set.
 
 ## Layout
 

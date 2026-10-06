@@ -120,6 +120,16 @@ def test_close_switches_off_and_gives_the_buttons_back(fake_serial):
     b.close()                          # twice is harmless
 
 
+def test_close_keeping_outputs_leaves_the_stage(fake_serial):
+    # shutdown{keep_outputs}: a restart sends no OUTP (the buttons still go back)
+    b = DsiSerialAmp("COM99", buttons_on_exit=True)
+    b.open()
+    ser = fake_serial[0]
+    n = len(ser.written)
+    b.close(output_off=False)
+    assert ser.written[n:] == ["*BUTTONS ON"] and ser.closed
+
+
 def test_brain_on_the_real_backend(fake_serial):
     """The brain runs unchanged on the serial backend."""
     from dsamp.amplifier import Amplifier

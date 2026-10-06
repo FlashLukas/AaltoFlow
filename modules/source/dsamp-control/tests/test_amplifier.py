@@ -148,6 +148,22 @@ def test_shutdown_switches_off_and_goes_to_minimum_gain():
     a.shutdown()                      # twice must be harmless
 
 
+def test_shutdown_keep_outputs_leaves_stage_and_gain():
+    # a restart for a code update: disconnect, no output or gain command
+    cfg = Config()
+    a, backend = build_sim_system(cfg)
+    a.start()
+    a.set_gain(8.0)
+    a.set_amp(True)
+    calls = []
+    backend.set_output = lambda on: calls.append(("out", on))   # spies
+    backend.set_gain = lambda dB: calls.append(("gain", dB))
+    a.shutdown(keep_outputs=True)
+    assert calls == []
+    assert backend._output is True and backend._gain == 8.0
+    assert backend._open is False and a.status().connected is False
+
+
 def test_amp_on_warns_about_termination(amp):
     amp.set_amp(True)
     assert any(lvl == "warn" and "terminated" in m for lvl, m in amp.events)

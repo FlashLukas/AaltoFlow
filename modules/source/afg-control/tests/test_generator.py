@@ -319,3 +319,16 @@ def test_shutdown_switches_every_output_off():
     assert not sim.ch[0]["output"] and not sim.ch[1]["output"]
     assert gen.status()["connected"] is False
     gen.shutdown()                            # twice is fine
+
+
+def test_shutdown_keep_outputs_changes_nothing():
+    # a restart for a code update: disconnect, but send no write at all
+    gen, sim = build_sim_system(Config())
+    gen.start()
+    gen.set_output("ch2", True)
+    wait(gen, lambda s: s["ch2_output"] and s["ch2_settled"])
+    n = len(sim.writes)
+    gen.shutdown(keep_outputs=True)
+    assert sim.writes[n:] == []
+    assert sim.ch[0]["output"] and sim.ch[1]["output"]
+    assert gen.status()["connected"] is False and not sim._open

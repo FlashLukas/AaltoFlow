@@ -268,12 +268,13 @@ class TekAFG:
                 self._hwlock.release()
                 self._hwlock = None
 
-    def close(self) -> None:
+    def close(self, outputs_off: bool = True) -> None:
         # Outputs OFF only through a session we opened: after a refused claim
-        # or a failed open there is none, and nothing is sent.
+        # or a failed open there is none, and nothing is sent. outputs_off=False
+        # is a restart (shutdown{keep_outputs}): the outputs stay as they are.
         try:
             if self._inst is not None:
-                for n in (1, 2):
+                for n in ((1, 2) if outputs_off else ()):
                     try:
                         self._inst.write(f"OUTP{n}:STAT OFF")
                     except Exception:

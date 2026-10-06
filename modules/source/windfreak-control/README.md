@@ -108,7 +108,10 @@ exactly that; a running output keeps running. The config's channel values are
 not pushed; they are overwritten with what was read, and a value goes to the
 instrument only when someone sets it. (The phase has no readback: "0 deg" is
 the phase at service start.) On `shutdown`, Ctrl-C and when the GUI of a local
-simulation closes, both outputs are switched **off**.
+simulation closes, both outputs are switched **off**. Verb
+`shutdown{keep_outputs?}`: with `keep_outputs: true` (a restart for a code
+update) the service closes but leaves both outputs as they are, and the next
+start adopts them.
 
 ## What a scan sees (`describe`)
 

@@ -171,8 +171,12 @@ class PhaseShifter:
         if found:
             self._emit("info", "adopted from the unit: " + ", ".join(found))
 
-    def shutdown(self) -> None:
-        """RF output off, stop the worker, disconnect. Safe to call twice / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """RF output off, stop the worker, disconnect. Safe to call twice / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the port the same, but leave the RF output as
+        it is -- the next start adopts it."""
         self._stop.set()
         self._kick.set()
         if self._worker is not None and self._worker is not threading.current_thread():
@@ -181,7 +185,7 @@ class PhaseShifter:
         was = self._connected
         try:
             with self._lock:
-                if self._connected:
+                if self._connected and not keep_outputs:
                     try:
                         self.backend.set_output(False)
                     finally:
@@ -190,12 +194,13 @@ class PhaseShifter:
         finally:
             try:
                 with self._lock:
-                    self.backend.close()
+                    self.backend.close(rf_off=not keep_outputs)
             finally:
                 self._connected = False
                 self._snap = self._build_snapshot()
                 if was:
-                    self._emit("info", "disconnected (RF output off)")
+                    self._emit("info", "disconnected (RF output left as it is)"
+                               if keep_outputs else "disconnected (RF output off)")
 
     # ---- commands (each clamps, rounds, then writes) -----------------------
 

@@ -190,15 +190,19 @@ class Amplifier:
             self._check_output_level()
         return True
 
-    def shutdown(self) -> None:
-        """Stage OFF, gain to minimum, disconnect. Safe to call twice / on a crash."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stage OFF, gain to minimum, disconnect. Safe to call twice / on a crash.
+
+        keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
+        disconnect and release the port the same, but leave the stage and its
+        gain as they are -- the next start adopts them."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None
         try:
             with self._hw:
-                if self._connected:
+                if self._connected and not keep_outputs:
                     try:
                         self.backend.set_output(False)
                         self.backend.set_gain(self.gain_range()[0])
@@ -208,13 +212,14 @@ class Amplifier:
         finally:
             try:
                 with self._hw:
-                    self.backend.close()
+                    self.backend.close(output_off=not keep_outputs)
             finally:
                 was = self._connected
                 self._connected = False
                 self._snap = self._offline_status()
                 if was:
-                    self._emit("info", "disconnected (stage OFF)")
+                    self._emit("info", "disconnected (stage left as it is)"
+                               if keep_outputs else "disconnected (stage OFF)")
 
     # ---- commands ------------------------------------------------------------
 
