@@ -186,8 +186,14 @@ class Rotator:
             self._emit("warn", f"controller acceleration {a:.4g} deg/s^2 is above the "
                                f"limit {self.cfg.limits.max_acceleration:.4g} (left as is)")
 
-    def shutdown(self) -> None:
-        """Stop motion (profiled), stop polling, close. Idempotent."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stop motion (profiled), stop polling, close. Idempotent.
+
+        ``keep_outputs`` (shutdown{keep_outputs: true}, a restart for a code
+        update) changes nothing here: stopping motion is a SAFETY step that a
+        restart keeps (no move may run on unsupervised), and nothing is moved
+        back, homed or parked either way -- the next start adopts the position.
+        """
         if not self._connected:
             return
         try:

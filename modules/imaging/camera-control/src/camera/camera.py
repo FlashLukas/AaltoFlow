@@ -546,7 +546,16 @@ class Camera:
             self._exposure_known = v
             self._emit("info", f"camera exposure adopted: {v:g} us")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        # keep_outputs (shutdown{keep_outputs: true}) is a RESTART for a code
+        # update. Nothing below commands XY or Z in either case: a routine cut
+        # short by _stop is "killed" and leaves Z where it is (its put-Z-back
+        # is skipped on _stop), and the motion clients are only closed -- so
+        # the sample stays exactly where it is and the next start adopts it.
+        # The one write left, putting back the working exposure an autofocus
+        # had switched, is done in both cases: it RESTORES the user's setting
+        # (the adopt rule), and keeping the autofocus exposure would make the
+        # next start adopt a value nobody chose.
         self._stop.set()
         if self._engine is not None:
             self._engine.join(timeout=2.0)

@@ -109,7 +109,8 @@ Every action is a ZeroMQ command (see `scripts/camera_console.py` for the verbs)
 `snapshot`, `autofocus`, `set_tracking`, `set_stabilize`, `set_selected_index`,
 `move_xy` / `read_xy`, `set_z` / `read_z`, `read_position_px` / `set_position_px`,
 `load_pattern` / `save_pattern`, `set_objective`, `get_frame`, plus the universal
-`status` / `info` / `get_config` / `set_config`.
+`status` / `info` / `get_config` / `set_config` / `describe` / `shutdown{keep_outputs?}`
+(shutdown never moves XY or Z; `keep_outputs: true` marks a restart for a code update).
 
 ## The laser on the sample, and fly scans in camera coordinates
 

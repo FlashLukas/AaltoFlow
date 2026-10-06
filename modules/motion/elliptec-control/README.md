@@ -113,6 +113,7 @@ status (published at ~8 Hz). An axis is its index 0..n-1, or `"@<address>"`.
 | user zero              | `set_zero` / `clear_zero` `{axis}` · `set_offset` `{axis, value}` |
 | identity, pulses/rev   | `{"cmd":"info"}` |
 | describe actions       | `home_<addr>`, `set_zero_<addr>`, `stop` (bare verbs) |
+| clean stop / restart   | `{"cmd":"shutdown"}` · `shutdown{keep_outputs?}`: `true` = restart for a code update (mounts stopped, nothing moved, the next start adopts the angles) |
 
 Arrived = `target_deg[i]` equals what you sent **and** `moving[i]` is false;
 that is exactly the settle policy `describe` declares for scan-core.

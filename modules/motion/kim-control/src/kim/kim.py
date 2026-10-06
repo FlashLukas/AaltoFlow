@@ -347,8 +347,16 @@ class Kim:
         if found:
             self._emit("info", "adopted from the controller: " + "; ".join(found))
 
-    def shutdown(self) -> None:
-        """Stop all motion and close the backend.  Idempotent."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stop all motion and close the backend.  Idempotent.
+
+        ``keep_outputs`` (shutdown{keep_outputs: true}, a restart for a code
+        update) changes nothing here: stopping motion is a SAFETY step that a
+        restart keeps (no move may run on unsupervised), and nothing is moved
+        back, homed or parked either way -- the next start adopts the position.
+        (A running px calibration is aborted either way; its own finally puts
+        back the drive voltages it found -- the user's setting, not a new one.)
+        """
         if not self._connected:
             return
         self.stream_stop()

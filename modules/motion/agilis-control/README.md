@@ -84,6 +84,7 @@ version.
   crashed session, so without its dead-man) is stopped after 2 s. `info` and
   status list what start-up wrote (`startup_writes`). On shutdown both axes
   stop and the push buttons are handed back (`ML`).
+  `shutdown{keep_outputs?}` -- `keep_outputs: true` is a restart for a code update: motion is still stopped, nothing is moved back or parked, the next start adopts the position.
 
 ## Architecture (same as every module in the suite)
 

@@ -244,8 +244,13 @@ class Piezo:
                                    "adopted (the brain ramps; the controller is not written)")
                 self.cfg.motion.ramp_mode = "software"
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop ramping and close the backend.  Idempotent.
+
+        ``keep_outputs`` (shutdown{keep_outputs: true}, a restart for a code
+        update) changes nothing here: stopping motion is a SAFETY step that a
+        restart keeps (no move may run on unsupervised), and nothing is moved
+        back, homed or parked either way -- the next start adopts the position.
 
         We deliberately leave the piezo where it is rather than forcing it to 0
         -- a surprise full-travel move could crash a sample into the optics.

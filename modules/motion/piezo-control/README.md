@@ -93,6 +93,7 @@ effect.
 | command | args | effect |
 |---|---|---|
 | `status` / `info` / `get_config` / `set_config` | — / `config` | universal verbs |
+| `shutdown` | `keep_outputs?` | clean stop (ramp stopped, piezo left where it is); `true` = restart for a code update, same, the next start adopts the position |
 | `move_axis` | `axis`, `position` | absolute move, one axis (µm) |
 | `move_xy` | `x`, `y` | absolute move, both axes |
 | `move_relative` | `axis`, `value` | move relative to the axis' zero |

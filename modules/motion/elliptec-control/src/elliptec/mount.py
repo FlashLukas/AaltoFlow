@@ -175,8 +175,13 @@ class RotationMount:
             self.home_all()
         self._emit("info", f"elliptec started: {self.backend.idn()}")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop every mount, stop the worker, close the bus.  Idempotent.
+
+        ``keep_outputs`` (shutdown{keep_outputs: true}, a restart for a code
+        update) changes nothing here: stopping motion is a SAFETY step that a
+        restart keeps (no move may run on unsupervised), and nothing is moved
+        back, homed or parked either way -- the next start adopts the position.
 
         A rotation mount holds its angle unpowered, so "safe" here just means
         "not turning": each axis gets a stop before the port is closed.

@@ -104,6 +104,7 @@ Commands are JSON over a REQ/REP socket on port 5559; every reply is
 | relative move (from the zero)  | `{"cmd":"move_relative","axis":"X","value":5.0}` |
 | home / stop                    | `{"cmd":"home"}` (all) or `{"axis":"Y"}` |
 | position list                  | `store_position` / `goto_position` / `save_positions` / `load_positions` |
+| clean stop / restart           | `{"cmd":"shutdown"}` · `shutdown{keep_outputs?}`: `true` = restart for a code update (motion stopped, nothing homed or moved back) |
 
 Axes accept `"X"/"Y"/"Z"` or `0/1/2`.
 

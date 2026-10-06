@@ -74,7 +74,8 @@ A GUI started without `--connect` runs its own private simulator.
 
 ## Wire contract
 
-Universal verbs `status, info, get_config, set_config, describe, shutdown`, plus
+Universal verbs `status, info, get_config, set_config, describe, shutdown{keep_outputs?}`
+(`keep_outputs: true` is a restart for a code update: motion is still stopped, nothing is moved back or parked, the next start adopts the position.), plus
 `move_to{angle}`, `move_by{delta}` (both reply `target` + `move_id`), `home` (replies `home_id`), `stop{immediate}`,
 `set_velocity{value}`, `set_acceleration{value}`, `set_wrap{wrap}`, `set_zero`,
 `clear_zero`, `store_angle{slot,name}`, `clear_angle{slot}`, `goto_angle{slot}` (replies `move_id`),

@@ -28,6 +28,7 @@ from ..control import ControlLease
 from .. import secure
 from .describe import build_manifest
 from . import protocol as P
+from ..config import _cast as _cast_cfg
 
 
 class PortInUse(RuntimeError):
@@ -58,6 +59,10 @@ class ElliptecService:
         self._guard = None                   # secure.Guard while secured
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._stop = threading.Event()
+        # Set by shutdown{keep_outputs: true}: a RESTART (code update). The
+        # service still closes and releases everything, but changes nothing
+        # the instrument holds; the next start ADOPTS that state.
+        self._keep_outputs = False
         self._threads: list[threading.Thread] = []
         # One controller, many viewers (control.py, docs/DEVELOPER_NOTES.md
         # section 4 "Control"): the gate every command passes.
@@ -137,8 +142,10 @@ class ElliptecService:
             t.join(timeout=2.0)
         secure.release_server(self._guard)
         self._guard = None
+        if self._keep_outputs:
+            print("shutdown: keep_outputs -- instrument state left as it is (restart)")
         try:
-            self.brain.shutdown()
+            self.brain.shutdown(keep_outputs=self._keep_outputs)
         except Exception:
             pass
 
@@ -282,8 +289,14 @@ class ElliptecService:
             # hard kill gives the brain no chance to close its hardware (it wedged
             # the PM16 until replugged, docs/DEVELOPER_NOTES.md gotcha #25). Setting _stop
             # ends serve_forever, whose finally: stop() shuts the brain down.
+            # keep_outputs=true: a restart for a code update -- close and
+            # release everything, but leave the instrument as it is. Parsed
+            # with the config's bool cast: the text "false" is False (gotcha #3).
+            self._keep_outputs = _cast_cfg(
+                str((req or {}).get("keep_outputs", False)), "bool")
             self._stop.set()
-            return {"ok": True, "stopping": True}
+            return {"ok": True, "stopping": True,
+                    "kept_outputs": self._keep_outputs}
         if cmd == "info":
             info = b.info()
             info["limits"] = P.config_to_dict(b.cfg)["limits"]

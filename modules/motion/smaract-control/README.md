@@ -97,7 +97,7 @@ it reports, then move gently towards each end and set `limits.min_mm` /
 | `store_position` / `goto_position` / `clear_position` | `slot` (+ `name`) | |
 | `get_positions` / `save_positions` / `load_positions` | (`path`) | `positions` |
 | `stream_start` / `stream_read` / `stream_stop` | — | `stream_id` / `stream` |
-| universal | `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown` | |
+| universal | `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown{keep_outputs?}` (`true` = restart for a code update: carriage stopped, nothing moved, the next start adopts) | `kept_outputs` |
 
 A reply means **accepted**, not arrived: watch `status` (`target_mm`, `moving`,
 `on_target`, `referenced`, `referencing`, `ref_id`).

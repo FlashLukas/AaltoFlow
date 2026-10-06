@@ -158,6 +158,7 @@ Commands are JSON over a REQ/REP socket on port 5567; every reply is
 | display zero / clear            | `{"cmd":"set_zero"}` · `{"cmd":"clear_zero"}` |
 | stop                            | `{"cmd":"stop"}` (all) or `{"axis":"Y"}` |
 | position list                   | `store_position` / `goto_position` / `save_positions` / `load_positions` |
+| clean stop / restart            | `{"cmd":"shutdown"}` · `shutdown{keep_outputs?}`: `true` = restart for a code update (motion stopped, nothing moved back, the next start adopts the counters) |
 | record the position (fly scan)  | `stream_start` (`rate_hz`, default 50) / `stream_read` / `stream_stop` → `{stream: {t, values: {x, y, z}}}` |
 
 Axes accept `"X"/"Y"/"Z"` or `0/1/2`.

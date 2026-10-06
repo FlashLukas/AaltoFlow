@@ -74,12 +74,15 @@ class ZPiezo:
             self._emit("warn", f"instrument holds {v:.3f} V, outside the limits "
                                f"{lim.v_min:g}..{lim.v_max:g} V; left as it is")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         # Park ONLY a KCube we actually opened.  If open() failed -- e.g. the
         # serial is claimed by another service (hwlock.HardwareBusy) -- that
         # other service owns the focus, and "parking" it at v_min from here
         # would defocus somebody else's measurement.
-        if self._connected:
+        # keep_outputs (shutdown{keep_outputs: true}) is a RESTART for a code
+        # update: the focus stays where it is (no park), the next start adopts
+        # the voltage. There is no motion to stop -- a set is one write.
+        if self._connected and not keep_outputs:
             try:
                 self.set_voltage(self.cfg.limits.v_min)   # park low = safe
             except Exception:

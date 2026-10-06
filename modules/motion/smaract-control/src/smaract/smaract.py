@@ -172,8 +172,13 @@ class Positioner:
         if self.cfg.motion.reference_on_start and not self._known:
             self.find_reference()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop the carriage, stop polling, close the controller. Idempotent.
+
+        ``keep_outputs`` (shutdown{keep_outputs: true}, a restart for a code
+        update) changes nothing here: stopping motion is a SAFETY step that a
+        restart keeps (no move may run on unsupervised), and nothing is moved
+        back, homed or parked either way -- the next start adopts the position.
 
         Stopping first matters: a closed-loop move left running while the
         library is released would keep the piezo stepping unobserved.

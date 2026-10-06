@@ -415,8 +415,16 @@ class AgilisStage:
                 self._emit("warn", f"{AXES[a]}: the controller's amplitude differs from the "
                                    "one the step size was measured at: um are approximate")
 
-    def shutdown(self) -> None:
-        """Stop all motion, stop polling and close the backend. Idempotent."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stop all motion, stop polling and close the backend. Idempotent.
+
+        ``keep_outputs`` (shutdown{keep_outputs: true}, a restart for a code
+        update) changes nothing here: stopping motion is a SAFETY step that a
+        restart keeps (no move may run on unsupervised), and nothing is moved
+        back, homed or parked either way -- the next start adopts the position.
+        (The real backend's close() still hands the push buttons back with ML
+        when hardware.local_on_close is set: a mode, not a position.)
+        """
         if not self._connected:
             return
         self.stream.stop()

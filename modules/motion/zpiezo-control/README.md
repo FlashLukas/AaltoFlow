@@ -83,6 +83,10 @@ uv run scripts/smoke_test.py
 uv run pytest -q
 ```
 
+`shutdown` parks the KCube at `v_min` (the safe end; the defocus is accepted).
+`shutdown{keep_outputs?}` with `true` is a restart for a code update: the voltage
+(the focus) stays where it is and the next start adopts it.
+
 The camera module drives this service when its `hardware.use_remote_z = true`
 (set `z_host` / `z_cmd_port` / `z_pub_port` in the camera config).
 
