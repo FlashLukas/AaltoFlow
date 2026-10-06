@@ -26,7 +26,9 @@ What the data say, in physics terms (see docs/sg12000l_spurs.png):
 Model used between the measured points: at each measured carrier frequency,
 level(P) = dBc_at_ref + slope * (P - ref), with P clamped to the measured power
 span (no invented growth beyond +5 dBm); linear interpolation in frequency
-between adjacent measured carriers; nothing outside a measured segment.
+between adjacent measured carriers. A segment speaks for its surroundings up to
+HALF WAY to the next measured carrier (a frequency takes what the nearer
+measured carrier showed, held at the end value); beyond that, nothing.
 """
 
 from __future__ import annotations
@@ -57,18 +59,40 @@ def table_ok() -> bool:
     return bool(load_table().get("model"))
 
 
+def _reach(fs: list[float], carriers: list[float]) -> tuple[float, float]:
+    """How far a segment measured at carriers fs[0]..fs[-1] speaks for: up to
+    HALF WAY to the next measured carrier on each side. Between two measured
+    carriers a frequency takes what the NEARER one showed. Before 2026-10-06 a
+    segment stopped exactly at its first and last carrier, so 3300 MHz -- 5 MHz
+    below the carrier where the 2nd harmonic was measured at -15 dBc, 280 MHz
+    above one where it was below the floor -- got no line at all and looked
+    clean (lab PC). The stored carriers are rounded to 0.1 MHz, which the same
+    rule absorbs (the real 3.30488 GHz is nearest to the stored 3.3049)."""
+    lo, hi = fs[0], fs[-1]
+    below = [c for c in carriers if c < lo - 1e-9]
+    above = [c for c in carriers if c > hi + 1e-9]
+    return ((lo + max(below)) / 2 if below else lo,
+            (hi + min(above)) / 2 if above else hi)
+
+
 def _level_dbc(seg: list[dict], f_ghz: float, p_dbm: float, ref: float,
-               p_span: tuple[float, float]) -> float | None:
+               p_span: tuple[float, float],
+               carriers: list[float] | None = None) -> float | None:
     fs = [r["f_GHz"] for r in seg]
-    if not fs[0] <= f_ghz <= fs[-1]:
+    lo, hi = _reach(fs, carriers or fs)
+    if not lo <= f_ghz <= hi:
         return None
-    i = min(bisect_right(fs, f_ghz) - 1, len(seg) - 2)
-    a, b = seg[i], seg[i + 1]
-    t = (f_ghz - a["f_GHz"]) / (b["f_GHz"] - a["f_GHz"])
     p = min(max(p_dbm, p_span[0]), p_span[1])
 
     def at(r):
         return r["dBc_at_ref"] + r["slope_dBc_per_dB"] * (p - ref)
+    if f_ghz <= fs[0]:
+        return at(seg[0])                  # nearer to the first measured carrier
+    if f_ghz >= fs[-1] or len(seg) == 1:
+        return at(seg[-1])
+    i = min(bisect_right(fs, f_ghz) - 1, len(seg) - 2)
+    a, b = seg[i], seg[i + 1]
+    t = (f_ghz - a["f_GHz"]) / (b["f_GHz"] - a["f_GHz"])
     return at(a) + t * (at(b) - at(a))
 
 
@@ -86,11 +110,12 @@ def spur_lines(f_hz: float, p_dbm: float) -> list[tuple[float, float, str]]:
     ref = float(tab.get("rules", {}).get("ref_power_dBm", 5.0))
     powers = tab.get("source", {}).get("powers_dBm") or [ref]
     p_span = (min(powers), max(powers))
+    carriers = sorted(float(c) for c in (tab.get("source", {}).get("carrier_GHz") or []))
     f_ghz = f_hz / 1e9
     out = []
     for tag, segs in model.items():
         for seg in segs:
-            dbc = _level_dbc(seg, f_ghz, p_dbm, ref, p_span)
+            dbc = _level_dbc(seg, f_ghz, p_dbm, ref, p_span, carriers)
             if dbc is not None:
                 out.append((MULTIPLE[tag] * f_hz, p_dbm + dbc, tag))
                 break

@@ -58,3 +58,25 @@ def test_nothing_invented_where_nothing_was_measured():
 
 def test_missing_file_degrades_to_no_spurs(tmp_path):
     assert spurs.load_table.__wrapped__(tmp_path / "nope.json") == {}
+
+
+def test_a_carrier_takes_what_the_nearest_measured_carrier_showed():
+    """Lab PC 2026-10-06 (Lukas: "this is missing harmonics for sure"): at
+    3300 MHz / +5 dBm the screen drew NO 2nd harmonic, though the measured
+    carrier 3304.88 MHz showed it at -15.4 dBc. Segments stopped exactly at
+    their first measured carrier (stored rounded, 3.3049 GHz), so the measured
+    point itself and everything below it looked clean."""
+    from dssg import spurs
+    for f in (3.30488e9, 3.300e9, 3.20e9):        # nearer to 3304.88 than to 3024.4
+        lines = {t: p for _f, p, t in spurs.spur_lines(f, 5.0)}
+        assert "2f" in lines, f
+        assert -12.5 < lines["2f"] < -9.0, (f, lines["2f"])   # +5 dBm, about -15 dBc
+    # nearer to 3024.4 MHz, where the 2nd harmonic was below the floor
+    assert "2f" not in {t for _f, _p, t in spurs.spur_lines(3.10e9, 5.0)}
+
+
+def test_a_segment_reaches_half_way_to_the_next_measured_carrier():
+    from dssg.spurs import _reach
+    assert _reach([3.3049, 4.0], [3.0244, 3.3049, 4.0, 4.3]) == (
+        (3.3049 + 3.0244) / 2, (4.0 + 4.3) / 2)
+    assert _reach([0.5, 1.0], [0.5, 1.0]) == (0.5, 1.0)       # nothing beyond the data
