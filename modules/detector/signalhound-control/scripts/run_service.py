@@ -28,6 +28,12 @@ shsg (CW) and shsna (TG sweeps) through this service. The TG44A has no off, so
 on shutdown or Ctrl+C it is PARKED (hardware.tg_park_hz / tg_park_dbm) before
 the analyser is closed.
 
+The sweep window (centre, span, reference level, RBW, VBW, image rejection,
+detector, averages) is REMEMBERED across a restart in signalhound_sweep.ini
+(signalhound_sweep_sim.ini for the simulator) next to this folder's
+pyproject.toml: the analyser keeps no settings to adopt, so the service does.
+Loading it at start sends nothing; it is what the first sweep will use.
+
 Output is ASCII only: the launcher reads it through a pipe (suite gotcha #14).
 """
 
@@ -95,6 +101,12 @@ def main() -> int:
         cfg.hardware.dll_path = args.dll
 
     signalhound = build_analyzer(cfg, args.real)
+    # Remember the operator's sweep window across restarts (remember.py). A
+    # simulator keeps its own file, so a sim session cannot overwrite the
+    # window of the real analyser on the same PC.
+    from signalhound.remember import SweepMemory, memory_path
+    signalhound.attach_memory(SweepMemory(memory_path(Path(__file__).resolve().parents[1],
+                                                      simulated=not args.real)))
     hw = cfg.hardware
     if args.real:
         which = f"serial {hw.serial}" if hw.serial else "the first one found"

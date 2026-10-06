@@ -15,3 +15,7 @@ Thumbs.db
 
 # this PC's own settings (model, serial, dll path), loaded by run_service.py
 signalhound.ini
+
+# the sweep window the service remembers across restarts (remember.py)
+signalhound_sweep*.ini
+signalhound_sweep*.tmp

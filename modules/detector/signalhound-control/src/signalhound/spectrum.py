@@ -86,6 +86,9 @@ shows `configured` False and `points` 0 until then. What the TG is doing
 cannot be read (saGetTgFreqAmpl only echoes what THIS handle set; the lab
 found a TG44A emitting a CW another program had left on), so `tg_mode` starts
 as "unknown" -- never a guessed "off" -- until a client commands it.
+Because the analyser keeps nothing, the SERVICE remembers the sweep window
+across a restart (remember.py, 2026-10-06): start() loads it into cfg.sweep --
+still writing nothing to the analyser; it is what the first sweep will use.
 """
 
 from __future__ import annotations
@@ -230,10 +233,17 @@ def _peak_and_floor(freqs, db) -> tuple[float, float, float]:
 
 
 class SpectrumAnalyzer:
-    def __init__(self, backend, cfg: Config | None = None, clock=time.monotonic):
+    def __init__(self, backend, cfg: Config | None = None, clock=time.monotonic,
+                 memory=None):
         self.backend = backend
         self.cfg = cfg or Config()
         self._clock = clock
+        # remember.SweepMemory, or None (tests, the in-process GUI simulator):
+        # the operator's sweep window, kept across a restart of the SERVICE
+        # (the analyser itself keeps nothing -- see remember.py)
+        self._memory = None
+        if memory is not None:
+            self.attach_memory(memory)
         self._hw = threading.RLock()        # serialises EVERY backend call
         self._lock = threading.Lock()       # guards the snapshot, traces, acquisition
 
@@ -296,6 +306,12 @@ class SpectrumAnalyzer:
         # replaced by the service / GUI to forward events; default = no-op
         self._on_event = lambda level, msg: None
 
+    def attach_memory(self, memory) -> None:
+        """Remember the sweep window in `memory` (a remember.SweepMemory).
+        Before start(): start() loads it."""
+        memory.on_error = lambda msg: self._emit("warn", msg)
+        self._memory = memory
+
     @property
     def simulated(self) -> bool:
         return bool(getattr(self.backend, "simulated", True))
@@ -323,10 +339,17 @@ class SpectrumAnalyzer:
         acq = self.cfg.acquisition
         if acq.continuous and not acq.sweep_on_start:
             acq.continuous = False
+        # The REMEMBERED sweep window (remember.py) replaces the config's
+        # [sweep] defaults. This only fills cfg -- nothing reaches the analyser
+        # until the first deliberate sweep, so the start-up rule still holds.
+        # Sanitised right below: the model just read decides what fits.
+        remembered = self._memory.load_into(self.cfg.sweep) if self._memory else None
         self._sanitise_config()
         self._connected = True
         self._emit("info", f"connected: {self._idn}"
                    + ("  + tracking generator" if self._tg else "  (no tracking generator)"))
+        if remembered is not None:
+            self._emit(*remembered)
         if not acq.continuous:
             self._emit("info", "analyser left as opened (nothing configured); "
                                "Continuous or Acquire starts sweeping")
@@ -346,6 +369,8 @@ class SpectrumAnalyzer:
             self._thread.join(timeout=2.0)
         self._thread = None
         was = self._connected
+        if self._memory is not None:
+            self._memory.flush()            # the last change, if the throttle held it back
         try:
             with self._hw:
                 if was and self._tg:
@@ -1329,6 +1354,8 @@ class SpectrumAnalyzer:
             if self._acq is not None:
                 restarted = self._acq["id"]
                 self._acq = self._new_acq(restarted)
+        if self._memory is not None:
+            self._memory.note(self.cfg.sweep)   # throttled; only what changed is written
         self._emit("warn" if clamped else "info", msg + (" (clamped)" if clamped else ""))
         if restarted is not None:
             self._emit("warn", f"acquisition #{restarted} restarted: settings changed")

@@ -76,6 +76,19 @@ of those configures the analyser with the settings shown.
 start. (The in-process simulator GUI, `python -m signalhound.apps.gui`, sweeps
 at once: it has no instrument to disturb.)
 
+**The service remembers the sweep window.** Because the analyser forgets
+everything when it is closed, the service itself keeps centre, span,
+reference level, RBW, VBW, image rejection, detector and averages in
+`signalhound_sweep.ini` next to `signalhound.ini` (the simulator uses
+`signalhound_sweep_sim.ini`, so it cannot overwrite the real analyser's
+window). It is rewritten after a change -- at most once a second, and once
+more on shutdown -- atomically, so a crash never leaves half a file. At start it
+replaces the `[sweep]` defaults of `signalhound.ini`, clamped to the model just
+read; it is still not sent to the analyser until the first sweep. `continuous`
+and the tracking generator are NOT remembered. A missing or unreadable file
+means the config defaults, with one line in the log; delete the file to start
+from the defaults on purpose.
+
 What the TG is doing cannot be read either (measured: `saGetTgFreqAmpl` only
 echoes what this program set), and a TG44A may be emitting whatever another
 program left on -- so at start the TG is reported as **unknown**, never as a
@@ -265,3 +278,5 @@ python ../../../tools/check_modules.py signalhound --live
 
 `tests/test_tg_owner.py` pins down the TG contract above (in the simulator,
 against the fake DLL, and over the wire on ports 17600/17601).
+`tests/test_remember.py` pins down the remembered sweep window (restart,
+corrupt file, throttling, and that start-up still writes nothing).
