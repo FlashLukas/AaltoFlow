@@ -57,8 +57,8 @@ def test_a_failing_open_releases_the_address(fake_visa, monkeypatch):
     free afterwards and nothing but *CLS was written (no "outputs off" to a
     box we never identified)."""
     from fake_visa import FakeAFGInstrument
-    monkeypatch.setattr(FakeAFGInstrument, "query",
-                        lambda self, cmd: (_ for _ in ()).throw(TimeoutError("no answer")))
+    monkeypatch.setattr(FakeAFGInstrument, "read_raw",
+                        lambda self: (_ for _ in ()).throw(TimeoutError("no answer")))
     b = TekAFG(RES)
     with pytest.raises(TimeoutError):
         b.open()

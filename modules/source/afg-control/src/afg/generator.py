@@ -126,6 +126,10 @@ class Generator:
         self._readback = {ch: None for ch in self.channels}  # what it last reported
         self._read_gen = {ch: -1 for ch in self.channels}    # gen the read-back belongs to
         self._mismatch = {ch: "" for ch in self.channels}
+        # knobs the instrument CANNOT report (a firmware without the query,
+        # e.g. ramp symmetry on the AFG1062 FV:V1.0.2): their value is the one
+        # last set from here (the config's at start), and status says so
+        self._not_read_back = {ch: [] for ch in self.channels}
         self._force_off = {ch: False for ch in self.channels}
         # numbered one-shot operations (outputs_off, align_phase): the reply
         # carries the number, the status the last one FINISHED (gotcha #17)
@@ -165,6 +169,11 @@ class Generator:
         for err in self.backend.drain_errors():
             notes.append(("warn", f"instrument error while reading its state: {err}"))
         self._idn = self.backend.idn()
+        # optional backend method: what the real backend learned about its
+        # firmware when it opened (queries it lacks); the simulator has none
+        report = getattr(self.backend, "probe_report", None)
+        if callable(report):
+            notes = [("info", f"instrument: {line}") for line in report()] + notes
         self._connected = True
         self._stop.clear()
         snap = self._build_snapshot("")
@@ -184,7 +193,9 @@ class Generator:
         (so the worker sends nothing) and is copied into the config."""
         notes = []
         unread = list(got.get("unread") or [])
+        nrb = list(got.get("not_read_back") or [])
         with self._lock:
+            self._not_read_back[ch] = nrb
             want = self._want[ch]
             for key in _KNOBS + ("output", "mode"):
                 if key in got and (got[key] is not None or key == "load_ohm") \
@@ -205,6 +216,11 @@ class Generator:
         if unread:
             notes.append(("warn", f"{ch.upper()}: could not read " + ", ".join(unread) +
                                   " -- showing the config value there (NOT written)"))
+        if nrb:
+            notes.append(("info", f"{ch.upper()}: this instrument cannot report "
+                                  + ", ".join(nrb) + " while running -- showing what it "
+                                  "said at start (or the config value), then the value "
+                                  "last set from here (NOT written, NOT read back)"))
         if want.get("mode", "continuous") != "continuous":
             notes.append(("warn", f"{ch.upper()}: the instrument is in {want['mode']} mode "
                                   f"-- left as it is; this module sets only the "
@@ -451,6 +467,12 @@ class Generator:
         with self._lock:
             return dict(self._want[parse_channel(ch)])
 
+    def not_read_back(self, ch: str) -> list[str]:
+        """The knobs of channel `ch` the instrument cannot report (their value
+        is the one last set from here). [] for the simulator."""
+        with self._lock:
+            return list(self._not_read_back[parse_channel(ch)])
+
     def follows(self) -> bool:
         """Is "CH2 follows CH1" on?"""
         return self._follows()
@@ -682,6 +704,11 @@ class Generator:
         got = self.backend.read_channel(_index(ch))
         if got.get("unread"):
             return                              # a partial read decides nothing
+        # A knob in "not_read_back" is simply absent from `got`: the checks
+        # below only compare keys that ARE there, so it never makes a
+        # mismatch, and its value stays the one last set from here.
+        with self._lock:
+            self._not_read_back[ch] = list(got.get("not_read_back") or [])
         with self._lock:
             want = self._want[ch]
             prev = self._readback[ch] or {}
@@ -718,6 +745,7 @@ class Generator:
             want = {ch: dict(self._want[ch]) for ch in self.channels}
             gen = dict(self._gen)
             mismatch = dict(self._mismatch)
+            not_read_back = {ch: list(self._not_read_back[ch]) for ch in self.channels}
             readback = {ch: dict(self._readback[ch] or {}) for ch in self.channels}
             read_gen = dict(self._read_gen)
             op_done, op_ok = self._op_done, self._op_ok
@@ -754,6 +782,8 @@ class Generator:
             snap[f"{ch}_offset_actual_V"] = rb.get("offset_V", _NAN)
             snap[f"{ch}_settled"] = bool(settled)
             snap[f"{ch}_mismatch"] = mismatch[ch]
+            # e.g. "symmetry_pct": shown as last set from here, not read back
+            snap[f"{ch}_not_read_back"] = ", ".join(not_read_back[ch])
             if not (applied_now and not w["output"] and rb.get("output") is False):
                 all_off = False
         snap["all_off"] = bool(all_off)

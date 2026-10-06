@@ -122,6 +122,9 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
     env = gen.envelope(ch)
     follows = ch == "ch2" and gen.follows()
     has_freq = wf not in ("dc", "noise")
+    nrb = set(gen.not_read_back(ch))
+    NRB = (" NOT READ BACK on this instrument (its firmware lacks the query): "
+           "the value shown is the one last set from here.")
 
     def settle(key):
         return {"policy": "adopt_then_flag", "setpoint_key": key,
@@ -198,14 +201,16 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                       min=env["duty_min_pct"], max=env["duty_max_pct"],
                       read_path=[f"{ch}_duty_pct"],
                       set={"verb": "set_duty", "arg": "duty_pct", "extra": extra},
-                      settle=settle(f"{ch}_duty_pct"), timeout_s=10.0))
+                      settle=settle(f"{ch}_duty_pct"), timeout_s=10.0,
+                      help=NRB.strip() if "duty_pct" in nrb else ""))
     if wf == "ramp":
         out.append(_p(f"{ch}_symmetry", f"{C} ramp symmetry", "control", "float", unit="%",
                       group=grp, order=base_order + 7, decimals=2, step=1.0,
                       min=0.0, max=100.0, read_path=[f"{ch}_symmetry_pct"],
                       set={"verb": "set_symmetry", "arg": "symmetry_pct", "extra": extra},
                       settle=settle(f"{ch}_symmetry_pct"), timeout_s=10.0,
-                      help="50 = triangle, 100 = rising saw, 0 = falling saw."))
+                      help="50 = triangle, 100 = rising saw, 0 = falling saw."
+                           + (NRB if "symmetry_pct" in nrb else "")))
     load = "high-Z" if want.get("load_ohm") is None else f"{want['load_ohm']:g}"
     if gen.caps.get("load_settable"):
         out.append(_p(f"{ch}_load", f"{C} load setting", "control", "enum", unit="ohm",
@@ -226,6 +231,11 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
         _p(f"{ch}_mismatch", f"{C} not as asked", "indicator", "string", group=grp,
            order=base_order + 11, read_path=[f"{ch}_mismatch"],
            help="Empty when the instrument's read-back agrees with the request."),
+        _p(f"{ch}_not_read_back", f"{C} not read back", "indicator", "string",
+           group=grp, order=base_order + 14, read_path=[f"{ch}_not_read_back"],
+           help="Knobs this instrument cannot report (e.g. ramp symmetry on the "
+                "AFG1062 firmware V1.0.2). Their value is the one last set from "
+                "here; settled does not check them."),
         _p(f"{ch}_mode", f"{C} mode", "indicator", "string", group=grp,
            order=base_order + 12, read_path=[f"{ch}_mode"],
            help="continuous, or burst / sweep / modulated (set at the instrument; "

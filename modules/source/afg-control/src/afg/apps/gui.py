@@ -431,6 +431,16 @@ class ChannelCard(QtWidgets.QFrame):
                 wdg.setVisible(wf == "pulse")
             for wdg in (self.sym_spin, *self.sym_row):
                 wdg.setVisible(wf == "ramp")
+        # A knob the instrument cannot report (firmware without the query, e.g.
+        # ramp symmetry on the AFG1062 FV:V1.0.2) shows the value last SET from
+        # here -- say so next to it, so nobody takes it for a measurement.
+        nrb = s.get(f"{ch}_not_read_back") or ""
+        for row, key, name in ((self.duty_row, "duty_pct", "Duty"),
+                               (self.sym_row, "symmetry_pct", "Symmetry")):
+            unread = key in nrb
+            row[0].setText(name + (" *" if unread else ""))
+            row[0].setToolTip("* not read back: this instrument cannot report it; "
+                              "the value is the one last set from here" if unread else "")
         i = self.wave_combo.findData(wf)
         if i < 0:
             self.wave_combo.addItem(_WAVE_LABELS.get(wf, wf), wf)

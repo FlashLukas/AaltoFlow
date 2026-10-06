@@ -2,13 +2,25 @@
 
 Only what backends/tek_afg.py sends is understood: the queries it makes and
 the settings it writes (which change the fake's state, so a written value
-reads back). Every line written is logged, so a test can prove that open()
-sends nothing but *CLS and queries.
+reads back). The backend asks with write("...?") + read_raw(), as it does on
+the real unit; a write ending in "?" is logged in `queries`, every other one
+in `writes` -- so a test can prove that open() sets nothing.
 
-The answers follow the AFG3000/AFG1000 conventions the backend assumes
-(short-form shape names, phase in RADIANS, "9.9E+37" for an infinite load) --
-which are exactly the # VERIFY items: if the real unit differs, these tests
-still pass and the lab-PC checklist (README) is what catches it.
+Two FIRMWARE profiles:
+
+  "manual"   -- everything the AFG1000 programmer manual lists answers
+                cleanly (short-form shape names, phase in RADIANS, "9.9E+37"
+                for an infinite load). What another firmware may do.
+  "v1.0.2"   -- what the lab's unit (FV:V1.0.2) did on 2026-10-06, measured
+                with read-only queries and SYST:ERR? after each:
+                  * a query it does not know (FUNC:RAMP:SYMM?, VOLT:UNIT?,
+                    ...) -> an EMPTY answer and -102,"Syntax error" queued;
+                  * PULS:DCYC? -> the value AND -102 queued;
+                  * OUTP:IMP? -> b'9.9E+37\\xa6\\xb8\\n' (a GBK Ohm sign);
+                  * the first *IDN? after *CLS -> empty; the next one complete.
+
+`error_log` keeps every error the fake ever queued, with the query that
+caused it, so a test can tell which queries made errors.
 """
 
 from __future__ import annotations
@@ -22,18 +34,28 @@ import pytest
 _SHAPES = {"SIN": "SIN", "SQU": "SQU", "PULS": "PULS", "RAMP": "RAMP",
            "PRN": "PRN", "DC": "DC"}
 
+_SYNTAX = '-102,"Syntax error"'
+_OHM_GBK = b"\xa6\xb8"
+
 
 class FakeAFGInstrument:
-    def __init__(self, resource: str):
+    #: the profile new instruments get; the fixtures set it
+    firmware = "manual"
+
+    def __init__(self, resource: str, firmware: str | None = None):
         self.resource = resource
+        self.firmware = firmware or type(self).firmware
         self.writes: list[str] = []
         self.queries: list[str] = []
         self.closed = False
         self.timeout = None
         self.write_termination = self.read_termination = None
         self.errors: list[str] = []
-        self.dead = False                   # True: every query times out
+        self.error_log: list[tuple[str, str]] = []   # (query, error) ever queued
+        self.dead = False                   # True: every read times out
         self.ren_calls: list[int] = []
+        self._reply: bytes | None = None    # the answer waiting for read_raw
+        self._idn_after_cls = False
         self.ch = {
             1: {"OUTP": "1", "SHAP": "SIN", "FREQ": 30.0, "AMPL": 2.0, "UNIT": "VPP",
                 "OFFS": 0.0, "PHAS": 0.0, "DCYC": 50.0, "SYMM": 50.0, "IMP": 50.0,
@@ -43,9 +65,25 @@ class FakeAFGInstrument:
                 "IMP": 9.9e37, "BURS": "0", "MODE": "CW"},
         }
 
+    @property
+    def measured(self) -> bool:
+        return self.firmware == "v1.0.2"
+
+    def _error(self, cmd: str, err: str = _SYNTAX) -> None:
+        self.errors.append(err)
+        self.error_log.append((cmd, err))
+
     # ---- pyvisa resource surface ----------------------------------------
     def write(self, cmd: str):
+        if cmd.endswith("?"):
+            self.queries.append(cmd)
+            self._reply = self._answer(cmd)
+            return
         self.writes.append(cmd)
+        if cmd == "*CLS":
+            self.errors.clear()
+            self._idn_after_cls = True
+            return
         m = re.match(r"(OUTP|SOUR)(\d):(\S+) (\S+)$", cmd)
         if not m:
             return
@@ -69,24 +107,42 @@ class FakeAFGInstrument:
         elif path == "PULS:DCYC":
             c["DCYC"] = float(arg)
         elif path == "FUNC:RAMP:SYMM":
+            # accepted here; on the real FV:V1.0.2 NOT TESTED (# VERIFY)
             c["SYMM"] = float(arg)
 
-    def query(self, cmd: str) -> str:
-        self.queries.append(cmd)
+    def read_raw(self) -> bytes:
         if self.dead:
             raise TimeoutError("VI_ERROR_TMO")
+        reply, self._reply = self._reply, None
+        if reply is None:
+            raise TimeoutError("VI_ERROR_TMO (nothing was asked)")
+        return reply
+
+    def _answer(self, cmd: str) -> bytes:
         if cmd == "*IDN?":
-            return "TEKTRONIX,AFG1062,C000001,SCPI:99.0 FV:V1.2.3\n"
+            if self.measured and self._idn_after_cls:
+                self._idn_after_cls = False
+                return b""                      # measured: first one after *CLS
+            return b"TEKTRONIX,AFG1062,C000001,SCPI:99.0 FV:V1.0.2\n"
+        self._idn_after_cls = False
         if cmd == "SYST:ERR?":
-            return self.errors.pop(0) if self.errors else '0,"No error"'
+            return ((self.errors.pop(0) if self.errors else '0,"No error"') + "\n").encode()
         m = re.match(r"(OUTP|SOUR)(\d):(\S+)\?$", cmd)
         if not m:
-            raise TimeoutError(f"unknown query {cmd}")
+            return self._unknown(cmd)
         root, n, path = m.group(1), int(m.group(2)), m.group(3)
         c = self.ch[n]
+        if self.measured:
+            if (root, path) == ("OUTP", "IMP"):
+                return f"{c['IMP']:.1E}".encode() + _OHM_GBK + b"\n"
+            if (root, path) in (("SOUR", "VOLT:UNIT"), ("SOUR", "FUNC:RAMP:SYMM")):
+                return self._unknown(cmd)
+            if (root, path) == ("SOUR", "PULS:DCYC"):
+                self._error(cmd)                # answers AND complains
+                return f"{c['DCYC']:g}\n".encode()
         table = {("OUTP", "STAT"): c["OUTP"], ("OUTP", "IMP"): f"{c['IMP']:.1E}",
                  ("SOUR", "FUNC:SHAP"): c["SHAP"], ("SOUR", "FREQ:FIX"): f"{c['FREQ']:.10E}",
-                 ("SOUR", "VOLT:LEV:IMM:AMPL"): f"{c['AMPL']:.4E}",
+                 ("SOUR", "VOLT:LEV:IMM:AMPL"): f"{c['AMPL']:.6E}",
                  ("SOUR", "VOLT:UNIT"): c["UNIT"],
                  ("SOUR", "VOLT:LEV:IMM:OFFS"): f"{c['OFFS']:.4E}",
                  ("SOUR", "PHAS:ADJ"): f"{c['PHAS']:.6E}",
@@ -94,10 +150,16 @@ class FakeAFGInstrument:
                  ("SOUR", "FUNC:RAMP:SYMM"): f"{c['SYMM']:.2E}",
                  ("SOUR", "BURS:STAT"): c["BURS"], ("SOUR", "FREQ:MODE"): c["MODE"]}
         if (root, path) in table:
-            return table[(root, path)]
-        if path.endswith(":STAT"):                    # AM/FM/PM/FSK/PWM
-            return "0"
-        raise TimeoutError(f"unknown query {cmd}")
+            return (str(table[(root, path)]) + "\n").encode()
+        if root == "SOUR" and path in ("AM:STAT", "FM:STAT", "PM:STAT", "FSK:STAT",
+                                       "PWM:STAT"):
+            return b"0\n"
+        return self._unknown(cmd)
+
+    def _unknown(self, cmd: str) -> bytes:
+        """A query this firmware does not know: an empty answer + -102."""
+        self._error(cmd)
+        return b""
 
     def control_ren(self, mode):
         self.ren_calls.append(mode)
@@ -106,14 +168,12 @@ class FakeAFGInstrument:
         self.closed = True
 
 
-@pytest.fixture
-def fake_visa(monkeypatch):
-    """Install a fake `pyvisa`; returns the list of instruments it opened."""
+def _install(monkeypatch, firmware: str) -> list:
     opened: list[FakeAFGInstrument] = []
 
     class RM:
         def open_resource(self, resource):
-            inst = FakeAFGInstrument(resource)
+            inst = FakeAFGInstrument(resource, firmware)
             opened.append(inst)
             return inst
 
@@ -123,3 +183,16 @@ def fake_visa(monkeypatch):
     mod = types.SimpleNamespace(ResourceManager=RM)
     monkeypatch.setitem(__import__("sys").modules, "pyvisa", mod)
     return opened
+
+
+@pytest.fixture
+def fake_visa(monkeypatch):
+    """A fake `pyvisa` whose AFG answers everything the manual lists; returns
+    the list of instruments it opened."""
+    return _install(monkeypatch, "manual")
+
+
+@pytest.fixture
+def fake_visa_v102(monkeypatch):
+    """A fake `pyvisa` whose AFG behaves as the lab's unit (FV:V1.0.2) did."""
+    return _install(monkeypatch, "v1.0.2")

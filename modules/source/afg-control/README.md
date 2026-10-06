@@ -10,14 +10,23 @@ amplifier at 30 Hz), CH2 is a synchronous square for the scope's trigger input.
 
 ![front panel](../../../front-panels/afg.png)
 
-**Simulation only so far** -- the real backend (`backends/tek_afg.py`) has never
-talked to the instrument; every unconfirmed command is marked `# VERIFY`, and
+**Read-only contact so far** -- the real backend (`backends/tek_afg.py`) has
+been checked against the lab's unit with QUERIES only (2026-10-06, see
+[Measured on the instrument](#measured-on-the-instrument)); no setting has been
+written to it yet. Every unconfirmed command is marked `# VERIFY`, and
 [First run on the instrument](#first-run-on-the-instrument) below is the
 checklist.
 
 ## Ports
 
 5631 (commands) / 5632 (status), declared in `module.toml`.
+
+**Reaching it from another PC:** the lab network lets the office reach TCP
+ports 5555-5600 only, so 5631/5632 are NOT reachable from there today. If the
+service must be reached from another PC, give it a per-PC port override inside
+that range in Mission Control (the card's **Ports** button, on the PC that runs
+the service) and add it on the other PC with the same ports (**Add remote...**).
+The defaults stay 5631/5632.
 
 ## Layout
 
@@ -119,11 +128,46 @@ Settings, and the manifest revision moves with them. Actions `outputs_off` and
 `align_phase` (usable as scan routine steps) wait for their own operation
 number.
 
+## Measured on the instrument
+
+The lab's AFG1062 (firmware FV:V1.0.2, USB-TMC via NI-VISA) was asked every
+query below on 2026-10-06, each followed by `SYST:ERR?`, nothing written:
+
+| query | on FV:V1.0.2 | what the module does |
+|---|---|---|
+| `OUTPn:STAT?`, `SOURn:FUNC:SHAP?`, `SOURn:FREQ:FIX?`, `...:AMPL?`, `...:OFFS?`, `SOURn:PHAS:ADJ?` | answer | polled |
+| `SOURn:BURS:STAT?`, `SOURn:FREQ:MODE?` (CW), `SOURn:AM/FM/PM/FSK/PWM:STAT?` | answer | polled (mode detection) |
+| `OUTPn:IMP?` | `9.9E+37` + an Ohm sign in the GBK code page | decoded tolerantly; >= 1 Mohm = high-Z |
+| `SOURn:PULS:DCYC?` | answers, but ALSO logs -102 "Syntax error" | read ONCE at start, then never polled |
+| `SOURn:FUNC:RAMP:SYMM?` (every spelling), `SOURn:VOLT:UNIT?` | empty answer + -102 | never sent after the start-up probe |
+| `*IDN?` | empty the first time after `*CLS`, complete the second | asked twice |
+
+So, on this firmware:
+
+- At start the backend **probes** every optional query once (query, then
+  `SYST:ERR?`, the errors it causes drained there). A query that fails is
+  never sent again -- the old poll sent them twice a second and filled the
+  instrument's error log with -102.
+- **Duty cycle and ramp symmetry are not read back.** The panel shows the duty
+  the AFG reported at start (symmetry: the config value), and after that the
+  value last SET from here. Status `chN_not_read_back` names them, the
+  describe help says so, the panel marks them with `*`. A change made at the
+  AFG's front panel to these two is NOT noticed, and `settled` does not check
+  them. (Choice for `PULS:DCYC?`: its one answer is used, because it is the
+  only way to learn the duty without writing; polling it would log an error
+  every time.)
+- **The amplitude is taken as Vpp** (there is no `VOLT:UNIT?` to ask). # VERIFY
+  with the AFG's amplitude unit set to Vrms.
+- Not tested (writes were not allowed): whether `PULS:DCYC <pct>` and
+  `FUNC:RAMP:SYMM <pct>` are ACCEPTED. If not, -102 appears in the service log
+  when they are set.
+
 ## SCPI commands used (real backend)
 
 `OUTPut<n>:STATe`, `OUTPut<n>:IMPedance`, `SOURce<n>:FUNCtion:SHAPe`,
 `SOURce<n>:FREQuency:FIXed`, `SOURce<n>:VOLTage:LEVel:IMMediate:AMPLitude`
-(sent with a `VPP` suffix; read in `VOLTage:UNIT`), `...:OFFSet`,
+(sent with a `VPP` suffix; read in `VOLTage:UNIT` where the firmware has it,
+else as Vpp), `...:OFFSet`,
 `SOURce<n>:PHASe:ADJust`, `SOURce1:PHASe:INITiate`, `SOURce<n>:PULSe:DCYCle`,
 `SOURce<n>:FUNCtion:RAMP:SYMMetry`, read-only `BURSt:STATe?`, `FREQuency:MODE?`,
 `AM|FM|PM|FSK|PWM:STATe?`, and `*CLS`, `*IDN?`, `SYSTem:ERRor?`. Short forms
@@ -176,7 +220,10 @@ the bench. In order; each step names the `# VERIFY` it settles.
    if the AFG coerces it (a high-frequency amplitude limit we do not know), the
    panel says "Instrument differs" -- then put that limit into
    `AFG1062_ENVELOPE` (`tek_afg.py`).
-6. **Pulse duty / ramp symmetry** commands (`PULS:DCYC`, `FUNC:RAMP:SYMM`).
+6. **Pulse duty / ramp symmetry** commands (`PULS:DCYC`, `FUNC:RAMP:SYMM`):
+   set a pulse duty and a ramp symmetry from the panel; the AFG's display must
+   follow and the service log must show no -102 (their QUERIES do not work on
+   FV:V1.0.2, so only the display can confirm the SETTINGS).
 7. **CH2 follows CH1, Align phase** (`SOUR1:PHAS:INIT`): CH2 square at +90 deg;
    on the scope the CH2 edge must sit a quarter period after the CH1 zero
    crossing, and stay there after a CH1 frequency change. Note whether the
@@ -196,7 +243,8 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q          # 78 tests, offline: sim + a fake SCPI instrument
+uv run pytest -q          # 83 tests, offline: sim + a fake SCPI instrument
+                          # (two profiles: the manual's, and FV:V1.0.2 as measured)
 python ..\..\..\tools\check_modules.py afg --live
 ```
 

@@ -27,6 +27,26 @@ ADOPT, DO NOT RESET (Lukas, 2026-09-27). open() sends no *RST and no
 setting: it only reads. The one write is *CLS (empties the status / error
 registers; nothing changes at the outputs). Both outputs OFF on close() stay.
 
+MEASURED ON THE LAB'S UNIT (2026-10-06, firmware FV:V1.0.2, read-only
+queries with SYST:ERR? after each one). What this file does about it:
+
+  * Some queries the manual lists do not exist on this firmware: the unit
+    sends an EMPTY answer and puts -102,"Syntax error" into its error queue
+    (FUNC:RAMP:SYMM? in every spelling tried, VOLT:UNIT?, ...). Polled twice a
+    second, that was three errors a second in the service log. So every
+    OPTIONAL query (_OPTIONAL) is PROBED ONCE in open() -- query, then
+    SYST:ERR? -- and one that fails is never sent again.
+  * PULS:DCYC? answers ('2.7') but ALSO logs -102: "noisy". Its probe answer
+    is used once (adopted at start); it is never polled, because a poll must
+    not fill the error queue. After that, the duty shown is the one last SET
+    from here, and status says it is not read back.
+  * OUTP:IMP? answers b'9.9E+37\\xa6\\xb8\\n': the number, then an Ohm sign in
+    the Chinese GB2312/GBK code page, which a strict ASCII decode refuses
+    (that refusal made the service show "50 ohm" on a high-Z unit). Replies
+    are read as RAW BYTES and decoded tolerantly (_decode); numbers are cut
+    out of the text (_number). 9.9E+37 is SCPI's "infinity" = high-Z.
+  * The first *IDN? after *CLS comes back empty; the second one is complete.
+
 Every line not yet confirmed against the instrument carries `# VERIFY`. The
 lab-PC checklist for them is in README.md, "First run on the instrument".
 """
@@ -34,6 +54,7 @@ lab-PC checklist for them is in README.md, "First run on the instrument".
 from __future__ import annotations
 
 import math
+import re
 
 from ..hwlock import claim
 from ..waveforms import load_factor
@@ -59,8 +80,69 @@ _SHAPE_GET = {"SIN": "sine", "SINUSOID": "sine", "SQU": "square", "SQUARE": "squ
               "PULS": "pulse", "PULSE": "pulse", "RAMP": "ramp", "PRN": "noise",
               "PRNOISE": "noise", "DC": "dc"}
 
-#: above this an IMPedance reply means INFinity (SCPI answers 9.9E+37)
+#: at or above this an IMPedance reply means INFinity = high-Z. The AFG1062
+#: answers 9.9E+37 (SCPI's "infinity"; measured 2026-10-06). A real load
+#: setting is at most 10 kohm, so nothing from 1 Mohm up can be one.
 _HIGHZ_OHM = 1e6
+
+#: The queries the manual lists but a firmware may lack, probed ONCE in open()
+#: on both channels ({n} = 1, 2). Only those found "ok" are ever sent again.
+#: Measured on FV:V1.0.2: burst, freq_mode and the five modulation states
+#: answer cleanly; duty answers but logs -102 ("noisy"); symmetry and
+#: volt_unit do not exist (empty answer + -102).
+_OPTIONAL = {
+    "volt_unit": "SOUR{n}:VOLT:UNIT?",
+    "duty": "SOUR{n}:PULS:DCYC?",
+    "symmetry": "SOUR{n}:FUNC:RAMP:SYMM?",
+    "burst": "SOUR{n}:BURS:STAT?",
+    "freq_mode": "SOUR{n}:FREQ:MODE?",
+    "am": "SOUR{n}:AM:STAT?",
+    "fm": "SOUR{n}:FM:STAT?",
+    "pm": "SOUR{n}:PM:STAT?",
+    "fsk": "SOUR{n}:FSK:STAT?",
+    "pwm": "SOUR{n}:PWM:STAT?",
+}
+OK, NOISY, NO = "ok", "noisy", "no"
+
+#: a decimal number at the start of a reply: "9.9E+37" out of "9.9E+37<Ohm>"
+_NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+class NoReply(Exception):
+    """The instrument sent an empty answer -- what this firmware does for a
+    query it does not know."""
+
+
+def _decode(raw) -> str:
+    """Instrument bytes -> text, never failing.
+
+    The AFG1062 talks ASCII, except that it writes units in a Chinese code
+    page (the Ohm sign after an impedance is b'\\xa6\\xb8' in GB2312/GBK).
+    ASCII is tried first, then GBK (which turns those two bytes into the Ohm
+    sign), then latin-1, which accepts any byte at all. A unit glued to a
+    number is dropped by _number(), so its exact spelling does not matter."""
+    if isinstance(raw, str):                 # a VISA layer that already decoded
+        return raw.strip()
+    for codec in ("ascii", "gbk"):
+        try:
+            return raw.decode(codec).strip()
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("latin-1").strip()
+
+
+def _number(text: str) -> float:
+    """The number at the start of a reply, ignoring a unit after it
+    ("INF"/"INFINITY" -> inf). NoReply on an empty reply, ValueError on text."""
+    t = text.strip()
+    if not t:
+        raise NoReply("empty reply")
+    if t.upper().startswith("INF"):
+        return math.inf
+    m = _NUM_RE.match(t)
+    if not m:
+        raise ValueError(f"not a number: {t!r}")
+    return float(m.group(0))
 
 
 def _on(reply: str) -> bool:
@@ -83,6 +165,13 @@ class TekAFG:
         self._rm = None
         self._inst = None
         self._idn = ""
+        # What the probe in open() found: key of _OPTIONAL -> OK / NOISY / NO,
+        # and the probe's answers per (key, channel number). A NOISY query's
+        # answer is handed out ONCE, to the first read of that channel (the
+        # brain's adoption at start).
+        self.support: dict[str, str] = {}
+        self._once: dict[tuple, str] = {}
+        self._probe_notes: list[str] = []
         # The claim on the VISA address (hwlock.py): held while the instrument
         # is open, so no second service can talk to this generator.
         self._hwlock = None
@@ -103,12 +192,65 @@ class TekAFG:
             # *CLS empties status + error queue -- nothing the outputs feel --
             # so later SYST:ERR? reports only what WE cause.
             self._inst.write("*CLS")
-            self._idn = self._q("*IDN?")
+            # Measured: the FIRST *IDN? after *CLS comes back empty, a second
+            # one is complete. So ask again once. Silent (or timed out) twice
+            # = nothing we know is there: open() fails, as it always did.
+            self._idn = self._q_or_empty("*IDN?")
+            if not self._idn:
+                self._idn = self._q("*IDN?")
+            if not self._idn:
+                raise NoReply(f"{self._resource} did not answer *IDN? (twice)")
+            self._probe()
         except BaseException:
             # a failed open must not keep the address claimed, and must not
             # leave a half-open session that close() would send OUTP OFF to
             self._release()
             raise
+
+    def _probe(self) -> None:
+        """Find out ONCE which optional queries this firmware understands.
+
+        Each one goes out with SYST:ERR? straight after it:
+          * an answer and no error             -> OK: polled from now on;
+          * an answer AND an error (PULS:DCYC? on FV:V1.0.2) -> NOISY: the
+            answer is used once, at adoption; the query is never polled;
+          * no answer (empty, or timed out)    -> NO: never sent again.
+        A key is OK only if it is OK on both channels. The errors the probe
+        causes are drained here, so they never reach the brain's log. Queries
+        only -- nothing is set (adopt-on-start rule)."""
+        self._drain_quiet()                     # whatever *CLS / *IDN? left behind
+        old_timeout = self._inst.timeout
+        # An unknown query might time out rather than answer empty; each then
+        # costs the whole timeout, once. Keep it short while probing.
+        self._inst.timeout = min(self._timeout_ms, 1000)
+        try:
+            for key, tmpl in _OPTIONAL.items():
+                verdicts = []
+                for n in (1, 2):
+                    reply = self._q_or_empty(tmpl.format(n=n))
+                    errs = self._drain_quiet()
+                    if not reply:
+                        verdicts.append(NO)
+                        continue
+                    verdicts.append(NOISY if errs else OK)
+                    self._once[(key, n)] = reply
+                self.support[key] = (NO if NO in verdicts else
+                                     NOISY if NOISY in verdicts else OK)
+        finally:
+            self._inst.timeout = old_timeout
+        bad = [f"{_OPTIONAL[k].format(n='<n>')} ({v})"
+               for k, v in self.support.items() if v != OK]
+        if bad:
+            self._probe_notes.append("queries this firmware does not answer cleanly "
+                                     "(probed once, never polled): " + ", ".join(bad))
+        if self.support.get("volt_unit") != OK:
+            self._probe_notes.append("no VOLT:UNIT? on this firmware: amplitude "
+                                     "replies are taken as Vpp")       # VERIFY
+
+    def probe_report(self) -> list[str]:
+        """What the probe in open() found, as log lines. An OPTIONAL backend
+        method: the brain emits these as info events at start if it exists."""
+        return list(self._probe_notes)
 
     def _release(self) -> None:
         """Close the VISA objects and give the address back. Sends nothing."""
@@ -158,14 +300,38 @@ class TekAFG:
     # ---- reading ---------------------------------------------------------
 
     def _q(self, cmd: str) -> str:
-        return self._inst.query(cmd).strip()
+        """Send a query, return the decoded answer ('' when it was empty).
+
+        write() + read_raw() instead of pyvisa's query(): query() decodes with
+        a strict ASCII codec and RAISES on the GBK Ohm sign of OUTP:IMP?."""
+        self._inst.write(cmd)
+        return _decode(self._inst.read_raw())
+
+    def _q_or_empty(self, cmd: str) -> str:
+        """_q, with a timeout counted as an empty answer (open() only)."""
+        try:
+            return self._q(cmd)
+        except Exception:
+            return ""
 
     def _qf(self, cmd: str) -> float:
-        return float(self._q(cmd))
+        return _number(self._q(cmd))
+
+    def _optional(self, key: str, n: int) -> str | None:
+        """An optional query's answer, or None = cannot be read here.
+
+        OK -> asked now; NOISY -> the probe's answer, handed out ONCE (then
+        None); NO -> None, nothing sent."""
+        state = self.support.get(key, OK)
+        if state == OK:
+            return self._q(_OPTIONAL[key].format(n=n))
+        if state == NOISY:
+            return self._once.pop((key, n), None)
+        return None
 
     def read_channel(self, ch: int) -> dict:
         n = ch + 1
-        out: dict = {"unread": []}
+        out: dict = {"unread": [], "not_read_back": []}
 
         def get(key, fn):
             try:
@@ -180,8 +346,22 @@ class TekAFG:
         get("amplitude_Vpp", lambda: self._read_amplitude(n))
         get("offset_V", lambda: self._qf(f"SOUR{n}:VOLT:LEV:IMM:OFFS?"))
         get("phase_deg", lambda: self._read_phase(n))
-        get("duty_pct", lambda: self._qf(f"SOUR{n}:PULS:DCYC?"))              # VERIFY
-        get("symmetry_pct", lambda: self._qf(f"SOUR{n}:FUNC:RAMP:SYMM?"))     # VERIFY
+        # Duty and symmetry cannot be read on every firmware (see _probe).
+        # Then they are LEFT OUT and named in "not_read_back": the brain keeps
+        # the value it last set (the config's at start) and does not count
+        # them as a failed read -- which would leave the channel unsettled.
+        # A NOISY one is named in "not_read_back" too, even on the one read
+        # that still carries the probe's answer: it is not FOLLOWED after that.
+        for key, probe_key in (("duty_pct", "duty"), ("symmetry_pct", "symmetry")):
+            try:
+                if self.support.get(probe_key, OK) != OK:
+                    out["not_read_back"].append(key)
+                reply = self._optional(probe_key, n)
+                if reply is not None:
+                    out[key] = _number(reply)
+            except Exception:
+                out[key] = None
+                out["unread"].append(key)
         get("load_ohm", lambda: self._read_load(n))
         get("mode", lambda: self._read_mode(n))
         return out
@@ -189,7 +369,10 @@ class TekAFG:
     def _read_amplitude(self, n: int) -> float:
         """Amplitude in Vpp whatever unit the front panel was left in."""
         raw = self._qf(f"SOUR{n}:VOLT:LEV:IMM:AMPL?")
-        unit = self._q(f"SOUR{n}:VOLT:UNIT?").upper()                      # VERIFY
+        # No VOLT:UNIT? on FV:V1.0.2 (empty + -102): the reply is then taken
+        # as Vpp. Measured: AMPL? said 6.000000e+00 on a channel set to 6 Vpp
+        # at high-Z. VERIFY with the AFG's amplitude unit switched to Vrms.
+        unit = (self._optional("volt_unit", n) or "VPP").upper()
         if unit.startswith("VRMS"):
             return raw * 2.0 * math.sqrt(2.0)        # exact for a sine only # VERIFY other shapes
         if unit.startswith("DBM"):
@@ -203,26 +386,25 @@ class TekAFG:
         return math.degrees(raw) if self._phase_rad else raw               # VERIFY unit
 
     def _read_load(self, n: int) -> float | None:
-        z = self._qf(f"OUTP{n}:IMP?")                                      # VERIFY
-        return None if z >= _HIGHZ_OHM else z
+        # measured at high-Z: b'9.9E+37\xa6\xb8\n' (infinity + a GBK Ohm sign)
+        z = self._qf(f"OUTP{n}:IMP?")
+        return None if z >= _HIGHZ_OHM else z                 # VERIFY the 50-ohm reply
 
     def _read_mode(self, n: int) -> str:
-        """Continuous, or one of the modes this module does not drive. Each
-        query is optional: a command the unit lacks counts as 'off'."""
-        def flag(cmd):
+        """Continuous, or one of the modes this module does not drive. A query
+        the probe found missing counts as 'off' and is not sent. On FV:V1.0.2
+        all of them answered cleanly."""
+        def ask(key):
             try:
-                return _on(self._q(cmd))
+                return self._optional(key, n) or ""
             except Exception:
-                return False
-        if flag(f"SOUR{n}:BURS:STAT?"):                                    # VERIFY
+                return ""
+        if _on(ask("burst")):
             return "burst"
-        try:
-            if self._q(f"SOUR{n}:FREQ:MODE?").upper().startswith("SWE"):   # VERIFY
-                return "sweep"
-        except Exception:
-            pass
-        for mod in ("AM", "FM", "PM", "FSK", "PWM"):                       # VERIFY
-            if flag(f"SOUR{n}:{mod}:STAT?"):
+        if ask("freq_mode").upper().startswith("SWE"):   # 'CW' measured; VERIFY sweep reply
+            return "sweep"
+        for key in ("am", "fm", "pm", "fsk", "pwm"):
+            if _on(ask(key)):
                 return "modulated"
         return "continuous"
 
@@ -253,9 +435,14 @@ class TekAFG:
         self._inst.write(f"SOUR{ch + 1}:PHAS:ADJ {v:.8g}")                # VERIFY unit
 
     def set_duty(self, ch: int, pct: float) -> None:
+        # Accepted by FV:V1.0.2? NOT tested (the visit was read-only). Its
+        # query logs -102, so the brain cannot read the result back; if the
+        # setting is refused, the error appears in the service log.
         self._inst.write(f"SOUR{ch + 1}:PULS:DCYC {pct:.6g}")             # VERIFY
 
     def set_symmetry(self, ch: int, pct: float) -> None:
+        # Every spelling of the QUERY failed on FV:V1.0.2; whether the
+        # SETTING is accepted is not tested (a -102 in the log would say no).
         self._inst.write(f"SOUR{ch + 1}:FUNC:RAMP:SYMM {pct:.6g}")        # VERIFY
 
     def set_load(self, ch: int, load_ohm: float | None) -> None:
@@ -274,6 +461,13 @@ class TekAFG:
                 break
             errors.append(resp)
         return errors
+
+    def _drain_quiet(self) -> list[str]:
+        """drain_errors() that never raises (probing)."""
+        try:
+            return self.drain_errors()
+        except Exception:
+            return []
 
     def idn(self) -> str:
         return self._idn

@@ -65,9 +65,15 @@ class WaveGen(Protocol):
              "duty_pct", "symmetry_pct",
              "load_ohm": float | None (None = high-Z),
              "mode": "continuous" | "burst" | "sweep" | "modulated",
-             "unread": ["amplitude_Vpp", ...]}
+             "unread": ["amplitude_Vpp", ...],
+             "not_read_back": ["symmetry_pct", ...]}     # optional
 
-        A value that could not be read is None and named in `unread`."""
+        A value whose read FAILED this time is None and named in `unread`
+        (the brain then decides nothing from this read). A value the
+        instrument CANNOT report at all (a firmware without that query) is
+        left OUT and named in `not_read_back`: the brain keeps the value it
+        last set, and status says so. Never poll such a query -- each failed
+        query leaves an error in the instrument's queue."""
 
     def set_output(self, ch: int, on: bool) -> None: ...
     def set_waveform(self, ch: int, waveform: str) -> None: ...
