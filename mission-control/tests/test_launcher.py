@@ -191,6 +191,33 @@ def test_remote_service_add_shows_variables_and_remove(env):
         svc.stop()
 
 
+def test_add_remote_identifies_the_service_by_itself(env):
+    """Lukas 2026-10-06: fill in host and ports, and the dialog finds out what
+    module it is -- no Test button, and the window does not freeze."""
+    mc, win, root, app = env
+    svc = FakeService(16310, key="lockin")
+    try:
+        dlg = mc.AddRemoteDialog(win.found.modules, win)
+        dlg.AUTO_ASK_MS = 50
+        dlg._auto.setInterval(50)
+        dlg.kind.setCurrentIndex(dlg.kind.findData("magnet"))      # a wrong guess
+        dlg.host.setText("127.0.0.1"); dlg.host.textEdited.emit("127.0.0.1")
+        dlg.cmd.setValue(16310)                                    # pub follows: 16311
+        assert dlg.pub.value() == 16311
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and "Found" not in dlg.result.text():
+            _pump(app, 0.05)
+        assert "Found" in dlg.result.text(), dlg.result.text()
+        assert dlg.kind.currentData() == "lockin"
+        assert dlg.name.text() == "Fake lock-in (127.0.0.1)"
+        # a stale answer for a port no longer in the box is ignored
+        dlg._on_answer(None, "127.0.0.1", 16999)
+        assert "Found" in dlg.result.text()
+        dlg.close()
+    finally:
+        svc.stop()
+
+
 def test_endpoints_are_handed_to_spawned_processes(env):
     mc, win, root, app = env
     table = json.loads(mc.endpoints_json(win.found.modules))

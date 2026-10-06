@@ -79,6 +79,17 @@ def test_add_a_remote_service_finds_a_secured_module_it_does_not_know(secured_ki
     assert MC.fetch_describe("127.0.0.1", PORT, timeout_ms=500)["module"] == "kim"
 
 
+def test_add_a_remote_service_finds_it_when_the_policy_secures_every_module(
+        secured_kim, tmp_path):
+    """Lab PC 2026-10-06: with the policy at modules "*" the dialog's
+    "Test connection" said "No answer" -- "*" was skipped when choosing how
+    to try encrypted, so an encrypted service was never asked that way."""
+    import mission_control as MC
+    (tmp_path / "keyring" / secure.POLICY_FILE).write_text(
+        json.dumps({"mode": "warn", "modules": ["*"]}), encoding="utf-8")
+    assert MC.fetch_describe("127.0.0.1", PORT, timeout_ms=500)["module"] == "kim"
+
+
 def test_a_module_the_policy_does_not_secure_is_asked_plain_first(secured_kim):
     import mission_control as MC
     # plain gets no answer from this CurveZMQ server; the second try is

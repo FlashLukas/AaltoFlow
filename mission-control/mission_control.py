@@ -288,12 +288,19 @@ def fetch_describe(host: str, port: int, timeout_ms: int = 1500,
     if module:
         return _describe_once(host, port, timeout_ms, module)
     manifest = _describe_once(host, port, timeout_ms, "")
-    if manifest is None and secure.policy()["mode"] != "off":
-        for m in secure.policy()["modules"]:
-            if m != "*":
-                manifest = _describe_once(host, port, timeout_ms, m)
-                if manifest is not None:
-                    break
+    pol = secure.policy()
+    if manifest is None and pol["mode"] != "off":
+        # The key is the HOST's, so one encrypted try per way of naming a
+        # secured module is enough. "*" (every module) used to be skipped
+        # here, so with the lab's policy at "*" an encrypted service was
+        # never tried and the dialog said "No answer" (2026-10-06).
+        names = [m for m in pol["modules"] if m != "*"]
+        if "*" in pol["modules"]:
+            names = ["remote"] + names       # any name counts as secured under "*"
+        for m in names:
+            manifest = _describe_once(host, port, timeout_ms, m)
+            if manifest is not None:
+                break
     return manifest
 
 
@@ -820,7 +827,17 @@ class AddRemoteDialog(QtWidgets.QDialog):
     what KIND of module it is -- and so which icon, description and GUI of the
     same module on this PC belong to it. If the other PC is off right now, the
     type can still be chosen by hand.
+
+    The question is also asked BY ITSELF a moment after host or port was
+    typed (Lukas 2026-10-06: "simply fill ip and ports and it would identify
+    the module itself"), in a thread: a switched-off PC makes the ask wait
+    for its timeout, and the dialog must not freeze meanwhile.
     """
+
+    #: (manifest or None, host, port) from the asking thread
+    _answered = QtCore.Signal(object, str, int)
+    #: ms after the last keystroke before asking by itself
+    AUTO_ASK_MS = 700
 
     def __init__(self, local_modules: list[ModuleSpec], parent=None):
         super().__init__(parent)
@@ -842,6 +859,14 @@ class AddRemoteDialog(QtWidgets.QDialog):
 
         test = QtWidgets.QPushButton("Test connection")
         test.clicked.connect(self._test)
+        self._asking: tuple[str, int] | None = None   # what the thread is asking now
+        self._name_auto = ""                          # a name WE filled in (replaceable)
+        self._answered.connect(self._on_answer)
+        self._auto = QtCore.QTimer(self); self._auto.setSingleShot(True)
+        self._auto.setInterval(self.AUTO_ASK_MS)
+        self._auto.timeout.connect(self._test)
+        self.host.textEdited.connect(lambda *_: self._auto.start())
+        self.cmd.valueChanged.connect(lambda *_: self._auto.start())
         self.result = QtWidgets.QLabel("Not tested yet."); self.result.setWordWrap(True)
         self.result.setObjectName("meta")
 
@@ -850,7 +875,11 @@ class AddRemoteDialog(QtWidgets.QDialog):
         form.addRow("status port", self.pub)
         form.addRow("module type", self.kind)
         form.addRow("name", self.name)
-        form.addRow(test, self.result)
+        # the button on its own row and the message under it, full width: a
+        # word-wrapping label beside a button in a form row is not given the
+        # height of its second and third lines, and was cut off (2026-10-06)
+        form.addRow(test)
+        form.addRow(self.result)
         self.error = QtWidgets.QLabel(""); self.error.setWordWrap(True)
         self.error.setStyleSheet(f"color:{C['danger']};")
         form.addRow(self.error)
@@ -861,15 +890,30 @@ class AddRemoteDialog(QtWidgets.QDialog):
         self.added_id: str | None = None
 
     def _test(self):
-        host = self.host.text().strip()
+        """Ask host:port what it is, in a thread; _on_answer gets the reply."""
+        self._auto.stop()
+        host, port = self.host.text().strip(), self.cmd.value()
         if not host:
             self.result.setText("Type a host first.")
             return
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            manifest = fetch_describe(host, self.cmd.value())
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        if self._asking == (host, port):
+            return                               # already asking exactly this
+        self._asking = (host, port)
+        self.result.setText(f"Asking {host}:{port} what it is ...")
+
+        def ask():
+            try:
+                manifest = fetch_describe(host, port)
+            except Exception:
+                manifest = None
+            self._answered.emit(manifest, host, port)
+        threading.Thread(target=ask, daemon=True, name="add-remote-ask").start()
+
+    def _on_answer(self, manifest, host: str, port: int):
+        if self._asking == (host, port):
+            self._asking = None
+        if (host, port) != (self.host.text().strip(), self.cmd.value()):
+            return                               # typed on meanwhile: a stale answer
         if not manifest:
             self.result.setText(f"No answer from {host}:{self.cmd.value()}. Is the service "
                                 f"running and the port open in that PC's firewall? You can "
@@ -885,6 +929,10 @@ class AddRemoteDialog(QtWidgets.QDialog):
         self.result.setText(f"Found '{manifest.get('label', key)}' (module {key}), "
                             f"{n} variables.")
         self._manifest = manifest
+        # a name to start from, unless one was typed: "<module> (<host>)"
+        if not self.name.text().strip() or self.name.text() == self._name_auto:
+            self._name_auto = f"{manifest.get('label') or key} ({host})"
+            self.name.setText(self._name_auto)
 
     def _ok(self):
         key = self.kind.currentData()
