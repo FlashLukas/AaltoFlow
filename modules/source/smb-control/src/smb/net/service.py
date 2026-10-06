@@ -228,7 +228,9 @@ class SmbService:
         cmd = msg.get("cmd")
         try:
             if cmd == "set_rf":
-                self.gen.set_rf(bool(msg["on"]))
+                # _as_bool, not bool(): "false" from a typed command must switch
+                # RF OFF, not on (gotcha #3; found 2026-10-06)
+                self.gen.set_rf(_as_bool(msg["on"]))
             elif cmd == "rf_off":
                 # the SAFETY verb: set_rf(False), but a verb of its own so a
                 # viewer may send it (it can only make things safer)

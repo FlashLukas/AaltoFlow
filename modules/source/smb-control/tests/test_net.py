@@ -50,6 +50,18 @@ def test_shutdown_verb_plain_and_text_false_switch_rf_off(service_and_client):
     assert backend.read_output() is False
 
 
+def test_set_rf_text_false_switches_rf_off(service_and_client):
+    """bool("false") is True: a typed set_rf with on="false" switched RF ON
+    (gotcha #3, found 2026-10-06)."""
+    svc, cli = service_and_client
+    cli.set_rf(True)
+    assert cli._cmd({"cmd": "set_rf", "on": "false"})["ok"]
+    t_end = time.monotonic() + 2
+    while svc.gen.backend.read_output() and time.monotonic() < t_end:
+        time.sleep(0.02)
+    assert svc.gen.backend.read_output() is False
+
+
 def test_info_and_config(service_and_client):
     _, cli = service_and_client
     info = cli.start()
