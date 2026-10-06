@@ -14,8 +14,9 @@ thread.
 The signature widget is the SpectrumIndicator: a miniature spectrum-analyser
 screen on a logarithmic frequency axis. The unit's usable band is shaded, and
 when RF is on the carrier stands up out of the noise floor at its frequency and
-power, with its 2nd and 3rd harmonics below it (the SG series is unfiltered, so
-they are really there). A small dial in the corner shows the phase setting.
+power, with the harmonic and sub-harmonic lines this unit was MEASURED to put
+out at that frequency and power (dssg/spurs.py). A small dial in the corner
+shows the phase setting.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..config import Config, REFERENCES
 from ..sim_system import build_sim_system
+from ..spurs import harmonics_measured, spur_lines
 from .theme import COLORS, build_stylesheet, apply_palette, set_theme
 from .settings_dialog import SettingsDialog
 from .control_bar import ControlBar, mark_always
@@ -71,8 +73,10 @@ class SpectrumIndicator(QtWidgets.QWidget):
 
     x: log10 frequency, 10 MHz .. 40 GHz (so the harmonics of a 12 GHz carrier
        still fit); y: power in dBm, -90 .. +20.
-    Harmonic levels are illustrative typical values for an unfiltered
-    fractional-N source (2nd ~ -25 dBc, 3rd ~ -35 dBc), not a measurement.
+    The spurious lines (2f, 3f, f/2, 3f/2) come from a spectrum-analyser
+    measurement of the real unit (spurs.py, sg12000l_spurs.json): drawn only
+    where they were seen, at the measured level for this frequency AND power
+    (the 2nd harmonic at 3.3 .. 6 GHz grows 1 dBc per dB of output).
     """
 
     F_LO, F_HI = 1e7, 4e10
@@ -185,11 +189,13 @@ class SpectrumIndicator(QtWidgets.QWidget):
         p.drawPath(path)
 
         if self._on:
-            # carrier + two harmonics: vertical spectral lines out of the floor
-            lines = [(self._f, self._p, 1.0), (2 * self._f, self._p - 25.0, 0.45),
-                     (3 * self._f, self._p - 35.0, 0.30)]
-            for freq, lvl, strength in lines:
-                if freq > self.F_HI:
+            # carrier + the measured spurs: vertical spectral lines out of the
+            # floor. A spur below the drawn floor would be invisible anyway.
+            lines = [(self._f, self._p, 1.0, "")]
+            lines += [(fr, lv, 0.45, tag) for fr, lv, tag in spur_lines(self._f, self._p)
+                      if lv > self.FLOOR_DBM]
+            for freq, lvl, strength, tag in lines:
+                if freq > self.F_HI or freq < self.F_LO:
                     continue
                 x = self._x(freq, r)
                 y_top, y_bot = self._y(lvl, r), self._y(self.FLOOR_DBM, r)
@@ -198,6 +204,15 @@ class SpectrumIndicator(QtWidgets.QWidget):
                 core = QColor(c_hi if strength == 1.0 else c_acc)
                 core.setAlpha(int(255 * max(strength, 0.5)))
                 p.setPen(QPen(core, 2)); p.drawLine(QPointF(x, y_bot), QPointF(x, y_top))
+                if tag:
+                    p.setPen(c_muted)
+                    p.drawText(QRectF(x - 20, y_top - 12, 40, 10), Qt.AlignHCenter, tag)
+            # harmonics above the analyser span were never measured: say so,
+            # rather than let an empty screen read as "clean"
+            if not harmonics_measured(self._f):
+                p.setPen(c_muted)
+                p.drawText(QRectF(r.left() + 4, r.bottom() - 13, 220, 11), Qt.AlignLeft,
+                           "harmonics not measured at this frequency")
             # marker on the carrier peak
             x, y = self._x(self._f, r), self._y(self._p, r)
             p.setPen(Qt.NoPen); p.setBrush(c_hi)

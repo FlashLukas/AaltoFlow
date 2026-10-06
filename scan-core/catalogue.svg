@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- run catalogue: a list of saved runs and a magnifier searching it. Grey
+       chassis, amber for the live part, as in the modules. -->
+  <g stroke="#5a626e" stroke-width="2.2" fill="none" stroke-linecap="round">
+    <line x1="7" y1="9" x2="27" y2="9"/>
+    <line x1="7" y1="15" x2="22" y2="15"/>
+    <line x1="7" y1="21" x2="16" y2="21"/>
+    <line x1="7" y1="27" x2="14" y2="27"/>
+  </g>
+  <circle cx="25" cy="24" r="6" stroke="#ff9e2c" stroke-width="2.4" fill="none"/>
+  <line x1="29.5" y1="28.5" x2="34" y2="33" stroke="#ff9e2c" stroke-width="2.8"
+        stroke-linecap="round"/>
+</svg>

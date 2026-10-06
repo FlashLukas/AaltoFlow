@@ -93,8 +93,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     set_theme(args.theme or DEFAULT_THEME)        # BEFORE any widget is built
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from apps.theme import apply_window_icon
-    apply_window_icon(app)
+    from apps.theme import CATALOGUE_ICON, apply_window_icon
+    # its own icon and taskbar button: not grouped with the measurement suite
+    apply_window_icon(app, CATALOGUE_ICON, "Aalto.AaltoFlow.catalogue")
     apply(app)
     win = CatalogueWindow(args.folder)
     win.show()
