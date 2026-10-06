@@ -60,6 +60,9 @@ class ScopeService:
         self.pub_addr = f"tcp://{host}:{pub_port}"
         self.status_dt = 1.0 / status_hz
         self._stop = threading.Event()
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
@@ -147,7 +150,7 @@ class ScopeService:
         # the service is gone: drop its guard (and its "running encrypted" marker)
         secure.release_server(self._guard)
         self._guard = None
-        self.scope.shutdown()
+        self.scope.shutdown(keep_outputs=self._keep_outputs)
         print("scope service stopped")
 
     # ---------------------------------------------------------------- threads
@@ -306,8 +309,13 @@ class ScopeService:
                 # A CLEAN stop, asked for by the launcher before it would kill us
                 # (suite gotcha #25). The reply still goes out: the commander
                 # sends it before it looks at _stop again.
+                # keep_outputs=true: a restart for a code update. A scope drives
+                # nothing, so it closes exactly as a plain stop does -- the
+                # reply says the outputs were kept (nothing was changed).
+                self._keep_outputs = _bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             if cmd in ("set_points", "set_averages", "set_keep_raw", "set_physical",

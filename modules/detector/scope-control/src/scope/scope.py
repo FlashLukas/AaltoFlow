@@ -134,8 +134,12 @@ class Scope:
                                             daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
-        """Stop reading and disconnect. A scope drives nothing: stopping is enough."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stop reading and disconnect. A scope drives nothing, so a plain stop
+        and a RESTART (`keep_outputs`, docs/DEVELOPER_NOTES.md section 4) are
+        the same: neither writes to the instrument; the next start adopts its
+        settings either way. (A backend with a generator -- the Analog
+        Discovery -- would switch it off only when keep_outputs is False.)"""
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)

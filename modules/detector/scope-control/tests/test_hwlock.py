@@ -44,7 +44,9 @@ def test_close_releases_the_claim(fake_visa):
     assert [h["module"] for h in hwlock.held()] == ["scope"]
     a.close()
     assert hwlock.held() == []
-    SiglentSDS(RES).open()
+    again = SiglentSDS(RES)
+    again.open()              # would raise HardwareBusy if close() had kept it
+    again.close()
 
 
 def test_a_failed_open_releases_the_claim(fake_visa, monkeypatch):

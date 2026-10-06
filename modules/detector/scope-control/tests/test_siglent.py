@@ -49,7 +49,8 @@ def test_setters_send_the_guide_commands(fake_visa):
     assert w[:5] == ["C1:TRA OFF", "C1:ATTN 10", "C1:CPL A1M", "C1:VDIV 2.0000E-01V",
                      "C1:OFST -1.0000E-01V"]
     assert w[5:7] == ["TDIV 1.0000E-03S", "TRDL 2.0000E-04S"]
-    assert w[7:] == ["TRSE EDGE,SR,C2,HT,OFF", "C2:TRLV 3.0000E-01V", "C2:TRSL NEG",
+    # a new source keeps the holdoff the scope was set to (TRSE carries it)
+    assert w[7:] == ["TRSE EDGE,SR,C2,HT,TI,HV,100NS", "C2:TRLV 3.0000E-01V", "C2:TRSL NEG",
                      "TRMD AUTO"]
     s = b.read_settings()
     assert s["trigger"]["source"] == "ch2" and s["trigger"]["slope"] == "falling"
@@ -99,3 +100,79 @@ def test_the_brain_on_the_siglent_backend(fake_visa):
         assert st["sample"]["ch1"]["pk2pk"] == pytest.approx(2.0, abs=0.05)
     finally:
         scope.shutdown()
+
+
+# ---- the lab-PC bug of 2026-10-06 (RSDS1102CML+, firmware 6.01.01.25) ----------
+
+def test_a_newline_byte_inside_the_block_does_not_cut_the_read(fake_visa):
+    """BUG 1: the int8 code 10 is the byte 0x0A. Read with the text terminator
+    on, the block was cut there and every later reply came out of step
+    (settings read wrong, "no number in ''"). The block is read with the
+    terminator off; the replies after it must be clean."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    t, v = b.read_traces(["ch1", "ch2"], max_points=20000)
+    assert v["ch1"].size == inst.st["SANU"] and v["ch2"].size == inst.st["SANU"]
+    assert not inst._out, "bytes of the block left in the queue"
+    assert inst.read_termination == "\n"              # restored for text replies
+    s = b.read_settings()                             # the replies after it: clean
+    assert s["unread"] == []
+    assert s["channels"]["ch1"]["enabled"] is True and s["channels"]["ch1"]["vdiv_V"] == 0.5
+    assert s["trigger"]["source"] == "ext"
+    b.close()
+
+
+def test_the_old_way_reproduces_the_desync(fake_visa):
+    """The fake really reproduces the bug: with the terminator on, the read
+    stops inside the block and the next query gets block bytes."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    inst.write("C1:WF? DAT2")
+    first = inst.read_raw()                           # terminator "\n" still on
+    assert len(first) < 1000 and inst._out            # cut short, rest queued
+    with pytest.raises(ValueError):
+        _num(b._q("C1:VDIV?"))                        # a shifted reply
+    b.close()
+
+
+def test_open_drains_a_queue_left_out_of_step(fake_visa, monkeypatch):
+    """A crashed client left 12 bytes queued; clear() fails on this scope
+    (VI_ERROR_SYSTEM_ERROR), so open() reads them away -- and the first query
+    gets its own answer."""
+    from fake_visa import FakeSDS
+    monkeypatch.setattr(FakeSDS, "stale", b"\x05\x0a\x41\x0a junk\x0a\n")
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    assert b.idn().startswith("Siglent")
+    assert inst.clear_calls == 0 and inst.timeout == b._timeout_ms
+    assert b.read_settings()["unread"] == []
+    b.close()
+
+
+def test_si_prefixes_and_units_are_scaled():
+    """BUGS 2 and 3: "SARA 500.0KSa" is 500 kSa/s, "TRDL 12.0us" 12 us."""
+    assert _num("SARA 500.0KSa") == 500e3
+    assert _num("SARA 1.00GSa") == 1e9
+    assert _num("SARA 1.00E+05Sa/s") == 1e5
+    assert _num("TRDL 0.00us", time_unit=True) == 0.0
+    assert _num("TRDL 12.0us", time_unit=True) == pytest.approx(12e-6)
+    assert _num("TDIV 1.00E-03s", time_unit=True) == 1e-3
+    assert _num("TDIV 1.00MS", time_unit=True) == pytest.approx(1e-3)   # SCPI: MS = milli
+    assert _num("C1:OFST 3.60E-01V") == 0.36
+    assert _num("X 500mV") == 0.5
+    assert _num("SANU 8000") == 8000
+
+
+def test_time_axis_uses_the_scaled_sample_rate(fake_visa):
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    inst.st["SARA"], inst.st["SANU"], inst.st["TRDL"] = 500e3, 8000, 0.0
+    t, v = b.read_traces(["ch1"], max_points=8000)
+    # 8000 points at 500 kSa/s: 16 ms, centred on the trigger (was 1000x off)
+    assert t[1] - t[0] == pytest.approx(2e-6)
+    assert t[0] == pytest.approx(-8e-3)
+    b.close()

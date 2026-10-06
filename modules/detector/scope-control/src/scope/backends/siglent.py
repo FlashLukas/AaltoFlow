@@ -29,6 +29,21 @@ changes no acquisition setting and nothing on the screen.
 Replies come with a header ("C1:VDIV 5.00E-01V"); `_num` takes the number out
 of whatever surrounds it, so the module does not have to switch the headers
 off (CHDR OFF would be a write).
+
+MEASURED ON THE LAB'S RSDS1102CML+ (2026-10-06, firmware 6.01.01.25):
+  * the waveform is a BINARY block of int8 codes, and a code of 10 is the byte
+    0x0A -- the same byte as the text terminator "\n". Read with the
+    terminator on, pyvisa stopped INSIDE the block (23 of 20480 bytes), the rest
+    stayed queued, and every later reply was shifted or empty: settings read
+    wrong, "no number in ''". The block is now read with the terminator OFF
+    (restored after), so the read ends at the end of the message.
+  * replies carry SI prefixes and units: "SARA 500.0KSa", "TRDL 0.00us",
+    "TDIV 1.00E-03s". `_num` scales by the prefix (the 1000x / 1e6x errors).
+  * pyvisa's clear() raises VI_ERROR_SYSTEM_ERROR on this scope; to recover a
+    queue left out of step (a crashed client), open() drains it by reading
+    at a short timeout until nothing comes.
+  * "SANU? C1" answers, a bare "SANU?" times out; TRSE carries the holdoff
+    ("EDGE,SR,C1,HT,TI,HV,100NS"), so a new source keeps it.
 """
 
 from __future__ import annotations
@@ -44,16 +59,39 @@ _SRC_TO_SCPI = {"ch1": "C1", "ch2": "C2", "ext": "EX", "ext5": "EX5", "line": "L
 _SCPI_TO_SRC = {v: k for k, v in _SRC_TO_SCPI.items()}
 _CPL_TO_SCPI = {"dc": "D1M", "ac": "A1M", "gnd": "GND"}
 _MODES = {"auto": "AUTO", "normal": "NORM", "single": "SINGLE", "stop": "STOP"}
-_NUM = re.compile(r"[-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?")
+_NUM = re.compile(r"([-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)\s*([a-zA-Z\u00b5]*)")
+_PREFIX = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "\u00b5": 1e-6, "m": 1e-3,
+           "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+_UNITS = ("SA/S", "SA", "S", "V", "HZ", "A", "OHM")
 
 
-def _num(reply: str) -> float:
-    """The LAST number in a reply: "C1:VDIV 5.00E-01V" -> 0.5. (The last,
-    because the header itself can hold a digit: "C1:...".)"""
-    found = _NUM.findall(reply.split(" ", 1)[-1] if " " in reply else reply)
+def _num(reply: str, time_unit: bool = False) -> float:
+    """The LAST number in a reply, scaled by an SI prefix glued to its unit:
+
+        "C1:VDIV 5.00E-01V" -> 0.5      "SARA 500.0KSa" -> 500000.0
+        "TRDL 0.00us"       -> 0.0      "TDIV 1.00E-03s" -> 0.001
+
+    (The last number, because the header itself can hold a digit: "C1:...".)
+    `time_unit`: the reply is a time -- there SCPI's "MS" means MILLIseconds,
+    not mega (case-insensitive SCPI suffixes), while in "500MSa" M is mega."""
+    body = reply.split(" ", 1)[-1] if " " in reply else reply
+    found = _NUM.findall(body)
     if not found:
         raise ValueError(f"no number in {reply!r}")
-    return float(found[-1])
+    text, suffix = found[-1]
+    value = float(text)
+    if suffix:
+        for unit in _UNITS:                      # strip the unit, keep the prefix
+            if suffix.upper().endswith(unit) and len(suffix) > len(unit):
+                prefix = suffix[:len(suffix) - len(unit)]
+                if time_unit and prefix in ("M", "m"):
+                    return value * 1e-3
+                return value * _PREFIX.get(prefix, 1.0)
+            if suffix.upper() == unit:
+                return value
+        if suffix in _PREFIX:                    # a bare prefix ("8.00K")
+            return value * _PREFIX[suffix]
+    return value
 
 
 def _word(reply: str) -> str:
@@ -97,12 +135,45 @@ class SiglentSDS:
             self._rm = pyvisa.ResourceManager()
             self._inst = self._rm.open_resource(self._resource)
             self._inst.timeout = self._timeout_ms
-            self._inst.write_termination = "\n"             # VERIFY
-            self._inst.read_termination = "\n"              # VERIFY (binary: read_raw)
+            self._inst.write_termination = "\n"
+            self._inst.read_termination = "\n"              # text replies; NOT the block
+            self._drain()
             self._idn = self._q("*IDN?")
         except BaseException:
             self._release()
             raise
+
+    def _drain(self, timeout_ms: int = 500, limit: int = 200) -> int:
+        """Read and throw away whatever an earlier client left in the output
+        queue (a reply nobody read, the rest of a cut-off waveform), so the
+        first query here gets ITS answer. pyvisa's clear() would be the
+        textbook way, but this scope answers it with VI_ERROR_SYSTEM_ERROR.
+        Reads only; returns the bytes thrown away."""
+        old = self._inst.timeout
+        self._inst.timeout = timeout_ms
+        dropped = 0
+        try:
+            for _ in range(limit):
+                try:
+                    chunk = self._inst.read_raw()
+                except Exception:                    # VisaIOError timeout: empty
+                    break
+                if not chunk:
+                    break
+                dropped += len(chunk)
+        finally:
+            self._inst.timeout = old
+        return dropped
+
+    def _read_block(self) -> bytes:
+        """One binary reply, read with the text terminator OFF: an int8 code
+        of 10 is the byte 0x0A, and with "\n" as terminator the read stopped
+        inside the block (see the module docstring)."""
+        self._inst.read_termination = None
+        try:
+            return self._inst.read_raw()
+        finally:
+            self._inst.read_termination = "\n"
 
     def _release(self) -> None:
         try:
@@ -164,8 +235,8 @@ class SiglentSDS:
                 f"{ch}.coupling")                                           # VERIFY codes
             get(c, "probe", lambda n=n: _num(self._q(f"C{n}:ATTN?")), f"{ch}.probe")
             out["channels"][ch] = c
-        get(out, "tdiv_s", lambda: _num(self._q("TDIV?")), "tdiv_s")
-        get(out, "delay_s", lambda: _num(self._q("TRDL?")), "delay_s")             # VERIFY unit
+        get(out, "tdiv_s", lambda: _num(self._q("TDIV?"), time_unit=True), "tdiv_s")
+        get(out, "delay_s", lambda: _num(self._q("TRDL?"), time_unit=True), "delay_s")  # VERIFY sign
         get(out, "sample_rate_Hz", lambda: _num(self._q("SARA?")), "sample_rate_Hz")
         trg = {}
         get(trg, "source", self._read_source, "trigger.source")
@@ -207,8 +278,17 @@ class SiglentSDS:
     def set_trigger(self, **values) -> None:
         src = values.get("source")
         if src is not None:
-            # NB: this also switches the holdoff OFF (it is part of TRSE)
-            self._w(f"TRSE EDGE,SR,{_SRC_TO_SCPI[src]},HT,OFF")                # VERIFY
+            # TRSE carries the holdoff too ("EDGE,SR,C1,HT,TI,HV,100NS"): change
+            # only the word after SR, so a new source keeps the holdoff the
+            # scope was set to
+            try:
+                parts = [p.strip() for p in _word(self._q("TRSE?")).split(",")]
+                i = [p.upper() for p in parts].index("SR") + 1
+                parts[i] = _SRC_TO_SCPI[src]
+                arg = ",".join(parts)
+            except (ValueError, IndexError):
+                arg = f"EDGE,SR,{_SRC_TO_SCPI[src]},HT,OFF"
+            self._w(f"TRSE {arg}")                                              # VERIFY
         cur = src or self._read_source()
         s = _SRC_TO_SCPI[cur]
         if "level_V" in values:
@@ -225,7 +305,7 @@ class SiglentSDS:
 
     def read_traces(self, channels, max_points):
         sara = _num(self._q("SARA?"))
-        delay = _num(self._q("TRDL?"))
+        delay = _num(self._q("TRDL?"), time_unit=True)
         n_total = None
         out = {}
         sparse = 1
@@ -242,7 +322,7 @@ class SiglentSDS:
             vdiv = _num(self._q(f"C{n}:VDIV?"))
             ofst = _num(self._q(f"C{n}:OFST?"))
             self._w(f"C{n}:WF? DAT2")
-            codes = parse_block(self._inst.read_raw())
+            codes = parse_block(self._read_block())
             out[ch] = codes * vdiv / 25.0 - ofst                                # VERIFY 25/div
         m = min(v.size for v in out.values())
         out = {k: v[:m] for k, v in out.items()}

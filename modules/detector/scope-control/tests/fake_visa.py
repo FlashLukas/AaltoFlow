@@ -1,6 +1,15 @@
 """A fake pyvisa + a fake Siglent SDS1000CML+ that answers the legacy command
 set, for offline tests of backends/siglent.py.
 
+It has a real OUTPUT QUEUE, like the instrument: a query puts its reply into
+it, a read takes bytes out -- up to the first "\n" while the resource's
+read_termination is "\n", all of the queued message otherwise. That is what
+reproduces the lab-PC bug of 2026-10-06: a waveform block whose int8 data
+holds a 0x0A, read with the terminator on, leaves the rest queued and every
+later reply out of step. Replies use the forms measured on the lab's
+RSDS1102CML+ (SI prefixes: "SARA 500.0KSa", "TRDL 0.00us", "TDIV 1.00E-03s";
+TRSE with a holdoff).
+
 It answers the way the programming guide says (headers included: "C1:VDIV
 5.00E-01V"), keeps the settings the backend writes, and serves a waveform as
 the binary block "C1:WF DAT2,#9<len><int8 codes>\\n\\n". Every write is logged,
@@ -30,19 +39,29 @@ class FakeSDS:
         self.st = {"C1": {"TRA": "ON", "VDIV": 0.5, "OFST": 0.0, "CPL": "D1M", "ATTN": 1.0},
                    "C2": {"TRA": "ON", "VDIV": 0.1, "OFST": -0.5, "CPL": "A1M", "ATTN": 10.0},
                    "TDIV": 5e-3, "TRDL": 0.0, "SARA": 1e5, "SANU": 14000,
-                   "TRSE": "EDGE,SR,EX,HT,OFF", "TRMD": "NORM",
+                   "TRSE": "EDGE,SR,EX,HT,TI,HV,100NS", "TRMD": "NORM",
                    "TRLV": {"C1": 0.0, "C2": 0.0, "EX": 0.5, "EX5": 0.5, "LINE": 0.0},
                    "TRSL": {"C1": "POS", "C2": "POS", "EX": "POS", "EX5": "POS", "LINE": "POS"},
                    "INR": 1, "WFSU": None}
-        self._pending_raw = None
+        self._out = bytearray(FakeSDS.stale)   # what an earlier client left behind
+        self.clear_calls = 0
+
+    #: bytes queued before the session opened (a crashed client's leftovers)
+    stale = b""
 
     # ---- pyvisa resource surface ----------------------------------------------
     def write(self, cmd: str):
         self.writes.append(cmd)
+        self._handle(cmd)
+
+    def _handle(self, cmd: str):
         st = self.st
         m = re.match(r"(C[12]):WF\? DAT2$", cmd)
         if m:
-            self._pending_raw = self._waveform(m.group(1))
+            self._out += self._waveform(m.group(1))
+            return
+        if cmd.endswith("?") or "? " in cmd:
+            self._out += self._reply(cmd).encode("latin-1") + b"\n"
             return
         m = re.match(r"(C[12]):(TRA|VDIV|OFST|CPL|ATTN) (\S+)$", cmd)
         if m:
@@ -73,6 +92,10 @@ class FakeSDS:
     def query(self, cmd: str) -> str:
         if self.dead:
             raise TimeoutError("VI_ERROR_TMO")
+        self._handle(cmd)
+        return self.read_raw().decode("latin-1").rstrip("\n")
+
+    def _reply(self, cmd: str) -> str:
         st = self.st
         if cmd == "*IDN?":
             return "Siglent Technologies,SDS1102CML+,SDS00000000001,1.01.01.25"
@@ -82,13 +105,15 @@ class FakeSDS:
             v = st[ch][key]
             unit = "V" if key in ("VDIV", "OFST") else ""
             return f"{ch}:{key} {v:.2E}{unit}" if isinstance(v, float) else f"{ch}:{key} {v}"
-        if cmd in ("TDIV?", "TRDL?"):
-            return f"{cmd[:-1]} {st[cmd[:-1]]:.2E}S"
+        if cmd == "TDIV?":
+            return f"TDIV {st['TDIV']:.2E}s"
+        if cmd == "TRDL?":
+            return f"TRDL {st['TRDL'] * 1e6:.2f}us"
         if cmd == "SARA?":
-            return f"SARA {st['SARA']:.2E}Sa/s"
+            return f"SARA {st['SARA'] / 1e3:.1f}KSa"
         m = re.match(r"SANU\? (C[12])$", cmd)
         if m:
-            return f"SANU {st['SANU']:.2E}"
+            return f"SANU {st['SANU']}"
         if cmd == "TRSE?":
             return f"TRSE {st['TRSE']}"
         if cmd == "TRMD?":
@@ -104,20 +129,33 @@ class FakeSDS:
         raise TimeoutError(f"unknown query {cmd}")
 
     def read_raw(self) -> bytes:
-        raw, self._pending_raw = self._pending_raw, None
-        if raw is None:
-            raise TimeoutError("nothing to read")
-        return raw
+        if not self._out:
+            raise TimeoutError("VI_ERROR_TMO: nothing to read")
+        if self.read_termination:
+            i = self._out.find(self.read_termination.encode())
+            n = len(self._out) if i < 0 else i + 1
+        else:
+            n = len(self._out)                   # the whole message (EOI)
+        chunk = bytes(self._out[:n])
+        del self._out[:n]
+        return chunk
+
+    def clear(self):
+        # the lab's scope answers viClear with VI_ERROR_SYSTEM_ERROR
+        self.clear_calls += 1
+        raise OSError("VI_ERROR_SYSTEM_ERROR")
 
     def _waveform(self, ch: str) -> bytes:
         sp = 1
         if self.st["WFSU"]:
             sp = int(self.st["WFSU"].split(",")[1])
         n = self.st["SANU"] // sp
-        # a sine of +-2 divisions: codes +-50
+        # a sine of +-2 divisions: codes +-50 -- which includes the code 10,
+        # i.e. the byte 0x0A in the middle of the block (the lab-PC bug)
         codes = np.round(50 * np.sin(np.linspace(0, 4 * np.pi, n, endpoint=False))).astype(np.int8)
         body = codes.tobytes()
-        return f"{ch}:WF DAT2,#9{len(body):09d}".encode() + body + b"\n\n"
+        assert b"\n" in body
+        return f"{ch}:WF DAT2,#9{len(body):09d}".encode() + body + b"\t\n\n"
 
     def control_ren(self, mode):
         self.ren.append(mode)

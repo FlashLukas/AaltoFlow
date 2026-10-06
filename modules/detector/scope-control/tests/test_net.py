@@ -95,5 +95,16 @@ def test_set_config_text_bool_and_shutdown(pair):
     r = cli._cmd({"cmd": "set_config", "config": {"analysis": {"subtract_background": "false"}}})
     assert r["ok"]
     wait_for(cli, lambda s: s["subtract_background"] is False)
-    r = cli._cmd({"cmd": "shutdown"})
-    assert r["ok"] and r["stopping"]
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # text: parsed, gotcha #3
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is False
+
+
+def test_restart_keeps_the_scope_untouched(pair):
+    """shutdown{keep_outputs: true} (the launcher's Restart): replies
+    kept_outputs, and nothing is written to the scope on the way out."""
+    svc, cli, sim = pair
+    before = list(sim.writes)
+    r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    svc.stop()
+    assert sim.writes == before

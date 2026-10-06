@@ -10,9 +10,12 @@ loops ...). Spec: `docs/ROADMAP.md`, "Oscilloscope module".
 
 ![front panel](../../../front-panels/scope.png)
 
-**Simulation only so far.** The real backend (`backends/siglent.py`, the
-SDS1000 series command set over VISA) has never talked to the instrument:
-every unconfirmed command is `# VERIFY`, and
+**First contact with the instrument on 2026-10-06** (lab PC, firmware
+6.01.01.25): the replies and three bugs it showed are written up at the top of
+`backends/siglent.py` and fixed (a 0x0A byte inside the binary waveform cut the
+read and put every later reply out of step; SI prefixes such as "500.0KSa" and
+"0.00us" were dropped). Not yet re-run on the instrument after the fix; the
+other unconfirmed commands are `# VERIFY`, and
 [First run on the instrument](#first-run-on-the-instrument) is the checklist.
 The Analog Discovery 3 backend (with its two generator outputs) comes later;
 the module is generic over the backend's capabilities.
@@ -64,6 +67,9 @@ The trace length, the time base and the units must not change during a scan
   It changes nothing about the acquisition or the screen.
 - Safety verbs `abort` / `stop` (cancel an acquisition) work for a viewer too.
   A scope drives nothing; the AD3 backend will add `generator_off`.
+- `shutdown{keep_outputs: true}` (Mission Control's Restart) closes exactly as
+  a plain stop does -- a scope's shutdown writes nothing either way -- and
+  replies `kept_outputs`.
 
 ## Verbs
 
@@ -115,7 +121,9 @@ following CH1 (`follow on 0`), both at high-Z.
    must have the AFG's amplitude; CH2 a 0..V square.
 6. **Time axis and the trigger point** (`SANU? / SARA? / TRDL?`): the CH2
    rising edge must sit at t = 0; with a delay set on the scope, check the
-   sign. Span = 14 divisions? (the simulator assumes 14).
+   sign. The record is SANU/SARA long: the lab saw 8000 points at 500 kSa/s
+   at 1 ms/div = 16 ms, i.e. 16 divisions of memory (the simulator assumes
+   14) -- check against the screen.
 7. **Writing** each setting from the GUI (V/div, offset, coupling, probe,
    time/div, delay, source, level, slope, mode): the screen follows, the GUI
    shows the snapped value.
@@ -127,6 +135,6 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q        # 60 tests, offline: the simulated bench + a fake SDS1000CML+
+uv run pytest -q        # 66 tests, offline: the simulated bench + a fake SDS1000CML+
 python ..\..\..\tools\check_modules.py scope --live
 ```
