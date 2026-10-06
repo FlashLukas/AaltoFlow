@@ -41,7 +41,7 @@ def test_manifest_shape_and_required_fields():
         assert isinstance(m["revision"], int)
         ids = [p["id"] for p in m["parameters"]]
         assert len(ids) == len(set(ids)), "duplicate parameter ids"
-        assert {"rf_on", "frequency", "power", "phase", "reference",
+        assert {"rf_on", "frequency", "power", "vernier", "phase", "reference",
                 "usb_volts", "ext_ref_detected"} <= set(ids)
         status = status_to_dict(brain.status())
         for p in m["parameters"]:
@@ -210,5 +210,41 @@ def test_reference_options_cover_every_value_status_reports():
             while brain.status().reference != mode and time.monotonic() < deadline:
                 time.sleep(0.05)
             assert _check_types(brain)["reference"] == mode
+    finally:
+        brain.shutdown()
+
+
+def test_vernier_control_is_declared_with_live_limits():
+    cfg = Config()
+    cfg.limits.vernier_min, cfg.limits.vernier_max = -12, 9
+    _, brain = _brain(cfg)
+    try:
+        by = _by_id(build_manifest(brain))
+        v = by["vernier"]
+        assert v["kind"] == "control" and v["type"] == "int" and v["unit"] == ""
+        assert (v["min"], v["max"]) == (-12, 9)
+        assert v["set"] == {"verb": "set_vernier", "arg": "vernier"}
+        assert v["settle"] == {"policy": "echoes", "key": "vernier", "tol": 0.5}
+        assert v["read_path"] == ["vernier"]
+        assert v["group"] == "Signal"
+        assert by["power"]["order"] < v["order"] < by["phase"]["order"]
+        assert "not calibrated" in v["help"]
+        _check_types(brain)
+    finally:
+        brain.shutdown()
+
+
+def test_unit_without_vernier_drops_the_vernier_control():
+    cfg = Config()
+    cfg.sim.has_vernier = False
+    brain, _ = build_sim_system(cfg)
+    # before connect we do not know yet: offered, like phase
+    assert "vernier" in _by_id(build_manifest(brain))
+    before = build_manifest(brain)["revision"]
+    brain.start()
+    try:
+        m = build_manifest(brain)
+        assert "vernier" not in _by_id(m)
+        assert m["revision"] != before
     finally:
         brain.shutdown()

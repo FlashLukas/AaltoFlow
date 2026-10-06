@@ -147,6 +147,11 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(lim.phase_min_deg, 0, 360, 0, 1.0, "deg"))
         self._add(form, "limits", "phase_max_deg", "Phase max",
                   _dspin(lim.phase_max_deg, 0, 360, 0, 1.0, "deg"))
+        # raw counts; the vendor documents no range -- +-30 is a safe guess
+        self._add(form, "limits", "vernier_min", "Vernier min",
+                  _ispin(lim.vernier_min, -1000, 1000, "counts"))
+        self._add(form, "limits", "vernier_max", "Vernier max",
+                  _ispin(lim.vernier_max, -1000, 1000, "counts"))
         form.addRow(_hint("Every setpoint is clamped to this envelope AND to the range the "
                           "SG12000L reports about itself, whichever is narrower. Keep the power "
                           "ceiling conservative to protect the sample and the amplifier chain."))
@@ -200,6 +205,8 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(sm.power_max_dBm, -100, 30, 1, 0.5, "dBm"))
         self._add(form, "sim", "has_phase", "Phase control",
                   _check("the simulated firmware has PHASE", sm.has_phase))
+        self._add(form, "sim", "has_vernier", "Vernier control",
+                  _check("the simulated firmware has VERNIER", sm.has_vernier))
         self._add(form, "sim", "external_ref_present", "External reference",
                   _check("a 10 MHz cable is plugged in", sm.external_ref_present))
         # The state the simulated box is in when the service connects -- the
@@ -212,6 +219,8 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(sm.state_power_dBm, -100, 30, 1, 0.5, "dBm"))
         self._add(form, "sim", "state_phase_deg", "Box state: phase",
                   _dspin(sm.state_phase_deg, 0, 360, 2, 1.0, "deg"))
+        self._add(form, "sim", "state_vernier", "Box state: vernier",
+                  _ispin(sm.state_vernier, -1000, 1000, "counts"))
         self._add(form, "sim", "state_reference", "Box state: reference",
                   _combo(REFERENCES, sm.state_reference))
         form.addRow(_hint("Only used without --real. Takes effect when the simulator restarts. "

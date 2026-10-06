@@ -16,8 +16,8 @@ draws a slider with the wrong range.
 
 The limits here ARE dynamic: the frequency and power ranges are the
 intersection of the config envelope and the range the SG12000L reports about
-itself at connect, and the phase control exists only if the unit's firmware
-has one. So the manifest before `start()` differs from the one after it, and
+itself at connect, and the phase and vernier controls exist only if the
+unit's firmware has them. So the manifest before `start()` differs from the one after it, and
 `revision` (in every status frame as `describe_rev`) tells a client when.
 """
 
@@ -142,6 +142,20 @@ def build_manifest(synth) -> dict:
                 "rounded to the nearest one (the unit itself ignores an "
                 "off-step value)."),
     ]
+    if synth.has_vernier() or not synth.status().connected:
+        # Same rule as phase below: offered before connect, dropped on a
+        # connected unit whose firmware does not answer VERNIER?.
+        params.append(
+            _p("vernier", "Power vernier", "control", "int", unit="",
+               group="Signal", order=31, step=1,
+               min=int(lim["vernier_min"]), max=int(lim["vernier_max"]),
+               read_path=["vernier"],
+               set={"verb": "set_vernier", "arg": "vernier"},
+               # an integer echoes exactly; 0.5 only absorbs a float round trip
+               settle={"policy": "echoes", "key": "vernier", "tol": 0.5},
+               help="Fine output-power trim in raw counts (no unit). The dB "
+                    "per count is not calibrated yet; measure it before "
+                    "relying on it."))
     if synth.has_phase() or not synth.status().connected:
         # Offered before connect (we do not know yet) and on units that have
         # it; a connected unit without phase control drops it, and the

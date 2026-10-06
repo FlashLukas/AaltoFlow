@@ -51,11 +51,13 @@ class Status:
     frequency_Hz: float = 0.0
     power_dBm: float = 0.0
     phase_deg: float = 0.0
+    vernier: int = 0                # fine power trim, raw counts (no unit)
     reference: str = "auto"
     ext_ref_detected: bool = False
     usb_volts: float = 0.0
     connected: bool = False
     has_phase: bool = False
+    has_vernier: bool = False
     idn: str = ""
     hw_error: str = ""
     # the effective (cfg AND instrument) envelope, published so a client can
@@ -87,6 +89,9 @@ class Synthesizer:
         self._freq = float(s.frequency_Hz)
         self._power = float(s.power_dBm)
         self._phase = float(s.phase_deg)
+        # The VERNIER is not part of the preset: it is always adopted from the
+        # unit, and only a set_vernier changes it.
+        self._vernier = 0
         self._reference = s.reference if s.reference in REFERENCES else "auto"
         self._rf_on = False                 # adopted at start; never switched ON by us
         # The config values the brain has already acted on. apply_config()
@@ -98,6 +103,7 @@ class Synthesizer:
         self._unit_freq: tuple[float, float] | None = None
         self._unit_power: tuple[float, float] | None = None
         self._has_phase = False
+        self._has_vernier = False
         self._idn = ""
         self._connected = False
 
@@ -128,10 +134,14 @@ class Synthesizer:
         f_hi, p_hi = max(f_hi, f_lo), max(p_hi, p_lo)
         return {"freq_min_Hz": f_lo, "freq_max_Hz": f_hi,
                 "power_min_dBm": p_lo, "power_max_dBm": p_hi,
-                "phase_min_deg": lim.phase_min_deg, "phase_max_deg": lim.phase_max_deg}
+                "phase_min_deg": lim.phase_min_deg, "phase_max_deg": lim.phase_max_deg,
+                "vernier_min": int(lim.vernier_min), "vernier_max": int(lim.vernier_max)}
 
     def has_phase(self) -> bool:
         return self._has_phase
+
+    def has_vernier(self) -> bool:
+        return self._has_vernier
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -154,7 +164,9 @@ class Synthesizer:
             raise
         self._emit("info", f"connected: {self._idn or 'SG12000L'}; adopted "
                            f"RF {'ON' if self._rf_on else 'off'}, "
-                           f"{self._freq / 1e6:.6f} MHz, {self._power:g} dBm, "
+                           f"{self._freq / 1e6:.6f} MHz, {self._power:g} dBm"
+                           + (f" (vernier {self._vernier:+d})" if self._has_vernier else "")
+                           + ", "
                            f"ref {self._reference} (nothing changed)")
         self._warn_if_outside_limits()
         self._seen = self._cfg_snapshot()       # the config as it stood at connect
@@ -183,6 +195,11 @@ class Synthesizer:
             self._power = float(b.read_power())
             if self._has_phase:
                 self._phase = float(b.read_phase())
+            # getattr: a backend written before the vernier existed simply
+            # has none (no crash, no control offered)
+            self._has_vernier = bool(getattr(b, "has_vernier", lambda: False)())
+            if self._has_vernier:
+                self._vernier = int(b.read_vernier())
             ref = b.read_reference()
             if ref in REFERENCES:
                 self._reference = ref
@@ -199,6 +216,9 @@ class Synthesizer:
         if self._has_phase:
             checks.append(("phase", self._phase, lim["phase_min_deg"],
                            lim["phase_max_deg"], "deg"))
+        if self._has_vernier:
+            checks.append(("vernier", self._vernier, lim["vernier_min"],
+                           lim["vernier_max"], "counts"))
         for name, v, lo, hi, unit in checks:
             if not lo <= v <= hi:
                 self._emit("warn", f"the unit is at {name} {v:g} {unit}, outside "
@@ -304,6 +324,29 @@ class Synthesizer:
         else:
             self._emit("info", f"phase = {value:g} deg")
 
+    def set_vernier(self, n) -> None:
+        """Fine output-power trim, in raw integer counts (no unit).
+
+        The step attenuator only makes 0.5 dB steps; the vernier trims in
+        between. The dB per count is NOT documented, so this is deliberately
+        a raw number until someone has measured counts -> dB on the unit."""
+        if not self._has_vernier and self._connected:
+            # refuse loudly, like phase: a scan over the vernier on a unit
+            # without one must fail, not measure identical points
+            raise ValueError("this unit has no vernier control")
+        lim = self.limits()
+        # round(), not int(): 2.6 from a GUI or a scan means 3, not 2
+        value, clamped = _clamp(int(round(float(n))), lim["vernier_min"],
+                                lim["vernier_max"])
+        value = int(value)
+        self._vernier = value
+        self._push(self.backend.set_vernier, value)
+        if clamped:
+            self._emit("warn", f"vernier clamped to {value:d} "
+                               f"(limit {lim['vernier_min']:d}..{lim['vernier_max']:d})")
+        else:
+            self._emit("info", f"vernier = {value:d}")
+
     def set_reference(self, mode: str) -> None:
         mode = str(mode).strip().lower()
         if mode not in REFERENCES:
@@ -321,8 +364,10 @@ class Synthesizer:
     def _offline_snapshot(self) -> Status:
         lim = self.limits()
         return Status(rf_on=False, frequency_Hz=self._freq, power_dBm=self._power,
-                      phase_deg=self._phase, reference=self._reference,
+                      phase_deg=self._phase, vernier=self._vernier,
+                      reference=self._reference,
                       connected=False, has_phase=self._has_phase,
+                      has_vernier=self._has_vernier,
                       freq_min_Hz=lim["freq_min_Hz"], freq_max_Hz=lim["freq_max_Hz"],
                       power_min_dBm=lim["power_min_dBm"],
                       power_max_dBm=lim["power_max_dBm"])
@@ -341,10 +386,12 @@ class Synthesizer:
                     frequency_Hz=float(b.read_frequency()),
                     power_dBm=float(b.read_power()),
                     phase_deg=float(b.read_phase()) if self._has_phase else 0.0,
+                    vernier=int(b.read_vernier()) if self._has_vernier else 0,
                     reference=b.read_reference(),
                     ext_ref_detected=bool(b.external_ref_detected()),
                     usb_volts=float(b.usb_volts()),
-                    connected=True, has_phase=self._has_phase, idn=self._idn,
+                    connected=True, has_phase=self._has_phase,
+                    has_vernier=self._has_vernier, idn=self._idn,
                     freq_min_Hz=lim["freq_min_Hz"], freq_max_Hz=lim["freq_max_Hz"],
                     power_min_dBm=lim["power_min_dBm"],
                     power_max_dBm=lim["power_max_dBm"],
@@ -434,8 +481,8 @@ class Synthesizer:
         overwrite the adopted instrument state with a stale preset every time
         someone changed the theme.
           * a changed `signal` preset field -> set that value (clamped),
-          * changed `limits` -> re-clamp the desired signal and push any value
-            that moved (a narrower ceiling must bite at once),
+          * changed `limits` -> re-clamp the desired signal (and the vernier)
+            and push any value that moved (a narrower ceiling must bite at once),
           * changed mute_buzzer / display_off -> *BUZZER / *DISPLAY.
         """
         now, prev = self._cfg_snapshot(), self._seen
@@ -461,6 +508,11 @@ class Synthesizer:
                 v = _clamp(self._phase, lim["phase_min_deg"], lim["phase_max_deg"])[0]
                 if v != self._phase:
                     self.set_phase(v)
+        # the vernier has no preset; only a narrower limit can move it
+        if (self._has_vernier and now["limits"] != prev["limits"]):
+            v = int(_clamp(self._vernier, lim["vernier_min"], lim["vernier_max"])[0])
+            if v != self._vernier:
+                self.set_vernier(v)
         if sig["reference"] != old["reference"] and sig["reference"] in REFERENCES:
             self.set_reference(sig["reference"])
         if now["mute_buzzer"] != prev["mute_buzzer"]:

@@ -128,6 +128,7 @@ class StrictLink(FakeLink):
 
 
 _UNIT = {"*IDN?": "DS INSTRUMENTS,SG12000L,1234,2.1", "PHASE?": "45.00",
+         "VERNIER?": "-3",
          "SYST:ERR?": '0,"No error"', "OUTP:STAT?": "ON",
          "FREQ:CW?": "3200000000", "POWER?": "2.5", "*REFMODE?": "0",
          "FREQ:MIN?": "25000000", "FREQ:MAX?": "12000000000",
@@ -149,6 +150,7 @@ def test_open_issues_no_state_changing_writes(monkeypatch, phase_mode):
     # ...and everything the brain reads to adopt is a query, too
     assert b.read_output() is True and b.read_frequency() == 3.2e9
     assert b.read_power() == 2.5 and b.read_reference() == "external"
+    assert b.has_vernier() is True and b.read_vernier() == -3   # probed by a query
     # a failed start releases the port WITHOUT touching RF
     b.close(rf_off=False)
     assert links[0].sent[-1] == "<close>"
@@ -195,3 +197,40 @@ def test_error_drain_collects_distinct_errors_until_clean():
     replies = iter(["-113,Undefined header", "-222,Data out of range", "0,No error"])
     b = _backend({"SYST:ERR?": lambda: next(replies)})
     assert b.errors() == ["-113,Undefined header", "-222,Data out of range"]
+
+
+# ---- VERNIER (fine power trim, raw counts; [CL] v2.1) ---------------------
+
+def test_vernier_command_spelling_and_readback():
+    b = _backend({"VERNIER?": "-22"})
+    b._has_vernier = True
+    b.set_vernier(3)
+    b.set_vernier(-22.0)              # a float from a scan goes out as an int
+    assert b._link.sent == ["VERNIER 3", "VERNIER -22"]
+    assert b.read_vernier() == -22
+
+
+def test_vernier_readback_tolerates_a_decimal_reply():
+    b = _backend({"VERNIER?": "3.0"})
+    b._has_vernier = True
+    assert b.read_vernier() == 3 and isinstance(b.read_vernier(), int)
+
+
+def test_vernier_probe():
+    ok = _backend({"VERNIER?": "0", "SYST:ERR?": "0"})
+    assert ok._probe_vernier() is True
+    missing = _backend({"SYST:ERR?": "0"})            # VERNIER? times out
+    assert missing._probe_vernier() is False
+    garbage = _backend({"VERNIER?": "?", "SYST:ERR?": "0"})
+    assert garbage._probe_vernier() is False
+    q = iter(['-113,"Undefined header"', "0"])         # a number AND an error
+    complained = _backend({"VERNIER?": "0", "SYST:ERR?": lambda: next(q)})
+    assert complained._probe_vernier() is False
+
+
+def test_no_vernier_refuses_set_and_reads_zero():
+    b = _backend({})
+    with pytest.raises(RuntimeError):
+        b.set_vernier(1)
+    assert b.read_vernier() == 0
+    assert b._link.sent == []                          # nothing reached the unit

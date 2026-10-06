@@ -88,6 +88,7 @@ class SpectrumIndicator(QtWidgets.QWidget):
         self._p = -20.0
         self._phase = 0.0
         self._has_phase = True
+        self._vernier = None              # raw counts, None = the unit has none
         self._band = (25e6, 12e9)
         self._rng = random.Random(7)
         self._floor = [self._rng.gauss(0.0, 1.6) for _ in range(160)]
@@ -98,8 +99,9 @@ class SpectrumIndicator(QtWidgets.QWidget):
         self._timer.timeout.connect(self._tick)
 
     def set_state(self, rf_on: bool, f_hz: float, p_dbm: float, phase_deg: float,
-                  has_phase: bool, band: tuple[float, float]):
+                  has_phase: bool, band: tuple[float, float], vernier=None):
         self._on = bool(rf_on)
+        self._vernier = vernier
         self._f, self._p = float(f_hz), float(p_dbm)
         self._phase, self._has_phase = float(phase_deg), bool(has_phase)
         if band[1] > band[0] > 0:
@@ -203,8 +205,13 @@ class SpectrumIndicator(QtWidgets.QWidget):
             p.setPen(c_text)
             f.setBold(True); p.setFont(f)
             label = f"{_fmt_freq(self._f)}  {self._p:+.1f} dBm"
-            tx = min(max(x - 70, r.left()), r.right() - 140)
-            p.drawText(QRectF(tx, y - 24, 140, 12), Qt.AlignHCenter, label)
+            # the vernier is shown as its raw count, NOT folded into the dBm:
+            # its dB per count is not calibrated, and a made-up level would
+            # look like a measurement
+            if self._vernier:
+                label += f"  vern {self._vernier:+d}"
+            tx = min(max(x - 90, r.left()), r.right() - 180)
+            p.drawText(QRectF(tx, y - 24, 180, 12), Qt.AlignHCenter, label)
         else:
             p.setPen(c_muted)
             f.setBold(True); f.setPointSize(9); p.setFont(f)
@@ -356,6 +363,20 @@ class MainWindow(QtWidgets.QMainWindow):
         set_pow.clicked.connect(self._set_power)
         prow.addWidget(self.power_spin, 1); prow.addWidget(set_pow)
         play.addLayout(prow)
+        # VERNIER: the fine trim between two 0.5 dB attenuator steps, in RAW
+        # counts (the dB per count is not calibrated yet). Sent when the user
+        # finishes editing (Enter / leaving the field), so arrow-clicking
+        # through values does not fire one command per click.
+        vrow = QtWidgets.QHBoxLayout()
+        vlab = QtWidgets.QLabel("Vernier")
+        vlab.setObjectName("hint")
+        self.vernier_spin = QtWidgets.QSpinBox()
+        self.vernier_spin.setSuffix("  counts")
+        self.vernier_spin.setToolTip("Fine output-power trim in raw counts (no unit). "
+                                     "The dB per count is not calibrated yet.")
+        self.vernier_spin.editingFinished.connect(self._set_vernier)
+        vrow.addWidget(vlab); vrow.addWidget(self.vernier_spin, 1)
+        play.addLayout(vrow)
         self.power_hint = QtWidgets.QLabel("")
         self.power_hint.setObjectName("hint")
         play.addWidget(self.power_hint)
@@ -446,6 +467,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 f"{lim['power_max_dBm']:g} dBm, "
                                 f"{self.cfg.hardware.power_step_dB:g} dB steps")
         self.phase_spin.setRange(lim["phase_min_deg"], lim["phase_max_deg"])
+        self.vernier_spin.setRange(int(lim.get("vernier_min", -30)),
+                                   int(lim.get("vernier_max", 30)))
         self._apply_freq_unit_range(initial_hz=self._current_freq_hz())
 
     def _seed_from_status(self):
@@ -456,6 +479,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_spin.setValue(s.frequency_Hz / _FREQ_UNITS[self._freq_unit])
         self.power_spin.setValue(s.power_dBm)
         self.phase_spin.setValue(s.phase_deg)
+        self.vernier_spin.setValue(int(getattr(s, "vernier", 0)))
         self.ref_combo.setCurrentText(s.reference)
 
     def _apply_freq_unit_range(self, initial_hz=None):
@@ -503,6 +527,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_phase(self):
         self._do(self.ctrl.set_phase, self.phase_spin.value())
 
+    def _set_vernier(self):
+        # editingFinished also fires when the field merely loses focus: send
+        # only a value that differs from what the unit reports, so clicking
+        # elsewhere does not re-send (or, as a viewer, log a refusal).
+        s = self.ctrl.status()
+        if not getattr(s, "has_vernier", False):
+            return
+        n = self.vernier_spin.value()
+        if n != int(getattr(s, "vernier", 0)):
+            self._do(self.ctrl.set_vernier, n)
+
     def _set_reference(self):
         self._do(self.ctrl.set_reference, self.ref_combo.currentText())
 
@@ -536,6 +571,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.volts_value.setText(f"{s.usb_volts:.2f}" if s.connected else "—")
         self.phase_spin.setEnabled(bool(s.has_phase))
         self.set_ph.setEnabled(bool(s.has_phase))
+        self.vernier_spin.setEnabled(bool(getattr(s, "has_vernier", False)))
         self.ext_ref_label.setText(
             f"reference in use: {s.reference}   -   external 10 MHz "
             f"{'DETECTED' if s.ext_ref_detected else 'not detected'}")
@@ -576,7 +612,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.idn_label.setText(s.idn)
 
         self.spectrum.set_state(s.rf_on, s.frequency_Hz, s.power_dBm, s.phase_deg,
-                                s.has_phase, (s.freq_min_Hz, s.freq_max_Hz))
+                                s.has_phase, (s.freq_min_Hz, s.freq_max_Hz),
+                                vernier=(int(s.vernier) if getattr(s, "has_vernier", False)
+                                         else None))
 
     def _badge_color(self, color):
         self.state_badge.setStyleSheet(

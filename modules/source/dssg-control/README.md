@@ -63,12 +63,12 @@ tests/                   pytest: config, brain, real backend vs a fake link, net
 ## Verbs
 
 `set_rf{on}`, `set_frequency{frequency_Hz}`, `set_power{power_dBm}`,
-`set_phase{phase_deg}`, `set_reference{mode: internal|external|auto}`, plus the
+`set_phase{phase_deg}`, `set_vernier{vernier}`, `set_reference{mode: internal|external|auto}`, plus the
 universal `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 A reply means *accepted*; the read-back in `status` means *done*.
 
-Status keys: `rf_on, frequency_Hz, power_dBm, phase_deg, reference,
-ext_ref_detected, usb_volts, connected, has_phase, idn, hw_error,
+Status keys: `rf_on, frequency_Hz, power_dBm, phase_deg, vernier, reference,
+ext_ref_detected, usb_volts, connected, has_phase, has_vernier, idn, hw_error,
 freq_min_Hz, freq_max_Hz, power_min_dBm, power_max_dBm, polls, describe_rev`.
 
 ## SCPI used (real backend)
@@ -83,6 +83,7 @@ been checked against the unit.
 | frequency     | `FREQ:CW 2450.000000MHZ`     | `FREQ:CW?` (format VERIFY)    |
 | power         | `POWER -12.50`               | `POWER?`                      |
 | phase         | `PHASE 90.00` (VERIFY)       | `PHASE?` (VERIFY)             |
+| vernier       | `VERNIER -3`                 | `VERNIER?` (format VERIFY)    |
 | reference     | `*INTERNALREF 1/0/A` + `*REFUPDATE` | `*REFMODE?`, `*EXTREF?` |
 | range         |                              | `FREQ:MIN?/MAX?`, `POWER:MIN?/MAX?` |
 | health        |                              | `*SYSVOLTS?`, `SYST:ERR?`     |
@@ -94,6 +95,15 @@ On connect the module ADOPTS the unit's state and changes nothing (rule of
 them. RF is switched OFF when the service stops. There is also a `PHASE?`
 probe -- the 2022 SG12000L list has no phase command, the shop page advertises 0-360 deg phase control, so the module asks the firmware. A unit
 without it simply has no phase control in `describe`, and `set_phase` is refused.
+
+**Power vernier.** The attenuator moves in 0.5 dB steps; the unit's `VERNIER`
+command trims the level in between. The vendor documents neither its range nor
+its dB per count, so the module offers it as RAW integer counts ("Power
+vernier", `set_vernier{vernier}`), clamped to `[limits] vernier_min/max`
+(default -30..+30, a safe guess). It is probed at connect (`VERNIER?`) and
+adopted like everything else; a unit that does not answer has no vernier in
+`describe` and `set_vernier` is refused. Measure counts -> dB (e.g. with a
+spectrum analyser) before relying on it for a calibrated level.
 
 USB: 115200 baud, 8N1, linefeed terminator. Ethernet: TCP port 10001 (fixed for
 all DSI models); the unit uses DHCP unless given a static address.

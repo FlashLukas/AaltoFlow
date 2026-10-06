@@ -25,6 +25,11 @@ What they say, and how sure we are
   PHASE <deg>        NOT in [CL] for the SG12000L; listed in [AN]'s combined
                      table ("PHASE 90", "PHASE -30") and the shop page advertises
                      0-360 deg phase control -> probed at connect
+  VERNIER <n>        "Fine tune the output power (no units)", e.g.
+                     "VERNIER 3", "VERNIER -22"                        [CL]
+  VERNIER?           "Return vernier setting"                          [CL]
+                     range, sign and dB per count NOT documented -> probed at
+                     connect, published as raw integer counts
   *INTERNALREF 1|0|A internal / external / auto-detect at power-on    [CL]
   *REFMODE?          "Return the current reference setting" -- format unknown
   *EXTREF?           "Is an external reference signal detected?"      [CL]
@@ -178,6 +183,7 @@ class DsiSG12000L:
         self._display_turned_off = False
         self._link = None
         self._has_phase = False
+        self._has_vernier = False
         self._idn = ""
         # The claim on this unit's physical address (hwlock.py): held from
         # open() to close() so no second service -- another dssg, or any
@@ -223,7 +229,7 @@ class DsiSG12000L:
         """The link died (USB unplugged, the adapter's driver replaced): drop
         it WITHOUT sending anything and open it again. The hwlock claim on the
         address stays ours meanwhile. Opening only clears the error queue and
-        reads *IDN? / PHASE? (adopt rule), so nothing on the unit changes.
+        reads *IDN? / PHASE? / VERNIER? (adopt rule), so nothing on the unit changes.
         Raises while the port is still missing; the brain tries again later."""
         link, self._link = self._link, None
         if link is not None:
@@ -252,6 +258,7 @@ class DsiSG12000L:
         self._link.write("*CLS")                               # clear old errors only
         self._idn = self._link.query("*IDN?")
         self._has_phase = self._probe_phase()                  # queries only
+        self._has_vernier = self._probe_vernier()              # queries only
 
     def _probe_phase(self) -> bool:
         """Does this firmware understand PHASE? The 2022 SG12000L list [CL] has
@@ -264,6 +271,19 @@ class DsiSG12000L:
         try:
             reply = self._link.query("PHASE?")                  # VERIFY: spelling
             parse_number(reply)
+        except Exception:
+            self.errors()                                      # drain the complaint
+            return False
+        return not self.errors()                               # VERIFY: error on unknown cmd
+
+    def _probe_vernier(self) -> bool:
+        """Does this firmware answer VERNIER? with a number? [CL] lists it for
+        the SG12000L, but an older or newer firmware might not -- so ask, the
+        same way as for PHASE?, and offer the control only if it answers
+        cleanly. A query changes nothing on the unit (adopt-on-start rule)."""
+        try:
+            reply = self._link.query("VERNIER?")               # [CL]
+            parse_number(reply)                                # VERIFY: reply format
         except Exception:
             self.errors()                                      # drain the complaint
             return False
@@ -340,6 +360,30 @@ class DsiSG12000L:
         if not self._has_phase:
             return 0.0
         return parse_number(self._link.query("PHASE?"))        # VERIFY
+
+    # ---- vernier (fine power trim, raw counts) -------------------------------
+    # The step attenuator only makes 0.5 dB steps; the VERNIER trims the level
+    # in between. [CL] gives the command and two examples (3, -22) but NO
+    # range, NO sign convention and NO dB per count, so we pass raw integer
+    # counts and let the brain clamp them to cfg limits (a guess, VERIFY).
+    # Also unknown (VERIFY): whether a POWER command resets the vernier to 0,
+    # whether POWER? includes the vernier's offset, and whether *SAVESTATE
+    # stores it across a power cycle.
+
+    def has_vernier(self) -> bool:
+        return self._has_vernier
+
+    def set_vernier(self, n: int) -> None:
+        if not self._has_vernier:
+            raise RuntimeError("this SG12000L firmware has no vernier control")
+        self._link.write(f"VERNIER {int(n)}")                  # [CL]; VERIFY: range
+                                                               # (examples 3, -22)
+
+    def read_vernier(self) -> int:
+        if not self._has_vernier:
+            return 0
+        # round(), not int(): a reply like "3.0" must read as 3, not fail
+        return int(round(parse_number(self._link.query("VERNIER?"))))  # VERIFY: format
 
     # ---- reference ---------------------------------------------------------
 

@@ -27,6 +27,7 @@ def _left_on(cfg: Config) -> Config:
     cfg.sim.state_frequency_Hz = 3.2e9
     cfg.sim.state_power_dBm = 2.5
     cfg.sim.state_phase_deg = 45.0
+    cfg.sim.state_vernier = 7
     cfg.sim.state_reference = "external"
     return cfg
 
@@ -35,7 +36,7 @@ class RecordingSim:
     """Wraps the simulated unit and records every STATE-CHANGING call. During
     start() there must be none (Lukas's rule, 2026-09-27)."""
     SETTERS = ("set_output", "set_frequency", "set_power", "set_phase",
-               "set_reference", "set_buzzer", "set_display")
+               "set_vernier", "set_reference", "set_buzzer", "set_display")
 
     def __init__(self, inner):
         self._inner = inner
@@ -298,3 +299,56 @@ def test_describe_declares_the_power_resolution():
     s, _b = build_sim_system(Config())
     d = next(p for p in build_manifest(s)["parameters"] if p["id"] == "power")
     assert d["resolution"] == 0.5
+
+
+# ---- VERNIER (fine power trim, raw counts) -------------------------------
+
+def test_vernier_is_adopted_not_pushed(synth):
+    """The box was left at vernier 7 (_left_on): start reads it, writes nothing."""
+    assert synth.has_vernier() is True
+    assert synth._vernier == 7
+    s = synth.status()
+    assert s.has_vernier is True and s.vernier == 7 and isinstance(s.vernier, int)
+
+
+def test_vernier_set_and_read_back(synth):
+    synth.set_vernier(-4)
+    s = wait_for(synth, lambda s: s.vernier == -4)
+    assert synth.sim.read_vernier() == -4
+    # the simulator's output level moves with it; POWER? does not (separate knob)
+    assert synth.sim.output_dBm() == pytest.approx(
+        s.power_dBm + synth.sim.SIM_DB_PER_COUNT * -4)
+    assert ("info", "vernier = -4") in synth.events
+
+
+def test_vernier_rounds_and_clamps_with_a_warning(synth):
+    synth.set_vernier(2.6)
+    assert synth._vernier == 3
+    synth.set_vernier(1000)
+    assert synth._vernier == synth.cfg.limits.vernier_max
+    synth.set_vernier(-1000)
+    assert synth._vernier == synth.cfg.limits.vernier_min
+    warns = [m for lvl, m in synth.events if lvl == "warn" and "vernier clamped" in m]
+    assert len(warns) == 2
+
+
+def test_vernier_refused_on_a_unit_without_it():
+    cfg = Config()
+    cfg.sim.has_vernier = False
+    s, inner = build_sim_system(cfg)
+    s.start()
+    try:
+        assert s.has_vernier() is False
+        with pytest.raises(ValueError):
+            s.set_vernier(1)
+        assert s.status().has_vernier is False and s.status().vernier == 0
+    finally:
+        s.shutdown()
+
+
+def test_narrower_vernier_limits_reclamp_the_unit(synth):
+    synth.set_vernier(20)
+    synth.cfg.limits.vernier_max = 5
+    synth.apply_config()
+    assert synth._vernier == 5
+    wait_for(synth, lambda s: s.vernier == 5)

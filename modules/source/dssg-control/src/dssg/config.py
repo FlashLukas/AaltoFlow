@@ -63,6 +63,12 @@ class Limits:
     power_max_dBm: float = 5.0
     phase_min_deg: float = 0.0
     phase_max_deg: float = 360.0
+    # VERNIER fine power trim, in raw integer counts (no unit). The vendor
+    # documents neither the range nor the dB per count (its examples are 3
+    # and -22), so +-30 is a SAFE GUESS, not a datasheet value: widen it once
+    # the counts -> dB curve has been measured on the unit (VERIFY).
+    vernier_min: int = -30
+    vernier_max: int = 30
 
 
 @dataclass
@@ -122,6 +128,7 @@ class Sim:
     power_min_dBm: float = -21.5              # calibrated range
     power_max_dBm: float = 10.0
     has_phase: bool = True
+    has_vernier: bool = True                  # the simulated firmware answers VERNIER?
     external_ref_present: bool = False        # is a 10 MHz cable plugged into the MCX jack?
     # The state the simulated box is IN when the service connects, as if
     # someone had left it like that from the front panel. The module adopts
@@ -131,6 +138,7 @@ class Sim:
     state_frequency_Hz: float = 2_450_000_000.0
     state_power_dBm: float = -10.0
     state_phase_deg: float = 0.0
+    state_vernier: int = 0
     state_reference: str = "internal"
 
 

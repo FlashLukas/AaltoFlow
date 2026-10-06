@@ -234,6 +234,9 @@ class DssgService:
                 self.synth.set_frequency(float(msg["frequency_Hz"]))
             elif cmd == "set_phase":
                 self.synth.set_phase(float(msg["phase_deg"]))
+            elif cmd == "set_vernier":
+                # raw counts; the brain rounds to an integer and clamps
+                self.synth.set_vernier(float(msg["vernier"]))
             elif cmd == "set_reference":
                 self.synth.set_reference(str(msg["mode"]))
             elif cmd == "status":
@@ -266,6 +269,7 @@ class DssgService:
         info = dict(self.synth.limits())
         st = self.synth.status()
         info.update({"idn": st.idn, "has_phase": self.synth.has_phase(),
+                     "has_vernier": self.synth.has_vernier(),
                      "transport": self.synth.cfg.hardware.transport})
         return info
 

@@ -28,6 +28,7 @@ Commands
     power <dBm>            set the output level in dBm (0.5 dB steps)
     freq <value> [unit]    set frequency; unit = Hz|kHz|MHz|GHz (default Hz)
     phase <deg>            set the phase in degrees (if the unit has it)
+    vernier <n>            fine power trim, raw integer counts (if the unit has it)
     ref internal|external|auto   choose the 10 MHz reference
     status                 print one status snapshot
     info                   print static info (effective limits, *IDN?)
@@ -157,6 +158,7 @@ class Console:
               f"  freq={f_hz/1e6:14.6f} MHz"
               f"  power={s.get('power_dBm', 0):7.2f} dBm"
               f"  phase={phase}"
+              f"  vernier={s.get('vernier', 0) if s.get('has_vernier') else 'n/a'}"
               f"  ref={s.get('reference')}{'(ext seen)' if s.get('ext_ref_detected') else ''}"
               f"  USB={s.get('usb_volts', 0):.2f} V"
               f"  connected={s.get('connected')}"
@@ -218,6 +220,8 @@ class Console:
                 print(self.send({"cmd": "set_frequency", "frequency_Hz": parse_freq(args)}))
             elif cmd == "phase":
                 print(self.send({"cmd": "set_phase", "phase_deg": float(args[0])}))
+            elif cmd == "vernier":
+                print(self.send({"cmd": "set_vernier", "vernier": int(args[0])}))
             elif cmd == "ref":
                 print(self.send({"cmd": "set_reference", "mode": args[0].lower()}))
             elif cmd == "status":

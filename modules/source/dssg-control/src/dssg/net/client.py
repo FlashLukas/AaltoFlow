@@ -2,7 +2,7 @@
 
 A GUI, a script, or the coordinator can hold a DssgClient exactly where it would
 hold a Synthesizer: same method names (set_rf, set_power, set_frequency,
-set_phase, set_reference, limits, has_phase), same status() shape, same get_config()/apply_config(), same
+set_phase, set_vernier, set_reference, limits, has_phase, has_vernier), same status() shape, same get_config()/apply_config(), same
 `_on_event` hook. So the caller does not care whether the brain is in-process
 or across the lab -- only the address changes.
 
@@ -34,11 +34,13 @@ class RemoteStatus:
         self.frequency_Hz = d.get("frequency_Hz", 0.0)
         self.power_dBm = d.get("power_dBm", 0.0)
         self.phase_deg = d.get("phase_deg", 0.0)
+        self.vernier = d.get("vernier", 0)
         self.reference = d.get("reference", "auto")
         self.ext_ref_detected = d.get("ext_ref_detected", False)
         self.usb_volts = d.get("usb_volts", 0.0)
         self.connected = d.get("connected", False)
         self.has_phase = d.get("has_phase", False)
+        self.has_vernier = d.get("has_vernier", False)
         self.idn = d.get("idn", "")
         self.hw_error = d.get("hw_error", "")
         self.freq_min_Hz = d.get("freq_min_Hz", 0.0)
@@ -136,6 +138,10 @@ class DssgClient(ControlClient):
     def set_phase(self, deg: float):
         self._checked({"cmd": "set_phase", "phase_deg": float(deg)})
 
+    def set_vernier(self, n: int):
+        """Fine power trim in raw integer counts (no unit)."""
+        self._checked({"cmd": "set_vernier", "vernier": int(round(float(n)))})
+
     def set_reference(self, mode: str):
         self._checked({"cmd": "set_reference", "mode": str(mode)})
 
@@ -145,10 +151,14 @@ class DssgClient(ControlClient):
         lim = self.cfg.limits
         return {"freq_min_Hz": s.freq_min_Hz, "freq_max_Hz": s.freq_max_Hz,
                 "power_min_dBm": s.power_min_dBm, "power_max_dBm": s.power_max_dBm,
-                "phase_min_deg": lim.phase_min_deg, "phase_max_deg": lim.phase_max_deg}
+                "phase_min_deg": lim.phase_min_deg, "phase_max_deg": lim.phase_max_deg,
+                "vernier_min": int(lim.vernier_min), "vernier_max": int(lim.vernier_max)}
 
     def has_phase(self) -> bool:
         return bool(self.status().has_phase)
+
+    def has_vernier(self) -> bool:
+        return bool(self.status().has_vernier)
 
     def shutdown(self):
         """Close the client. Does NOT stop the remote service."""

@@ -12,6 +12,11 @@ datasheet (V3.6, Dec 2022) where it matters to a caller:
 * The box starts in whatever state `Sim.state_*` describes (as if left like
   that from the front panel); `open()` only connects, it changes nothing, so
   the brain's adopt-on-start logic is exercised against a non-default state.
+* The VERNIER (fine power trim, integer counts) shifts the simulated OUTPUT
+  level by 0.05 dB per count. That number is an ASSUMPTION for the simulator
+  only -- the vendor documents no dB per count. POWER? keeps reporting the
+  attenuator setting (the vernier is a separate knob), so a power scan's echo
+  is not disturbed by a vernier offset.
 * The USB supply sags a little when the RF chain is on (the 12 GHz model draws
   ~0.8 A from USB), which makes the "USB volts" indicator come alive.
 * An external 10 MHz reference is only "detected" if the Sim config says a
@@ -39,6 +44,7 @@ class SimulatedSG12000L:
         self._freq = min(max(float(sim.state_frequency_Hz), lo), hi)
         self._power = self._quantise(float(sim.state_power_dBm))
         self._phase = float(sim.state_phase_deg) if sim.has_phase else 0.0
+        self._vernier = int(sim.state_vernier) if sim.has_vernier else 0
         self._ref = sim.state_reference if sim.state_reference in REFERENCES else "auto"
         self._output = bool(sim.state_rf_on)
         self._buzzer = True               # what a unit does out of the box
@@ -69,6 +75,9 @@ class SimulatedSG12000L:
 
     def has_phase(self) -> bool:
         return bool(self._sim.has_phase)
+
+    def has_vernier(self) -> bool:
+        return bool(self._sim.has_vernier)
 
     # ---- RF output -------------------------------------------------------
 
@@ -112,6 +121,26 @@ class SimulatedSG12000L:
 
     def read_phase(self) -> float:
         return self._phase
+
+    # ---- vernier -------------------------------------------------------------
+
+    #: dB of output level per vernier count. A plausible guess for the
+    #: SIMULATOR ONLY; the real unit's value is not documented and has to be
+    #: measured (e.g. with a spectrum analyser) before anyone relies on it.
+    SIM_DB_PER_COUNT = 0.05
+
+    def set_vernier(self, n: int) -> None:
+        if not self.has_vernier():
+            raise RuntimeError("this unit has no vernier control")
+        self._vernier = int(n)
+
+    def read_vernier(self) -> int:
+        return self._vernier
+
+    def output_dBm(self) -> float:
+        """What would really come out of the SMA port: the attenuator setting
+        plus the vernier trim (simulator model only, see SIM_DB_PER_COUNT)."""
+        return self._power + self.SIM_DB_PER_COUNT * self._vernier
 
     # ---- reference ---------------------------------------------------------
 

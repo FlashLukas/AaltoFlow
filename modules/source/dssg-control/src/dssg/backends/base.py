@@ -45,6 +45,9 @@ class MicrowaveSource(Protocol):
     def has_phase(self) -> bool:
         """True if the firmware accepts a phase setting."""
 
+    def has_vernier(self) -> bool:
+        """True if the firmware answers VERNIER? (fine power trim)."""
+
     # ---- RF output on/off -----------------------------------------------
     def set_output(self, on: bool) -> None: ...
     def read_output(self) -> bool: ...
@@ -60,6 +63,12 @@ class MicrowaveSource(Protocol):
     # ---- phase (deg) ------------------------------------------------------
     def set_phase(self, deg: float) -> None: ...
     def read_phase(self) -> float: ...
+
+    # ---- vernier: fine output-power trim in raw integer counts -----------
+    # No unit: the dB per count is not documented (measure it before
+    # relying on it). Clamping to a safe count range is the brain's job.
+    def set_vernier(self, n: int) -> None: ...
+    def read_vernier(self) -> int: ...
 
     # ---- 10 MHz reference ------------------------------------------------
     def set_reference(self, mode: str) -> None:

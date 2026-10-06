@@ -112,3 +112,20 @@ def test_shutdown_verb_turns_rf_off(service_and_client):
     assert r["ok"] is True
     svc.stop()                      # what serve_forever's finally: does
     assert backend.read_output() is False
+
+
+def test_vernier_over_the_wire(service_and_client):
+    _, cli, backend = service_and_client
+    cli.start()
+    assert _wait(cli, lambda s: s.has_vernier).has_vernier
+    assert cli.has_vernier() is True
+    cli.set_vernier(-6)
+    s = _wait(cli, lambda s: s.vernier == -6)
+    assert s.vernier == -6 and backend.read_vernier() == -6
+    cli.set_vernier(500)                                 # clamped by the brain
+    lim = Config().limits
+    s = _wait(cli, lambda s: s.vernier == lim.vernier_max)
+    assert s.vernier == lim.vernier_max
+    assert cli.limits()["vernier_min"] == lim.vernier_min
+    r = cli._cmd({"cmd": "set_vernier"})                 # missing argument
+    assert r["ok"] is False
