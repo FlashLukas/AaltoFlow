@@ -46,7 +46,10 @@ tests/               offline; fake_visa.py is a fake SCPI instrument
   and left alone (this module sets only the continuous-wave parameters).
 - **Safety clamps.** Every request is clamped to the lab's ceiling (Settings >
   Limits, per channel: amplitude, PEAK voltage, frequency) AND to the
-  instrument's range for the chosen waveform and load. The peak rule:
+  instrument's range for the chosen waveform and load. The lab ceiling's
+  defaults are the FULL range (Lukas, 2026-10-06: also for CH1 on the magnet
+  amplifier), so out of the box only the instrument's range applies; lower them
+  when a setup needs it. The peak rule:
   `|offset| + amplitude/2 <= peak_max_V`, always. When amplitude and offset
   together would pass it, the knob you just SET is the one that stops
   (sweep the amplitude -> it stops at the limit; your offset stays).
@@ -72,6 +75,12 @@ ohm, "1 Vpp" is 1 Vpp across a 50-ohm termination -- and **2 Vpp on an open
 input** (a scope at 1 Mohm, most amplifier inputs). On the bench (CH1 -> scope
 CH1, CH2 -> scope CH2 + EXT TRIG, no terminators) the scope therefore shows
 twice the number on the panel unless the load is set to high-Z.
+
+**The bench runs at high-Z on both channels** (Lukas, 2026-10-06): then the
+panel's volts are the volts on the cable. Set it once (panel: Load > High-Z,
+or `afg_console.py load 1 highz` and `load 2 highz`); the module does not set it
+at start, it reads whatever the AFG holds -- which is why step 9 of the
+first run checks that the AFG keeps it over a power cycle.
 
 This module never changes the load by itself. When you change it (panel, verb
 `set_load`), the AFG rescales the volts it shows; the module reads them back
@@ -175,7 +184,12 @@ the bench. In order; each step names the `# VERIFY` it settles.
 8. **Error queue form** (`SYST:ERR?` reply), **burst/sweep detection** (switch
    burst on at the panel: the module must say "burst"), **Go To Local** on close
    (the AFG's front panel works again after the service stops).
-9. Stop the service: both outputs off.
+9. **High-Z survives a power cycle.** Set both loads to high-Z, switch the AFG
+   off and on, start the service: both channels must read "high-Z". If the AFG
+   comes back at 50 ohm (its power-on setting), either set its power-on state
+   to "last" in the AFG's Utility menu, or ask for a "load at start" option
+   (it would be the one setting written at start -- a deliberate exception).
+10. Stop the service: both outputs off.
 
 Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 

@@ -84,10 +84,16 @@ class Limits:
                          waveform or offset someone picks.
     freq_max_Hz       -- highest frequency (e.g. what the coil + amplifier
                          can follow). The waveform's own maximum applies too.
+
+    DEFAULTS = THE FULL RANGE (Lukas, 2026-10-06: "full range", also for CH1
+    on the magnet amplifier). They are the AFG1062's widest numbers (into
+    high-Z: 20 Vpp, 10 V peak; 60 MHz), so out of the box only the
+    instrument's own range for the waveform and load setting applies. Lower
+    them in Settings > Limits when a setup needs a ceiling.
     """
 
-    amplitude_max_Vpp: float = 10.0
-    peak_max_V: float = 5.0
+    amplitude_max_Vpp: float = 20.0
+    peak_max_V: float = 10.0
     freq_max_Hz: float = 60e6
 
 

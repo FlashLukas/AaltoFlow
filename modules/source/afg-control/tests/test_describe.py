@@ -107,7 +107,7 @@ def test_limits_are_the_live_envelope(brain):
     by = _by_id(build_manifest(gen))
     assert by["ch1_frequency"]["max"] == 60e6                  # sine, AFG1062
     assert by["ch1_amplitude"]["max"] == 10.0
-    assert by["ch1_offset"]["max"] == cfg.limits_1.peak_max_V
+    assert by["ch1_offset"]["max"] == 5.0          # the AFG at 50 ohm (lab limit = full range)
     cfg.limits_1.peak_max_V = 2.0
     cfg.limits_1.freq_max_Hz = 1000.0
     by = _by_id(build_manifest(gen))

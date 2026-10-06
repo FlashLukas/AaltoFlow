@@ -15,6 +15,14 @@ def test_defaults():
     assert cfg.coupling.ch2_follows_ch1 is False
     assert cfg.channel("ch2") is cfg.channel_2 and cfg.limits("ch2") is cfg.limits_2
     assert cfg.channel_1.waveform in WAVEFORMS
+    # Lukas 2026-10-06: "full range" -- the lab limits do not narrow the AFG1062
+    # (its widest numbers are into high-Z: 20 Vpp, 10 V peak, 60 MHz)
+    from afg.backends.tek_afg import afg1062_envelope
+    widest = afg1062_envelope("sine", None)
+    for lim in (cfg.limits_1, cfg.limits_2):
+        assert lim.amplitude_max_Vpp >= widest["amp_max_Vpp"]
+        assert lim.peak_max_V >= widest["peak_max_V"]
+        assert lim.freq_max_Hz >= widest["freq_max_Hz"]
 
 
 def test_save_load_roundtrip(tmp_path):

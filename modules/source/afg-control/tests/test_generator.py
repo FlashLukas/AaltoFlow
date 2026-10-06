@@ -95,8 +95,9 @@ def test_start_reports_burst_mode_and_arb():
     try:
         s = gen.status()
         assert s["ch1_waveform"] == "arb" and s["ch2_mode"] == "burst"
-        # high-Z doubles the instrument range (10 V), but the lab limit (5 V) wins
-        assert s["ch2_load"] == "high-Z" and s["ch2_peak_max_V"] == 5.0
+        # high-Z doubles the instrument range to 10 V; the lab limit's default
+        # is the full range, so 10 V it is
+        assert s["ch2_load"] == "high-Z" and s["ch2_peak_max_V"] == 10.0
         assert gen.backend.envelope("sine", None)["peak_max_V"] == 10.0
         assert any("burst" in m for _, m in events)
         assert sim.writes == []
@@ -137,8 +138,7 @@ def test_peak_rule_the_knob_being_set_yields(system):
 
 def test_high_z_doubles_the_range(system):
     gen, sim, cfg, events = system
-    cfg.limits_1.amplitude_max_Vpp = 20.0
-    cfg.limits_1.peak_max_V = 10.0
+    # no limits edited: the default lab limits are the full range
     gen.set_load("ch1", "high-Z")
     wait(gen, lambda s: s["ch1_load"] == "high-Z" and s["ch1_settled"])
     # the AFG rescales the shown volts for the new load: adopted from read-back
