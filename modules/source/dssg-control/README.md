@@ -10,8 +10,9 @@ Ethernet option (a TCP socket), or fully simulated with no hardware.
 *The simulator as the service starts it: it adopts the simulated box's own state
 (RF off, 2.45 GHz at -10 dBm, internal reference -- `[sim] state_*`). The spectrum
 screen shades the band this unit can reach; with RF on the carrier stands up out
-of the noise floor at its frequency and power, with its 2nd and 3rd harmonics
-below it, and the dial in the corner shows the phase.*
+of the noise floor at its frequency and power, with the harmonic and
+sub-harmonic lines measured on this model at that frequency and power (see
+[Spurious lines](#spurious-lines-measured)), and the dial in the corner shows the phase.*
 
 A **set-and-forget** instrument: no control loop, no ramp, no state machine. The
 `Synthesizer` brain holds the desired signal, clamps it, pushes it to the unit,
@@ -28,6 +29,37 @@ unit's calibrated +10 dBm: raise it on purpose.
 
 `describe` publishes that intersection, so its revision changes when the service
 connects and learns the unit's real range, and again when you edit the limits.
+
+## Spurious lines (measured)
+
+The spectrum screen draws the harmonics the SG12000L really emits, from a
+spectrum-analyser measurement, not from the datasheet (which gives one "typical"
+figure, < -25 dBc, for the whole band). Scan `Harmonics12GHzV2` (2026-10-06):
+generator -> 30 dB attenuator -> Signal Hound SA124B (0.48 .. 12.4 GHz, RBW
+6 MHz), set power -20 .. +5 dBm x carrier 0.5 .. 12 GHz.
+
+![SG12000L spurious lines](docs/sg12000l_spurs.png)
+
+| carrier | what comes out | power dependence |
+|---|---|---|
+| 0.5 .. 1.1 GHz | 3rd harmonic -11 .. -25 dBc, 2nd -25 .. -33 dBc (frequency-divider square wave) | none: constant dBc |
+| 1.3 .. 1.9 GHz | 2nd harmonic ~ -24 .. -30 dBc at +5 dBm | grows with power |
+| 2.2 .. 3.0 GHz | clean: 2nd < ~-40 dBc, 3rd < ~-35 dBc | -- |
+| 3.3 .. 6.1 GHz | **strong 2nd harmonic, up to -8 dBc at +5 dBm** (3.6 .. 4.7 GHz) | **+1 dBc per dB** (2nd-order distortion in the output amplifier) |
+| 6.1 .. 6.4 GHz | 3f/2 ~ -29 dBc | none |
+| 8 .. 12 GHz | f/2 leakage of the doubler, -33 dBc rising to -15 dBc | none |
+
+If a harmonic matters to your experiment, filter it or stay at low power.
+Not measured: carriers below 500 MHz, and any line above 12.4 GHz (2f of carriers
+above 6.2 GHz, 3f above 4.1 GHz); the GUI says so instead of drawing nothing.
+
+The reduced data live in `src/dssg/sg12000l_spurs.json` (every point, plus the
+fitted per-frequency model the GUI uses; `spurs.py` reads it). The raw scan is
+in the lab archive, not in git. To re-measure, run the same scan and:
+
+```
+uv run --with xarray --with netcdf4 --with numpy --with matplotlib python scripts/extract_spurs.py SCAN.nc --plot docs/sg12000l_spurs.png
+```
 
 ## Ports
 
@@ -51,12 +83,14 @@ src/dssg/
     describe.py          the parameter manifest (limits live, settle = echoes)
     service.py           DssgService -- owns the brain, serves it over ZeroMQ
     client.py            DssgClient -- Synthesizer-compatible facade over the socket
+  spurs.py               measured harmonics/sub-harmonics for the GUI (reads sg12000l_spurs.json)
   apps/                  gui.py (SpectrumIndicator), settings_dialog.py, theme.py
 scripts/
   run_service.py         start the service (simulated by default, --real for the unit)
   run_gui.py             the GUI, local sim or --connect HOST
   dssg_console.py        standalone raw-protocol console (only needs pyzmq)
   smoke_test.py          quick offline check
+  extract_spurs.py       harmonics scan (.nc) -> src/dssg/sg12000l_spurs.json (+ docs plot)
 tests/                   pytest: config, brain, real backend vs a fake link, net, describe, GUI
 ```
 

@@ -29,6 +29,10 @@ real = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The measured spur table the GUI draws (spurs.py) is data, not code: ship it.
+[tool.setuptools.package-data]
+dssg = ["*.json"]
+
 # Development-only tools (installed by `uv sync`, not shipped in an .exe).
 [dependency-groups]
 dev = ["pytest>=8"]
