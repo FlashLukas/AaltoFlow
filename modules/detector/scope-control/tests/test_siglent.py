@@ -170,9 +170,29 @@ def test_time_axis_uses_the_scaled_sample_rate(fake_visa):
     b = SiglentSDS(RES)
     b.open()
     inst = fake_visa[0]
-    inst.st["SARA"], inst.st["SANU"], inst.st["TRDL"] = 500e3, 8000, 0.0
+    inst.st["SARA"], inst.st["SANU"], inst.st["MEM"], inst.st["TRDL"] = 500e3, 8000, 8000, 0.0
     t, v = b.read_traces(["ch1"], max_points=8000)
     # 8000 points at 500 kSa/s: 16 ms, centred on the trigger (was 1000x off)
     assert t[1] - t[0] == pytest.approx(2e-6)
     assert t[0] == pytest.approx(-8e-3)
+    b.close()
+
+
+def test_the_time_axis_comes_from_the_points_received(fake_visa):
+    """Lab PC, 1 ms/div: SANU? said 8000, the block held 20480. The axis was
+    built from SANU: 20480 samples spanning 41 ms but starting at -8 ms. Now
+    it spans the data and is centred on the trigger (centring # VERIFY)."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    inst.st["SARA"], inst.st["SANU"], inst.st["MEM"] = 500e3, 8000, 20480
+    t, v = b.read_traces(["ch1", "ch2"], max_points=30000)
+    assert t.size == v["ch1"].size == 20480
+    assert t[1] - t[0] == pytest.approx(2e-6)
+    assert t[0] == pytest.approx(-20.48e-3) and t[-1] == pytest.approx(20.48e-3 - 2e-6)
+    # thinning learns the real record length: 20480 / 2000 -> every 11th point
+    t, v = b.read_traces(["ch1"], max_points=2000)
+    assert "WFSU SP,11,NP,0,FP,0" in inst.writes
+    assert t[1] - t[0] == pytest.approx(11 * 2e-6)
+    assert t[0] == pytest.approx(-(20480 // 11) * 11 * 2e-6 / 2)
     b.close()

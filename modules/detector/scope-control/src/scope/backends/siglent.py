@@ -19,7 +19,8 @@ on the instrument" is the checklist.
     waveform   WFSU SP,<sparse>,NP,0,FP,0   then   C<n>:WF? DAT2
                -> "C1:WF DAT2,#9<9-digit length><int8 codes>\\n\\n"
                volts = code * VDIV / 25 - OFST
-               time  = -TRDL - span/2 + i * SP / SARA,  span = SANU / SARA
+               time  = -TRDL - span/2 + i * SP / SARA,  span = n_received * SP / SARA
+               (NOT SANU / SARA: SANU undercounts the memory, see read_traces)
 
 READ-ONLY START (Lukas, 2026-09-27): open() and read_settings() only ask.
 The one write the module makes on its own is WFSU (how the NEXT waveform
@@ -125,6 +126,7 @@ class SiglentSDS:
         self._idn = ""
         self._hwlock = None
         self._sparse = None          # the WFSU thinning last sent
+        self._n_full = 0             # points in the scope's record, as last received
 
     # ---- lifecycle ---------------------------------------------------------------
     def open(self) -> None:
@@ -304,19 +306,29 @@ class SiglentSDS:
         return bool(int(_num(self._q("INR?"))) & 1)                             # VERIFY
 
     def read_traces(self, channels, max_points):
+        """The latest record of `channels`, in volts, and its time axis.
+
+        THE TIME AXIS COMES FROM THE DATA, not from SANU (lab PC, 2026-10-06):
+        at 1 ms/div "SANU? C1" said 8000 points, but "C1:WF? DAT2" delivered a
+        block of 20480 -- the memory holds more than the screen (14 div) and
+        SANU does not count it. Building the axis from SANU made 20480 samples
+        span 41 ms but start at -8 ms. Now: n points received, SP apart, at
+        SARA -> span = n * SP / SARA, centred on the trigger, shifted by the
+        delay. # VERIFY the centring with a signal (trigger edge at t = 0):
+        the record might instead start at -SANU/SARA/2 (trigger near the left)."""
         sara = _num(self._q("SARA?"))
         delay = _num(self._q("TRDL?"), time_unit=True)
-        n_total = None
         out = {}
-        sparse = 1
-        for ch in channels:
+        sparse = self._sparse or 1
+        for i, ch in enumerate(channels):
             n = 1 if ch == "ch1" else 2
-            if n_total is None:
-                n_total = int(_num(self._q(f"SANU? C{n}")))                     # VERIFY
-                sparse = max(1, int(math.ceil(n_total / max(1, int(max_points)))))
-                # thin the TRANSFER, not the acquisition (see module docstring);
-                # only when the factor changes, to keep the bus quiet
-                if sparse != self._sparse:
+            if i == 0:
+                # how much to thin the TRANSFER (not the acquisition, see the
+                # module docstring): from the larger of SANU and the record
+                # length actually seen last time (SANU undercounts)
+                n_full = max(int(_num(self._q(f"SANU? C{n}"))), self._n_full)  # VERIFY
+                sparse = max(1, int(math.ceil(n_full / max(1, int(max_points)))))
+                if sparse != self._sparse:            # only when it changes
                     self._w(f"WFSU SP,{sparse},NP,0,FP,0")                      # VERIFY
                     self._sparse = sparse
             vdiv = _num(self._q(f"C{n}:VDIV?"))
@@ -326,6 +338,8 @@ class SiglentSDS:
             out[ch] = codes * vdiv / 25.0 - ofst                                # VERIFY 25/div
         m = min(v.size for v in out.values())
         out = {k: v[:m] for k, v in out.items()}
-        span = n_total / sara
-        t = -delay - span / 2.0 + np.arange(m) * sparse / sara                  # VERIFY
+        self._n_full = m * sparse                     # the record's real length
+        dt = sparse / sara
+        span = m * dt
+        t = -delay - span / 2.0 + np.arange(m) * dt                             # VERIFY centring
         return t, out

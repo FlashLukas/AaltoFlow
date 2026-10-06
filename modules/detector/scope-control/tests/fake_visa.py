@@ -39,6 +39,9 @@ class FakeSDS:
         self.st = {"C1": {"TRA": "ON", "VDIV": 0.5, "OFST": 0.0, "CPL": "D1M", "ATTN": 1.0},
                    "C2": {"TRA": "ON", "VDIV": 0.1, "OFST": -0.5, "CPL": "A1M", "ATTN": 10.0},
                    "TDIV": 5e-3, "TRDL": 0.0, "SARA": 1e5, "SANU": 14000,
+                   # points in the block WF? actually sends -- on the real scope
+                   # MORE than SANU says (8000 vs 20480 at 1 ms/div, lab PC)
+                   "MEM": 14000,
                    "TRSE": "EDGE,SR,EX,HT,TI,HV,100NS", "TRMD": "NORM",
                    "TRLV": {"C1": 0.0, "C2": 0.0, "EX": 0.5, "EX5": 0.5, "LINE": 0.0},
                    "TRSL": {"C1": "POS", "C2": "POS", "EX": "POS", "EX5": "POS", "LINE": "POS"},
@@ -149,7 +152,7 @@ class FakeSDS:
         sp = 1
         if self.st["WFSU"]:
             sp = int(self.st["WFSU"].split(",")[1])
-        n = self.st["SANU"] // sp
+        n = self.st["MEM"] // sp
         # a sine of +-2 divisions: codes +-50 -- which includes the code 10,
         # i.e. the byte 0x0A in the middle of the block (the lab-PC bug)
         codes = np.round(50 * np.sin(np.linspace(0, 4 * np.pi, n, endpoint=False))).astype(np.int8)

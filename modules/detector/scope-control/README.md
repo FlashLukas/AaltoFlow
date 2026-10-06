@@ -121,9 +121,11 @@ following CH1 (`follow on 0`), both at high-Z.
    must have the AFG's amplitude; CH2 a 0..V square.
 6. **Time axis and the trigger point** (`SANU? / SARA? / TRDL?`): the CH2
    rising edge must sit at t = 0; with a delay set on the scope, check the
-   sign. The record is SANU/SARA long: the lab saw 8000 points at 500 kSa/s
-   at 1 ms/div = 16 ms, i.e. 16 divisions of memory (the simulator assumes
-   14) -- check against the screen.
+   sign. The time axis is built from the points the scope actually SENDS
+   (at 1 ms/div the block held 20480 points = 41 ms of memory, while SANU?
+   said 8000 and the screen shows 14 ms), centred on the trigger -- the
+   centring is the guess to confirm here: AFG CH1 square -> scope CH1,
+   trigger CH1, the edge must sit at t = 0.
 7. **Writing** each setting from the GUI (V/div, offset, coupling, probe,
    time/div, delay, source, level, slope, mode): the screen follows, the GUI
    shows the snapped value.
@@ -135,6 +137,6 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q        # 66 tests, offline: the simulated bench + a fake SDS1000CML+
+uv run pytest -q        # 67 tests, offline: the simulated bench + a fake SDS1000CML+
 python ..\..\..\tools\check_modules.py scope --live
 ```
