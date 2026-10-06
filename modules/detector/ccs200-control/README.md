@@ -83,7 +83,7 @@ pixel comes from the instrument's own calibration (`tlccs_getWavelengthData`).
 | `set_light` / `set_sim` | `on` / `name`, `value` | simulator only |
 
 plus the universal `status`, `info`, `get_config`, `set_config`, `describe`,
-`shutdown`.
+`shutdown{keep_outputs?}` (the flag changes nothing here: a stop never changes an output).
 
 ## In a scan
 

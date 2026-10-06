@@ -142,7 +142,8 @@ Measured on the TG44A (2026-09-28): `saAbort`, closing the device, even exiting
 the program leave the TG emitting its last frequency and level, and after a TG
 sweep it sits at the last swept frequency. So "off" is a **park** (Lukas's
 decision): `tg_cw` with `on: false`, the service's shutdown and the end of a TG
-sweep without a CW all park it.
+sweep without a CW all park it. `shutdown{keep_outputs: true}` (a restart for a
+code update) does NOT park it: the TG keeps its tone and the next start adopts it.
 
 ## For client modules: the TG contract
 

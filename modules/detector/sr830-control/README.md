@@ -99,6 +99,8 @@ and `[aux_out]` values of the .ini are applied only on Settings > Apply /
 SINE OUT cannot be switched off on an SR830; its minimum is 4 mV. When the service stops cleanly (Stop in the launcher, `shutdown`),
 SINE OUT goes back to 4 mV and every AUX OUT to 0 V (`[safety]` in the config;
 switch off if a setup must keep driving). A hard kill cannot do this.
+`shutdown{keep_outputs: true}` is a restart (a code update): SINE OUT and the AUX
+OUTs are left as they are, and the next start adopts them.
 `[limits]` narrows the sine and aux ranges to protect what is connected.
 
 ## Commands (wire verbs)
@@ -115,7 +117,7 @@ switch off if a setup must keep driving). A hard kill cannot do this.
 `stream_start` / `stream_read` / `stream_stop` (fly scans: X, Y, R, θ and the
 four aux inputs, with each channel's lag order × τ) ·
 plus the universal `status`, `info`, `describe`, `get_config`, `set_config`,
-`shutdown`.
+`shutdown{keep_outputs?}`.
 
 ## The real instrument
 

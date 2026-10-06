@@ -226,10 +226,15 @@ class Pm400Meter:
                                             name="pm400-poll", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop polling and disconnect. Safe to call more than once. A power
         meter has no output to make safe, but a zero adjustment in progress is
-        cancelled so the console is not left half-zeroed."""
+        cancelled so the console is not left half-zeroed.
+
+        keep_outputs (the restart flag of the universal `shutdown` verb,
+        2026-10-06) changes nothing here: this shutdown never changes an
+        output, so every stop already leaves the instrument as it is.
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)

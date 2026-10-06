@@ -66,6 +66,13 @@ boolean apart:
 
 Details, and why it is not a gain problem, in that file's docstring.
 
+## Stopping
+
+`shutdown` ramps the coils to 0 V and drops the enable line, as mag2d does.
+`shutdown{keep_outputs: true}` is a restart for a code update: no ramp, the
+coils keep their drive (open loop, no stabilizer, nothing watches the water)
+until the next start adopts it.
+
 ## More
 
 The suite's shared rules -- wire contract, conventions, gotchas -- are in

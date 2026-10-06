@@ -276,12 +276,18 @@ class Controller:
                                f"{self._sp_field:g} mT at {self._sp_angle:.2f} deg, "
                                f"drive {ao[0]:.3f} / {ao[1]:.3f} V"))
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Ramp the output to 0 V at the slew rate, disable, close. Idempotent.
 
         The loop thread is stopped FIRST, so from here on this (calling) thread
         is the only one touching the hardware -- and it keeps calling tick(),
         which does the ramp exactly as it would in RAMP_DOWN.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        the loop stops and the DAQ is closed and released, but nothing is
+        written -- no ramp, no 0 V, enable line untouched. The coils keep the
+        drive they have (open loop until the next start), and the next start
+        ADOPTS it, as every start does.
         """
         if not self._opened:
             return
@@ -289,6 +295,13 @@ class Controller:
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=5.0)
         self._thread = None
+        if keep_outputs:
+            try:
+                self.backend.close(output_off=False)
+            finally:
+                self._opened = False
+            self._emit("info", "magnet service closed; output left as it is (restart)")
+            return
         try:
             with self._lock:
                 if self._state in (REGULATING, STABLE):

@@ -358,11 +358,16 @@ class Analyzer:
             self._thread = threading.Thread(target=self._run, name="shsna-sweep", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop sweeping and disconnect. A TG acquisition this module started
         on the owner is aborted (only ours: see RemoteSa.abort), so the
         analyser goes back to its spectrum display at once. Safe to call more
-        than once."""
+        than once.
+
+        keep_outputs (the restart flag of the universal `shutdown` verb,
+        2026-10-06) changes nothing here: this shutdown never changes an
+        output, so every stop already leaves the instrument as it is.
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)

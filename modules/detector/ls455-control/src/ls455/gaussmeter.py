@@ -304,10 +304,15 @@ class Gaussmeter:
             self._emit("info", f"probe: {self.probe_desc()} (geometry from config); {rng}"
                        if first else f"probe re-read: {self.probe_desc()}; {rng}")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop polling and disconnect. Safe to call more than once. A
         gaussmeter drives nothing, so there is no output to make safe; its
-        settings are left as they are for the next user of the front panel."""
+        settings are left as they are for the next user of the front panel.
+
+        keep_outputs (the restart flag of the universal `shutdown` verb,
+        2026-10-06) changes nothing here: this shutdown never changes an
+        output, so every stop already leaves the instrument as it is.
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)

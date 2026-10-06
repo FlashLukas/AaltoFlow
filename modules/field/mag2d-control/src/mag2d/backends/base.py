@@ -31,9 +31,11 @@ class VectorMagnetBackend(Protocol):
         AO or drop the enable line. The brain reads the state with
         read_output_state() and adopts it."""
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         """Disconnect. A last-resort backstop sets AO 0 V and enable False first;
-        the brain has normally ramped the output down before calling this."""
+        the brain has normally ramped the output down before calling this.
+        output_off=False (a restart, shutdown{keep_outputs: true}): no backstop
+        write at all -- close the channels and release the card only."""
 
     def read_output_state(self) -> tuple[bool | None, tuple[float, float] | None]:
         """What the output is doing RIGHT NOW, read from the hardware:

@@ -147,5 +147,5 @@ def test_reference_verbs_round_trip(service_and_client):
 def test_shutdown_verb_replies_then_stops(service_and_client):
     svc, cli = service_and_client
     r = cli._cmd({"cmd": "shutdown"})
-    assert r == {"ok": True, "stopping": True}
+    assert r == {"ok": True, "stopping": True, "kept_outputs": True}
     assert svc._stop.is_set()

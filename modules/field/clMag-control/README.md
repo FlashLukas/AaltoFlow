@@ -95,7 +95,9 @@ and remote-controllable. The gear button opens **Settings** (Kepco address + DAQ
 PID / limits, config + calibration file load/save, and an **Appearance** tab to pick a
 **light or dark** theme). The theme applies on the next launch (saved to config), or
 override it once with `uv run scripts/run_gui.py --theme light`. Closing the window
-ramps the supply to zero.
+ramps the supply to zero; so does the service's `shutdown` verb.
+`shutdown{keep_outputs: true}` is a restart for a code update: no ramp, no
+OUTP OFF -- the magnet keeps its field and the next start adopts the supply.
 
 ### Running over the network (Session 5)
 

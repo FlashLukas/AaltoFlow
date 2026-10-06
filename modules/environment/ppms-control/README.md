@@ -67,7 +67,8 @@ loaded by the service when present: put the magnet's real limit there
   current setpoints; at stop it just disconnects. A Kepco electromagnet is ramped
   down when its service dies; a DynaCool left at 5 T and 2 K on purpose stays
   there. Returning the field to 0 after a scan is a scan routine, as the old
-  "Switch off field after sweep?" was.
+  "Switch off field after sweep?" was. So `shutdown{keep_outputs?}` behaves the
+  same either way (the reply says `kept_outputs: true`).
 - **Driven only.** The DynaCool magnet has no persistent mode (MultiPyVu: "the
   PPMS is the only flavor which can run persistent"), so there is no mode choice.
 - Rate and approach (linear / no overshoot / oscillate; fast settle / no

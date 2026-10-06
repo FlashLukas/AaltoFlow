@@ -52,6 +52,9 @@ coils are then unprotected -- run with `--bypass-water`.
 Ctrl+C, the launcher's Stop, or `mag2d_console.py shutdown` all **ramp the output
 to 0 V at the slew rate** and release the enable line. A hard kill cannot: the
 DAQ keeps its last output. Do not taskkill a running magnet.
+`shutdown{keep_outputs: true}` is a RESTART for a code update: no ramp, the
+coils keep their drive (open loop, nothing watches the water) until the next
+start adopts it.
 
 ## Commands (REQ/REP, JSON; fire-and-forget)
 
@@ -67,7 +70,7 @@ DAQ keeps its last output. Do not taskkill a running magnet.
 | `set_water_bypass` | `enabled` | DANGER |
 | `clear_fault` | | refused while the cause is still there |
 
-plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
+plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown{keep_outputs?}`.
 A refused command (a setpoint during a FAULT) replies `{"ok": false, "error": "..."}`.
 
 Control (one controller, many viewers -- docs/DEVELOPER_NOTES.md section 4):

@@ -49,10 +49,12 @@ class SimulatedKepco:
         # zeroed the current here, which a real supply would never do by itself.
         self._open = True
 
-    def close(self) -> None:
-        # mirror the real shutdown: the controller has ramped to zero, output off
-        self._current = 0.0
-        self._output_on = False
+    def close(self, output_off: bool = True) -> None:
+        # mirror the real shutdown: the controller has ramped to zero, output off.
+        # output_off=False is a restart: the supply keeps driving what it drives.
+        if output_off:
+            self._current = 0.0
+            self._output_on = False
         self._open = False
 
     def set_current(self, amps: float) -> None:

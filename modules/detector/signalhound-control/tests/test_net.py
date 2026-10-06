@@ -123,5 +123,5 @@ def test_bool_args_are_parsed_not_cast(service_and_client):
 def test_shutdown_verb_replies_then_stops(service_and_client):
     svc, cli = service_and_client
     r = cli._cmd({"cmd": "shutdown"})
-    assert r == {"ok": True, "stopping": True}
+    assert r == {"ok": True, "stopping": True, "kept_outputs": False}
     assert svc._stop.is_set()

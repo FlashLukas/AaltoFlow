@@ -110,6 +110,9 @@ uv run scripts/shsna_console.py            # raw-protocol console
 uv run scripts/smoke_test.py
 ```
 
+`shutdown{keep_outputs?}`: the flag changes nothing here -- a stop never
+changes an output (a TG acquisition this module started is aborted either way).
+
 The simulator models the bench: TG ripple, cable loss rising as sqrt(f), a
 20 dB pad, and a Butterworth band-pass DUT that can be removed (`set_sim
 dut_inserted false`) to take the thru -- or, with `fmr_on`, a waveguide with a

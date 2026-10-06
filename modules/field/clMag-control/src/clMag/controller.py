@@ -237,23 +237,36 @@ class Controller:
         self._event("info", f"controller started; adopted supply state: output "
                             f"{'ON' if self._output_on else 'OFF'}, {adopted:.3f} A")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Safe stop: ramp to zero, output off, threads down. Safe to call on a
-        crash or a lost client."""
+        crash or a lost client.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        the threads stop and the instruments are closed exactly the same, but
+        the current is NOT ramped down and the output stays on -- the magnet
+        keeps its field, and the next start adopts the supply's state. Only the
+        `shutdown{keep_outputs: true}` verb asks for this; every other path
+        (window close, Ctrl-C, crash) keeps the safe default."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5.0)
         try:
-            self._ramp_to_zero_blocking()
+            if not keep_outputs:
+                self._ramp_to_zero_blocking()
         finally:
-            self.kepco.close()
+            if keep_outputs:
+                # disconnect WITHOUT the OUTP OFF a normal close sends
+                self.kepco.close(output_off=False)
+            else:
+                self.kepco.close()
             if self.aux is not None:
-                self.aux.close()
+                self.aux.close()          # never writes an AO/DO value
             self.acq.stop()
             if self._csv:
                 self._csv.close()
                 self._csv = None
-        self._event("info", "controller shut down (output off)")
+        self._event("info", "controller shut down (output left as it is)"
+                    if keep_outputs else "controller shut down (output off)")
 
     # Each command returns its sequence number (see Status.cmd_done). Values
     # are checked HERE, in the caller's thread, so a bad value is refused with

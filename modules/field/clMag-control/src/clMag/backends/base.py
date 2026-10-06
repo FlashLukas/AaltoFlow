@@ -35,9 +35,11 @@ class CurrentSource(Protocol):
     def open(self) -> None:
         """Connect. Queries only -- no write that changes the supply's state."""
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         """OUTP OFF and disconnect. Called on shutdown/crash, after the
-        controller has ramped the current to zero (shutdown is unchanged)."""
+        controller has ramped the current to zero (shutdown is unchanged).
+        output_off=False (a restart, shutdown{keep_outputs: true}): disconnect
+        only -- no OUTP OFF, no CURR; the next start adopts the supply."""
 
     def set_current(self, amps: float) -> None:
         """Command an output current. This sets it directly; ramping is the

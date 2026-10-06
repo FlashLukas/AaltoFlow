@@ -211,9 +211,13 @@ class Heater:
                                             name="tc200-poll", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop polling, switch the output off when hardware.disable_on_shutdown,
-        and disconnect. Safe to call more than once."""
+        and disconnect. Safe to call more than once.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        disconnect and release the port the same, but leave the heater as it
+        is whatever disable_on_shutdown says -- the next start adopts it."""
         self._stop.set()
         t = self._thread
         if t is not None and t is not threading.current_thread():
@@ -222,7 +226,8 @@ class Heater:
         switched_off = False
         try:
             with self._hw:
-                if self._connected and self.cfg.hardware.disable_on_shutdown:
+                if (self._connected and self.cfg.hardware.disable_on_shutdown
+                        and not keep_outputs):
                     try:
                         switched_off = self._set_output(False)
                     except Exception as exc:     # still close the port
@@ -235,7 +240,8 @@ class Heater:
             if was:
                 self._emit("info", "disconnected" + (
                     " (heater switched OFF)" if switched_off else
-                    " (heater left as it is)" if not self.cfg.hardware.disable_on_shutdown
+                    " (heater left as it is)"
+                    if keep_outputs or not self.cfg.hardware.disable_on_shutdown
                     else ""))
 
     # ---- commands ---------------------------------------------------------------

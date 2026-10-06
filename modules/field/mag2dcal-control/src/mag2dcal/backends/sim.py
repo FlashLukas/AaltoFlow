@@ -123,10 +123,11 @@ class SimVectorMagnet:
         self._advance()
         return (self.ao[0], self.ao[1], self.enable)
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         self._advance()
-        self.ao = [0.0, 0.0]
-        self.enable = False
+        if output_off:              # False = a restart: the coils stay driven
+            self.ao = [0.0, 0.0]
+            self.enable = False
         self.is_open = False
 
     def write_ao(self, x_V: float, y_V: float) -> None:

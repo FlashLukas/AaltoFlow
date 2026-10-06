@@ -38,9 +38,11 @@ class VectorMagnetBackend(Protocol):
         open(). None for anything the hardware cannot report (the brain then
         estimates it, or assumes off, and says so). Queries only."""
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         """Disconnect. A last-resort backstop sets AO 0 V and enable False first;
-        the brain has normally ramped the output down before calling this."""
+        the brain has normally ramped the output down before calling this.
+        output_off=False (a restart, shutdown{keep_outputs: true}): no backstop
+        write at all -- close the channels and release the card only."""
 
     def write_ao(self, x_V: float, y_V: float) -> None:
         """Drive the X and Y coils. Sets directly -- slew limiting is the brain's job."""

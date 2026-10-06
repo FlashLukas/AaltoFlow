@@ -169,5 +169,6 @@ def test_calibrate_runs_in_the_service_and_can_be_aborted(pair):
 def test_shutdown_verb_stops_the_service(pair):
     cfg, ctrl, sim, svc, client = pair
     client.start()
-    assert client.stop_service() == {"ok": True, "stopping": True}
+    assert client.stop_service() == {"ok": True, "stopping": True,
+                                     "kept_outputs": False}
     assert _wait(lambda: svc._stop.is_set(), 2.0)

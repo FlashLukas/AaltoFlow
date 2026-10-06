@@ -361,7 +361,7 @@ class GspAnalyzer:
                 return name
         raise ValueError(f"unknown detector reply {reply!r}")
 
-    def close(self) -> None:
+    def close(self, tg_off: bool = True) -> None:
         inst, self._inst = self._inst, None
         self._pending = False
         if inst is None:
@@ -371,7 +371,8 @@ class GspAnalyzer:
             self._release_locks()
             return
         try:
-            inst.write(":OUTP:TRAC OFF")           # never leave the TG driving a DUT
+            if tg_off:                             # False = a restart: TG left as it is
+                inst.write(":OUTP:TRAC OFF")       # never leave the TG driving a DUT
             if self._single_armed:
                 inst.write(":INIT:CONT ON")        # hand the front panel back sweeping
         except Exception:

@@ -46,6 +46,9 @@ class SignalhoundService:
         self.pub_addr = f"tcp://{host}:{pub_port}"
         self.status_dt = 1.0 / status_hz
         self._stop = threading.Event()
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
@@ -134,7 +137,9 @@ class SignalhoundService:
         time.sleep(self.status_dt + 0.1)
         secure.release_server(self._guard)
         self._guard = None
-        self.signalhound.shutdown()
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        self.signalhound.shutdown(keep_outputs=self._keep_outputs)
         print("signalhound service stopped")
 
     # ---------------------------------------------------------------- threads
@@ -311,8 +316,12 @@ class SignalhoundService:
                 # A CLEAN stop, asked for by the launcher before it would kill us
                 # (suite gotcha #25). The reply still goes out: the commander
                 # sends it before it looks at _stop again.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the outputs as they are.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}
@@ -355,3 +364,11 @@ def _bool(x) -> bool:
 
 def _json(d: dict) -> bytes:
     return json.dumps(d).encode("utf-8")
+
+
+def _as_bool(v) -> bool:
+    """JSON true/false, but also "false"/0 from a hand-typed console command --
+    bool("false") is True (the INI gotcha again, docs/DEVELOPER_NOTES.md #3)."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)

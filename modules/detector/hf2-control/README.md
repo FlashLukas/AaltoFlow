@@ -66,7 +66,8 @@ reading. Use 99.9 % (or `extra_wait_s`) when signals change by large factors.
 `set_reference{channel, mode}` · `set_frequency{channel, frequency_Hz}`
 (internal only; refused on external) · `acquire` → `{acq_id}` · `get_sample` ·
 `stream_start` / `stream_read` / `stream_stop` (below) ·
-plus the universal `status`, `info`, `describe`, `get_config`, `set_config`.
+plus the universal `status`, `info`, `describe`, `get_config`, `set_config`,
+`shutdown{keep_outputs?}` (the flag changes nothing here: a stop never changes an output).
 Channels are 1 and 2.
 
 ## Streaming, for a fly scan

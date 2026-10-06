@@ -79,7 +79,8 @@ sync with `--extra gui --extra real`.
   (with a warning in the log).
 - **Safety:** the tracking generator is switched **OFF** when the module
   disconnects (also on the launcher's Stop). It is flagged `danger` in
-  `describe`.
+  `describe`. `shutdown{keep_outputs: true}` (a restart for a code update)
+  leaves it as it is; the next start adopts it.
 
 ## The thru reference and norm
 

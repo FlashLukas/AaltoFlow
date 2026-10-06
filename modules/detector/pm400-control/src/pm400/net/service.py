@@ -45,6 +45,9 @@ class Pm400Service:
         self.pub_addr = f"tcp://{host}:{pub_port}"
         self.status_dt = 1.0 / status_hz
         self._stop = threading.Event()
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
@@ -130,7 +133,9 @@ class Pm400Service:
         # the service is gone: drop its guard (and its "running encrypted" marker)
         secure.release_server(self._guard)
         self._guard = None
-        self.meter.shutdown()
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        self.meter.shutdown(keep_outputs=self._keep_outputs)
         print("pm400 service stopped, meter closed")
 
     # ---------------------------------------------------------------- threads
@@ -251,8 +256,13 @@ class Pm400Service:
                 # Setting _stop ends serve_forever, which closes the meter; the
                 # reply still goes out, because the commander sends it before it
                 # looks at _stop again.
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the outputs as they are.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                # This shutdown never changes the console (it has no output), so the
+                # outputs are kept either way: kept_outputs is always true.
+                return {"ok": True, "stopping": True, "kept_outputs": True}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}
@@ -274,3 +284,11 @@ class Pm400Service:
 
 def _json(d: dict) -> bytes:
     return json.dumps(d).encode("utf-8")
+
+
+def _as_bool(v) -> bool:
+    """JSON true/false, but also "false"/0 from a hand-typed console command --
+    bool("false") is True (the INI gotcha again, docs/DEVELOPER_NOTES.md #3)."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)

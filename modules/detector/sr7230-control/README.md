@@ -71,7 +71,8 @@ The oscillator output can drive a coil or a sample, so it is treated as an
 output: a setpoint above `limits.amplitude_max_V` (1 V rms by default; the
 instrument can do 5) is clamped with a warning, and it goes **back to 0 V when
 the service stops** (switch off `hardware.osc_off_on_shutdown` if it must keep
-running).
+running; `shutdown{keep_outputs: true}`, a restart for a code update, leaves it
+as it is too).
 
 ## Start-up reads, it does not write
 
@@ -96,7 +97,7 @@ it.
 `set_fast_mode{enabled}` · `auto_phase` / `auto_sensitivity` / `auto_measure`
 → `{auto_id}` · `acquire` → `{acq_id}` · `get_sample` ·
 `stream_start` / `stream_read` / `stream_stop` ·
-plus the universal `status`, `info`, `describe`, `get_config`, `set_config`, `shutdown`.
+plus the universal `status`, `info`, `describe`, `get_config`, `set_config`, `shutdown{keep_outputs?}`.
 
 The auto operations take real time on the instrument; they are queued and run
 by the polling thread, and `describe` gives them a `wait` block, so a scan

@@ -267,9 +267,14 @@ class Spectrometer:
         else:
             self._emit("info", f"adopted the instrument's integration time {v * 1e3:.6g} ms")
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop scanning and disconnect. Safe to call more than once. A
-        spectrometer has no output to make safe: stopping is enough."""
+        spectrometer has no output to make safe: stopping is enough.
+
+        keep_outputs (the restart flag of the universal `shutdown` verb,
+        2026-10-06) changes nothing here: this shutdown never changes an
+        output, so every stop already leaves the instrument as it is.
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)

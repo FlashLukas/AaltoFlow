@@ -49,6 +49,9 @@ class Mag2dcalService:
         self.pub_addr = f"tcp://{host}:{pub_port}"
         self.status_dt = 1.0 / status_hz
         self._stop = threading.Event()
+        # set by shutdown{keep_outputs: true}: a RESTART (code update) that must
+        # not change what the instrument outputs; the next start adopts it
+        self._keep_outputs = False
         self._events: "queue.Queue[dict]" = queue.Queue()
         self._ctx = zmq.Context.instance()
         self._guard = None                   # secure.Guard while secured
@@ -152,8 +155,11 @@ class Mag2dcalService:
         time.sleep(self.status_dt + 0.1)
         secure.release_server(self._guard)
         self._guard = None
-        self.ctrl.shutdown()
-        print("mag2dcal service stopped, output at 0 V and disabled")
+        if self._keep_outputs:
+            print("shutdown: outputs left as they are (restart)")
+        self.ctrl.shutdown(keep_outputs=self._keep_outputs)
+        print("mag2dcal service stopped, output left as it is" if self._keep_outputs
+              else "mag2dcal service stopped, output at 0 V and disabled")
 
     # ---------------------------------------------------------------- threads
 
@@ -282,8 +288,12 @@ class Mag2dcalService:
                 # A CLEAN stop, asked for by the launcher before it would kill us.
                 # serve_forever's finally: stop() ramps the coils down and closes
                 # the DAQ -- a killed process could do neither (gotcha #25).
+                # keep_outputs=true: a restart for a code update -- close and
+                # release everything, but leave the outputs as they are.
+                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
                 self._stop.set()
-                return {"ok": True, "stopping": True}
+                return {"ok": True, "stopping": True,
+                        "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}

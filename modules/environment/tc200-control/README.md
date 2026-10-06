@@ -59,7 +59,8 @@ ceiling (`[limits] temperature_max_C = 150`).
 - **Stop switches the heater OFF** (`hardware.disable_on_shutdown`, default
   True -- the safer choice for an unattended heater; set False to leave it
   heating). The TC200 regulates on its own, so a *crashed* service leaves it
-  heating whatever this says.
+  heating whatever this says. `shutdown{keep_outputs: true}` is a restart (a
+  code update): the heater is left as it is and the next start adopts it.
 - **`ens` toggles**, there is no "enable". Switching on and off is therefore
   read status byte -> toggle only if needed -> read again to confirm, under
   one lock, so pressing "Heater ON" twice never switches it off.

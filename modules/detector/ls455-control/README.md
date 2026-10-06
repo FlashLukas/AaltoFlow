@@ -85,7 +85,7 @@ not a blend of old and new.
 `set_auto_range{on}` · `set_range{range_mT}` (switches auto off) ·
 `set_display_unit{unit}` · `set_relative{on?, setpoint_mT?}` · `relative_here` ·
 `set_acquisition{readings}` · `acquire` → `{acq_id}` · `get_sample` · `zero` ·
-`clear_zero` · `reread_probe` · `shutdown` · plus the universal `status`, `info`, `describe`,
+`clear_zero` · `reread_probe` · `shutdown{keep_outputs?}` (the flag changes nothing: no output) · plus the universal `status`, `info`, `describe`,
 `get_config`, `set_config`.
 
 In scan-core: settables `mode`, `dc_digits` (DC) / `rms_band` (RMS),

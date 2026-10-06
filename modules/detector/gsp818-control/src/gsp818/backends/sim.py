@@ -73,10 +73,11 @@ class SimulatedAnalyzer:
         # it was doing): only queries are allowed at start.
         self._open = True
 
-    def close(self) -> None:
+    def close(self, tg_off: bool = True) -> None:
         # SHUTDOWN behaviour is kept as it was: the TG is switched off when the
         # service stops, so nothing is left driving a DUT unattended.
-        if self.panel["tg_on"]:
+        # tg_off=False is a restart: the TG is left as it is.
+        if tg_off and self.panel["tg_on"]:
             self.panel["tg_on"] = False
             self.writes.append(("tg_on", False))
         self._open = False

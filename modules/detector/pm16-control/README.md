@@ -53,7 +53,7 @@ you set them (a setter, `set_config`, or Settings > Apply). The old
 
 `set_wavelength{wavelength_nm}` · `set_auto_range{on}` · `set_range{range_W}`
 (switches auto off) · `set_acquisition{readings}` · `acquire` → `{acq_id}` ·
-`get_sample` · `zero` · `cancel_zero` · `shutdown` (close the meter and exit) · plus the universal `status`, `info`,
+`get_sample` · `zero` · `cancel_zero` · `shutdown{keep_outputs?}` (close the meter and exit; the flag changes nothing, a meter has no output) · plus the universal `status`, `info`,
 `describe`, `get_config`, `set_config`.
 
 In scan-core: settable `wavelength` (and `range` when auto-range is off),

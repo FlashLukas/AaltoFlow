@@ -36,6 +36,9 @@ uv run scripts/run_gui.py --connect localhost
 uv run scripts/vna_console.py acquire
 ```
 
+`shutdown{keep_outputs?}`: the flag changes nothing here -- a stop never
+changes the analyser's output (it only hands the sweep back to the front panel).
+
 **`uv sync` removes extras you do not name.** On the PC with the analyser always
 sync with `--extra gui --extra real`; otherwise `--real` stops with "pyvisa is
 not installed". pyvisa also needs a VISA library (Keysight IO Libraries or

@@ -207,9 +207,13 @@ class Cryostat:
                                             name="ppms-poll", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop polling and disconnect. Field and temperature are LEFT AS THEY
-        ARE (see the module docstring). Safe to call more than once."""
+        ARE (see the module docstring). Safe to call more than once.
+
+        keep_outputs (the restart flag of the universal `shutdown` verb,
+        2026-10-06) changes nothing here: this shutdown never touches the
+        cryostat, so every stop already leaves its outputs as they are."""
         self._stop.set()
         t = self._thread
         if t is not None and t is not threading.current_thread():

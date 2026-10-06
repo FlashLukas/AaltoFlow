@@ -362,8 +362,15 @@ class SpectrumAnalyzer:
                                             daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
-        """Stop sweeping, park the tracking generator, disconnect. Safe to call twice."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stop sweeping, park the tracking generator, disconnect. Safe to call twice.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        disconnect and release the address the same, but do NOT park the
+        tracking generator: it keeps its frequency and level, and the next
+        start adopts them. (The close still aborts a running sweep -- that is
+        how the API lets go of the device.)
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
@@ -373,7 +380,7 @@ class SpectrumAnalyzer:
             self._memory.flush()            # the last change, if the throttle held it back
         try:
             with self._hw:
-                if was and self._tg:
+                if was and self._tg and not keep_outputs:
                     # SAFETY: PARK the TG before the device closes -- the TG44A
                     # has no off and keeps emitting after close (measured)
                     try:

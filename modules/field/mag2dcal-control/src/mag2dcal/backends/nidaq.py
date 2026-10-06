@@ -201,20 +201,26 @@ class NidaqVectorMagnet:
         Hall task owns from then on."""
         return self._found
 
-    def close(self) -> None:
+    def close(self, output_off: bool = True) -> None:
         # Backstop only: the brain has already ramped to 0 V at the slew rate.
         # If it could not (a crash), a step to 0 V is still safer than leaving
         # the coils driven.
-        try:
-            if self._ao is not None:
-                self._ao.write([0.0, 0.0])
-        except Exception:
-            pass
-        try:
-            if self._do is not None:
-                self._do.write(False)
-        except Exception:
-            pass
+        # output_off=False is a RESTART (shutdown{keep_outputs: true}): no
+        # backstop write, the coils keep their drive.
+        # VERIFY: closing an AO/DO task leaves the card driving its last value
+        # (the usual M/X-series behaviour) -- if this card resets on task
+        # close, a restart drops the field anyway.
+        if output_off:
+            try:
+                if self._ao is not None:
+                    self._ao.write([0.0, 0.0])
+            except Exception:
+                pass
+            try:
+                if self._do is not None:
+                    self._do.write(False)
+            except Exception:
+                pass
         self._close_tasks()
         # Release the card LAST: the backstop writes above still happen while
         # we own it, and only then may another service take it.

@@ -244,8 +244,13 @@ class LockIn:
                                             name="sr7230-poll", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
-        """Stop polling, make OSC OUT safe, disconnect. Safe to call twice."""
+    def shutdown(self, keep_outputs: bool = False) -> None:
+        """Stop polling, make OSC OUT safe, disconnect. Safe to call twice.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        disconnect and release the address the same, but leave OSC OUT as it
+        is (osc_off_on_shutdown is not applied) -- the next start adopts it.
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=5.0)
@@ -253,7 +258,7 @@ class LockIn:
         was = self._connected
         try:
             with self._hw:
-                if was and self.cfg.hardware.osc_off_on_shutdown:
+                if was and self.cfg.hardware.osc_off_on_shutdown and not keep_outputs:
                     try:
                         self.backend.set_osc_amplitude(0.0)
                         self.cfg.reference.amplitude_V = 0.0

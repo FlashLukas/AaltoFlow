@@ -230,12 +230,17 @@ class DspLockIn:
                                             name="sr830-poll", daemon=True)
             self._thread.start()
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop polling, make the OUTPUTS safe (see config.Safety), disconnect.
 
         Safe to call more than once. The input side needs nothing: a lock-in
         input cannot hurt the sample. SINE OUT cannot be switched off on an
         SR830, so "safe" means its 4 mV minimum.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        disconnect and release the address the same, but leave SINE OUT and the AUX
+        OUTs as they are (config.Safety is not applied) -- the next start
+        adopts them.
         """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
@@ -243,7 +248,7 @@ class DspLockIn:
         self._thread = None
         was = self._connected
         try:
-            if was:
+            if was and not keep_outputs:
                 self._make_outputs_safe()
             with self._hw:
                 self.backend.close()

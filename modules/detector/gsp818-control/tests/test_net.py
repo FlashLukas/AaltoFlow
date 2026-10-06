@@ -144,7 +144,7 @@ def test_shutdown_verb_replies_then_stops_with_tg_off(service_and_client):
     cli.set_tg(True)
     _wait(lambda s: sim.tg_output, cli)
     r = cli._cmd({"cmd": "shutdown"})
-    assert r == {"ok": True, "stopping": True}
+    assert r == {"ok": True, "stopping": True, "kept_outputs": False}
     assert svc._stop.is_set()
     svc.gsp818.shutdown()
     assert sim.tg_output is False

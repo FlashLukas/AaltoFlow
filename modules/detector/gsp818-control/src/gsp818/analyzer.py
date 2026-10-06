@@ -315,9 +315,14 @@ class SpectrumAnalyzer:
         for note in (state.get("notes") or []):
             self._emit("warn", str(note))
 
-    def shutdown(self) -> None:
+    def shutdown(self, keep_outputs: bool = False) -> None:
         """Stop sweeping, switch the tracking generator off and disconnect.
-        Safe to call more than once."""
+        Safe to call more than once.
+
+        keep_outputs=True is a RESTART for a code update (Lukas, 2026-10-06):
+        disconnect and release the address the same, but leave the tracking
+        generator as it is (on or off) -- the next start adopts it.
+        """
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
@@ -325,16 +330,21 @@ class SpectrumAnalyzer:
         was = self._connected
         try:
             with self._hw:
-                self.backend.close()        # the backend turns the TG off first
+                if keep_outputs:
+                    self.backend.close(tg_off=False)   # a restart: TG untouched
+                else:
+                    self.backend.close()    # the backend turns the TG off first
         finally:
             self._connected = False
-            self.cfg.tracking.tg_on = False
+            if not keep_outputs:
+                self.cfg.tracking.tg_on = False
             with self._lock:
                 self._acq = None
                 self._sweeping = False
                 self._applied = None
             if was:
-                self._emit("info", "disconnected (tracking generator off)")
+                self._emit("info", "disconnected (tracking generator left as it is)"
+                           if keep_outputs else "disconnected (tracking generator off)")
 
     # ---- frequency (each clamps, stores in cfg, reports) ----------------------------
 

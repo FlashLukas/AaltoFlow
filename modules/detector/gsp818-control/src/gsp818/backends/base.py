@@ -62,9 +62,10 @@ class SpectrumBackend(Protocol):
         """Before an acquisition: make the next read a fresh sweep, writing
         only what is wrong. Returns one sentence per change (for warn events)."""
 
-    def close(self) -> None:
+    def close(self, tg_off: bool = True) -> None:
         """Tracking generator OFF, then disconnect. Safe to call more than
-        once and on a crash."""
+        once and on a crash. tg_off=False (a restart, shutdown{keep_outputs:
+        true}): disconnect only, the TG stays as it is."""
 
     def idn(self) -> str:
         """'Vendor,Model,S/N,fw', or '' if unknown."""

@@ -69,7 +69,7 @@ option was removed on 2026-09-27; an .ini that still has it loads fine.
 (W or J, whichever the head measures; switches auto off) ·
 `set_avg_time{avg_time_s}` · `set_acquisition{readings}` · `set_settle{settle_s}` ·
 `acquire` → `{acq_id}` · `get_sample` · `zero` → `{zero_id}` · `cancel_zero` ·
-`shutdown` · plus the universal `status`, `info`, `describe`, `get_config`,
+`shutdown{keep_outputs?}` (the flag changes nothing: no output) · plus the universal `status`, `info`, `describe`, `get_config`,
 `set_config`.
 
 In scan-core: settables `wavelength`, `avg_time`, `range` (when manual),
