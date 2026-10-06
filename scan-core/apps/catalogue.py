@@ -37,8 +37,20 @@ def default_folder() -> Path:
 
 
 def open_in_viewer(path) -> subprocess.Popen | None:
-    """Open one file in the data viewer, a window of its own (this process
-    does not wait for it)."""
+    """Open one file in the data viewer: in the viewer window that is already
+    running if there is one (it loads the file and comes to the front, ~0.2 s),
+    else in a new viewer process (this one does not wait for it; starting a
+    viewer takes seconds). Returns the new process, or None when handed over.
+
+    The handover (aaltoview.apps.single_instance) imports only QtCore +
+    QtNetwork and gives up after 0.5 s in total, so it runs on the GUI thread:
+    when no viewer listens it fails at once."""
+    try:
+        from aaltoview.apps.single_instance import send_to_running
+        if send_to_running(path):
+            return None
+    except Exception:                    # an older aaltoview: start one as before
+        pass
     try:
         return subprocess.Popen([sys.executable, str(VIEWER), str(path)])
     except OSError:
