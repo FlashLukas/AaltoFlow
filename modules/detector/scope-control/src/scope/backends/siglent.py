@@ -149,6 +149,8 @@ class SiglentSDS:
         # read then is remembered, not returned.
         self._last_fp = None
         self._fp_reset = True
+        self._last_new = time.monotonic()   # when the content last changed
+        self.identical_records = 0          # new records with identical bytes (INR? said so)
         self._desync_s = 0.0         # > 0: a late reply may still arrive; drain it first
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -440,8 +442,23 @@ class SiglentSDS:
                     self._last_fp = fp
                     return None
                 if fp == self._last_fp:
-                    return None                 # the same record as last time
+                    # The same bytes. Usually the same record -- but a clean,
+                    # synced signal on an 8-bit scope (or a flat channel) can
+                    # make bit-identical NEW records. So when the content has
+                    # not changed for a while (2 s or a record length), ask
+                    # INR? once: it blocks ~0.5 s while running, which is
+                    # affordable that rarely. Its bit 0 = a record completed
+                    # since the last INR? (the first such ask may report an
+                    # older one: harmless, the content is identical anyway).
+                    wait = max(2.0, record_s)
+                    if time.monotonic() - self._last_new < wait:
+                        return None
+                    self._last_new = time.monotonic()
+                    if not (int(_num(self._q("INR?"))) & 1):                 # VERIFY
+                        return None
+                    self.identical_records += 1
                 self._last_fp = fp
+                self._last_new = time.monotonic()
             codes = parse_block(raw)
             # how long the scope took to answer WF? (it may wait for a record
             # in progress to complete -- VERIFY on the rig with this number)

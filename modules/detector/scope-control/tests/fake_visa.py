@@ -161,7 +161,7 @@ class FakeSDS:
         # a NEW record (INR's flag set by the test = "the scope triggered")
         # has new content: the module tells records apart by it, INR? blocks
         # ~0.5 s on the real scope while it runs
-        if ch == "C1" and self.st.get("INR"):
+        if ch == "C1" and self.st.get("INR") and not self.st.get("REC_SAME"):
             self.st["INR"] = 0
             self.st["REC"] = self.st.get("REC", 0) + 1
         codes = np.roll(codes, self.st.get("REC", 0))

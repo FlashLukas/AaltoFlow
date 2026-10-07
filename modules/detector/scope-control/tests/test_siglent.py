@@ -298,3 +298,28 @@ def test_a_new_record_is_told_by_its_content(fake_visa):
     assert b.read_new_traces(["ch1"], 30000) is None
     assert "INR?" not in inst.queries
     b.close()
+
+
+def test_identical_new_records_are_found_by_a_rare_inr(fake_visa, monkeypatch):
+    """A clean synced sine (or a flat channel) can make bit-identical new
+    records: the content test alone would stall. After 2 s (or a record) of
+    unchanged content, ONE INR? (~0.5 s on the real scope) decides."""
+    import scope.backends.siglent as S
+    clock = [100.0]
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    b.read_settings()
+    assert b.read_new_traces(["ch1"], 30000) is None          # old content
+    inst.st["REC_SAME"] = True
+    inst.st["INR"] = 1                       # the scope triggered, same bytes
+    clock[0] += 0.5
+    assert b.read_new_traces(["ch1"], 30000) is None          # too soon to ask
+    assert "INR?" not in inst.queries
+    clock[0] += 2.0
+    assert b.read_new_traces(["ch1"], 30000) is not None      # INR? said: new
+    assert inst.queries.count("INR?") == 1 and b.identical_records == 1
+    clock[0] += 2.5                          # no trigger since: INR 0
+    assert b.read_new_traces(["ch1"], 30000) is None
+    b.close()
