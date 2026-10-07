@@ -19,6 +19,7 @@ def test_save_load_roundtrip(tmp_path):
     cfg.channel_2.enabled = False
     cfg.acquisition.points = 512
     cfg.acquisition.keep_raw = True
+    cfg.acquisition.freshness = "trigger"
     cfg.filter.lowpass_Hz = 1500.0
     cfg.sim.ch2_phase_deg = 90.0
     cfg.hardware.visa = "GPIB0::18::INSTR"
@@ -28,7 +29,7 @@ def test_save_load_roundtrip(tmp_path):
     assert back.channel_1.phys_scale == 2500.0 and back.channel_1.phys_unit == "A"
     assert back.channel_2.enabled is False
     assert back.acquisition.points == 512 and isinstance(back.acquisition.points, int)
-    assert back.acquisition.keep_raw is True
+    assert back.acquisition.keep_raw is True and back.acquisition.freshness == "trigger"
     assert back.filter.lowpass_Hz == 1500.0
     assert back.sim.ch2_phase_deg == 90.0 and back.hardware.visa == "GPIB0::18::INSTR"
 

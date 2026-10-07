@@ -915,7 +915,11 @@ class Scope:
                 now - float(self.cfg.hardware.poll_s) - 0.5
             if a is not None and now >= a["t0"]:
                 a["seen"] += 1
-                fresh = a["n"] > 0 or ended_after - span >= a["t0"]
+                # "trigger" freshness: only the part AFTER the trigger (t > 0)
+                # must be newer than the request (config: Acquisition.freshness)
+                need = span if self.cfg.acquisition.freshness != "trigger" \
+                    else max(0.0, float(tr[-1]))
+                fresh = a["n"] > 0 or ended_after - need >= a["t0"]
                 if a["skip"] > 0:
                     a["skip"] -= 1              # may have begun before the trigger
                     a["skipped_first"] += 1

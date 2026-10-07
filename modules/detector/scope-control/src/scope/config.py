@@ -27,6 +27,8 @@ CHANNEL_NAMES = ("ch1", "ch2")
 COUPLINGS = ("dc", "ac", "gnd")
 TRIGGER_SOURCES = ("ch1", "ch2", "ext", "ext5", "line")
 TRIGGER_SLOPES = ("rising", "falling")
+# when the first record of an acquisition counts (Acquisition.freshness)
+FRESHNESS = ("strict", "trigger")
 TRIGGER_MODES = ("auto", "normal", "single", "stop")
 
 
@@ -115,6 +117,14 @@ class Acquisition:
                    the real limit grows with `averages` (see describe).
     min_trigger_hz -- the slowest trigger rate an acquisition plans for (sets
                    that timeout: averages / min_trigger_hz * 1.5 + 10 s).
+    freshness   -- when the FIRST record of an acquisition counts:
+                   "strict" (default): the whole record, pre-trigger part
+                   included, was recorded after the acquisition started;
+                   "trigger": its TRIGGER came after it -- the part after
+                   the trigger is new, the part BEFORE the trigger may predate
+                   the request. Faster at a slow time/div (0.5 s/div, delay 0:
+                   about half a 16 s record sooner); with a positive delay
+                   (trigger near the record start) the stale part is small.
     """
 
     points: int = 1000
@@ -122,6 +132,7 @@ class Acquisition:
     keep_raw: bool = False
     timeout_s: float = 30.0
     min_trigger_hz: float = 5.0
+    freshness: str = "strict"
 
 
 @dataclass

@@ -37,7 +37,10 @@ _HINTS = {
     "trigger": _SCOPE_NOTE + "A stopped scope makes no traces; an acquisition is refused.",
     "acquisition": "points: samples per recorded trace (must not change during a scan). "
                    "averages: fresh traces per acquisition. timeout_s / min_trigger_hz set "
-                   "how long an acquisition may take. keep_raw: record unfiltered too.",
+                   "how long an acquisition may take. keep_raw: record unfiltered too. "
+                   "freshness: strict = the whole first record was recorded after the "
+                   "request; trigger = its trigger came after it (the part BEFORE the "
+                   "trigger may be older -- faster at a slow time/div).",
     "filter": "Zero phase, the same on every channel. 0 = off. order: of one pass "
               "(the zero-phase response is its square).",
     "sim": "SIMULATOR only: CH1 a sine; CH2 the same frequency, phase-shifted, with "
@@ -51,7 +54,8 @@ _HINTS = {
 # Settings that only take one of a FIXED set of values get a drop-down instead
 # of a text box, so a typo cannot reach the config. The lists come from the
 # code that checks the value, so they cannot drift apart.
-from ..config import COUPLINGS, TRIGGER_SOURCES, TRIGGER_SLOPES, TRIGGER_MODES  # noqa: E402
+from ..config import (COUPLINGS, FRESHNESS, TRIGGER_SOURCES, TRIGGER_SLOPES,  # noqa: E402
+                      TRIGGER_MODES)
 
 _CHOICES = {
     ("ui", "theme"): ["dark", "light"],
@@ -60,6 +64,7 @@ _CHOICES = {
     ("trigger", "source"): list(TRIGGER_SOURCES),
     ("trigger", "slope"): list(TRIGGER_SLOPES),
     ("trigger", "mode"): list(TRIGGER_MODES),
+    ("acquisition", "freshness"): list(FRESHNESS),
 }
 
 

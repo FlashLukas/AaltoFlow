@@ -64,6 +64,13 @@ are in -- the first trace after the trigger is skipped, because it may have
 been recorded before the thing the scan just changed, and so is every record
 that may have BEGUN before the trigger (its pre-trigger part included).
 
+`acquisition.freshness` (Settings > Acquisition) relaxes that for the FIRST
+record: `strict` (default) = the whole record was recorded after the request;
+`trigger` = its trigger came after it, so the part after the trigger is new
+but the part BEFORE the trigger may be older than the request. Faster at a
+slow time/div (about half a record sooner with delay 0); with a positive delay
+the older part is small.
+
 At a slow time/div consecutive records overlap: the scope re-arms once the
 part AFTER the trigger is recorded, and the next record's pre-trigger part
 comes from the buffer that kept running (lab bench, 0.5 s/div, delay 0: a

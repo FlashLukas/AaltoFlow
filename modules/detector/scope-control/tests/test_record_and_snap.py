@@ -167,3 +167,27 @@ def test_frequency_with_two_periods_is_exact():
     for ph in (0.0, 0.7, 1.9, 3.0):
         assert A.frequency(t, 0.52 * np.sin(2 * np.pi * 50 * t + ph)) == \
             pytest.approx(50.0, abs=0.02)
+
+
+@pytest.mark.parametrize("mode, counted_at", [("strict", 16.9), ("trigger", 8.9)])
+def test_freshness_option(manual, mode, counted_at):
+    """acquisition.freshness: "strict" waits for a record that BEGAN after
+    acquire(); "trigger" takes the first whose trigger came after it (0.5
+    s/div, delay 0: half a 16 s record sooner)."""
+    scope, events = manual
+    scope.cfg.acquisition.freshness = mode
+    scope.set_tdiv(0.5)
+    scope.set_averages(1)
+    scope.step()
+    clock = [2000.0]
+    scope._clock = lambda: clock[0]
+    scope._poll_prev = None
+    n = scope.acquire()
+    t0 = clock[0]
+    t = np.linspace(-8.19, 8.19, 10240)
+    y = np.sin(2 * np.pi * 50 * t)
+    for dt in (1.0, 8.9, 16.9):
+        scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=t0 + dt)
+        if not scope.status()["acquiring"]:
+            break
+    assert dt == counted_at and scope.status()["sample"]["acq_id"] == n
