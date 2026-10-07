@@ -237,3 +237,36 @@ def test_noise_and_dc_are_not_offered_on_the_afg1062(fake_visa):
         assert "noise" not in opts and "dc" not in opts and "sine" in opts
     finally:
         gen.shutdown()
+
+
+
+def test_open_retries_an_input_protocol_error(fake_visa, monkeypatch):
+    """Lab PC 2026-10-07: after every AaltoFlow process had vanished, the
+    restarted service failed at its first *IDN? with VI_ERROR_INP_PROT_VIOL;
+    seconds later the instrument answered. open() now tries again (session
+    closed and reopened between tries), warns about each failed try, and
+    gives up -- with the reason -- only after the last."""
+    import afg.backends.tek_afg as B
+    from fake_visa import FAULTS
+    pauses = []
+    monkeypatch.setattr(B, "_sleep", pauses.append)
+    FAULTS["idn"] = 2                                 # twice, then it answers
+    b = TekAFG(RES)
+    b.open()
+    try:
+        n = len(b.open_warnings)          # (the AFG asks *IDN? twice per try)
+        assert n >= 1 and "INP_PROT_VIOL" in b.open_warnings[0]
+        assert len(pauses) == n and len(fake_visa) == n + 1   # a fresh session each try
+        assert all(i.closed for i in fake_visa[:n])
+    finally:
+        b.close()
+    FAULTS["idn"] = 99                                # never answers
+    b = TekAFG(RES)
+    with pytest.raises(Exception, match="4 tries"):
+        b.open()
+    assert len(pauses) == n + 3
+    TekAFG(RES).open_warnings                          # (constructible again)
+    FAULTS["idn"] = 0
+    c = TekAFG(RES)
+    c.open()                                          # the address was released
+    c.close()

@@ -27,6 +27,21 @@ import numpy as np
 import pytest
 
 
+# Faults to inject, shared by every instrument the fake opens (a reopened
+# session is a new object): "idn" = how many *IDN? queries still fail with
+# the lab's VI_ERROR_INP_PROT_VIOL. Reset by the fixture.
+FAULTS = {"idn": 0}
+
+
+class InpProtViol(OSError):
+    """What pyvisa raised on the lab PC (a VisaIOError) after the services
+    had vanished mid-scan."""
+
+    def __init__(self):
+        super().__init__("VI_ERROR_INP_PROT_VIOL (-1073807305): Device reported "
+                         "an input protocol error during transfer.")
+
+
 class FakeSDS:
     def __init__(self, resource):
         self.resource = resource
@@ -97,6 +112,9 @@ class FakeSDS:
         if self.dead:
             raise TimeoutError("VI_ERROR_TMO")
         self.queries.append(cmd)
+        if cmd == "*IDN?" and FAULTS["idn"] > 0:
+            FAULTS["idn"] -= 1
+            raise InpProtViol()
         self._handle(cmd)
         return self.read_raw().decode("latin-1").rstrip("\n")
 
@@ -180,6 +198,7 @@ class FakeSDS:
 def fake_visa(monkeypatch):
     """Install a fake `pyvisa`; returns the list of instruments it opened."""
     opened: list[FakeSDS] = []
+    FAULTS["idn"] = 0
 
     class RM:
         def open_resource(self, resource):

@@ -197,6 +197,8 @@ class Generator:
         self._idn = self.backend.idn()
         # optional backend method: what the real backend learned about its
         # firmware when it opened (queries it lacks); the simulator has none
+        notes = [("warn", f"instrument: {w}")
+                 for w in getattr(self.backend, "open_warnings", [])] + notes
         report = getattr(self.backend, "probe_report", None)
         if callable(report):
             self._probe_lines = list(report())

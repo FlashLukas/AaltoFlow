@@ -55,9 +55,29 @@ from __future__ import annotations
 
 import math
 import re
+import sys
+import time
 
 from ..hwlock import claim
 from ..waveforms import load_factor
+
+# open() retries the identification (lab PC 2026-10-07): after every AaltoFlow
+# process had gone, the restarted services failed at their first *IDN? with
+# VI_ERROR_INP_PROT_VIOL ("input protocol error during transfer") -- the USB
+# devices were fine, and seconds later both answered again (the scope after two
+# more errors). So: up to _OPEN_TRIES tries, pausing _OPEN_PAUSES_S between
+# them (~4.5 s in all), the session closed (and, where the instrument allows,
+# cleared) and reopened in between; each failed try is printed and reported
+# as a warn; only the last failure ends open(), with what went wrong.
+_OPEN_TRIES = 4
+_OPEN_PAUSES_S = (0.5, 1.5, 2.5)
+_sleep = time.sleep          # tests replace it
+
+
+def _short(exc: BaseException) -> str:
+    """An exception as one ASCII line (gotcha #14: printed text is ASCII)."""
+    text = f"{type(exc).__name__}: {exc}".replace("\n", " ")
+    return text.encode("ascii", "replace").decode("ascii")[:200]
 
 #: Tektronix AFG1000 series datasheet, AFG1062 column (2 channels, 60 MHz).
 #: Volts are into 50 ohm; envelope() scales them for the load setting.
@@ -173,6 +193,7 @@ class TekAFG:
         self.support: dict[str, str] = {}
         self._once: dict[tuple, str] = {}
         self._probe_notes: list[str] = []
+        self.open_warnings: list[str] = []   # failed open() tries (brain: warn events)
         # The claim on the VISA address (hwlock.py): held while the instrument
         # is open, so no second service can talk to this generator.
         self._hwlock = None
@@ -186,27 +207,60 @@ class TekAFG:
         try:
             import pyvisa                                   # lazy: real hw only
             self._rm = pyvisa.ResourceManager()
-            self._inst = self._rm.open_resource(self._resource)
-            self._inst.timeout = self._timeout_ms
-            self._inst.write_termination = "\n"             # VERIFY (USB-TMC: harmless)
-            self._inst.read_termination = "\n"              # VERIFY
-            # *CLS empties status + error queue -- nothing the outputs feel --
-            # so later SYST:ERR? reports only what WE cause.
-            self._inst.write("*CLS")
-            # Measured: the FIRST *IDN? after *CLS comes back empty, a second
-            # one is complete. So ask again once. Silent (or timed out) twice
-            # = nothing we know is there: open() fails, as it always did.
-            self._idn = self._q_or_empty("*IDN?")
-            if not self._idn:
-                self._idn = self._q("*IDN?")
-            if not self._idn:
-                raise NoReply(f"{self._resource} did not answer *IDN? (twice)")
+            for attempt in range(1, _OPEN_TRIES + 1):
+                try:
+                    self._identify()
+                    break
+                except Exception as exc:
+                    if attempt == _OPEN_TRIES:
+                        raise NoReply(f"{self._resource}: no valid *IDN? after "
+                                      f"{_OPEN_TRIES} tries ({_short(exc)})") from exc
+                    pause = _OPEN_PAUSES_S[min(attempt, len(_OPEN_PAUSES_S)) - 1]
+                    note = (f"open: try {attempt} of {_OPEN_TRIES} failed ({_short(exc)}); "
+                            f"clearing and retrying in {pause:g} s")
+                    print(f"afg {note}", file=sys.stderr, flush=True)
+                    self.open_warnings.append(note)
+                    self._reset_session()
+                    _sleep(pause)
             self._probe()
         except BaseException:
             # a failed open must not keep the address claimed, and must not
             # leave a half-open session that close() would send OUTP OFF to
             self._release()
             raise
+
+    def _identify(self) -> None:
+        """Open the VISA session (if needed) and identify the instrument."""
+        if self._inst is None:
+            self._inst = self._rm.open_resource(self._resource)
+        self._inst.timeout = self._timeout_ms
+        self._inst.write_termination = "\n"             # VERIFY (USB-TMC: harmless)
+        self._inst.read_termination = "\n"              # VERIFY
+        # *CLS empties status + error queue -- nothing the outputs feel --
+        # so later SYST:ERR? reports only what WE cause.
+        self._inst.write("*CLS")
+        # Measured: the FIRST *IDN? after *CLS comes back empty, a second
+        # one is complete. So ask again once. Silent (or timed out) twice
+        # = nothing we know is there: this try fails.
+        self._idn = self._q_or_empty("*IDN?")
+        if not self._idn:
+            self._idn = self._q("*IDN?")
+        if not self._idn:
+            raise NoReply(f"{self._resource} did not answer *IDN? (twice)")
+
+    def _reset_session(self) -> None:
+        """Between open() tries: a VISA clear (device clear -- resets the
+        USB-TMC transfer, changes no setting) where it works, then close the
+        session; the next try opens a fresh one."""
+        inst, self._inst = self._inst, None
+        if inst is None:
+            return
+        for fn in (getattr(inst, "clear", None), inst.close):
+            try:
+                if fn is not None:
+                    fn()
+            except Exception:
+                pass
 
     def _probe(self) -> None:
         """Find out ONCE which optional queries this firmware understands.

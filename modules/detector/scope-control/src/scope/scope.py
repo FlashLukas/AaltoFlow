@@ -183,6 +183,8 @@ class Scope:
             self._idn = self.backend.idn()
             got = self.backend.read_settings()
         self._connected = True
+        for w in getattr(self.backend, "open_warnings", []):
+            self._emit("warn", f"scope: {w}")
         self._emit("info", f"connected: {self._idn or 'scope'}  (settings read, nothing changed)")
         self._adopt(got, at_start=True)
         if run:

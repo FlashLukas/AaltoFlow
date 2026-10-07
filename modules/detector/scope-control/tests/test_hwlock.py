@@ -52,11 +52,15 @@ def test_close_releases_the_claim(fake_visa):
 def test_a_failed_open_releases_the_claim(fake_visa, monkeypatch):
     monkeypatch.setattr(FakeSDS, "query",
                         lambda self, cmd: (_ for _ in ()).throw(TimeoutError("no answer")))
+    import scope.backends.siglent as B
+    monkeypatch.setattr(B, "_sleep", lambda s: None)   # open() retries (4 tries)
     b = SiglentSDS(RES)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(RuntimeError, match="4 tries") as err:
         b.open()
+    assert isinstance(err.value.__cause__, TimeoutError)
     assert hwlock.held() == []
-    assert fake_visa[0].closed and fake_visa[0].writes == []
+    assert len(fake_visa) == 4
+    assert all(i.closed and i.writes == [] for i in fake_visa)
 
 
 def test_a_missing_pyvisa_releases_the_claim(monkeypatch):

@@ -50,12 +50,31 @@ MEASURED ON THE LAB'S RSDS1102CML+ (2026-10-06, firmware 6.01.01.25):
 from __future__ import annotations
 
 import math
+import sys
 import time
 import re
 
 import numpy as np
 
 from ..hwlock import claim
+
+# open() retries the identification (lab PC 2026-10-07): after every AaltoFlow
+# process had gone, the restarted services failed at their first *IDN? with
+# VI_ERROR_INP_PROT_VIOL ("input protocol error during transfer") -- the USB
+# devices were fine, and seconds later both answered again (the scope after two
+# more errors). So: up to _OPEN_TRIES tries, pausing _OPEN_PAUSES_S between
+# them (~4.5 s in all), the session closed (and, where the instrument allows,
+# cleared) and reopened in between; each failed try is printed and reported
+# as a warn; only the last failure ends open(), with what went wrong.
+_OPEN_TRIES = 4
+_OPEN_PAUSES_S = (0.5, 1.5, 2.5)
+_sleep = time.sleep          # tests replace it
+
+
+def _short(exc: BaseException) -> str:
+    """An exception as one ASCII line (gotcha #14: printed text is ASCII)."""
+    text = f"{type(exc).__name__}: {exc}".replace("\n", " ")
+    return text.encode("ascii", "replace").decode("ascii")[:200]
 
 _SRC_TO_SCPI = {"ch1": "C1", "ch2": "C2", "ext": "EX", "ext5": "EX5", "line": "LINE"}
 _SCPI_TO_SRC = {v: k for k, v in _SRC_TO_SCPI.items()}
@@ -152,6 +171,7 @@ class SiglentSDS:
         self._last_new = time.monotonic()   # when the content last changed
         self.identical_records = 0          # new records with identical bytes (INR? said so)
         self._desync_s = 0.0         # > 0: a late reply may still arrive; drain it first
+        self.open_warnings: list[str] = []   # failed open() tries (brain: warn events)
 
     # ---- lifecycle ---------------------------------------------------------------
     def open(self) -> None:
@@ -160,15 +180,48 @@ class SiglentSDS:
         try:
             import pyvisa                                   # lazy: real hw only
             self._rm = pyvisa.ResourceManager()
-            self._inst = self._rm.open_resource(self._resource)
-            self._inst.timeout = self._timeout_ms
-            self._inst.write_termination = "\n"
-            self._inst.read_termination = "\n"              # text replies; NOT the block
-            self._drain()
-            self._idn = self._q("*IDN?")
+            self.open_warnings = []
+            for attempt in range(1, _OPEN_TRIES + 1):
+                try:
+                    self._identify()
+                    break
+                except Exception as exc:
+                    if attempt == _OPEN_TRIES:
+                        raise RuntimeError(f"{self._resource}: no valid *IDN? after "
+                                           f"{_OPEN_TRIES} tries ({_short(exc)})") from exc
+                    pause = _OPEN_PAUSES_S[min(attempt, len(_OPEN_PAUSES_S)) - 1]
+                    note = (f"open: try {attempt} of {_OPEN_TRIES} failed ({_short(exc)}); "
+                            f"reopening and retrying in {pause:g} s")
+                    print(f"scope {note}", file=sys.stderr, flush=True)
+                    self.open_warnings.append(note)
+                    self._reset_session()
+                    _sleep(pause)
         except BaseException:
             self._release()
             raise
+
+    def _identify(self) -> None:
+        """Open the VISA session (if needed), empty its queue, identify."""
+        if self._inst is None:
+            self._inst = self._rm.open_resource(self._resource)
+        self._inst.timeout = self._timeout_ms
+        self._inst.write_termination = "\n"
+        self._inst.read_termination = "\n"              # text replies; NOT the block
+        self._drain()
+        self._idn = self._q("*IDN?")
+        if not self._idn:
+            raise RuntimeError(f"{self._resource} answered *IDN? with nothing")
+
+    def _reset_session(self) -> None:
+        """Between open() tries: close the session (this scope answers a VISA
+        clear with VI_ERROR_SYSTEM_ERROR, so no clear); the next try opens a
+        fresh one and drains whatever is left in the queue."""
+        inst, self._inst = self._inst, None
+        if inst is not None:
+            try:
+                inst.close()
+            except Exception:
+                pass
 
     def _drain(self, timeout_ms: int = 500, limit: int = 200, binary: bool = False) -> int:
         """Read and throw away whatever an earlier client left in the output

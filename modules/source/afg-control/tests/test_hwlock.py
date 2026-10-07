@@ -59,13 +59,17 @@ def test_a_failing_open_releases_the_address(fake_visa, monkeypatch):
     from fake_visa import FakeAFGInstrument
     monkeypatch.setattr(FakeAFGInstrument, "read_raw",
                         lambda self: (_ for _ in ()).throw(TimeoutError("no answer")))
+    import afg.backends.tek_afg as B
+    monkeypatch.setattr(B, "_sleep", lambda s: None)   # open() retries (4 tries)
     b = TekAFG(RES)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(B.NoReply, match="4 tries") as err:
         b.open()
+    assert isinstance(err.value.__cause__, TimeoutError)
     assert hwlock.held() == []
-    assert fake_visa[0].closed and fake_visa[0].writes == ["*CLS"]
+    assert len(fake_visa) == 4
+    assert all(i.closed and i.writes == ["*CLS"] for i in fake_visa)
     b.close()                 # after a failed open: sends nothing, no error
-    assert fake_visa[0].writes == ["*CLS"]
+    assert fake_visa[-1].writes == ["*CLS"]
 
 
 def test_a_missing_pyvisa_releases_the_address(monkeypatch):

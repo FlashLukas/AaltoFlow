@@ -31,6 +31,21 @@ import types
 
 import pytest
 
+
+# Faults to inject, shared by every instrument the fake opens (a reopened
+# session is a new object): "idn" = how many *IDN? queries still fail with
+# the lab's VI_ERROR_INP_PROT_VIOL. Reset by the fixture.
+FAULTS = {"idn": 0}
+
+
+class InpProtViol(OSError):
+    """What pyvisa raised on the lab PC (a VisaIOError) after the services
+    had vanished mid-scan."""
+
+    def __init__(self):
+        super().__init__("VI_ERROR_INP_PROT_VIOL (-1073807305): Device reported "
+                         "an input protocol error during transfer.")
+
 _SHAPES = {"SIN": "SIN", "SQU": "SQU", "PULS": "PULS", "RAMP": "RAMP",
            "PRN": "PRN", "DC": "DC"}
 
@@ -75,6 +90,11 @@ class FakeAFGInstrument:
 
     # ---- pyvisa resource surface ----------------------------------------
     def write(self, cmd: str):
+        if cmd == "*IDN?" and FAULTS["idn"] > 0:
+            FAULTS["idn"] -= 1
+            self.queries.append(cmd)
+            self._reply = InpProtViol
+            return
         if cmd.endswith("?"):
             self.queries.append(cmd)
             self._reply = self._answer(cmd)
@@ -121,6 +141,8 @@ class FakeAFGInstrument:
         if self.dead:
             raise TimeoutError("VI_ERROR_TMO")
         reply, self._reply = self._reply, None
+        if reply is InpProtViol:
+            raise InpProtViol()
         if reply is None:
             raise TimeoutError("VI_ERROR_TMO (nothing was asked)")
         return reply
@@ -177,6 +199,7 @@ class FakeAFGInstrument:
 
 def _install(monkeypatch, firmware: str) -> list:
     opened: list[FakeAFGInstrument] = []
+    FAULTS["idn"] = 0
 
     class RM:
         def open_resource(self, resource):
