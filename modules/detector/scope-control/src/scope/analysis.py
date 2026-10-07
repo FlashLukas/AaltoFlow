@@ -123,23 +123,72 @@ def frequency(t: np.ndarray, y: np.ndarray) -> float:
     return (len(edges) - 1) / (2.0 * (edges[-1] - edges[0]))
 
 
-def phase_deg(t: np.ndarray, ref: np.ndarray, y: np.ndarray) -> float:
-    """Phase of `y` relative to `ref` at ref's fundamental, in degrees
-    (-180..180; positive = y LEADS ref). From one DFT bin at the frequency
-    found in ref; NaN if ref has no clear frequency."""
-    f0 = frequency(t, ref)
-    if not (f0 > 0) or len(t) < 4:
-        return _NAN
+def peak_frequency(t: np.ndarray, y: np.ndarray) -> float:
+    """The strongest non-DC line of the spectrum (Hann window, the peak bin
+    refined by a parabola through its neighbours). A fallback for
+    `frequency` when the mean-crossing count fails (a signal with a large
+    harmonic, or noise that the dead band does not catch). NaN if the
+    strongest line is below two periods per record."""
+    y = np.asarray(y, dtype=float)
     t = np.asarray(t, dtype=float)
-    # use a whole number of periods so the DFT bin is clean
-    periods = math.floor((t[-1] - t[0]) * f0)
-    if periods < 1:
+    n = y.size
+    if n < 8 or not (t[-1] > t[0]):
         return _NAN
+    dt = (t[-1] - t[0]) / (n - 1)
+    spec = np.abs(np.fft.rfft((y - np.mean(y)) * np.hanning(n)))
+    k = int(np.argmax(spec[1:])) + 1
+    if k < 2 or k >= spec.size - 1:
+        return _NAN
+    a, b, c = spec[k - 1], spec[k], spec[k + 1]
+    den = a - 2 * b + c
+    shift = 0.5 * (a - c) / den if den != 0 else 0.0
+    return (k + shift) / (n * dt)
+
+
+def phase_detail(t: np.ndarray, ref: np.ndarray, y: np.ndarray) -> tuple[float, str]:
+    """Phase of `y` relative to `ref` at the FUNDAMENTAL, in degrees (-180..180;
+    positive = y LEADS ref), and why there is none ("" when there is one).
+
+    A lock-in in software: both signals are projected onto exp(-i 2 pi f0 t)
+    over a whole number of periods of f0, and the phase is the angle between
+    the two projections. Only the fundamental counts, so a sine against a
+    square of the same frequency gives the phase of their edges (lab bench
+    2026-10-07: AFG sine on CH1, square on CH2 -> 0 deg). f0 comes from CH1's
+    mean crossings, else CH2's, else the strongest line of CH1's spectrum."""
+    t = np.asarray(t, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if t.size < 8 or ref.size != t.size or y.size != t.size:
+        return _NAN, "too few points"
+    if not (np.isfinite(ref).all() and np.isfinite(y).all()):
+        return _NAN, "the record holds non-numbers"
+    for name, v in (("CH1", ref), ("CH2", y)):
+        if np.ptp(v) <= 0:
+            return _NAN, f"{name} is flat (no signal, or clipped at the screen edge)"
+    f0 = frequency(t, ref)
+    if not (f0 > 0):
+        f0 = frequency(t, y)
+    if not (f0 > 0):
+        f0 = peak_frequency(t, ref)
+    if not (f0 > 0):
+        return _NAN, "no frequency found (fewer than two periods in the record?)"
+    periods = math.floor((t[-1] - t[0]) * f0 + 1e-9)
+    if periods < 1:
+        return _NAN, (f"less than one period of {f0:.4g} Hz in the record -- "
+                      f"use a slower time/div")
+    # a whole number of periods: the bin is then blind to every harmonic and to DC
     sel = t <= t[0] + periods / f0
     w = np.exp(-2j * np.pi * f0 * t[sel])
-    a = np.sum((np.asarray(ref, float)[sel] - np.mean(np.asarray(ref, float)[sel])) * w)
-    b = np.sum((np.asarray(y, float)[sel] - np.mean(np.asarray(y, float)[sel])) * w)
-    if abs(a) == 0 or abs(b) == 0:
-        return _NAN
+    a = np.sum((ref[sel] - np.mean(ref[sel])) * w)
+    b = np.sum((y[sel] - np.mean(y[sel])) * w)
+    if abs(a) == 0:
+        return _NAN, f"CH1 has nothing at {f0:.4g} Hz"
+    if abs(b) == 0:
+        return _NAN, f"CH2 has nothing at {f0:.4g} Hz"
     d = math.degrees(np.angle(b / a))
-    return (d + 180.0) % 360.0 - 180.0
+    return (d + 180.0) % 360.0 - 180.0, ""
+
+
+def phase_deg(t: np.ndarray, ref: np.ndarray, y: np.ndarray) -> float:
+    """`phase_detail` without the reason (NaN when there is no phase)."""
+    return phase_detail(t, ref, y)[0]

@@ -54,6 +54,33 @@ from .config import (Config, CHANNEL_NAMES, COUPLINGS, TRIGGER_SOURCES, TRIGGER_
 _NAN = float("nan")
 #: divisions across the scope's screen (RSDS1102CML+: 14; the memory holds more)
 _SCREEN_DIV = 14.0
+
+
+def _tdiv_key(tdiv: float) -> str:
+    """A time/div as a dict key (0.5 and 0.5000000001 are the same setting)."""
+    return f"{float(tdiv):.6g}"
+
+
+def _flatten(got: dict) -> dict:
+    """read_settings() as flat keys: ch1_vdiv_V, tdiv_s, trigger_mode, ..."""
+    flat = {}
+    for ch, vals in (got.get("channels") or {}).items():
+        for k, v in vals.items():
+            if v is not None:
+                flat[f"{ch}_{k}"] = v
+    for k in ("tdiv_s", "delay_s", "sample_rate_Hz"):
+        if got.get(k) is not None:
+            flat[k] = got[k]
+    for k, v in (got.get("trigger") or {}).items():
+        if v is not None:
+            flat[f"trigger_{k}"] = v
+    return flat
+
+
+def _brief(info: dict) -> str:
+    """The record diagnostics as one ASCII line for an event."""
+    return ", ".join(f"{k} {v:g}" if isinstance(v, float) else f"{k} {v}"
+                     for k, v in info.items())
 _SETTINGS_REREAD_S = 3.0            # how often the scope's settings are re-read
 
 #: limits for the module's own numbers (sanity, not physics)
@@ -108,10 +135,16 @@ class Scope:
         self._live_numbers: dict = {}
         self._last_reread = -1e9
         self._record_s = 0.0                # length of the latest record
-        # how many divisions a record spans (measured: 41 at 1 ms/div on the
-        # RSDS1102CML+); learned from every record, so the expected record
-        # length follows a time/div change at once (`record_s`)
-        self._div_per_record = 14.0
+        # How long a record is, PER TIME/DIV: the divisions in a record are NOT
+        # the same at every time/div on the RSDS1102CML+ (lab PC 2026-10-07:
+        # 41 at 1 ms/div, more at 0.5 s/div), so nothing learned at one
+        # time/div may be carried to another. Two sources: the scope's own
+        # SANU/SARA (read with the settings) and the span of the records
+        # actually received at that time/div (`record_s`).
+        self._sanu = 0                      # SANU? -- points in the record, scope's word
+        self._span_at: dict = {}            # "tdiv" -> span of the records received
+        self._last_record: dict = {}        # what the last read looked like (diagnostics)
+        self._suspect_warned: set = set()
         self._roll_warned = False
 
         self._thread: threading.Thread | None = None
@@ -179,6 +212,8 @@ class Scope:
         changed = []
         unread = list(got.get("unread") or [])
         with self._lock:
+            if got.get("record_points"):
+                self._sanu = int(got["record_points"])
             old = dict(self._actual)
             flat = {}
             for ch, vals in (got.get("channels") or {}).items():
@@ -396,11 +431,19 @@ class Scope:
         return float(self._setting("tdiv_s", self.cfg.timebase.tdiv_s) or 0.0)
 
     def record_s(self) -> float:
-        """How long one record lasts at the CURRENT time/div: at least the
-        screen (14 divisions -- the lab's RSDS shows 14), or the divisions per
-        record learned from full records (41 at 1 ms/div on the RSDS1102CML+).
-        Follows a time/div change at once."""
-        return max(_SCREEN_DIV, self._div_per_record) * self._tdiv()
+        """How long one record lasts at the CURRENT time/div: the longest of
+        the screen (14 divisions), the scope's SANU / SARA, and the span of the
+        records received at this time/div. A time/div still being pushed has
+        no SANU / SARA yet: the screen, until the scope answers."""
+        tdiv = self._tdiv()
+        best = _SCREEN_DIV * tdiv
+        with self._lock:
+            if "tdiv_s" not in self._pending_keys:
+                sara = float(self._actual.get("sample_rate_Hz") or 0.0)
+                if self._sanu > 0 and sara > 0:
+                    best = max(best, self._sanu / sara)
+            best = max(best, self._span_at.get(_tdiv_key(tdiv), 0.0))
+        return best
 
     def rolling(self) -> bool:
         """AUTO trigger mode at a slow time/div: the scope free-runs / rolls and
@@ -504,9 +547,11 @@ class Scope:
             out[f"{ch}_values"] = analysis.channel_values(t, y)
             out[f"{ch}_unit"] = c.phys_unit
         if "ch1" in filt and "ch2" in filt:
-            out["phase_21_deg"] = analysis.phase_deg(t, filt["ch1"], filt["ch2"])
+            out["phase_21_deg"], out["phase_21_reason"] = analysis.phase_detail(
+                t, filt["ch1"], filt["ch2"])
         else:
             out["phase_21_deg"] = _NAN
+            out["phase_21_reason"] = "needs CH1 and CH2 both on"
         return out
 
     # ---- status ------------------------------------------------------------------------
@@ -522,6 +567,7 @@ class Scope:
                   "generator_channels": int(self.caps.get("generator_channels", 0)),
                   "records": self._records,
                   "record_s": self.record_s(),
+                  "last_record": dict(self._last_record),
                   "rolling": self.rolling(),
                   "trigger_rate_Hz": self._trigger_rate_locked(),
                   "running_n": len(self._running),
@@ -673,6 +719,7 @@ class Scope:
                     self.backend.set_trigger(**values)
             got = self.backend.read_settings()
         self._adopt(got)
+        got_flat = _flatten(got)                # THIS push's read-back, nothing older
         snapped = []
         with self._lock:
             self._settings_done = pending[-1][0]
@@ -681,21 +728,29 @@ class Scope:
             for _, kind, values in self._pending:          # asked again meanwhile
                 prefix = {"timebase": "", "trigger": "trigger_"}.get(kind, f"{kind}_")
                 still_queued |= {f"{prefix}{k}" for k in values}
+            # Only the LAST request per setting in this batch is compared with
+            # the read-back of this push: requests in quick succession (0.5,
+            # then 0.01 s/div) were each compared with the final value and gave
+            # "asked 0.5, the scope set 0.01" (lab PC 2026-10-07). A setting
+            # asked again meanwhile is not compared at all -- its own push is.
+            last = {}
             for _, kind, values in pending:
                 prefix = {"timebase": "", "trigger": "trigger_"}.get(kind, f"{kind}_")
                 for k, asked in values.items():
-                    key = f"{prefix}{k}"
-                    if key not in still_queued:
-                        self._pending_keys.discard(key)
-                    held = self._actual.get(key)
-                    # the scope snaps to its own steps (lab PC 2026-10-07: TDIV
-                    # 20 ms -> 10 ms, 200 ms -> 100 ms; 50 / 100 / 500 ms
-                    # stick): say so, the value it HOLDS is what is shown
-                    if (isinstance(asked, float) and isinstance(held, (int, float))
-                            and not isinstance(held, bool)
-                            and abs(held - asked) > 1e-3 * max(abs(asked), 1e-12)):
-                        snapped.append(f"{key.replace('_', ' ')}: asked {asked:g}, "
-                                       f"the scope set {held:g}")
+                    last[f"{prefix}{k}"] = asked
+            for key, asked in last.items():
+                if key in still_queued:
+                    continue
+                self._pending_keys.discard(key)
+                held = got_flat.get(key)
+                # the scope snaps to its own steps (lab PC 2026-10-07: TDIV
+                # 20 ms -> 10 ms, 200 ms -> 100 ms; 50 / 100 / 500 ms
+                # stick): say so, the value it HOLDS is what is shown
+                if (isinstance(asked, float) and isinstance(held, (int, float))
+                        and not isinstance(held, bool)
+                        and abs(held - asked) > 1e-3 * max(abs(asked), 1e-12)):
+                    snapped.append(f"{key.replace('_', ' ')}: asked {asked:g}, "
+                                   f"the scope set {held:g}")
         for msg in snapped:
             self._emit("warn", msg)
         self._restart(None)
@@ -716,18 +771,32 @@ class Scope:
                 clipped.add(ch)
             phys[ch] = cc.phys_scale * v + cc.phys_offset
         tr, red = analysis.reduce_points(np.asarray(t, float), phys, int(c.acquisition.points))
-        if len(t) > 1:
-            self._record_s = float(t[-1] - t[0])   # for the acquisition timeout
-            tdiv = self._tdiv()
-            # learn the record length only from a FULL record (at least the
-            # screen): at 0.5 s/div a short 0.64 s record once taught the module
-            # a record of 1.3 divisions (lab PC 2026-10-07)
-            if tdiv > 0 and self._record_s >= 0.9 * _SCREEN_DIV * tdiv:
-                self._div_per_record = self._record_s / tdiv
+        span = float(t[-1] - t[0]) if len(t) > 1 else 0.0
+        info = dict(getattr(self.backend, "last_record", {}) or {})
+        info.update({"points": int(len(t)), "span_s": span})
         latched = None
+        suspect = None
         with self._lock:
             if self._rev != rev0:
                 return                          # settings changed during the read
+            tdiv = float(self._actual.get("tdiv_s") or 0.0)
+            info["tdiv_s"] = tdiv
+            self._last_record = info
+            if span > 0 and tdiv > 0:
+                self._record_s = span           # for the acquisition timeout
+                # the span received AT THIS time/div (a record of another
+                # time/div never teaches this one -- divisions differ)
+                self._span_at[_tdiv_key(tdiv)] = span
+                # a record cannot be longer than the time since the previous
+                # one: if it is, the memory read is NOT one fresh record (lab
+                # PC 2026-10-07, 0.5 s/div NORMAL: a 32 s block, records every
+                # ~8 s, nonsense values). Said once per time/div, with numbers.
+                if self._trigger_times:
+                    gap = now - self._trigger_times[-1]
+                    key = _tdiv_key(tdiv)
+                    if span > 1.5 * gap + 0.5 and key not in self._suspect_warned:
+                        self._suspect_warned.add(key)
+                        suspect = (span, gap, info)
             self._records += 1
             self._trigger_times.append(now)
             if self._live_t.size != tr.size or not np.allclose(self._live_t, tr):
@@ -757,6 +826,7 @@ class Scope:
                         sample = {"acq_id": a["id"], "time": time.time(), "averages": a["n"],
                                   "clipped": sorted(a["clipped"]),
                                   "phase_21_deg": proc["phase_21_deg"],
+                                  "phase_21_reason": proc["phase_21_reason"],
                                   "lowpass_Hz": proc["lowpass_Hz"],
                                   "highpass_Hz": proc["highpass_Hz"]}
                         for ch in mean:
@@ -772,11 +842,18 @@ class Scope:
         mean = {ch: np.mean([r[ch] for r in recs], axis=0) for ch in red}
         proc = self._process(tr, mean, n_live)
         live = {"phase_21_deg": proc["phase_21_deg"],
+                "phase_21_reason": proc["phase_21_reason"],
                 "clipped": sorted(clipped), "n": n_live}
         for ch in red:
             live[ch] = dict(proc[f"{ch}_values"])
         with self._lock:
             self._live_numbers = live
+        if suspect is not None:
+            span, gap, info = suspect
+            self._emit("warn", f"at {info['tdiv_s']:g} s/div the record read spans "
+                               f"{span:.3g} s but records arrive every {gap:.3g} s: it "
+                               f"cannot be ONE fresh record -- treat these traces as "
+                               f"suspect (details: {_brief(info)})")
         if latched is not None and latched["clipped"]:
             self._emit("warn", f"acquisition #{latched['acq_id']}: "
                                f"{', '.join(c.upper() for c in latched['clipped'])} CLIPPED "

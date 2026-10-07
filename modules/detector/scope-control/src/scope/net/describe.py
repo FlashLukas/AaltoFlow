@@ -301,6 +301,9 @@ def build_manifest(scope) -> dict:
         params.append(_p("live_phase_21", "Phase CH2 - CH1 (live)", "indicator", "float",
                          unit="deg", group="Live", order=order, decimals=2, plottable=True,
                          read_path=["live", "phase_21_deg"]))
+        params.append(_p("live_phase_21_reason", "Phase CH2 - CH1: why none", "indicator",
+                         "string", group="Live", order=order + 1,
+                         read_path=["live", "phase_21_reason"]))
     # -- status ----------------------------------------------------------------------------
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status", order=1,

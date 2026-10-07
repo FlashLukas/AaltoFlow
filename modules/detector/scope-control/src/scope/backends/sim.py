@@ -90,6 +90,7 @@ class SimulatedScope:
         return {"channels": {c: dict(v) for c, v in s["channels"].items()},
                 "tdiv_s": s["tdiv_s"], "delay_s": s["delay_s"],
                 "sample_rate_Hz": _NATIVE_POINTS / span,
+                "record_points": _NATIVE_POINTS,
                 "trigger": dict(s["trigger"]), "unread": []}
 
     def set_channel(self, ch: str, **values) -> None:

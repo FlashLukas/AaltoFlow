@@ -127,6 +127,8 @@ class SiglentSDS:
         self._hwlock = None
         self._sparse = None          # the WFSU thinning last sent
         self._n_full = 0             # points in the scope's record, as last received
+        self._n_key = None           # ... valid only for this (SARA, SANU) -- one time/div
+        self.last_record: dict = {}  # how the last read went (status "last_record")
         self._desync_s = 0.0         # > 0: a late reply may still arrive; drain it first
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -268,6 +270,9 @@ class SiglentSDS:
         get(out, "tdiv_s", lambda: _num(self._q("TDIV?"), time_unit=True), "tdiv_s")
         get(out, "delay_s", lambda: _num(self._q("TRDL?"), time_unit=True), "delay_s")
         get(out, "sample_rate_Hz", lambda: _num(self._q("SARA?")), "sample_rate_Hz")
+        # points in the record, the scope's word: with SARA it gives the
+        # record length at THIS time/div (the brain's record_s)
+        get(out, "record_points", lambda: _num(self._q("SANU? C1")), "record_points")  # VERIFY
         trg = {}
         get(trg, "source", self._read_source, "trigger.source")
         src = _SRC_TO_SCPI.get(trg.get("source") or "ch1", "C1")
@@ -355,13 +360,18 @@ class SiglentSDS:
         out = {}
         sparse = self._sparse or 1
         n_full = self._n_full
+        sanu = 0
         for i, ch in enumerate(channels):
             n = 1 if ch == "ch1" else 2
             if i == 0:
                 # how much to thin the TRANSFER (not the acquisition, see the
                 # module docstring): from the larger of SANU and the record
-                # length actually seen last time (SANU undercounts)
-                n_full = max(int(_num(self._q(f"SANU? C{n}"))), self._n_full)  # VERIFY
+                # length actually seen last time (SANU undercounts) -- but only
+                # a length seen at the SAME sample rate and SANU, i.e. the same
+                # time/div: one from another time/div is a different record
+                sanu = int(_num(self._q(f"SANU? C{n}")))                      # VERIFY
+                learned = self._n_full if self._n_key == (sara, sanu) else 0
+                n_full = max(sanu, learned)
                 sparse = max(1, int(math.ceil(n_full / max(1, int(max_points)))))
                 if sparse != self._sparse:            # only when it changes
                     self._w(f"WFSU SP,{sparse},NP,0,FP,0")                      # VERIFY
@@ -374,10 +384,14 @@ class SiglentSDS:
             record_s = n_full / sara if sara > 0 else 0.0
             codes = parse_block(self._read_block(record_s))
             out[ch] = codes * vdiv / 25.0 - ofst                                # VERIFY 25/div
-        m = min(v.size for v in out.values())
+        lengths = {k: int(v.size) for k, v in out.items()}
+        m = min(lengths.values())
         out = {k: v[:m] for k, v in out.items()}
         self._n_full = m * sparse                     # the record's real length
+        self._n_key = (sara, sanu)
         dt = sparse / sara
         span = m * dt
+        self.last_record = {"sara": sara, "sanu": sanu, "sparse": sparse,
+                            "block_points": lengths, "delay_s": delay}
         t = delay - span / 2.0 + np.arange(m) * dt         # measured: see docstring
         return t, out

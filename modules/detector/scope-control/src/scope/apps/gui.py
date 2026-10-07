@@ -616,8 +616,10 @@ class MainWindow(QtWidgets.QMainWindow):
             vals = src.get(ch) or {}
             for i, (key, _) in enumerate(rows):
                 self.table.setItem(i, j + 1, QtWidgets.QTableWidgetItem(_fmt(vals.get(key), ".5g")))
-        self.table.setItem(len(rows), 1, QtWidgets.QTableWidgetItem(
-            _fmt(src.get("phase_21_deg"), ".2f") + " deg"))
+        item = QtWidgets.QTableWidgetItem(_fmt(src.get("phase_21_deg"), ".2f") + " deg")
+        # no phase: the reason on hover (flat / clipped channel, too short a record)
+        item.setToolTip(src.get("phase_21_reason") or "")
+        self.table.setItem(len(rows), 1, item)
 
     def _fetch_and_draw(self, s):
         which = "sample" if self.src.currentIndex() == 1 else "live"
