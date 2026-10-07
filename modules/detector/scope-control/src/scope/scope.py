@@ -146,6 +146,8 @@ class Scope:
         self._last_record: dict = {}        # what the last read looked like (diagnostics)
         self._suspect_warned: set = set()
         self._prev_take = None              # (settings rev, tdiv, when) of the last record
+        self._poll_prev = None              # the poll before the one that found a record
+        self._poll_now = None
         self._alias_warned = False
         self._roll_warned = False
 
@@ -497,7 +499,9 @@ class Scope:
 
     def _new_acq(self, acq_id: int) -> dict:
         return {"id": acq_id, "t0": self._clock(), "want": max(1, int(self.cfg.acquisition.averages)),
-                "n": 0, "skip": 1, "sum": None, "t": None, "clipped": set()}
+                "n": 0, "skip": 1, "sum": None, "t": None, "clipped": set(),
+                # where the time goes (logged when it completes)
+                "seen": 0, "skipped_first": 0, "not_fresh": 0, "resampled": 0}
 
     def get_trace(self, which: str = "live") -> dict:
         """Traces and what they were measured under.
@@ -699,6 +703,9 @@ class Scope:
         Public so tests can drive it by hand."""
         self._push_settings()
         now = self._clock()
+        # a record found now was not there at the previous poll: it ENDED
+        # after that moment (used for the freshness of an acquisition)
+        self._poll_prev, self._poll_now = self._poll_now, now
         if now - self._last_reread >= _SETTINGS_REREAD_S:
             self._last_reread = now
             with self._hw:
@@ -808,6 +815,7 @@ class Scope:
         info.update({"points": int(len(t)), "span_s": span})
         latched = None
         suspect = None
+        took = None
         with self._lock:
             if self._rev != rev0:
                 return                          # settings changed during the read
@@ -840,8 +848,15 @@ class Scope:
             self._records += 1
             self._trigger_times.append(now)
             if self._live_t.size != tr.size or not np.allclose(self._live_t, tr):
-                self._running.clear()           # a new time axis: start again
-                self._live_t = tr
+                if self._running and self._live_t.size > 1 and \
+                        abs((tr[-1] - tr[0]) - (self._live_t[-1] - self._live_t[0])) \
+                        <= 0.01 * (self._live_t[-1] - self._live_t[0]):
+                    # the same window, a point more or less: resample
+                    red = {ch: np.interp(self._live_t, tr, y) for ch, y in red.items()}
+                    tr = self._live_t
+                else:
+                    self._running.clear()       # a new time axis: start again
+                    self._live_t = tr
             self._running.append((now, red))
             while len(self._running) > max(1, int(c.acquisition.averages)):
                 self._running.popleft()
@@ -854,17 +869,35 @@ class Scope:
             # half, see above) it waits for one whose pre-trigger part, too,
             # is new. Plus the old rule: the first record after the trigger is
             # skipped anyway.
-            late = float(self.cfg.hardware.poll_s) + 0.5
-            fresh = a is not None and now - span - late >= a["t0"]
+            # Only the FIRST counted record needs the test (lab PC
+            # 2026-10-07: applied to every record with a 0.5 s margin it made
+            # acquires 2-4x slower); every later one is a newer record, fresh
+            # by construction. The record ended after the previous poll, so
+            # it began after (previous poll - span).
+            ended_after = self._poll_prev if (self._poll_prev is not None
+                                              and self._poll_prev < now) else \
+                now - float(self.cfg.hardware.poll_s) - 0.5
             if a is not None and now >= a["t0"]:
-                if a["skip"] > 0 or not fresh:
-                    a["skip"] = max(0, a["skip"] - 1)   # may have begun before the trigger
+                a["seen"] += 1
+                fresh = a["n"] > 0 or ended_after - span >= a["t0"]
+                if a["skip"] > 0:
+                    a["skip"] -= 1              # may have begun before the trigger
+                    a["skipped_first"] += 1
+                elif not fresh:
+                    a["not_fresh"] += 1         # its pre-trigger part predates acquire()
                 else:
-                    if a["sum"] is None or a["t"].size != tr.size:
+                    if a["sum"] is None:
                         a["sum"] = {ch: y.copy() for ch, y in red.items()}
                         a["t"] = tr
                         a["n"] = 1
                     else:
+                        if a["t"].size != tr.size or not np.allclose(a["t"], tr):
+                            # a record one point longer or shorter (the
+                            # transfer is thinned by the scope): onto the
+                            # first record's time axis -- restarting the sum
+                            # here threw records away, acquires got slow
+                            red = {ch: np.interp(a["t"], tr, y) for ch, y in red.items()}
+                            a["resampled"] += 1
                         for ch, y in red.items():
                             a["sum"][ch] = a["sum"][ch] + y
                         a["n"] += 1
@@ -886,6 +919,10 @@ class Scope:
                         self._sample_trace = proc
                         self._acq = None
                         latched = sample
+                        took = f"acquisition #{a['id']}: {a['n']} records in " \
+                               f"{now - a['t0']:.1f} s ({a['seen']} seen: " \
+                               f"{a['skipped_first']} skipped as first, {a['not_fresh']} " \
+                               f"begun before acquire, {a['resampled']} resampled)"
             recs = [r for _, r in self._running]
             n_live = len(recs)
         # live numbers (outside the lock: a few ms of numpy)
@@ -907,6 +944,8 @@ class Scope:
             live[ch] = dict(proc[f"{ch}_values"])
         with self._lock:
             self._live_numbers = live
+        if took is not None:
+            self._emit("info", took)
         if suspect is not None:
             span, gap, info = suspect
             self._emit("warn", f"at {info['tdiv_s']:g} s/div the record read has "

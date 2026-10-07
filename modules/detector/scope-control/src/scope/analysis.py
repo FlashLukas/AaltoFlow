@@ -131,12 +131,26 @@ def frequency(t: np.ndarray, y: np.ndarray) -> float:
     if flips.size < 2 or cross.size == 0:
         return _NAN
     j = np.searchsorted(cross, flips, side="right") - 1
-    j = j[j >= 0]
+    keep = j >= 0
+    j = j[keep]
+    up = side[flips[keep]] > 0          # the edge went to the high side
     if j.size < 2:
         return _NAN
     i = cross[j]
     frac = (mean - y[i - 1]) / (y[i] - y[i - 1])
     edges = t[i - 1] + frac * (t[i] - t[i - 1])
+    # With few periods (lab PC 2026-10-07: two periods of 50 Hz at 1 ms/div
+    # read 49.67 Hz) the record's mean is not the signal's: rising and
+    # falling crossings move in OPPOSITE directions, and counting both is
+    # biased. Rising-to-rising (and falling-to-falling) is not: average the
+    # two when each has two edges.
+    est = []
+    for sel in (up, ~up):
+        e = edges[sel]
+        if e.size >= 2 and e[-1] > e[0]:
+            est.append((e.size - 1) / (e[-1] - e[0]))
+    if est:
+        return float(np.mean(est))
     return (edges.size - 1) / (2.0 * (edges[-1] - edges[0]))
 
 

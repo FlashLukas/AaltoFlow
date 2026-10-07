@@ -132,3 +132,38 @@ def test_acquire_waits_for_a_record_begun_after_it(manual):
     scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=t0 + 16.9)
     st = scope.status()
     assert not st["acquiring"] and st["sample"]["acq_id"] == n
+
+
+def test_a_length_change_does_not_restart_the_acquisition(manual):
+    """Lab PC 2026-10-07: acquires got 2-4x slower after the numbers moved
+    to the full record -- a record a point longer or shorter restarted the
+    sum. Now it is resampled; 16 averages = the skipped first + 16 records,
+    and the completion is logged with the counts."""
+    scope, events = manual
+    scope.set_tdiv(1e-3)
+    scope.set_averages(16)
+    scope.step()
+    clock = [500.0]
+    scope._clock = lambda: clock[0]
+    n = scope.acquire()
+    for k in range(17):
+        m = 10240 + (k % 2)                       # alternating lengths
+        t = np.arange(m) * 4e-6 - 0.02048
+        y = np.sin(2 * np.pi * 50 * t)
+        clock[0] += 0.3
+        scope._poll_prev, scope._poll_now = clock[0] - 0.01, clock[0]
+        scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=clock[0])
+    st = scope.status()
+    assert not st["acquiring"] and st["sample"]["acq_id"] == n
+    assert st["sample"]["ch1"]["pk2pk"] == pytest.approx(2.0, rel=0.01)
+    assert any(f"acquisition #{n}: 16 records" in m for _, m in events), events
+
+
+def test_frequency_with_two_periods_is_exact():
+    """1 ms/div, 41 ms, 50 Hz: read 49.67 Hz (the record's mean is off with
+    two periods; rising and falling crossings move apart)."""
+    from scope import analysis as A
+    t = np.arange(20480) * 2e-6 - 0.02048
+    for ph in (0.0, 0.7, 1.9, 3.0):
+        assert A.frequency(t, 0.52 * np.sin(2 * np.pi * 50 * t + ph)) == \
+            pytest.approx(50.0, abs=0.02)
