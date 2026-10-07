@@ -211,6 +211,7 @@ def test_a_positive_delay_moves_the_window_later(fake_visa):
     assert t[0] == pytest.approx(2.02e-3 - 20.48e-3)
     assert t[-1] == pytest.approx(2.02e-3 + 20.48e-3 - 2e-6)
     inst.st["TRDL"] = -2e-3
+    b.read_settings()           # the brain re-reads the settings (every 3 s)
     t, v = b.read_traces(["ch1"], max_points=30000)
     assert t[0] == pytest.approx(-2e-3 - 20.48e-3)
     b.close()
@@ -250,4 +251,26 @@ def test_a_long_record_gets_a_long_timeout_and_a_timeout_resyncs(fake_visa):
     inst.read_raw = real
     assert _num(b._q("C1:VDIV?")) == 0.5              # drained first, then clean
     assert b._desync_s == 0
+    b.close()
+
+
+def test_a_record_read_asks_only_for_the_data(fake_visa):
+    """Lab PC 2026-10-07: ~1.3 records/s at 1 ms/div. A record read asked
+    SARA, TRDL, SANU, V/div and offset again every time (~9 queries per
+    record). After a settings read only the WF? data travel; a change made
+    through the module clears that, and the read reports its timing."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    b.read_settings()
+    n0, q0 = len(inst.writes), len(inst.queries)
+    t, v = b.read_traces(["ch1", "ch2"], max_points=30000)
+    sent = [w for w in inst.writes[n0:] if not w.startswith("WFSU")]
+    assert sent == ["C1:WF? DAT2", "C2:WF? DAT2"], sent
+    assert inst.queries[q0:] == [], inst.queries[q0:]
+    assert set(b.last_record["ms"]) >= {"wf_ch1", "wf_ch2", "read_total"}
+    b.set_channel("ch1", vdiv_V=0.5)
+    q0 = len(inst.queries)
+    b.read_traces(["ch1"], max_points=30000)
+    assert any("VDIV?" in q for q in inst.queries[q0:])
     b.close()

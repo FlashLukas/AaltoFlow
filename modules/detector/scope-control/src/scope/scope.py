@@ -146,6 +146,7 @@ class Scope:
         self._last_record: dict = {}        # what the last read looked like (diagnostics)
         self._suspect_warned: set = set()
         self._prev_take = None              # (settings rev, tdiv, when) of the last record
+        self._cycle_ms: dict = {}
         self._poll_prev = None              # the poll before the one that found a record
         self._poll_now = None
         self._alias_warned = False
@@ -499,7 +500,7 @@ class Scope:
 
     def _new_acq(self, acq_id: int) -> dict:
         return {"id": acq_id, "t0": self._clock(), "want": max(1, int(self.cfg.acquisition.averages)),
-                "n": 0, "skip": 1, "sum": None, "t": None, "clipped": set(),
+                "n": 0, "skip": 0, "sum": None, "t": None, "clipped": set(),
                 # where the time goes (logged when it completes)
                 "seen": 0, "skipped_first": 0, "not_fresh": 0, "resampled": 0}
 
@@ -701,6 +702,7 @@ class Scope:
         """One pass: push queued settings, re-read the settings now and then,
         take a new record if the scope has one. True if a record was taken.
         Public so tests can drive it by hand."""
+        t_cycle = time.perf_counter()
         self._push_settings()
         now = self._clock()
         # a record found now was not there at the previous poll: it ENDED
@@ -723,8 +725,10 @@ class Scope:
                                f"{self.cfg.hardware.roll_tdiv_s:g} s/div)")
         elif not roll:
             self._roll_warned = False
+        t_inr = time.perf_counter()
         with self._hw:
             ready = self.backend.new_trace_ready()
+        t_ready = time.perf_counter()
         if not ready:
             return False
         with self._lock:
@@ -734,7 +738,19 @@ class Scope:
             return False
         with self._hw:
             t, volts = self.backend.read_traces(chans, int(self.cfg.hardware.max_points))
+        t_read = time.perf_counter()
+        # where one cycle's time goes (status last_record.cycle_ms; the lab
+        # PC saw ~0.77 s per record at 1 ms/div): settings push / re-read,
+        # the INR? poll, the record read, the numbers
+        self._cycle_ms = {"settings": 1000 * (t_inr - t_cycle),
+                          "inr": 1000 * (t_ready - t_inr),
+                          "read": 1000 * (t_read - t_ready)}
         self._take(t, volts, rev0, now)
+        self._cycle_ms["take"] = 1000 * (time.perf_counter() - t_read)
+        with self._lock:
+            if self._last_record:
+                self._last_record["cycle_ms"] = {k: round(v, 1)
+                                                 for k, v in self._cycle_ms.items()}
         if self._hw_error:
             with self._lock:
                 self._hw_error = ""
@@ -869,6 +885,9 @@ class Scope:
             # half, see above) it waits for one whose pre-trigger part, too,
             # is new. Plus the old rule: the first record after the trigger is
             # skipped anyway.
+            # (This replaces "skip the first record after the trigger": it
+            # says the same thing with the record's length in it, and at a
+            # slow time/div it costs no whole record.)
             # Only the FIRST counted record needs the test (lab PC
             # 2026-10-07: applied to every record with a 0.5 s margin it made
             # acquires 2-4x slower); every later one is a newer record, fresh
@@ -921,8 +940,10 @@ class Scope:
                         latched = sample
                         took = f"acquisition #{a['id']}: {a['n']} records in " \
                                f"{now - a['t0']:.1f} s ({a['seen']} seen: " \
-                               f"{a['skipped_first']} skipped as first, {a['not_fresh']} " \
-                               f"begun before acquire, {a['resampled']} resampled)"
+                               f"{a['not_fresh']} begun before acquire, " \
+                               f"{a['resampled']} resampled; last cycle ms " \
+                               f"{_brief({k: round(v, 1) for k, v in self._cycle_ms.items()})}" \
+                               f"; read ms {_brief(info.get('ms') or {})})"
             recs = [r for _, r in self._running]
             n_live = len(recs)
         # live numbers (outside the lock: a few ms of numpy)

@@ -50,6 +50,7 @@ MEASURED ON THE LAB'S RSDS1102CML+ (2026-10-06, firmware 6.01.01.25):
 from __future__ import annotations
 
 import math
+import time
 import re
 
 import numpy as np
@@ -129,6 +130,16 @@ class SiglentSDS:
         self._n_full = 0             # points in the scope's record, as last received
         self._n_key = None           # ... valid only for this (SARA, SANU) -- one time/div
         self.last_record: dict = {}  # how the last read went (status "last_record")
+        # What a record read needs besides the data (SARA, TRDL, SANU, V/div,
+        # offset), as read with the settings. Lab PC 2026-10-07: asking all of
+        # it again for every record was ~9 queries per record on top of the
+        # data, and the module saw ~1.3 records/s. The brain re-reads the
+        # settings every 3 s and after every change it makes, and a change
+        # found at the scope restarts the average and any acquisition, so a
+        # record scaled with a value up to 3 s old never ends up in one.
+        # `query_each_record=True` asks every time anyway (the old way).
+        self._cache: dict = {}
+        self.query_each_record = False
         self._desync_s = 0.0         # > 0: a late reply may still arrive; drain it first
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -282,6 +293,12 @@ class SiglentSDS:
         get(trg, "mode", lambda: {"AUTO": "auto", "NORM": "normal", "SINGLE": "single",
                                   "STOP": "stop"}[_word(self._q("TRMD?"))], "trigger.mode")
         out["trigger"] = trg
+        cache = {"sara": out.get("sample_rate_Hz"), "delay": out.get("delay_s"),
+                 "sanu1": out.get("record_points")}
+        for ch, n in (("ch1", 1), ("ch2", 2)):
+            cache[f"vdiv{n}"] = out["channels"][ch].get("vdiv_V")
+            cache[f"ofst{n}"] = out["channels"][ch].get("offset_V")
+        self._cache = {k: v for k, v in cache.items() if v is not None}
         return out
 
     def _read_source(self) -> str:
@@ -292,6 +309,7 @@ class SiglentSDS:
         raise ValueError(f"cannot read the trigger source from {parts}")      # VERIFY
 
     def set_channel(self, ch: str, **values) -> None:
+        self._cache = {}                     # re-read before the next record
         n = 1 if ch == "ch1" else 2
         if "enabled" in values:
             self._w(f"C{n}:TRA {'ON' if values['enabled'] else 'OFF'}")
@@ -305,12 +323,14 @@ class SiglentSDS:
             self._w(f"C{n}:OFST {values['offset_V']:.4E}V")
 
     def set_timebase(self, tdiv_s=None, delay_s=None) -> None:
+        self._cache = {}
         if tdiv_s is not None:
             self._w(f"TDIV {tdiv_s:.4E}S")
         if delay_s is not None:
             self._w(f"TRDL {delay_s:.4E}S")                                    # VERIFY
 
     def set_trigger(self, **values) -> None:
+        self._cache = {}
         src = values.get("source")
         if src is not None:
             # TRSE carries the holdoff too ("EDGE,SR,C1,HT,TI,HV,100NS"): change
@@ -355,8 +375,18 @@ class SiglentSDS:
         -3.97 ms, with -2 ms at +4.09 ms: the edge landed at -2 x delay, so the
         sign was inverted. With +TRDL the edge stays at t = 0 and a POSITIVE
         delay moves the window LATER (more of what follows the trigger)."""
-        sara = _num(self._q("SARA?"))
-        delay = _num(self._q("TRDL?"), time_unit=True)
+        t_start = time.perf_counter()
+        ms = {}
+
+        def value(key, query, time_unit=False):
+            if not self.query_each_record and key in self._cache:
+                return self._cache[key]
+            v = _num(self._q(query), time_unit=time_unit)
+            self._cache[key] = v
+            return v
+
+        sara = value("sara", "SARA?")
+        delay = value("delay", "TRDL?", time_unit=True)
         out = {}
         sparse = self._sparse or 1
         n_full = self._n_full
@@ -369,20 +399,25 @@ class SiglentSDS:
                 # length actually seen last time (SANU undercounts) -- but only
                 # a length seen at the SAME sample rate and SANU, i.e. the same
                 # time/div: one from another time/div is a different record
-                sanu = int(_num(self._q(f"SANU? C{n}")))                      # VERIFY
+                sanu = int(value(f"sanu{n}", f"SANU? C{n}"))                   # VERIFY
                 learned = self._n_full if self._n_key == (sara, sanu) else 0
                 n_full = max(sanu, learned)
                 sparse = max(1, int(math.ceil(n_full / max(1, int(max_points)))))
                 if sparse != self._sparse:            # only when it changes
                     self._w(f"WFSU SP,{sparse},NP,0,FP,0")                      # VERIFY
                     self._sparse = sparse
-            vdiv = _num(self._q(f"C{n}:VDIV?"))
-            ofst = _num(self._q(f"C{n}:OFST?"))
+            vdiv = value(f"vdiv{n}", f"C{n}:VDIV?")
+            ofst = value(f"ofst{n}", f"C{n}:OFST?")
             self._resync()
+            t_wf = time.perf_counter()
+            ms.setdefault("queries", 1000 * (t_wf - t_start))
             self._w(f"C{n}:WF? DAT2")
             # the reply may wait for the record to complete: give it time
             record_s = n_full / sara if sara > 0 else 0.0
             codes = parse_block(self._read_block(record_s))
+            # how long the scope took to answer WF? (it may wait for a record
+            # in progress to complete -- VERIFY on the rig with this number)
+            ms[f"wf_{ch}"] = 1000 * (time.perf_counter() - t_wf)
             out[ch] = codes * vdiv / 25.0 - ofst                                # VERIFY 25/div
         lengths = {k: int(v.size) for k, v in out.items()}
         m = min(lengths.values())
@@ -391,7 +426,9 @@ class SiglentSDS:
         self._n_key = (sara, sanu)
         dt = sparse / sara
         span = m * dt
+        ms["read_total"] = 1000 * (time.perf_counter() - t_start)
         self.last_record = {"sara": sara, "sanu": sanu, "sparse": sparse,
-                            "block_points": lengths, "delay_s": delay}
+                            "block_points": lengths, "delay_s": delay,
+                            "ms": {k: round(v, 1) for k, v in ms.items()}}
         t = delay - span / 2.0 + np.arange(m) * dt         # measured: see docstring
         return t, out

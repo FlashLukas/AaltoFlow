@@ -31,6 +31,7 @@ class FakeSDS:
     def __init__(self, resource):
         self.resource = resource
         self.writes: list[str] = []
+        self.queries: list[str] = []      # query() calls (writes holds only write())
         self.closed = False
         self.timeout = None
         self.write_termination = self.read_termination = None
@@ -95,6 +96,7 @@ class FakeSDS:
     def query(self, cmd: str) -> str:
         if self.dead:
             raise TimeoutError("VI_ERROR_TMO")
+        self.queries.append(cmd)
         self._handle(cmd)
         return self.read_raw().decode("latin-1").rstrip("\n")
 
