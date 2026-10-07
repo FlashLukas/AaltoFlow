@@ -145,6 +145,8 @@ class Scope:
         self._span_at: dict = {}            # "tdiv" -> span of the records received
         self._last_record: dict = {}        # what the last read looked like (diagnostics)
         self._suspect_warned: set = set()
+        self._prev_take = None              # (settings rev, tdiv, when) of the last record
+        self._alias_warned = False
         self._roll_warned = False
 
         self._thread: threading.Thread | None = None
@@ -522,6 +524,7 @@ class Scope:
             recs = [r for _, r in self._running]
             n = len(recs)
         chans = list(recs[-1].keys())
+        # (full-resolution records; _process reduces them for the trace)
         raw = {ch: np.mean([r[ch] for r in recs], axis=0) for ch in chans}
         return self._process(t, raw, n)
 
@@ -530,28 +533,55 @@ class Scope:
         with self._lock:
             if self._sample_trace is not None:
                 return list(self._sample_trace["time_s"])
-            return list(self._live_t)
+            if self._live_t.size < 2:
+                return []
+            tr, _ = analysis.reduce_points(self._live_t, {}, int(self.cfg.acquisition.points))
+            return list(tr)
 
     def _process(self, t: np.ndarray, raw: dict, n: int) -> dict:
-        """Filter and numbers for an averaged record (pure; no lock)."""
+        """Filter, numbers and the stored trace for an averaged record (pure;
+        no lock). `t` / `raw` are the FULL record as read from the scope.
+
+        Filter and numbers (pk-pk, frequency, phase ...) run on the full
+        record; only then is the trace reduced to `points` for storage and
+        display. Reducing first made the numbers depend on the reduction:
+        lab PC 2026-10-07, 0.5 s/div, a 1 Vpp 50 Hz sine read 0.26 Vpp at
+        "11 Hz" because 20 samples (0.8 period) were averaged into one."""
         f = self.cfg.filter
         dt = float(t[1] - t[0]) if t.size > 1 else 0.0
         filt = {ch: analysis.zero_phase(y, dt, f.lowpass_Hz, f.highpass_Hz, f.order)
                 for ch, y in raw.items()}
-        out = {"time_s": t, "averages": n, "lowpass_Hz": f.lowpass_Hz,
-               "highpass_Hz": f.highpass_Hz, "filter_order": f.order}
+        points = int(self.cfg.acquisition.points)
+        out = {"averages": n, "lowpass_Hz": f.lowpass_Hz,
+               "highpass_Hz": f.highpass_Hz, "filter_order": f.order,
+               "record_points": int(t.size)}
+        freqs = []
         for ch, y in filt.items():
-            c = self.cfg.channel(ch)
-            out[ch] = y
-            out[f"{ch}_raw"] = raw[ch]
             out[f"{ch}_values"] = analysis.channel_values(t, y)
-            out[f"{ch}_unit"] = c.phys_unit
+            out[f"{ch}_unit"] = self.cfg.channel(ch).phys_unit
+            fr = out[f"{ch}_values"]["frequency"]
+            if fr > 0:
+                freqs.append(fr)
         if "ch1" in filt and "ch2" in filt:
             out["phase_21_deg"], out["phase_21_reason"] = analysis.phase_detail(
                 t, filt["ch1"], filt["ch2"])
         else:
             out["phase_21_deg"] = _NAN
             out["phase_21_reason"] = "needs CH1 and CH2 both on"
+        # the stored trace: average neighbours only within 1/20 of the
+        # shortest period seen, else sample (no amplitude lost)
+        max_bin = 1.0 / (20.0 * max(freqs)) if freqs else 0.0
+        both = {**{ch: y for ch, y in filt.items()},
+                **{f"{ch}_raw": y for ch, y in raw.items()}}
+        tr, red = analysis.reduce_points(t, both, points, max_bin_s=max_bin)
+        out["time_s"] = tr
+        out.update(red)
+        span = float(t[-1] - t[0]) if t.size > 1 else 0.0
+        # too few stored points per period: the trace shows an alias (the
+        # numbers above do not -- they come from the full record)
+        per_period = (points / (span * max(freqs))) if (freqs and span > 0) else _NAN
+        out["points_per_period"] = per_period
+        out["trace_aliased"] = bool(per_period == per_period and per_period < 4.0)
         return out
 
     # ---- status ------------------------------------------------------------------------
@@ -770,7 +800,9 @@ class Scope:
             if np.any(v >= hi - 1e-9 * abs(hi)) or np.any(v <= lo + 1e-9 * abs(lo)):
                 clipped.add(ch)
             phys[ch] = cc.phys_scale * v + cc.phys_offset
-        tr, red = analysis.reduce_points(np.asarray(t, float), phys, int(c.acquisition.points))
+        # the running average and the acquisition keep the FULL record; the
+        # reduction to `points` happens in _process, after the numbers
+        tr, red = np.asarray(t, float), phys
         span = float(t[-1] - t[0]) if len(t) > 1 else 0.0
         info = dict(getattr(self.backend, "last_record", {}) or {})
         info.update({"points": int(len(t)), "span_s": span})
@@ -791,12 +823,17 @@ class Scope:
                 # one: if it is, the memory read is NOT one fresh record (lab
                 # PC 2026-10-07, 0.5 s/div NORMAL: a 32 s block, records every
                 # ~8 s, nonsense values). Said once per time/div, with numbers.
-                if self._trigger_times:
-                    gap = now - self._trigger_times[-1]
-                    key = _tdiv_key(tdiv)
+                # (only against the previous record at the SAME settings: the
+                # first slow record after a time/div change came 1.69 s after
+                # the last FAST one -- a false alarm on the lab PC)
+                key = _tdiv_key(tdiv)
+                prev = self._prev_take
+                if prev is not None and prev[0] == rev0 and prev[1] == key:
+                    gap = now - prev[2]
                     if span > 1.5 * gap + 0.5 and key not in self._suspect_warned:
                         self._suspect_warned.add(key)
                         suspect = (span, gap, info)
+                self._prev_take = (rev0, key, now)
             self._records += 1
             self._trigger_times.append(now)
             if self._live_t.size != tr.size or not np.allclose(self._live_t, tr):
@@ -841,6 +878,15 @@ class Scope:
         # live numbers (outside the lock: a few ms of numpy)
         mean = {ch: np.mean([r[ch] for r in recs], axis=0) for ch in red}
         proc = self._process(tr, mean, n_live)
+        if proc["trace_aliased"] and not self._alias_warned:
+            self._alias_warned = True
+            self._emit("warn", f"the stored trace has {proc['points_per_period']:.2g} points "
+                               f"per signal period ({int(c.acquisition.points)} points over "
+                               f"{proc['record_points']} read): it shows an alias -- raise "
+                               f"'points' or use a faster time/div. The NUMBERS are from the "
+                               f"full record and are right.")
+        elif not proc["trace_aliased"]:
+            self._alias_warned = False
         live = {"phase_21_deg": proc["phase_21_deg"],
                 "phase_21_reason": proc["phase_21_reason"],
                 "clipped": sorted(clipped), "n": n_live}

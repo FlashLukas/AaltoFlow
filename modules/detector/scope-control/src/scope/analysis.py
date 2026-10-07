@@ -26,16 +26,28 @@ _NAN = float("nan")
 
 # ---- trace length -------------------------------------------------------------
 
-def reduce_points(t: np.ndarray, ys: dict, points: int) -> tuple[np.ndarray, dict]:
-    """Average neighbouring samples so every trace has `points` samples.
-    Fewer samples than `points` are interpolated onto `points` (no new
-    information, but every trace of a scan then has the same length)."""
+def reduce_points(t: np.ndarray, ys: dict, points: int,
+                  max_bin_s: float = 0.0) -> tuple[np.ndarray, dict]:
+    """The scope's record down to `points` samples for the STORED / shown trace.
+
+    Averaging neighbours (a boxcar) lowers the noise -- but only while a bin
+    is short against the signal's period. Lab PC 2026-10-07: 20480 points of
+    a 50 Hz sine at 1250 Sa/s averaged down to 1000 = bins of 0.8 period,
+    and the 1 Vpp sine came out as 0.26 Vpp at "11 Hz". So when a bin would
+    be longer than `max_bin_s` (the caller passes ~1/20 of the measured
+    period; 0 = no limit) the trace is SAMPLED at the `points` instants
+    instead (linear interpolation): no amplitude is lost, though a trace
+    with too few points per period shows an alias -- the numbers never come
+    from it (they are computed on the full record). Fewer samples than
+    `points` are interpolated onto `points` (every trace of a scan then has
+    the same length)."""
     t = np.asarray(t, dtype=float)
     n = t.size
     points = max(2, int(points))
     if n == points:
         return t.copy(), {k: np.asarray(v, dtype=float).copy() for k, v in ys.items()}
-    if n > points:
+    bin_s = (t[-1] - t[0]) / points if n > 1 else 0.0
+    if n > points and not (max_bin_s > 0 and bin_s > max_bin_s):
         edges = np.linspace(0, n, points + 1).astype(int)
         idx = np.repeat(np.arange(points), np.diff(edges))
         counts = np.bincount(idx, minlength=points).astype(float)
@@ -97,7 +109,8 @@ def frequency(t: np.ndarray, y: np.ndarray) -> float:
     """From the crossings of the mean level -- rising AND falling, so two
     periods already give four edges. A crossing only counts once the signal
     has gone 10 % of its peak-to-peak beyond the level (a dead band), so noise
-    near the level does not add crossings. NaN with fewer than two edges."""
+    near the level does not add crossings. NaN with fewer than two edges.
+    (numpy throughout: it runs on full records of tens of thousands of points.)"""
     y = np.asarray(y, dtype=float)
     t = np.asarray(t, dtype=float)
     if y.size < 4:
@@ -106,21 +119,25 @@ def frequency(t: np.ndarray, y: np.ndarray) -> float:
     hyst = 0.1 * float(np.max(y) - np.min(y))
     if hyst <= 0:
         return _NAN
-    edges = []
-    state = 0                 # -1 below the band, +1 above, 0 not known yet
-    last_cross = None         # time of the latest mean crossing
-    for i in range(1, y.size):
-        if (y[i - 1] - mean) * (y[i] - mean) < 0 or (y[i] == mean != y[i - 1]):
-            frac = (mean - y[i - 1]) / (y[i] - y[i - 1])
-            last_cross = t[i - 1] + frac * (t[i] - t[i - 1])
-        new = 1 if y[i] > mean + hyst else (-1 if y[i] < mean - hyst else state)
-        if new != state:
-            if state != 0 and last_cross is not None:
-                edges.append(last_cross)
-            state = new
-    if len(edges) < 2:
+    # which side of the dead band each sample is on (0 = inside it)
+    side = np.where(y > mean + hyst, 1, np.where(y < mean - hyst, -1, 0))
+    known = np.nonzero(side)[0]
+    if known.size < 2:
         return _NAN
-    return (len(edges) - 1) / (2.0 * (edges[-1] - edges[0]))
+    # an edge = the side changes; it happened at the last mean crossing before
+    flips = known[1:][np.diff(side[known]) != 0]
+    d = y - mean
+    cross = np.nonzero((d[:-1] < 0) != (d[1:] < 0))[0] + 1      # between i-1 and i
+    if flips.size < 2 or cross.size == 0:
+        return _NAN
+    j = np.searchsorted(cross, flips, side="right") - 1
+    j = j[j >= 0]
+    if j.size < 2:
+        return _NAN
+    i = cross[j]
+    frac = (mean - y[i - 1]) / (y[i] - y[i - 1])
+    edges = t[i - 1] + frac * (t[i] - t[i - 1])
+    return (edges.size - 1) / (2.0 * (edges[-1] - edges[0]))
 
 
 def peak_frequency(t: np.ndarray, y: np.ndarray) -> float:

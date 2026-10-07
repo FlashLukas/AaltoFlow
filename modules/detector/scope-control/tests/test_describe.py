@@ -135,3 +135,16 @@ def test_timeout_covers_long_records():
     cfg.acquisition.averages = 4
     assert acquisition_timeout_s(cfg, 20.5) >= 1.5 * 5 * 20.5 * 1.2
     assert acquisition_timeout_s(cfg, 0.0) < 60
+
+
+def test_every_read_path_resolves_to_a_value(scope):
+    """Lab PC 2026-10-07: live_phase_21 read None while status live held
+    phase_21_deg 0.01. Every scalar indicator's FULL read_path must give a
+    value in a real status (CH1 and CH2 on, records taken, a sample latched),
+    after the trip through JSON."""
+    _latch(scope)
+    st = status_to_dict(scope.status())
+    missing = [p["id"] for p in build_manifest(scope)["parameters"]
+               if p.get("read_path") and p["type"] != "string"
+               and read_path(st, p["read_path"]) is None]
+    assert not missing, missing

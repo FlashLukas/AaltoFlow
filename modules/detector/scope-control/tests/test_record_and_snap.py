@@ -61,3 +61,37 @@ def test_a_record_longer_than_the_trigger_gap_is_flagged(manual):
     scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=108.0)   # ... every 8 s
     assert any("cannot be ONE fresh record" in m for lvl, m in events if lvl == "warn")
     assert scope.status()["last_record"]["span_s"] == pytest.approx(32.0)
+
+
+def test_numbers_come_from_the_full_record(manual):
+    """Lab PC 2026-10-07, 0.5 s/div: 20480 points of a 1 Vpp 50 Hz sine at
+    1250 Sa/s read 0.26 Vpp at "11 Hz" -- the record had been averaged down
+    to 1000 points (bins of 0.8 period) BEFORE the numbers. Now the numbers
+    come from the full record, the stored trace keeps the amplitude, and the
+    trace's alias is warned about."""
+    scope, events = manual
+    scope.set_tdiv(0.5)
+    scope.set_averages(1)
+    scope.step()
+    n = 20480
+    t = np.arange(n) / 1250.0 - n / 2500.0
+    v = 0.52 * np.sin(2 * np.pi * 50 * t)
+    scope._take(t, {"ch1": v, "ch2": v}, scope._rev, now=1.0)
+    live = scope.status()["live"]
+    assert live["ch1"]["pk2pk"] == pytest.approx(1.04, rel=0.01)
+    assert live["ch1"]["frequency"] == pytest.approx(50.0, rel=1e-3)
+    assert live["phase_21_deg"] == pytest.approx(0.0, abs=0.1)
+    tr = scope.get_trace("live")
+    assert tr["ch1"].size == scope.cfg.acquisition.points
+    assert np.ptp(tr["ch1"]) > 0.9                 # sampled, not washed out
+    assert any("alias" in m for lvl, m in events if lvl == "warn")
+
+
+def test_boxcar_still_used_when_bins_are_short(manual):
+    """At a fast time/div the neighbour averaging stays (it lowers noise)."""
+    from scope import analysis as A
+    t = np.arange(20480) * 2e-6                    # 41 ms at 500 kSa/s
+    y = np.sin(2 * np.pi * 50 * t)
+    noisy = y + np.random.default_rng(1).normal(0, 0.1, t.size)
+    tr, red = A.reduce_points(t, {"y": noisy}, 1000, max_bin_s=1 / (20 * 50))
+    assert np.std(red["y"] - np.sin(2 * np.pi * 50 * tr)) < 0.04   # averaged: ~0.1/sqrt(20)
