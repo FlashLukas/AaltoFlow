@@ -187,9 +187,9 @@ are all testable offline.
 ~2 days; loop analysis ~1 day; scan integration, simulator and tests
 ~1-1.5 days -- about 6-7 days, plus a hardware session with the AD3.
 
-**Open:** which instrument gets W2's sync (its trigger input level); running
-average as the mean of the last N traces or an exponential one (N = time
-constant); whether filtering should also apply to the live display only.
+**Open:** which instrument gets W2's sync (its trigger input level); whether
+filtering should also apply to the live display only. (Decided 2026-10-07:
+the running average is the mean of the last N traces, not exponential.)
 
 ### Scientific cameras for spectroscopy (2026-10-02)
 
