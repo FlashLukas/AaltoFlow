@@ -11,6 +11,9 @@ from dssg.sim_system import build_sim_system
 from dssg.net.service import DssgService
 from dssg.net.client import DssgClient
 
+# these tests are written for the step-power mode (see conftest.step_power)
+pytestmark = pytest.mark.usefixtures("step_power")
+
 CMD_PORT = 17120
 PUB_PORT = 17121
 

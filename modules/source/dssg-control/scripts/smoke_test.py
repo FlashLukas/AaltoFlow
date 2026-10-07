@@ -48,15 +48,17 @@ def main() -> int:
           f"{lim['power_min_dBm']:g} .. {lim['power_max_dBm']:g} dBm")
 
     synth.set_frequency(2.45e9)
-    synth.set_power(-7.3)                      # the attenuator steps by 0.5 dB
+    synth.set_power(-7.3)                      # attenuator -7.5 + the vernier (fine power)
     synth.set_phase(45.0)
     synth.set_reference("internal")
     synth.set_rf(True)
     s = wait_for(synth, lambda s: s.rf_on and s.frequency_Hz == 2.45e9)
     print(f"after set: RF={s.rf_on}  f={s.frequency_Hz/1e6:.3f} MHz  "
-          f"P={s.power_dBm} dBm (asked -7.3)  phase={s.phase_deg} deg  ref={s.reference}  "
+          f"P={s.power_dBm} dBm (asked -7.3; attenuator {s.attenuator_dBm}, "
+          f"vernier {s.vernier:+d})  phase={s.phase_deg} deg  ref={s.reference}  "
           f"USB={s.usb_volts:.2f} V")
-    assert s.power_dBm == -7.5
+    s = wait_for(synth, lambda s: s.attenuator_dBm == -7.5)
+    assert abs(s.power_dBm - -7.3) <= 0.05
 
     synth.set_power(999.0)                     # above the config ceiling
     synth.set_frequency(40e9)                  # above what the unit can do

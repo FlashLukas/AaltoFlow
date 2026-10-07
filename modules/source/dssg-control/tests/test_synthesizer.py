@@ -8,6 +8,9 @@ import pytest
 from dssg.config import Config
 from dssg.sim_system import build_sim_system
 
+# these tests are written for the step-power mode (see conftest.step_power)
+pytestmark = pytest.mark.usefixtures("step_power")
+
 
 def wait_for(synth, pred, timeout=2.0):
     end = time.monotonic() + timeout

@@ -385,6 +385,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vrow = QtWidgets.QHBoxLayout()
         vlab = QtWidgets.QLabel("Vernier")
         vlab.setObjectName("hint")
+        self.vernier_lbl = vlab
         self.vernier_spin = QtWidgets.QSpinBox()
         self.vernier_spin.setSuffix("  counts")
         self.vernier_spin.setToolTip("Fine output-power trim in raw counts, + = more power.\n"
@@ -480,13 +481,26 @@ class MainWindow(QtWidgets.QMainWindow):
         lim = self.ctrl.limits()
         self._lim = lim
         self.power_spin.setRange(lim["power_min_dBm"], lim["power_max_dBm"])
-        self.power_hint.setText(f"allowed {lim['power_min_dBm']:g} .. "
-                                f"{lim['power_max_dBm']:g} dBm, "
-                                f"{self.cfg.hardware.power_step_dB:g} dB steps")
+        self._power_hint_text()
         self.phase_spin.setRange(lim["phase_min_deg"], lim["phase_max_deg"])
         self.vernier_spin.setRange(int(lim.get("vernier_min", -30)),
                                    int(lim.get("vernier_max", 30)))
         self._apply_freq_unit_range(initial_hz=self._current_freq_hz())
+
+    def _power_hint_text(self, fine: bool | None = None):
+        lim = self._lim
+        if fine is None:
+            fine = bool(getattr(self.ctrl.status(), "fine_power", False))
+        step = self.cfg.hardware.power_step_dB
+        how = "any 0.01 dB" if fine else f"{step:g} dB steps"
+        self.power_hint.setText(f"allowed {lim['power_min_dBm']:g} .. "
+                                f"{lim['power_max_dBm']:g} dBm, {how}")
+        self.power_hint.setToolTip(
+            f"Fine power: the attenuator moves in {step:g} dB steps and the vernier\n"
+            "fills in between (dB per count measured on the lab unit), so the level\n"
+            "asked for is delivered to about 0.05 dB." if fine else
+            f"The attenuator moves in {step:g} dB steps; a request in between is\n"
+            "rounded to the nearest step. The vernier trims by hand (raw counts).")
 
     def _seed_from_status(self):
         """Fill the entry fields with what the unit is ACTUALLY doing, once, at
@@ -589,6 +603,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.phase_spin.setEnabled(bool(s.has_phase))
         self.set_ph.setEnabled(bool(s.has_phase))
         self.vernier_spin.setEnabled(bool(getattr(s, "has_vernier", False)))
+        # FINE POWER: the module owns the vernier (it fills the attenuator's
+        # steps), so its raw-count field goes and the power box takes 0.1 dB
+        # steps; without it, the old 0.5 dB steps and the manual vernier
+        fine = bool(getattr(s, "fine_power", False))
+        if fine != getattr(self, "_fine_shown", None):
+            self._fine_shown = fine
+            self.vernier_lbl.setVisible(not fine)
+            self.vernier_spin.setVisible(not fine)
+            self.power_spin.setSingleStep(0.1 if fine else
+                                          (self.cfg.hardware.power_step_dB or 0.5))
+            self._power_hint_text(fine)
         self.ext_ref_label.setText(
             f"reference in use: {s.reference}   -   external 10 MHz "
             f"{'DETECTED' if s.ext_ref_detected else 'not detected'}")

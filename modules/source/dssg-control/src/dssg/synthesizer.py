@@ -39,6 +39,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass
 
+from . import vernier_cal
 from .backends.base import MicrowaveSource
 from .config import Config, REFERENCES
 
@@ -58,6 +59,10 @@ class Status:
     connected: bool = False
     has_phase: bool = False
     has_vernier: bool = False
+    # FINE POWER (vernier_cal.py): the vernier fills the attenuator's 0.5 dB
+    # gaps and power_dBm is attenuator + vernier, the level delivered
+    fine_power: bool = False
+    attenuator_dBm: float = 0.0     # the step attenuator alone (POWER?)
     idn: str = ""
     hw_error: str = ""
     # the effective (cfg AND instrument) envelope, published so a client can
@@ -143,6 +148,19 @@ class Synthesizer:
     def has_vernier(self) -> bool:
         return self._has_vernier
 
+    def fine_power(self) -> bool:
+        """True when the vernier fills the attenuator's steps (cfg
+        hardware.fine_power AND a unit that has a vernier). Before connect we
+        do not know the unit yet: assume it can, like phase and vernier."""
+        if not bool(getattr(self.cfg.hardware, "fine_power", False)):
+            return False
+        return self._has_vernier or not self._connected
+
+    def _delivered(self, attenuator: float, counts: int, freq: float) -> float:
+        """The level we believe comes out: attenuator + the vernier's share
+        (rounded to 0.01 dB: the model is not better than that)."""
+        return round(attenuator + vernier_cal.dB_for(counts, freq), 2)
+
     # ---- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
@@ -200,6 +218,16 @@ class Synthesizer:
             self._has_vernier = bool(getattr(b, "has_vernier", lambda: False)())
             if self._has_vernier:
                 self._vernier = int(b.read_vernier())
+            if self.fine_power() and self._vernier:
+                if abs(self._vernier) <= vernier_cal.MAX_FILL_COUNTS:
+                    # a fine-power setting left by us (or alike): adopt the
+                    # level it makes, not just the attenuator's
+                    self._power = self._delivered(self._power, self._vernier, self._freq)
+                else:
+                    # a big manual trim: its dB is outside the fine-power model
+                    self._emit("warn", f"vernier is at {self._vernier:+d} counts (a manual "
+                                       f"trim): the power read-back ignores it until "
+                                       f"the next power or frequency set resets it")
             ref = b.read_reference()
             if ref in REFERENCES:
                 self._reference = ref
@@ -282,6 +310,14 @@ class Synthesizer:
         value, clamped = _clamp(float(hz), lim["freq_min_Hz"], lim["freq_max_Hz"])
         self._freq = value
         self._push(self.backend.set_frequency, value)
+        if self.fine_power():
+            # the vernier's dB per count changes with frequency: re-split the
+            # SAME asked power, so the level stays what was asked
+            att, n = vernier_cal.split(self._power, self._step(), value,
+                                       *self._power_lims())
+            if n != self._vernier:
+                self._vernier = n
+                self._push(self.backend.set_vernier, n)
         if clamped:
             self._emit("warn", f"frequency clamped to {value / 1e6:.6f} MHz "
                                f"(limit {lim['freq_min_Hz'] / 1e6:g}.."
@@ -289,9 +325,32 @@ class Synthesizer:
         else:
             self._emit("info", f"frequency = {value / 1e6:.6f} MHz")
 
+    def _step(self) -> float:
+        return float(getattr(self.cfg.hardware, "power_step_dB", 0.0) or 0.0)
+
+    def _power_lims(self) -> tuple[float, float]:
+        lim = self.limits()
+        return lim["power_min_dBm"], lim["power_max_dBm"]
+
     def set_power(self, dBm: float) -> None:
         lim = self.limits()
         value, clamped = _clamp(float(dBm), lim["power_min_dBm"], lim["power_max_dBm"])
+        if self.fine_power():
+            # the attenuator to the nearest step, the vernier for the rest
+            # (vernier_cal.py): the level asked for, to ~0.05 dB
+            value = round(value, 2)
+            att, n = vernier_cal.split(value, self._step(), self._freq, *self._power_lims())
+            self._power, self._vernier = value, n
+            self._push(self.backend.set_power, att)
+            if self._has_vernier:
+                self._push(self.backend.set_vernier, n)
+            if clamped:
+                self._emit("warn", f"power clamped to {value:g} dBm "
+                                   f"(limit {lim['power_min_dBm']:g}..{lim['power_max_dBm']:g})")
+            else:
+                self._emit("info", f"power = {value:g} dBm (attenuator {att:g} dBm, "
+                                   f"vernier {n:+d})")
+            return
         # ROUND to the attenuator step. The SG12000L (firmware V7.84) IGNORES
         # an off-step request -- "POWER -13.75" left it at -20 dBm, and a scan
         # then waited 60 s for a level that never came (lab PC, 2026-10-06).
@@ -341,6 +400,10 @@ class Synthesizer:
             # refuse loudly, like phase: a scan over the vernier on a unit
             # without one must fail, not measure identical points
             raise ValueError("this unit has no vernier control")
+        if self.fine_power():
+            raise ValueError("the vernier is used for fine power (set the power in "
+                             "0.01 dB instead); switch hardware.fine_power off to "
+                             "trim it by hand")
         lim = self.limits()
         # round(), not int(): 2.6 from a GUI or a scan means 3, not 2
         value, clamped = _clamp(int(round(float(n))), lim["vernier_min"],
@@ -374,7 +437,8 @@ class Synthesizer:
                       phase_deg=self._phase, vernier=self._vernier,
                       reference=self._reference,
                       connected=False, has_phase=self._has_phase,
-                      has_vernier=self._has_vernier,
+                      has_vernier=self._has_vernier, fine_power=self.fine_power(),
+                      attenuator_dBm=self._power,
                       freq_min_Hz=lim["freq_min_Hz"], freq_max_Hz=lim["freq_max_Hz"],
                       power_min_dBm=lim["power_min_dBm"],
                       power_max_dBm=lim["power_max_dBm"])
@@ -388,12 +452,22 @@ class Synthesizer:
         try:
             with self._io:
                 b = self.backend
+                freq = float(b.read_frequency())
+                att = float(b.read_power())
+                vern = int(b.read_vernier()) if self._has_vernier else 0
+                fine = self.fine_power()
+                # with fine power the published level is attenuator + vernier
+                # (what is delivered) -- a scan's echo waits for THAT; a big
+                # manual trim outside the model is left out (warned at start)
+                power = (self._delivered(att, vern, freq)
+                         if fine and abs(vern) <= vernier_cal.MAX_FILL_COUNTS else att)
                 st = Status(
                     rf_on=bool(b.read_output()),
-                    frequency_Hz=float(b.read_frequency()),
-                    power_dBm=float(b.read_power()),
+                    frequency_Hz=freq,
+                    power_dBm=power,
                     phase_deg=float(b.read_phase()) if self._has_phase else 0.0,
-                    vernier=int(b.read_vernier()) if self._has_vernier else 0,
+                    vernier=vern,
+                    fine_power=fine, attenuator_dBm=att,
                     reference=b.read_reference(),
                     ext_ref_detected=bool(b.external_ref_detected()),
                     usb_volts=float(b.usb_volts()),

@@ -176,6 +176,10 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(hw.poll_hz, 0.5, 50.0, 1, 1.0, "Hz"))
         self._add(form, "hardware", "power_step_dB", "Attenuator step",
                   _dspin(hw.power_step_dB, 0.0, 5.0, 2, 0.05, "dB"))
+        self._add(form, "hardware", "fine_power", "Fine power",
+                  _check("fill the attenuator's steps with the vernier (power to "
+                         "~0.05 dB); off = 0.5 dB steps + a manual vernier",
+                         hw.fine_power))
         self._add(form, "hardware", "freq_echo_tol_Hz", "Frequency echo tolerance",
                   _dspin(hw.freq_echo_tol_Hz, 0.0, 1e6, 1, 100.0, "Hz"))
         self._add(form, "hardware", "phase_echo_tol_deg", "Phase echo tolerance",

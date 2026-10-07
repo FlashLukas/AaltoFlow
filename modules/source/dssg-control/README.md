@@ -160,9 +160,18 @@ Measured on an SG12000L (firmware V7.84) against a spectrum analyser:
 | +30    |  +1.4 |  +1.3 |  +1.3 |  +2.3 |  +1.4 | |
 | +100   |  +4.1 |  +4.0 |  +4.0 |  +3.1 |  +3.9 | |
 
-So it stays RAW counts: one dB-per-count number would be off by up to 0.5 dB
-even within +-30 counts. To set a level precisely, measure it (a short scan of
-the vernier against an analyser) at the frequency and power you use.
+**Fine power (default since 2026-10-07).** You never touch the vernier: a
+power request is split into the NEAREST attenuator step plus a few vernier
+counts for the remainder (at most half a step, ~+-6 counts, where the vernier
+is close to linear), using the dB per count measured above, interpolated in
+frequency (`src/dssg/vernier_cal.py`). So -13.73 dBm at 2 GHz becomes
+attenuator -13.5 dBm + vernier -5, and the module reports -13.73 dBm (the
+attenuator alone is in the status as `attenuator_dBm`). A frequency change
+re-splits the same power. Accuracy: within ~0.05 dB of the model, up to ~0.1 dB
+around 6 GHz and at low power (the power dependence of the slope is not
+modelled) -- far better than 0.5 dB steps, but measure the level when it really
+matters. Scans can ask for any 0.01 dB. `[hardware] fine_power = False` brings
+back the 0.5 dB steps with the vernier as a manual control in raw counts.
 
 USB: 115200 baud, 8N1, linefeed terminator. Ethernet: TCP port 10001 (fixed for
 all DSI models); the unit uses DHCP unless given a static address.

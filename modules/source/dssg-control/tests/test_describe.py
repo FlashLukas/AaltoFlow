@@ -21,6 +21,9 @@ from dssg.net.protocol import status_to_dict
 from dssg.net.service import DssgService
 from dssg.net.client import DssgClient
 
+# these tests are written for the step-power mode (see conftest.step_power)
+pytestmark = pytest.mark.usefixtures("step_power")
+
 
 def _brain(cfg=None):
     cfg = cfg or Config()

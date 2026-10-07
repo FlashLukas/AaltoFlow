@@ -107,6 +107,13 @@ def build_manifest(synth) -> dict:
     lim = synth.limits()
     hw = synth.cfg.hardware
     power_tol = max(0.01, 0.5 * float(hw.power_step_dB) + 1e-3)
+    fine = synth.fine_power()
+    if fine:
+        # FINE POWER: the vernier fills the attenuator's steps, and power_dBm
+        # is attenuator + vernier. The vernier moves in counts of up to ~0.073
+        # dB (the steepest measured slope, 6 GHz), so the delivered level sits
+        # within half a count of the request: 0.05 dB is that plus rounding.
+        power_tol = 0.05
     params = [
         _p("rf_on", "RF output", "control", "bool", group="Output", order=10,
            read_path=["rf_on"],
@@ -129,20 +136,30 @@ def build_manifest(synth) -> dict:
            help="CW frequency. Range = your limits AND the unit's own range."),
 
         _p("power", "Power", "control", "float", unit="dBm", group="Signal",
-           order=30, decimals=2, plottable=True, step=float(hw.power_step_dB),
-           # the attenuator realises ONLY multiples of this (`step` is just the
-           # GUI increment): scan-core rounds a setpoint to it before sending
-           resolution=float(hw.power_step_dB) or None,
+           order=30, decimals=2, plottable=True,
+           step=0.1 if fine else float(hw.power_step_dB),
+           # without fine power the attenuator realises ONLY multiples of the
+           # step, so scan-core rounds a setpoint to it before sending; with
+           # fine power any 0.01 dB value can be asked for
+           resolution=0.01 if fine else (float(hw.power_step_dB) or None),
            min=lim["power_min_dBm"], max=lim["power_max_dBm"],
            read_path=["power_dBm"],
            set={"verb": "set_power", "arg": "power_dBm"},
            settle={"policy": "echoes", "key": "power_dBm", "tol": power_tol},
-           help="Calibrated output level. The step attenuator moves in "
-                f"{hw.power_step_dB:g} dB steps: a request between two steps is "
-                "rounded to the nearest one (the unit itself ignores an "
-                "off-step value)."),
+           help=("Output level. The step attenuator moves in "
+                 f"{hw.power_step_dB:g} dB steps; the vernier fills in between "
+                 "(dB per count measured on the lab unit), so the level asked "
+                 "for is delivered to about 0.05 dB (0.1 dB around 6 GHz). "
+                 "attenuator_dBm in the status is the step attenuator alone."
+                 if fine else
+                 "Calibrated output level. The step attenuator moves in "
+                 f"{hw.power_step_dB:g} dB steps: a request between two steps is "
+                 "rounded to the nearest one (the unit itself ignores an "
+                 "off-step value).")),
     ]
-    if synth.has_vernier() or not synth.status().connected:
+    if not fine and (synth.has_vernier() or not synth.status().connected):
+        # With fine power the vernier is the module's own business (it fills
+        # the attenuator's steps), so it is not offered as a control.
         # Same rule as phase below: offered before connect, dropped on a
         # connected unit whose firmware does not answer VERNIER?.
         params.append(

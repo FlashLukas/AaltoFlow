@@ -97,6 +97,12 @@ class Hardware:
     # read-back power may therefore differ from the request by up to half a
     # step, and the scan's echo tolerance is derived from this number.
     power_step_dB: float = 0.5
+    # FINE POWER (2026-10-07): fill the attenuator's 0.5 dB gaps with the
+    # VERNIER, so a power request is delivered to ~0.05 dB instead of rounded
+    # to a step (vernier_cal.py has the measured dB per count). The vernier is
+    # then the module's business: it is not offered as a control of its own.
+    # False = the old behaviour (power in 0.5 dB steps, vernier as raw counts).
+    fine_power: bool = True
     # How close FREQ:CW? must be to the request to count as "arrived". The
     # fractional-N synthesiser's grid is up to ~3 kHz coarse; whether the query
     # returns the request or the grid value is not documented (VERIFY). If it
