@@ -37,6 +37,15 @@ Threads and locks (both rules learned the hard way elsewhere in the suite):
     setters) plus a few brain attributes. The polling thread builds a NEW
     snapshot each cycle and never shares an object a setter writes to
     (gotcha #1, the lost-update race).
+
+FOLLOW (2026-10-07). A channel's frequency can follow another module's value
+through a formula -- super-Nyquist MOKE: RF 810 MHz, laser 80 MHz, demodulate
+at alias(x, 80e6) = 10 MHz. follow.py does the listening; this brain only
+applies the number. While a channel follows, its frequency belongs to the
+formula: set_frequency and a switch to external reference are REFUSED (a hand
+set would be overwritten at the next RF change, silently). And `acquire` asks
+the source for its value before it starts the settle clock, so a scan point is
+never measured at the previous point's demodulation frequency.
 """
 
 from __future__ import annotations
@@ -49,6 +58,7 @@ from dataclasses import dataclass, field
 from . import filters
 from .backends.base import LockInBackend
 from .config import Config, REF_MODES
+from .follow import Follower, Formula, parse_source
 from .stream import StreamRecorder
 
 #: The channels of the fly-scan stream, named like the scan detectors in the
@@ -81,6 +91,8 @@ class Status:
     acquiring: bool = False
     acq_progress: float = 0.0
     sample: dict = field(default_factory=dict)         # the last LATCHED acquisition
+    follow_on: list = field(default_factory=list)      # bool per channel
+    follow: list = field(default_factory=list)         # None, or {source, formula, x, target, age_s, error}
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -145,6 +157,9 @@ class LockIn:
         # stamped, while a scan has it running (stream.py). Costs nothing
         # when stopped.
         self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
+
+        # One Follower per channel while it follows another module (follow.py)
+        self._followers: list = [None] * N_CHANNELS
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -213,6 +228,8 @@ class LockIn:
         output, so every stop already leaves the instrument as it is.
         """
         self._stop.set()
+        for i in range(N_CHANNELS):           # stop listening before disconnecting
+            self._stop_follow(i)
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
         self._thread = None
@@ -263,6 +280,9 @@ class LockIn:
         if ch.reference == "external":
             raise ValueError(f"ch{i + 1} follows the EXTERNAL reference; its frequency "
                              f"is measured, not set (switch it to internal first)")
+        if self._followers[i] is not None:
+            raise ValueError(f"ch{i + 1} frequency follows "
+                             f"{self._followers[i].source}; switch Follow off first")
         lim = self.cfg.limits
         value, clamped = _clamp(_finite(hz, "frequency"), lim.freq_min_Hz, lim.freq_max_Hz)
         ch.frequency_Hz = value
@@ -278,6 +298,10 @@ class LockIn:
     def set_reference(self, channel: int, mode: str) -> None:
         i = self._index(channel)
         m = _parse_mode(mode)
+        if m == "external" and self._followers[i] is not None:
+            raise ValueError(f"ch{i + 1} frequency follows "
+                             f"{self._followers[i].source}; switch Follow off before "
+                             f"switching to the external reference")
         ch = self.cfg.channel(i)
         ch.reference = m
         if self._connected:
@@ -285,6 +309,81 @@ class LockIn:
         self._emit("info", f"ch{i + 1} reference = {m}"
                            + (f" (input {ch.ref_input})" if m == "external" else
                               f" at {ch.frequency_Hz:g} Hz"))
+
+    # ---- follow another module (follow.py) ------------------------------------
+
+    def set_follow(self, channel: int, enabled: bool, source: str | None = None,
+                   formula: str | None = None, endpoint: str | None = None) -> None:
+        """Switch following on or off for one channel.
+
+        source / formula / endpoint, when given, are stored in cfg.follow first
+        (so Settings and the .ini show them); when not given, cfg.follow's are
+        used. Everything is checked BEFORE anything changes: a typo in the
+        formula is refused here, not at the first RF change.
+
+        Switching on applies the source's value at once when the source
+        answers; when it does not (not started yet), the channel follows as
+        soon as the source publishes.
+        """
+        i = self._index(channel)
+        n = i + 1
+        fcfg = self.cfg.follow
+        src = getattr(fcfg, f"ch{n}_source") if source is None else str(source).strip()
+        fml = getattr(fcfg, f"ch{n}_formula") if formula is None else str(formula).strip()
+        ep = getattr(fcfg, f"ch{n}_endpoint") if endpoint is None else str(endpoint).strip()
+        Formula(fml)                          # raise on a bad formula before any change
+        if enabled:
+            parse_source(src)                 # ... or a bad source
+            if self.cfg.channel(i).reference == "external":
+                raise ValueError(f"ch{n} uses the EXTERNAL reference; its frequency is "
+                                 f"measured, so it cannot follow (switch to internal)")
+        setattr(fcfg, f"ch{n}_source", src)
+        setattr(fcfg, f"ch{n}_formula", fml)
+        setattr(fcfg, f"ch{n}_endpoint", ep)
+        self._stop_follow(i)
+        if not enabled:
+            self._emit("info", f"ch{n} frequency: follow off (stays at "
+                               f"{self.cfg.channel(i).frequency_Hz:g} Hz)")
+            return
+        # Follower() raises (ValueError) when it cannot know where the source
+        # listens -- before anything is stored as "following".
+        fol = Follower(src, fml, lambda hz, i=i: self._apply_followed(i, hz),
+                       endpoint=ep, on_event=self._emit, clock=self._clock)
+        self._followers[i] = fol
+        self._emit("info", f"ch{n} frequency follows {src}"
+                           + (f" through {fml}" if fml else ""))
+        try:
+            fol.sync()
+        except ValueError as exc:
+            self._emit("warn", f"ch{n} follow: {exc} -- following as soon as "
+                               f"{fol.module} publishes")
+
+    def _stop_follow(self, i: int) -> None:
+        fol, self._followers[i] = self._followers[i], None
+        if fol is not None:
+            fol.close()
+
+    def _apply_followed(self, i: int, hz: float) -> None:
+        """The Follower's apply function: set channel i's oscillator.
+
+        Out of limits is REFUSED, not clamped: a clamped demodulation frequency
+        is a different measurement, and a scan would record it without a word.
+        """
+        lim = self.cfg.limits
+        hz = _finite(hz, "followed frequency")
+        if not lim.freq_min_Hz <= hz <= lim.freq_max_Hz:
+            raise ValueError(f"the formula gives {hz:g} Hz, outside "
+                             f"{lim.freq_min_Hz:g}..{lim.freq_max_Hz:g} Hz")
+        ch = self.cfg.channel(i)
+        if ch.frequency_Hz == hz:
+            return
+        ch.frequency_Hz = hz
+        if self._connected:
+            with self._hw:
+                self.backend.set_oscillator_frequency(ch.oscillator, hz)
+        fol = self._followers[i]
+        self._emit("info", f"ch{i + 1} frequency = {hz:g} Hz"
+                           + (f" (follows {fol.source})" if fol is not None else ""))
 
     # ---- the scan-safe read ---------------------------------------------------
 
@@ -298,6 +397,16 @@ class LockIn:
         """
         if not self._connected:
             raise ValueError("not connected")
+        # A following channel first asks its source for the value NOW (see the
+        # module docstring): the subscription may be a frame behind the scan.
+        # A source that does not answer refuses the acquisition -- measuring
+        # at a frequency nobody can vouch for is worse than a loud stop.
+        for i, fol in enumerate(list(self._followers)):
+            if fol is not None:
+                try:
+                    fol.sync()
+                except ValueError as exc:
+                    raise ValueError(f"ch{i + 1} follows {fol.source}: {exc}") from None
         acq = self.cfg.acquisition
         settle = max(self.settle_time_s(i) for i in range(N_CHANNELS))
         settle += max(0.0, float(acq.extra_wait_s))
@@ -374,6 +483,8 @@ class LockIn:
                 acquiring=a is not None,
                 acq_progress=progress,
                 sample=_copy_sample(self._sample),
+                follow_on=[f is not None for f in self._followers],
+                follow=[f.state() if f is not None else None for f in self._followers],
             )
 
     # ---- config (Settings dialog / wire) ------------------------------------------
@@ -545,6 +656,12 @@ class LockIn:
             ch.time_constant_s = _clamp(float(ch.time_constant_s), lim.tc_min_s, lim.tc_max_s)[0]
             ch.order = int(_clamp(int(ch.order), lim.order_min, lim.order_max)[0])
             ch.frequency_Hz = _clamp(float(ch.frequency_Hz), lim.freq_min_Hz, lim.freq_max_Hz)[0]
+            # a follow source / formula that could never work is refused when
+            # it is typed (Settings / set_config), not when Follow is switched on
+            src = str(getattr(cfg.follow, f"ch{i + 1}_source")).strip()
+            if src:
+                parse_source(src)
+            Formula(getattr(cfg.follow, f"ch{i + 1}_formula"))
 
     def _adopt_channel(self, i: int) -> None:
         """READ channel i's demodulator (and its input, oscillator, PLL) and

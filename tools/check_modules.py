@@ -23,8 +23,9 @@ Static checks, per module:
   * ports do not clash with another module's
   * start_after names modules that exist, without a cycle
   * src/<pkg>/control.py and src/<pkg>/apps/control_bar.py (one controller,
-    many viewers) and src/<pkg>/secure.py (CurveZMQ encryption -- being
-    rolled out module by module), WHERE PRESENT, are byte-identical to the
+    many viewers), src/<pkg>/secure.py (CurveZMQ encryption -- being
+    rolled out module by module) and src/<pkg>/follow.py (a setting that
+    follows another module through a formula), WHERE PRESENT, are byte-identical to the
     masters in suite-common/src/suite_common/
   * src/<pkg>/hwlock.py exists and is byte-identical to the master copy
     suite-common/src/suite_common/hwlock.py (FAIL otherwise: a stale copy may
@@ -96,6 +97,9 @@ HWLOCK_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "hwlock.py"
 CONTROL_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "control.py"
 CONTROL_BAR_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "control_bar.py"
 SECURE_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "secure.py"
+# Follow (a setting follows another module's value through a formula): optional,
+# copied into the modules that use it (hf2 first).
+FOLLOW_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "follow.py"
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -269,7 +273,8 @@ def control_check(rep: Report, m):
         return
     for rel, master, required in (("control.py", CONTROL_MASTER, True),
                                   ("apps/control_bar.py", CONTROL_BAR_MASTER, False),
-                                  ("secure.py", SECURE_MASTER, True)):
+                                  ("secure.py", SECURE_MASTER, True),
+                                  ("follow.py", FOLLOW_MASTER, False)):
         copy = pkg / rel
         name = f"{rel} is the master copy"
         if not copy.is_file():

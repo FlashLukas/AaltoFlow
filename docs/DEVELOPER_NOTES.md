@@ -325,6 +325,19 @@ still assumes piezo/zpiezo.
     `mark_always(widget)`; dialogs (Settings) are not guarded -- a viewer may
     look, the service refuses the OK. `tools/check_modules.py` checks the
     copies wherever a module has them.
+- **Follow: a setting that follows another module (2026-10-07, hf2 first).**
+  `suite-common/src/suite_common/follow.py` is the master, copied
+  byte-identical as `src/<pkg>/follow.py` where a module uses it (check_modules
+  compares it where present). A `Follower(source "<module>.<status key>",
+  formula in x, apply_fn)` subscribes to the source's status (raw pyzmq,
+  secure_client, endpoint from AALTOFLOW_ENDPOINTS or "host:cmd:pub"),
+  applies formula(x) only when x CHANGES, and `sync()` asks the source by REQ
+  -- a detector calls it before its settle clock starts, because scan-core
+  only waited for the SOURCE to echo, not for our subscription to hear it.
+  The formula is parsed with `ast` and whitelisted (no eval). Rules: following
+  is off after a start (adopt on start); while on, the followed setting is an
+  indicator and hand sets are refused; out-of-range results are refused, not
+  clamped.
 - **Encryption: CurveZMQ (2026-09-30 in kim + camera; every module since
   2026-10-04).** Why: the
   control lock trusts what a client says about itself (`kind`, `host`), and

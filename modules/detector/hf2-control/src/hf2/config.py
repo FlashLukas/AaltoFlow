@@ -72,6 +72,31 @@ class Acquisition:
 
 
 @dataclass
+class Follow:
+    """A channel's frequency FOLLOWING another module's value (follow.py).
+
+    source   -- <module key>.<status key>, e.g. "smb.frequency_Hz" (empty = none)
+    formula  -- in x, the source's value, e.g. "alias(x, 80e6)": super-Nyquist
+                MOKE with an 80 MHz laser, 810 MHz RF -> demodulate at 10 MHz.
+                Empty = the value itself.
+    endpoint -- "host:cmd_port:pub_port" of the source; empty = where the
+                launcher says it is (AALTOFLOW_ENDPOINTS).
+
+    These are only WHAT to follow. Following itself is switched on at run time
+    (set_follow, the Follow box on the channel card) and is OFF after every
+    start: a restarted service must not change the instrument by itself
+    (adopt on start, Lukas 2026-09-27).
+    """
+
+    ch1_source: str = ""
+    ch1_formula: str = ""
+    ch1_endpoint: str = ""
+    ch2_source: str = ""
+    ch2_formula: str = ""
+    ch2_endpoint: str = ""
+
+
+@dataclass
 class Limits:
     """Safety / sanity envelope. Setpoints outside are clamped with a warning.
 
@@ -121,6 +146,7 @@ class Config:
     ch1: Channel = None
     ch2: Channel = None
     acquisition: Acquisition = None
+    follow: Follow = None
     limits: Limits = None
     hardware: Hardware = None
     ui: UI = None
@@ -133,6 +159,7 @@ class Config:
         self.ch2 = self.ch2 or Channel(demod=3, signal_input=1, oscillator=1,
                                        ref_input=1)
         self.acquisition = self.acquisition or Acquisition()
+        self.follow = self.follow or Follow()
         self.limits = self.limits or Limits()
         self.hardware = self.hardware or Hardware()
         self.ui = self.ui or UI()
@@ -147,6 +174,7 @@ class Config:
         "ch1": Channel,
         "ch2": Channel,
         "acquisition": Acquisition,
+        "follow": Follow,
         "limits": Limits,
         "hardware": Hardware,
         "ui": UI,

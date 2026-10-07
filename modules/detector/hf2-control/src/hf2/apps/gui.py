@@ -285,6 +285,33 @@ class ChannelControls(QtWidgets.QFrame):
         f_row.addWidget(self.freq_unit); f_row.addWidget(self.freq_set)
         lay.addLayout(f_row)
 
+        # follow: the frequency computed from another module's value
+        # (follow.py), e.g. smb.frequency_Hz through alias(x, 80e6). Ticking
+        # the box sends what is typed; while it follows, the boxes and the
+        # frequency Set are locked (the service would refuse a hand set).
+        fcfg = win.cfg.follow
+        fw_row = QtWidgets.QHBoxLayout(); fw_row.setSpacing(6)
+        self.follow_box = QtWidgets.QCheckBox("Follow")
+        self.follow_box.setToolTip(
+            "Compute this channel's frequency from another module's value.\n"
+            "Source: <module>.<status key>, e.g. smb.frequency_Hz\n"
+            "Formula in x, e.g. alias(x, 80e6): 810 MHz RF with an 80 MHz laser "
+            "-> 10 MHz.\nFunctions: alias, fold, abs, round, min, max, floor, ceil, sqrt.")
+        self.follow_src = QtWidgets.QLineEdit(getattr(fcfg, f"ch{self.n}_source"))
+        self.follow_src.setPlaceholderText("smb.frequency_Hz")
+        self.follow_fml = QtWidgets.QLineEdit(getattr(fcfg, f"ch{self.n}_formula"))
+        self.follow_fml.setPlaceholderText("alias(x, 80e6)")
+        # .clicked: the user only, never our own setChecked (gotcha #13)
+        self.follow_box.clicked.connect(self._follow_clicked)
+        fw_row.addWidget(self.follow_box)
+        fw_row.addWidget(self.follow_src, 1); fw_row.addWidget(self.follow_fml, 1)
+        lay.addLayout(fw_row)
+        self.follow_info = QtWidgets.QLabel("")
+        self.follow_info.setObjectName("hint"); self.follow_info.setWordWrap(True)
+        self.follow_info.hide()
+        lay.addWidget(self.follow_info)
+        self._following = False
+
         # time constant
         t_row = QtWidgets.QHBoxLayout(); t_row.setSpacing(6)
         self.tc_spin = QtWidgets.QDoubleSpinBox()
@@ -321,6 +348,40 @@ class ChannelControls(QtWidgets.QFrame):
         self._last_mode = None
         # the setpoints last copied INTO the boxes, to spot changes made elsewhere
         self._synced = {"tc": ch.time_constant_s, "freq": ch.frequency_Hz, "order": ch.order}
+
+    def _follow_clicked(self, checked: bool):
+        self.win.call(self.win.ctrl.set_follow, self.n, bool(checked),
+                      self.follow_src.text().strip(), self.follow_fml.text().strip())
+
+    def _refresh_follow(self, s, external: bool):
+        i = self.i
+        on = bool((getattr(s, "follow_on", None) or [False, False])[i])
+        st = (getattr(s, "follow", None) or [None, None])[i]
+        if on != self._following:
+            self._following = on
+            self.follow_box.blockSignals(True)
+            self.follow_box.setChecked(on)
+            self.follow_box.blockSignals(False)
+            self.follow_src.setEnabled(not on)
+            self.follow_fml.setEnabled(not on)
+            self.follow_info.setVisible(on)
+        # the frequency is the formula's while following, the PLL's on external
+        manual = not (on or external)
+        for w in (self.freq_spin, self.freq_unit, self.freq_set):
+            w.setEnabled(manual)
+        self.follow_box.setEnabled(not external)
+        if on and isinstance(st, dict):
+            x, err = st.get("x"), st.get("error")
+            if err:
+                txt, col = f"follow: {err}", COLORS["danger"]
+            elif x is None:
+                txt, col = f"waiting for {st.get('source')} ...", COLORS["muted"]
+            else:
+                txt = (f"{st.get('source')} = {x:.9g}  ->  "
+                       f"{st.get('formula') or 'x'} = {fmt_hz(st.get('target'))}")
+                col = COLORS["muted"]
+            self.follow_info.setText(txt)
+            self.follow_info.setStyleSheet(f"color:{col};")
 
     def _freq_unit_changed(self, unit):
         hz = self.freq_spin.value() * self._freq_scale
@@ -367,10 +428,7 @@ class ChannelControls(QtWidgets.QFrame):
             for b in (self.btn_int, self.btn_ext):
                 b.setObjectName("primary" if b.isChecked() else "")
                 b.style().unpolish(b); b.style().polish(b)
-            external = mode == "external"
-            self.freq_spin.setEnabled(not external)
-            self.freq_unit.setEnabled(not external)
-            self.freq_set.setEnabled(not external)
+        self._refresh_follow(s, mode == "external")
         self._sync_boxes(s, mode == "external")
         locked = s.pll_locked[i]
         if mode == "external":

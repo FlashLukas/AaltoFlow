@@ -56,6 +56,8 @@ class RemoteStatus:
         sample = d.get("sample") or {}
         self.sample = {k: (_nan_list(v) if isinstance(v, list) else v)
                        for k, v in sample.items()}
+        self.follow_on = d.get("follow_on", [False, False])
+        self.follow = d.get("follow", [None, None])
         self.describe_rev = d.get("describe_rev")
 
 
@@ -138,6 +140,16 @@ class Hf2Client(ControlClient):
 
     def set_reference(self, channel: int, mode: str):
         return self._cmd({"cmd": "set_reference", "channel": int(channel), "mode": str(mode)})
+
+    def set_follow(self, channel: int, enabled: bool, source: str | None = None,
+                   formula: str | None = None, endpoint: str | None = None):
+        """Let the channel's frequency follow another module, e.g.
+        set_follow(1, True, "smb.frequency_Hz", "alias(x, 80e6)")."""
+        d = {"cmd": "set_follow", "channel": int(channel), "enabled": bool(enabled)}
+        for k, v in (("source", source), ("formula", formula), ("endpoint", endpoint)):
+            if v is not None:
+                d[k] = str(v)
+        return self._cmd(d)
 
     def acquire(self) -> int:
         """Start an acquisition; returns its id (or raises if refused)."""

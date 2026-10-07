@@ -159,7 +159,19 @@ def build_manifest(lockin) -> dict:
             help="external: a PLL locks the oscillator to the reference input "
                  "and the frequency is measured. internal: set the frequency."))
 
-        if external:
+        follower = lockin._followers[i]
+        if follower is not None:
+            # FOLLOWING another module (follow.py): the frequency belongs to
+            # the formula, so it is an indicator here exactly as on external
+            # reference -- a scan cannot set it (set_frequency is refused).
+            params.append(_p(
+                f"freq{n}", f"Ch{n} reference frequency", "indicator", "float",
+                unit="Hz", group=grp, order=30, decimals=4, plottable=True,
+                read_path=["ref_freq_Hz", i],
+                help=f"Follows {follower.source}"
+                     + (f" through {follower.formula.text}" if follower.formula.text else "")
+                     + "; switch Follow off to set it."))
+        elif external:
             params.append(_p(
                 f"freq{n}", f"Ch{n} reference frequency", "indicator", "float",
                 unit="Hz", group=grp, order=30, decimals=4, plottable=True,
@@ -178,6 +190,15 @@ def build_manifest(lockin) -> dict:
                      "extra": {"channel": n}},
                 settle={"policy": "echoes", "key": "freq_set_Hz", "index": i,
                         "tol": 1e-6}))
+
+        params.append(_p(
+            f"follow{n}", f"Ch{n} frequency follows", "control", "bool",
+            group=grp, order=32, read_path=["follow_on", i],
+            set={"verb": "set_follow", "arg": "enabled", "extra": {"channel": n}},
+            settle={"policy": "echoes", "key": "follow_on", "index": i, "tol": 0.5},
+            help="On: the frequency is computed from another module's value "
+                 "(Settings > Follow: source and formula), e.g. smb.frequency_Hz "
+                 "through alias(x, 80e6). Off after every start."))
 
         params.append(_p(
             f"settle{n}", f"Ch{n} settle time", "indicator", "float", unit="ms",

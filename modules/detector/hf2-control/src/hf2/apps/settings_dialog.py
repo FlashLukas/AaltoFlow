@@ -22,7 +22,7 @@ from .theme import COLORS
 
 _TAB_TITLES = {
     "ch1": "Channel 1", "ch2": "Channel 2", "acquisition": "Acquisition",
-    "limits": "Limits", "hardware": "Hardware", "ui": "Appearance",
+    "follow": "Follow", "limits": "Limits", "hardware": "Hardware", "ui": "Appearance",
 }
 
 _HINTS = {
@@ -35,6 +35,13 @@ _HINTS = {
                    "filter output (computed from time constant and order), then "
                    "averages over average_tc time constants. Raise timeout_s for "
                    "very long time constants.",
+    "follow": "A channel's frequency can follow another module: source = "
+              "<module>.<status key> (e.g. smb.frequency_Hz), formula in x "
+              "(e.g. alias(x, 80e6): 810 MHz RF, 80 MHz laser -> 10 MHz). "
+              "Functions: alias, fold, abs, round, min, max, floor, ceil, sqrt. "
+              "endpoint host:cmd:pub only when not started from Mission Control. "
+              "Switch following on with the Follow box on the channel tab "
+              "(it is off after every start).",
     "limits": "Every setpoint is clamped to this envelope before it reaches the "
               "instrument. The time-constant range is marked VERIFY until checked "
               "against the real HF2LI.",

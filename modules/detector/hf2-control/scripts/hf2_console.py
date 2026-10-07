@@ -25,6 +25,9 @@ Commands
     order <ch> <1..8>              set a channel's filter order
     ref <ch> int|ext               internal or external reference
     freq <ch> <value> [Hz|kHz|MHz] set the frequency (internal reference only)
+    follow <ch> <source> [formula] the frequency follows another module, e.g.
+                                   follow 1 smb.frequency_Hz alias(x, 80e6)
+    follow <ch> off                stop following (the frequency stays)
     acquire                        settle, latch and print one sample (waits)
     status                         print one status snapshot
     info                           static info (limits, channel routing)
@@ -255,6 +258,16 @@ class Console:
             elif cmd == "freq":
                 print(self.send({"cmd": "set_frequency", "channel": int(args[0]),
                                  "frequency_Hz": _value(args[1:], _HZ, "hz")}))
+            elif cmd == "follow":
+                # the formula may contain spaces: everything after the source
+                if len(args) >= 2 and args[1].lower() == "off":
+                    req = {"cmd": "set_follow", "channel": int(args[0]), "enabled": False}
+                else:
+                    req = {"cmd": "set_follow", "channel": int(args[0]), "enabled": True,
+                           "source": args[1]}
+                    if args[2:]:          # none given: the service keeps its formula
+                        req["formula"] = " ".join(args[2:])
+                print(self.send(req))
             elif cmd == "acquire":
                 self.acquire()
             elif cmd == "status":

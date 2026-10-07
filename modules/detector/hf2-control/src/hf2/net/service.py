@@ -208,6 +208,11 @@ class Hf2Service:
                 li.set_frequency(msg["channel"], msg["frequency_Hz"])
             elif cmd == "set_reference":
                 li.set_reference(msg["channel"], msg["mode"])
+            elif cmd == "set_follow":
+                # {channel, enabled, source?, formula?, endpoint?}: the channel's
+                # frequency follows another module's value (follow.py)
+                li.set_follow(msg["channel"], _as_bool(msg["enabled"]),
+                              msg.get("source"), msg.get("formula"), msg.get("endpoint"))
             elif cmd == "acquire":
                 # Returns at once with the id. The caller waits for status to
                 # show THIS id with acquiring == false.

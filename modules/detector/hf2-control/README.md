@@ -66,9 +66,41 @@ reading. Use 99.9 % (or `extra_wait_s`) when signals change by large factors.
 `set_reference{channel, mode}` · `set_frequency{channel, frequency_Hz}`
 (internal only; refused on external) · `acquire` → `{acq_id}` · `get_sample` ·
 `stream_start` / `stream_read` / `stream_stop` (below) ·
+`set_follow{channel, enabled, source?, formula?, endpoint?}` (below) ·
 plus the universal `status`, `info`, `describe`, `get_config`, `set_config`,
 `shutdown{keep_outputs?}` (the flag changes nothing here: a stop never changes an output).
 Channels are 1 and 2.
+
+## Following another module (super-Nyquist MOKE)
+
+A channel's frequency can **follow** another module's value through a formula.
+With an 80 MHz laser, an 810 MHz excitation is sampled down to
+810 − 10 × 80 = 10 MHz, so:
+
+    source   smb.frequency_Hz      (<module key>.<status key>)
+    formula  alias(x, 80e6)        (x = the source's value)
+
+and every RF change -- from a scan, a script or the SMB's own GUI -- moves the
+demodulation with it. Tick **Follow** on the channel card (source and formula
+next to it, or in Settings > Follow), or from the console
+`follow 1 smb.frequency_Hz alias(x, 80e6)` / `follow 1 off`.
+
+- Functions: `alias(f, fs)` = distance to the nearest multiple of fs
+  (0..fs/2; 790 and 810 MHz both give 10), `fold(f, fs)` = f mod fs (keeps the
+  side: 790 -> 70 MHz), `abs round min max floor ceil sqrt`, `+ - * / // % **`.
+  Harmonic n: `alias(n*x, 80e6)`. Nothing else is allowed (it is not eval).
+- While a channel follows, `set_frequency` and a switch to external reference
+  are refused, and `freq1/2` is an indicator in describe. A result outside
+  1 Hz..50 MHz is refused, not clamped, and shown in red on the card.
+- **Scans:** `acquire` asks the source for its value before starting the
+  settle clock, so a point is never measured at the previous point's
+  frequency; if the source does not answer, the acquisition is refused.
+- Following is **off after every start** (a restart never changes the
+  instrument by itself); the source and formula are remembered in the .ini.
+- The source is found where Mission Control says it runs; started by hand,
+  give `endpoint = host:cmd_port:pub_port` in Settings > Follow.
+- Generic: `follow.py` (master in suite-common) knows nothing about lock-ins;
+  any module can make one of its settings follow another module the same way.
 
 ## Streaming, for a fly scan
 
