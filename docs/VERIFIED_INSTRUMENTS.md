@@ -26,6 +26,9 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **verified** (spectrum mode, TG CW + TG sweep via shsg / shsna) | 2026-09-28 |
 | [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
 | [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
+| [`dssg`](../modules/source/dssg-control) | DS Instruments SG12000L (fw V7.84) | **verified** (vernier measured, fine power, per-unit power calibration) | 2026-10-07 |
+| [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart) | 2026-10-07 |
+| [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates) | 2026-09-28 |
 | all others | -- | simulation only | -- |
 
@@ -325,6 +328,59 @@ before/after routines.
 - Not yet checked: `saStoreTgThru` (VERIFY 6), a real DUT in the SNA path, and
   two SAs on one PC.
 
+## dssg -- DS Instruments SG12000L microwave generator (2026-10-07)
+
+Checked against a Signal Hound SA124B through a 30 dB pad.
+
+- **Vernier** (`VERNIER n`): the unit takes -800..+100 counts and clamps
+  outside that SILENTLY (no error); + = more power; `POWER` / `FREQ` changes
+  keep it; `POWER?` excludes it. ~0.045 dB/count near 0 at 1-4 GHz, but
+  frequency- and power-dependent (a resonance near 6 GHz) and non-linear far
+  out. The module's limits are the measured range.
+- **The attenuator's 0.5 dB steps are not accurate above ~4 GHz**: up to
+  0.8 dB off at 4-7 GHz and 1.2-1.7 dB at 8-12 GHz (relative to the unit's own
+  -10 dBm). Fine power (the vernier fills the steps) plus the per-unit power
+  calibration (`scripts/calibrate_power.py`, 22 frequencies x every step,
+  2 passes, ~30 min) fixes it: verified within +-0.07 dB at 1, 4, 6, 10 GHz and
+  2 GHz / -20 dBm. The steps repeat only to ~0.1-0.2 dB between runs, so
+  ~0.2-0.3 dB is the honest promise.
+- An off-step `POWER` value is ignored by the firmware (fine power never sends one).
+- Caveats: the calibration is per unit (a gitignored JSON on the lab PC); at
+  12 GHz the low-power rows are near the analyser's noise floor (spread 0.57 dB).
+
+## afg -- Tektronix AFG1062 (2026-10-07)
+
+Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
+
+- Levels 10 mVpp..20 Vpp within the scope's ~2-3 %; offsets to the 10 V peak
+  limit; clamps with clear warnings; amplitude + offset fitted as a pair
+  (order-independent).
+- **Phase**: the unit keeps WHOLE degrees and truncates; bare numbers are
+  radians; negative phases are refused (error -201 "Invalid while in local").
+  The module sends `<deg>DEG` normalised to 0..360 and compares modulo 360.
+- Frequency / phase follow (CH2 from CH1) including front-panel changes;
+  follow settings kept in afg.ini across restarts; ~0.6 s per change.
+- Not available remotely on this firmware: ramp symmetry, noise, DC level
+  (refused with the reason).
+- `shutdown{keep_outputs}` leaves the outputs as they are (restart).
+
+## scope -- RS PRO RSDS1102CML+ / Siglent SDS1000CML+ (2026-10-07)
+
+- Records over USB (binary block, no terminator), trigger delay sign, both
+  channels, physical units saved in scope.ini, XY view.
+- **Slow timebases**: in NORMAL trigger mode records keep coming (one per
+  record length); in AUTO at >= 50 ms/div the scope rolls -> acquire refused
+  with the reason. The read timeout follows the record length (a too-short one
+  wedged the USB once: power cycle needed).
+- `INR?` blocks ~0.5 s while running, so new records are found by comparing
+  the data (with one `INR?` as a fallback for identical records): 16 averages
+  at 1 ms/div in ~4.5 s.
+- Numbers (pk2pk, frequency, phase CH2-CH1) come from the FULL record; the
+  stored trace is reduced without inventing a signal (an alias warning when it
+  has < 4 points per period).
+- Only some time/div values exist on this model (20 ms -> 10 ms); the module
+  warns when the scope changed a value.
+
 ## scan-core -- scans with real instruments
 
 - 2026-09-15: wavelength scan with acquired pm16 detectors (see pm16).
@@ -354,8 +410,8 @@ before/after routines.
 
 ## Simulation only (no hardware pass yet)
 
-afg, agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, dssg, elliptec,
-gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms, scope,
+agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, elliptec,
+gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms,
 smaract, smb, sr7230, sr830, stage, superk, tc200, usb6001, vna,
 windfreak, zpiezo. The per-module hardware checklists are in
 [`DEVELOPER_NOTES.md`](DEVELOPER_NOTES.md) section 11 and each module's README.
