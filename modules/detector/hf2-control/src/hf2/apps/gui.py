@@ -286,28 +286,34 @@ class ChannelControls(QtWidgets.QFrame):
         lay.addLayout(f_row)
 
         # follow: the frequency computed from another module's value
-        # (follow.py), e.g. smb.frequency_Hz through alias(x, 80e6). Ticking
-        # the box sends what is typed; while it follows, the boxes and the
-        # frequency Set are locked (the service would refuse a hand set).
-        fcfg = win.cfg.follow
+        # (follow.py), e.g. the SMB's frequency through the super-Nyquist rule.
+        # The setup is made in a dialog (follow_dialog.py) and shown here in
+        # plain words; the tick box switches following on and off. While it
+        # follows, the frequency Set is locked (the service would refuse it).
         fw_row = QtWidgets.QHBoxLayout(); fw_row.setSpacing(6)
         self.follow_box = QtWidgets.QCheckBox("Follow")
         self.follow_box.setToolTip(
-            "Compute this channel's frequency from another module's value.\n"
-            "Source: <module>.<status key>, e.g. smb.frequency_Hz\n"
-            "Formula in x, e.g. alias(x, 80e6): 810 MHz RF with an 80 MHz laser "
-            "-> 10 MHz.\nFunctions: alias, fold, abs, round, min, max, floor, ceil, sqrt.")
-        self.follow_src = QtWidgets.QLineEdit(getattr(fcfg, f"ch{self.n}_source"))
-        self.follow_src.setPlaceholderText("smb.frequency_Hz")
-        self.follow_fml = QtWidgets.QLineEdit(getattr(fcfg, f"ch{self.n}_formula"))
-        self.follow_fml.setPlaceholderText("alias(x, 80e6)")
+            "Tick: this channel's frequency is computed from another module's value\n"
+            "and recomputed whenever that value changes (scan, script, its own window).\n"
+            "Example: RF 810 MHz, 80 MHz laser -> demodulate at 10 MHz.\n"
+            "Untick: the frequency stays where it is. Off after every restart.")
         # .clicked: the user only, never our own setChecked (gotcha #13)
         self.follow_box.clicked.connect(self._follow_clicked)
+        self.follow_what = QtWidgets.QLabel("")
+        self.follow_what.setObjectName("hint")
+        self.follow_btn = QtWidgets.QPushButton("Set up...")
+        self.follow_btn.setToolTip("Choose what to follow and the rule (super-Nyquist, "
+                                   "same value, custom), check it with a test value, "
+                                   "and save it as a preset.")
+        self.follow_btn.clicked.connect(self._follow_setup)
         fw_row.addWidget(self.follow_box)
-        fw_row.addWidget(self.follow_src, 1); fw_row.addWidget(self.follow_fml, 1)
+        fw_row.addWidget(self.follow_what, 1); fw_row.addWidget(self.follow_btn)
         lay.addLayout(fw_row)
         self.follow_info = QtWidgets.QLabel("")
         self.follow_info.setObjectName("hint"); self.follow_info.setWordWrap(True)
+        self.follow_info.setToolTip("Live: the followed value as last heard, and the "
+                                    "frequency it gave. Red = refused (the frequency "
+                                    "stays where it was).")
         self.follow_info.hide()
         lay.addWidget(self.follow_info)
         self._following = False
@@ -349,9 +355,33 @@ class ChannelControls(QtWidgets.QFrame):
         # the setpoints last copied INTO the boxes, to spot changes made elsewhere
         self._synced = {"tc": ch.time_constant_s, "freq": ch.frequency_Hz, "order": ch.order}
 
+    def _follow_cfg(self) -> tuple[str, str, str]:
+        f = self.win.cfg.follow
+        return (getattr(f, f"ch{self.n}_source"), getattr(f, f"ch{self.n}_formula"),
+                getattr(f, f"ch{self.n}_endpoint"))
+
     def _follow_clicked(self, checked: bool):
-        self.win.call(self.win.ctrl.set_follow, self.n, bool(checked),
-                      self.follow_src.text().strip(), self.follow_fml.text().strip())
+        if checked and not self._follow_cfg()[0]:
+            # nothing set up yet: set it up first, then switch on
+            self.follow_box.setChecked(False)
+            self._follow_setup(switch_on=True)
+            return
+        self.win.call(self.win.ctrl.set_follow, self.n, bool(checked))
+
+    def _follow_setup(self, _=False, switch_on: bool = False) -> bool:
+        from .follow_dialog import FollowDialog
+        src, fml, ep = self._follow_cfg()
+        dlg = FollowDialog(self.n, src, fml, ep, parent=self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return False
+        # enabled: keep following if it was (it then follows the new setup at
+        # once), or switch on when the user ticked the box to get here
+        on = switch_on or self._following
+        self.win.call(self.win.ctrl.set_follow, self.n, on,
+                      dlg.source, dlg.formula, dlg.endpoint)
+        if self.win._remote and hasattr(self.win.ctrl, "get_config"):
+            self.win.ctrl.get_config()          # the card reads cfg.follow
+        return True
 
     def _refresh_follow(self, s, external: bool):
         i = self.i
@@ -362,9 +392,15 @@ class ChannelControls(QtWidgets.QFrame):
             self.follow_box.blockSignals(True)
             self.follow_box.setChecked(on)
             self.follow_box.blockSignals(False)
-            self.follow_src.setEnabled(not on)
-            self.follow_fml.setEnabled(not on)
             self.follow_info.setVisible(on)
+        from .follow_dialog import explain
+        src, fml, _ep = self._follow_cfg()
+        txt = explain(src, fml)
+        if txt != self.follow_what.text():
+            self.follow_what.setText(txt)
+            self.follow_what.setToolTip(
+                f"Source: {src or '-'}\nFormula: {fml or 'x (same value)'}\n"
+                "Press Set up... to change it.")
         # the frequency is the formula's while following, the PLL's on external
         manual = not (on or external)
         for w in (self.freq_spin, self.freq_unit, self.freq_set):

@@ -44,8 +44,15 @@ class FakeGenerator:
         next_pub = 0.0
         while not self._stop.is_set():
             if poller.poll(10):
-                self._rep.recv()
-                self._rep.send(json.dumps({"ok": True, "status": {"frequency_Hz": self.f}}).encode())
+                req = json.loads(self._rep.recv())
+                if req.get("cmd") == "describe":      # what smb's describe says about it
+                    reply = {"ok": True, "describe": {"module": "smb", "parameters": [
+                        {"id": "frequency", "label": "Frequency", "type": "float",
+                         "unit": "MHz", "scale": 1e6, "read_path": ["frequency_Hz"]},
+                        {"id": "rf", "label": "RF on", "type": "bool", "read_path": ["rf_on"]}]}}
+                else:
+                    reply = {"ok": True, "status": {"frequency_Hz": self.f}}
+                self._rep.send(json.dumps(reply).encode())
             if self.publish and time.monotonic() >= next_pub:
                 next_pub = time.monotonic() + 0.05
                 self._pub.send_multipart([b"status", json.dumps({"frequency_Hz": self.f}).encode()])
@@ -238,32 +245,99 @@ def test_over_the_wire(gen):
         svc.stop()
 
 
-def test_gui_follow_row(gen):
-    """Ticking Follow on the channel card follows; the frequency box locks."""
+def test_rule_words_round_trip():
+    from hf2.apps.follow_dialog import (RULE_ALIAS, RULE_CUSTOM, RULE_FOLD, RULE_SAME,
+                                        build_formula, explain, parse_rule)
+    assert parse_rule("alias(x, 80e6)") == (RULE_ALIAS, 80e6, 1)
+    assert parse_rule("fold(2*x, 76e6)") == (RULE_FOLD, 76e6, 2)
+    assert parse_rule("") == (RULE_SAME, 80e6, 1)
+    assert parse_rule("abs(x - 1)")[0] == RULE_CUSTOM
+    assert build_formula(RULE_ALIAS, 80e6, 1, "") == "alias(x, 8e+07)"
+    assert Formula(build_formula(RULE_ALIAS, 80e6, 1, ""))(810e6) == pytest.approx(10e6)
+    assert parse_rule(build_formula(RULE_FOLD, 80e6, 3, "")) == (RULE_FOLD, 80e6, 3)
+    assert explain("smb.frequency_Hz", "alias(x, 80e6)") ==         "smb.frequency_Hz  ->  super-Nyquist, 80 MHz laser"
+    assert explain("", "") == "not set up"
+
+
+def test_presets_file(tmp_path):
+    from hf2.apps.follow_dialog import BUILTIN_PRESETS, load_presets, save_presets
+    f = tmp_path / "follow_presets.json"
+    assert len(load_presets(f)) == len(BUILTIN_PRESETS)          # no file: built-ins
+    mine = {"name": "76 MHz laser", "source": "smb.frequency_Hz",
+            "formula": "alias(x, 76e6)", "endpoint": ""}
+    save_presets(load_presets(f) + [mine], f)
+    got = load_presets(f)
+    assert got[-1]["name"] == "76 MHz laser" and not got[-1].get("builtin")
+    assert len(json.loads(f.read_text(encoding="utf-8"))) == 1   # built-ins not written
+    f.write_text("not json", encoding="utf-8")
+    assert len(load_presets(f)) == len(BUILTIN_PRESETS)          # broken file ignored
+
+
+def _qt():
     pytest.importorskip("PySide6")
     pytest.importorskip("pyqtgraph")
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6 import QtWidgets
+    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+def test_follow_dialog(gen, tmp_path, monkeypatch):
+    """Pick the module's quantity from ITS describe, choose the rule, check it,
+    save a preset -- and get back the two strings the wire needs."""
+    _qt()
+    from PySide6 import QtWidgets
+    from hf2.apps.follow_dialog import RULE_FOLD, FollowDialog
+    presets = tmp_path / "p.json"
+    dlg = FollowDialog(1, "smb.frequency_Hz", "alias(x, 80e6)", EP, presets_path=presets)
+    assert dlg.quantity.count() == 1                       # the bool is not offered
+    assert dlg.quantity.currentText() == "Frequency (MHz)"
+    assert dlg.test.suffix() == " MHz"
+    assert "10 MHz" in dlg.outcome.text()                   # 810 MHz -> 10 MHz
+    dlg.rule.setCurrentIndex(RULE_FOLD)
+    dlg.test.setValue(790)
+    assert "70 MHz" in dlg.outcome.text()
+    dlg.rep.setValue(76)
+    dlg.harm.setValue(2)
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("76 MHz, 2nd", True)))
+    dlg._save_preset()
+    assert json.loads(presets.read_text(encoding="utf-8"))[0]["formula"] == "fold(2*x, 7.6e+07)"
+    dlg._accept()
+    assert dlg.result() == QtWidgets.QDialog.Accepted
+    assert (dlg.source, dlg.formula, dlg.endpoint) ==         ("smb.frequency_Hz", "fold(2*x, 7.6e+07)", EP)
+    # a preset fills everything in again
+    dlg2 = FollowDialog(1, "", "", "", presets_path=presets)
+    dlg2.preset.setCurrentIndex(dlg2.preset.findData("76 MHz, 2nd"))
+    dlg2._preset_chosen(0)
+    assert dlg2.rule.currentIndex() == RULE_FOLD and dlg2.harm.value() == 2
+
+
+def test_gui_follow_row(gen):
+    """The card says in words what is followed; ticking Follow follows and
+    locks the frequency box; unticking frees it."""
+    _qt()
+    from PySide6 import QtWidgets
     from hf2.apps.gui import MainWindow
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     cfg = Config()
-    cfg.follow.ch1_endpoint = EP
     lockin, _ = build_sim_system(cfg, seed=5)
     win = MainWindow(lockin, cfg)
     try:
         ch1 = win.channels[0]
-        ch1.follow_src.setText("smb.frequency_Hz")
-        ch1.follow_fml.setText("alias(x, 80e6)")
+        win._refresh()
+        assert ch1.follow_what.text() == "not set up"
+        lockin.set_follow(1, False, "smb.frequency_Hz", "alias(x, 80e6)", EP)  # = dialog OK
+        win._refresh()
+        assert "super-Nyquist, 80 MHz laser" in ch1.follow_what.text()
         ch1.follow_box.click()                       # the user ticks Follow
         win._refresh()
         assert lockin.status().follow_on[0]
-        assert not ch1.freq_set.isEnabled() and not ch1.follow_src.isEnabled()
+        assert not ch1.freq_set.isEnabled()
         assert "10 MHz" in ch1.follow_info.text()
         ch1.follow_box.click()                       # and unticks it
         win._refresh()
         assert not lockin.status().follow_on[0] and ch1.freq_set.isEnabled()
-        app.processEvents()
+        QtWidgets.QApplication.instance().processEvents()
     finally:
         win.close()
         lockin.shutdown()

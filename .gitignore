@@ -44,6 +44,9 @@ suite_local.json
 mission-control/profiles.json
 mission-control/launcher.json
 scan-core/suite_layouts.json
+# hf2's saved Follow setups (follow_dialog.py): this PC's own presets
+modules/**/follow_presets.json
+modules/**/follow_presets.tmp
 
 # Editor / OS cruft
 .vscode/
