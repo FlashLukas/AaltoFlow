@@ -37,6 +37,7 @@ will serve the Analog Discovery's two generator outputs in the scope module.
 from __future__ import annotations
 
 import threading
+import time
 
 from .backends.base import WaveGen
 from .config import Config, CHANNEL_NAMES
@@ -45,6 +46,9 @@ from . import waveforms
 _KNOBS = ("waveform", "frequency_Hz", "amplitude_Vpp", "offset_V", "phase_deg",
           "duty_pct", "symmetry_pct", "load_ohm")
 _NAN = float("nan")
+#: how often the rarely changing settings (load, burst / sweep / modulation)
+#: are read back; the rest is read every poll and after every push
+_FULL_READ_S = 5.0
 
 
 def parse_channel(ch) -> str:
@@ -128,6 +132,12 @@ class Generator:
         self._readback = {ch: None for ch in self.channels}  # what it last reported
         self._read_gen = {ch: -1 for ch in self.channels}    # gen the read-back belongs to
         self._mismatch = {ch: "" for ch in self.channels}
+        # amplitude / offset as last ASKED per channel (see _change, _fit)
+        self._asked: dict = {}
+        # when each channel was last read back, and last read IN FULL (the
+        # rarely changing load / mode / modulation queries) -- see _poll_once
+        self._last_read = {ch: -1e9 for ch in self.channels}
+        self._last_full = {ch: -1e9 for ch in self.channels}
         #: (mismatch text, read-backs in a row with it) -- see _read_back
         self._mismatch_seen: dict = {}
         #: what the backend learned about the firmware at open (queries it
@@ -173,7 +183,7 @@ class Generator:
         self.backend.open()
         notes = []
         for ch in self.channels:
-            notes += self._adopt(ch, self.backend.read_channel(_index(ch)))
+            notes += self._adopt(ch, self.backend.read_channel(_index(ch), full=True))
         for err in self.backend.drain_errors():
             notes.append(("warn", f"instrument error while reading its state: {err}"))
         self._idn = self.backend.idn()
@@ -301,10 +311,13 @@ class Generator:
         """Clamp the desired setting `w` IN PLACE into the envelope. Returns
         what had to change (for the warn event).
 
-        When amplitude and offset together pass the peak limit, the knob that
-        was just SET (`yields`) is the one cut back: sweep the amplitude at a
-        fixed offset and the amplitude stops at the limit; sweep the offset and
-        the offset does. Nobody's other setting changes behind their back."""
+        When amplitude and offset together pass the peak limit, the OFFSET is
+        kept and the AMPLITUDE is cut back (`yields` is kept for callers but
+        no longer changes this). Together with `_change` re-fitting from the
+        pair AS ASKED, the result depends only on what was asked, never on the
+        order (lab PC 2026-10-07: from 1 Vpp at +9.5 V, asking 20 Vpp then
+        +1 V ended at 1 Vpp -- the amplitude had been cut against the OLD
+        offset; now it is 18 Vpp at +1 V whichever comes first)."""
         env = self.envelope(ch, w["waveform"], w["load_ohm"])
         notes = []
         if env["freq_max_Hz"] is not None:
@@ -316,7 +329,7 @@ class Generator:
             if c:
                 notes.append(f"amplitude {w['amplitude_Vpp']:g} Vpp")
             room = env["peak_max_V"] - abs(w["offset_V"])
-            if w["amplitude_Vpp"] / 2 > room and yields == "amplitude_Vpp":
+            if w["amplitude_Vpp"] / 2 > room:
                 w["amplitude_Vpp"] = max(env["amp_min_Vpp"], 2 * room)
                 notes.append(f"amplitude {w['amplitude_Vpp']:g} Vpp (peak limit "
                              f"{env['peak_max_V']:g} V)")
@@ -372,7 +385,15 @@ class Generator:
         with self._lock:
             w = dict(self._want[ch])
             w.update(values)
-            notes = self._fit(ch, w, "offset_V" if "offset_V" in values else "amplitude_Vpp")
+            # amplitude and offset are fitted from the values last ASKED (not
+            # the clamped ones), so the order of two requests cannot matter
+            asked = self._asked.setdefault(
+                ch, {"amplitude_Vpp": w["amplitude_Vpp"], "offset_V": w["offset_V"]})
+            for k in ("amplitude_Vpp", "offset_V"):
+                if k in values:
+                    asked[k] = float(values[k])
+                w[k] = asked[k]
+            notes = self._fit(ch, w)
             self._want[ch] = w
             self._gen[ch] += 1
             self._to_cfg(ch)
@@ -426,6 +447,9 @@ class Generator:
         self._change(ch, f"duty {float(pct):g} %", duty_pct=float(pct))
 
     def set_symmetry(self, ch, pct: float) -> None:
+        if not self.caps.get("ramp_symmetry", True):
+            raise ValueError("this instrument has no ramp symmetry setting (the "
+                             "AFG1062 firmware lacks the command)")
         self._change(ch, f"symmetry {float(pct):g} %", symmetry_pct=float(pct))
 
     def set_load(self, ch, load_ohm) -> None:
@@ -553,9 +577,33 @@ class Generator:
     # ---- status ----------------------------------------------------------
 
     def status(self) -> dict:
-        """The latest snapshot (a copy). Never touches hardware."""
+        """The latest snapshot (a copy), with any request the worker has not
+        finished laid over it. Never touches hardware.
+
+        The snapshot is rebuilt by the worker, so right after a setter it
+        still showed the OLD setpoints with `settled` True for 0.5-1.6 s (lab
+        PC 2026-10-07). adopt_then_flag protects a scan from that, but a GUI or
+        script reading status would believe the old state. So a channel with a
+        request not yet pushed AND read back shows the NEW setpoints and
+        settled False at once."""
         with self._lock:
-            return dict(self._snapshot)
+            snap = dict(self._snapshot)
+            if not self._connected:
+                return snap
+            for ch in self.channels:
+                done = (self._applied_gen[ch] == self._gen[ch]
+                        and self._read_gen[ch] == self._gen[ch])
+                if not done:
+                    w = self._want[ch]
+                    for k in ("output", "waveform", "frequency_Hz", "amplitude_Vpp",
+                              "offset_V", "phase_deg", "duty_pct", "symmetry_pct"):
+                        snap[f"{ch}_{k}"] = w[k]
+                    snap[f"{ch}_settled"] = False
+            snap["follow"] = self._follows()
+            snap["phase_follow"] = self._phase_follows()
+            snap["phase_follow_set"] = bool(getattr(self.cfg.coupling, "ch2_phase_follows", True))
+            snap["phase_offset_deg"] = float(self.cfg.coupling.phase_offset_deg)
+            return snap
 
     # ---- settings (Settings dialog / wire use these) ---------------------
 
@@ -641,8 +689,26 @@ class Generator:
             self._run_ops()
             for err in self.backend.drain_errors():
                 self._emit("warn", f"instrument: {err}")
+            # READ BACK what is due (lab PC 2026-10-07: ~2 s per change; each
+            # full read is ~15 USB queries per channel):
+            #  * a channel that was just pushed -- at once, that is "settled";
+            #  * any other channel once per poll period (front-panel changes);
+            #  * the rarely changing load / mode / modulation queries only
+            #    every _FULL_READ_S;
+            #  * and if a NEW request arrived meanwhile, stop reading: it is
+            #    pushed in the next pass at once (the wake flag is set), and a
+            #    read of the old state would be stale anyway.
+            now = time.monotonic()
+            period = 1.0 / max(0.2, float(self.cfg.hardware.poll_hz))
             for ch in self.channels:
-                self._read_back(ch, ch in pushed)
+                if self._new_request():
+                    break
+                if ch in pushed or now - self._last_read[ch] >= period:
+                    full = now - self._last_full[ch] >= _FULL_READ_S
+                    self._read_back(ch, ch in pushed, full)
+                    self._last_read[ch] = now
+                    if full:
+                        self._last_full[ch] = now
         except Exception as exc:                  # never let the worker die
             error = f"{type(exc).__name__}: {exc}"
             with self._lock:
@@ -658,6 +724,11 @@ class Generator:
         snap = self._build_snapshot(error)
         with self._lock:
             self._snapshot = snap                 # one assignment = atomic swap
+
+    def _new_request(self) -> bool:
+        """Has a setter asked for something the worker has not pushed yet?"""
+        with self._lock:
+            return any(self._gen[c] != self._applied_gen[c] for c in self.channels)
 
     def _push(self, ch: str) -> bool:
         """Send the backend whatever differs from what it holds. Returns True
@@ -694,12 +765,13 @@ class Generator:
             # stage is unchanged: the same wire, a new meaning). Take what it
             # now reports as both held and desired -- pushing the old number
             # back would change the real output, which nobody asked for.
-            got = b.read_channel(i)
+            got = b.read_channel(i, full=True)
             with self._lock:
                 for k in ("amplitude_Vpp", "offset_V"):
                     if got.get(k) is not None:
                         have[k] = want[k] = got[k]
                         self._want[ch][k] = got[k]
+                self._asked.pop(ch, None)            # rescaled by the load change
                 self._to_cfg(ch)
             have["load_ohm"] = want["load_ohm"]
             sent = True
@@ -736,7 +808,8 @@ class Generator:
                 self._align_pending = True
         if want["duty_pct"] != have.get("duty_pct") and want["waveform"] == "pulse":
             b.set_duty(i, want["duty_pct"])
-        if want["symmetry_pct"] != have.get("symmetry_pct") and want["waveform"] == "ramp":
+        if (want["symmetry_pct"] != have.get("symmetry_pct") and want["waveform"] == "ramp"
+                and self.caps.get("ramp_symmetry", True)):
             b.set_symmetry(i, want["symmetry_pct"])
         if want["output"] and not have.get("output"):
             b.set_output(i, True)
@@ -766,7 +839,7 @@ class Generator:
             with self._lock:
                 self._op_done, self._op_ok = ops[-1][0], True
 
-    def _read_back(self, ch: str, just_pushed: bool) -> None:
+    def _read_back(self, ch: str, just_pushed: bool, full: bool = True) -> None:
         """Read the channel and compare.
 
         * after OUR push: the read-back must agree with what was asked; if
@@ -776,7 +849,7 @@ class Generator:
           was changed at the front panel -> adopted (the instrument is the
           truth), with an info event.
         """
-        got = self.backend.read_channel(_index(ch))
+        got = self.backend.read_channel(_index(ch), full=full)
         if got.get("unread"):
             return                              # a partial read decides nothing
         # A knob in "not_read_back" is simply absent from `got`: the checks
@@ -807,6 +880,7 @@ class Generator:
                             self._applied[ch][k] = got[k]
                     self._to_cfg(ch)
                     self._seen = self._cfg_snapshot()
+                    self._asked.pop(ch, None)    # the instrument's values now
                 self._emit("info", f"{ch.upper()}: changed at the instrument: "
                                    + ", ".join(f"{k} = {got[k]}" for k in changed))
         with self._lock:

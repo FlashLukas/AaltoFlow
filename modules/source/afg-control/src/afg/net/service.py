@@ -322,6 +322,7 @@ class AfgService:
             "model": g.caps.get("model", ""),
             "channels": list(g.channels),
             "waveforms": list(g.caps.get("waveforms", ())),
+            "ramp_symmetry": bool(g.caps.get("ramp_symmetry", True)),
             "limits": {ch: dict(vars(g.cfg.limits(ch))) for ch in g.channels},
             "envelope": {ch: g.envelope(ch) for ch in g.channels},
         }

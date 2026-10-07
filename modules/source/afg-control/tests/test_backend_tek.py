@@ -190,3 +190,27 @@ def test_minus201_is_explained(fake_visa):
     errs = b.drain_errors()
     assert len(errs) == 1 and "rejected" in errs[0]
     b.close()
+
+
+def test_duty_write_noise_is_dropped_but_other_errors_are_not(fake_visa):
+    """Measured: FV:V1.0.2 applies PULS:DCYC but logs a -102 for it."""
+    b = TekAFG(RES)
+    b.open()
+    inst = fake_visa[0]
+    b.set_duty(0, 20.0)
+    inst.errors.append('-102,"Syntax error"')            # what the unit logs
+    assert b.drain_errors() == []
+    inst.errors.append('-102,"Syntax error"')            # an UNEXPECTED one
+    assert len(b.drain_errors()) == 1
+    assert b.capabilities()["ramp_symmetry"] is False
+    b.close()
+
+
+def test_a_quick_read_skips_load_and_mode(fake_visa):
+    b = TekAFG(RES)
+    b.open()
+    quick = b.read_channel(0, full=False)
+    assert "load_ohm" not in quick and "mode" not in quick and "frequency_Hz" in quick
+    full = b.read_channel(0, full=True)
+    assert "load_ohm" in full and "mode" in full
+    b.close()

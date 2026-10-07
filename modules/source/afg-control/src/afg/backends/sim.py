@@ -51,6 +51,7 @@ class SimulatedAFG:
         self._open = False
         self.phase_epoch = 0              # bumped by align_phase (tests)
         self.fail_reads = False           # tests: make every read raise
+        self.reads: list[tuple] = []      # (channel, full) of every read (tests)
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -74,7 +75,8 @@ class SimulatedAFG:
 
     # ---- reading ---------------------------------------------------------
 
-    def read_channel(self, ch: int) -> dict:
+    def read_channel(self, ch: int, full: bool = True) -> dict:
+        self.reads.append((ch, bool(full)))
         if self.fail_reads:
             raise OSError("simulated USB timeout")
         return dict(self.ch[ch], unread=[])

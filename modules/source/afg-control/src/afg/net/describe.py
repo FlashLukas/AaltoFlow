@@ -212,7 +212,7 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                       set={"verb": "set_duty", "arg": "duty_pct", "extra": extra},
                       settle=settle(f"{ch}_duty_pct"), timeout_s=10.0,
                       help=NRB.strip() if "duty_pct" in nrb else ""))
-    if wf == "ramp":
+    if wf == "ramp" and gen.caps.get("ramp_symmetry", True):
         out.append(_p(f"{ch}_symmetry", f"{C} ramp symmetry", "control", "float", unit="%",
                       group=grp, order=base_order + 7, decimals=2, step=1.0,
                       min=0.0, max=100.0, read_path=[f"{ch}_symmetry_pct"],

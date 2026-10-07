@@ -61,7 +61,7 @@ class WaveGen(Protocol):
              "peak_max_V", "duty_min_pct", "duty_max_pct"}
         """
 
-    def read_channel(self, ch: int) -> dict:
+    def read_channel(self, ch: int, full: bool = True) -> dict:
         """What one channel is doing right now, read with queries only::
 
             {"output": bool, "waveform": "sine"|...|"arb",

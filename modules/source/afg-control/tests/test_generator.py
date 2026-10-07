@@ -126,14 +126,31 @@ def test_lab_limit_and_instrument_range(system):
     settled(gen, "ch1", frequency_Hz=1e6, waveform="ramp")
 
 
-def test_peak_rule_the_knob_being_set_yields(system):
+def test_peak_rule_depends_only_on_what_was_asked(system):
+    """The offset is kept, the amplitude yields to the peak limit -- fitted
+    from the pair AS ASKED, so the order of two requests cannot matter (lab PC
+    2026-10-07: 1 Vpp at +9.5 V, then 20 Vpp and +1 V, ended at 1 Vpp)."""
     gen, sim, cfg, events = system
-    gen.set_amplitude("ch1", 6.0)
-    gen.set_offset("ch1", 4.0)                # 4 + 3 > 5: the OFFSET stops at 2
-    s = settled(gen, "ch1", amplitude_Vpp=6.0, offset_V=2.0)
-    gen.set_amplitude("ch1", 9.0)             # 2 + 4.5 > 5: the AMPLITUDE stops at 6
-    s = settled(gen, "ch1", amplitude_Vpp=6.0, offset_V=2.0)
-    assert s["ch1_peak_V"] == pytest.approx(5.0)
+    cfg.limits_1.peak_max_V = 10.0
+    gen.set_load("ch1", "high-Z")                      # the lab's case: 10 V peak
+    wait(gen, lambda s: s["ch1_load"] == "high-Z" and s["ch1_settled"])
+    gen.set_amplitude("ch1", 1.0)
+    gen.set_offset("ch1", 9.5)
+    settled(gen, "ch1", amplitude_Vpp=1.0, offset_V=9.5)
+    gen.set_amplitude("ch1", 20.0)                     # cut to 1 against +9.5 V ...
+    gen.set_offset("ch1", 1.0)                         # ... and back up: 18 Vpp at +1 V
+    s = settled(gen, "ch1", amplitude_Vpp=18.0, offset_V=1.0)
+    assert s["ch1_peak_V"] == pytest.approx(10.0)
+    # the other order gives the same
+    gen.set_offset("ch1", 9.5); gen.set_amplitude("ch1", 1.0)
+    settled(gen, "ch1", amplitude_Vpp=1.0, offset_V=9.5)
+    gen.set_offset("ch1", 1.0); gen.set_amplitude("ch1", 20.0)
+    settled(gen, "ch1", amplitude_Vpp=18.0, offset_V=1.0)
+    # a lone offset change cuts the amplitude, and gives it back when it returns
+    gen.set_offset("ch1", 6.0)
+    settled(gen, "ch1", amplitude_Vpp=8.0, offset_V=6.0)
+    gen.set_offset("ch1", 1.0)
+    settled(gen, "ch1", amplitude_Vpp=18.0, offset_V=1.0)
 
 
 def test_high_z_doubles_the_range(system):
@@ -265,8 +282,8 @@ def test_a_mismatch_seen_once_is_not_warned(system):
     real_read = sim.read_channel
     stale = {"left": 1}
 
-    def lagging(n):
-        got = real_read(n)
+    def lagging(n, full=True):
+        got = real_read(n, full=full)
         if stale["left"] and got.get("output"):
             stale["left"] -= 1
             got = dict(got, output=False)          # the AFG has not applied it yet
@@ -396,3 +413,58 @@ def test_phase_follows_can_be_switched_off(system):
     assert cfg.coupling.ch2_phase_follows is False
     gen.set_phase_follow(True)
     settled(gen, "ch2", phase_deg=90.0)
+
+
+def test_status_shows_a_pending_request_at_once(system):
+    """Lab PC 2026-10-07: right after a set_* the status showed the OLD
+    setpoints with settled True for 0.5-1.6 s. Now: the new setpoint and
+    settled False at once, until it is pushed AND read back."""
+    gen, sim, cfg, events = system
+    settled(gen, "ch1", frequency_Hz=30.0)
+    gen._lock.acquire()                     # hold the worker off this channel
+    try:
+        gen._want["ch1"]["frequency_Hz"] = 777.0
+        gen._gen["ch1"] += 1
+    finally:
+        gen._lock.release()
+    s = gen.status()
+    assert s["ch1_frequency_Hz"] == 777.0 and s["ch1_settled"] is False
+    settled(gen, "ch1", frequency_Hz=777.0)
+
+
+def test_a_push_reads_back_only_its_channel_and_mode_rarely(system):
+    """Speed (lab PC: ~2 s per change): after a push only the pushed channel
+    is read back, and the load / mode queries only every few seconds."""
+    gen, sim, cfg, events = system
+    time.sleep(0.3)
+    sim.reads.clear()
+    gen.set_frequency("ch1", 1234.0)
+    settled(gen, "ch1", frequency_Hz=1234.0)
+    first = sim.reads[0] if sim.reads else None
+    assert first == (0, False), sim.reads[:4]            # CH1, not a full read
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 1.2:
+        time.sleep(0.05)
+    fulls = [r for r in sim.reads if r[1]]
+    assert len(fulls) <= 2                               # not every poll
+
+
+def test_no_ramp_symmetry_where_the_instrument_has_none():
+    """Lab PC 2026-10-07: FUNC:RAMP:SYMM is not a command of the AFG1062
+    firmware (-102, the ramp stayed symmetric): not offered, not sent."""
+    from afg.net.describe import build_manifest
+    gen, sim = build_sim_system(Config())
+    sim_caps = sim.capabilities
+    sim.capabilities = lambda: dict(sim_caps(), ramp_symmetry=False)
+    gen = Generator(sim, Config())
+    gen.start()
+    try:
+        gen.set_waveform("ch1", "ramp")
+        settled(gen, "ch1", waveform="ramp")
+        ids = {p["id"] for p in build_manifest(gen)["parameters"]}
+        assert "ch1_symmetry" not in ids
+        with pytest.raises(ValueError, match="symmetry"):
+            gen.set_symmetry("ch1", 80.0)
+        assert not any(w[0] == "set_symmetry" for w in sim.writes)
+    finally:
+        gen.shutdown()

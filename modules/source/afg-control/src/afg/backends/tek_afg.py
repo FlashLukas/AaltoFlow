@@ -162,6 +162,7 @@ class TekAFG:
         self._resource = resource
         self._timeout_ms = int(timeout_ms)
         self._phase_rad = str(phase_unit).lower().startswith("rad")
+        self._expected_102 = 0       # -102s the last writes are known to cause
         self._rm = None
         self._inst = None
         self._idn = ""
@@ -295,6 +296,10 @@ class TekAFG:
                 "waveforms": list(_SHAPE_SET), "phase_align": True,
                 # whole degrees, measured 2026-10-07 (see set_phase)
                 "phase_resolution_deg": 1.0,
+                # MEASURED 2026-10-07: FUNC:RAMP:SYMM is not a command of
+                # FV:V1.0.2 (every set -> -102, the ramp stayed symmetric).
+                # Not offered rather than a silent no-op.
+                "ramp_symmetry": False,
                 "load_settable": True}
 
     def envelope(self, waveform: str, load_ohm: float | None) -> dict:
@@ -332,7 +337,10 @@ class TekAFG:
             return self._once.pop((key, n), None)
         return None
 
-    def read_channel(self, ch: int) -> dict:
+    def read_channel(self, ch: int, full: bool = True) -> dict:
+        """`full`=False skips the rarely changing load and burst / sweep /
+        modulation queries (8 of ~15 per channel): the brain asks for those
+        every few seconds only. Skipped keys are simply absent."""
         n = ch + 1
         out: dict = {"unread": [], "not_read_back": []}
 
@@ -365,8 +373,9 @@ class TekAFG:
             except Exception:
                 out[key] = None
                 out["unread"].append(key)
-        get("load_ohm", lambda: self._read_load(n))
-        get("mode", lambda: self._read_mode(n))
+        if full:
+            get("load_ohm", lambda: self._read_load(n))
+            get("mode", lambda: self._read_mode(n))
         return out
 
     def _read_amplitude(self, n: int) -> float:
@@ -445,12 +454,16 @@ class TekAFG:
         self._inst.write(f"SOUR{ch + 1}:PHAS:ADJ {deg:g}DEG")
 
     def set_duty(self, ch: int, pct: float) -> None:
-        # Accepted by FV:V1.0.2? NOT tested (the visit was read-only). Its
-        # query logs -102, so the brain cannot read the result back; if the
-        # setting is refused, the error appears in the service log.
-        self._inst.write(f"SOUR{ch + 1}:PULS:DCYC {pct:.6g}")             # VERIFY
+        # MEASURED 2026-10-07: FV:V1.0.2 APPLIES it (20/50/80 % on the scope)
+        # but logs a -102 "Syntax error" for it all the same, like its query.
+        # That one -102 is expected and dropped by the next drain_errors.
+        self._inst.write(f"SOUR{ch + 1}:PULS:DCYC {pct:.6g}")
+        self._expected_102 += 1
 
     def set_symmetry(self, ch: int, pct: float) -> None:
+        # NOT offered on the AFG1062 (capabilities ramp_symmetry False: every
+        # set logged -102 and the ramp did not change); kept for a firmware
+        # that has it.
         # Every spelling of the QUERY failed on FV:V1.0.2; whether the
         # SETTING is accepted is not tested (a -102 in the log would say no).
         self._inst.write(f"SOUR{ch + 1}:FUNC:RAMP:SYMM {pct:.6g}")        # VERIFY
@@ -464,11 +477,20 @@ class TekAFG:
 
     def drain_errors(self) -> list[str]:
         errors = []
+        try:
+            return self._drain_into(errors)
+        finally:
+            self._expected_102 = 0                # only the writes since the last drain
+
+    def _drain_into(self, errors: list) -> list[str]:
         for _ in range(20):                       # guard against a runaway queue
             resp = self._q("SYST:ERR?")
             code = resp.split(",", 1)[0].strip()  # '0,"No error"'      # VERIFY form
             if code.lstrip("+") in ("0", ""):
                 break
+            if code == "-102" and self._expected_102 > 0:
+                self._expected_102 -= 1          # the duty write's known noise
+                continue
             if code == "-201":
                 # this firmware's answer to an OUT-OF-RANGE value (measured:
                 # a negative phase), despite the wording

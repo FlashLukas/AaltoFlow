@@ -68,7 +68,8 @@ class AfgClient(ControlClient):
             self.channels = tuple(info["channels"])
             self.caps = dict(self.caps, waveforms=info.get("waveforms",
                                                            self.caps["waveforms"]),
-                             model=info.get("model", ""))
+                             model=info.get("model", ""),
+                             ramp_symmetry=bool(info.get("ramp_symmetry", True)))
         self.start_heartbeat()   # "still here": counted as a viewer / keeps control
         self.get_config()
         return info

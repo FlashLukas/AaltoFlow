@@ -433,7 +433,8 @@ class ChannelCard(QtWidgets.QFrame):
             for wdg in (self.duty_spin, *self.duty_row):
                 wdg.setVisible(wf == "pulse")
             for wdg in (self.sym_spin, *self.sym_row):
-                wdg.setVisible(wf == "ramp")
+                # only where the instrument has it (not the AFG1062)
+                wdg.setVisible(wf == "ramp" and self.ctrl.caps.get("ramp_symmetry", True))
         # A knob the instrument cannot report (firmware without the query, e.g.
         # ramp symmetry on the AFG1062 FV:V1.0.2) shows the value last SET from
         # here -- say so next to it, so nobody takes it for a measurement.
