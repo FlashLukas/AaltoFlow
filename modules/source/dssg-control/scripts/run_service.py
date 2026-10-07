@@ -31,6 +31,7 @@ _SRC = os.path.join(_HERE, "..", "src")
 if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
+from dssg import vernier_cal
 from dssg.config import Config
 from dssg.hwlock import HardwareBusy
 from dssg.synthesizer import Synthesizer
@@ -83,6 +84,11 @@ def main() -> int:
     # a GUI's private simulation leave calibration_dir unset and never pick up
     # a unit's calibration by accident.
     synth.calibration_dir = os.path.abspath(os.path.join(_HERE, ".."))
+    # ...and SAID on stdout (the launcher's log), not only as an event: which
+    # file, when it was measured, its range, passes and worst spread -- or
+    # that there is none.
+    print(vernier_cal.summary_line(synth.calibration_path(),
+                                   bool(cfg.hardware.fine_power)))
 
     service = DssgService(synth, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:

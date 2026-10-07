@@ -187,7 +187,7 @@ class Synthesizer:
         """The loaded vernier_cal.Calibration, or None."""
         return self._cal
 
-    def _calibration_path(self) -> str | None:
+    def calibration_path(self) -> str | None:
         """Where cfg.hardware.power_calibration points, or None when it is
         empty, or relative with no calibration_dir to resolve it against."""
         p = str(getattr(self.cfg.hardware, "power_calibration", "") or "").strip()
@@ -205,7 +205,7 @@ class Synthesizer:
         file must not keep the generator from starting."""
         self._cal = None
         self._cal_out_of_range = False
-        path = self._calibration_path()
+        path = self.calibration_path()
         if path is None:
             return
         if not os.path.isfile(path):

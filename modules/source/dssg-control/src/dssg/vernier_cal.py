@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 
 #: (frequency in Hz, dB per count) measured at -10 dBm, slope over -30..+30
 SLOPE_TABLE = ((1.0e9, 0.0480), (2.0e9, 0.0441), (4.0e9, 0.0450),
@@ -148,6 +149,35 @@ DEFAULT_FILE = "dssg_power_calibration.json"
 
 _TABLE_KEYS = ("freqs_Hz", "steps_dBm", "dev_dB", "slope_powers_dBm",
                "slope_dB_per_count")
+#: optional tables (a calibration averaged over several passes): the
+#: pass-to-pass standard deviation of each entry, same shape as its table
+_SPREAD_KEYS = ("dev_std_dB", "slope_std_dB_per_count")
+
+
+def shrink(mean: float, spread: float) -> float:
+    """How much of a measured step deviation the module trusts.
+
+    The bench showed ~0.1-0.2 dB run-to-run differences (warm-up drift,
+    thermal trends), so a small deviation can be mostly noise -- at 4 GHz,
+    -10.5 dBm read -0.01 in one run and +0.15 in the next, and correcting by
+    the +0.15 made the level WORSE than not correcting at all. So each mean
+    deviation m is weighted by how clearly it stands above its pass-to-pass
+    spread s:
+
+        used = m * m^2 / (m^2 + s^2)
+
+    (the weight a least-squares "is this signal or noise?" estimate gives;
+    a Wiener filter in one line). Where |m| is much larger than s the
+    correction is used in full (10 GHz, -13.5: m 0.63, s 0.14 -> 0.60); where
+    the spread is as large as the deviation itself, half of it (a coin flip
+    between "real" and "noise"); where the spread dominates, almost nothing --
+    the nominal step, which is what we would assume without a calibration.
+    It never flips the sign and never makes a correction bigger. With no
+    spread (one pass, or s = 0) the mean is used as measured."""
+    m, sd = float(mean), abs(float(spread))
+    if sd == 0.0 or m == 0.0:
+        return m
+    return m * m * m / (m * m + sd * sd)
 
 
 def _interp(x: float, xs, ys) -> float:
@@ -216,7 +246,8 @@ class Calibration:
     """
 
     def __init__(self, freqs_Hz, steps_dBm, dev_dB, slope_powers_dBm,
-                 slope_dB_per_count, meta: dict | None = None, path: str = ""):
+                 slope_dB_per_count, meta: dict | None = None, path: str = "",
+                 dev_std_dB=None, slope_std_dB_per_count=None):
         self.freqs_Hz = _numbers("freqs_Hz", freqs_Hz, ascending=True)
         self.steps_dBm = _numbers("steps_dBm", steps_dBm, ascending=True)
         self.dev_dB = _table("dev_dB", dev_dB, len(self.freqs_Hz), len(self.steps_dBm))
@@ -228,8 +259,31 @@ class Calibration:
             # zero would divide by zero in split(); negative would drive the
             # vernier the wrong way
             raise ValueError("slope_dB_per_count: every slope must be > 0")
+        nf, ns, npw = len(self.freqs_Hz), len(self.steps_dBm), len(self.slope_powers_dBm)
+        # pass-to-pass spread (None for a single-pass calibration)
+        self.dev_std_dB = (None if dev_std_dB is None
+                           else _table("dev_std_dB", dev_std_dB, nf, ns))
+        self.slope_std_dB_per_count = (
+            None if slope_std_dB_per_count is None
+            else _table("slope_std_dB_per_count", slope_std_dB_per_count, nf, npw))
+        # what dev() USES: each mean deviation shrunk by its spread (shrink()).
+        # The file keeps the measured means; only the use is cautious.
+        if self.dev_std_dB is None:
+            self.dev_used_dB = [list(r) for r in self.dev_dB]
+        else:
+            self.dev_used_dB = [[shrink(m, sd) for m, sd in zip(rm, rs)]
+                                for rm, rs in zip(self.dev_dB, self.dev_std_dB)]
         self.meta = dict(meta or {})
         self.path = str(path)
+
+    def passes(self) -> int:
+        return int(self.meta.get("passes", 1) or 1)
+
+    def worst_spread(self) -> float | None:
+        """The largest pass-to-pass spread of any step deviation, dB."""
+        if self.dev_std_dB is None:
+            return None
+        return max(v for row in self.dev_std_dB for v in row)
 
     # ---- lookups -------------------------------------------------------------
 
@@ -239,8 +293,8 @@ class Calibration:
     def dev(self, frequency_Hz: float, attenuator_dBm: float) -> float:
         """dB the step `attenuator_dBm` really sits ABOVE its nominal value."""
         i0, i1, w = _bracket(float(frequency_Hz), self.freqs_Hz)
-        d0 = _interp(float(attenuator_dBm), self.steps_dBm, self.dev_dB[i0])
-        d1 = _interp(float(attenuator_dBm), self.steps_dBm, self.dev_dB[i1])
+        d0 = _interp(float(attenuator_dBm), self.steps_dBm, self.dev_used_dB[i0])
+        d1 = _interp(float(attenuator_dBm), self.steps_dBm, self.dev_used_dB[i1])
         return d0 + (d1 - d0) * w
 
     def slope(self, frequency_Hz: float, power_dBm: float) -> float:
@@ -251,11 +305,15 @@ class Calibration:
         return s0 + (s1 - s0) * w
 
     def describe(self) -> str:
-        """One line for the log and the status: file, date, frequency range."""
+        """One line for the log, the status and the service's stdout: file,
+        date, frequency range, passes, worst spread. ASCII only."""
         name = self.path.replace("\\", "/").rsplit("/", 1)[-1] if self.path else "calibration"
         date = str(self.meta.get("date", "?"))[:10]
+        spread = self.worst_spread()
         return (f"{name}, measured {date}, "
-                f"{self.freqs_Hz[0] / 1e9:g}-{self.freqs_Hz[-1] / 1e9:g} GHz")
+                f"{self.freqs_Hz[0] / 1e9:g}-{self.freqs_Hz[-1] / 1e9:g} GHz, "
+                f"{self.passes()} pass{'es' if self.passes() != 1 else ''}"
+                + (f", worst spread {spread:.2f} dB" if spread is not None else ""))
 
     # ---- (de)serialisation ---------------------------------------------------
 
@@ -272,8 +330,9 @@ class Calibration:
         missing = [k for k in _TABLE_KEYS if k not in d]
         if missing:
             raise ValueError(f"missing {', '.join(missing)}")
-        meta = {k: v for k, v in d.items() if k not in _TABLE_KEYS}
-        return cls(*(d[k] for k in _TABLE_KEYS), meta=meta, path=path)
+        meta = {k: v for k, v in d.items() if k not in _TABLE_KEYS + _SPREAD_KEYS}
+        return cls(*(d[k] for k in _TABLE_KEYS), meta=meta, path=path,
+                   **{k: d[k] for k in _SPREAD_KEYS if d.get(k) is not None})
 
     def to_dict(self) -> dict:
         d = {"schema": SCHEMA, "kind": KIND}
@@ -282,6 +341,10 @@ class Calibration:
                   "dev_dB": [list(r) for r in self.dev_dB],
                   "slope_powers_dBm": list(self.slope_powers_dBm),
                   "slope_dB_per_count": [list(r) for r in self.slope_dB_per_count]})
+        if self.dev_std_dB is not None:
+            d["dev_std_dB"] = [list(r) for r in self.dev_std_dB]
+        if self.slope_std_dB_per_count is not None:
+            d["slope_std_dB_per_count"] = [list(r) for r in self.slope_std_dB_per_count]
         return d
 
     @classmethod
@@ -292,6 +355,22 @@ class Calibration:
 
     def save(self, path) -> None:
         save_calibration(self.to_dict(), path)
+
+
+def summary_line(path, fine_power: bool = True) -> str:
+    """What the service PRINTS at start about its calibration file (ASCII):
+    in use / not usable / not found. Never raises."""
+    if not path:
+        return "power calibration: none configured (nominal attenuator steps)"
+    if not os.path.isfile(path):
+        return f"power calibration: no file ({path}) -- nominal attenuator steps"
+    try:
+        cal = Calibration.load(path)
+    except Exception as exc:
+        return (f"power calibration: {os.path.basename(path)} NOT usable "
+                f"({type(exc).__name__}: {exc}) -- nominal attenuator steps")
+    return (f"power calibration: {cal.describe()}"
+            + ("" if fine_power else " (NOT used: fine power is off)"))
 
 
 def save_calibration(d: dict, path) -> None:
@@ -405,4 +484,98 @@ def build_calibration(freqs, powers, levels_A, slope_rows, *,
     d.update({"reference_power_dBm": p_ref, "notes": notes,
               "freqs_Hz": keep_f, "steps_dBm": powers, "dev_dB": dev,
               "slope_powers_dBm": s_pows, "slope_dB_per_count": slopes})
+    return d
+
+
+# ---- drift removal and averaging over passes (2026-10-08) ----------------------
+
+def drift_corrected(seq_powers, seq_levels, ref_power: float = -10.0) -> dict:
+    """One frequency row of an INTERLEAVED scan -> {power: level - reference}.
+
+    The row visits the reference step again and again ([-10, P1..P10, -10,
+    P11.., -10]); the bench drifts by 0.1-0.2 dB over minutes (warm-up,
+    temperature), the same for every step. The reference level at any moment
+    is interpolated linearly between its neighbouring reference readings (in
+    POINT ORDER, a stand-in for time: every point takes about as long), and
+    each reading is taken relative to it. What drifts in common cancels;
+    what is left is the step's own level. A power read more than once is
+    averaged; the reference itself comes out as 0 by construction.
+    Readings that are NaN/None are skipped; a row with no finite reference
+    reading gives NaN for everything."""
+    pw = [float(p) for p in seq_powers]
+    lv = [float("nan") if v is None else float(v) for v in seq_levels]
+    if len(pw) != len(lv):
+        raise ValueError("seq_powers and seq_levels differ in length")
+    ref_i = [i for i, p in enumerate(pw)
+             if abs(p - ref_power) < 1e-6 and math.isfinite(lv[i])]
+    out: dict = {}
+    if not ref_i:
+        return {round(p, 6): float("nan") for p in pw}
+    ref_v = [lv[i] for i in ref_i]
+    sums: dict = {}
+    for i, (p, v) in enumerate(zip(pw, lv)):
+        key = round(p, 6)
+        sums.setdefault(key, [])
+        if math.isfinite(v):
+            sums[key].append(v - _interp(i, ref_i, ref_v))
+    for key, vals in sums.items():
+        out[key] = sum(vals) / len(vals) if vals else float("nan")
+    return out
+
+
+def average_passes(cals: list) -> dict:
+    """Average calibration dicts of several PASSES into one, with the spread.
+
+    Each dict comes from build_calibration on one pass (alternate passes
+    sweep the power up and down, so a hysteresis or a thermal trend shows up
+    as a pass-to-pass difference instead of a bias). dev and slope are the
+    mean over the passes; dev_std_dB / slope_std_dB_per_count are the
+    pass-to-pass standard deviations (sample std, n-1) -- what the module's
+    shrink() weighs each deviation by, and what tells you which entries are
+    real. Only frequencies present in EVERY pass are kept (noted); the steps
+    and slope powers must be the same in all passes."""
+    if not cals:
+        raise ValueError("no passes to average")
+    first = cals[0]
+    for c in cals[1:]:
+        if c["steps_dBm"] != first["steps_dBm"] or c["slope_powers_dBm"] != first["slope_powers_dBm"]:
+            raise ValueError("passes differ in their steps or slope powers")
+    common = [f for f in first["freqs_Hz"]
+              if all(any(abs(f - g) <= 1.0 for g in c["freqs_Hz"]) for c in cals)]
+    notes: list = []
+    for i, c in enumerate(cals):
+        notes += [f"pass {i + 1}: {n}" for n in c.get("notes", [])]
+    dropped = [f for c in cals for f in c["freqs_Hz"]
+               if not any(abs(f - g) <= 1.0 for g in common)]
+    for f in sorted(set(dropped)):
+        notes.append(f"{f / 1e9:g} GHz dropped: not in every pass")
+    if not common:
+        raise ValueError("no frequency was measured in every pass")
+
+    def row(c, key, f):
+        j = next(k for k, g in enumerate(c["freqs_Hz"]) if abs(f - g) <= 1.0)
+        return c[key][j]
+
+    def stats(key):
+        mean, std = [], []
+        for f in common:
+            rows = [row(c, key, f) for c in cals]
+            n = len(rows)
+            m = [sum(col) / n for col in zip(*rows)]
+            sd = [math.sqrt(sum((v - mu) ** 2 for v in col) / (n - 1)) if n > 1 else 0.0
+                  for col, mu in zip(zip(*rows), m)]
+            mean.append([round(v, 4) for v in m])
+            std.append([round(v, 4) for v in sd])
+        return mean, std
+
+    dev, dev_sd = stats("dev_dB")
+    slope, slope_sd = stats("slope_dB_per_count")
+    d = {k: v for k, v in first.items() if k not in _TABLE_KEYS + _SPREAD_KEYS}
+    d.update({"passes": len(cals), "notes": notes, "freqs_Hz": common,
+              "steps_dBm": first["steps_dBm"], "dev_dB": dev,
+              "slope_powers_dBm": first["slope_powers_dBm"],
+              "slope_dB_per_count": [[round(v, 5) for v in r] for r in slope]})
+    if len(cals) > 1:
+        d["dev_std_dB"] = dev_sd
+        d["slope_std_dB_per_count"] = [[round(v, 5) for v in r] for r in slope_sd]
     return d

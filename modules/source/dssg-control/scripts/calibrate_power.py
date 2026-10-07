@@ -2,11 +2,11 @@
 
 WHY: the attenuator's 0.5 dB steps are exact at 1-2 GHz but not above ~4 GHz
 (10 GHz: "-10.5 dBm" is only 0.32 dB below "-10.0", "-13.5" is 0.56 dB short of
-its nominal 3.5 dB), and the vernier's dB per count depends on frequency AND
-power. This script measures both with the Signal Hound spectrum analyser and
-writes dssg_power_calibration.json, which the dssg service loads at start
-(src/dssg/vernier_cal.py explains how it is used). After that, fine power
-delivers the level asked for to ~0.05 dB at every frequency.
+its nominal 3.5 dB; at 12 GHz the worst step is ~2 dB off), and the vernier's dB
+per count depends on frequency AND power (resonant near 6 GHz). This script
+measures both with the Signal Hound spectrum analyser and writes
+dssg_power_calibration.json, which the dssg service loads at start
+(src/dssg/vernier_cal.py explains how it is used).
 
 RUN IT FROM SCAN-CORE'S ENVIRONMENT (it uses scan-core's engine and registry;
 the dssg package is not needed there, only its vernier_cal.py, imported from
@@ -33,16 +33,31 @@ What it does
      and the analyser's sweep settings, to put them back at the end;
   2. switches the generator to STEP mode (hardware.fine_power = false), so a
      power set goes straight to the attenuator and the vernier is a control;
-  3. scan A, attenuator linearity: frequency (generator and analyser centre
-     together, a `zip` axis) x every 0.5 dB step, vernier 0, RF on;
-  4. scan B, vernier slope: frequency x power (-20, -10, 0 dBm) x vernier
-     (-8, -4, 0, +4, +8 counts);
-  5. RF OFF (an after_scan routine of each scan, and again at the end
-     whatever happens -- error or Ctrl+C included), then the start state
-     back: fine power, frequency, power, vernier, the analyser's settings.
-     The RF output is left OFF unless you pass --restore-rf (then it is
-     switched back on if it was on at the start and the run succeeded);
-  6. builds the calibration (vernier_cal.build_calibration) and writes it.
+  3. WARM-UP (--warmup-s, default 60 s): RF on at -10 dBm at the first
+     frequency, the analyser reads the level every few seconds and the drift
+     since RF on is printed (the bench drifted 0.1-0.15 dB in the minutes
+     after RF on; what is left, the interleaved reference removes);
+  4. --passes N (default 2) times, alternating the power direction (up, down,
+     up ...) so a hysteresis or a thermal trend averages out instead of
+     biasing the result:
+       scan A, attenuator linearity: frequency (generator and analyser centre
+       together, a `zip` axis) x every 0.5 dB step, vernier 0, with the -10 dBm
+       REFERENCE step measured again every REF_EVERY points (and first and
+       last). Each reading is taken relative to the reference interpolated to
+       its moment, so a slow drift during the row cancels;
+       scan B, vernier slope: frequency x power (-20, -10, 0 dBm) x vernier
+       (-8, -4, 0, +4, +8 counts);
+  5. RF OFF at the end whatever happens -- error or Ctrl+C included (it stays
+     on BETWEEN the scans, so the unit does not cool down and re-drift), then
+     the start state back: fine power, frequency, power, vernier, the
+     analyser's settings. The RF output is left OFF unless you pass
+     --restore-rf (then it is switched back on if it was on at the start and
+     the run succeeded);
+  6. builds one calibration per pass (vernier_cal.build_calibration), averages
+     them (vernier_cal.average_passes) with the pass-to-pass SPREAD of every
+     entry, writes it, and prints the worst spread per frequency: an entry
+     whose spread is as large as the deviation itself is noise, and the
+     module weights it down (vernier_cal.shrink).
      The step deviations are RELATIVE to the -10 dBm step, so the pad, the
      cables and the analyser's flatness cancel; the absolute level at -10 dBm
      remains the generator's own factory calibration.
@@ -50,8 +65,13 @@ What it does
 Output (default: dssg_power_calibration.json in the module folder, which the
 service loads; *calibration*.json is gitignored in this module -- it is lab
 data of ONE unit -- and the installer and Mission Control's settings export
-keep it). Both raw scans are kept as .nc next to it (named in the JSON).
+keep it). Every raw scan is kept as .nc next to it (named in the JSON).
 Restart the dssg service afterwards to load the new file.
+
+How good is it? The goal is SOUND, not heroic (Lukas: "dont try to get it to
+0.1 dBm"): it removes the big step errors (0.5-2 dB above ~4 GHz) down to
+~0.2-0.3 dB. The steps themselves repeat only to ~0.1-0.2 dB from one run to
+the next, so no table can do much better.
 
 Printed text is ASCII (gotcha #14).
 """
@@ -73,22 +93,33 @@ if os.path.isdir(_SRC):
 
 from dssg import vernier_cal  # noqa: E402  (stdlib only: works in scan-core's env)
 
-#: the frequencies measured (GHz); clipped to what BOTH instruments can do
-FREQS_GHZ = (0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+#: the frequencies measured (GHz); clipped to what BOTH instruments can do.
+#: Dense around 6 GHz, where the vernier slope is resonant (bench 2026-10-08:
+#: 0.041 dB/count at 5 GHz, 0.111 at 6, 0.086 at 7) -- linear interpolation
+#: between 5 and 7 GHz would miss the peak entirely.
+FREQS_GHZ = (0.1, 0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 5.25, 5.5, 5.75, 6, 6.25, 6.5,
+             6.75, 7, 8, 9, 10, 11, 12)
 QUICK_FREQS_GHZ = (1, 4, 10)
 #: scan B: the powers and vernier counts the slope is fitted over. +-8 counts
 #: covers the +-6 the fine power ever uses, in the vernier's linear part
 SLOPE_POWERS = (-20.0, -10.0, 0.0)
 SLOPE_COUNTS = (-8, -4, 0, 4, 8)
 STEP_DB = 0.5
+#: the reference step every reading is taken relative to, and how often it is
+#: measured again inside a row (in points) to follow the drift
+REF_POWER = -10.0
+REF_EVERY = 10
 #: analyser settings: a 1 MHz window around the tone, 10 kHz RBW -- a clean
 #: CW peak far above the floor, and a sweep of a few tens of ms
 SPAN_MHZ, RBW_KHZ, VBW_KHZ = 1.0, 10.0, 10.0
 #: a peak further than this from the generator's frequency is not our tone
 #: (RF not on, a spur, no signal): that reading is dropped, not used
 PEAK_TOL_HZ = 200e3
-#: rough time per point (set, settle, one analyser sweep): only for the ETA
-SEC_PER_POINT = 0.6
+#: time per point measured on the bench (2026-10-08: 16 frequencies x
+#: (59 + 15) points in ~2.5 min): only for the ETA
+SEC_PER_POINT = 0.13
+#: warm-up: a level reading every WARMUP_EVERY_S, printed with the drift
+WARMUP_EVERY_S = 5.0
 
 # registry ids (scan_core.lab.build_lab_registry(..., prefix=True))
 D_FREQ, D_POWER, D_VERNIER, D_RF = ("dssg.frequency", "dssg.power",
@@ -123,40 +154,67 @@ def slope_powers(lo: float, hi: float, max_power: float) -> list[float]:
     return [p for p in SLOPE_POWERS if lo - 1e-9 <= p <= top + 1e-9]
 
 
+def interleave(steps, ref: float = REF_POWER, every: int = REF_EVERY,
+               descending: bool = False) -> list[float]:
+    """The power sequence of one row: the reference first, then `every` steps,
+    the reference again, ... and the reference last. The reference's own
+    step is left out of the steps (it IS the reference, measured often)."""
+    seq = sorted((float(s) for s in steps if abs(float(s) - ref) > 1e-6),
+                 reverse=descending)
+    out = [float(ref)]
+    for k in range(0, len(seq), max(1, int(every))):
+        out += seq[k:k + every] + [float(ref)]
+    return out
+
+
 def build_recipes(freqs_GHz, steps, spowers, counts=SLOPE_COUNTS, *,
-                  ref_level: float = -10.0, name: str = "dssg_power_cal") -> tuple[dict, dict]:
-    """The two scans as Recipe dicts (scan_core.recipe.Recipe.from_dict).
+                  ref_level: float = -10.0, descending: bool = False,
+                  rf_off_after: bool = True, name: str = "dssg_power_cal",
+                  tag: str = "") -> tuple[dict, dict]:
+    """The two scans of ONE pass as Recipe dicts (scan_core.recipe.Recipe).
 
     The generator (MHz) and the analyser's centre (GHz) move TOGETHER on one
-    `zip` axis: one dimension, two parameters in lockstep. RF on is a fixed
-    condition -- set last, after the analyser, at the lowest power (the
-    script parks the generator there first) -- and an after_scan routine
-    switches it off again, also after an abort or an error.
+    `zip` axis: one dimension, two parameters in lockstep. Scan A's power axis
+    is the interleaved sequence (reference every few points; scan-core is
+    happy with repeated values on an array axis). `descending` sweeps the
+    powers -- and scan B's vernier counts -- downwards (alternate passes).
+    RF on is a fixed condition, set last after the analyser. `rf_off_after`
+    adds an after_scan routine to scan B (the last scan of a pass) that
+    switches it off (also after an abort or an error); pass it only for the
+    LAST pass, so the unit stays warm between scans. The script's own finally
+    switches the RF off whatever happens.
     """
     freqs_GHz = [float(f) for f in freqs_GHz]
-    fzip = {"type": "zip", "name": "frequency",
-            "members": [{"param": D_FREQ, "values": [f * 1e3 for f in freqs_GHz]},
-                        {"param": S_CENTER, "values": list(freqs_GHz)}]}
+
+    def fzip():
+        return {"type": "zip", "name": "frequency",
+                "members": [{"param": D_FREQ, "values": [f * 1e3 for f in freqs_GHz]},
+                            {"param": S_CENTER, "values": list(freqs_GHz)}]}
+
     sa_fixed = {S_SPAN: SPAN_MHZ, S_RBW: RBW_KHZ, S_VBW: VBW_KHZ, S_REF: float(ref_level)}
-    dets = [S_LEVEL, S_PEAKF, S_OVER]
-    rf_off = [{"when": "after_scan", "action": "call", "args": {"set": {D_RF: 0}}}]
-    common = {"detectors": dets, "hooks": rf_off, "zigzag": False,
+    hooks = ([{"when": "after_scan", "action": "call", "args": {"set": {D_RF: 0}}}]
+             if rf_off_after else [])
+    common = {"detectors": [S_LEVEL, S_PEAKF, S_OVER], "zigzag": False,
               "settle": {"default_timeout_s": 30.0},
               "output": {"dir": ".", "basename": name, "format": "netcdf"}}
-    a = {"name": f"{name}_A_attenuator",
-         "comment": "dssg power calibration, scan A: every attenuator step at "
-                    "vernier 0 (step mode), level on the spectrum analyser",
-         "fixed": {D_VERNIER: 0, **sa_fixed, D_RF: 1},
-         "axes": [fzip, {"type": "array", "param": D_POWER,
-                         "values": [float(p) for p in steps]}],
+    way = "down" if descending else "up"
+    pw = sorted((float(p) for p in spowers), reverse=descending)
+    cn = sorted((int(c) for c in counts), reverse=descending)
+    a = {"name": f"{name}{tag}_A_attenuator",
+         "comment": f"dssg power calibration, scan A ({way}): every attenuator step "
+                    f"at vernier 0 (step mode), the {REF_POWER:g} dBm reference every "
+                    f"{REF_EVERY} points, level on the spectrum analyser",
+         "fixed": {D_VERNIER: 0, **sa_fixed, D_RF: 1}, "hooks": [],
+         "axes": [fzip(), {"type": "array", "param": D_POWER,
+                           "values": interleave(steps, descending=descending)}],
          **common}
-    b = {"name": f"{name}_B_vernier",
-         "comment": "dssg power calibration, scan B: vernier slope at a few "
-                    "powers (step mode), level on the spectrum analyser",
-         "fixed": {**sa_fixed, D_RF: 1},
-         "axes": [dict(fzip, members=[dict(m) for m in fzip["members"]]),
-                  {"type": "array", "param": D_POWER, "values": [float(p) for p in spowers]},
-                  {"type": "array", "param": D_VERNIER, "values": [int(c) for c in counts]}],
+    b = {"name": f"{name}{tag}_B_vernier",
+         "comment": f"dssg power calibration, scan B ({way}): vernier slope at a few "
+                    f"powers (step mode), level on the spectrum analyser",
+         "fixed": {**sa_fixed, D_RF: 1}, "hooks": hooks,
+         "axes": [fzip(),
+                  {"type": "array", "param": D_POWER, "values": pw},
+                  {"type": "array", "param": D_VERNIER, "values": cn}],
          **common}
     return a, b
 
@@ -185,12 +243,23 @@ def clean_levels(levels, peak_GHz, overloaded, expect_GHz) -> list:
     if isinstance(levels, (list, tuple)):
         return [clean_levels(l, p, o, expect_GHz) for l, p, o in
                 zip(levels, peak_GHz, overloaded)]
-    lv = float(levels)
-    if (not math.isfinite(lv) or bool(overloaded)
-            or not math.isfinite(float(peak_GHz))
-            or abs(float(peak_GHz) - expect_GHz) * 1e9 > PEAK_TOL_HZ):
+    lv = float("nan") if levels is None else float(levels)
+    pk = float("nan") if peak_GHz is None else float(peak_GHz)
+    if (not math.isfinite(lv) or bool(overloaded) or not math.isfinite(pk)
+            or abs(pk - expect_GHz) * 1e9 > PEAK_TOL_HZ):
         return float("nan")
     return lv
+
+
+def row_levels(seq_powers, levels_rows, steps, ref: float = REF_POWER) -> list[list[float]]:
+    """Scan A of one pass -> [f][step] levels RELATIVE to the drifting
+    reference (vernier_cal.drift_corrected per row). The reference step
+    itself comes out as 0, so build_calibration's dev formula is unchanged."""
+    out = []
+    for row in levels_rows:
+        rel = vernier_cal.drift_corrected(seq_powers, row, ref)
+        out.append([rel.get(round(float(s), 6), float("nan")) for s in steps])
+    return out
 
 
 # ---- the measurement -------------------------------------------------------------
@@ -204,9 +273,10 @@ def _endpoints(args) -> dict:
 
 
 def _connect_ctl(args):
-    """Our OWN connections, for reading the start state and putting it back.
-    Kept apart from the scans' registry, so a scan interrupted half-way (a
-    REQ socket left mid-request) cannot stop the restore."""
+    """Our OWN connections, for reading the start state, the warm-up and
+    putting everything back. Kept apart from the scans' registry, so a scan
+    interrupted half-way (a REQ socket left mid-request) cannot stop the
+    restore."""
     from scan_core.lab import Lab
     ctl = Lab()
     eps = _endpoints(args)
@@ -223,7 +293,7 @@ def _registry(args):
     from scan_core.lab import build_lab_registry
     return build_lab_registry(host=args.host, include=("dssg", "signalhound"),
                               prefix=True, endpoints=_endpoints(args) or None,
-                              on_warn=lambda m: print(f"  note: {m}"))
+                              on_warn=lambda m: None)
 
 
 def _limits(reg, pid):
@@ -232,6 +302,42 @@ def _limits(reg, pid):
         raise RuntimeError(f"{pid} is not in the registry -- is the service the "
                            f"right version?")
     return tuple(float(v) for v in p.limits)
+
+
+def _sa_level(sa, timeout_s: float = 15.0) -> float:
+    """One fresh analyser acquisition (the module's acquire contract: trigger,
+    wait for THAT acquisition number to finish), its peak level in dBm."""
+    aid = sa.command("acquire").get("acq_id")
+    st = sa.wait_until(lambda s: s.get("acq_id") == aid and not s.get("acquiring"),
+                       timeout_s=timeout_s, what="an analyser sweep")
+    v = (st.get("sample") or {}).get("peak_dBm")
+    return float("nan") if v is None else float(v)
+
+
+def _warmup(dssg, sa, f_GHz: float, seconds: float) -> None:
+    """RF on at the reference power at the first frequency for `seconds`,
+    printing the level and its drift since RF on every few seconds. Simple on
+    purpose (Lukas: a sound correction of the big step errors is the goal,
+    not 0.1 dB): what is left of the drift after it, the interleaved
+    reference removes."""
+    dssg.command("set_frequency", frequency_Hz=f_GHz * 1e9)
+    dssg.command("set_power", power_dBm=REF_POWER)
+    sa.command("set_center", center_Hz=f_GHz * 1e9)
+    dssg.command("set_rf", on=True)
+    print(f"warm-up: RF on at {REF_POWER:g} dBm, {f_GHz:g} GHz, for {seconds:.0f} s")
+    t0 = time.monotonic()
+    first = None
+    while True:
+        t = time.monotonic() - t0
+        lv = _sa_level(sa)
+        if first is None and math.isfinite(lv):
+            first = lv
+        drift = lv - first if first is not None and math.isfinite(lv) else float("nan")
+        print(f"  {t:5.0f} s  {lv:8.3f} dBm  drift since RF on {drift:+.3f} dB")
+        if t >= seconds:
+            print(f"warm-up done: {drift:+.3f} dB drift over {t:.0f} s")
+            return
+        time.sleep(max(0.0, WARMUP_EVERY_S - (time.monotonic() - t0 - t)))
 
 
 def _restore(ctl, start: dict, sa_start: dict, rf_back: bool) -> None:
@@ -287,6 +393,11 @@ def main(argv=None) -> int:
                     help=f"only {', '.join(f'{f:g}' for f in QUICK_FREQS_GHZ)} GHz (a first try)")
     ap.add_argument("--yes", action="store_true",
                     help="really measure (without it: print the plan, change nothing)")
+    ap.add_argument("--passes", type=int, default=2,
+                    help="repeat the measurement N times, alternating the power "
+                         "direction; averaged, with the spread (default 2)")
+    ap.add_argument("--warmup-s", type=float, default=60.0,
+                    help="warm-up with RF on before measuring, s (0 = none; default 60)")
     ap.add_argument("--max-power", type=float, default=5.0,
                     help="highest generator power used, dBm (default +5)")
     ap.add_argument("--ref-level", type=float, default=-10.0,
@@ -301,6 +412,7 @@ def main(argv=None) -> int:
     ap.add_argument("--sa-port", type=int, default=None,
                     help="signalhound command port if not the launcher's")
     args = ap.parse_args(argv)
+    passes = max(1, int(args.passes))
 
     try:
         from scan_core.engine import run
@@ -323,18 +435,23 @@ def main(argv=None) -> int:
     freqs = plan_freqs(QUICK_FREQS_GHZ if args.quick else FREQS_GHZ, f_lim, c_lim)
     steps = power_steps(p_lim[0], p_lim[1], args.max_power)
     spows = slope_powers(p_lim[0], p_lim[1], args.max_power)
-    if not freqs or len(steps) < 2:
-        print(f"nothing to measure: frequencies {freqs}, steps {steps}")
+    if not freqs or len(steps) < 2 or not any(abs(s - REF_POWER) < 1e-6 for s in steps):
+        print(f"nothing to measure: frequencies {freqs}, steps {steps} "
+              f"(the {REF_POWER:g} dBm reference step must be among them)")
         return 1
     rec_a, rec_b = build_recipes(freqs, steps, spows, ref_level=args.ref_level)
     na, nb = n_points(rec_a), n_points(rec_b)
-    print(f"plan: {len(freqs)} frequencies ({', '.join(f'{f:g}' for f in freqs)} GHz)")
-    print(f"  scan A: {len(steps)} attenuator steps {steps[0]:g}..{steps[-1]:g} dBm "
-          f"-> {na} points")
+    per_pass = na + nb
+    print(f"plan: {len(freqs)} frequencies ({', '.join(f'{f:g}' for f in freqs)} GHz), "
+          f"{passes} pass{'es' if passes != 1 else ''} (power up / down alternately)")
+    print(f"  scan A: {len(steps)} attenuator steps {steps[0]:g}..{steps[-1]:g} dBm + the "
+          f"{REF_POWER:g} dBm reference every {REF_EVERY} -> {na} points")
     print(f"  scan B: powers {', '.join(f'{p:g}' for p in spows)} dBm x vernier "
           f"{', '.join(f'{c:+d}' for c in SLOPE_COUNTS)} -> {nb} points")
-    print(f"  {na + nb} points, roughly {(na + nb) * SEC_PER_POINT / 60:.0f} min; "
-          f"max power {steps[-1]:g} dBm, analyser ref level {args.ref_level:g} dBm")
+    eta = passes * per_pass * SEC_PER_POINT + max(0.0, args.warmup_s)
+    print(f"  {passes * per_pass} points + {args.warmup_s:.0f} s warm-up: roughly "
+          f"{eta / 60:.0f} min; max power {steps[-1]:g} dBm, analyser ref level "
+          f"{args.ref_level:g} dBm")
     print(f"  output: {args.out}")
     if not args.yes:
         print("dry run: nothing was changed. Add --yes to measure.")
@@ -346,8 +463,6 @@ def main(argv=None) -> int:
     os.makedirs(out_dir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(out))[0]
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    nc_a = os.path.join(out_dir, f"{stem}_{stamp}_A_attenuator.nc")
-    nc_b = os.path.join(out_dir, f"{stem}_{stamp}_B_vernier.nc")
 
     ctl = _connect_ctl(args)
     dssg, sa = ctl["dssg"], ctl["signalhound"]
@@ -371,48 +486,54 @@ def main(argv=None) -> int:
         return 1
 
     ok = False
-    ds_a = ds_b = None
+    results = []                      # per pass: (seq, ds_a, ds_b, nc_a, nc_b, recipe_b)
     try:
         # STEP mode: the vernier becomes a control, a power set goes straight
         # to the attenuator, and the published power is the nominal step
         dssg.command("set_config", config={"hardware": {"fine_power": False}})
         dssg.wait_until(lambda s: s.get("fine_power") is False, timeout_s=10.0,
                         what="the generator to switch to step mode")
-        # park at the LOWEST step before RF goes on (it is switched on as a
-        # fixed condition of the scan), and set the analyser up -- RBW first,
-        # or a VBW above the old RBW is refused by its limits
-        dssg.command("set_power", power_dBm=float(steps[0]))
+        dssg.command("set_vernier", vernier=0)
+        # the analyser -- RBW first, or a VBW above the old RBW is refused
         sa.command("set_rbw", rbw_Hz=RBW_KHZ * 1e3)
         sa.command("set_vbw", vbw_Hz=VBW_KHZ * 1e3)
         sa.command("set_span", span_Hz=SPAN_MHZ * 1e6)
         sa.command("set_ref_level", ref_level_dBm=float(args.ref_level))
+        if args.warmup_s > 0:
+            _warmup(dssg, sa, freqs[0], args.warmup_s)
         time.sleep(0.5)                        # describe revisions settle
 
-        for rec, nc, label in ((rec_a, nc_a, "A"), (rec_b, nc_b, "B")):
-            # each scan switches RF on as a fixed condition: let that happen
-            # at the lowest step, not where the last scan ended (+5 dBm)
-            dssg.command("set_power", power_dBm=float(steps[0]))
-            reg, lab = _registry(args)          # step mode: vernier is a control
-            try:
-                recipe = Recipe.from_dict(rec)
-                errs = recipe.validate(reg)
-                if errs:
-                    raise RuntimeError("recipe not valid:\n  " + "\n  ".join(errs))
-                print(f"scan {label}: {n_points(rec)} points")
-                t0 = time.monotonic()
-                ds = run(recipe, reg, data_path=nc,
-                         on_log=lambda m: print(f"\n  [scan] {m}"),
-                         on_progress=lambda d, n, eta: print(
-                             f"\r  {d}/{n} points, {eta:5.0f} s left", end="", flush=True))
-                print(f"\n  done in {time.monotonic() - t0:.0f} s")
-            finally:
-                lab.close()
-            ds.to_netcdf(nc, engine="h5netcdf")
-            print(f"  raw data: {nc}")
-            if label == "A":
-                ds_a = ds
-            else:
-                ds_b = ds
+        for k in range(passes):
+            down = bool(k % 2)
+            tag = f"_p{k + 1}"
+            ra, rb = build_recipes(freqs, steps, spows, ref_level=args.ref_level,
+                                   descending=down, rf_off_after=(k == passes - 1),
+                                   tag=tag)
+            got = []
+            for rec, label in ((ra, "A"), (rb, "B")):
+                nc = os.path.join(out_dir, f"{stem}_{stamp}{tag}_{label}_"
+                                           f"{'attenuator' if label == 'A' else 'vernier'}.nc")
+                reg, lab = _registry(args)          # step mode: vernier is a control
+                try:
+                    recipe = Recipe.from_dict(rec)
+                    errs = recipe.validate(reg)
+                    if errs:
+                        raise RuntimeError("recipe not valid:\n  " + "\n  ".join(errs))
+                    print(f"pass {k + 1}/{passes} ({'down' if down else 'up'}), scan {label}: "
+                          f"{n_points(rec)} points")
+                    t0 = time.monotonic()
+                    ds = run(recipe, reg, data_path=nc,
+                             on_log=lambda m: print(f"\n  [scan] {m}"),
+                             on_progress=lambda d, n, eta: print(
+                                 f"\r  {d}/{n} points, {eta:5.0f} s left", end="",
+                                 flush=True))
+                    print(f"\n  done in {time.monotonic() - t0:.0f} s")
+                finally:
+                    lab.close()
+                ds.to_netcdf(nc, engine="h5netcdf")
+                print(f"  raw data: {os.path.basename(nc)}")
+                got.append((ds, nc, rec))
+            results.append(got)
         ok = True
     except KeyboardInterrupt:
         print("\ninterrupted (Ctrl+C)")
@@ -428,33 +549,44 @@ def main(argv=None) -> int:
     if not ok:
         return 1
 
-    # ---- extract ------------------------------------------------------------
-    levels_a = _levels(ds_a, freqs)
-    lv_b = _levels(ds_b, freqs)
-    rows = [(f * 1e9, p, list(SLOPE_COUNTS), lv_b[i][k])
-            for i, f in enumerate(freqs) for k, p in enumerate(spows)]
+    # ---- extract: one calibration per pass, then the average + spread -------
     meta = {"model": model, "firmware": firmware,
             "date": _dt.datetime.now().isoformat(timespec="seconds"),
             "measured_with": "scripts/calibrate_power.py",
-            "sources": [os.path.basename(nc_a), os.path.basename(nc_b)],
+            "sources": [os.path.basename(nc) for got in results for _, nc, _ in got],
             "analyser": {"model": sst.get("model", ""), "span_MHz": SPAN_MHZ,
                          "rbw_kHz": RBW_KHZ, "vbw_kHz": VBW_KHZ,
                          "ref_level_dBm": float(args.ref_level)},
-            "vernier_counts": list(SLOPE_COUNTS)}
-    d = vernier_cal.build_calibration([f * 1e9 for f in freqs], steps, levels_a, rows,
-                                      meta=meta)
-    vernier_cal.Calibration.from_dict(d)       # refuse to write what cannot load
+            "vernier_counts": list(SLOPE_COUNTS), "reference_every_points": REF_EVERY,
+            "warmup_s": float(args.warmup_s)}
+    per_pass_cals = []
+    for (ds_a, _, rec_a_k), (ds_b, _, rec_b_k) in results:
+        seq = rec_a_k["axes"][1]["values"]
+        levels_a = row_levels(seq, _levels(ds_a, freqs), steps)
+        lv_b = _levels(ds_b, freqs)
+        pw_k = rec_b_k["axes"][1]["values"]
+        cn_k = rec_b_k["axes"][2]["values"]
+        rows = [(f * 1e9, p, list(cn_k), lv_b[i][j])
+                for i, f in enumerate(freqs) for j, p in enumerate(pw_k)]
+        per_pass_cals.append(vernier_cal.build_calibration(
+            [f * 1e9 for f in freqs], steps, levels_a, rows, ref_power=REF_POWER, meta=meta))
+    d = vernier_cal.average_passes(per_pass_cals)
+    cal = vernier_cal.Calibration.from_dict(d)   # refuse to write what cannot load
     vernier_cal.save_calibration(d, out)
     print(f"calibration written: {out}")
     for note in d["notes"]:
         print(f"  note: {note}")
-    print("  freq (GHz)   worst step error (dB)   vernier dB/count at "
+    print("  freq (GHz)  worst step dev (dB)  worst spread (dB)  vernier dB/count at "
           + ", ".join(f"{p:g}" for p in d["slope_powers_dBm"]) + " dBm")
-    for f, drow, srow in zip(d["freqs_Hz"], d["dev_dB"], d["slope_dB_per_count"]):
+    for i, f in enumerate(d["freqs_Hz"]):
+        drow = d["dev_dB"][i]
         worst = max(drow, key=abs)
-        print(f"  {f / 1e9:9.3f}   {worst:+8.3f}                "
-              + ", ".join(f"{s:.4f}" for s in srow))
-    print("Restart the dssg service to load it (its log names the file).")
+        spread = max(cal.dev_std_dB[i]) if cal.dev_std_dB is not None else float("nan")
+        print(f"  {f / 1e9:9.3f}   {worst:+8.3f}            {spread:7.3f}           "
+              + ", ".join(f"{s:.4f}" for s in d["slope_dB_per_count"][i]))
+    print("A spread close to the deviation itself means that entry is mostly noise;")
+    print("the module weights such entries down (vernier_cal.shrink).")
+    print("Restart the dssg service to load it (it prints the file it loaded).")
     return 0
 
 

@@ -387,6 +387,8 @@ def test_calibrate_power_plans_and_builds_the_recipes():
     # clipped to BOTH instruments: an SA44B stops at 4.4 GHz
     assert cp.plan_freqs(cp.FREQS_GHZ, (25, 12000), (0.0001, 4.4)) == [
         0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+    # dense around the 6 GHz vernier resonance
+    assert {5.25, 5.5, 5.75, 6.25, 6.5, 6.75} <= set(cp.FREQS_GHZ)
     steps = cp.power_steps(-21.5, 10.0, 5.0)
     assert steps[0] == -21.5 and steps[-1] == 5.0 and len(steps) == 54
     assert cp.power_steps(-21.5, 10.0, 0.2)[-1] == 0.0          # --max-power clips
@@ -398,15 +400,177 @@ def test_calibrate_power_plans_and_builds_the_recipes():
     assert [m["param"] for m in fz["members"]] == ["dssg.frequency", "signalhound.center"]
     assert fz["members"][0]["values"] == [1000.0, 4000.0, 10000.0]        # MHz
     assert fz["members"][1]["values"] == [1.0, 4.0, 10.0]                 # GHz
-    assert a["axes"][1] == {"type": "array", "param": "dssg.power", "values": steps}
+    seq = a["axes"][1]["values"]
+    assert a["axes"][1]["param"] == "dssg.power"
+    assert seq == cp.interleave(steps)
     assert a["fixed"]["dssg.vernier"] == 0 and a["fixed"]["signalhound.ref_level"] == -12
     assert list(a["fixed"])[-1] == "dssg.rf_on"     # RF on LAST, after the analyser
-    assert a["hooks"] == [{"when": "after_scan", "action": "call",
+    # RF off after the LAST scan only (B of the last pass): warm in between
+    assert a["hooks"] == []
+    assert b["hooks"] == [{"when": "after_scan", "action": "call",
                            "args": {"set": {"dssg.rf_on": 0}}}]
     assert "signalhound.peak_level" in a["detectors"]
     assert "dssg.vernier" not in b["fixed"]
     assert b["axes"][2]["values"] == [-8, -4, 0, 4, 8]
-    assert cp.n_points(a) == 3 * 54 and cp.n_points(b) == 3 * 3 * 5
+    assert cp.n_points(a) == 3 * len(seq) and cp.n_points(b) == 3 * 3 * 5
+    # a DOWN pass, not the last: everything reversed, and the RF stays on
+    a2, b2 = cp.build_recipes([1], steps, [-20.0, -10.0, 0.0], descending=True,
+                              rf_off_after=False, tag="_p2")
+    assert a2["axes"][1]["values"] == cp.interleave(steps, descending=True)
+    assert b2["axes"][1]["values"] == [0.0, -10.0, -20.0]
+    assert b2["axes"][2]["values"] == [8, 4, 0, -4, -8]
+    assert a2["hooks"] == [] and b2["hooks"] == []
+    assert a2["name"].endswith("_p2_A_attenuator")
+
+
+def test_interleave_puts_the_reference_between_every_few_steps():
+    cp = _script()
+    seq = cp.interleave([-12.0, -11.5, -11.0, -10.5, -10.0, -9.5, -9.0], every=3)
+    assert seq == [-10.0, -12.0, -11.5, -11.0, -10.0, -10.5, -9.5, -9.0, -10.0]
+    down = cp.interleave([-12.0, -11.5, -10.0, -9.5], every=10, descending=True)
+    assert down == [-10.0, -9.5, -11.5, -12.0, -10.0]
+    # every step except the reference appears exactly once
+    full = cp.interleave(cp.power_steps(-21.5, 10, 5))
+    assert sorted(set(full)) == cp.power_steps(-21.5, 10, 5)
+    assert full.count(-10.0) == 1 + math.ceil(53 / cp.REF_EVERY)
+
+
+# ---- drift removal, passes, spread, shrink (bench 2026-10-08) --------------------
+
+def test_a_linear_drift_is_removed():
+    cp = _script()
+    steps = [-12.0, -11.5, -11.0, -10.5, -10.0, -9.5, -9.0]
+    true = {p: p + (0.3 if p < -10 else 0.0) for p in steps}     # steps below -10 short
+    seq = cp.interleave(steps, every=2)
+    drift = lambda i: 0.004 * i - 0.25                       # 0.004 dB per point
+    loss = 30.7
+    row = [true[p] - loss + drift(i) for i, p in enumerate(seq)]
+    rel = vernier_cal.drift_corrected(seq, row, -10.0)
+    for p in steps:
+        assert rel[p] == pytest.approx(true[p] - true[-10.0], abs=1e-9)
+    # without the correction the drift WOULD have shown up
+    naive = {p: row[seq.index(p)] - row[0] for p in steps}
+    assert max(abs(naive[p] - (true[p] - true[-10.0])) for p in steps) > 0.02
+    # and through the script's helper, into build_calibration
+    levels = cp.row_levels(seq, [row], steps)
+    d = vernier_cal.build_calibration([4e9], steps, levels, [])
+    assert d["dev_dB"][0] == pytest.approx([0.3, 0.3, 0.3, 0.3, 0.0, 0.0, 0.0], abs=1e-6)
+
+
+def test_drift_correction_skips_bad_readings_and_needs_a_reference():
+    nan = float("nan")
+    rel = vernier_cal.drift_corrected([-10, -11, -10, -12, -10], [-40, nan, -40.2, -42.1, nan])
+    assert math.isnan(rel[-11.0])
+    assert rel[-12.0] == pytest.approx(-42.1 - -40.2)      # end value of the reference
+    allbad = vernier_cal.drift_corrected([-10, -11], [nan, -41])
+    assert all(math.isnan(v) for v in allbad.values())
+
+
+def _one_pass(dev_row, slope):
+    return {"schema": 1, "kind": vernier_cal.KIND, "notes": [], "date": "2026-10-08",
+            "freqs_Hz": [4e9, 10e9], "steps_dBm": [-11.0, -10.5, -10.0],
+            "dev_dB": [list(dev_row), [0.6, 0.3, 0.0]],
+            "slope_powers_dBm": [-10.0], "slope_dB_per_count": [[slope], [0.06]]}
+
+
+def test_passes_are_averaged_with_their_spread():
+    passes = [_one_pass([0.10, -0.01, 0.0], 0.044), _one_pass([0.14, 0.15, 0.0], 0.046),
+              _one_pass([0.12, 0.07, 0.0], 0.045)]
+    d = vernier_cal.average_passes(passes)
+    assert d["passes"] == 3
+    assert d["dev_dB"][0] == pytest.approx([0.12, 0.07, 0.0], abs=1e-4)
+    assert d["dev_std_dB"][0] == pytest.approx([0.02, 0.08, 0.0], abs=1e-4)
+    assert d["dev_std_dB"][1] == pytest.approx([0.0, 0.0, 0.0])
+    assert d["slope_dB_per_count"][0] == pytest.approx([0.045])
+    assert d["slope_std_dB_per_count"][0][0] == pytest.approx(0.001, abs=1e-6)
+    c = vernier_cal.Calibration.from_dict(d)
+    assert c.passes() == 3 and c.worst_spread() == pytest.approx(0.08)
+    assert "3 passes" in c.describe() and "worst spread 0.08 dB" in c.describe()
+    # round trip keeps the spread
+    assert vernier_cal.Calibration.from_dict(c.to_dict()).dev_std_dB == c.dev_std_dB
+
+
+def test_a_frequency_missing_from_one_pass_is_dropped():
+    p1, p2 = _one_pass([0.1, 0.0, 0.0], 0.04), _one_pass([0.1, 0.0, 0.0], 0.04)
+    p2["freqs_Hz"], p2["dev_dB"], p2["slope_dB_per_count"] = [10e9], [[0.6, 0.3, 0.0]], [[0.06]]
+    d = vernier_cal.average_passes([p1, p2])
+    assert d["freqs_Hz"] == [10e9]
+    assert any("4 GHz dropped" in n for n in d["notes"])
+
+
+def test_shrink_trusts_a_deviation_only_as_far_as_it_stands_above_its_spread():
+    assert vernier_cal.shrink(0.5, 0.0) == 0.5                    # no spread: as measured
+    assert vernier_cal.shrink(0.15, 0.15) == pytest.approx(0.075)  # spread = size: half
+    assert vernier_cal.shrink(0.07, 0.11) == pytest.approx(0.07 * 0.0049 / (0.0049 + 0.0121))
+    assert vernier_cal.shrink(0.63, 0.14) == pytest.approx(0.60, abs=0.01)   # clear: ~all
+    assert vernier_cal.shrink(-0.2, 0.1) < 0                      # never flips the sign
+    for m, sd in ((0.3, 0.05), (-0.1, 0.4), (0.02, 0.02)):
+        assert abs(vernier_cal.shrink(m, sd)) <= abs(m)          # never bigger
+
+
+def test_the_module_uses_the_shrunk_deviation():
+    """The 4 GHz case from the bench: -10.5 dBm read -0.01 in one pass and
+    +0.15 in another. Correcting by the mean over-corrected; the shrunk value
+    keeps the level near the nominal step."""
+    passes = [_one_pass([0.10, -0.01, 0.0], 0.044), _one_pass([0.14, 0.15, 0.0], 0.046)]
+    c = vernier_cal.Calibration.from_dict(vernier_cal.average_passes(passes))
+    m, sd = c.dev_dB[0][1], c.dev_std_dB[0][1]
+    assert m == pytest.approx(0.07) and sd > m
+    assert c.dev(4e9, -10.5) == pytest.approx(vernier_cal.shrink(m, sd))
+    assert abs(c.dev(4e9, -10.5)) < 0.03
+    assert c.dev(10e9, -11.0) == pytest.approx(0.6)               # no spread there
+
+
+def test_the_service_prints_its_calibration(tmp_path):
+    p = tmp_path / "dssg_power_calibration.json"
+    line = vernier_cal.summary_line(str(p))
+    assert "no file" in line
+    passes = [_one_pass([0.10, -0.01, 0.0], 0.044), _one_pass([0.14, 0.15, 0.0], 0.046)]
+    vernier_cal.save_calibration(vernier_cal.average_passes(passes), p)
+    line = vernier_cal.summary_line(str(p))
+    assert line.startswith("power calibration: dssg_power_calibration.json, measured 2026-10-08")
+    assert "4-10 GHz" in line and "2 passes" in line and "worst spread" in line
+    assert line.isascii()
+    assert "NOT used" in vernier_cal.summary_line(str(p), fine_power=False)
+    p.write_text("{}", encoding="utf-8")
+    assert "NOT usable" in vernier_cal.summary_line(str(p))
+
+
+def test_run_service_prints_the_calibration_line(tmp_path):
+    """The real script, as a process: stdout names the file (or says none)."""
+    import subprocess
+    import sys
+    passes = [_one_pass([0.10, -0.01, 0.0], 0.044), _one_pass([0.14, 0.15, 0.0], 0.046)]
+    cal = tmp_path / "unit_calibration.json"
+    vernier_cal.save_calibration(vernier_cal.average_passes(passes), cal)
+    ini = tmp_path / "dssg.ini"
+    cfg = Config()
+    cfg.hardware.power_calibration = str(cal)
+    cfg.save(str(ini))
+    script = os.path.join(os.path.dirname(__file__), "..", "scripts", "run_service.py")
+    import threading
+    # unbuffered, or the child's print() reaches the pipe only at exit (gotcha #19)
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    proc = subprocess.Popen([sys.executable, script, "--cmd-port", "17641", "--pub-port",
+                             "17642", "--config", str(ini)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                            text=True, encoding="utf-8", errors="replace")
+    lines, seen = [], threading.Event()
+
+    def reader():                      # readline() blocks: never on the test's thread
+        for line in proc.stdout:
+            lines.append(line)
+            if "power calibration" in line:
+                seen.set()
+
+    threading.Thread(target=reader, daemon=True).start()
+    try:
+        seen.wait(timeout=30)
+        text = "".join(lines)
+        assert "power calibration: unit_calibration.json, measured 2026-10-08" in text, text
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
 
 
 def test_calibrate_power_keeps_no_serial_and_drops_bad_readings():
@@ -427,5 +591,5 @@ def test_calibrate_power_recipes_compile_in_scan_core():
     from scan_core.recipe import Recipe
     cp = _script()
     a, b = cp.build_recipes([1, 4, 10], cp.power_steps(-21.5, 10, 5), [-20.0, -10.0, 0.0])
-    assert Recipe.from_dict(a).compile().shape == (3, 54)
+    assert Recipe.from_dict(a).compile().shape == (3, len(cp.interleave(cp.power_steps(-21.5, 10, 5))))
     assert Recipe.from_dict(b).compile().shape == (3, 3, 5)

@@ -186,15 +186,26 @@ cables and the analyser's flatness cancel and the absolute level stays the
 unit's factory calibration -- and the vernier's dB per count per frequency and
 power. With it, fine power picks the step whose REAL level is nearest the
 request (at 10 GHz, -13.5 dBm is made from the -14.0 step) and fills the rest
-with the measured slope: the level asked for to ~0.05 dB at every frequency.
-Between the measured frequencies both tables are interpolated linearly; outside
-them the end values are used (the log says so once). The service loads it at
-start (`[hardware] power_calibration`, a path relative to the module folder);
-the log names the file, its date and frequency range, and the status says
-`power_calibrated`. A missing file = the behaviour above; a broken one = a
-warning and no calibration, never a failed start. The file is lab data of ONE
-unit: gitignored (`*calibration*.json`), kept by the installer and by Mission
-Control's settings export.
+with the measured slope. Between the measured frequencies both tables are
+interpolated linearly; outside them the end values are used (the log says so
+once).
+
+**Honest accuracy: ~0.2-0.3 dB after calibration; the steps themselves repeat
+only to ~0.1-0.2 dB** from one run to the next (bench, 2026-10-08), so no table
+can do much better. What it is for: removing the big step errors -- 0.5-2 dB
+above ~4 GHz (worst step: +0.9 dB at 4 GHz, +1.6 at 10, +2.0 at 12). The file
+keeps, per entry, the mean over several passes and its pass-to-pass spread; the
+module uses a deviation only as far as it stands above its spread (`shrink()` in
+`vernier_cal.py`: an entry within the noise is pulled towards 0, the nominal
+step), so the table does not "correct" noise.
+
+The service loads it at start (`[hardware] power_calibration`, a path relative
+to the module folder) and PRINTS one line about it (file, date, frequency range,
+passes, worst spread -- or "no file"); the status says `power_calibrated`. A
+missing file = the behaviour above; a broken one = a warning and no
+calibration, never a failed start. The file is lab data of ONE unit: gitignored
+(`*calibration*.json`), kept by the installer and by Mission Control's settings
+export.
 
 Measure it on the bench with the Signal Hound (both services running, the
 generator into the analyser through a pad), from scan-core's environment:
@@ -203,16 +214,21 @@ generator into the analyser through a pad), from scan-core's environment:
 cd scan-core
 uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --quick         # the plan only
 uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --quick --yes   # 1, 4, 10 GHz
-uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --yes           # 16 frequencies, ~1100 points
+uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --yes           # 22 frequencies, 2 passes, ~8 min
 ```
 
-It switches the generator to step mode, runs two scans (A: every 0.5 dB step at
-vernier 0; B: vernier -8..+8 at -20/-10/0 dBm), keeps both as .nc next to the
-JSON, and at the end -- also after an error or Ctrl+C -- switches the RF OFF and
-puts back fine power, frequency, power, vernier and the analyser's settings
-(`--restore-rf` switches the RF back on if it was on). `--max-power` (default
-+5 dBm) caps the power, `--ref-level` (default -10 dBm) suits a 30 dB pad.
-Restart the dssg service to load the new file.
+It switches the generator to step mode, warms it up with RF on at -10 dBm
+(`--warmup-s`, default 60; the drift is printed), then measures `--passes`
+times (default 2, the power swept up, then down): scan A, every 0.5 dB step at
+vernier 0 with the -10 dBm reference measured again every 10 points (each
+reading is taken relative to the reference interpolated to its moment, so a
+slow drift cancels); scan B, vernier -8..+8 at -20/-10/0 dBm. Every scan is
+kept as .nc next to the JSON. At the end -- also after an error or Ctrl+C -- it
+switches the RF OFF and puts back fine power, frequency, power, vernier and the
+analyser's settings (`--restore-rf` switches the RF back on if it was on), and
+prints per frequency the worst deviation and the worst spread. `--max-power`
+(default +5 dBm) caps the power, `--ref-level` (default -10 dBm) suits a 30 dB
+pad. Restart the dssg service to load the new file.
 
 USB: 115200 baud, 8N1, linefeed terminator. Ethernet: TCP port 10001 (fixed for
 all DSI models); the unit uses DHCP unless given a static address.
