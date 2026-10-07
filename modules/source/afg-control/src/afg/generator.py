@@ -427,6 +427,12 @@ class Generator:
     def set_waveform(self, ch, waveform: str) -> None:
         waveform = str(waveform).strip().lower()
         if waveform not in self.caps.get("waveforms", ()):
+            # a shape the instrument has but cannot be driven to remotely
+            # says WHY (lab PC 2026-10-07: "unknown waveform 'noise'" read
+            # like a typo); anything else is simply unknown
+            why = (self.caps.get("unavailable") or {}).get(waveform)
+            if why:
+                raise ValueError(f"{waveform} is not available on this instrument: {why}")
             raise ValueError(f"unknown waveform {waveform!r} (use one of "
                              f"{', '.join(self.caps.get('waveforms', ()))})")
         self._change(ch, f"waveform {waveform}", waveform=waveform)

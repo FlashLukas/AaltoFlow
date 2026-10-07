@@ -302,6 +302,15 @@ class TekAFG:
                 # Both would be status that lies, so neither is offered (a
                 # shape left on by hand is still READ and shown).
                 "waveforms": [w for w in _SHAPE_SET if w not in ("noise", "dc")],
+                # why, for the refusal message
+                "unavailable": {
+                    "noise": "the AFG1062 firmware (FV:V1.0.2) does not switch to noise "
+                             "over USB -- it reports 'PRN' but keeps the old waveform; "
+                             "select noise on the front panel",
+                    "dc": "the AFG1062 firmware (FV:V1.0.2) ignores the DC level over "
+                          "USB (a fixed ~2 V whatever the offset); set DC on the front "
+                          "panel",
+                },
                 "phase_align": True,
                 # whole degrees, measured 2026-10-07 (see set_phase)
                 "phase_resolution_deg": 1.0,

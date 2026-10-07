@@ -225,10 +225,13 @@ def test_noise_and_dc_are_not_offered_on_the_afg1062(fake_visa):
     gen = Generator(b, Config())
     gen.start()
     try:
-        with pytest.raises(ValueError):
+        # refused with the REASON, not "unknown waveform" (read like a typo)
+        with pytest.raises(ValueError, match="not available.*front panel"):
             gen.set_waveform("ch1", "noise")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="not available.*front panel"):
             gen.set_waveform("ch1", "dc")
+        with pytest.raises(ValueError, match="unknown waveform"):
+            gen.set_waveform("ch1", "triangle")
         from afg.net.describe import build_manifest
         opts = {p["id"]: p for p in build_manifest(gen)["parameters"]}["ch1_waveform"]["options"]
         assert "noise" not in opts and "dc" not in opts and "sine" in opts
