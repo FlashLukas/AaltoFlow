@@ -145,9 +145,11 @@ following CH1 (`follow on 0`), both at high-Z.
    Coupling words (D1M/A1M/GND) and probe (ATTN) right?
 3. **Trigger readback** (`TRSE?` format, `EX:TRLV?`, `EX:TRSL?`): source EXT,
    level, slope as on the screen.
-4. **New-trace flag** (`INR?` bit 0): the trigger rate in the header should be
-   the AFG's 30 Hz, or whatever the scope manages (each record takes its own
-   length plus dead time). 0 Hz = INR does not work that way: tell Claude.
+4. **New records** are told by the CONTENT of the CH1 block (not `INR?`, which
+   blocks ~0.5 s per call while the scope runs -- measured 2026-10-07): the
+   trigger rate in the header should be the AFG's rate, or whatever the scope
+   manages (each record takes its own length plus dead time, plus ~0.1 s per
+   channel transfer). 0 Hz with a running scope: tell Claude.
 5. **Waveform** (`WFSU`, `C1:WF? DAT2`, 25 codes/div): CH1 in the Y-t plot
    must have the AFG's amplitude; CH2 a 0..V square.
 6. **Time axis and the trigger point** -- MEASURED 2026-10-07: the axis is

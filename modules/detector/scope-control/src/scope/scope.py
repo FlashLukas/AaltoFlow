@@ -147,6 +147,7 @@ class Scope:
         self._suspect_warned: set = set()
         self._prev_take = None              # (settings rev, tdiv, when) of the last record
         self._cycle_ms: dict = {}
+        self._next_poll = -1e9              # rate limit of the record poll
         self._poll_prev = None              # the poll before the one that found a record
         self._poll_now = None
         self._alias_warned = False
@@ -705,9 +706,6 @@ class Scope:
         t_cycle = time.perf_counter()
         self._push_settings()
         now = self._clock()
-        # a record found now was not there at the previous poll: it ENDED
-        # after that moment (used for the freshness of an acquisition)
-        self._poll_prev, self._poll_now = self._poll_now, now
         if now - self._last_reread >= _SETTINGS_REREAD_S:
             self._last_reread = now
             with self._hw:
@@ -725,25 +723,44 @@ class Scope:
                                f"{self.cfg.hardware.roll_tdiv_s:g} s/div)")
         elif not roll:
             self._roll_warned = False
-        t_inr = time.perf_counter()
-        with self._hw:
-            ready = self.backend.new_trace_ready()
-        t_ready = time.perf_counter()
-        if not ready:
+        # Poll no more often than a quarter of a record (max 2 s apart): a
+        # slow time/div must not hammer the bus with reads of the same record.
+        if now < self._next_poll:
             return False
+        self._next_poll = now + min(0.25 * self.record_s(), 2.0)
         with self._lock:
             rev0 = self._rev
             chans = [ch for ch in self.channels if self._actual.get(f"{ch}_enabled", True)]
         if not chans:
             return False
-        with self._hw:
-            t, volts = self.backend.read_traces(chans, int(self.cfg.hardware.max_points))
-        t_read = time.perf_counter()
-        # where one cycle's time goes (status last_record.cycle_ms; the lab
-        # PC saw ~0.77 s per record at 1 ms/div): settings push / re-read,
-        # the INR? poll, the record read, the numbers
-        self._cycle_ms = {"settings": 1000 * (t_inr - t_cycle),
-                          "inr": 1000 * (t_ready - t_inr),
+        # a record found now was not there at the previous poll: it ENDED
+        # after that moment (used for the freshness of an acquisition)
+        self._poll_prev, self._poll_now = self._poll_now, now
+        t_poll = time.perf_counter()
+        mp = int(self.cfg.hardware.max_points)
+        if hasattr(self.backend, "read_new_traces"):
+            # the backend tells a new record by its CONTENT (Siglent: INR?
+            # blocks ~0.5 s per call while the scope runs -- lab PC
+            # 2026-10-07 -- so it is not asked at all)
+            with self._hw:
+                got = self.backend.read_new_traces(chans, mp)
+            t_ready = t_read = time.perf_counter()
+            if got is None:
+                return False
+            t, volts = got
+        else:
+            with self._hw:
+                ready = self.backend.new_trace_ready()
+            t_ready = time.perf_counter()
+            if not ready:
+                return False
+            with self._hw:
+                t, volts = self.backend.read_traces(chans, mp)
+            t_read = time.perf_counter()
+        # where one cycle's time goes (status last_record.cycle_ms): settings
+        # push / re-read, the poll for a new record, the record read, the numbers
+        self._cycle_ms = {"settings": 1000 * (t_poll - t_cycle),
+                          "poll": 1000 * (t_ready - t_poll),
                           "read": 1000 * (t_read - t_ready)}
         self._take(t, volts, rev0, now)
         self._cycle_ms["take"] = 1000 * (time.perf_counter() - t_read)

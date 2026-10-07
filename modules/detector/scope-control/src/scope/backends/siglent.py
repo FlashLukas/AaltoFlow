@@ -140,6 +140,15 @@ class SiglentSDS:
         # `query_each_record=True` asks every time anyway (the old way).
         self._cache: dict = {}
         self.query_each_record = False
+        # A new record is told by its CONTENT: a fingerprint of the first
+        # channel's raw block, compared with the last one read. INR? (the
+        # "new acquisition" flag) blocks ~0.5 s per call while the scope runs
+        # (lab PC 2026-10-07: 1.45 s the first time, then 0.51 s; 2-3 ms when
+        # stopped) -- that WAS the record rate. After a change the module
+        # makes (or at open) the memory's content is OLD: the first block
+        # read then is remembered, not returned.
+        self._last_fp = None
+        self._fp_reset = True
         self._desync_s = 0.0         # > 0: a late reply may still arrive; drain it first
 
     # ---- lifecycle ---------------------------------------------------------------
@@ -310,6 +319,7 @@ class SiglentSDS:
 
     def set_channel(self, ch: str, **values) -> None:
         self._cache = {}                     # re-read before the next record
+        self._fp_reset = True                # what is in memory now is old
         n = 1 if ch == "ch1" else 2
         if "enabled" in values:
             self._w(f"C{n}:TRA {'ON' if values['enabled'] else 'OFF'}")
@@ -324,6 +334,7 @@ class SiglentSDS:
 
     def set_timebase(self, tdiv_s=None, delay_s=None) -> None:
         self._cache = {}
+        self._fp_reset = True
         if tdiv_s is not None:
             self._w(f"TDIV {tdiv_s:.4E}S")
         if delay_s is not None:
@@ -331,6 +342,7 @@ class SiglentSDS:
 
     def set_trigger(self, **values) -> None:
         self._cache = {}
+        self._fp_reset = True
         src = values.get("source")
         if src is not None:
             # TRSE carries the holdoff too ("EDGE,SR,C1,HT,TI,HV,100NS"): change
@@ -358,7 +370,13 @@ class SiglentSDS:
         # INR? is read-and-clear: bit 0 = a new signal acquired since last time
         return bool(int(_num(self._q("INR?"))) & 1)                             # VERIFY
 
-    def read_traces(self, channels, max_points):
+    def read_new_traces(self, channels, max_points):
+        """`read_traces`, or None when the scope holds no record that was not
+        read before (same content as the last read). One WF? per poll, ~0.1 s
+        over USB, instead of INR?'s ~0.5 s."""
+        return self.read_traces(channels, max_points, only_if_new=True)
+
+    def read_traces(self, channels, max_points, only_if_new=False):
         """The latest record of `channels`, in volts, and its time axis.
 
         THE TIME AXIS COMES FROM THE DATA, not from SANU (lab PC, 2026-10-06):
@@ -414,7 +432,17 @@ class SiglentSDS:
             self._w(f"C{n}:WF? DAT2")
             # the reply may wait for the record to complete: give it time
             record_s = n_full / sara if sara > 0 else 0.0
-            codes = parse_block(self._read_block(record_s))
+            raw = self._read_block(record_s)
+            if only_if_new and i == 0:
+                fp = hash(raw)
+                if self._fp_reset:              # old content: remember, wait
+                    self._fp_reset = False
+                    self._last_fp = fp
+                    return None
+                if fp == self._last_fp:
+                    return None                 # the same record as last time
+                self._last_fp = fp
+            codes = parse_block(raw)
             # how long the scope took to answer WF? (it may wait for a record
             # in progress to complete -- VERIFY on the rig with this number)
             ms[f"wf_{ch}"] = 1000 * (time.perf_counter() - t_wf)

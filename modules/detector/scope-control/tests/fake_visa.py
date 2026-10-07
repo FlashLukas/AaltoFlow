@@ -158,6 +158,13 @@ class FakeSDS:
         # a sine of +-2 divisions: codes +-50 -- which includes the code 10,
         # i.e. the byte 0x0A in the middle of the block (the lab-PC bug)
         codes = np.round(50 * np.sin(np.linspace(0, 4 * np.pi, n, endpoint=False))).astype(np.int8)
+        # a NEW record (INR's flag set by the test = "the scope triggered")
+        # has new content: the module tells records apart by it, INR? blocks
+        # ~0.5 s on the real scope while it runs
+        if ch == "C1" and self.st.get("INR"):
+            self.st["INR"] = 0
+            self.st["REC"] = self.st.get("REC", 0) + 1
+        codes = np.roll(codes, self.st.get("REC", 0))
         body = codes.tobytes()
         assert b"\n" in body
         return f"{ch}:WF DAT2,#9{len(body):09d}".encode() + body + b"\t\n\n"

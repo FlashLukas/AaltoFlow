@@ -98,6 +98,7 @@ def test_the_brain_on_the_siglent_backend(fake_visa):
             time.sleep(0.005)
         assert st["sample"]["acq_id"] == n
         assert st["sample"]["ch1"]["pk2pk"] == pytest.approx(2.0, abs=0.05)
+        assert "INR?" not in inst.queries          # blocks ~0.5 s on the real scope
     finally:
         scope.shutdown()
 
@@ -273,4 +274,27 @@ def test_a_record_read_asks_only_for_the_data(fake_visa):
     q0 = len(inst.queries)
     b.read_traces(["ch1"], max_points=30000)
     assert any("VDIV?" in q for q in inst.queries[q0:])
+    b.close()
+
+
+def test_a_new_record_is_told_by_its_content(fake_visa):
+    """Lab PC 2026-10-07: INR? blocks ~0.5 s per call while the scope runs,
+    and that was the module's record rate. A new record is now told by the
+    content of its block: what is in memory at open (or after a change the
+    module makes) is old; the same block again is no new record."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    b.read_settings()
+    inst.st["INR"] = 0
+    assert b.read_new_traces(["ch1", "ch2"], 30000) is None      # old content
+    assert b.read_new_traces(["ch1", "ch2"], 30000) is None      # still the same
+    inst.st["INR"] = 1                                            # the scope triggers
+    got = b.read_new_traces(["ch1", "ch2"], 30000)
+    assert got is not None and set(got[1]) == {"ch1", "ch2"}
+    assert b.read_new_traces(["ch1", "ch2"], 30000) is None
+    b.set_timebase(tdiv_s=1e-3)                                   # a change: memory old
+    inst.st["INR"] = 1
+    assert b.read_new_traces(["ch1"], 30000) is None
+    assert "INR?" not in inst.queries
     b.close()
