@@ -214,7 +214,7 @@ generator into the analyser through a pad), from scan-core's environment:
 cd scan-core
 uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --quick         # the plan only
 uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --quick --yes   # 1, 4, 10 GHz
-uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --yes           # 22 frequencies, 2 passes, ~8 min
+uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --yes           # 22 frequencies, 2 passes, ~30 min
 ```
 
 It switches the generator to step mode, warms it up with RF on at -10 dBm

@@ -115,9 +115,11 @@ SPAN_MHZ, RBW_KHZ, VBW_KHZ = 1.0, 10.0, 10.0
 #: a peak further than this from the generator's frequency is not our tone
 #: (RF not on, a spur, no signal): that reading is dropped, not used
 PEAK_TOL_HZ = 200e3
-#: time per point measured on the bench (2026-10-08: 16 frequencies x
-#: (59 + 15) points in ~2.5 min): only for the ETA
-SEC_PER_POINT = 0.13
+#: time per point measured on the bench (2026-10-07, v2: 22 frequencies x
+#: 2 passes x (61 + 15) points in ~31 min, scan A ~0.56 s, scan B ~0.53 s per
+#: point): only for the ETA. (v1's "2.5 min" was a misreading -- 0.13 s
+#: made the ETA 3.5x too short.)
+SEC_PER_POINT = 0.55
 #: warm-up: a level reading every WARMUP_EVERY_S, printed with the drift
 WARMUP_EVERY_S = 5.0
 
