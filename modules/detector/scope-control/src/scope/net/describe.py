@@ -100,11 +100,15 @@ def read_path(status: dict, path):
 
 
 
-def acquisition_timeout_s(cfg) -> float:
-    """How long one acquisition may take: `averages` + 1 traces at the slowest
-    trigger rate planned for, x 1.5, + 10 s; never less than timeout_s."""
+def acquisition_timeout_s(cfg, record_s: float = 0.0) -> float:
+    """How long one acquisition may take: `averages` + 1 traces, each taking
+    the longer of one period of the slowest planned trigger rate and the
+    record itself (a 20 s record at 0.5 s/div cannot come faster than every
+    ~20 s, whatever the trigger), x 1.5, + 10 s; never less than timeout_s.
+    `record_s`: the length of the records seen so far (0 = not known yet)."""
     a = cfg.acquisition
-    need = 1.5 * (int(a.averages) + 1) / max(float(a.min_trigger_hz), 1e-3) + 10.0
+    per_trace = max(1.0 / max(float(a.min_trigger_hz), 1e-3), 1.2 * float(record_s or 0.0))
+    need = 1.5 * (int(a.averages) + 1) * per_trace + 10.0
     return round(max(float(a.timeout_s), need), 1)
 
 
@@ -127,7 +131,9 @@ def build_manifest(scope) -> dict:
     cfg = scope.cfg
     st = scope.status()
     chans = list(scope.channels)
-    timeout = acquisition_timeout_s(cfg)
+    # the record length rounded UP to 1 s steps, so its jitter does not move
+    # the manifest revision
+    timeout = acquisition_timeout_s(cfg, math.ceil(float(st.get("record_s") or 0.0)))
     npts = int(cfg.acquisition.points)
     unit = {ch: cfg.channel(ch).phys_unit for ch in chans}
     acquire = {

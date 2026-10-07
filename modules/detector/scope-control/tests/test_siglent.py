@@ -214,3 +214,40 @@ def test_a_positive_delay_moves_the_window_later(fake_visa):
     t, v = b.read_traces(["ch1"], max_points=30000)
     assert t[0] == pytest.approx(-2e-3 - 20.48e-3)
     b.close()
+
+
+def test_a_long_record_gets_a_long_timeout_and_a_timeout_resyncs(fake_visa):
+    """Lab PC 2026-10-07: 0.5 s/div -> a ~20 s record; WF? answers only when
+    it is complete, the fixed 5 s timeout expired, the late reply desynced
+    the queue and the scope's USB hung. The block read now waits 1.5 x the
+    record + 5 s; a timeout that still happens drains the late reply before
+    the next query."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    inst.st["SARA"], inst.st["SANU"], inst.st["MEM"] = 1000.0, 20480, 20480   # 20.5 s
+    seen = []
+    real = inst.read_raw
+
+    def slow_block():
+        if inst.read_termination is None:          # the block read
+            seen.append(inst.timeout)
+        return real()
+    inst.read_raw = slow_block
+    b.read_traces(["ch1"], max_points=30000)
+    assert seen and seen[0] >= (1.5 * 20.48 + 5.0) * 1000 - 1
+    assert inst.timeout == b._timeout_ms              # restored afterwards
+
+    # a timeout: the reply comes late; the next query must get ITS answer
+    def timing_out():
+        if inst.read_termination is None:
+            raise TimeoutError("VI_ERROR_TMO")
+        return real()
+    inst.read_raw = timing_out
+    with pytest.raises(TimeoutError):
+        b.read_traces(["ch1"], max_points=30000)
+    assert b._desync_s > 0                            # late block still queued
+    inst.read_raw = real
+    assert _num(b._q("C1:VDIV?")) == 0.5              # drained first, then clean
+    assert b._desync_s == 0
+    b.close()

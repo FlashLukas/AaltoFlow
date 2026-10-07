@@ -127,6 +127,7 @@ class SiglentSDS:
         self._hwlock = None
         self._sparse = None          # the WFSU thinning last sent
         self._n_full = 0             # points in the scope's record, as last received
+        self._desync_s = 0.0         # > 0: a late reply may still arrive; drain it first
 
     # ---- lifecycle ---------------------------------------------------------------
     def open(self) -> None:
@@ -145,14 +146,17 @@ class SiglentSDS:
             self._release()
             raise
 
-    def _drain(self, timeout_ms: int = 500, limit: int = 200) -> int:
+    def _drain(self, timeout_ms: int = 500, limit: int = 200, binary: bool = False) -> int:
         """Read and throw away whatever an earlier client left in the output
         queue (a reply nobody read, the rest of a cut-off waveform), so the
         first query here gets ITS answer. pyvisa's clear() would be the
         textbook way, but this scope answers it with VI_ERROR_SYSTEM_ERROR.
-        Reads only; returns the bytes thrown away."""
+        Reads only; returns the bytes thrown away. `binary`: read whole
+        messages (terminator off) -- a late waveform block is full of 0x0A."""
         old = self._inst.timeout
         self._inst.timeout = timeout_ms
+        if binary:
+            self._inst.read_termination = None
         dropped = 0
         try:
             for _ in range(limit):
@@ -165,17 +169,32 @@ class SiglentSDS:
                 dropped += len(chunk)
         finally:
             self._inst.timeout = old
+            self._inst.read_termination = "\n"
         return dropped
 
-    def _read_block(self) -> bytes:
+    def _read_block(self, record_s: float = 0.0) -> bytes:
         """One binary reply, read with the text terminator OFF: an int8 code
         of 10 is the byte 0x0A, and with "\n" as terminator the read stopped
-        inside the block (see the module docstring)."""
+        inside the block (see the module docstring).
+
+        THE TIMEOUT GROWS WITH THE RECORD (lab PC 2026-10-07): at 0.5 s/div the
+        record is ~20 s long and the scope answers WF? only when it is
+        complete; the fixed 5 s timeout expired, the reply arrived later into
+        a queue nobody was reading, and the scope's USB hung until it was
+        power cycled. Now: 1.5 x the record + 5 s, never less than the base
+        timeout. A timeout that still happens marks the link out of step
+        (`_desync_s`): the next query first drains whatever arrives late."""
+        old = self._inst.timeout
+        self._inst.timeout = max(self._timeout_ms, int((1.5 * record_s + 5.0) * 1000))
         self._inst.read_termination = None
         try:
             return self._inst.read_raw()
+        except Exception:
+            self._desync_s = max(5.0, 1.5 * record_s + 5.0)
+            raise
         finally:
             self._inst.read_termination = "\n"
+            self._inst.timeout = old
 
     def _release(self) -> None:
         try:
@@ -211,7 +230,16 @@ class SiglentSDS:
 
     # ---- helpers -------------------------------------------------------------------
     def _q(self, cmd: str) -> str:
+        self._resync()
         return self._inst.query(cmd).strip()
+
+    def _resync(self) -> None:
+        """After a timed-out waveform read: wait for (and throw away) the late
+        reply before asking anything else, or every later answer is shifted."""
+        if self._desync_s:
+            wait_ms = int(self._desync_s * 1000)
+            self._desync_s = 0.0
+            self._drain(timeout_ms=wait_ms, limit=4, binary=True)
 
     def _w(self, cmd: str) -> None:
         self._inst.write(cmd)
@@ -326,6 +354,7 @@ class SiglentSDS:
         delay = _num(self._q("TRDL?"), time_unit=True)
         out = {}
         sparse = self._sparse or 1
+        n_full = self._n_full
         for i, ch in enumerate(channels):
             n = 1 if ch == "ch1" else 2
             if i == 0:
@@ -339,8 +368,11 @@ class SiglentSDS:
                     self._sparse = sparse
             vdiv = _num(self._q(f"C{n}:VDIV?"))
             ofst = _num(self._q(f"C{n}:OFST?"))
+            self._resync()
             self._w(f"C{n}:WF? DAT2")
-            codes = parse_block(self._read_block())
+            # the reply may wait for the record to complete: give it time
+            record_s = n_full / sara if sara > 0 else 0.0
+            codes = parse_block(self._read_block(record_s))
             out[ch] = codes * vdiv / 25.0 - ofst                                # VERIFY 25/div
         m = min(v.size for v in out.values())
         out = {k: v[:m] for k, v in out.items()}

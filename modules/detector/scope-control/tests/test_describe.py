@@ -125,3 +125,11 @@ def test_every_value_fits_its_type(scope):
             assert v in d["options"], (d["id"], v)
         elif t == "string":
             assert isinstance(v, str), d["id"]
+
+
+def test_timeout_covers_long_records():
+    """A 20 s record (0.5 s/div) cannot come faster than every ~20 s."""
+    cfg = Config()
+    cfg.acquisition.averages = 4
+    assert acquisition_timeout_s(cfg, 20.5) >= 1.5 * 5 * 20.5 * 1.2
+    assert acquisition_timeout_s(cfg, 0.0) < 60

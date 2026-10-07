@@ -170,7 +170,8 @@ class ScopeClient(ControlClient):
         acquiring", and trusting that would return the previous point."""
         n = self.acquire()
         from .describe import acquisition_timeout_s
-        limit = timeout_s if timeout_s is not None else acquisition_timeout_s(self.cfg)
+        limit = (timeout_s if timeout_s is not None else
+                 acquisition_timeout_s(self.cfg, float(self.status().get("record_s") or 0.0)))
         deadline = time.monotonic() + limit
         while time.monotonic() < deadline:
             st = self._status_dict()

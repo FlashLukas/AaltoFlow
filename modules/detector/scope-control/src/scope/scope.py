@@ -103,6 +103,7 @@ class Scope:
         self._sample_trace: dict | None = None
         self._live_numbers: dict = {}
         self._last_reread = -1e9
+        self._record_s = 0.0                # length of the latest record
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -511,6 +512,7 @@ class Scope:
                   "channels": list(self.channels),
                   "generator_channels": int(self.caps.get("generator_channels", 0)),
                   "records": self._records,
+                  "record_s": self._record_s,
                   "trigger_rate_Hz": self._trigger_rate_locked(),
                   "running_n": len(self._running),
                   "averages": int(c.acquisition.averages),
@@ -670,6 +672,8 @@ class Scope:
                 clipped.add(ch)
             phys[ch] = cc.phys_scale * v + cc.phys_offset
         tr, red = analysis.reduce_points(np.asarray(t, float), phys, int(c.acquisition.points))
+        if len(t) > 1:
+            self._record_s = float(t[-1] - t[0])   # for the acquisition timeout
         latched = None
         with self._lock:
             if self._rev != rev0:
