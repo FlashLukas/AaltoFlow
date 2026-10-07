@@ -869,15 +869,22 @@ class Scope:
                 # record is suspect only if its post-trigger part (t[-1]) is
                 # longer than the time since the previous record at the SAME
                 # settings (the first after a change is never compared).
+                # Not measured: the FIRST record after a change (it may have
+                # been under way during the change -- lab PC 2026-10-07, a
+                # false "records every 2 s" right after 1 ms -> 0.5 s/div),
+                # nor a record found by the INR? fallback (its time is the
+                # fallback's, not the record's).
                 key = _tdiv_key(tdiv)
                 post = max(0.0, float(t[-1]))
                 prev = self._prev_take
-                if prev is not None and prev[0] == rev0 and prev[1] == key:
+                nth = prev[3] + 1 if (prev is not None and prev[0] == rev0
+                                      and prev[1] == key) else 1
+                if nth >= 3 and not info.get("identical") and not prev[4]:
                     gap = now - prev[2]
                     if 0 < gap and post > 1.5 * gap + 0.5 and key not in self._suspect_warned:
                         self._suspect_warned.add(key)
                         suspect = (post, gap, info)
-                self._prev_take = (rev0, key, now)
+                self._prev_take = (rev0, key, now, nth, bool(info.get("identical")))
             self._records += 1
             self._trigger_times.append(now)
             if self._live_t.size != tr.size or not np.allclose(self._live_t, tr):

@@ -125,6 +125,14 @@ class Generator:
         n = max(1, min(int(self.caps.get("channels", 2)), len(CHANNEL_NAMES)))
         self.channels = CHANNEL_NAMES[:n]
         self._lock = threading.RLock()
+        # Where the MODULE's own settings are kept on this PC (afg.ini; the
+        # service sets it). The coupling (CH2 follows CH1, phase follows,
+        # phase offset) and the limits exist only in the module -- the AFG
+        # cannot be asked for them -- so without this file a restart, even a
+        # keep_outputs one, silently fell back to the defaults (lab PC
+        # 2026-10-07). None = not saved (tests, a GUI on its own).
+        self.persist_path = None
+        self._persist_lock = threading.Lock()
         self._want = {ch: self._from_cfg(ch) for ch in self.channels}
         self._gen = {ch: 0 for ch in self.channels}
         self._applied_gen = {ch: -1 for ch in self.channels}
@@ -498,6 +506,7 @@ class Generator:
                 self._mirror_to_ch2(notes_out=notes)
             self._seen = self._cfg_snapshot()
         self._wake.set()
+        self._persist()
         what = "frequency and phase follow" if self._phase_follows() else "frequency follows"
         self._emit("info", f"CH2 {what} CH1: {'ON' if on else 'off'}"
                            + (f", phase offset {self.cfg.coupling.phase_offset_deg:g} deg"
@@ -659,6 +668,25 @@ class Generator:
         with self._lock:
             self._seen = self._cfg_snapshot()
         self._wake.set()
+        self._persist()
+
+    def _persist(self) -> None:
+        """Write the whole config to `persist_path`: a temporary file in the
+        same folder, then os.replace -- an interrupted write leaves the old
+        file whole. The channel values in it are harmless: at start they are
+        READ from the AFG (read-only start); only the module's own settings
+        (coupling, limits, hardware, ui) come from the file."""
+        path = self.persist_path
+        if not path:
+            return
+        import os
+        tmp = f"{path}.tmp"
+        try:
+            with self._persist_lock:
+                self.cfg.save(tmp)
+                os.replace(tmp, path)
+        except OSError as exc:
+            self._emit("warn", f"could not save the settings to {path}: {exc}")
 
     def _to_cfg(self, ch: str) -> None:
         """Copy the desired setting into the config group (lock held)."""

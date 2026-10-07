@@ -12,3 +12,7 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# this PC's saved module settings (follow / phase offset / limits)
+afg.ini
+afg.ini.tmp

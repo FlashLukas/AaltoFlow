@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if os.path.isdir(_SRC):
@@ -52,7 +53,16 @@ def main() -> int:
     ap.add_argument("--config", default=None, help="path to a .ini config to load")
     args = ap.parse_args()
 
-    cfg = Config.load(args.config) if args.config else Config()
+    # No --config: use afg.ini in the project folder if this PC has saved one.
+    # It holds the MODULE's settings (CH2 follows CH1, phase follows, phase
+    # offset, limits), saved at every change, so a restart keeps them; the
+    # AFG's own settings are read from the AFG at start whatever the file says.
+    config = args.config
+    default_ini = Path(__file__).resolve().parents[1] / "afg.ini"
+    if config is None and default_ini.is_file():
+        config = str(default_ini)
+        print(f"afg service: settings from {default_ini.name}")
+    cfg = Config.load(config) if config else Config()
 
     if args.real:
         from afg.backends.tek_afg import TekAFG
@@ -65,6 +75,7 @@ def main() -> int:
         gen, _ = build_sim_system(cfg)
         print("SIMULATED backend (no hardware needed)")
 
+    gen.persist_path = config or str(default_ini)
     service = AfgService(gen, host=args.host, cmd_port=args.cmd_port,
                          pub_port=args.pub_port)
     try:

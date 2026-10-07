@@ -515,3 +515,38 @@ def test_quick_and_full_reads_alternating_report_no_change(system, monkeypatch):
     sim.ch[1]["load_ohm"] = None                        # and the load to high-Z
     st = wait(gen, lambda s: s["ch2_mode"] == "burst" and s["ch2_load"] == "high-Z")
     assert any("changed at the instrument" in m and "mode" in m for _, m in events)
+
+
+def test_module_settings_survive_a_restart(tmp_path):
+    """Lab PC 2026-10-07: after a keep_outputs restart CH2 no longer followed
+    CH1 (follow / phase follow are module settings; the AFG cannot be asked
+    for them). They are saved to afg.ini at every change and loaded again."""
+    from afg.config import Config
+    ini = tmp_path / "afg.ini"
+    gen, _ = build_sim_system(Config())
+    gen.persist_path = str(ini)
+    gen.start()
+    try:
+        gen.set_follow(True, 30.0, phase=False)
+    finally:
+        gen.shutdown(keep_outputs=True)
+    assert ini.is_file() and not (tmp_path / "afg.ini.tmp").exists()
+    gen2, _ = build_sim_system(Config.load(str(ini)))
+    gen2.start()
+    try:
+        st = gen2.status()
+        assert st["follow"] is True and st["phase_follow_set"] is False
+        assert st["phase_offset_deg"] == pytest.approx(30.0)
+    finally:
+        gen2.shutdown(keep_outputs=True)
+
+
+def test_nothing_is_saved_without_a_persist_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    gen, _ = build_sim_system()
+    gen.start()
+    try:
+        gen.set_follow(True)
+    finally:
+        gen.shutdown()
+    assert list(tmp_path.iterdir()) == []

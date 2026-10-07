@@ -57,8 +57,8 @@ def test_a_record_longer_than_the_trigger_gap_is_flagged(manual):
     scope.step()
     t = np.linspace(-16, 16, 20000)            # a 32 s block ...
     y = np.sin(2 * np.pi * 50 * t)
-    scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=100.0)
-    scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=108.0)   # ... every 8 s
+    for k in range(3):                         # the first after a change is not measured
+        scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=100.0 + 8.0 * k)  # every 8 s
     assert any("cannot be ONE fresh record" in m for lvl, m in events if lvl == "warn")
     assert scope.status()["last_record"]["span_s"] == pytest.approx(32.0)
 
@@ -191,3 +191,18 @@ def test_freshness_option(manual, mode, counted_at):
         if not scope.status()["acquiring"]:
             break
     assert dt == counted_at and scope.status()["sample"]["acq_id"] == n
+
+
+def test_the_first_record_after_a_change_is_not_measured(manual):
+    """Lab PC 2026-10-07: right after 1 ms -> 0.5 s/div the first interval
+    read "8.19 s after its trigger but records arrive every 2 s" -- the first
+    record after a change may have been under way during it."""
+    scope, events = manual
+    scope.set_tdiv(0.5)
+    scope.step()
+    t = np.linspace(-8.19, 8.19, 10240)
+    y = np.sin(2 * np.pi * 50 * t)
+    scope._prev_take = None                    # (the sim's own record from step())
+    for now in (100.0, 102.0, 110.0, 118.0):   # 2 s, then the real ~8 s
+        scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=now)
+    assert not any("fresh record" in m for _, m in events), events

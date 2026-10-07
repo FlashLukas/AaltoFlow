@@ -411,6 +411,7 @@ class SiglentSDS:
         sparse = self._sparse or 1
         n_full = self._n_full
         sanu = 0
+        same_bytes = False          # found by the INR? fallback, not by content
         for i, ch in enumerate(channels):
             n = 1 if ch == "ch1" else 2
             if i == 0:
@@ -457,6 +458,7 @@ class SiglentSDS:
                     if not (int(_num(self._q("INR?"))) & 1):                 # VERIFY
                         return None
                     self.identical_records += 1
+                    same_bytes = True
                 self._last_fp = fp
                 self._last_new = time.monotonic()
             codes = parse_block(raw)
@@ -474,6 +476,7 @@ class SiglentSDS:
         ms["read_total"] = 1000 * (time.perf_counter() - t_start)
         self.last_record = {"sara": sara, "sanu": sanu, "sparse": sparse,
                             "block_points": lengths, "delay_s": delay,
+                            "identical": same_bytes,
                             "ms": {k: round(v, 1) for k, v in ms.items()}}
         t = delay - span / 2.0 + np.arange(m) * dt         # measured: see docstring
         return t, out
