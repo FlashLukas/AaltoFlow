@@ -10,9 +10,9 @@ Two kinds of settings live here, and the difference matters:
     trigger): READ from the instrument at start and adopted (Lukas's rule
     2026-09-27: start changes nothing); they reach the instrument only when
     someone changes them;
-  * the MODULE's settings (physical units, averaging, the filter, the loop
-    analysis, the trace length): the scope knows nothing about them, they are
-    applied to the traces the module reads.
+  * the MODULE's settings (physical units, averaging, the filter, the trace
+    length): the scope knows nothing about them, they are applied to the
+    traces the module reads.
 
 Everything that shapes a RECORDED trace (points, physical units, filter) is
 written into every scan's data file next to the traces.
@@ -43,14 +43,14 @@ class Channel:
       probe          -- probe attenuation (1, 10, ...); the scope already
                         divides by it, so volts here are at the probe tip.
     MODULE settings -- the physical quantity this channel measures:
-      phys_scale     -- quantity per volt (e.g. mT/V for a Hall probe,
-                        A/V for a shunt; 1 = stay in volts),
+      phys_scale     -- quantity per volt (e.g. 10 A/V for a current probe
+                        that gives 0.1 V/A; 1 = stay in volts),
       phys_offset    -- quantity at 0 V,
-      phys_unit      -- its unit ("mT", "A", "V", "a.u."),
-      phys_label     -- what it is ("Field", "Intensity").
-    quantity = phys_scale * volts + phys_offset. Traces, live view, loop and
-    every number derived from them are in this unit; the conversion is
-    recorded with the data.
+      phys_unit      -- its unit ("A", "mT", "V", "a.u."),
+      phys_label     -- what it is ("Current", "Signal").
+    quantity = phys_scale * volts + phys_offset. Traces, live view and every
+    number derived from them are in this unit; the conversion is recorded
+    with the data.
     """
 
     enabled: bool = True
@@ -128,10 +128,12 @@ class Acquisition:
 class Filter:
     """MODULE settings: a digital filter on the averaged traces.
 
-    ZERO-PHASE and IDENTICAL on every channel: a phase lag between the field
-    channel and the intensity channel would tilt or open the loop. Done as a
-    Butterworth magnitude |H|^2 applied in the frequency domain -- what a
-    forward-backward (filtfilt) run gives, without scipy.
+    ZERO-PHASE and IDENTICAL on every channel, so the channels stay
+    time-aligned with each other (an ordinary filter delays a signal by a
+    frequency-dependent amount, which would shift one channel against the
+    other -- and distort an XY plot). Done as a Butterworth magnitude |H|^2
+    applied in the frequency domain -- what a forward-backward (filtfilt) run
+    gives, without scipy.
 
     lowpass_Hz / highpass_Hz -- cut-offs; 0 = off.
     order                    -- Butterworth order of ONE pass. Zero-phase means
@@ -146,49 +148,24 @@ class Filter:
 
 
 @dataclass
-class Analysis:
-    """MODULE settings: the hysteresis loop (Y against X) and its numbers.
-
-    loop_x / loop_y      -- the channels for X (field or current) and Y (signal).
-    sat_fraction         -- the 'high-field ends' used to fit the saturation
-                            levels and the linear background: |X| above this
-                            fraction of the largest |X|.
-    subtract_background  -- remove the fitted linear slope (Faraday effect,
-                            substrate) before the loop numbers are taken; the
-                            slope is recorded either way.
-    normalise            -- also give the loop scaled to -1..1.
-    """
-
-    loop_x: str = "ch1"
-    loop_y: str = "ch2"
-    sat_fraction: float = 0.8
-    subtract_background: bool = True
-    normalise: bool = False
-
-
-@dataclass
 class Sim:
-    """The simulated bench (no instrument needed).
+    """The simulated bench (no instrument needed): two test signals and a sync.
 
-    scene  -- "moke": CH1 = a Hall-probe field (sine), CH2 = the light
-              intensity, a hysteresis loop against it; EXT = a sync square.
-              "bench": what is wired on the lab bench today -- CH1 the AFG's
-              sine, CH2 and EXT its synchronous square.
-    drive_Hz, field_amp_mT, hall_V_per_mT -- the drive; hc_mT, ms_V (half the
-    Kerr jump), slope_V_per_mT (Faraday background), bias_mT (exchange bias),
-    noise_V; drift_V_per_s (slow intensity drift).
+    CH1  a sine: frequency_Hz, ch1_amplitude_V (peak);
+    CH2  the same frequency, ch2_amplitude_V (peak), shifted by ch2_phase_deg
+         and with a ch2_harmonic share of its 2nd harmonic, plus ch2_offset_V
+         -- so the XY view is a tilted, slightly distorted ellipse, not a line;
+    EXT  a sync square (0 / square_V), high for the first half period;
+    noise_V rms on both channels, fresh in every record.
     """
 
-    scene: str = "moke"
-    drive_Hz: float = 30.0
-    field_amp_mT: float = 50.0
-    hall_V_per_mT: float = 0.02
-    hc_mT: float = 12.0
-    bias_mT: float = 0.0
-    ms_V: float = 0.2
-    slope_V_per_mT: float = 0.001
+    frequency_Hz: float = 30.0
+    ch1_amplitude_V: float = 1.0
+    ch2_amplitude_V: float = 0.2
+    ch2_phase_deg: float = 60.0
+    ch2_harmonic: float = 0.15
+    ch2_offset_V: float = 0.5
     noise_V: float = 0.01
-    drift_V_per_s: float = 0.0
     square_V: float = 1.0
 
 
@@ -205,11 +182,14 @@ class Hardware:
                    none is waiting (and the status poll of the settings).
     max_points  -- the most points read per channel and trace; the scope's
                    record is thinned to about this before transfer.
-    roll_tdiv_s -- at this time/div and slower the scope ROLLS: the trace
-                   scrolls and no triggered records come (lab PC 2026-10-07:
-                   at 0.5 s/div one record in 120 s). A triggered acquisition
-                   is refused there, with the reason. # VERIFY the threshold
-                   on the RSDS1102CML+ (Siglent: roll from ~50 ms/div).
+    roll_tdiv_s -- in AUTO trigger mode at this time/div and slower the scope
+                   free-runs / rolls and no triggered records come (lab PC
+                   2026-10-07: at 0.5 s/div in AUTO one record in 120 s). An
+                   acquisition is refused THERE (AUTO + slow), with the
+                   reason: switch to NORMAL. In NORMAL mode triggered records
+                   keep coming at every time/div, just slowly (measured: one
+                   per ~8 s at 0.1 - 0.5 s/div), and the acquisition simply
+                   waits long enough. # VERIFY where AUTO starts rolling.
     """
 
     visa: str = "USB0::0xF4EC::0xEE3A::SERIAL::INSTR"
@@ -234,19 +214,17 @@ class Config:
     trigger: Trigger = None
     acquisition: Acquisition = None
     filter: Filter = None
-    analysis: Analysis = None
     sim: Sim = None
     hardware: Hardware = None
     ui: UI = None
 
     def __post_init__(self):
-        self.channel_1 = self.channel_1 or Channel(phys_label="Field")
-        self.channel_2 = self.channel_2 or Channel(phys_label="Intensity")
+        self.channel_1 = self.channel_1 or Channel()
+        self.channel_2 = self.channel_2 or Channel()
         self.timebase = self.timebase or Timebase()
         self.trigger = self.trigger or Trigger()
         self.acquisition = self.acquisition or Acquisition()
         self.filter = self.filter or Filter()
-        self.analysis = self.analysis or Analysis()
         self.sim = self.sim or Sim()
         self.hardware = self.hardware or Hardware()
         self.ui = self.ui or UI()
@@ -256,7 +234,7 @@ class Config:
 
     _GROUPS = {"channel_1": Channel, "channel_2": Channel, "timebase": Timebase,
                "trigger": Trigger, "acquisition": Acquisition, "filter": Filter,
-               "analysis": Analysis, "sim": Sim, "hardware": Hardware, "ui": UI}
+               "sim": Sim, "hardware": Hardware, "ui": UI}
 
     def save(self, path: str) -> None:
         parser = configparser.ConfigParser()

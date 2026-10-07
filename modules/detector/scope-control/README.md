@@ -1,12 +1,15 @@
 # scope-control -- Oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+)
 
-A two-channel oscilloscope as an AaltoFlow detector, written for classical
-laser MOKE hysteresis loops: the magnet is driven continuously (~30 Hz), one
-channel measures the field (Hall probe) or the current, the other the light
-intensity, and the loop is one against the other. A scan point is one
-averaged loop, so loops can be recorded against anything else in a scan
-(position on the sample, temperature, angle, the drive amplitude for minor
-loops ...). Spec: `docs/ROADMAP.md`, "Oscilloscope module".
+A two-channel oscilloscope as an AaltoFlow detector: averaged, triggered
+traces of both channels in physical units, with per-channel numbers, so a scan
+can record a waveform (or two, and their XY relation) at every point --
+against position, temperature, a drive amplitude, anything else the suite
+sweeps.
+
+It is a SCOPE, deliberately nothing more: what the recorded signals mean for
+an experiment (a hysteresis loop and its coercive field, a resonance, ...)
+is analysed in the AaltoView processing module, from the traces this module
+records (Lukas, 2026-10-07).
 
 ![front panel](../../../front-panels/scope.png)
 
@@ -27,28 +30,28 @@ Ports 5633 / 5634.
 1. The scope triggers; the module notices the new record (it never changes
    the scope's run mode) and reads both channels.
 2. Volts -> the channel's **physical quantity** (`quantity = scale x V +
-   offset`, e.g. 50 mT/V for a Hall probe), recorded with the data.
+   offset`, e.g. 10 A/V for a current probe that gives 0.1 V/A), recorded
+   with the data.
 3. The record is reduced to `points` samples (neighbours averaged).
 4. **Running average** of the last N traces ("312 / 500"; Restart average
    empties it). A change of any setting that shapes a trace empties it too.
 5. **Zero-phase filter** (low/high-pass, Butterworth magnitude squared) --
-   identical on every channel, so it cannot tilt the loop.
-6. Numbers: per channel mean, rms, peak-to-peak, amplitude, frequency; the
-   phase CH2 - CH1; and the **loop**: Hc+, Hc-, Hc, exchange bias, Ms (Kerr
-   amplitude), Mr, squareness, background slope, area per cycle. How each is
-   computed is written out at the top of `src/scope/analysis.py`.
+   identical on every channel, so the channels stay time-aligned with each
+   other (an ordinary filter would shift one against the other).
+6. Numbers: per channel mean, rms, peak-to-peak, amplitude, frequency; and
+   the phase of CH2 against CH1 (`src/scope/analysis.py`).
 
 ## The window
 
 Two tabs, each the full height: **X(t), Y(t)** (the channels against time,
-CH2 on its own axis) and **XY / YX** (the loop; "YX" puts the signal
-horizontal). A cursor readout under each plot, in that plot's axis units. The
+CH2 on its own axis) and **XY / YX** (the scope's XY mode: CH2 against
+CH1; "YX" swaps them). A cursor readout under each plot, in that plot's axis units. The
 columns sit in a splitter -- drag the borders. Tab, XY/YX and the column
 widths are remembered on this PC (QSettings).
 
 The module's own settings -- the QUANTITY of each channel (label, unit, scale
-per volt, value at 0 V: e.g. the Hall calibration), averaging, points, filter,
-loop -- are saved to `scope.ini` next to the project at every change
+per volt, value at 0 V: e.g. a probe's calibration), averaging, points,
+filter -- are saved to `scope.ini` next to the project at every change
 (atomically), so a restart keeps them. The scope's own settings are read from
 the scope at start, as always.
 
@@ -60,12 +63,18 @@ the scope at start, as always.
 are in -- the first trace after the trigger is skipped, because it may have
 been recorded before the thing the scan just changed. 500 averages at 30 Hz
 are ~17 s per point; the scan's wait and its timeout know that (the timeout
-grows with the averages). One acquisition feeds every detector: the two traces
-(arrays with their own `time` dimension), the per-channel numbers, the loop
-numbers. A trace that hit the screen edge is reported as CLIPPED.
+grows with the averages AND the record length). One acquisition feeds every
+detector: the two traces (arrays with their own `time` dimension), the
+per-channel numbers and the phase. A trace that hit the screen edge is reported as CLIPPED.
 
 Refused, with the reason, when the scope cannot deliver: trigger mode STOP,
-or SINGLE with more than one trace to average.
+SINGLE with more than one trace to average, or AUTO at a slow time base
+(>= `hardware.roll_tdiv_s`, 50 ms/div): there the scope free-runs / rolls and
+makes no triggered records (lab PC: one in 120 s). In NORMAL mode triggered
+records come at any time/div, one per record length (measured: ~8 s at
+0.1 - 0.5 s/div) -- an acquisition there just takes long, and its timeout
+knows it. The scope snaps some time/div values (the lab's: 20 ms -> 10 ms,
+200 ms -> 100 ms); a warn event says when it did.
 
 The trace length, the time base and the units must not change during a scan
 (scan-core refuses ragged data); sweep them only as an outer axis, if at all.
@@ -93,9 +102,7 @@ Scope settings: `set_channel_enabled`, `set_vdiv`, `set_offset`,
 `set_coupling`, `set_probe` (each `{channel, ...}`), `set_tdiv`, `set_delay`,
 `set_trigger_source|level|slope|mode`. Module: `set_points`, `set_averages`,
 `set_keep_raw`, `set_filter {lowpass_Hz?, highpass_Hz?, order?}`,
-`set_physical {channel, scale?, offset?, unit?, label?}`, `set_loop {x?, y?}`,
-`set_analysis {sat_fraction?, subtract_background?, normalise?}`,
-`restart_average`, `set_sim` (simulator). Measuring: `acquire -> {acq_id}`,
+`set_physical {channel, scale?, offset?, unit?, label?}`, `restart_average`, `set_sim` (simulator). Measuring: `acquire -> {acq_id}`,
 `abort`/`stop`, `get_trace {which: live|sample}`, `get_time`, `get_sample`.
 Plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 
@@ -110,7 +117,7 @@ Plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 ## Run
 
 ```powershell
-uv run scripts/run_service.py                      # the simulated MOKE bench
+uv run scripts/run_service.py                      # the simulated bench
 uv run scripts/run_service.py --real --visa "USB0::0xF4EC::0xEE3A::SDS...::INSTR"
 uv run scripts/run_gui.py --connect localhost
 uv run scripts/scope_console.py acquire
@@ -152,6 +159,6 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q        # 67 tests, offline: the simulated bench + a fake SDS1000CML+
+uv run pytest -q        # 71 tests, offline: the simulated bench + a fake SDS1000CML+
 python ..\..\..\tools\check_modules.py scope --live
 ```

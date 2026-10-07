@@ -128,17 +128,6 @@ class ScopeClient(ControlClient):
                 msg[k] = v
         return self._cmd(msg)
 
-    def set_loop(self, x=None, y=None):
-        return self._cmd({"cmd": "set_loop", **({"x": x} if x else {}), **({"y": y} if y else {})})
-
-    def set_analysis(self, sat_fraction=None, subtract_background=None, normalise=None):
-        msg = {"cmd": "set_analysis"}
-        for k, v in (("sat_fraction", sat_fraction), ("subtract_background", subtract_background),
-                     ("normalise", normalise)):
-            if v is not None:
-                msg[k] = v
-        return self._cmd(msg)
-
     def set_sim(self, name: str, value):
         return self._checked({"cmd": "set_sim", "name": str(name), "value": value})
 

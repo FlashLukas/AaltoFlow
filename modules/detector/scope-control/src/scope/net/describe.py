@@ -13,9 +13,9 @@ one wait, many reads:
     own dimension `time` (the record's time axis, from `get_time`), fetched
     with `get_trace` because they are too big for the status stream.
   * per channel: mean, rms, peak-to-peak, amplitude, frequency;
-  * `phase_21` -- CH2's phase relative to CH1 at CH1's fundamental;
-  * the LOOP (Y = loop_y against X = loop_x): Hc+, Hc-, Hc, bias, Ms (the
-    Kerr amplitude), Mr, squareness, background slope, area.
+  * `phase_21` -- CH2's phase relative to CH1 at CH1's fundamental.
+(What the signals MEAN for an experiment is analysed in the AaltoView
+processing module, from the recorded traces.)
 The `acquire` block makes scan-core trigger and wait for THAT acquisition
 (acq_id, gotcha #17) before reading -- a cold read would return the previous
 point's trace and nothing would raise.
@@ -25,7 +25,7 @@ time/div, delay, trigger) settle on "the module echoes what was ASKED
 (`<key>_set`) and has written it and read the scope back"
 (`settings_settled`): the scope snaps V/div and time/div to its own steps, so
 the value it really holds is a separate indicator. The module's settings
-(averages, points, filter, units, loop) are immediate.
+(averages, points, filter, units) are immediate.
 
 What is dynamic: the acquisition timeout grows with `averages`, the trace
 detectors' length is `points`, raw traces exist only with keep_raw, and the
@@ -112,17 +112,6 @@ def acquisition_timeout_s(cfg, record_s: float = 0.0) -> float:
     return round(max(float(a.timeout_s), need), 1)
 
 
-_LOOP = (("hc_plus", "Hc+", "x", "Coercive field on the rising branch."),
-         ("hc_minus", "Hc-", "x", "Coercive field on the falling branch."),
-         ("hc", "Hc", "x", "(Hc+ - Hc-)/2."),
-         ("bias", "Exchange bias", "x", "(Hc+ + Hc-)/2: the loop's shift."),
-         ("ms", "Ms (Kerr amplitude)", "y", "Half the jump between the saturation levels."),
-         ("mr", "Mr (remanence)", "y", "Y at X = 0, about the mid level."),
-         ("squareness", "Squareness Mr/Ms", "", ""),
-         ("slope", "Background slope", "y/x", "Linear background (Faraday, substrate) "
-                                              "fitted in the high-field ends."),
-         ("area", "Loop area", "x*y", "Per cycle; only when the record closes."))
-
 _VALUES = (("mean", "mean", ""), ("rms", "rms", ""), ("pk2pk", "peak-to-peak", ""),
            ("amplitude", "amplitude", ""), ("frequency", "frequency", "Hz"))
 
@@ -183,8 +172,9 @@ def build_manifest(scope) -> dict:
                read_path=[f"{ch}_phys_scale"],
                set={"verb": "set_physical", "arg": "scale", "extra": ex},
                settle={"policy": "echoes", "key": f"{ch}_phys_scale", "tol": 1e-12},
-               help=f"What {C} measures: quantity = scale x volts + offset (e.g. mT/V "
-                    f"of the Hall probe). Changing it restarts the average."),
+               help=f"What {C} measures: quantity = scale x volts + offset (e.g. 10 A/V "
+                    f"for a current probe that gives 0.1 V/A). Changing it restarts "
+                    f"the average."),
             _p(f"{ch}_phys_offset", f"{C} {unit[ch]} at 0 V", "control", "float",
                unit=unit[ch], group=f"{C} quantity", order=base + 7, decimals=6,
                read_path=[f"{ch}_phys_offset"],
@@ -218,13 +208,18 @@ def build_manifest(scope) -> dict:
         _p("trigger_rate", "Trigger rate", "indicator", "float", unit="Hz",
            group="Trigger", order=5, decimals=2, plottable=True,
            read_path=["trigger_rate_Hz"]),
-        _p("rolling", "Roll mode (no triggered records)", "indicator", "bool",
+        _p("rolling", "Rolling (AUTO at a slow time base)", "indicator", "bool",
            group="Timebase", order=4, read_path=["rolling"],
-           help="At slow time bases the scope rolls; acquisitions are refused there."),
+           help="AUTO trigger mode at a slow time base: the scope free-runs and makes "
+                "no triggered records; acquisitions are refused (use NORMAL)."),
+        _p("record_s", "Record length", "indicator", "float", unit="s",
+           group="Timebase", order=5, decimals=4, read_path=["record_s"],
+           help="How long one record lasts at this time/div (the memory holds more "
+                "than the screen): a triggered record cannot come faster."),
         _p("settings_settled", "Scope settings applied", "indicator", "bool",
            group="Trigger", order=6, read_path=["settings_settled"]),
     ]
-    # -- acquisition, filter, loop: the module's own ----------------------------------
+    # -- acquisition and filter: the module's own ------------------------------------
     params += [
         _p("averages", "Averages", "control", "int", group="Acquisition", order=1,
            min=1, max=100000, step=1, read_path=["averages"],
@@ -255,28 +250,11 @@ def build_manifest(scope) -> dict:
            min=0.0, decimals=3, read_path=["highpass_Hz"],
            set={"verb": "set_filter", "arg": "highpass_Hz"},
            settle={"policy": "echoes", "key": "highpass_Hz"},
-           help="0 = off. A high-pass removes the DC level: the loop numbers then "
-                "lose their mid level."),
+           help="0 = off. A high-pass removes the DC level (the mean then reads ~0)."),
         _p("filter_order", "Filter order", "control", "int", group="Filter", order=3,
            min=1, max=8, step=1, read_path=["filter_order"],
            set={"verb": "set_filter", "arg": "order"},
            settle={"policy": "echoes", "key": "filter_order", "tol": 0.5}),
-        _p("loop_x", "Loop X", "control", "enum", group="Loop", order=1,
-           options=chans, read_path=["loop_x"], set={"verb": "set_loop", "arg": "x"},
-           settle={"policy": "echoes", "key": "loop_x"}),
-        _p("loop_y", "Loop Y", "control", "enum", group="Loop", order=2,
-           options=chans, read_path=["loop_y"], set={"verb": "set_loop", "arg": "y"},
-           settle={"policy": "echoes", "key": "loop_y"}),
-        _p("sat_fraction", "Saturation above", "control", "float", group="Loop", order=3,
-           min=0.3, max=0.98, decimals=2, step=0.05, read_path=["sat_fraction"],
-           set={"verb": "set_analysis", "arg": "sat_fraction"},
-           settle={"policy": "echoes", "key": "sat_fraction", "tol": 1e-9},
-           help="Fraction of the largest |X| above which the sample counts as "
-                "saturated (fits the levels and the background)."),
-        _p("subtract_background", "Subtract background", "control", "bool", group="Loop",
-           order=4, read_path=["subtract_background"],
-           set={"verb": "set_analysis", "arg": "subtract_background"},
-           settle={"policy": "echoes", "key": "subtract_background"}),
     ]
     # -- the measurement ------------------------------------------------------------------
     params += [
@@ -313,22 +291,16 @@ def build_manifest(scope) -> dict:
                          read_path=["sample", "phase_21_deg"], acquire=acquire,
                          help="At CH1's fundamental; positive = CH2 leads."))
         order += 1
-        ux, uy = unit.get(cfg.analysis.loop_x, ""), unit.get(cfg.analysis.loop_y, "")
-        for key, label, kind, help in _LOOP:
-            u = {"x": ux, "y": uy, "y/x": f"{uy}/{ux}", "x*y": f"{ux}*{uy}", "": ""}[kind]
-            params.append(_p(f"loop_{key}", f"Loop {label}", "indicator", "float", unit=u,
-                             group="Loop result", order=order,
-                             read_path=["sample", "loop", key], acquire=acquire, help=help))
-            order += 1
     # -- live (not scan-safe: the running average now) -------------------------------------
     for ch in chans:
         params.append(_p(f"live_{ch}_amplitude", f"{ch.upper()} amplitude (live)",
                          "indicator", "float", unit=unit[ch], group="Live", order=order,
                          plottable=True, read_path=["live", ch, "amplitude"]))
         order += 1
-    params.append(_p("live_loop_hc", "Loop Hc (live)", "indicator", "float",
-                     unit=unit.get(cfg.analysis.loop_x, ""), group="Live", order=order,
-                     plottable=True, read_path=["live", "loop", "hc"]))
+    if len(chans) > 1:
+        params.append(_p("live_phase_21", "Phase CH2 - CH1 (live)", "indicator", "float",
+                         unit="deg", group="Live", order=order, decimals=2, plottable=True,
+                         read_path=["live", "phase_21_deg"]))
     # -- status ----------------------------------------------------------------------------
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status", order=1,
@@ -339,9 +311,8 @@ def build_manifest(scope) -> dict:
            read_path=["hw_error"]),
     ]
     if scope.simulated:
-        for i, (name, label, u) in enumerate((("hc_mT", "Coercive field", "mT"),
-                                               ("ms_V", "Kerr half-jump", "V"),
-                                               ("drive_Hz", "Drive frequency", "Hz"),
+        for i, (name, label, u) in enumerate((("frequency_Hz", "Test signal frequency", "Hz"),
+                                               ("ch2_phase_deg", "CH2 phase shift", "deg"),
                                                ("noise_V", "Noise", "V"))):
             params.append(_p(f"sim_{name}", f"{label} (simulation)", "control", "float",
                              unit=u, group="Simulated bench", order=i + 1,

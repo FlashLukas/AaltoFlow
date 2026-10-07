@@ -15,9 +15,9 @@ Commands (channel = 1 | 2)
     mode auto|normal|single|stop
     avg <n>                traces per average      points <n>
     lp <Hz> / hp <Hz>      zero-phase filter (0 = off)   order <n>
-    unit <ch> <scale> <offset> <unit> [label]   e.g. unit 1 2500 0 mT Field
-    loop <xch> <ych>       restart                 raw on|off
-    sim <name> <value>     (simulator) e.g. sim hc_mT 20
+    unit <ch> <scale> <offset> <unit> [label]   e.g. unit 1 10 0 A Current
+    restart                raw on|off
+    sim <name> <value>     (simulator) e.g. sim ch2_phase_deg 90
     acquire                trigger, wait, print the numbers
     abort                  status     watch [s]     help     quit
 Control: take / take! / release / clients
@@ -159,7 +159,6 @@ class Console:
             "unit": lambda: self.cmd(cmd="set_physical", channel=ch(), scale=num(1),
                                      offset=num(2), unit=args[3],
                                      **({"label": " ".join(args[4:])} if len(args) > 4 else {})),
-            "loop": lambda: self.cmd(cmd="set_loop", x=ch(0), y=ch(1)),
             "restart": lambda: self.cmd(cmd="restart_average"),
             "raw": lambda: self.cmd(cmd="set_keep_raw", on=_on(args[0])),
             "sim": lambda: self.cmd(cmd="set_sim", name=args[0], value=num(1)),
@@ -211,9 +210,7 @@ class Console:
                     if v:
                         print(f"  {c}: mean {_f(v.get('mean'))}  pp {_f(v.get('pk2pk'))}  "
                               f"f {_f(v.get('frequency'), '.4f')} Hz  ({st.get(c + '_unit')})")
-                lp = smp.get("loop") or {}
-                print("  loop: " + "  ".join(f"{k} {_f(lp.get(k), '.4g')}" for k in
-                                             ("hc", "bias", "ms", "mr", "squareness", "slope")))
+                print(f"  phase CH2 - CH1: {_f(smp.get('phase_21_deg'), '.2f')} deg")
                 return
             time.sleep(0.05)
         print(f"acquisition {n} did not finish")
@@ -234,12 +231,11 @@ class Console:
                         print(f"  [{d.get('level')}] {d.get('msg')}")
                     else:
                         lv = d.get("live") or {}
-                        lp = lv.get("loop") or {}
                         print(f"  {d.get('running_n')}/{d.get('averages')} averaged  "
                               f"trigger {_f(d.get('trigger_rate_Hz'), '.2f')} Hz  "
                               f"ch1 pp {_f((lv.get('ch1') or {}).get('pk2pk'))}  "
                               f"ch2 pp {_f((lv.get('ch2') or {}).get('pk2pk'))}  "
-                              f"Hc {_f(lp.get('hc'), '.4g')}")
+                              f"phase {_f(lv.get('phase_21_deg'), '.2f')} deg")
         finally:
             sub.close(0)
 

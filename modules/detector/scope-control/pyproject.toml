@@ -2,7 +2,7 @@
 name = "scope-control"
 version = "0.2.0"
 license = "MIT"
-description = "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+, or a simulated MOKE bench): averaged traces, zero-phase filter, hysteresis-loop analysis"
+description = "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+, or a simulated bench): averaged triggered traces, zero-phase filter, XY view"
 requires-python = ">=3.11"
 dependencies = [
     "pyzmq>=25",    # the control service + client

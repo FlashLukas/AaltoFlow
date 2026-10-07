@@ -1,9 +1,9 @@
 """scope: a two-channel oscilloscope -- the Siglent SDS1000CML+ series (the
-lab's RS PRO RSDS1102CML+) over VISA, or a simulated MOKE bench.
+lab's RS PRO RSDS1102CML+) over VISA, or a simulated bench.
 
     config     -- every tunable number as dataclasses, with .ini save/load.
     analysis   -- trace length, the zero-phase filter, per-channel numbers and
-                  the hysteresis-loop numbers (numpy only).
+                  the phase between the channels (numpy only).
     backends   -- `base` (the interface: generic, N channels, capabilities),
                   `sim` (the simulated bench), `siglent` (the real scope).
     scope      -- the brain: adopts the scope's settings, owns the trace

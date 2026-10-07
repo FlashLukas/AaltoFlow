@@ -8,7 +8,7 @@ Each rule of scope.py has a test that fails without it:
   * refused when the scope is stopped / single-shot with averaging;
   * settings: queued, written, read back (snapped), echoed as asked;
   * a change made at the scope's front panel is adopted;
-  * physical units, the filter, the loop numbers end to end;
+  * physical units, the filter and the numbers end to end;
   * clipping at the screen edge is reported.
 """
 
@@ -135,28 +135,28 @@ def test_a_front_panel_change_is_adopted(system, monkeypatch):
     assert any("changed at the scope" in m for _, m in events)
 
 
-def test_units_filter_and_loop_end_to_end(system):
+def test_units_filter_and_numbers_end_to_end(system):
     scope, sim, cfg, events = system
-    scope.set_physical("ch1", scale=1 / cfg.sim.hall_V_per_mT, unit="mT")
+    scope.set_physical("ch1", scale=10.0, unit="A")   # a current probe at 0.1 V/A
     scope.set_filter(lowpass_Hz=3000.0)
     scope.set_averages(6)
     n, st = acquire(scope)
     smp = st["sample"]
-    assert smp["ch1"]["amplitude"] == pytest.approx(cfg.sim.field_amp_mT, rel=0.03)
-    assert smp["ch1"]["frequency"] == pytest.approx(cfg.sim.drive_Hz, rel=0.01)
-    assert smp["loop"]["hc"] == pytest.approx(cfg.sim.hc_mT, abs=0.5)
-    assert smp["loop"]["ms"] == pytest.approx(cfg.sim.ms_V, rel=0.05)
+    assert smp["ch1"]["amplitude"] == pytest.approx(10.0 * cfg.sim.ch1_amplitude_V, rel=0.03)
+    assert smp["ch1"]["frequency"] == pytest.approx(cfg.sim.frequency_Hz, rel=0.01)
+    assert smp["phase_21_deg"] == pytest.approx(cfg.sim.ch2_phase_deg, abs=2.0)
     assert smp["lowpass_Hz"] == 3000.0
-    assert scope.status()["ch1_unit"] == "mT"
-    # the simulated sample changes, the numbers follow
-    scope.set_sim("hc_mT", 25.0)
+    assert "loop" not in smp
+    assert scope.status()["ch1_unit"] == "A"
+    # the simulated signal changes, the numbers follow
+    scope.set_sim("ch2_phase_deg", -45.0)
     n, st = acquire(scope)
-    assert st["sample"]["loop"]["hc"] == pytest.approx(25.0, abs=0.5)
+    assert st["sample"]["phase_21_deg"] == pytest.approx(-45.0, abs=2.0)
 
 
 def test_clipping_is_reported(system):
     scope, sim, cfg, events = system
-    scope.set_vdiv("ch1", 0.05)           # the 1 V field sine goes off the screen
+    scope.set_vdiv("ch1", 0.05)           # the 1 V sine goes off the screen
     wait(scope, lambda s: s["ch1_vdiv_V"] == 0.05 and s["settings_settled"])
     scope.set_averages(2)
     n, st = acquire(scope)
@@ -182,44 +182,58 @@ def test_hardware_error_fails_a_running_acquisition(system, monkeypatch):
         scope.get_trace("sample")
 
 
-def test_bench_scene_triggers_on_the_square():
+def test_ext_trigger_puts_the_sync_edge_at_t0():
+    """The sync square on EXT rises where CH1's sine crosses zero going up:
+    with the trigger on EXT, that crossing sits at t = 0."""
     cfg = Config()
-    cfg.sim.scene = "bench"
     scope, sim = build_sim_system(cfg, seed=2)
     scope.start()
     try:
         scope.set_averages(2)
         n, st = acquire(scope)
         tr = scope.get_trace("sample")
-        # CH2 is the AFG's synchronous square, rising at the trigger (t = 0)
-        y = tr["ch2_raw"]
-        mid = (y.max() + y.min()) / 2
+        y = tr["ch1_raw"]
         i0 = int(np.argmin(np.abs(tr["time_s"])))
-        assert y[i0 + 5] > mid > y[i0 - 5]
+        assert y[i0 + 5] > 0 > y[i0 - 5]
     finally:
         scope.shutdown()
 
 
-def test_roll_range_refuses_acquire_and_record_s_follows_tdiv(system):
-    """Lab PC 2026-10-07: at 0.5 s/div the scope rolls, one record came in
-    120 s and an acquire never finished; record_s stayed at the 1 ms/div
-    value. Now: refused with the reason, and record_s follows the time/div."""
+def test_roll_only_in_auto_and_record_s_follows_tdiv(system):
+    """Lab PC 2026-10-07, raw: in NORMAL mode triggered records keep coming at
+    every time/div (one per ~8 s at 0.1 - 0.5 s/div) -- only AUTO at a slow
+    time/div rolls (one record in 120 s). So: refused only there, with the
+    reason; and record_s follows the time/div at once (it showed 0.64 s at
+    0.5 s/div, the old value, for ~2 s)."""
     scope, sim, cfg, events = system
     wait(scope, lambda s: s["records"] >= 2)
-    st = scope.status()
-    per_div = st["record_s"] / st["tdiv_s"]
+    # NORMAL (the sim boots in it) at 0.5 s/div: allowed, long records expected
     scope.set_tdiv(0.5)
+    st = scope.status()                       # at once, before the push
+    assert st["tdiv_s"] == 0.5 and st["record_s"] >= 14 * 0.5 - 1e-9
     st = wait(scope, lambda s: s["tdiv_s"] == 0.5 and s["settings_settled"])
-    assert st["rolling"] is True
-    assert st["record_s"] == pytest.approx(per_div * 0.5, rel=1e-6)
-    with pytest.raises(ValueError, match="ROLLS"):
+    assert st["rolling"] is False and st["trigger_mode"] == "normal"
+    # AUTO at 0.5 s/div: rolls -> refused, with the way out
+    scope.set_trigger_mode("auto")
+    assert scope.status()["rolling"] is True  # at once
+    with pytest.raises(ValueError, match="NORMAL"):
         scope.acquire()
     t_end = time.monotonic() + 2
-    while not any("ROLLS" in m for _, m in events) and time.monotonic() < t_end:
+    while not any("rolls" in m for _, m in events) and time.monotonic() < t_end:
         time.sleep(0.02)
-    assert any("ROLLS" in m for _, m in events)
+    assert any("rolls" in m for _, m in events)
     scope.set_tdiv(1e-3)
     st = wait(scope, lambda s: s["tdiv_s"] == 1e-3 and s["settings_settled"])
     assert st["rolling"] is False
+    scope.set_trigger_mode("normal")
+    wait(scope, lambda s: s["trigger_mode"] == "normal" and s["settings_settled"])
     scope.set_averages(1)
     acquire(scope)                                    # fine again
+
+
+def test_a_snapped_setting_is_reported(system):
+    """The scope snaps to its own steps (lab PC: TDIV 20 ms -> 10 ms): say so."""
+    scope, sim, cfg, events = system
+    scope.set_vdiv("ch1", 0.3)                # the sim snaps 0.3 -> 0.2
+    wait(scope, lambda s: s["ch1_vdiv_V_set"] == 0.3 and s["settings_settled"])
+    assert any("asked 0.3" in m and "set 0.2" in m for _, m in events)

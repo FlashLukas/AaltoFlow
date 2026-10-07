@@ -1298,10 +1298,10 @@ def _scope(theme, tab: int = 0):
     scope, _ = build_sim_system(cfg, seed=3)
 
     def warm_up(win):
-        # The MOKE bench: CH1 a Hall probe shown in mT, CH2 the intensity;
-        # a light low-pass, and one latched acquisition for the numbers.
-        win.ctrl.set_physical("ch1", scale=50.0, unit="mT", label="Field")
-        win.ctrl.set_physical("ch2", label="Intensity")
+        # CH1 through a current probe (0.1 V/A -> 10 A/V), CH2 in volts; a
+        # light low-pass
+        win.ctrl.set_physical("ch1", scale=10.0, unit="A", label="Current")
+        win.ctrl.set_physical("ch2", label="Signal")
         win.ctrl.set_filter(lowpass_Hz=2000.0)
         win.ctrl.set_averages(16)
         win.tabs.setCurrentIndex(tab)

@@ -77,10 +77,12 @@ def test_trace_and_scalar_detectors_share_one_acquire(scope):
     assert tr["type"] == "array" and tr["dims"][0]["name"] == "time"
     assert tr["dims"][0]["length"] == scope.cfg.acquisition.points
     assert tr["read"]["verb"] == "get_trace" and tr["read"]["args"] == {"which": "sample"}
-    groups = {by[i]["acquire"]["group"] for i in ("ch1", "ch2", "ch1_mean", "loop_hc", "phase_21")}
+    groups = {by[i]["acquire"]["group"] for i in ("ch1", "ch2", "ch1_mean", "phase_21")}
     assert groups == {"scope"}
-    assert by["loop_hc"]["acquire"]["target_key"] == "acq_id"
-    assert by["loop_hc"]["read_path"] == ["sample", "loop", "hc"]
+    assert by["phase_21"]["acquire"]["target_key"] == "acq_id"
+    assert by["phase_21"]["read_path"] == ["sample", "phase_21_deg"]
+    # a scope, not a loop analyser (Lukas 2026-10-07): no loop ids at all
+    assert not any(i.startswith("loop") or "loop" in i for i in by)
 
 
 def test_revision_follows_shape_not_values(scope):
@@ -93,9 +95,9 @@ def test_revision_follows_shape_not_values(scope):
     scope.set_keep_raw(False)
     scope.set_points(500)                     # trace length
     assert _by_id(build_manifest(scope))["ch1"]["dims"][0]["length"] == 500
-    scope.set_physical("ch1", unit="mT")      # units
+    scope.set_physical("ch1", unit="A")       # units
     by = _by_id(build_manifest(scope))
-    assert by["ch1"]["unit"] == "mT" and by["loop_hc"]["unit"] == "mT"
+    assert by["ch1"]["unit"] == "A" and by["ch1_mean"]["unit"] == "A"
 
 
 def test_timeout_grows_with_averages(scope):

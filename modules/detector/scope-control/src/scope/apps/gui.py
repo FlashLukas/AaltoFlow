@@ -1,4 +1,4 @@
-"""Front panel for the oscilloscope (real scope or the simulated MOKE bench).
+"""Front panel for the oscilloscope (real scope or the simulated bench).
 
     uv run scripts/run_gui.py                  # a private simulated bench
     uv run scripts/run_gui.py --connect HOST   # the running service
@@ -15,14 +15,13 @@ Layout:
           sent, and the poll never overwrites what you are typing.
   centre  two tabs (Lukas, 2026-10-07), each the full height:
           "X(t), Y(t)" -- the channels against time (CH2 on its own axis);
-          "XY / YX"    -- the hysteresis loop: loop Y against loop X, or
-                          swapped, background removed when that is on, Hc+
-                          and Hc- marked. Both in the channels' physical units.
+          "XY / YX"    -- the scope's XY mode: CH2 against CH1, or swapped.
+          Both in the channels' physical units.
           A cursor readout under each plot, in THAT plot's axis units.
   The three columns sit in a splitter: drag the borders to resize; the
   widths, the tab and the XY/YX choice are remembered per PC (QSettings).
-  right   averaging (with "312 / 500" and Restart), the filter, the loop
-          settings, the numbers (per channel + loop), Acquire, and the
+  right   averaging (with "312 / 500" and Restart), the filter, the numbers
+          (per channel, and the phase of CH2 against CH1), Acquire, and the
           generator card -- greyed when the instrument has no generator.
 """
 
@@ -40,9 +39,6 @@ from .control_bar import ControlBar, mark_always
 from ..control import ControlRefused
 
 _TRACE_PERIOD_MS = 120          # how often the live average is fetched
-_LOOP_ROWS = (("hc", "Hc"), ("hc_plus", "Hc+"), ("hc_minus", "Hc-"), ("bias", "bias"),
-              ("ms", "Ms"), ("mr", "Mr"), ("squareness", "Mr/Ms"), ("slope", "slope"),
-              ("area", "area"))
 
 
 def _gui_settings() -> QtCore.QSettings:
@@ -324,8 +320,8 @@ class MainWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(page); lay.setContentsMargins(6, 8, 6, 6)
         self.yt = self._plot("time", "s", "CH1", "")
         # CH2 on its OWN axis (right), as a scope scales each channel by its
-        # own V/div: a 0.4 V intensity next to a 100 mT field would otherwise
-        # be a flat line. A second ViewBox shares the time axis with the first.
+        # own V/div: a 0.4 V signal next to a 10 V one would otherwise be a
+        # flat line. A second ViewBox shares the time axis with the first.
         self.vb2 = pg.ViewBox()
         pi = self.yt.getPlotItem()
         pi.showAxis("right")
@@ -352,9 +348,8 @@ class MainWindow(QtWidgets.QMainWindow):
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page); lay.setContentsMargins(6, 8, 6, 6)
         bar = QtWidgets.QHBoxLayout()
-        self.swap_xy = QtWidgets.QCheckBox("YX: signal horizontal, field vertical")
-        self.swap_xy.setToolTip("Which channel is horizontal. The loop numbers do not "
-                                "change: they always treat loop X as the field.")
+        self.swap_xy = QtWidgets.QCheckBox("YX: CH2 horizontal, CH1 vertical")
+        self.swap_xy.setToolTip("Which channel is horizontal (XY = CH1 horizontal).")
         mark_always(self.swap_xy)
         self.swap_xy.setChecked(self._settings.value("swap_xy", False, type=bool))
         self.swap_xy.toggled.connect(lambda on: (self._remember("swap_xy", bool(on)),
@@ -362,12 +357,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addWidget(self.swap_xy); bar.addStretch(1)
         lay.addLayout(bar)
         self.xy = self._plot("X", "", "Y", "")
-        self.loop_curve = self.xy.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
-        self.hc_lines = []
-        for _ in range(2):
-            ln = pg.InfiniteLine(angle=90, movable=False,
-                                 pen=pg.mkPen(COLORS["accent_hi"], style=QtCore.Qt.DashLine))
-            self.xy.addItem(ln); self.hc_lines.append(ln)
+        self.xy_curve = self.xy.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
         lay.addWidget(self.xy, 1)
         self.xy_cursor = QtWidgets.QLabel(" "); self.xy_cursor.setObjectName("hint")
         lay.addWidget(self.xy_cursor)
@@ -416,20 +406,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.order = self._spin(1, 8, 0, "", 1)
         self._row(form, "Order", self.order, lambda: self.ctrl.set_filter(order=int(self.order.value())))
         hint = QtWidgets.QLabel("0 = off. The same filter on every channel, no phase "
-                                "shift: the loop is not tilted by it.")
+                                "shift: the channels stay time-aligned.")
         hint.setObjectName("hint"); hint.setWordWrap(True)
         lay.addLayout(form); lay.addWidget(hint)
-        col.addWidget(card)
-
-        card, lay = _card("Loop")
-        form = QtWidgets.QFormLayout(); form.setSpacing(6)
-        self.lx = self._combo(("ch1", "ch2"), lambda v: self.ctrl.set_loop(x=v))
-        self.ly = self._combo(("ch1", "ch2"), lambda v: self.ctrl.set_loop(y=v))
-        form.addRow("X", self.lx); form.addRow("Y", self.ly)
-        self.bg = QtWidgets.QCheckBox("subtract linear background")
-        self.bg.clicked.connect(lambda v: self._call(self.ctrl.set_analysis, None, bool(v)))
-        form.addRow("", self.bg)
-        lay.addLayout(form)
         col.addWidget(card)
 
         card, lay = _card("Measurement")
@@ -453,13 +432,11 @@ class MainWindow(QtWidgets.QMainWindow):
         rows = [("mean", "mean"), ("rms", "rms"), ("pk2pk", "pk-pk"),
                 ("amplitude", "amplitude"), ("frequency", "freq (Hz)")]
         self._value_rows = rows
-        self.table.setRowCount(len(rows) + 1 + len(_LOOP_ROWS))
+        self.table.setRowCount(len(rows) + 1)
         for i, (_, name) in enumerate(rows):
             self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(name))
         self.table.setItem(len(rows), 0, QtWidgets.QTableWidgetItem("phase 2-1"))
-        for j, (_, name) in enumerate(_LOOP_ROWS):
-            self.table.setItem(len(rows) + 1 + j, 0, QtWidgets.QTableWidgetItem("loop " + name))
-        self.table.setMinimumHeight(420)
+        self.table.setMinimumHeight(230)
         lay.addWidget(self.table)
         col.addWidget(card)
 
@@ -580,13 +557,11 @@ class MainWindow(QtWidgets.QMainWindow):
             put(self.tdiv, s.get("tdiv_s"), 1e3); put(self.delay, s.get("delay_s"), 1e3)
             put(self.tlevel, s.get("trigger_level_V"))
             for combo, key in ((self.tsrc, "trigger_source"), (self.tslope, "trigger_slope"),
-                               (self.tmode, "trigger_mode"), (self.lx, "loop_x"),
-                               (self.ly, "loop_y")):
+                               (self.tmode, "trigger_mode")):
                 put_combo(combo, s.get(key))
             put(self.avg, s.get("averages")); put(self.points, s.get("points"))
             put(self.lp, s.get("lowpass_Hz")); put(self.hp, s.get("highpass_Hz"))
             put(self.order, s.get("filter_order"))
-            self.bg.setChecked(bool(s.get("subtract_background", True)))
         finally:
             self._syncing = False
         if force:
@@ -643,14 +618,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.table.setItem(i, j + 1, QtWidgets.QTableWidgetItem(_fmt(vals.get(key), ".5g")))
         self.table.setItem(len(rows), 1, QtWidgets.QTableWidgetItem(
             _fmt(src.get("phase_21_deg"), ".2f") + " deg"))
-        loop = src.get("loop") or {}
-        ux = s.get(f"{s.get('loop_x', 'ch1')}_unit", "")
-        uy = s.get(f"{s.get('loop_y', 'ch2')}_unit", "")
-        units = {"hc": ux, "hc_plus": ux, "hc_minus": ux, "bias": ux, "ms": uy, "mr": uy,
-                 "squareness": "", "slope": f"{uy}/{ux}", "area": f"{ux}*{uy}"}
-        for k, (key, _) in enumerate(_LOOP_ROWS):
-            self.table.setItem(len(rows) + 1 + k, 1, QtWidgets.QTableWidgetItem(
-                f"{_fmt(loop.get(key), '.5g')} {units[key]}"))
 
     def _fetch_and_draw(self, s):
         which = "sample" if self.src.currentIndex() == 1 else "live"
@@ -670,23 +637,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 curve.setData(t, y)
         for ch, side in (("ch1", "left"), ("ch2", "right")):
             self.yt.setLabel(side, s.get(f"{ch}_label") or ch.upper(), units=units[ch])
-        lx, ly = s.get("loop_x", "ch1"), s.get("loop_y", "ch2")
-        x = tr.get(lx)
-        y = tr.get("loop_y") if tr.get("loop_y") is not None else tr.get(ly)
-        swap = self.swap_xy.isChecked()           # YX: the signal horizontal
-        if x is not None and y is not None and lx != ly:
-            h, v = (ly, lx) if swap else (lx, ly)
-            self.loop_curve.setData(*((y, x) if swap else (x, y)))
-            self.xy.setLabel("bottom", f"{s.get(f'{h}_label', h.upper())}", units=units[h])
-            self.xy.setLabel("left", f"{s.get(f'{v}_label', v.upper())}", units=units[v])
-        loop = tr.get("loop") or {}
-        for ln, key in zip(self.hc_lines, ("hc_plus", "hc_minus")):
-            val = _num(loop.get(key))
-            ln.setVisible(val is not None)
-            # Hc is a FIELD value: a vertical line normally, horizontal in YX
-            ln.setAngle(0 if swap else 90)
-            if val is not None:
-                ln.setValue(val)
+        x, y = tr.get("ch1"), tr.get("ch2")
+        swap = self.swap_xy.isChecked()           # YX: CH2 horizontal
+        if x is not None and y is not None:
+            h, v = ("ch2", "ch1") if swap else ("ch1", "ch2")
+            self.xy_curve.setData(*((y, x) if swap else (x, y)))
+            self.xy.setLabel("bottom", s.get(f"{h}_label") or h.upper(), units=units[h])
+            self.xy.setLabel("left", s.get(f"{v}_label") or v.upper(), units=units[v])
 
     def closeEvent(self, ev: QtGui.QCloseEvent):
         self.timer.stop()

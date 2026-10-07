@@ -15,8 +15,7 @@ Verbs (a reply means ACCEPTED; poll status for the effect):
   module settings  set_points {points}  set_averages {averages}  set_keep_raw {on}
                    set_filter {lowpass_Hz?, highpass_Hz?, order?}
                    set_physical {channel, scale?, offset?, unit?, label?}
-                   set_loop {x?, y?}  set_analysis {sat_fraction?, subtract_background?,
-                   normalise?}  restart_average {}  set_sim {name, value} (simulator)
+                   restart_average {}  set_sim {name, value} (simulator)
   measuring        acquire {} -> {acq_id}   abort {} (safety)   stop {} (safety, = abort)
                    get_trace {which: "live"|"sample"}   get_time {}   get_sample {}
   + status, info, get_config, set_config, describe, shutdown.
@@ -266,13 +265,6 @@ class ScopeService:
             elif cmd == "set_physical":
                 v.set_physical(ch, _opt_float(msg, "scale"), _opt_float(msg, "offset"),
                                msg.get("unit"), msg.get("label"))
-            elif cmd == "set_loop":
-                v.set_loop(msg.get("x"), msg.get("y"))
-            elif cmd == "set_analysis":
-                v.set_analysis(_opt_float(msg, "sat_fraction"),
-                               None if msg.get("subtract_background") is None
-                               else _bool(msg["subtract_background"]),
-                               None if msg.get("normalise") is None else _bool(msg["normalise"]))
             elif cmd == "restart_average":
                 v.restart_average()
             elif cmd == "set_sim":
@@ -319,7 +311,7 @@ class ScopeService:
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             if cmd in ("set_points", "set_averages", "set_keep_raw", "set_physical",
-                       "set_channel_enabled", "set_analysis", "set_loop"):
+                       "set_channel_enabled"):
                 self._rev_at = 0.0          # the manifest moved: recompute at once
             return {"ok": True}
         except (KeyError, ValueError, TypeError) as exc:

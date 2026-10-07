@@ -7,7 +7,7 @@ Two ZeroMQ sockets, same design as every module in the suite:
 A TRACE never rides in the status stream (2 x 1000 numbers ten times a second
 for nothing). It is fetched on request with `get_trace`, as JSON lists of
 floats (null for NaN). The status carries the NUMBERS (per-channel values,
-loop numbers) of the live average and of the latched sample.
+phase) of the live average and of the latched sample.
 """
 
 from __future__ import annotations

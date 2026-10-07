@@ -1,6 +1,6 @@
 """Run the oscilloscope service -- simulated (default) or the real scope (--real).
 
-    uv run scripts/run_service.py                       # the simulated bench (MOKE loop)
+    uv run scripts/run_service.py                       # the simulated bench (two test signals)
     uv run scripts/run_service.py --real --visa "USB0::0xF4EC::0xEE3A::<serial>::INSTR"
     uv run scripts/run_service.py --cmd-port 5633 --pub-port 5634
 
@@ -67,7 +67,7 @@ def main() -> int:
         cfg.hardware.visa = args.visa
 
     spec = build_scope(cfg, args.real)
-    # The module's settings (physical units = the Hall calibration, averaging,
+    # The module's settings (physical units = a probe's calibration, averaging,
     # filter, loop) are saved to scope.ini at every change, so a restart keeps
     # them (Lukas, 2026-10-07: "need to be saved"). A --config file given on
     # the command line is the one written.
@@ -75,7 +75,7 @@ def main() -> int:
     if args.real:
         print(f"REAL scope at {cfg.hardware.visa}")
     else:
-        print(f"SIMULATED scope (bench: {cfg.sim.scene})")
+        print("SIMULATED scope (two test signals + a sync square)")
     try:
         ScopeService(spec, host=args.host, cmd_port=args.cmd_port,
                       pub_port=args.pub_port).serve_forever()

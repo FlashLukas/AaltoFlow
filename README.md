@@ -801,7 +801,7 @@ python tools/render_all.py clMag       # or just one
 | 33 | `sr7230-control` | `sr7230` | 5621/5622 | Ametek Signal Recovery 7230 DSP lock-in (simulation; untested on the instrument) |
 | 34 | `k2450-control` | `k2450` | 5623/5624 | Keithley 2450 SourceMeter (simulation; untested on the instrument) |
 | 38 | `afg-control` | `afg` | 5631/5632 | Tektronix AFG1062 two-channel function generator, CH2 can follow CH1 as a synchronous trigger (simulation; untested on the instrument) |
-| 39 | `scope-control` | `scope` | 5633/5634 | Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+): averaged traces, zero-phase filter, hysteresis-loop analysis for MOKE (simulation; untested on the instrument) |
+| 39 | `scope-control` | `scope` | 5633/5634 | Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+): averaged triggered traces in physical units, zero-phase filter, XY view (on the instrument since 2026-10-07) |
 
 Each project folder lives in `modules/<category>/` (the links above go there).
 Instrument *n* gets `cmd = 5555 + 2n` and `pub = cmd + 1` by default, declared in

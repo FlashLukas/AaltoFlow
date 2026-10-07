@@ -14,14 +14,11 @@ behaves like one where it matters for the module:
   * V/div and time/div snap to the instrument's steps (the brain reads back);
   * fresh noise in every record, so averaging really averages.
 
-The world (config group `sim`):
-  scene "moke"  CH1 = Hall probe: hall_V_per_mT * B, B = field_amp * sin(phase);
-                CH2 = light intensity: a hysteresis loop in B (tanh branches
-                with coercive field hc and bias), Kerr half-jump ms_V, a linear
-                Faraday slope, noise and slow drift, around 0.5 V;
-                EXT = a sync square, high for the first half period.
-  scene "bench" the lab bench of 2026-10-06: CH1 = the AFG's sine,
-                CH2 = its synchronous square, which also feeds EXT.
+The world (config group `sim`): two test signals and a sync --
+  CH1  a sine;
+  CH2  the same frequency, phase-shifted, with some 2nd harmonic and an
+       offset (so the XY view is a tilted, slightly distorted ellipse);
+  EXT  a sync square, high for the first half period.
 """
 
 from __future__ import annotations
@@ -122,23 +119,14 @@ class SimulatedScope:
         """Volts on CH1, CH2 and EXT at drive `phase` (radians, may be an array)."""
         sim = self.sim
         sync = np.where(np.mod(phase, 2 * np.pi) < np.pi, sim.square_V, 0.0)
-        if sim.scene == "bench":
-            ch1 = sim.field_amp_mT * sim.hall_V_per_mT * np.sin(phase)
-            ch2 = sync.copy()
-            ext = sync
-        else:
-            b = sim.field_amp_mT * np.sin(phase)
-            rising = np.cos(phase) > 0                    # dB/dt > 0
-            width = max(0.05 * sim.field_amp_mT, 1e-6)    # switching width
-            centre = np.where(rising, sim.hc_mT + sim.bias_mT, -sim.hc_mT + sim.bias_mT)
-            m = np.tanh((b - centre) / width)
-            ch1 = sim.hall_V_per_mT * b
-            ch2 = 0.5 + sim.ms_V * m + sim.slope_V_per_mT * b + sim.drift_V_per_s * t_abs
-            ext = sync
+        ch1 = sim.ch1_amplitude_V * np.sin(phase)
+        p2 = phase + np.radians(sim.ch2_phase_deg)
+        ch2 = sim.ch2_offset_V + sim.ch2_amplitude_V * (
+            np.sin(p2) + sim.ch2_harmonic * np.sin(2 * p2))
         if noise and sim.noise_V > 0:
-            ch1 = ch1 + self._rng.normal(0.0, sim.noise_V / 2, np.shape(phase))
+            ch1 = ch1 + self._rng.normal(0.0, sim.noise_V, np.shape(phase))
             ch2 = ch2 + self._rng.normal(0.0, sim.noise_V, np.shape(phase))
-        return {"ch1": ch1, "ch2": ch2, "ext": ext, "ext5": ext, "line": np.sin(phase)}
+        return {"ch1": ch1, "ch2": ch2, "ext": sync, "ext5": sync, "line": np.sin(phase)}
 
     def _trigger_phase(self) -> float | None:
         """Drive phase at which the trigger condition is met, or None."""
@@ -161,7 +149,7 @@ class SimulatedScope:
         if mode == "stop":
             return False
         now = self._clock()
-        period = 1.0 / max(self.sim.drive_Hz, 1e-3)
+        period = 1.0 / max(self.sim.frequency_Hz, 1e-3)
         span = _H_DIV * self.settings["tdiv_s"]
         # a record needs its own span plus ~5 ms of dead time, and the next
         # trigger edge; never faster than the drive repeats
@@ -186,7 +174,7 @@ class SimulatedScope:
         # span/2 + i / sample_rate, i.e. a POSITIVE delay moves the window
         # LATER, the trigger stays at t = 0
         t = np.linspace(-span / 2, span / 2, _NATIVE_POINTS, endpoint=False) + s["delay_s"]
-        phase = phi + 2 * np.pi * self.sim.drive_Hz * t
+        phase = phi + 2 * np.pi * self.sim.frequency_Hz * t
         sig = self._signals(phase, t_abs + t, noise=True)
         out = {}
         for ch in ("ch1", "ch2"):

@@ -39,8 +39,8 @@ def test_window_builds_draws_and_sends(app):
     try:
         _pump(app, win, lambda s: s["running_n"] >= 3)
         win._force_fetch(); win._refresh()
-        x, y = win.loop_curve.getData()
-        assert x is not None and len(x) == cfg.acquisition.points       # the loop is drawn
+        x, y = win.xy_curve.getData()
+        assert x is not None and len(x) == cfg.acquisition.points       # XY is drawn
         assert sim.writes == []                                         # start only read
         assert win.inp["ch2"]["vdiv"].value() == pytest.approx(0.1)     # boxes = the scope
         # a scope setting: edit + Set
@@ -50,14 +50,15 @@ def test_window_builds_draws_and_sends(app):
         _pump(app, win, lambda s: s["tdiv_s_set"] == pytest.approx(2e-3) and s["settings_settled"])
         assert win.tdiv not in win._dirty
         # module settings and the quantity
-        win.inp["ch1"]["unit"].setText("mT"); win.inp["ch1"]["scale"].setValue(50.0)
+        win.inp["ch1"]["unit"].setText("A"); win.inp["ch1"]["scale"].setValue(10.0)
         win._send_quantity("ch1")
-        _pump(app, win, lambda s: s["ch1_unit"] == "mT")
+        _pump(app, win, lambda s: s["ch1_unit"] == "A")
         # acquire through the button; the table shows the latched numbers
         win.acq_btn.click()
         _pump(app, win, lambda s: s["acq_id"] == 1 and not s["acquiring"], timeout=10)
         win.src.setCurrentIndex(1); win._refresh()
-        assert win.table.item(len(win._value_rows) + 1, 1).text().endswith("mT")
+        assert win.table.item(len(win._value_rows), 1).text().endswith("deg")
+        assert win.table.rowCount() == len(win._value_rows) + 1        # no loop rows
         assert not win.gen_card.isEnabled()                              # no generator
         assert "," not in win.inp["ch1"]["scale"].text()                # C locale
     finally:
@@ -92,9 +93,8 @@ def test_two_tabs_swap_cursor_units_and_splitter(app):
         _pump(app, win, lambda s: s["running_n"] >= 3)
         win.tabs.setCurrentIndex(1)
         win._force_fetch(); win._refresh(); app.processEvents()
-        x, y = win.loop_curve.getData()
-        assert win.hc_lines[0].angle == 90
-        # the loop Y (CH2, ~0.3..0.7 V) is shown in mV: the readout must be too
+        x, y = win.xy_curve.getData()
+        # CH2 (~0.3..0.7 V) is shown in mV: the readout must be too
         left = win.xy.getPlotItem().getAxis("left")
         for _ in range(20):
             app.processEvents(); time.sleep(0.02)
@@ -105,13 +105,12 @@ def test_two_tabs_swap_cursor_units_and_splitter(app):
         mid = vb.viewRect().center()
         win._cursor_xy(vb.mapViewToScene(mid))
         assert "cursor" in win.xy_cursor.text() and "V" in win.xy_cursor.text()
-        # YX: the signal horizontal, Hc lines horizontal
+        # YX: CH2 horizontal
         win.swap_xy.setChecked(True)
         win._refresh()
-        xs, ys = win.loop_curve.getData()
-        # horizontal is now the intensity (~0.3..0.7 V), vertical the field (+-1 V)
+        xs, ys = win.xy_curve.getData()
+        # horizontal is now CH2 (~0.3..0.7 V), vertical CH1 (+-1 V)
         assert 0.1 < xs.min() and xs.max() < 0.9 and ys.max() - ys.min() > 1.5
-        assert win.hc_lines[0].angle == 0
         # the splitter: three panes, the left one at least as wide as it needs
         assert win.body.count() == 3
         assert win.left_panel.minimumWidth() >= win.left_panel.widget().minimumSizeHint().width()

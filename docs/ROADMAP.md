@@ -82,6 +82,10 @@ original point; Z changed; a failing autofocus still returns; Kill AF).
 
 ### Oscilloscope module (first: Digilent Analog Discovery 3) for MOKE hysteresis loops (2026-10-03, spec agreed)
 
+**2026-10-07, Lukas: the scope module is a plain SCOPE** -- the loop
+analysis (Hc, Ms, ...) below was removed from it and belongs in the AaltoView
+processing module; the scope records the traces (and keeps the XY view).
+
 **BUILT 2026-10-06** as `scope-control` (simulation + the Siglent SDS1000CML+
 backend, untested on the instrument). Still open from this spec: the AD3
 backend with its Generator / Supplies (copy afg-control's generator brain),

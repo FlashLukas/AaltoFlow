@@ -54,11 +54,12 @@ def test_info(pair):
 def test_acquire_blocking_returns_traces_and_numbers(pair):
     _, cli, _ = pair
     cli.set_averages(2)
-    cli.set_physical("ch1", scale=50.0, unit="mT")
-    wait_for(cli, lambda s: s["ch1_unit"] == "mT" and s["averages"] == 2)
+    cli.set_physical("ch1", scale=10.0, unit="A")
+    wait_for(cli, lambda s: s["ch1_unit"] == "A" and s["averages"] == 2)
     tr = cli.acquire_blocking(timeout_s=10)
     assert isinstance(tr["ch1"], np.ndarray) and tr["ch1"].size == 1000
-    assert tr["loop"]["hc"] == pytest.approx(12.0, abs=0.6)
+    assert tr["ch1_values"]["amplitude"] == pytest.approx(10.0, rel=0.03)
+    assert tr["phase_21_deg"] == pytest.approx(60.0, abs=2.0)
     assert np.allclose(cli.get_time(), tr["time_s"])
     live = cli.get_trace("live")
     assert live["ch2"].size == 1000
@@ -92,9 +93,9 @@ def test_stopped_scope_refuses_acquire(pair):
 
 def test_set_config_text_bool_and_shutdown(pair):
     svc, cli, _ = pair
-    r = cli._cmd({"cmd": "set_config", "config": {"analysis": {"subtract_background": "false"}}})
+    r = cli._cmd({"cmd": "set_config", "config": {"acquisition": {"keep_raw": "false"}}})
     assert r["ok"]
-    wait_for(cli, lambda s: s["subtract_background"] is False)
+    wait_for(cli, lambda s: s["keep_raw"] is False)
     r = cli._cmd({"cmd": "shutdown", "keep_outputs": "false"})   # text: parsed, gotcha #3
     assert r["ok"] and r["stopping"] and r["kept_outputs"] is False
 
@@ -111,10 +112,10 @@ def test_restart_keeps_the_scope_untouched(pair):
 
 
 def test_quantity_survives_a_restart_and_shapes_describe(tmp_path):
-    """Lukas 2026-10-07: the QUANTITY settings (the Hall calibration) "need to
+    """Lukas 2026-10-07: the QUANTITY settings (a probe's calibration) "need to
     be saved". Every change goes to scope.ini at once (atomically); a new
     service started from that file has them -- and describe's detector units
-    follow at once (describe_rev moves), so a scan records mT, not V."""
+    follow at once (describe_rev moves), so a scan records A, not V."""
     from scope.config import Config as C
     ini = tmp_path / "scope.ini"
     scope, _ = build_sim_system(C(), seed=1)
@@ -125,13 +126,12 @@ def test_quantity_survives_a_restart_and_shapes_describe(tmp_path):
     try:
         cli.start()
         rev0 = cli._cmd({"cmd": "status"})["status"]["describe_rev"]
-        cli.set_physical("ch1", scale=2500.0, unit="mT", label="Field")
+        cli.set_physical("ch1", scale=10.0, unit="A", label="Current")
         cli.set_averages(64)
         cli.set_filter(lowpass_Hz=1500.0)
-        st = wait_for(cli, lambda s: s["ch1_unit"] == "mT" and s["describe_rev"] != rev0)
+        st = wait_for(cli, lambda s: s["ch1_unit"] == "A" and s["describe_rev"] != rev0)
         by = {p["id"]: p for p in cli.describe()["parameters"]}
-        assert by["ch1"]["unit"] == "mT" and by["ch1_mean"]["unit"] == "mT"
-        assert by["loop_hc"]["unit"] == "mT"
+        assert by["ch1"]["unit"] == "A" and by["ch1_mean"]["unit"] == "A"
     finally:
         cli.shutdown()
         svc.stop()
@@ -139,8 +139,8 @@ def test_quantity_survives_a_restart_and_shapes_describe(tmp_path):
         svc._pub_t.join(timeout=2.0)
     assert ini.is_file() and not (tmp_path / "scope.ini.tmp").exists()
     back = C.load(str(ini))                      # what the next start reads
-    assert back.channel_1.phys_scale == 2500.0 and back.channel_1.phys_unit == "mT"
-    assert back.channel_1.phys_label == "Field"
+    assert back.channel_1.phys_scale == 10.0 and back.channel_1.phys_unit == "A"
+    assert back.channel_1.phys_label == "Current"
     assert back.acquisition.averages == 64 and back.filter.lowpass_Hz == 1500.0
 
 

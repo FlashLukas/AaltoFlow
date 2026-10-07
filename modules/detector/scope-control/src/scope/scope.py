@@ -7,14 +7,15 @@ WHAT IT DOES WITH EVERY TRIGGERED RECORD
     -> into the RUNNING AVERAGE: the mean of the last `averages` records
        ("312 / 500" in the GUI; "Restart average" empties it)
     -> filtered (zero-phase, identical on all channels) for display
-    -> per-channel numbers and the loop numbers, live.
+    -> per-channel numbers (mean, rms, peak-to-peak, amplitude, frequency)
+       and the phase of CH2 against CH1, live.
 
 THE SCAN-SAFE READ: `acquire()` returns an id at once. The trace thread then
 averages the next `averages` FRESH records -- the first record that becomes
 ready after the trigger is skipped, because it may have been captured just
 before the trigger (the scope's "new data" flag says only that a record was
 finished, not when it began) -- and latches the result as THE sample:
-filtered (and, with keep_raw, unfiltered) traces, the numbers, the loop.
+filtered (and, with keep_raw, unfiltered) traces and the numbers.
 Callers wait until status shows `acq_id` == their id AND `acquiring` False.
 A change of any setting that shapes a record (V/div, offset, time/div,
 trigger, points, units) RESTARTS a running acquisition and empties the
@@ -51,6 +52,8 @@ from .config import (Config, CHANNEL_NAMES, COUPLINGS, TRIGGER_SOURCES, TRIGGER_
                      TRIGGER_MODES)
 
 _NAN = float("nan")
+#: divisions across the scope's screen (RSDS1102CML+: 14; the memory holds more)
+_SCREEN_DIV = 14.0
 _SETTINGS_REREAD_S = 3.0            # how often the scope's settings are re-read
 
 #: limits for the module's own numbers (sanity, not physics)
@@ -91,6 +94,7 @@ class Scope:
         self._requested: dict = {}          # what was last ASKED, per setting key
         self._pending: list = []            # setting writes waiting for the thread
         self._settings_gen = 0              # bumped per request; done when pushed + read
+        self._pending_keys: set = set()     # settings queued, not yet pushed + read back
         self._settings_done = 0
         self._rev = 0                       # bumped by any change that shapes a record
         self._records = 0                   # triggered records seen since start
@@ -114,7 +118,7 @@ class Scope:
         self._stop = threading.Event()
         self._on_event = lambda level, msg: None
         # Where the MODULE's settings are kept on this PC (physical units --
-        # the Hall calibration --, averaging, points, filter, loop): set by
+        # a probe's calibration --, averaging, points, filter): set by
         # run_service.py to scope.ini next to the project. Every change is
         # written there at once, atomically, so a restart (also a Restart that
         # keeps the instrument's state) does not lose a calibration. None =
@@ -227,6 +231,7 @@ class Scope:
             prefix = {"timebase": "", "trigger": "trigger_"}.get(kind, f"{kind}_")
             for k, v in values.items():
                 self._requested[f"{prefix}{k}"] = v
+                self._pending_keys.add(f"{prefix}{k}")
         self._restart(f"{what}")
 
     def set_channel_enabled(self, ch, on: bool) -> None:
@@ -345,42 +350,13 @@ class Scope:
                       f"{c.phys_offset:+g} {c.phys_unit}")
         self._persist()
 
-    def set_loop(self, x: str | None = None, y: str | None = None) -> None:
-        a = self.cfg.analysis
-        if x is not None:
-            a.loop_x = parse_channel(x)
-        if y is not None:
-            a.loop_y = parse_channel(y)
-        self._emit("info", f"loop: {a.loop_y.upper()} against {a.loop_x.upper()}")
-        self._persist()
-
-    def set_analysis(self, sat_fraction: float | None = None,
-                     subtract_background: bool | None = None,
-                     normalise: bool | None = None) -> None:
-        a = self.cfg.analysis
-        if sat_fraction is not None:
-            a.sat_fraction = min(max(_finite(sat_fraction, "fraction"), 0.3), 0.98)
-        if subtract_background is not None:
-            a.subtract_background = bool(subtract_background)
-        if normalise is not None:
-            a.normalise = bool(normalise)
-        self._emit("info", f"loop analysis: ends above {a.sat_fraction:g} of max |X|, "
-                           f"background {'subtracted' if a.subtract_background else 'kept'}")
-        self._persist()
-
     def set_sim(self, name: str, value) -> None:
-        """SIMULATOR only: change the pretend bench (e.g. the coercive field)."""
+        """SIMULATOR only: change the pretend bench (e.g. CH2's phase shift)."""
         if not self.simulated:
             raise ValueError("only the simulator has a pretend bench")
         if not hasattr(self.cfg.sim, name):
             raise ValueError(f"unknown sim parameter {name!r}")
-        cur = getattr(self.cfg.sim, name)
-        if isinstance(cur, str):
-            if name == "scene" and value not in ("moke", "bench"):
-                raise ValueError("scene must be 'moke' or 'bench'")
-            setattr(self.cfg.sim, name, str(value))
-        else:
-            setattr(self.cfg.sim, name, _finite(value, name))
+        setattr(self.cfg.sim, name, _finite(value, name))
         self._emit("info", f"sim {name} = {value}")
 
     def restart_average(self) -> None:
@@ -406,19 +382,35 @@ class Scope:
 
     # ---- the scan-safe read ----------------------------------------------------------
 
+    def _setting(self, key: str, default):
+        """A scope setting as it will be: the value ASKED while it is still
+        queued (lab PC 2026-10-07: after set_tdiv the status showed the old
+        time/div, record_s and roll state for up to ~2 s), else what the scope
+        reported."""
+        with self._lock:
+            if key in self._pending_keys:
+                return self._requested.get(key, default)
+            return self._actual.get(key, default)
+
     def _tdiv(self) -> float:
-        return float(self._actual.get("tdiv_s", self.cfg.timebase.tdiv_s) or 0.0)
+        return float(self._setting("tdiv_s", self.cfg.timebase.tdiv_s) or 0.0)
 
     def record_s(self) -> float:
-        """How long one record lasts at the CURRENT time/div: divisions per
-        record (learned from the records seen) x time/div. Follows a time/div
-        change at once (lab PC 2026-10-07: it stayed at the old value until
-        the next record arrived -- which at a slow time base was never)."""
-        return self._div_per_record * self._tdiv()
+        """How long one record lasts at the CURRENT time/div: at least the
+        screen (14 divisions -- the lab's RSDS shows 14), or the divisions per
+        record learned from full records (41 at 1 ms/div on the RSDS1102CML+).
+        Follows a time/div change at once."""
+        return max(_SCREEN_DIV, self._div_per_record) * self._tdiv()
 
     def rolling(self) -> bool:
-        """At this time/div the scope rolls and makes no triggered records."""
-        return self._tdiv() >= float(self.cfg.hardware.roll_tdiv_s) > 0
+        """AUTO trigger mode at a slow time/div: the scope free-runs / rolls and
+        makes no triggered records (lab PC 2026-10-07: one record in 120 s at
+        0.5 s/div in AUTO). In NORMAL mode triggered records still come at
+        every time/div, slowly -- measured one per ~8 s at 0.1 - 0.5 s/div --
+        so NORMAL is never "rolling"."""
+        mode = self._setting("trigger_mode", self.cfg.trigger.mode)
+        return (mode == "auto"
+                and self._tdiv() >= float(self.cfg.hardware.roll_tdiv_s) > 0)
 
     def acquire(self) -> int:
         """Start an acquisition; returns its id at once (see module docstring).
@@ -426,16 +418,18 @@ class Scope:
         SINGLE mode with more than one trace to average."""
         if not self._connected:
             raise ValueError("not connected")
-        mode = self.cfg.trigger.mode
+        mode = self._setting("trigger_mode", self.cfg.trigger.mode)
         if mode == "stop":
             raise ValueError("the scope is stopped: no new traces will come "
                              "(set the trigger mode to normal or auto)")
         if self.rolling():
             raise ValueError(
-                f"at {self._tdiv():g} s/div the scope ROLLS: it makes no triggered "
-                f"records, so there is nothing to average in step (lab PC: one record "
-                f"in 120 s at 0.5 s/div). Use a time/div faster than "
-                f"{self.cfg.hardware.roll_tdiv_s:g} s/div for loops and scans.")
+                f"at {self._tdiv():g} s/div in AUTO trigger mode the scope free-runs "
+                f"(rolls): it makes no triggered records to average (lab PC: one record "
+                f"in 120 s). Set the trigger mode to NORMAL -- triggered records then "
+                f"come at any time/div, one per record length (~{self.record_s():.3g} s "
+                f"here) -- or use a time/div faster than "
+                f"{self.cfg.hardware.roll_tdiv_s:g} s/div.")
         if mode == "single" and int(self.cfg.acquisition.averages) > 1:
             raise ValueError("single-shot mode gives ONE trace, the acquisition wants "
                              f"{self.cfg.acquisition.averages}: use normal mode")
@@ -496,7 +490,7 @@ class Scope:
             return list(self._live_t)
 
     def _process(self, t: np.ndarray, raw: dict, n: int) -> dict:
-        """Filter, numbers and loop for an averaged record (pure; no lock)."""
+        """Filter and numbers for an averaged record (pure; no lock)."""
         f = self.cfg.filter
         dt = float(t[1] - t[0]) if t.size > 1 else 0.0
         filt = {ch: analysis.zero_phase(y, dt, f.lowpass_Hz, f.highpass_Hz, f.order)
@@ -513,16 +507,6 @@ class Scope:
             out["phase_21_deg"] = analysis.phase_deg(t, filt["ch1"], filt["ch2"])
         else:
             out["phase_21_deg"] = _NAN
-        a = self.cfg.analysis
-        if a.loop_x in filt and a.loop_y in filt and a.loop_x != a.loop_y:
-            loop = analysis.loop_numbers(filt[a.loop_x], filt[a.loop_y],
-                                         a.sat_fraction, a.subtract_background)
-            out["loop_y"] = loop.pop("y_corrected")
-            out["loop"] = loop
-            if a.normalise:
-                out["loop_y_norm"] = analysis.normalised(out["loop_y"], loop["ms"], loop["mid"])
-        else:
-            out["loop"] = {k: _NAN for k in analysis.LOOP_KEYS}
         return out
 
     # ---- status ------------------------------------------------------------------------
@@ -546,9 +530,6 @@ class Scope:
                   "keep_raw": bool(c.acquisition.keep_raw),
                   "lowpass_Hz": c.filter.lowpass_Hz, "highpass_Hz": c.filter.highpass_Hz,
                   "filter_order": int(c.filter.order),
-                  "loop_x": c.analysis.loop_x, "loop_y": c.analysis.loop_y,
-                  "sat_fraction": c.analysis.sat_fraction,
-                  "subtract_background": bool(c.analysis.subtract_background),
                   "settings_settled": (self._connected and not self._hw_error
                                        and self._settings_done == self._settings_gen),
                   "acq_id": self._acq_id, "acquiring": a is not None,
@@ -558,24 +539,30 @@ class Scope:
             for ch in CHANNEL_NAMES:
                 ch_cfg = c.channel(ch)
                 for k in ("enabled", "vdiv_V", "offset_V", "coupling", "probe"):
-                    st[f"{ch}_{k}"] = self._actual.get(f"{ch}_{k}", getattr(ch_cfg, k))
+                    st[f"{ch}_{k}"] = self._shown(f"{ch}_{k}", getattr(ch_cfg, k))
                     st[f"{ch}_{k}_set"] = self._requested.get(f"{ch}_{k}", getattr(ch_cfg, k))
                 st[f"{ch}_unit"] = ch_cfg.phys_unit
                 st[f"{ch}_label"] = ch_cfg.phys_label or ch.upper()
                 st[f"{ch}_phys_scale"] = ch_cfg.phys_scale
                 st[f"{ch}_phys_offset"] = ch_cfg.phys_offset
             for k in ("tdiv_s", "delay_s"):
-                st[k] = self._actual.get(k, getattr(c.timebase, k))
+                st[k] = self._shown(k, getattr(c.timebase, k))
                 st[f"{k}_set"] = self._requested.get(k, getattr(c.timebase, k))
             st["sample_rate_Hz"] = self._actual.get("sample_rate_Hz", _NAN)
             if self.simulated:                  # the pretend bench's knobs
-                for k in ("hc_mT", "ms_V", "drive_Hz", "noise_V"):
+                for k in ("frequency_Hz", "ch2_phase_deg", "noise_V"):
                     st[f"sim_{k}"] = getattr(c.sim, k)
             for k in ("source", "level_V", "slope", "mode"):
-                st[f"trigger_{k}"] = self._actual.get(f"trigger_{k}", getattr(c.trigger, k))
+                st[f"trigger_{k}"] = self._shown(f"trigger_{k}", getattr(c.trigger, k))
                 st[f"trigger_{k}_set"] = self._requested.get(f"trigger_{k}",
                                                              getattr(c.trigger, k))
         return st
+
+    def _shown(self, key: str, default):
+        """Lock held: the queued value of a pending setting, else the scope's."""
+        if key in self._pending_keys:
+            return self._requested.get(key, default)
+        return self._actual.get(key, default)
 
     def _trigger_rate_locked(self) -> float:
         ts = self._trigger_times
@@ -647,9 +634,10 @@ class Scope:
         roll = self.rolling()
         if roll and not self._roll_warned:
             self._roll_warned = True
-            self._emit("warn", f"{self._tdiv():g} s/div: the scope ROLLS -- no triggered "
-                               f"records, acquisitions are refused until the time/div "
-                               f"is faster than {self.cfg.hardware.roll_tdiv_s:g} s/div")
+            self._emit("warn", f"{self._tdiv():g} s/div in AUTO: the scope rolls -- no "
+                               f"triggered records; acquisitions are refused (set the "
+                               f"trigger mode to NORMAL, or a time/div faster than "
+                               f"{self.cfg.hardware.roll_tdiv_s:g} s/div)")
         elif not roll:
             self._roll_warned = False
         with self._hw:
@@ -685,9 +673,31 @@ class Scope:
                     self.backend.set_trigger(**values)
             got = self.backend.read_settings()
         self._adopt(got)
+        snapped = []
         with self._lock:
             self._settings_done = pending[-1][0]
             self._last_reread = self._clock()
+            still_queued = set()
+            for _, kind, values in self._pending:          # asked again meanwhile
+                prefix = {"timebase": "", "trigger": "trigger_"}.get(kind, f"{kind}_")
+                still_queued |= {f"{prefix}{k}" for k in values}
+            for _, kind, values in pending:
+                prefix = {"timebase": "", "trigger": "trigger_"}.get(kind, f"{kind}_")
+                for k, asked in values.items():
+                    key = f"{prefix}{k}"
+                    if key not in still_queued:
+                        self._pending_keys.discard(key)
+                    held = self._actual.get(key)
+                    # the scope snaps to its own steps (lab PC 2026-10-07: TDIV
+                    # 20 ms -> 10 ms, 200 ms -> 100 ms; 50 / 100 / 500 ms
+                    # stick): say so, the value it HOLDS is what is shown
+                    if (isinstance(asked, float) and isinstance(held, (int, float))
+                            and not isinstance(held, bool)
+                            and abs(held - asked) > 1e-3 * max(abs(asked), 1e-12)):
+                        snapped.append(f"{key.replace('_', ' ')}: asked {asked:g}, "
+                                       f"the scope set {held:g}")
+        for msg in snapped:
+            self._emit("warn", msg)
         self._restart(None)
 
     def _take(self, t, volts: dict, rev0: int, now: float) -> None:
@@ -709,7 +719,10 @@ class Scope:
         if len(t) > 1:
             self._record_s = float(t[-1] - t[0])   # for the acquisition timeout
             tdiv = self._tdiv()
-            if tdiv > 0:
+            # learn the record length only from a FULL record (at least the
+            # screen): at 0.5 s/div a short 0.64 s record once taught the module
+            # a record of 1.3 divisions (lab PC 2026-10-07)
+            if tdiv > 0 and self._record_s >= 0.9 * _SCREEN_DIV * tdiv:
                 self._div_per_record = self._record_s / tdiv
         latched = None
         with self._lock:
@@ -744,7 +757,6 @@ class Scope:
                         sample = {"acq_id": a["id"], "time": time.time(), "averages": a["n"],
                                   "clipped": sorted(a["clipped"]),
                                   "phase_21_deg": proc["phase_21_deg"],
-                                  "loop": dict(proc["loop"]),
                                   "lowpass_Hz": proc["lowpass_Hz"],
                                   "highpass_Hz": proc["highpass_Hz"]}
                         for ch in mean:
@@ -759,7 +771,7 @@ class Scope:
         # live numbers (outside the lock: a few ms of numpy)
         mean = {ch: np.mean([r[ch] for r in recs], axis=0) for ch in red}
         proc = self._process(tr, mean, n_live)
-        live = {"phase_21_deg": proc["phase_21_deg"], "loop": dict(proc["loop"]),
+        live = {"phase_21_deg": proc["phase_21_deg"],
                 "clipped": sorted(clipped), "n": n_live}
         for ch in red:
             live[ch] = dict(proc[f"{ch}_values"])

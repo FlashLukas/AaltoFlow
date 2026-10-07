@@ -22,7 +22,7 @@ from ..config import Config, _cast
 
 _TABS = [("channel_1", "CH1"), ("channel_2", "CH2"), ("timebase", "Timebase"),
          ("trigger", "Trigger"), ("acquisition", "Acquisition"), ("filter", "Filter"),
-         ("analysis", "Loop"), ("sim", "Sim"), ("hardware", "Hardware"),
+         ("sim", "Sim"), ("hardware", "Hardware"),
          ("ui", "Appearance")]
 
 _SCOPE_NOTE = ("The SCOPE's own settings: read from it at start; a value you CHANGE "
@@ -40,11 +40,8 @@ _HINTS = {
                    "how long an acquisition may take. keep_raw: record unfiltered too.",
     "filter": "Zero phase, the same on every channel. 0 = off. order: of one pass "
               "(the zero-phase response is its square).",
-    "analysis": "loop_x / loop_y: channels of the loop. sat_fraction: |X| above this "
-                "fraction of the maximum counts as saturated (levels and background "
-                "are fitted there).",
-    "sim": "SIMULATOR only. scene moke: CH1 Hall field, CH2 a hysteresis loop; scene "
-           "bench: CH1 sine, CH2 + EXT a synchronous square (the lab bench).",
+    "sim": "SIMULATOR only: CH1 a sine; CH2 the same frequency, phase-shifted, with "
+           "some 2nd harmonic and an offset; EXT a sync square.",
     "hardware": "REAL scope only (--real), read when the service starts: restart it "
                 "after a change. visa: usually passed by Mission Control (--visa).",
     "ui": "theme: dark or light. Applies the next time the GUI starts.",
@@ -63,9 +60,6 @@ _CHOICES = {
     ("trigger", "source"): list(TRIGGER_SOURCES),
     ("trigger", "slope"): list(TRIGGER_SLOPES),
     ("trigger", "mode"): list(TRIGGER_MODES),
-    ("analysis", "loop_x"): ["ch1", "ch2"],
-    ("analysis", "loop_y"): ["ch1", "ch2"],
-    ("sim", "scene"): ["moke", "bench"],
 }
 
 
