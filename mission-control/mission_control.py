@@ -1609,6 +1609,30 @@ class ClampLabel(QtWidgets.QLabel):
         self.setToolTip(self._full if cut else "")
 
 
+def short_address(address: str) -> str:
+    """A VISA / serial address short enough for a card: the bus and what tells
+    this instrument apart.
+        USB0::0x0699::0x0353::C012345::INSTR -> USB ...2345   (serial tail)
+        TCPIP0::192.168.1.20::inst0::INSTR   -> TCPIP 192.168.1.20
+        GPIB0::6::INSTR                      -> GPIB0::6
+        ASRL3::INSTR / COM3                  -> ASRL3 / COM3
+    The full address stays in the tooltip."""
+    a = str(address or "").strip()
+    parts = [x for x in a.split("::") if x]
+    if parts and parts[-1].upper() == "INSTR":
+        parts = parts[:-1]
+    if not parts:
+        return a
+    bus = parts[0]
+    up = bus.upper()
+    if up.startswith("USB") and len(parts) >= 4:
+        return f"USB …{parts[3][-4:]}"
+    if up.startswith("TCPIP") and len(parts) >= 2:
+        return f"TCPIP {parts[1]}"
+    short = "::".join(parts)
+    return short if len(short) <= 18 else short[:8] + "…" + short[-6:]
+
+
 class ModuleCard(QtWidgets.QFrame):
     """One module: identity, live status, actions, and its variables."""
 
@@ -1654,6 +1678,8 @@ class ModuleCard(QtWidgets.QFrame):
         # name and ports on one line, the description on at most two, each
         # ending in "..." when the card is too narrow (full text as tooltip)
         self.name = ClampLabel(1); self.name.setObjectName("name")
+        # the name column always keeps room for a readable name (2026-10-07)
+        self.name.setMinimumWidth(170)
         self.desc = ClampLabel(2); self.desc.setObjectName("meta")
         self.meta = ClampLabel(1); self.meta.setObjectName("meta")
         # The physical address(es) this service holds ("holds GPIB0::6"), or,
@@ -1670,6 +1696,11 @@ class ModuleCard(QtWidgets.QFrame):
         self.real_check.setToolTip("On: start the service with --real (drives the instrument).\n"
                                    "Off: simulated backend. Remembered on this PC.")
         self.real_check.clicked.connect(self._real_clicked)     # user clicks only
+        # never wider than this: a full VISA address ("USB0::0x0699::0x0353::
+        # <serial>::INSTR") squeezed the name column to nothing on a card whose
+        # service was down (Lukas 2026-10-07: "too long address"). The label
+        # shows short_address(); the tooltip has the whole thing.
+        self.real_check.setMaximumWidth(150)
         row.addWidget(self.real_check)
 
         self.status_dot = QtWidgets.QLabel()
@@ -1788,7 +1819,8 @@ class ModuleCard(QtWidgets.QFrame):
             tip += ("\nInstrument on this PC: " + (spec.address or "from the module's own "
                     "config") + "  (set it with Instruments…)")
         self.real_check.setToolTip(tip)
-        self.real_check.setText(f"real: {spec.address}" if spec.address else "real")
+        self.real_check.setText(f"real: {short_address(spec.address)}" if spec.address
+                                else "real")
         for b in (self.btn_service, self.btn_stop, self.btn_restart, self.btn_ports):
             b.setVisible(not spec.remote)
         self.btn_remove.setVisible(spec.remote)

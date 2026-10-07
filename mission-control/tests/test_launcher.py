@@ -872,3 +872,16 @@ def test_restart_keeps_the_outputs_and_stop_does_not(env, tmp_path, monkeypatch)
         if card.service_proc is not None:
             card.service_proc.kill(); card.service_proc.waitForFinished(3000)
         card.service_proc = None
+
+
+def test_a_long_visa_address_is_shortened_on_the_card(env):
+    """Lukas 2026-10-07: "too long address" -- the full USB VISA address next to
+    'real' squeezed the scope card's name column to nothing."""
+    mc, win, root, app = env
+    assert mc.short_address("USB0::0x0699::0x0353::C012345::INSTR") == "USB …2345"
+    assert mc.short_address("TCPIP0::192.168.1.20::inst0::INSTR") == "TCPIP 192.168.1.20"
+    assert mc.short_address("GPIB0::6::INSTR") == "GPIB0::6"
+    assert mc.short_address("COM3") == "COM3"
+    card = win.cards["magnet"]
+    assert card.real_check.maximumWidth() <= 150
+    assert card.name.minimumWidth() >= 170
