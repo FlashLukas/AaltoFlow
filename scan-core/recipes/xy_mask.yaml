@@ -1,0 +1,19 @@
+name: xy_masked_map
+comment: XY map measured only on the elements -- a quick reflectivity pass first, then the mask.
+# Pass 1 reads the reflectivity at every 3rd point (21 x 21 of 61 x 61). Its
+# map is interpolated onto the 61 x 61 grid, split by Otsu's threshold (the
+# islands reflect more than the substrate) and grown by half the pass-1 pitch.
+# The lock-in is then read only inside the mask; the rest is never visited
+# and is stored as NaN, with `scan_mask` in the file saying which is which.
+# A mask of your own: replace `detector`/`step` by e.g. `from: mask.png`.
+fixed: {rf_freq: 850, rf_power: 8, field: 40}
+axes:
+  - {type: raster,
+     x: {param: pos_x, start: -45, stop: 45, num: 61},
+     y: {param: pos_y, start: -45, stop: 45, num: 61},
+     fast: x}
+detectors: [lockin_r]
+mask: {detector: reflectivity, step: 3, keep: above, threshold: auto, margin: auto}
+hooks: []
+output: {dir: ., basename: xy_masked_map, format: netcdf}
+settle: {default_timeout_s: 20.0}

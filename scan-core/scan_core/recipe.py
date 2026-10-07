@@ -20,6 +20,8 @@ hooks:     [Hook, ...]       # optional actions bound to a level/cadence
 zigzag:    bool              # serpentine order (off by default)
 window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
                              # array detector only around the predicted FMR line
+mask:      {...}             # optional XY MASK (mask.py): a quick reflectivity
+                             # pass first, then measure only inside the mask
 
 A ROUTINE is a hook with action `call` (see hooks.py):
   {when: before_scan, action: call,
@@ -155,12 +157,18 @@ class Recipe:
     #: each trace is filled from the last full sweep's baseline and marked in a
     #: `<det>_measured` mask. Opt-in: a recipe without it runs exactly as before.
     window: dict | None = None
+    #: XY MASK (mask.py, 2026-10-07), or None = off. A quick pass of one
+    #: detector (the reflectivity) at every `step`-th point first; the real
+    #: scan then visits only the points inside the mask made from it, and the
+    #: rest are stored as not measured. Opt-in, like the window.
+    mask: dict | None = None
 
     # ---- (de)serialization ------------------------------------------------
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
-                                   "hooks", "output", "settle", "zigzag", "window")
+                                   "hooks", "output", "settle", "zigzag", "window",
+                                   "mask")
                  if f in d}
         return cls(**known)
 
@@ -170,6 +178,8 @@ class Recipe:
         # written (and stored in every .nc as recipe_json) exactly as before.
         if not d.get("window"):
             d.pop("window", None)
+        if not d.get("mask"):
+            d.pop("mask", None)            # the same for the mask
         return d
 
     @classmethod
@@ -254,6 +264,8 @@ class Recipe:
         errs += validate_window(self, registry)
         from .repeat import validate as validate_repeat
         errs += validate_repeat(self, registry)
+        from .mask import validate as validate_mask
+        errs += validate_mask(self, registry)
         # range check against each settable's limits
         try:
             for dim in self.compile(registry).dims:

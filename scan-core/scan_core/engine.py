@@ -183,6 +183,9 @@ def _used_ids(recipe, compiled, registry) -> set:
         for key in ("field", "angle"):
             if isinstance(w.get(key), str):
                 ids.add(w[key])
+    m = getattr(recipe, "mask", None)
+    if isinstance(m, dict) and isinstance(m.get("detector"), str) and not m.get("from"):
+        ids.add(m["detector"])           # the mask pass reads it
     return ids
 
 
@@ -547,8 +550,15 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
             # The ETA clock starts AFTER the before-scan routine: a two-minute
             # magnet ramp and reference sweep would otherwise be spread over
             # the points as if every one of them were that slow.
-            t0 = time.monotonic()
             sweeping = True
+            # The XY MASK (mask.py): pass 1 -- the quick reflectivity map --
+            # and the mask made from it, before the first point of the real
+            # scan. Its readings go into the file even if the scan is aborted
+            # later, so a mask that came out wrong can be looked at.
+            if getattr(recipe, "mask", None):
+                from .mask import prepare as prepare_mask
+                prepare_mask(recipe, registry, compiled, ctx, should_abort)
+            t0 = time.monotonic()
             # A FLY axis (innermost, flyscan.py) is one continuous move per row
             # instead of a point-by-point odometer. Every other scan takes
             # _sweep, unchanged.
@@ -570,7 +580,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
                                           var_attrs=ctx.get("var_attrs"),
-                                          ds_attrs=ctx.get("ds_attrs"))
+                                          ds_attrs=ctx.get("ds_attrs"),
+                                          extra=ctx.get("ds_extra"))
             except Exception as build_exc:
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         after_error(exc)
@@ -595,7 +606,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
                                           var_attrs=ctx.get("var_attrs"),
-                                          ds_attrs=ctx.get("ds_attrs"))
+                                          ds_attrs=ctx.get("ds_attrs"),
+                                          extra=ctx.get("ds_extra"))
             except Exception as build_exc:     # say it, but do not hide the abort
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         raise
@@ -613,7 +625,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                           created_iso, time.monotonic() - t_start,
                                           det_axes, det_coords,
                                           var_attrs=ctx.get("var_attrs"),
-                                          ds_attrs=ctx.get("ds_attrs"))
+                                          ds_attrs=ctx.get("ds_attrs"),
+                                          extra=ctx.get("ds_extra"))
             except Exception as build_exc:     # say it, but do not hide the error
                 ctx["log_fn"](f"could not keep the measured points: {build_exc}")
         after_error(exc)
@@ -625,7 +638,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     ds = _to_dataset(recipe, compiled, registry, data, created_iso,
                      time.monotonic() - t_start, det_axes, det_coords,
                      var_attrs=ctx.get("var_attrs"),
-                     ds_attrs=ctx.get("ds_attrs"))
+                     ds_attrs=ctx.get("ds_attrs"),
+                     extra=ctx.get("ds_extra"))
     try:
         after_scan(aborted=aborted)
     except Exception as exc:
@@ -688,6 +702,7 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     current = ctx["current"]
     guard = ctx.get("guard") or _Guard(None, (), None, should_abort,
                                        lambda m: None, PAUSE_POLL_S)
+    visit = ctx.get("visit")             # the XY mask, or None = every point
     for flat in range(total):
         if should_abort and should_abort():
             return True
@@ -699,6 +714,16 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             idx = _zigzag(idx, shape)
         ctx["flat"] = flat
         ctx["index"] = idx
+
+        if visit is not None and not visit.measured[flat]:
+            # left out by the XY MASK (mask.py): not visited at all -- no
+            # move, no settle, no routine -- and its slot keeps the "not
+            # measured" value. Progress is reported only for the very last
+            # point, so a long masked stretch does not flood the GUI.
+            if on_progress and flat == total - 1:
+                on_progress(total, total, 0.0,
+                            where=where_of(dims, idx, flat, registry))
+            continue
 
         redo = False
         values = None             # None = not measured (a skip_if before it)
@@ -771,7 +796,12 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # time spent PAUSED by the operator is not measuring time: leave
             # it out, or one coffee break would inflate the ETA for the rest
             elapsed = time.monotonic() - t0 - ctx.get("user_paused_s", 0.0)
-            eta = max(0.0, elapsed) / done * (total - done)
+            if visit is not None:
+                # with a mask only the MEASURED points cost time
+                m_done = int(visit.before[flat]) + 1
+                eta = max(0.0, elapsed) / m_done * (visit.n_measured - m_done)
+            else:
+                eta = max(0.0, elapsed) / done * (total - done)
             # `idx` is the index just MEASURED, zig-zag already applied
             on_progress(done, total, eta,
                         where=where_of(dims, idx, flat, registry))
@@ -787,7 +817,8 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                                          {k: v.copy() for k, v in data.items()},
                                          created_iso, time.monotonic() - t0,
                                          det_axes, det_coords,
-                                         ds_attrs=dict(ctx.get("ds_attrs") or {})))
+                                         ds_attrs=dict(ctx.get("ds_attrs") or {}),
+                                         extra=ctx.get("ds_extra")))
     return False
 
 
@@ -1059,7 +1090,7 @@ def _storage_for(name, g, arr, extra: dict):
 
 def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                 det_axes=None, det_coords=None, var_attrs=None,
-                ds_attrs=None) -> xr.Dataset:
+                ds_attrs=None, extra=None) -> xr.Dataset:
     """Build the Dataset. `var_attrs` = {name: {attr: value}} merged into a
     variable's or coordinate's attributes (a fly scan's per-pixel count and
     spread are not registry parameters, so their units come from here).
@@ -1164,6 +1195,16 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         if target is not None and len(target) >= 3:
             target[2].update(extra)
 
+    # Variables on axes of their OWN (the XY mask's pass 1 and the mask
+    # itself, mask.py): {"coords": {name: (dim, values, attrs)},
+    # "vars": {name: (dims, values, attrs)}}. Copied, so a live snapshot does
+    # not share them.
+    if extra:
+        for name, (dim, vals, a) in (extra.get("coords") or {}).items():
+            coords[name] = (dim, np.array(vals, copy=True), dict(a))
+        for name, (vdims, vals, a) in (extra.get("vars") or {}).items():
+            data_vars[name] = (list(vdims), np.array(vals, copy=True), dict(a),
+                               dict(COMPRESSION))
     ds = xr.Dataset(data_vars=data_vars, coords=coords)
     w = getattr(recipe, "window", None)
     if w:

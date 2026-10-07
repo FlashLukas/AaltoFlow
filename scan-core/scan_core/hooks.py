@@ -753,8 +753,20 @@ def sweep_block(shape, dim_names, axis) -> int | None:
     return int(math.prod(shape[list(dim_names).index(axis):]))
 
 
-def _each_sweep_fires(h, moment, flat, total, block) -> bool:
+def _each_sweep_fires(h, moment, flat, total, block, visit=None) -> bool:
     every = max(1, int(h.get("every") or 1))
+    if visit is not None:
+        # With an XY MASK (mask.py) the points left out are never visited, so
+        # the edges of a sweep are its first and last MEASURED points: an
+        # autofocus "at the start of each row" still runs on a row whose first
+        # point is substrate, and not at all on a row that is all substrate.
+        start = (flat // block) * block
+        if (h.get("edge") or "start") == "start":
+            return (moment == "before_point" and not visit.any_in(start, flat)
+                    and (flat // block) % every == 0)
+        end = start + block
+        return (moment == "after_point" and not visit.any_in(flat + 1, end)
+                and end < total and (end // block) % every == 0)
     if (h.get("edge") or "start") == "start":
         return (moment == "before_point" and flat % block == 0
                 and (flat // block) % every == 0)
@@ -808,6 +820,10 @@ def run_hooks(hooks, moment, ctx, axis_name=None):
     flat = ctx.get("flat", 0)
     shape = ctx.get("shape") or ()
     total = int(math.prod(shape)) if shape else 0
+    # the XY mask's visiting record (mask.Visit), or None: "every n points"
+    # then counts MEASURED points, the ones that cost time
+    visit = ctx.get("visit")
+    nth = int(visit.before[flat]) if visit is not None else flat
     for h in hooks:
         when = h.get("when")
         axis_bound = when in ("before_axis", "after_axis")
@@ -821,8 +837,8 @@ def run_hooks(hooks, moment, ctx, axis_name=None):
             # every point. (Fixed 2026-09-16.)
             (when == moment and not axis_bound)
             or (when == "every_n_points" and moment == "before_point"
-                and h.get("n") and flat % int(h["n"]) == 0)
-            or (block and _each_sweep_fires(h, moment, flat, total, block))
+                and h.get("n") and nth % int(h["n"]) == 0)
+            or (block and _each_sweep_fires(h, moment, flat, total, block, visit))
             or (axis_bound and moment == when and h.get("axis") == axis_name)
         )
         if not fire:

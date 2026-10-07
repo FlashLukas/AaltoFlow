@@ -562,6 +562,57 @@ while another PC holds control, or another scan uses it), its scans are saved
 with the suite's names in the suite's data folder, and Ctrl+C aborts a scan
 cleanly with the measured points saved.
 
+## Measuring only the elements: the XY mask
+
+On a patterned sample much of an XY map is substrate, and measuring it as
+carefully as the magnetic elements wastes most of the time. The `mask` block
+does the map in two passes:
+
+1. **Pass 1** reads ONE quick detector (the reflectivity, a power meter) at
+   every `step`-th point of the grid, in X and Y (`step: 3` = 1/9 of the
+   points).
+2. **The mask:** that map is interpolated onto the full grid, split by a
+   threshold (`auto` = Otsu's method, which finds the level between the
+   substrate and the elements), and grown by a `margin` so the edges are
+   measured too. `margin: auto` = half the pass-1 pitch, about how well a coarse
+   map can place an edge.
+3. **Pass 2**, the real scan, visits only the points inside the mask. The others
+   are never moved to (no travel, no settle) and stay NaN, so the result is
+   still the full matrix. `scan_mask` (1 = measured) and pass 1 itself
+   (`mask_<detector>` on its own coarse axes) are in the file.
+
+```yaml
+axes:
+  - {type: raster, x: {param: pos_x, start: -45, stop: 45, num: 61},
+                   y: {param: pos_y, start: -45, stop: 45, num: 61}}
+detectors: [lockin_r]
+mask: {detector: reflectivity, step: 3, keep: above, threshold: auto, margin: auto}
+```
+
+**Your own mask:** `from:` takes a file instead of pass 1. It can be a
+grayscale **image** (.png .tif .bmp .jpg; a colour image is read as its
+brightness), a number **matrix** (.csv, .txt/.dat, .npy), or an earlier **scan**
+(.nc; `detector` names the variable). With `keep: above`, bright pixels or large
+numbers mean *measure*. Columns run along X and rows along Y. Without `extent`
+the picture covers exactly the scan's area, with its first row at the start of
+Y. `extent: {x: [x0, x1], y: [y0, y1]}` places it elsewhere: the coordinates
+of the first and last column and row. Give y as [y1, y0] to flip it. Scan
+points outside the picture are measured.
+
+**Coordinates:** the mask is matched by coordinate value, never by index, so it
+works in camera coordinates (`camera.laser_x/y`, which follow the sample) as well
+as in absolute stage µm. A scan file used as a mask must have been measured in
+the same parameters as the scan. A stage-µm mask on a camera-coordinate scan is
+refused, because the two differ by the stage's drift.
+
+**Limits:** an element smaller than about one pass-1 pitch can fall between the
+coarse points entirely, so use a smaller `step` for such a sample. Fly scans
+cannot use a mask, because a row is one continuous move. Routines "at the start
+of each row" run at the first *measured* point of the row, and "every n points"
+counts measured points. In the Scan Builder, the XY MASK card appears for any
+scan with two moving axes. For a mask from a file, **Preview mask** draws it on
+the scan's grid before anything moves. Example: `recipes/xy_mask.yaml`.
+
 ## Repeating and averaging: the `repeat` axis
 
 A `repeat` axis sets nothing: everything INSIDE it is done N times. Where it

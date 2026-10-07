@@ -507,6 +507,21 @@ class SimState:
         on = best_w >= 0.5
         return (best_w if on else 0.0), (best_df if on else 0.0)
 
+    def reflectivity(self) -> float:
+        """The fraction of the laser reflected HERE: the metal islands reflect
+        more than the substrate between them, with the same soft-edged outline
+        as their magnetic response (2026-10-07, for the XY mask's quick pass,
+        mask.py). Not a step at the rim: a real spot of finite size sees a
+        smooth transition, which is what the mask's interpolation is for."""
+        cover = 0.0
+        for x0, y0, r, aspect, _df, _amp in ISLANDS:
+            dx = (self.x_um - x0) / r
+            dy = (self.y_um - y0) / (r * aspect)
+            rr = dx * dx + dy * dy
+            if rr < 9.0:
+                cover = max(cover, float(np.exp(-(rr ** 3))))
+        return 0.30 + 0.45 * cover + 0.005 * float(self._rng.standard_normal())
+
     def _f_res(self) -> float:
         """The resonance HERE: the film's Kittel line on the bare substrate, the
         island's own line wherever an island is."""
@@ -708,6 +723,7 @@ def build_sim_registry() -> Registry:
     reg.add(Gettable("lockin_y",   "Lock-in Y",   "V",   lambda: s.lockin()["y"]))
     reg.add(Gettable("lockin_phi", "Lock-in phase", "deg", lambda: s.lockin()["phi"]))
     reg.add(Gettable("aux_in",     "Aux in",      "V",   lambda: s.lockin()["aux"]))
+    reg.add(Gettable("reflectivity", "Reflectivity", "", s.reflectivity))
 
     # Detectors that are NOT floats (2026-10-04), so a simulated scan -- and
     # the tests -- exercise the storage types a module's describe declares

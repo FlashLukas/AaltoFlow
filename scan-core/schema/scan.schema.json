@@ -35,7 +35,8 @@
     },
     "zigzag": {"type": "boolean",
                "description": "serpentine order: reverse inner axes on every other pass"},
-    "window": {"$ref": "#/$defs/window"}
+    "window": {"$ref": "#/$defs/window"},
+    "mask": {"$ref": "#/$defs/mask"}
   },
   "required": ["axes", "detectors"],
   "$defs": {
@@ -232,6 +233,29 @@
                        "description": "a full-band sweep every N points (and always at the first); 0 = only the first"}
       },
       "required": ["detector", "field"],
+      "additionalProperties": false
+    },
+    "mask": {
+      "title": "XY MASK: a quick pass of one detector (or a file) first; the scan then visits only the points inside the mask (optional; stepped scans only)",
+      "type": "object",
+      "properties": {
+        "detector": {"type": "string", "description": "what pass 1 records (one number per point), or the variable read from a .nc in `from`"},
+        "axes": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2,
+                 "description": "[X, Y] axis names; default the raster's"},
+        "step": {"type": "integer", "minimum": 1, "description": "pass 1 at every step-th point of the fine grid"},
+        "keep": {"enum": ["above", "below"], "description": "measure where the reading is above / below the threshold"},
+        "threshold": {"oneOf": [{"const": "auto"}, {"type": "number"},
+                                {"type": "object", "properties": {"fraction": {"type": "number", "minimum": 0, "maximum": 1}},
+                                 "required": ["fraction"], "additionalProperties": false}]},
+        "margin": {"oneOf": [{"const": "auto"}, {"type": "number", "minimum": 0}],
+                   "description": "grow the mask by this much, in the axes' unit; auto = half the source pitch"},
+        "from": {"type": "string", "description": "a mask source file: .nc scan, image (.png .tif .bmp .jpg) or matrix (.csv .txt .dat .npy)"},
+        "extent": {"type": "object",
+                   "properties": {"x": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                                  "y": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}},
+                   "additionalProperties": false,
+                   "description": "where a picture lies: X of the first/last column, Y of the first/last row"}
+      },
       "additionalProperties": false
     },
     "call_step": {

@@ -2577,6 +2577,423 @@ class WindowCard(QtWidgets.QFrame):
             f"   ·   {100 * st.get('fraction_measured', float('nan')):.0f} % of the bins measured")
 
 
+class MaskCard(QtWidgets.QFrame):
+    """XY MASK: measure only the elements of a patterned sample.
+
+    Lukas, 2026-10-07: a quick reflectivity pass at every 3rd point, a mask
+    from it interpolated onto the real grid, then the real scan inside the
+    mask only -- or a mask he makes himself from anything (a grayscale image,
+    a matrix, an earlier scan). Everything here becomes the recipe's `mask`
+    block (scan_core/mask.py), so it travels in the .yaml and in every .nc.
+
+    Shown when the scan has two axes that move something (an XY map). The
+    PREVIEW draws the mask a FILE gives over the scan's own grid -- the check
+    that a picture is placed and thresholded as meant, before anything moves.
+    A measured pass 1 cannot be previewed (it does not exist yet): run a
+    quick reflectivity map once, then point `file` at it to tune.
+    """
+
+    changed = QtCore.Signal()
+
+    SOURCES = (("measure first (pass 1)", "measure"), ("from a file", "file"))
+    KEEPS = (("measure where it is ABOVE the threshold", "above"),
+             ("measure where it is BELOW the threshold", "below"))
+    THRESHOLDS = (("auto (Otsu)", "auto"), ("value", "value"),
+                  ("fraction of the range", "fraction"))
+    FILES = ("Mask source (*.nc *.png *.tif *.tiff *.bmp *.jpg *.jpeg *.csv *.txt "
+             "*.dat *.npy);;All files (*)")
+
+    def __init__(self, recipe_fn=None):
+        super().__init__()
+        self.setObjectName("card")
+        self.registry = None
+        #: builds the current recipe (the builder's); the preview needs the grid
+        self._recipe_fn = recipe_fn
+        self._dims: list[str] = []
+        self._raster: list[str] | None = None
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
+        head = QtWidgets.QHBoxLayout()
+        tag = QtWidgets.QLabel("XY MASK  ·  measure only the elements")
+        tag.setObjectName("tag")
+        head.addWidget(tag); head.addStretch(1)
+        self.enable = QtWidgets.QCheckBox("on")
+        self.enable.setToolTip(
+            "First a quick pass of ONE detector (the reflectivity) at every N-th\n"
+            "point -- or a mask from a file -- then the scan measures only the\n"
+            "points inside the mask. The others are never visited (no move, no\n"
+            "settle) and are stored as not measured (NaN); the file's\n"
+            "'scan_mask' says which is which. The grid keeps its full shape.")
+        self.enable.toggled.connect(self._on_toggle)
+        head.addWidget(self.enable)
+        v.addLayout(head)
+
+        self.body = QtWidgets.QWidget()
+        g = QtWidgets.QGridLayout(self.body)
+        g.setContentsMargins(0, 0, 0, 0); g.setHorizontalSpacing(8); g.setVerticalSpacing(4)
+
+        def lbl(text, tip=""):
+            w = QtWidgets.QLabel(text)
+            w.setStyleSheet(f"color:{C['muted']};")
+            if tip:
+                w.setToolTip(tip)
+            return w
+
+        def spin(lo, hi, dec, val, width=90):
+            s = QtWidgets.QDoubleSpinBox()
+            s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
+            s.setFixedWidth(width)
+            s.valueChanged.connect(lambda *_: self._edited())
+            return s
+
+        def combo(items):
+            b = QtWidgets.QComboBox()
+            for text, key in items:
+                b.addItem(text, key)
+            b.currentIndexChanged.connect(lambda *_: self._edited())
+            return b
+
+        # row 0: where the mask comes from
+        self.source_box = combo(self.SOURCES)
+        self.det_box = QtWidgets.QComboBox()
+        self.det_box.setToolTip("What pass 1 records -- one number per point (the\n"
+                                "reflectivity, a power meter). For a .nc file: the\n"
+                                "variable read from it.")
+        self.det_box.currentIndexChanged.connect(lambda *_: self._edited())
+        self.step_spin = QtWidgets.QSpinBox()
+        self.step_spin.setRange(1, 1000); self.step_spin.setValue(3)
+        self.step_spin.setFixedWidth(70)
+        self.step_spin.setToolTip("Pass 1 at every N-th point of the scan's grid, in X\n"
+                                  "and in Y (3 = 1/9 of the points). The last point of\n"
+                                  "each axis is always included. An element smaller than\n"
+                                  "N grid steps can fall between the pass-1 points.")
+        self.step_spin.valueChanged.connect(lambda *_: self._edited())
+        g.addWidget(lbl("mask from"), 0, 0); g.addWidget(self.source_box, 0, 1)
+        self.det_label = lbl("detector")
+        g.addWidget(self.det_label, 0, 2); g.addWidget(self.det_box, 0, 3)
+        self.step_label = lbl("every")
+        g.addWidget(self.step_label, 0, 4); g.addWidget(self.step_spin, 0, 5)
+
+        # row 1: the file
+        self.file_edit = QtWidgets.QLineEdit()
+        self.file_edit.setPlaceholderText("a scan (.nc), an image (.png .tif ...) or a "
+                                          "matrix (.csv .txt .npy)")
+        self.file_edit.editingFinished.connect(self._edited)
+        self.browse = QtWidgets.QPushButton("Browse…")
+        self.browse.clicked.connect(self._browse)
+        self.file_label = lbl("file", "An IMAGE: bright = measure (with 'above'); grayscale\n"
+                                      "or colour (read as brightness). A MATRIX: one row per\n"
+                                      "line, columns along X, rows along Y. A .nc scan of the\n"
+                                      "SAME X/Y parameters (camera or stage coordinates).")
+        g.addWidget(self.file_label, 1, 0)
+        g.addWidget(self.file_edit, 1, 1, 1, 4)
+        g.addWidget(self.browse, 1, 5)
+
+        # row 2: the threshold
+        self.keep_box = combo(self.KEEPS)
+        self.thr_box = combo(self.THRESHOLDS)
+        self.thr_box.setToolTip("auto: Otsu's method, the level that best splits the\n"
+                                "readings into two groups (substrate, elements).\n"
+                                "fraction: 0 = the lowest reading, 1 = the highest.")
+        self.thr_spin = spin(-1e12, 1e12, 6, 0.5, 110)
+        g.addWidget(lbl("keep"), 2, 0); g.addWidget(self.keep_box, 2, 1, 1, 3)
+        g.addWidget(lbl("threshold"), 2, 4)
+        th = QtWidgets.QHBoxLayout(); th.setSpacing(4)
+        th.addWidget(self.thr_box); th.addWidget(self.thr_spin)
+        g.addLayout(th, 2, 5, 1, 2)
+
+        # row 3: margin and axes
+        self.margin_auto = QtWidgets.QCheckBox("auto")
+        self.margin_auto.setChecked(True)
+        self.margin_auto.setToolTip("Half the pitch of pass 1 (or of the file's pixels):\n"
+                                    "about how well the source can place an edge.")
+        self.margin_auto.toggled.connect(lambda *_: self._edited())
+        self.margin_spin = spin(0, 1e6, 3, 2.0)
+        self.margin_spin.setToolTip("Grow the mask by this much, in the axes' unit, so the\n"
+                                    "edges of every element are measured too.")
+        self.x_box = QtWidgets.QComboBox(); self.y_box = QtWidgets.QComboBox()
+        for b in (self.x_box, self.y_box):
+            b.currentIndexChanged.connect(lambda *_: self._edited())
+        g.addWidget(lbl("margin"), 3, 0)
+        mg = QtWidgets.QHBoxLayout(); mg.setSpacing(4)
+        mg.addWidget(self.margin_auto); mg.addWidget(self.margin_spin); mg.addStretch(1)
+        g.addLayout(mg, 3, 1)
+        self.axes_label = lbl("X / Y axes", "Which two axes the mask lies on. A raster\n"
+                                            "axis finds them on its own.")
+        g.addWidget(self.axes_label, 3, 2)
+        ax = QtWidgets.QHBoxLayout(); ax.setSpacing(4)
+        ax.addWidget(self.x_box); ax.addWidget(self.y_box)
+        g.addLayout(ax, 3, 3, 1, 3)
+
+        # row 4: where a picture lies
+        self.extent_box = QtWidgets.QCheckBox("place the picture")
+        self.extent_box.setToolTip(
+            "Off: the picture covers exactly the scan's area, its first row at the\n"
+            "START of the Y axis. On: X of the first / last column and Y of the\n"
+            "first / last row (row 0 = the top of an image), in the axes' unit.\n"
+            "Scan points outside the picture are measured.")
+        self.extent_box.toggled.connect(lambda *_: self._edited())
+        self.ext = [spin(-1e9, 1e9, 3, v, 80) for v in (-50.0, 50.0, -50.0, 50.0)]
+        g.addWidget(self.extent_box, 4, 0, 1, 2)
+        ex = QtWidgets.QHBoxLayout(); ex.setSpacing(4)
+        for text, w in zip(("x", "", "y", ""), self.ext):
+            if text:
+                ex.addWidget(lbl(text))
+            ex.addWidget(w)
+        ex.addStretch(1)
+        g.addLayout(ex, 4, 2, 1, 5)
+        g.setColumnStretch(6, 1)
+        v.addWidget(self.body)
+
+        # the preview
+        pv = QtWidgets.QHBoxLayout()
+        self.preview_btn = QtWidgets.QPushButton("Preview mask")
+        self.preview_btn.setToolTip("Draw the mask this FILE gives on the scan's grid\n"
+                                    "(grey = the source, amber = measured).")
+        self.preview_btn.clicked.connect(self.preview)
+        pv.addWidget(self.preview_btn, 0, QtCore.Qt.AlignTop)
+        self.picture = QtWidgets.QLabel()
+        self.picture.setMinimumSize(0, 0)
+        pv.addWidget(self.picture, 0)
+        self.info = QtWidgets.QLabel("")
+        self.info.setWordWrap(True)
+        self.info.setStyleSheet(f"color:{C['accent']}; font-size:11px;")
+        pv.addWidget(self.info, 1)
+        v.addLayout(pv)
+        self._sync_enabled()
+        self.hide()
+
+    # ---- contents -----------------------------------------------------------
+    def set_registry(self, registry) -> None:
+        """The detectors pass 1 can use: readable, one number per point."""
+        self.registry = registry
+        keep = self.det_box.currentData()
+        self.det_box.blockSignals(True)
+        self.det_box.clear()
+        for p in registry.gettables():
+            if getattr(p, "axes", None) or getattr(p, "dtype", "float") not in ("float", "int"):
+                continue
+            self.det_box.addItem(f"{p.label}  ·  {p.id}", p.id)
+        i = self.det_box.findData(keep)
+        if keep and i < 0:
+            self.det_box.addItem(f"(missing)  ·  {keep}", keep)
+            i = self.det_box.findData(keep)
+        self.det_box.setCurrentIndex(max(0, i))
+        self.det_box.blockSignals(False)
+
+    def set_dims(self, dim_names: list[str], raster: list[str] | None,
+                 fly: bool) -> None:
+        """The scan's axes (dims); `raster` = the raster's [x, y] names."""
+        self._dims, self._raster = list(dim_names), raster
+        # keep the operator's X / Y only while it is still a pair of two
+        # different axes of this scan; otherwise X = the inner axis, Y = the
+        # one outside it (or the raster's)
+        old = [self.x_box.currentData(), self.y_box.currentData()]
+        if not (old[0] in dim_names and old[1] in dim_names and old[0] != old[1]):
+            old = (raster if raster else
+                   [dim_names[-1], dim_names[-2]] if len(dim_names) > 1 else [None, None])
+        for box, want in ((self.x_box, old[0]), (self.y_box, old[1])):
+            box.blockSignals(True)
+            box.clear()
+            for name in dim_names:
+                box.addItem(name, name)
+            box.setCurrentIndex(max(0, box.findData(want)))
+            box.blockSignals(False)
+        self.setVisible((len(dim_names) >= 2 and not fly) or self.enable.isChecked())
+        self._sync_enabled()
+
+    def _browse(self):
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Mask source",
+                                                      self.file_edit.text(), self.FILES)
+        if fn:
+            self.file_edit.setText(fn)
+            self._edited()
+
+    def _on_toggle(self, *_):
+        self._sync_enabled()
+        self.changed.emit()
+
+    def _edited(self, *_):
+        self._sync_enabled()
+        self.changed.emit()
+
+    def _sync_enabled(self):
+        on = self.enable.isChecked()
+        self.body.setEnabled(on)
+        from_file = self.source_box.currentData() == "file"
+        path = self.file_edit.text().strip()
+        from scan_core.mask import is_picture
+        picture = from_file and is_picture(path)
+        for w in (self.step_label, self.step_spin):
+            w.setVisible(not from_file)
+        for w in (self.file_label, self.file_edit, self.browse):
+            w.setVisible(from_file)
+        # a picture has no detector: hide the box rather than grey it out,
+        # or "Lock-in R" next to a .png reads as if it mattered
+        self.det_box.setVisible(not picture)
+        self.det_label.setVisible(not picture)
+        self.thr_spin.setEnabled(on and self.thr_box.currentData() != "auto")
+        self.margin_spin.setEnabled(on and not self.margin_auto.isChecked())
+        self.extent_box.setVisible(picture)
+        for w in self.ext:
+            w.setVisible(picture)
+            w.setEnabled(on and self.extent_box.isChecked())
+        single_raster = bool(self._raster)
+        for w in (self.axes_label, self.x_box, self.y_box):
+            w.setVisible(not single_raster)
+        self.preview_btn.setVisible(from_file)
+        self.preview_btn.setEnabled(on and bool(path))
+        if not on or not from_file:
+            self.picture.clear()
+            self.info.setText("")
+
+    # ---- recipe round trip --------------------------------------------------
+    def to_block(self) -> dict | None:
+        if not self.enable.isChecked():
+            return None
+        from scan_core.mask import is_picture
+        b: dict = {}
+        from_file = self.source_box.currentData() == "file"
+        path = self.file_edit.text().strip()
+        if not (from_file and is_picture(path)) and self.det_box.currentData():
+            b["detector"] = self.det_box.currentData()
+        if not self._raster:
+            b["axes"] = [self.x_box.currentData(), self.y_box.currentData()]
+        if from_file:
+            b["from"] = path
+        else:
+            b["step"] = int(self.step_spin.value())
+        b["keep"] = self.keep_box.currentData()
+        t = self.thr_box.currentData()
+        b["threshold"] = ("auto" if t == "auto" else float(self.thr_spin.value())
+                          if t == "value" else {"fraction": float(self.thr_spin.value())})
+        b["margin"] = "auto" if self.margin_auto.isChecked() else float(self.margin_spin.value())
+        if from_file and is_picture(path) and self.extent_box.isChecked():
+            x0, x1, y0, y1 = (float(w.value()) for w in self.ext)
+            b["extent"] = {"x": [x0, x1], "y": [y0, y1]}
+        return b
+
+    def load_block(self, block) -> list[str]:
+        """Fill the card from a recipe's `mask` block (None = off). Returns the
+        ids this registry does not have."""
+        from scan_core.mask import spec_of
+        widgets = (self.enable, self.source_box, self.det_box, self.step_spin,
+                   self.file_edit, self.keep_box, self.thr_box, self.thr_spin,
+                   self.margin_auto, self.margin_spin, self.x_box, self.y_box,
+                   self.extent_box, *self.ext)
+        missing: list[str] = []
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            if not block:
+                self.enable.setChecked(False)
+                return []
+            s = spec_of(block)
+            self.source_box.setCurrentIndex(1 if s["from"] else 0)
+            self.file_edit.setText(str(s["from"] or ""))
+            det = s["detector"]
+            if det:
+                i = self.det_box.findData(det)
+                if i < 0:
+                    if not s["from"]:
+                        missing.append(det)
+                    self.det_box.addItem(f"(missing)  ·  {det}", det)
+                    i = self.det_box.findData(det)
+                self.det_box.setCurrentIndex(i)
+            self.step_spin.setValue(int(s["step"]))
+            self.keep_box.setCurrentIndex(max(0, self.keep_box.findData(s["keep"])))
+            t = s["threshold"]
+            if t == "auto":
+                self.thr_box.setCurrentIndex(0)
+            elif isinstance(t, dict):
+                self.thr_box.setCurrentIndex(2); self.thr_spin.setValue(float(t["fraction"]))
+            else:
+                self.thr_box.setCurrentIndex(1); self.thr_spin.setValue(float(t))
+            self.margin_auto.setChecked(s["margin"] == "auto")
+            if s["margin"] != "auto":
+                self.margin_spin.setValue(float(s["margin"]))
+            for box, name in zip((self.x_box, self.y_box), s["axes"] or ()):
+                i = box.findData(name)
+                if i < 0:
+                    box.addItem(name, name)
+                    i = box.findData(name)
+                box.setCurrentIndex(i)
+            e = s["extent"]
+            self.extent_box.setChecked(bool(e))
+            if e:
+                vals = list(e.get("x") or (-50, 50)) + list(e.get("y") or (-50, 50))
+                for w, val in zip(self.ext, vals):
+                    w.setValue(float(val))
+            self.enable.setChecked(True)
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+            self._sync_enabled()
+            self.setVisible(len(self._dims) >= 2 or self.enable.isChecked())
+        return missing
+
+    def describe(self) -> str:
+        """One clause for the scan summary."""
+        b = self.to_block()
+        if not b:
+            return ""
+        src = (f"from {Path(b['from']).name}" if b.get("from")
+               else f"pass 1: {b.get('detector', '?')} every {b['step']}. point")
+        return f"XY mask {src}, then only inside it"
+
+    # ---- preview -------------------------------------------------------------
+    def preview(self) -> None:
+        """The mask a FILE gives, on the scan's grid, drawn small: grey = the
+        source reading, amber = measured. X to the right, Y UP (as a map)."""
+        from scan_core import mask as M
+        try:
+            recipe = self._recipe_fn()
+            if not recipe.mask or not M.spec_of(recipe.mask)["from"]:
+                raise ValueError("choose a file first")
+            dims = recipe.compile(self.registry).dims
+            ka, kb, kx, ky = M.mask_dims(recipe, dims)
+            spec = M.spec_of(recipe.mask)
+            ca, cb, V = M.load_source(spec, dims, ka, kb, kx, ky)
+            fa = np.asarray(dims[ka].coord, float)
+            fb = np.asarray(dims[kb].coord, float)
+            res = M.build(spec, ca, cb, V, fa, fb)
+        except Exception as exc:
+            self.picture.clear()
+            self.info.setText(f"no preview: {exc}")
+            return
+        keep, vals = res.keep, res.fine_values
+        if kx == ka:                                  # make it [y, x]
+            keep, vals = keep.T, vals.T
+        cy = np.asarray(dims[ky].coord, float)
+        cx = np.asarray(dims[kx].coord, float)
+        # Y up and X right, whichever way the axes were swept
+        if cy[0] < cy[-1]:
+            keep, vals = keep[::-1], vals[::-1]
+        if cx[0] > cx[-1]:
+            keep, vals = keep[:, ::-1], vals[:, ::-1]
+        lo, hi = np.nanmin(vals) if np.isfinite(vals).any() else 0.0, \
+            np.nanmax(vals) if np.isfinite(vals).any() else 1.0
+        grey = np.nan_to_num((vals - lo) / ((hi - lo) or 1.0), nan=0.5)
+        grey = (40 + 140 * grey).astype(np.uint8)
+        rgb = np.dstack([grey, grey, grey])
+        acc = QtGui.QColor(C["accent"])
+        a = np.array([acc.red(), acc.green(), acc.blue()], float)
+        mix = (0.45 * rgb[keep].astype(float) + 0.55 * a).astype(np.uint8)
+        rgb[keep] = mix
+        rgb = np.ascontiguousarray(rgb)
+        h, w = keep.shape
+        img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888).copy()
+        side = 180
+        self.picture.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
+            side, side, QtCore.Qt.KeepAspectRatio, QtCore.Qt.FastTransformation))
+        n, total = int(res.keep.sum()), int(res.keep.size)
+        self.info.setText(
+            f"{n} of {total} XY points measured ({100.0 * n / max(1, total):.0f} %)"
+            f"   ·   threshold {res.threshold:.6g}"
+            f"   ·   margin {M.margin_of(spec, ca, cb):.4g}"
+            f"   ·   X right, Y up")
+
+
 #: the ON THE SCAN SERVER card's queue/definition tree never grows past this
 SERVER_TREE_MAX = 230
 
@@ -2734,6 +3151,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if hasattr(self, "window_card"):
             self.window_card.load_block(None)
             self.window_card.set_registry(registry)
+        if hasattr(self, "mask_card"):
+            self.mask_card.load_block(None)
+            self.mask_card.set_registry(registry)
         self._rebuild_summary()
 
     # ---- panels ----------------------------------------------------------
@@ -2963,6 +3383,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.window_card.set_registry(self.registry)
         self.window_card.changed.connect(self._rebuild_summary)
         v.addWidget(self.window_card, 0)
+        # XY MASK: shown when the scan has two axes that move something
+        self.mask_card = MaskCard(recipe_fn=self.build_recipe)
+        self.mask_card.set_registry(self.registry)
+        self.mask_card.changed.connect(self._rebuild_summary)
+        v.addWidget(self.mask_card, 0)
         return page
 
     def _build_routines(self) -> QtWidgets.QWidget:
@@ -3582,7 +4007,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       comment=self.run_info.values()["comment"],
                       zigzag=self.zigzag_box.isChecked(),
                       window=(self.window_card.to_block()
-                              if hasattr(self, "window_card") else None))
+                              if hasattr(self, "window_card") else None),
+                      mask=(self.mask_card.to_block()
+                            if hasattr(self, "mask_card") else None))
 
     def _compose_hooks(self) -> list[dict]:
         """The loaded hooks in their original order, with the card's routines
@@ -3779,6 +4206,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self._sync_window_card()
             missing += [m for m in self.window_card.load_block(getattr(recipe, "window", None))
                         if m not in missing]
+        if hasattr(self, "mask_card"):
+            self._sync_mask_card()
+            missing += [m for m in self.mask_card.load_block(getattr(recipe, "mask", None))
+                        if m not in missing]
         self._rebuild_summary()
         return missing
 
@@ -3815,6 +4246,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.routines_card.arrange()      # a new step may no longer fit side by side
         parked = self._sync_fly_detectors()
         self._sync_window_card()
+        self._sync_mask_card()
         recipe = self.build_recipe()
         errs = recipe.validate(self.registry)
         conditions = ("   ·   " + ", ".join(
@@ -3831,6 +4263,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 conditions += self._throughout_summary(recipe)
         if hasattr(self, "window_card") and self.window_card.describe():
             conditions += "   ·   " + self.window_card.describe()
+        if hasattr(self, "mask_card") and self.mask_card.describe():
+            conditions += "   ·   " + self.mask_card.describe()
         if parked:
             conditions += (f"   ·   {parked} detector(s) set aside while flying "
                            f"(they cannot be recorded continuously)")
@@ -3894,6 +4328,27 @@ class ScanBuilder(QtWidgets.QMainWindow):
             clause = f"~{_fmt_duration(self.run_progress[2])} left (measured)"
         self._detail_shown = head + clause + tail
         self.detail.setText(self._detail_shown)
+
+    def _sync_mask_card(self) -> None:
+        """Give the XY mask card the scan's axes (and the raster's, if one)."""
+        if not hasattr(self, "mask_card"):
+            return
+        axes = [r.to_axis() for r in self.rows]
+        dims = []
+        for ax in axes:
+            try:
+                from scan_core.recipe import _compile_axis
+                dims += [d for d in _compile_axis(ax) if d.params]
+            except Exception:
+                continue
+        rasters = [ax for ax in axes if ax.get("type") == "raster"]
+        raster = None
+        if len(rasters) == 1:
+            r = rasters[0]
+            raster = [r["x"].get("name") or r["x"]["param"],
+                      r["y"].get("name") or r["y"]["param"]]
+        fly = any(ax.get("type") == "fly" for ax in axes)
+        self.mask_card.set_dims([d.name for d in dims if d.kind != "fly"], raster, fly)
 
     def _sync_window_card(self) -> None:
         """Offer the resonance window for the TICKED detectors that support it."""
