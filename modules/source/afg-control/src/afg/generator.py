@@ -548,6 +548,41 @@ class Generator:
             self._to_cfg("ch2")
         self._align_pending = True
 
+    def _coupling_after_panel(self, ch: str, changed: list) -> None:
+        """A change made AT THE AFG while CH2 follows CH1 (lab PC 2026-10-08:
+        CH1 set to 118 Hz at the panel, CH2 stayed at 114 Hz -- the coupling
+        silently broken). The coupling is the user's standing instruction:
+          * CH1 changed -> CH2 follows, exactly as after a set from here;
+          * CH2's followed knob changed -> the user overrode the coupling at
+            the instrument: that follow is switched OFF (said, and saved),
+            rather than fighting the panel in a loop."""
+        if len(self.channels) < 2 or not self._follows():
+            return
+        notes, followed, dropped = [], "", ""
+        with self._lock:
+            co = self.cfg.coupling
+            if ch == "ch1" and ("frequency_Hz" in changed
+                                or (self._phase_follows() and "phase_deg" in changed)):
+                self._mirror_to_ch2(notes_out=notes)
+                w2 = self._want["ch2"]
+                followed = f"{w2['frequency_Hz']:g} Hz" + (
+                    f", phase {w2['phase_deg']:g} deg" if self._phase_follows() else "")
+            elif ch == "ch2" and "frequency_Hz" in changed:
+                co.ch2_follows_ch1 = False
+                dropped = "frequency follow (and phase follow with it)"
+            elif ch == "ch2" and self._phase_follows() and "phase_deg" in changed:
+                co.ch2_phase_follows = False
+                dropped = "phase follow"
+            self._seen = self._cfg_snapshot()
+        if followed:
+            self._wake.set()
+            self._emit("info", f"CH1 changed at the instrument -> CH2 follows: {followed}")
+            if notes:
+                self._emit("warn", "CH2 clamped -> " + ", ".join(notes))
+        if dropped:
+            self._persist()
+            self._emit("warn", f"CH2 changed at the instrument: {dropped} switched OFF")
+
     def outputs_off(self) -> int:
         """Every output OFF (the safety action). Returns the operation number."""
         for ch in self.channels:
@@ -922,6 +957,7 @@ class Generator:
                     self._asked.pop(ch, None)    # the instrument's values now
                 self._emit("info", f"{ch.upper()}: changed at the instrument: "
                                    + ", ".join(f"{k} = {got[k]}" for k in changed))
+                self._coupling_after_panel(ch, changed)
         with self._lock:
             want = self._want[ch]
             bad = [k for k in _relevant(want)

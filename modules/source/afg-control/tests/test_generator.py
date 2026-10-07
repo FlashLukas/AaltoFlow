@@ -550,3 +550,31 @@ def test_nothing_is_saved_without_a_persist_path(tmp_path, monkeypatch):
     finally:
         gen.shutdown()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_panel_change_of_ch1_keeps_ch2_following(system):
+    """Lab PC 2026-10-08: CH1 set to 118 Hz at the panel with "CH2 follows
+    CH1" on; the module adopted it, CH2 stayed at 114 Hz."""
+    gen, sim, cfg, events = system
+    gen.set_follow(True, phase=False)
+    wait(gen, lambda s: s["ch2_settled"] and s["ch2_frequency_Hz"] == s["ch1_frequency_Hz"])
+    sim.ch[0]["frequency_Hz"] = 118.0                 # the knob on CH1
+    gen._wake.set()
+    s = wait(gen, lambda s: s["ch2_frequency_Hz"] == 118.0 and s["ch2_settled"], 4.0)
+    assert sim.ch[1]["frequency_Hz"] == 118.0 and s["follow"] is True
+    assert any("CH2 follows: 118 Hz" in m for _, m in events), events
+
+
+def test_a_panel_change_of_ch2_switches_follow_off(system, tmp_path):
+    """CH2 changed at the panel while it follows: the user overrode it there
+    -- follow off, with a warn, saved; no tug of war with the panel."""
+    gen, sim, cfg, events = system
+    gen.persist_path = str(tmp_path / "afg.ini")
+    gen.set_follow(True, phase=False)
+    wait(gen, lambda s: s["ch2_settled"] and s["ch2_frequency_Hz"] == s["ch1_frequency_Hz"])
+    sim.ch[1]["frequency_Hz"] = 777.0                 # the knob on CH2
+    gen._wake.set()
+    s = wait(gen, lambda s: s["follow"] is False, 4.0)
+    assert s["ch2_frequency_Hz"] == 777.0 and sim.ch[1]["frequency_Hz"] == 777.0
+    assert any(lvl == "warn" and "follow" in m and "OFF" in m for lvl, m in events)
+    assert "ch2_follows_ch1 = False" in (tmp_path / "afg.ini").read_text(encoding="utf-8")
