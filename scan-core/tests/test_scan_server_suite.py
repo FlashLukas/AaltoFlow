@@ -276,3 +276,26 @@ def test_stop_watching_gives_the_pane_back(qapp, rig):
     win.stop_watching()
     assert win.watch is None and b.server is None
     assert b.run_btn.isEnabled() and not win.server_strip.isVisibleTo(win)
+
+
+def test_a_stale_status_frame_does_not_flip_the_pause_button_back(qapp, rig):
+    """Lukas 2026-10-07: "when i click Resume it shows pause, then resume shows
+    and then pause again" -- a frame sent BEFORE the server took the click
+    flipped the button back. The clicked state now holds until the server
+    agrees (or PAUSE_CLICK_HOLD_S passes)."""
+    srv, win, c = rig()
+    b = win.builder
+    c.submit(recipe(num=200, dets=("slow",)))
+    pump(qapp, lambda: b.pause_btn.isEnabled() and b.progress.value() >= 2)
+    b.pause_btn.click()
+    pump(qapp, lambda: srv.status_payload()["user_paused"])
+    stale = dict(srv.status_payload())           # still paused: sent before Resume
+    b.pause_btn.click()                           # Resume
+    assert "Resume" not in b.pause_btn.text()
+    b.show_server_status(stale)                   # the old frame arrives late
+    assert "Resume" not in b.pause_btn.text()     # no flicker back
+    pump(qapp, lambda: not srv.status_payload()["user_paused"])
+    b.show_server_status(dict(srv.status_payload()))   # the server agrees
+    assert b._pause_click is None
+    b.abort_btn.click()
+    pump(qapp, lambda: not srv.running, timeout=20)

@@ -396,6 +396,8 @@ class ScanServer:
         self._last_error = ""
         self._last_summary = ""
         self._shutting_down = False
+        #: set by a verb whose effect watchers must see at once (publisher)
+        self._status_kick = False
 
         # live data and log
         self._live_ds = None
@@ -775,6 +777,11 @@ class ScanServer:
                 except queue.Empty:
                     pass
                 now = time.monotonic()
+                if self._status_kick:
+                    # a Pause / Resume just landed: watchers should see it NOW,
+                    # not up to a status period later (their button flickered)
+                    self._status_kick = False
+                    next_status = now
                 if now >= next_status:
                     next_status = now + period
                     try:
@@ -1222,6 +1229,7 @@ class ScanServer:
                 return {"ok": True, "running": False, "user_paused": False}
             was, self._user_pause = self._user_pause, bool(pause)
             name = self._entries[self._qi].name if 0 <= self._qi < len(self._entries) else ""
+        self._status_kick = True
         if was != bool(pause):
             self.log(f"{'PAUSE' if pause else 'RESUME'} pressed by {self._who(req)} "
                      f"('{name}')", "warn" if pause else "info")

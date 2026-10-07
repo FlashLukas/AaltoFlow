@@ -3257,6 +3257,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: True while THIS pane has the scan paused (or, watching a scan
         #: server, while the server reports user_paused)
         self._user_paused = False
+        #: (state, deadline) of the last Pause / Resume click on a server scan
+        self._pause_click: tuple | None = None
         self.abort_btn = QtWidgets.QPushButton("■ Abort"); self.abort_btn.setObjectName("danger")
         self.abort_btn.clicked.connect(self._abort); self.abort_btn.setEnabled(False)
         self.stop_queue_btn = QtWidgets.QPushButton("■■ Stop queue")
@@ -4323,6 +4325,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # safety verb like Abort (enabled while busy, for every PC); Resume
         # needs control, so it is only offered when the server would take it
         user_paused = busy and bool(st.get("user_paused"))
+        # A click shows its result at once; a status frame the server sent
+        # BEFORE it took the click must not flip the button back (Lukas
+        # 2026-10-07: "Resume shows pause, then resume, then pause again").
+        # Keep the clicked state until the server agrees, at most HOLD_S.
+        want = self._pause_click
+        if want is not None:
+            if not busy or user_paused == want[0] or time.monotonic() > want[1]:
+                self._pause_click = None
+            else:
+                user_paused = want[0]
         self._show_pause_state(user_paused,
                                enabled=busy and (not user_paused or self._server_may_resume()))
         if busy:
@@ -4772,6 +4784,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     # not U+23F8 (the pause sign): the Windows UI font has no glyph for it
     # and it rendered as an empty box; block characters are there
+    #: seconds a Pause / Resume click on a SERVER scan wins over status frames
+    #: that still show the old state (they were sent before the click landed)
+    PAUSE_CLICK_HOLD_S = 3.0
     PAUSE_TEXT = "▌▌ Pause"
     RESUME_TEXT = "▶ Resume"
     PAUSE_TIP = ("Hold the scan after the point being measured; Resume carries on. "
@@ -4799,6 +4814,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if self.server is not None and self.worker is None:
             # a SAFETY verb on the server, like abort: allowed from every PC
             if self._server_cmd("pause", self.server.pause):
+                self._pause_click = (True, time.monotonic() + self.PAUSE_CLICK_HOLD_S)
                 self._show_pause_state(True, enabled=self._server_may_resume())
                 return True
             return False
@@ -4816,6 +4832,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if self.server is not None and self.worker is None:
             # needs control on the server, like submit
             if self._server_cmd("resume", self.server.resume):
+                self._pause_click = (False, time.monotonic() + self.PAUSE_CLICK_HOLD_S)
                 self._show_pause_state(False, enabled=True)
                 return True
             return False
