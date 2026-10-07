@@ -66,6 +66,7 @@ class SimulatedAFG:
     def capabilities(self) -> dict:
         return {"model": "AFG1062 (simulated)", "channels": len(self.ch),
                 "waveforms": list(_SHAPES), "phase_align": True,
+                "phase_resolution_deg": 1.0,
                 "load_settable": True}
 
     def envelope(self, waveform: str, load_ohm):
@@ -137,8 +138,14 @@ class SimulatedAFG:
         c["offset_V"] = min(max(float(volts), -room), room)
 
     def set_phase(self, ch: int, deg: float) -> None:
+        """Like the lab's AFG1062 (measured 2026-10-07): a negative (or >= 360)
+        phase is REJECTED with -201 and nothing changes; otherwise it keeps
+        whole degrees, TRUNCATED (31.6 -> 31). It reports 0..360."""
         self.writes.append(("set_phase", ch, float(deg)))
-        self.ch[ch]["phase_deg"] = waveforms.wrap_phase(deg)
+        if not 0.0 <= deg < 360.0:
+            self._errors.append('-201,"Invalid while in local"')
+            return
+        self.ch[ch]["phase_deg"] = float(int(deg + 1e-9))
 
     def set_duty(self, ch: int, pct: float) -> None:
         self.writes.append(("set_duty", ch, float(pct)))

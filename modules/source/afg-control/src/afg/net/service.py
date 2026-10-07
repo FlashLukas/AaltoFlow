@@ -21,7 +21,8 @@ Commands (a reply means ACCEPTED, not done -- poll status for the effect):
     set_duty          {channel, duty_pct}          (pulse)
     set_symmetry      {channel, symmetry_pct}      (ramp)
     set_load          {channel, load: "50"|"high-Z"|<ohm>}
-    set_follow        {on: bool, phase_offset_deg?}   CH2 follows CH1
+    set_follow        {on: bool, phase_offset_deg?, phase?}   CH2's frequency follows CH1
+    set_phase_follow  {on: bool}   CH2's phase follows CH1 (+ offset) as well
     set_phase_offset  {deg}
     align_phase       {}  -> {"op_id": n}
     outputs_off       {}  -> {"op_id": n}           the safety verb
@@ -272,7 +273,11 @@ class AfgService:
                 g.set_load(ch, msg["load"])
             elif cmd == "set_follow":
                 off = msg.get("phase_offset_deg")
-                g.set_follow(_as_bool(msg["on"]), None if off is None else float(off))
+                ph = msg.get("phase")
+                g.set_follow(_as_bool(msg["on"]), None if off is None else float(off),
+                             None if ph is None else _as_bool(ph))
+            elif cmd == "set_phase_follow":
+                g.set_phase_follow(_as_bool(msg["on"]))
             elif cmd == "set_phase_offset":
                 g.set_phase_offset(float(msg["deg"]))
             elif cmd == "align_phase":
@@ -304,7 +309,7 @@ class AfgService:
                         "kept_outputs": self._keep_outputs}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
-            if cmd in ("set_waveform", "set_load", "set_follow"):
+            if cmd in ("set_waveform", "set_load", "set_follow", "set_phase_follow"):
                 self._rev_at = -1e9       # the manifest's SHAPE / ranges follow these
             return {"ok": True}
         except (KeyError, ValueError, TypeError) as exc:

@@ -3,8 +3,9 @@
 Two-channel arbitrary function generator, 60 MHz, 300 MS/s, USB (USB-TMC,
 SCPI). Per channel: sine, square, pulse, ramp, noise or DC; frequency,
 amplitude, offset, start phase, pulse duty, ramp symmetry and the load setting.
-Plus one coupling: **CH2 follows CH1** -- CH2 takes CH1's frequency, its phase
-is CH1's plus an offset, and the two are re-aligned after every change. That is
+Plus a coupling with two switches: **frequency follows CH1** (CH2 takes CH1's
+frequency; the two are re-aligned after every change) and **phase follows
+CH1** (CH2's phase = CH1's + an offset; off = CH2's phase is its own). That is
 the bench use it was written for: CH1 drives the experiment (e.g. a magnet
 amplifier at 30 Hz), CH2 is a synchronous square for the scope's trigger input.
 
@@ -107,10 +108,11 @@ doubles at high-Z; the lab limits (Settings) stay where they are.
 | `set_frequency` | `channel`, `frequency_Hz` | refused on CH2 while it follows CH1 |
 | `set_amplitude` | `channel`, `amplitude_Vpp` | into the load setting |
 | `set_offset` | `channel`, `offset_V` | the level, for dc |
-| `set_phase` | `channel`, `phase_deg` | -180..180; refused on CH2 while following |
+| `set_phase` | `channel`, `phase_deg` | kept as asked; sent as 0..360 in whole degrees; refused on CH2 while its phase follows |
 | `set_duty` / `set_symmetry` | `channel`, `duty_pct` / `symmetry_pct` | pulse / ramp |
 | `set_load` | `channel`, `load` | "50", "high-Z" or ohms |
-| `set_follow` | `on`, `phase_offset_deg?` | CH2 follows CH1 |
+| `set_follow` | `on`, `phase_offset_deg?`, `phase?` | CH2's frequency (and optionally phase) follows CH1 |
+| `set_phase_follow` | `on` | CH2's phase follows CH1 (+ offset) |
 | `set_phase_offset` | `deg` | scannable |
 | `align_phase` | -- | reply `op_id`; restarts both outputs together |
 | `outputs_off` | -- | reply `op_id`; the safety verb |
@@ -206,10 +208,14 @@ the bench. In order; each step names the `# VERIFY` it settles.
    (CH1 sine 1 kHz 0.5 Vpp, output on). Start the service `--real`. The log must
    list exactly that, the output must stay on, and nothing on the AFG may change.
    If a channel line says "could not read ...", note which query failed.
-2. **Phase unit** (`hardware.phase_unit`, default "rad"). Set CH2 phase to 90 deg
-   from the panel; the AFG's display must say 90 deg. If it shows anything else
-   (90 rad wraps to about -84 deg) or refuses, set the unit to "deg" in
-   Settings > Hardware and restart.
+2. **Phase** -- MEASURED 2026-10-07 (raw SCPI): `PHAS:ADJ 31DEG` is exact, a
+   bare number is RADIANS and is TRUNCATED to whole degrees (31 deg sent as
+   0.54105207 rad came back as 30), a NEGATIVE phase is rejected with -201
+   "Invalid while in local", the query answers in radians. So the module
+   keeps your setpoint as asked (-90 stays -90), sends the same angle in
+   0..360 rounded to whole degrees with `DEG`, compares modulo 360 at 1 deg,
+   and declares `resolution: 1` so a scan rounds its phases to whole degrees.
+   Re-check: phases -180..180 from a scan settle; the panel shows 270 for -90.
 3. **Amplitude suffix.** Set 1 Vpp with the AFG's own unit switched to Vrms:
    the read-back must be 1 Vpp (no "not as asked" note).
 4. **Load.** Switch CH1 load to high-Z from the panel: the AFG display should

@@ -42,7 +42,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
        settle=None, args=None, danger=False, help="", timeout_s=None,
-       wait=None):
+       wait=None, resolution=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -54,7 +54,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("timeout_s", timeout_s), ("wait", wait), ("help", help)):
+                 ("timeout_s", timeout_s), ("wait", wait), ("help", help),
+                 ("resolution", resolution)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -120,7 +121,12 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
     want = gen.desired(ch)
     wf = want.get("waveform", "sine")
     env = gen.envelope(ch)
-    follows = ch == "ch2" and gen.follows()
+    follows = ch == "ch2" and gen.follows()                  # frequency
+    phase_follows = ch == "ch2" and gen.phase_follows()
+    # the instrument's phase step (AFG1062: whole degrees). Declared, so a
+    # scan rounds its phase values to it and settles on the rounded value
+    # instead of waiting for 31.4 deg on a unit that holds 31.
+    phase_res = gen.phase_resolution() or None
     has_freq = wf not in ("dc", "noise")
     nrb = set(gen.not_read_back(ch))
     NRB = (" NOT READ BACK on this instrument (its firmware lacks the query): "
@@ -183,13 +189,16 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                   help="Into the load setting. Limited so that |offset| + "
                        "amplitude/2 stays within the peak limit (the offset stops "
                        "there when it is the one being set)."))
-    if has_freq and not follows:
+    if has_freq and not phase_follows:
         out.append(_p(f"{ch}_phase", f"{C} phase", "control", "float", unit="deg",
                       group=grp, order=base_order + 6, decimals=2, step=1.0,
-                      min=-180.0, max=180.0, read_path=[f"{ch}_phase_deg"],
+                      min=-180.0, max=360.0, read_path=[f"{ch}_phase_deg"],
                       set={"verb": "set_phase", "arg": "phase_deg", "extra": extra},
                       settle=settle(f"{ch}_phase_deg"), timeout_s=10.0,
-                      help="Start phase. Between the two channels it means something "
+                      resolution=phase_res,
+                      help="Start phase. Kept as asked (-90 stays -90); the instrument "
+                           "gets the same angle in 0..360, in its own steps (AFG1062: "
+                           "whole degrees). Between the two channels it means something "
                            "only at the same frequency and after 'Align phase'."))
     else:
         out.append(_p(f"{ch}_phase", f"{C} phase", "indicator", "float", unit="deg",
@@ -262,18 +271,27 @@ def build_manifest(gen) -> dict:
     for n, ch in enumerate(gen.channels):
         params += _channel_params(gen, ch, 10 * (n + 1))
     if len(gen.channels) > 1:
-        follow = bool(gen.cfg.coupling.ch2_follows_ch1)
+        phase_res = gen.phase_resolution() or None
+        follow = gen.follows()
         params.append(
-            _p("follow", "CH2 follows CH1", "control", "bool", group="Coupling", order=1,
-               read_path=["follow"], set={"verb": "set_follow", "arg": "on"},
+            _p("follow", "CH2 frequency follows CH1", "control", "bool", group="Coupling",
+               order=1, read_path=["follow"], set={"verb": "set_follow", "arg": "on"},
                settle={"policy": "echoes", "key": "follow"},
-               help="CH2 takes CH1's frequency, and its phase is CH1's plus the "
-                    "offset; the channels are re-aligned after every change. For "
-                    "a synchronous trigger square on CH2 next to the drive on CH1."))
-        if follow:
+               help="CH2 takes CH1's frequency; the channels are re-aligned after "
+                    "every change. For a synchronous trigger square on CH2 next to "
+                    "the drive on CH1."))
+        params.append(
+            _p("phase_follow", "CH2 phase follows CH1", "control", "bool", group="Coupling",
+               order=2, read_path=["phase_follow_set"],
+               set={"verb": "set_phase_follow", "arg": "on"},
+               settle={"policy": "echoes", "key": "phase_follow_set"},
+               help="While the frequency follows: CH2's phase = CH1's + the offset. "
+                    "Off: CH2's phase is its own setting (Lukas 2026-10-07)."))
+        if gen.phase_follows():
             params.append(
                 _p("phase_offset", "CH2 phase offset", "control", "float", unit="deg",
-                   group="Coupling", order=2, decimals=2, step=1.0, min=-180.0, max=180.0,
+                   group="Coupling", order=3, decimals=2, step=1.0, min=-180.0, max=360.0,
+                   resolution=phase_res,
                    read_path=["phase_offset_deg"],
                    set={"verb": "set_phase_offset", "arg": "deg"},
                    settle={"policy": "adopt_then_flag", "setpoint_key": "phase_offset_deg",
@@ -283,12 +301,12 @@ def build_manifest(gen) -> dict:
         else:
             params.append(
                 _p("phase_offset", "CH2 phase offset (unused)", "indicator", "float",
-                   unit="deg", group="Coupling", order=2, decimals=2,
+                   unit="deg", group="Coupling", order=3, decimals=2,
                    read_path=["phase_offset_deg"]))
         if gen.caps.get("phase_align"):
             params.append(
                 _p("align_phase", "Align phase", "action", "action", group="Coupling",
-                   order=3, wait=_OP_WAIT,
+                   order=4, wait=_OP_WAIT,
                    help="Restart both channels' phase together (the AFG's 'Align "
                         "phase'). Done automatically while CH2 follows CH1. The "
                         "outputs restart: a glitch on a driven magnet."))

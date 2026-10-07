@@ -224,7 +224,9 @@ class OutputsView(QtWidgets.QWidget):
                    f"{span * 1e3 / 10:.4g} ms/div   {div_v:.3g} V/div")
         caption = "dashed = peak limit"
         if self._s.get("follow"):
-            caption = f"CH2 follows CH1, {self._s.get('phase_offset_deg', 0):g} deg   " + caption
+            caption = ((f"CH2 follows CH1, {self._s.get('phase_offset_deg', 0):g} deg   "
+                        if self._s.get("phase_follow") else "CH2 frequency follows CH1   ")
+                       + caption)
         p.drawText(QRectF(x0, y1 + 6, x1 - x0, 16), Qt.AlignRight, caption)
         p.end()
 
@@ -311,7 +313,7 @@ class ChannelCard(QtWidgets.QFrame):
         self.amp_row = knob("Amplitude", self.amp_spin, self.ctrl.set_amplitude)
         self.off_spin = _spin(4, 0.01, "V")
         self.off_row = knob("Offset", self.off_spin, self.ctrl.set_offset)
-        self.phase_spin = _spin(2, 1.0, "deg"); self.phase_spin.setRange(-180.0, 180.0)
+        self.phase_spin = _spin(2, 1.0, "deg"); self.phase_spin.setRange(-180.0, 360.0)
         self.phase_row = knob("Phase", self.phase_spin, self.ctrl.set_phase)
         self.duty_spin = _spin(2, 1.0, "%")
         self.duty_row = knob("Duty", self.duty_spin, self.ctrl.set_duty)
@@ -414,8 +416,9 @@ class ChannelCard(QtWidgets.QFrame):
     def refresh(self, s: dict):
         ch = self.ch
         wf = s.get(f"{ch}_waveform") or "sine"
-        follows = ch == "ch2" and bool(s.get("follow"))
-        shape = (wf, s.get(f"{ch}_load"), follows, s.get("describe_rev"))
+        follows = ch == "ch2" and bool(s.get("follow"))          # frequency
+        phase_follows = ch == "ch2" and bool(s.get("phase_follow"))
+        shape = (wf, s.get(f"{ch}_load"), follows, phase_follows, s.get("describe_rev"))
         if shape != self._shape:
             self._shape = shape
             self.apply_limits()
@@ -423,7 +426,7 @@ class ChannelCard(QtWidgets.QFrame):
             for wdg in (self.freq_spin, self.unit_combo, self.freq_btn):
                 wdg.setEnabled(has_freq and not follows)
             for wdg in (self.phase_spin, *self.phase_row):
-                wdg.setEnabled(has_freq and not follows)
+                wdg.setEnabled(has_freq and not phase_follows)
             for wdg in (self.amp_spin, *self.amp_row):
                 wdg.setEnabled(wf != "dc")
             self.off_row[0].setText("DC level" if wf == "dc" else "Offset")
@@ -463,7 +466,7 @@ class ChannelCard(QtWidgets.QFrame):
             self.freq_value.setText(num); self.freq_unit.setText(unit)
             if follows:                         # the box tracks CH1
                 self._set_freq_box(hz)
-        if follows:
+        if phase_follows:
             ph = _num(s.get(f"{ch}_phase_deg"))
             if ph is not None and not self.phase_spin.hasFocus():
                 self.phase_spin.setValue(ph)
@@ -494,7 +497,8 @@ class ChannelCard(QtWidgets.QFrame):
         if mismatch:
             notes.append(f"Instrument differs: {mismatch}")
         if follows:
-            notes.append("Frequency and phase follow CH1.")
+            notes.append("Frequency and phase follow CH1." if phase_follows
+                         else "Frequency follows CH1; the phase is set here.")
         if wf == "arb":
             notes.append("Arbitrary waveform kept from the instrument.")
         self.note.setText("  ".join(notes))
@@ -617,17 +621,26 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_coupling(self):
         card, lay = _card("Coupling")
         row = QtWidgets.QHBoxLayout(); row.setSpacing(10)
-        self.follow_box = QtWidgets.QCheckBox("CH2 follows CH1")
-        self.follow_box.setToolTip("CH2 takes CH1's frequency; its phase is CH1's plus "
-                                   "the offset; the channels are re-aligned after each "
-                                   "change. For a trigger square next to a drive signal.")
+        # Two switches (Lukas 2026-10-07: "select if also the phase follows or
+        # not.. not just frequency"). The phase can follow only while the
+        # frequency does.
+        self.follow_box = QtWidgets.QCheckBox("Frequency follows CH1")
+        self.follow_box.setToolTip("CH2 takes CH1's frequency; the channels are "
+                                   "re-aligned after each change. For a trigger square "
+                                   "next to a drive signal.")
         # `clicked` = user only; refresh uses blockSignals (gotcha #13)
         self.follow_box.clicked.connect(
             lambda on: self._safe(self.ctrl.set_follow, bool(on), self.offset_spin.value()))
         row.addWidget(self.follow_box)
+        self.phase_follow_box = QtWidgets.QCheckBox("Phase follows CH1")
+        self.phase_follow_box.setToolTip("CH2's phase = CH1's + the offset. Off: CH2's "
+                                         "phase is set on its own card.")
+        self.phase_follow_box.clicked.connect(
+            lambda on: self._safe(self.ctrl.set_phase_follow, bool(on)))
+        row.addWidget(self.phase_follow_box)
         row.addSpacing(12)
         row.addWidget(QtWidgets.QLabel("Phase offset"))
-        self.offset_spin = _spin(2, 1.0, "deg"); self.offset_spin.setRange(-180.0, 180.0)
+        self.offset_spin = _spin(2, 1.0, "deg"); self.offset_spin.setRange(-180.0, 360.0)
         row.addWidget(self.offset_spin)
         self.offset_btn = QtWidgets.QPushButton("Set")
         self.offset_btn.clicked.connect(
@@ -695,13 +708,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if s.get("idn"):
             self.idn_label.setText(s["idn"])
         follow = bool(s.get("follow"))
-        if follow != self.follow_box.isChecked():
-            self.follow_box.blockSignals(True)
-            self.follow_box.setChecked(follow)
-            self.follow_box.blockSignals(False)
-        self.offset_spin.setEnabled(follow); self.offset_btn.setEnabled(follow)
+        phase_follow = bool(s.get("phase_follow"))
+        for box, val in ((self.follow_box, follow),
+                         (self.phase_follow_box, bool(s.get("phase_follow_set", True)))):
+            if val != box.isChecked():
+                box.blockSignals(True)
+                box.setChecked(val)
+                box.blockSignals(False)
+        self.phase_follow_box.setEnabled(follow)     # meaningless without it
+        self.offset_spin.setEnabled(phase_follow); self.offset_btn.setEnabled(phase_follow)
         off = _num(s.get("phase_offset_deg"))
-        if follow and off is not None and not self.offset_spin.hasFocus()                 and self.offset_spin.value() != off:
+        if (phase_follow and off is not None and not self.offset_spin.hasFocus()
+                and self.offset_spin.value() != off):
             # the offset can be set from elsewhere (a scan, a script): show it
             self.offset_spin.setValue(off)
 

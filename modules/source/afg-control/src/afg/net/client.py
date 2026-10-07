@@ -147,8 +147,14 @@ class AfgClient(ControlClient):
         """50, "50", None / "high-Z" for high-Z, or a value in ohm."""
         return self._ch("set_load", channel, load="high-Z" if load is None else str(load))
 
-    def set_follow(self, on: bool, phase_offset_deg: float | None = None):
+    def set_phase_follow(self, on: bool):
+        return self._cmd({"cmd": "set_phase_follow", "on": bool(on)})
+
+    def set_follow(self, on: bool, phase_offset_deg: float | None = None,
+                   phase: bool | None = None):
         msg = {"cmd": "set_follow", "on": bool(on)}
+        if phase is not None:
+            msg["phase"] = bool(phase)
         if phase_offset_deg is not None:
             msg["phase_offset_deg"] = float(phase_offset_deg)
         return self._cmd(msg)

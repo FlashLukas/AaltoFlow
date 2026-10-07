@@ -103,7 +103,14 @@ class FakeAFGInstrument:
         elif path == "VOLT:LEV:IMM:OFFS":
             c["OFFS"] = float(arg)
         elif path == "PHAS:ADJ":
-            c["PHAS"] = float(arg)
+            # as MEASURED on the AFG1062 (2026-10-07): "<x>DEG" is degrees,
+            # a bare number radians; the unit keeps whole degrees, TRUNCATED;
+            # a negative (or >= 360) phase is rejected with -201
+            deg = float(arg[:-3]) if arg.upper().endswith("DEG") else math.degrees(float(arg))
+            if not 0.0 <= deg < 360.0:
+                self.errors.append('-201,"Invalid while in local"')
+            else:
+                c["PHAS"] = math.radians(int(deg + 1e-9))
         elif path == "PULS:DCYC":
             c["DCYC"] = float(arg)
         elif path == "FUNC:RAMP:SYMM":

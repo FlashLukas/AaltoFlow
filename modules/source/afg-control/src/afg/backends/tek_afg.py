@@ -16,7 +16,7 @@ long-form-compatible short form:
     frequency     SOURce<n>:FREQuency:FIXed <Hz>      SOURce<n>:FREQuency:FIXed?
     amplitude     SOURce<n>:VOLTage:LEVel:IMMediate:AMPLitude <v>VPP   (query in VOLTage:UNIT)
     offset        SOURce<n>:VOLTage:LEVel:IMMediate:OFFSet <V>
-    phase         SOURce<n>:PHASe:ADJust <phase>      (radians on the AFG3000; see phase_unit)
+    phase         SOURce<n>:PHASe:ADJust <deg>DEG     (read back in radians; see set_phase)
     align         SOURce1:PHASe:INITiate
     pulse duty    SOURce<n>:PULSe:DCYCle <pct>
     ramp symmetry SOURce<n>:FUNCtion:RAMP:SYMMetry <pct>
@@ -152,9 +152,9 @@ def _on(reply: str) -> bool:
 class TekAFG:
     """Drives a physical Tektronix AFG1062. Implements the WaveGen interface.
 
-    phase_unit -- what the instrument's PHASe:ADJust speaks when no unit is
-                  given: "rad" (the AFG3000's documented default) or "deg".
-                  Settings > Hardware; # VERIFY on the AFG1062 (README).
+    phase_unit -- the unit the instrument ANSWERS PHASe:ADJust? in: "rad"
+                  (measured on the AFG1062, 2026-10-07) or "deg". Writing
+                  always says DEG explicitly (see set_phase).
     """
 
     def __init__(self, resource: str, timeout_ms: int = 3000,
@@ -293,6 +293,8 @@ class TekAFG:
     def capabilities(self) -> dict:
         return {"model": "AFG1062", "channels": 2,
                 "waveforms": list(_SHAPE_SET), "phase_align": True,
+                # whole degrees, measured 2026-10-07 (see set_phase)
+                "phase_resolution_deg": 1.0,
                 "load_settable": True}
 
     def envelope(self, waveform: str, load_ohm: float | None) -> dict:
@@ -384,7 +386,7 @@ class TekAFG:
 
     def _read_phase(self, n: int) -> float:
         raw = self._qf(f"SOUR{n}:PHAS:ADJ?")
-        return math.degrees(raw) if self._phase_rad else raw               # VERIFY unit
+        return math.degrees(raw) if self._phase_rad else raw   # rad: measured
 
     def _read_load(self, n: int) -> float | None:
         # measured at high-Z: b'9.9E+37\xa6\xb8\n' (infinity + a GBK Ohm sign)
@@ -432,8 +434,15 @@ class TekAFG:
         self._inst.write(f"SOUR{ch + 1}:VOLT:LEV:IMM:OFFS {volts:.6g}")
 
     def set_phase(self, ch: int, deg: float) -> None:
-        v = math.radians(deg) if self._phase_rad else deg
-        self._inst.write(f"SOUR{ch + 1}:PHAS:ADJ {v:.8g}")                # VERIFY unit
+        """MEASURED on the lab's AFG1062 (2026-10-07, raw SCPI):
+          * "31DEG" -> 31 exactly; "90DEG", "270DEG", "180DEG" exact.
+          * a bare number is RADIANS: "0.54105207" (31 deg to 8 digits) came
+            back as 30 -- the unit converts to degrees and TRUNCATES to whole
+            degrees (31.6DEG -> 31 as well); "31" bare = 31 rad -> rejected.
+          * a NEGATIVE phase is rejected with -201 "Invalid while in local".
+        So the brain hands over 0 <= deg < 360 in whole degrees
+        (Generator.phase_to_send) and it is sent with an explicit DEG."""
+        self._inst.write(f"SOUR{ch + 1}:PHAS:ADJ {deg:g}DEG")
 
     def set_duty(self, ch: int, pct: float) -> None:
         # Accepted by FV:V1.0.2? NOT tested (the visit was read-only). Its
@@ -460,6 +469,10 @@ class TekAFG:
             code = resp.split(",", 1)[0].strip()  # '0,"No error"'      # VERIFY form
             if code.lstrip("+") in ("0", ""):
                 break
+            if code == "-201":
+                # this firmware's answer to an OUT-OF-RANGE value (measured:
+                # a negative phase), despite the wording
+                resp += " (= the value was rejected: out of the instrument's range)"
             errors.append(resp)
         return errors
 

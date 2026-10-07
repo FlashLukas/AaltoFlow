@@ -64,7 +64,8 @@ def test_phase_unit_degrees(fake_visa):
     fake_visa[0].ch[2]["PHAS"] = 45.0
     assert b.read_channel(1)["phase_deg"] == pytest.approx(45.0)
     b.set_phase(1, 30.0)
-    assert fake_visa[0].writes[-1] == "SOUR2:PHAS:ADJ 30"
+    # written with an explicit DEG whatever the read unit (measured 2026-10-07)
+    assert fake_visa[0].writes[-1] == "SOUR2:PHAS:ADJ 30DEG"
     b.close()
 
 
@@ -85,7 +86,7 @@ def test_setters_send_the_manual_commands(fake_visa):
     w = fake_visa[0].writes[1:]
     assert w[:4] == ["SOUR1:FUNC:SHAP RAMP", "SOUR1:FREQ:FIX 1234.5",
                      "SOUR1:VOLT:LEV:IMM:AMPL 0.5VPP", "SOUR1:VOLT:LEV:IMM:OFFS -0.1"]
-    assert w[4].startswith("SOUR2:PHAS:ADJ 1.5707963")
+    assert w[4] == "SOUR2:PHAS:ADJ 90DEG"
     assert w[5:] == ["SOUR2:PULS:DCYC 25", "SOUR1:FUNC:RAMP:SYMM 80", "OUTP2:IMP INF",
                      "OUTP1:IMP 50", "OUTP2:STAT ON", "SOUR1:PHAS:INIT"]
     with pytest.raises(ValueError):
@@ -158,3 +159,34 @@ def test_the_brain_on_the_real_backend(fake_visa):
     finally:
         gen.shutdown()
     assert inst.ch[1]["OUTP"] == "0" and inst.ch[2]["OUTP"] == "0"
+
+
+def test_phase_is_written_in_whole_degrees_with_DEG(fake_visa):
+    """Measured 2026-10-07: 31 deg sent as 0.54105207 rad came back as 30 (the
+    unit truncates to whole degrees); "31DEG" is exact; negatives -> -201."""
+    gen = Generator(TekAFG(RES), Config())
+    gen.start()
+    inst = fake_visa[0]
+    try:
+        for asked, sent in ((31.0, "31DEG"), (90.0, "90DEG"), (-90.0, "270DEG")):
+            gen.set_phase("ch1", asked)
+            t_end = time.monotonic() + 3
+            while time.monotonic() < t_end:
+                s = gen.status()
+                if s["ch1_phase_deg"] == asked and s["ch1_settled"]:
+                    break
+                time.sleep(0.02)
+            assert s["ch1_settled"] and s["ch1_mismatch"] == "", s["ch1_mismatch"]
+            assert f"SOUR1:PHAS:ADJ {sent}" in inst.writes
+        assert not any("-201" in e for _, e in inst.error_log)
+    finally:
+        gen.shutdown()
+
+
+def test_minus201_is_explained(fake_visa):
+    b = TekAFG(RES)
+    b.open()
+    fake_visa[0].errors.append('-201,"Invalid while in local"')
+    errs = b.drain_errors()
+    assert len(errs) == 1 and "rejected" in errs[0]
+    b.close()

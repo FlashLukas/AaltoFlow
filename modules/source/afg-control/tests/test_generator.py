@@ -332,3 +332,67 @@ def test_shutdown_keep_outputs_changes_nothing():
     assert sim.writes[n:] == []
     assert sim.ch[0]["output"] and sim.ch[1]["output"]
     assert gen.status()["connected"] is False and not sim._open
+
+
+# ---- the phase, as measured on the lab's AFG1062 (2026-10-07) -------------------
+# The simulator behaves like the unit: negative phases rejected (-201), whole
+# degrees, truncated. The brain must keep the user's setpoint, send the same
+# angle in 0..360 rounded to whole degrees, and compare modulo 360.
+
+def _sent_phases(sim, ch):
+    return [w[2] for w in sim.writes if w[0] == "set_phase" and w[1] == ch]
+
+
+@pytest.mark.parametrize("asked, sent", [(-90.0, 270.0), (-180.0, 180.0), (31.0, 31.0),
+                                         (90.0, 90.0), (179.5, 180.0), (31.4, 31.0),
+                                         (359.7, 0.0)])
+def test_phase_is_kept_as_asked_and_sent_in_range(system, asked, sent):
+    gen, sim, cfg, events = system
+    sim.writes.clear()
+    gen.set_phase("ch1", asked)
+    s = settled(gen, "ch1", phase_deg=asked)          # the echo is what was ASKED
+    assert _sent_phases(sim, 0) == [sent]
+    assert s["ch1_mismatch"] == ""
+    assert sim.drain_errors() == []                   # nothing the unit rejected
+
+
+def test_a_scan_of_phase_minus180_to_180_never_hangs(system):
+    """The scan "TestOscilloscope" (ch1_phase -180..180) stopped at its first
+    point: -180 was wrapped to +180 and the echo never matched."""
+    gen, sim, cfg, events = system
+    for asked in (-180.0, -135.0, -90.0, -45.0, 0.0, 45.0, 90.0, 135.0, 180.0):
+        gen.set_phase("ch1", asked)
+        settled(gen, "ch1", phase_deg=asked)
+
+
+def test_an_equivalent_phase_is_not_a_front_panel_change(system):
+    gen, sim, cfg, events = system
+    gen.set_phase("ch1", -90.0)
+    settled(gen, "ch1", phase_deg=-90.0)
+    time.sleep(0.3)                                   # several read-backs of 270
+    assert gen.status()["ch1_phase_deg"] == -90.0
+    assert not any("changed at the instrument" in m for _, m in events)
+    sim.ch[0]["phase_deg"] = 100.0                    # a REAL change at the panel
+    gen._wake.set()
+    wait(gen, lambda s: s["ch1_phase_deg"] == 100.0)
+
+
+def test_phase_follows_can_be_switched_off(system):
+    """Lukas 2026-10-07: "select if also the phase follows or not"."""
+    gen, sim, cfg, events = system
+    gen.set_follow(True, 90.0)
+    settled(gen, "ch2", phase_deg=90.0, frequency_Hz=gen.status()["ch1_frequency_Hz"])
+    with pytest.raises(ValueError, match="phase follows"):
+        gen.set_phase("ch2", 10.0)
+    gen.set_phase_follow(False)
+    st = wait(gen, lambda s: not s["phase_follow"])   # the snapshot is rebuilt by the worker
+    assert st["follow"] and st["phase_follow_set"] is False
+    gen.set_phase("ch2", -45.0)                       # its own setting again
+    settled(gen, "ch2", phase_deg=-45.0)
+    with pytest.raises(ValueError, match="frequency follows"):
+        gen.set_frequency("ch2", 10.0)                # the frequency still follows
+    gen.set_frequency("ch1", 500.0)
+    settled(gen, "ch2", frequency_Hz=500.0, phase_deg=-45.0)   # phase untouched
+    assert cfg.coupling.ch2_phase_follows is False
+    gen.set_phase_follow(True)
+    settled(gen, "ch2", phase_deg=90.0)

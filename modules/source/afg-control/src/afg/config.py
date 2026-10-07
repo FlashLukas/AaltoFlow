@@ -103,10 +103,13 @@ class Coupling:
     drives the experiment (e.g. a magnet at 30 Hz), CH2 makes a synchronous
     square for the trigger input of a scope.
 
-    ch2_follows_ch1   -- CH2 always gets CH1's frequency, and after every
-                         frequency change the two channels are phase-aligned
-                         (the AFG's "align phase"), so the phase offset below
-                         is meaningful.
+    ch2_follows_ch1   -- CH2's FREQUENCY is always CH1's, and after every
+                         frequency change the channels are phase-aligned
+                         (the AFG's "align phase").
+    ch2_phase_follows -- while the frequency follows: CH2's PHASE is CH1's
+                         + phase_offset_deg as well. Off = CH2's phase is its
+                         own setting (counted from CH1's after the alignment).
+                         Lukas 2026-10-07: "select if also the phase follows".
     phase_offset_deg  -- CH2's phase = CH1's phase + this.
 
     A software rule of this module (the brain applies it), so it is in the
@@ -115,6 +118,7 @@ class Coupling:
     """
 
     ch2_follows_ch1: bool = False
+    ch2_phase_follows: bool = True
     phase_offset_deg: float = 0.0
 
 
@@ -131,9 +135,10 @@ class Hardware:
     poll_hz    -- how often the worker READS the instrument back (each read is
                   ~20 queries per channel over USB). The readback is what makes
                   `settled` honest and notices a change made at the front panel.
-    phase_unit -- what the instrument's phase command speaks: "rad" (the
-                  AFG3000 family's default) or "deg". # VERIFY on the AFG1062:
-                  set CH1 phase to 90 deg here and read the front panel.
+    phase_unit -- the unit the instrument ANSWERS a phase query in: "rad"
+                  (measured on the AFG1062, 2026-10-07). A phase is always
+                  WRITTEN with an explicit DEG (bare numbers are radians and
+                  were truncated -- see backends/tek_afg.py set_phase).
     """
 
     visa: str = "USB0::0x0699::0x0353::SERIAL::INSTR"

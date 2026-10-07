@@ -149,11 +149,14 @@ class SettingsDialog(QtWidgets.QDialog):
     def _coupling_tab(self):
         page, form = self._form_widget()
         co = self.cfg.coupling
-        box = QtWidgets.QCheckBox("CH2 takes CH1's frequency and phase (+ offset)")
+        box = QtWidgets.QCheckBox("CH2 takes CH1's frequency")
         box.setChecked(bool(co.ch2_follows_ch1))
-        self._add(form, "coupling", "ch2_follows_ch1", "CH2 follows CH1", box)
+        self._add(form, "coupling", "ch2_follows_ch1", "Frequency follows CH1", box)
+        pbox = QtWidgets.QCheckBox("CH2's phase = CH1's + the offset")
+        pbox.setChecked(bool(getattr(co, "ch2_phase_follows", True)))
+        self._add(form, "coupling", "ch2_phase_follows", "Phase follows CH1", pbox)
         self._add(form, "coupling", "phase_offset_deg", "Phase offset",
-                  _dspin(co.phase_offset_deg, -180.0, 180.0, 2, 1.0, "deg"))
+                  _dspin(co.phase_offset_deg, -180.0, 360.0, 2, 1.0, "deg"))
         form.addRow(_hint("For a synchronous trigger: CH1 drives the experiment, CH2 "
                           "makes a square at the same frequency for the scope's "
                           "trigger input. The channels are re-aligned after every "

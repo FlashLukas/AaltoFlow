@@ -222,3 +222,20 @@ def test_every_status_value_fits_its_type(brain, waveform):
         if d.get("read_path") and d["kind"] in ("indicator", "control"):
             v = read_path(st, d["read_path"])
             assert _fits(d, v), f"{d['id']}: {v!r} does not fit {d}"
+
+
+def test_phase_controls_declare_whole_degrees_and_phase_follow(brain):
+    cfg, gen = brain
+    by = {p["id"]: p for p in build_manifest(gen)["parameters"]}
+    assert by["ch1_phase"]["resolution"] == 1.0          # scan-core rounds to it
+    assert by["ch1_phase"]["min"] == -180.0
+    assert by["phase_follow"]["kind"] == "control"
+    gen.set_follow(True, 0.0)
+    by = {p["id"]: p for p in build_manifest(gen)["parameters"]}
+    assert by["ch2_phase"]["kind"] == "indicator" and by["phase_offset"]["kind"] == "control"
+    assert by["phase_offset"]["resolution"] == 1.0
+    gen.set_phase_follow(False)
+    by = {p["id"]: p for p in build_manifest(gen)["parameters"]}
+    assert by["ch2_phase"]["kind"] == "control"          # its own setting again
+    assert by["ch2_frequency"]["kind"] == "indicator"    # the frequency still follows
+    assert by["phase_offset"]["kind"] == "indicator"

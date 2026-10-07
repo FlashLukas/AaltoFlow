@@ -70,10 +70,12 @@ def _clamp(v: float, lo: float, hi: float) -> tuple[float, bool]:
     return v, False
 
 
-def _same(key: str, a, b) -> bool:
+def _same(key: str, a, b, phase_tol: float = 0.05) -> bool:
     """Does the instrument's read-back `b` agree with what was asked, `a`?
     The tolerances are the AFG's display resolution, generously: a value the
-    instrument ROUNDS is fine, a value it COERCES is not."""
+    instrument ROUNDS is fine, a value it COERCES is not. Phases compare
+    MODULO 360 (asked -90, the unit holds 270: the same phase) within
+    `phase_tol` -- half the instrument's phase resolution."""
     if key in ("output", "waveform", "mode"):
         return a == b
     if key == "load_ohm":
@@ -89,7 +91,7 @@ def _same(key: str, a, b) -> bool:
     if key == "offset_V":
         return abs(a - b) <= 1e-3 + 5e-4 * abs(a)
     if key == "phase_deg":
-        return abs(waveforms.wrap_phase(a - b)) <= 0.05
+        return abs(waveforms.wrap_phase(a - b)) <= phase_tol
     return abs(a - b) <= 0.05                       # duty / symmetry, percent
 
 
@@ -329,8 +331,35 @@ class Generator:
         if c:
             notes.append(f"duty {w['duty_pct']:g} %")
         w["symmetry_pct"], _ = _clamp(w["symmetry_pct"], 0.0, 100.0)
-        w["phase_deg"] = waveforms.wrap_phase(w["phase_deg"])
+        # The phase is KEPT as asked (lab PC 2026-10-07): -180 used to be
+        # wrapped to +180 here, the status then echoed +180, and a scan that
+        # asked -180 waited for an echo that never came. The instrument gets
+        # an equivalent value in its own range (see `phase_to_send`); only a
+        # silly number of turns is clamped.
+        w["phase_deg"], c = _clamp(float(w["phase_deg"]), -360.0, 360.0)
+        if c:
+            notes.append(f"phase {w['phase_deg']:g} deg")
         return notes
+
+    def phase_resolution(self) -> float:
+        """The instrument's phase step in degrees (AFG1062: whole degrees,
+        measured 2026-10-07); 0 = continuous."""
+        return float(self.caps.get("phase_resolution_deg", 0.0) or 0.0)
+
+    def phase_to_send(self, deg: float) -> float:
+        """The value the INSTRUMENT is given for a phase of `deg`: the same
+        angle in 0 <= x < 360 (the AFG1062 rejects a negative phase with
+        -201), rounded to its resolution (it TRUNCATES 31.6 to 31, and a
+        31 deg sent as 0.54105207 rad came back as 30 -- so the module rounds,
+        and sends exact whole degrees)."""
+        x = float(deg) % 360.0
+        res = self.phase_resolution()
+        if res > 0:
+            x = round(x / res) * res
+        return round(x % 360.0, 9)
+
+    def _phase_tol(self) -> float:
+        return max(0.05, self.phase_resolution() / 2.0 + 1e-6)
 
     # ---- commands (each clamps, stores, wakes the worker) ------------------
 
@@ -356,9 +385,14 @@ class Generator:
             self._emit("info", f"{ch.upper()}: {what}")
 
     def _refuse_if_following(self, ch: str, what: str) -> None:
-        if self._follows() and parse_channel(ch) == "ch2":
-            raise ValueError(f"CH2 follows CH1: set the {what} on CH1 (or switch "
-                             f"'CH2 follows CH1' off)")
+        if parse_channel(ch) != "ch2":
+            return
+        if what == "frequency" and self._follows():
+            raise ValueError("CH2's frequency follows CH1: set it on CH1 (or switch "
+                             "'frequency follows CH1' off)")
+        if what == "phase" and self._phase_follows():
+            raise ValueError("CH2's phase follows CH1 (+ offset): set CH1's phase or "
+                             "the offset (or switch 'phase follows CH1' off)")
 
     def set_output(self, ch, on: bool) -> None:
         ch = parse_channel(ch)
@@ -410,39 +444,60 @@ class Generator:
         self._change(ch, "load " + ("high-Z" if load_ohm is None else f"{load_ohm:g} ohm"),
                      load_ohm=load_ohm)
 
-    def set_follow(self, on: bool, phase_offset_deg: float | None = None) -> None:
-        """Switch "CH2 follows CH1" on/off, optionally with a new offset."""
+    def set_follow(self, on: bool, phase_offset_deg: float | None = None,
+                   phase: bool | None = None) -> None:
+        """"CH2's frequency follows CH1" on/off; optionally a new phase offset
+        and whether the PHASE follows too (Lukas 2026-10-07: "i want to be able
+        to select if also the phase follows or not"). The phase can only
+        follow while the frequency does: at different frequencies a phase
+        relation means nothing."""
         if len(self.channels) < 2:
             raise ValueError("needs two channels")
         notes = []
         with self._lock:
             co = self.cfg.coupling
             co.ch2_follows_ch1 = bool(on)
+            if phase is not None:
+                co.ch2_phase_follows = bool(phase)
             if phase_offset_deg is not None:
-                co.phase_offset_deg = waveforms.wrap_phase(float(phase_offset_deg))
+                # kept as asked, like a phase setpoint (a scan echoes it)
+                co.phase_offset_deg, _ = _clamp(float(phase_offset_deg), -360.0, 360.0)
             if on:
                 self._mirror_to_ch2(notes_out=notes)
             self._seen = self._cfg_snapshot()
         self._wake.set()
-        self._emit("info", f"CH2 follows CH1: {'ON' if on else 'off'}"
+        what = "frequency and phase follow" if self._phase_follows() else "frequency follows"
+        self._emit("info", f"CH2 {what} CH1: {'ON' if on else 'off'}"
                            + (f", phase offset {self.cfg.coupling.phase_offset_deg:g} deg"
-                              if on else ""))
+                              if self._phase_follows() else ""))
         if notes:
             self._emit("warn", "CH2 clamped -> " + ", ".join(notes))
+
+    def set_phase_follow(self, on: bool) -> None:
+        """Whether CH2's phase follows CH1's (+ offset) while its frequency
+        does. Off: CH2's phase is its own setting again."""
+        self.set_follow(self._follows(), None, bool(on))
 
     def set_phase_offset(self, deg: float) -> None:
         self.set_follow(self._follows(), deg)
 
     def _follows(self) -> bool:
+        """CH2's FREQUENCY follows CH1."""
         return len(self.channels) > 1 and bool(self.cfg.coupling.ch2_follows_ch1)
 
+    def _phase_follows(self) -> bool:
+        """CH2's PHASE follows CH1 (+ offset): only while the frequency does."""
+        return self._follows() and bool(getattr(self.cfg.coupling, "ch2_phase_follows", True))
+
     def _mirror_to_ch2(self, notes_out: list) -> None:
-        """CH2 takes CH1's frequency and CH1's phase + offset; ask for an
-        alignment. Called with the lock held."""
+        """CH2 takes CH1's frequency and -- if the phase follows too -- CH1's
+        phase + offset; ask for an alignment (so CH2's phase, followed or its
+        own, counts from CH1's). Called with the lock held."""
         w1, w2 = self._want["ch1"], dict(self._want["ch2"])
         w2["frequency_Hz"] = w1["frequency_Hz"]
-        w2["phase_deg"] = waveforms.wrap_phase(w1["phase_deg"]
-                                               + self.cfg.coupling.phase_offset_deg)
+        if self._phase_follows():
+            w2["phase_deg"] = waveforms.wrap_phase(w1["phase_deg"]
+                                                   + self.cfg.coupling.phase_offset_deg)
         notes_out += self._fit("ch2", w2)
         if w2 != self._want["ch2"]:
             self._want["ch2"] = w2
@@ -488,8 +543,12 @@ class Generator:
             return list(self._not_read_back[parse_channel(ch)])
 
     def follows(self) -> bool:
-        """Is "CH2 follows CH1" on?"""
+        """Does CH2's frequency follow CH1?"""
         return self._follows()
+
+    def phase_follows(self) -> bool:
+        """Does CH2's phase follow CH1 (+ offset)?"""
+        return self._phase_follows()
 
     # ---- status ----------------------------------------------------------
 
@@ -520,7 +579,8 @@ class Generator:
                    "symmetry_pct": self.set_symmetry}
         if cur["coupling"] != seen["coupling"]:
             self.set_follow(cur["coupling"]["ch2_follows_ch1"],
-                            cur["coupling"]["phase_offset_deg"])
+                            cur["coupling"]["phase_offset_deg"],
+                            cur["coupling"]["ch2_phase_follows"])
         for ch in self.channels:
             for key, fn in setters.items():
                 if cur[ch][key] != seen[ch][key]:
@@ -556,6 +616,7 @@ class Generator:
              for ch in self.channels}
         co = self.cfg.coupling
         d["coupling"] = {"ch2_follows_ch1": bool(co.ch2_follows_ch1),
+                         "ch2_phase_follows": bool(getattr(co, "ch2_phase_follows", True)),
                          "phase_offset_deg": float(co.phase_offset_deg)}
         return d
 
@@ -670,7 +731,7 @@ class Generator:
             if o_changes:
                 b.set_offset(i, o_new)
         if has_freq and want["phase_deg"] != have.get("phase_deg"):
-            b.set_phase(i, want["phase_deg"])
+            b.set_phase(i, self.phase_to_send(want["phase_deg"]))
             if self._follows():
                 self._align_pending = True
         if want["duty_pct"] != have.get("duty_pct") and want["waveform"] == "pulse":
@@ -729,8 +790,15 @@ class Generator:
             gen = self._applied_gen[ch]
             pending = self._gen[ch] != gen
         if not just_pushed and not pending and prev:
+            # compared with the PREVIOUS read-back, at the instrument's own
+            # resolution: only a real change counts, never a re-reading
             changed = [k for k in _KNOBS + ("output", "mode")
-                       if k in got and not _same(k, prev.get(k), got[k])]
+                       if k in got and not _same(k, prev.get(k), got[k], self._phase_tol())]
+            # a phase the instrument holds that is the SAME angle as the
+            # setpoint (270 for an asked -90) is not a change at the panel
+            if "phase_deg" in changed and _same("phase_deg", want.get("phase_deg"),
+                                               got["phase_deg"], self._phase_tol()):
+                changed.remove("phase_deg")
             if changed:
                 with self._lock:
                     for k in changed:
@@ -743,7 +811,8 @@ class Generator:
                                    + ", ".join(f"{k} = {got[k]}" for k in changed))
         with self._lock:
             want = self._want[ch]
-            bad = [k for k in _relevant(want) if k in got and not _same(k, want[k], got[k])]
+            bad = [k for k in _relevant(want)
+                   if k in got and not _same(k, want[k], got[k], self._phase_tol())]
             self._readback[ch] = dict(got)
             self._read_gen[ch] = gen
             text = ", ".join(f"{k}: asked {want[k]}, instrument {got[k]}" for k in bad)
@@ -777,6 +846,10 @@ class Generator:
                 "channels": list(self.channels),
                 "hw_error": error,
                 "follow": self._follows(),
+                "phase_follow": self._phase_follows(),
+                # the SETTING (the effective phase_follow is False while the
+                # frequency does not follow)
+                "phase_follow_set": bool(getattr(self.cfg.coupling, "ch2_phase_follows", True)),
                 "phase_offset_deg": float(self.cfg.coupling.phase_offset_deg),
                 "op_id": op_done, "op_ok": bool(op_ok and not ops_waiting)}
         all_off = self._connected and not error

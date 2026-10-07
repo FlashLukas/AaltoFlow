@@ -34,7 +34,8 @@ Commands  (channel = 1 | 2)
     duty <ch> <pct>            pulse duty cycle
     sym <ch> <pct>             ramp symmetry (50 = triangle)
     load <ch> 50|highz|<ohm>   the load setting (changes what the volts mean)
-    follow on|off [offset]     CH2 follows CH1 (frequency, phase + offset)
+    follow on|off [offset]     CH2's frequency follows CH1 (+ the phase offset)
+    phasefollow on|off         CH2's phase follows CH1 too (off: its own phase)
     align                      re-align the channels' phases
     status                     print one status snapshot
     info                       print static info (limits, envelope, id)
@@ -251,6 +252,8 @@ class Console:
             elif cmd == "load":
                 print(self.send({"cmd": "set_load", "channel": parse_ch(args[0]),
                                  "load": args[1]}))
+            elif cmd == "phasefollow":
+                print(self.send({"cmd": "set_phase_follow", "on": _on(args[0])}))
             elif cmd == "follow":
                 msg = {"cmd": "set_follow", "on": _on(args[0])}
                 if len(args) > 1:
