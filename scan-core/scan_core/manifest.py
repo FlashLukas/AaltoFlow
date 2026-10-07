@@ -95,7 +95,11 @@ def _clamp_guard(predicate, inst, desc: dict, wire, pid: str, is_bool: bool):
         got = _lookup(st, key)
         if not isinstance(got, (int, float)) or isinstance(got, bool) \
                 or abs(got - wire) <= tol:
-            state["since"] = None
+            # forget BOTH: a stale frame can flap back to the old value after
+            # the echo matched once (old, new, old, ... seen on the AFG's phase,
+            # 2026-10-07); with `seen` kept, that old value looked "unchanged"
+            # and the clock below was read while `since` was None (TypeError)
+            state["since"] = state["seen"] = None
             return False
         now = time.monotonic()
         if state["seen"] != got:                       # still moving: restart the clock

@@ -103,3 +103,22 @@ def test_a_slow_but_legal_setpoint_is_waited_for_as_before(monkeypatch):
     assert guarded({"selected_index_x": 46}) is False   # checked once, no raise
     assert guarded({"selected_index_x": 48}) is True
     assert inst.asked == ["describe"]
+
+
+def test_an_echo_that_flaps_back_to_the_old_value_does_not_crash():
+    """Lab 2026-10-07: an AFG phase scan died at its 2nd point with "unsupported
+    operand type(s) for -: 'float' and 'NoneType'". The echo went old, new
+    (= the request, but the flag not yet set), old again (a stale frame): the
+    guard had kept `seen` = old while clearing `since`."""
+    desc = {"id": "ch1_phase", "settle": {"policy": "adopt_then_flag",
+                                          "setpoint_key": "ch1_phase_deg",
+                                          "flag_key": "ch1_settled"}}
+    inst = _Inst("afg", _manifest("afg", 1, 360))
+    inst.fresh = _manifest("afg", 1, 360)
+    guarded = M._clamp_guard(lambda st: st["ch1_phase_deg"] == 2.0225 and st["ch1_settled"],
+                             inst, desc, 2.0225, "afg.ch1_phase", False)
+    old = {"ch1_phase_deg": 0.0, "ch1_settled": True}
+    new = {"ch1_phase_deg": 2.0225, "ch1_settled": False}
+    for st in (old, new, old, old, new):
+        assert guarded(st) is False
+    assert guarded({"ch1_phase_deg": 2.0225, "ch1_settled": True}) is True
