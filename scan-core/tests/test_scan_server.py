@@ -399,6 +399,74 @@ def test_a_fault_pauses_and_clear_fault_goes_to_the_module(server, client):
     assert c.command("status")["status"]["queue"]["results"][0][1] == "done"
 
 
+# ──────────────────────── the operator's Pause / Resume ───────────────────────
+
+def test_pause_holds_the_scan_and_resume_finishes_it(server, client):
+    srv = server()
+    c = client(srv)
+    st = c.command("status")["status"]
+    assert st["user_paused"] is False
+    assert c.pause()["running"] is False                # nothing runs: harmless
+    c.submit(recipe(num=60, dets=("slow",)))
+    wait_for(lambda: c.command("status")["status"]["done"] >= 3)
+    r = c.pause()
+    assert r["running"] and r["user_paused"]
+    st = wait_for(lambda: (lambda s: s if s["user_paused"] and s["state"] == "paused"
+                           else None)(c.command("status")["status"]))
+    assert st["faults"] == []                           # not a FAULT pause
+    # the point in progress finishes, then nothing more is measured
+    wait_for(lambda: any("PAUSED by the operator" in ln for ln in c.get_log()["lines"]))
+    n = c.command("status")["status"]["done"]
+    time.sleep(0.5)
+    assert c.command("status")["status"]["done"] == n < 60
+    r = c.resume()
+    assert r["running"] and not r["user_paused"]
+    wait_for(lambda: c.command("status")["status"]["state"] == "idle", timeout=20)
+    st = c.command("status")["status"]
+    assert st["done"] == 60 and st["queue"]["results"][0][1] == "done"
+    assert st["user_paused"] is False
+    assert any(ln.endswith("resumed") for ln in c.get_log()["lines"])
+
+
+def test_abort_while_paused_and_the_next_scan_of_a_queue_starts_unpaused(server, client):
+    srv = server()
+    c = client(srv)
+    c.submit_queue([("one", recipe(num=200, dets=("slow",))), ("two", recipe(num=5))])
+    wait_for(lambda: c.command("status")["status"]["done"] >= 3)
+    c.pause()
+    wait_for(lambda: any("PAUSED by the operator" in ln for ln in c.get_log()["lines"]))
+    c.abort()                                           # skips "one", as always
+    wait_for(lambda: c.command("status")["status"]["state"] == "idle", timeout=20)
+    q = c.command("status")["status"]["queue"]
+    # "two" was not held: the pause belonged to "one" only
+    assert [r[:2] for r in q["results"]] == [["one", "aborted"], ["two", "done"]]
+
+
+def test_pause_is_a_safety_verb_and_resume_needs_control(server, client):
+    srv = server()
+    lab_gui = client(srv)
+    assert lab_gui.take_control()                       # the lab PC holds control
+    lab_gui.submit(recipe(num=200, dets=("slow",)))
+    wait_for(lambda: lab_gui.command("status")["status"]["done"] >= 2)
+    # a viewer on another PC may PAUSE (like abort) ...
+    r = raw(srv, {"cmd": "pause", "client": OTHER_PC})
+    assert r["ok"] and r["user_paused"]
+    assert srv.status_payload()["user_paused"]
+    # ... but not RESUME: carrying on is the controller's decision
+    r = raw(srv, {"cmd": "resume", "client": OTHER_PC})
+    assert not r["ok"] and r["refused"] == "control"
+    assert srv.status_payload()["user_paused"]
+    assert lab_gui.resume()["running"]                  # the holder may
+    assert not srv.status_payload()["user_paused"]
+    lab_gui.abort()
+    wait_for(lambda: lab_gui.command("status")["status"]["state"] == "idle")
+    st = srv.status_payload()
+    assert "pause" in st["control"]["always"] and "resume" not in st["control"]["always"]
+    ids = {p["id"]: p for p in raw(srv, {"cmd": "describe"})["describe"]["parameters"]}
+    assert ids["pause"]["order"] == 89 and ids["pause"]["kind"] == "action"
+    assert "resume" in ids and "user_paused" in ids
+
+
 def test_where_text_matches_the_suites_line():
     where = {"row": None, "axes": [
         {"name": "field", "i": 4, "n": 9, "value": 40.0, "unit": "mT"}]}

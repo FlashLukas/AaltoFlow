@@ -237,6 +237,15 @@ class ScanServerClient(ControlClient):
     def stop_queue(self) -> dict:
         return self.command("stop_queue")
 
+    def pause(self) -> dict:
+        """Hold the running scan after the point being measured (a SAFETY
+        verb, like abort: allowed for every client)."""
+        return self.command("pause")
+
+    def resume(self) -> dict:
+        """Carry on with a paused scan (needs control, like submit)."""
+        return self.command("resume")
+
     def answer_pause(self, answer) -> dict:
         """True = Continue, False = Abort scan, "all" = Abort all."""
         return self.command("answer_pause", answer=answer)

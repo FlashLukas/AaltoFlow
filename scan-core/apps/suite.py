@@ -393,7 +393,10 @@ class Suite(QtWidgets.QMainWindow):
         if self.scan_running():
             if getattr(self, "_t0", None) is None:
                 self._t0 = time.monotonic()
-            self.run_state.setText("RUNNING")
+            # PAUSED: held by the operator's Pause button, or by a fault
+            # (the same word the header shows for a scan server's scan)
+            paused = self.builder.is_user_paused() or bool(self.builder.paused_faults)
+            self.run_state.setText("PAUSED" if paused else "RUNNING")
             secs = int(time.monotonic() - self._t0)
             self.elapsed_lbl.setText(f"elapsed {secs // 60}:{secs % 60:02d}")
             self._show_status(self.builder.run_status_text())

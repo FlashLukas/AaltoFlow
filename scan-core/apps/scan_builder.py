@@ -1960,6 +1960,9 @@ class ScanWorker(QtCore.QThread):
         self.attrs = dict(attrs or {})
         self.save_path = Path(save_path) if save_path else None
         self._abort = False
+        #: the operator's Pause button (2026-10-07): the engine holds BETWEEN
+        #: points while this is True (engine._hold_for_operator)
+        self._pause = False
         self._last_live = 0.0
         self._checkpoint_every = 0          # set once the total is known
         self._next_checkpoint = 0           # the point count that triggers the next one
@@ -1992,6 +1995,14 @@ class ScanWorker(QtCore.QThread):
 
     def abort(self):
         self._abort = True
+
+    def pause(self):
+        """Hold the scan after the point being measured (read by the scan
+        thread between points; a plain bool needs no lock)."""
+        self._pause = True
+
+    def resume(self):
+        self._pause = False
 
     def _live(self, done, total, snapshot):
         """Redraw, and checkpoint the file, as the scan goes.
@@ -2050,7 +2061,9 @@ class ScanWorker(QtCore.QThread):
                      on_window=lambda st: self.window.emit(dict(st)),
                      attrs=self.attrs,
                      # a `pause` step: the banner asks, the scan waits
-                     on_pause=lambda msg, answer: self.ask.emit(msg or "", answer))
+                     on_pause=lambda msg, answer: self.ask.emit(msg or "", answer),
+                     # the operator's Pause button: held between points
+                     should_pause=lambda: self._pause)
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
@@ -3233,6 +3246,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
         row.addStretch(1)
         self.run_btn = QtWidgets.QPushButton("▶  Run scan"); self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self.run_scan)
+        # PAUSE (Lukas, 2026-10-07): hold the scan between two points -- to
+        # refill a dewar, look at the sample, lend the magnet for a minute --
+        # without ending it. No objectName: the plain button of the theme, so it
+        # does not compete with Run (amber) and Abort (red).
+        self.pause_btn = QtWidgets.QPushButton(self.PAUSE_TEXT)
+        self.pause_btn.setToolTip(self.PAUSE_TIP)
+        self.pause_btn.clicked.connect(self._toggle_pause)
+        self.pause_btn.setEnabled(False)
+        #: True while THIS pane has the scan paused (or, watching a scan
+        #: server, while the server reports user_paused)
+        self._user_paused = False
         self.abort_btn = QtWidgets.QPushButton("■ Abort"); self.abort_btn.setObjectName("danger")
         self.abort_btn.clicked.connect(self._abort); self.abort_btn.setEnabled(False)
         self.stop_queue_btn = QtWidgets.QPushButton("■■ Stop queue")
@@ -3241,7 +3265,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                                        "(Abort alone skips to the next scan.)")
         self.stop_queue_btn.clicked.connect(self.stop_queue)
         self.stop_queue_btn.hide()
-        row.addWidget(self.run_btn); row.addWidget(self.abort_btn); row.addWidget(self.stop_queue_btn)
+        row.addWidget(self.run_btn); row.addWidget(self.pause_btn)
+        row.addWidget(self.abort_btn); row.addWidget(self.stop_queue_btn)
         v.addLayout(row)
 
         # The PAUSED banner: a fault (a camera that lost its pattern, a failed
@@ -3972,6 +3997,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _start_worker(self, recipe) -> "ScanWorker":
         """Start one scan in its thread; the run pane follows it."""
         self.run_btn.setEnabled(False); self.abort_btn.setEnabled(True)
+        # every scan starts un-paused -- also the next one of a queue: Pause
+        # holds the CURRENT scan only
+        self._show_pause_state(False, enabled=True)
         path = self.autosave_path(recipe)
         self.worker = ScanWorker(recipe, self.registry, save_path=path,
                                  attrs=self.run_info.attrs())
@@ -4143,6 +4171,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             "phase 2: stop watching (Settings tab) to run scans in this window,\n"
             "or tick 'Run scans on this PC's scan server' on the scan server's PC.")
         self.abort_btn.setEnabled(False)
+        self._show_pause_state(False, enabled=False)
         self.save_lbl.setText(f"watching the scan server on {watch.label}")
         # phase 2 of watching: the definitions and the lab's view
         self._server_scan = dict(getattr(watch, "scan", {}) or {})
@@ -4183,6 +4212,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_btn.setToolTip("")
         self.run_btn.setEnabled(self.worker is None)
         self.abort_btn.setEnabled(self.worker is not None)
+        self._show_pause_state(bool(self.worker is not None and self.worker._pause),
+                               enabled=self.worker is not None)
         self.stop_queue_btn.setVisible(self.queue_running())
         self.queue_lbl.setVisible(self.queue_running())
         self.progress.setFormat("%p%")
@@ -4223,6 +4254,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.progress.setValue(0)
             self.run_btn.setEnabled(False)
             self.abort_btn.setEnabled(True)
+            self._show_pause_state(False, enabled=True)
         return ok
 
     def _server_answer(self, value) -> None:
@@ -4287,6 +4319,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # buttons: Abort while anything runs; Run only when we may submit
         self.abort_btn.setEnabled(busy)
         self.run_btn.setEnabled(self.server_submit and not busy)
+        # Pause follows the SERVER's flag (whoever pressed it). Pause is a
+        # safety verb like Abort (enabled while busy, for every PC); Resume
+        # needs control, so it is only offered when the server would take it
+        user_paused = busy and bool(st.get("user_paused"))
+        self._show_pause_state(user_paused,
+                               enabled=busy and (not user_paused or self._server_may_resume()))
         if busy:
             self.summary.setStyleSheet("")
             self.summary.setText(f"on the scan server:  {st.get('scan', '')}")
@@ -4565,7 +4603,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.clear_fault_btns = {}
         if not self.paused_faults:
             self.pause_box.hide()
-            self.progress.setFormat("%p%")
+            self.progress.setFormat("PAUSED -- %p%" if self._user_paused else "%p%")
             return
         self.pause_lbl.setText("\n".join(f"{name}: {msg}" for name, msg in self.paused_faults))
         self.progress.setFormat("PAUSED -- %p%")
@@ -4632,7 +4670,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         return ok
 
     def _on_progress(self, done, total, eta):
-        self.progress.setFormat("%p%")      # the points have started
+        # the points have started; the point that was in progress when Pause
+        # was pressed still reports -- keep saying PAUSED then
+        self.progress.setFormat("PAUSED -- %p%" if self._user_paused else "%p%")
         self.progress.setMaximum(total); self.progress.setValue(done)
         self.run_progress = (int(done), int(total), float(eta))
         if self.queue_running():
@@ -4670,6 +4710,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if not self._running:
             return ""
         bits = []
+        if self._user_paused:
+            # first, so a glance at the header line says it
+            bits.append("PAUSED (Resume carries on)")
         if self.queue_running() and self._queue_i >= 0:
             bits.append(f"scan {self._queue_i + 1} of {len(self._queue)}")
         prog = self.run_progress
@@ -4726,6 +4769,81 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self._show_where()
         if self.on_log is not None:
             self.on_log(msg)
+
+    # not U+23F8 (the pause sign): the Windows UI font has no glyph for it
+    # and it rendered as an empty box; block characters are there
+    PAUSE_TEXT = "▌▌ Pause"
+    RESUME_TEXT = "▶ Resume"
+    PAUSE_TIP = ("Hold the scan after the point being measured; Resume carries on. "
+                 "Abort still works while paused.")
+
+    def _show_pause_state(self, paused: bool, enabled: bool) -> None:
+        """Draw the Pause button (and the PAUSED marks) for `paused`."""
+        changed = bool(paused) != self._user_paused
+        self._user_paused = bool(paused)
+        self.pause_btn.setText(self.RESUME_TEXT if paused else self.PAUSE_TEXT)
+        self.pause_btn.setEnabled(bool(enabled))
+        if changed:
+            fmt = self.progress.format()
+            if paused and not fmt.startswith("PAUSED"):
+                self.progress.setFormat("PAUSED -- %p%")
+            elif not paused and fmt == "PAUSED -- %p%":
+                self.progress.setFormat("%p%")
+            self._show_where()
+
+    def is_user_paused(self) -> bool:
+        return self._user_paused
+
+    def pause_scan(self) -> bool:
+        """Pause the running scan (between points). False if none runs."""
+        if self.server is not None and self.worker is None:
+            # a SAFETY verb on the server, like abort: allowed from every PC
+            if self._server_cmd("pause", self.server.pause):
+                self._show_pause_state(True, enabled=self._server_may_resume())
+                return True
+            return False
+        if self.worker is None:
+            return False
+        self.worker.pause()
+        self.run_log.append("operator: Pause")
+        if self.on_log is not None:
+            self.on_log("operator: Pause -- the scan holds after the point being measured")
+        self._show_pause_state(True, enabled=True)
+        return True
+
+    def resume_scan(self) -> bool:
+        """Carry on with a paused scan. False if none runs (or refused)."""
+        if self.server is not None and self.worker is None:
+            # needs control on the server, like submit
+            if self._server_cmd("resume", self.server.resume):
+                self._show_pause_state(False, enabled=True)
+                return True
+            return False
+        if self.worker is None:
+            return False
+        self.worker.resume()
+        self.run_log.append("operator: Resume")
+        if self.on_log is not None:
+            self.on_log("operator: Resume")
+        self._show_pause_state(False, enabled=True)
+        return True
+
+    def _toggle_pause(self):
+        if self._user_paused:
+            self.resume_scan()
+        else:
+            self.pause_scan()
+
+    def _server_may_resume(self) -> bool:
+        """Would the scan server accept `resume` from us? It needs control
+        when somebody holds it -- so: nobody holds it, or we do."""
+        fn = getattr(self.server, "control_text", None)
+        if fn is None:
+            return True
+        try:
+            return fn()[0] in ("you", "free")
+        except Exception:
+            return True
 
     def _abort(self):
         if self.server is not None and self.worker is None:
@@ -4791,6 +4909,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._run_finished()
 
     def _run_finished(self):
+        self._show_pause_state(False, enabled=False)   # ... nor held by the operator
         self._on_paused([])                 # a finished run is never paused
         self._on_ask("", None)              # ... nor waiting for the operator
         self.progress.setFormat("%p%")

@@ -320,8 +320,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     from one continuous move. Adds `<det>_n` (samples per pixel) and
     `<det>_std` (their spread) next to every detector.
     """
-    from .engine import (PAUSE_POLL_S, _Guard, _to_dataset, _unravel, _zigzag,
-                         where_of)
+    from .engine import (PAUSE_POLL_S, _Guard, _hold_for_operator, _to_dataset,
+                         _unravel, _zigzag, where_of)
 
     # the engine's fault check / pause (engine._Guard): checked after every
     # row, and a faulted row is flown again once the fault is gone
@@ -497,7 +497,9 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         while True:
             aborted, chunks, again = _fly_one_row(
                 pos_p, b, row_timeout, groups, should_abort, row, npix, total,
-                t0, on_progress, rb, params, edges, lag, data, oidx, snapshot,
+                # the ETA clock leaves out the time the operator held the scan
+                t0 + ctx.get("user_paused_s", 0.0), on_progress, rb, params,
+                edges, lag, data, oidx, snapshot,
                 on_point, log, a=a, move_p=move_p, drive=drive, speed=speed)
             if not again:
                 break
@@ -536,6 +538,10 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         for row in range(n_rows):
             if should_abort and should_abort():
                 return True
+            # the operator's Pause (engine._hold_for_operator): between rows,
+            # where Abort is checked -- a row in flight is never cut short
+            if _hold_for_operator(ctx, should_abort, f"row {row + 1} of {n_rows}"):
+                return True
             redo = False
             while True:
                 where = f"row {row + 1} of {n_rows}"
@@ -570,7 +576,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
             done = (row + 1) * npix
             if on_progress:
-                elapsed = time.monotonic() - t0
+                elapsed = time.monotonic() - t0 - ctx.get("user_paused_s", 0.0)
                 # WHERE, once per row: the outer index of the row just flown
                 # (zig-zag applied); the fly axis itself has no single value
                 on_progress(done, total, elapsed / done * (total - done),

@@ -213,6 +213,12 @@ class ServerWatch(QtCore.QObject):
     def stop_queue(self):
         return self._do(self.client.stop_queue)
 
+    def pause(self):
+        return self._do(self.client.pause)
+
+    def resume(self):
+        return self._do(self.client.resume)
+
     def answer(self, value):
         return self._do(self.client.answer_pause, value)
 

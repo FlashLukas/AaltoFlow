@@ -39,12 +39,12 @@ What it is made of -- nothing new where something tested exists:
 Control (who may do what):
   * watching -- status, info, describe, get_config, get_live, get_log -- is
     free for everyone;
-  * `abort` and `stop_queue` are SAFETY verbs: always allowed, for any client
+  * `abort`, `stop_queue` and `pause` are SAFETY verbs: always allowed, for any client
     on any PC (like a stage's `stop`): whoever sees a scan going wrong must be
     able to stop it, and above all the PC that started it must never be locked
     out of its own Abort by somebody else holding control;
-  * `submit`, `submit_queue`, `answer_pause`, `clear_fault`, `set_config`
-    need control when somebody holds it (nobody holds it -> allowed, as for
+  * `submit`, `submit_queue`, `resume`, `answer_pause`, `clear_fault`,
+    `set_config` need control when somebody holds it (nobody holds it -> allowed, as for
     every module). A person's suite takes control with the "Take control"
     button of the watch header;
   * PHASE 1: `submit` / `submit_queue` only from a client on THIS PC. "This
@@ -265,6 +265,17 @@ def build_manifest() -> dict:
            order=13, group="Files"),
         _p("live_rev", "Live data revision", "indicator", "int", ["live_rev"], order=14,
            min=0),
+        _p("user_paused", "Paused by the operator", "indicator", "bool", ["user_paused"],
+           order=15),
+        # PAUSE is a SAFETY verb like abort (anyone who sees a scan going wrong
+        # may hold it); RESUME needs control like submit: carrying on with a
+        # measurement is a decision for whoever runs it (2026-10-07)
+        _p("pause", "Pause scan", "action", "action", order=89, group="Run",
+           help="Hold the scan after the point being measured (a fly scan: after "
+                "the row). Resume carries on. Abort still works while paused. "
+                "Always allowed, for every PC."),
+        _p("resume", "Resume scan", "action", "action", order=89, group="Run",
+           help="Carry on with a scan held by Pause."),
         # a SAFETY verb: allowed for everyone, always (control.py `safety`)
         _p("abort", "Abort scan", "action", "action", order=90, group="Run",
            danger=True, help="Stop the running scan (a queue goes on with the next "
@@ -411,7 +422,10 @@ class ScanServer:
         self._indexer: threading.Thread | None = None
 
         self.control = ControlLease(
-            safety={"abort", "stop_queue"},
+            # pause: hold the scan -- as harmless to allow as abort, and for
+            # the same reason (whoever sees it going wrong). resume is NOT
+            # here: it needs control when somebody holds it, like submit.
+            safety={"abort", "stop_queue", "pause"},
             # set_view changes nothing on an instrument: not behind the control
             # lease, but only from this PC (_set_view)
             read={"set_view", "set_design"},
@@ -428,6 +442,9 @@ class ScanServer:
         self._save_path = ""
         self._last_saved = ""
         self._save_error = ""
+        # the operator's Pause button: for the CURRENT scan only -- the next
+        # scan of a queue starts un-paused (this runs at the start of each)
+        self._user_pause = False
         self._ck_every = 0
         self._ck_next = 0
         self._last_live = 0.0
@@ -659,7 +676,7 @@ class ScanServer:
             return "idle"
         if self._ask is not None:
             return "waiting_operator"
-        if self._faults:
+        if self._faults or self._user_pause:
             return "paused"
         return "running"
 
@@ -717,6 +734,9 @@ class ScanServer:
                 "now": self._now,
                 "faults": self._fault_rows() if self._faults else [],
                 "pause_message": (self._ask[0] or "(no message)") if self._ask else "",
+                # held by the operator's Pause (state says "paused" too; a
+                # FAULT pause has `faults` instead)
+                "user_paused": bool(self._busy and self._user_pause),
                 "save_path": self._save_path,
                 "last_saved": self._last_saved,
                 "save_error": self._save_error,
@@ -846,6 +866,10 @@ class ScanServer:
             return self._abort_verb(req)
         if cmd == "stop_queue":
             return self._stop_queue_verb(req)
+        if cmd == "pause":
+            return self._pause_verb(req, True)
+        if cmd == "resume":
+            return self._pause_verb(req, False)
         if cmd == "answer_pause":
             return self._answer(req.get("answer", True), req)
         if cmd == "clear_fault":
@@ -1189,6 +1213,20 @@ class ScanServer:
         self.log(f"ABORT pressed by {self._who(req)} ('{name}')", "warn")
         return {"ok": True, "running": True, "aborting": name}
 
+    def _pause_verb(self, req, pause: bool) -> dict:
+        """Pause (True) / Resume (False) the running scan. The engine holds
+        BETWEEN points (engine._hold_for_operator), so the point in progress
+        is finished first; the flag is reset when the next scan starts."""
+        with self._lock:
+            if not self._busy:
+                return {"ok": True, "running": False, "user_paused": False}
+            was, self._user_pause = self._user_pause, bool(pause)
+            name = self._entries[self._qi].name if 0 <= self._qi < len(self._entries) else ""
+        if was != bool(pause):
+            self.log(f"{'PAUSE' if pause else 'RESUME'} pressed by {self._who(req)} "
+                     f"('{name}')", "warn" if pause else "info")
+        return {"ok": True, "running": True, "user_paused": bool(pause)}
+
     def _abort_all(self, reason: str) -> bool:
         with self._lock:
             if not self._busy:
@@ -1315,6 +1353,7 @@ class ScanServer:
                 self._busy = False
                 self._ask = None
                 self._faults = []
+                self._user_pause = False
                 lab = self.lab
             if lab is not None:
                 lab.set_abort(None)
@@ -1344,7 +1383,9 @@ class ScanServer:
                      data_path=path,
                      on_fault=self._on_fault,
                      attrs=e.attrs,
-                     on_pause=self._on_pause)
+                     on_pause=self._on_pause,
+                     # the operator's Pause verb: held between points
+                     should_pause=lambda: self._user_pause)
             self._final(ds, path)
             e.result = "aborted" if (self._abort or ds.attrs.get("stopped_by")) else "done"
             e.stop_all = ds.attrs.get("stopped_scope") == "all"

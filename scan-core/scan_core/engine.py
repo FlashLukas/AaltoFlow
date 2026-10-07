@@ -99,6 +99,52 @@ class _Guard:
             self.on_fault([])             # the banner goes, whatever happened
 
 
+# ───────────────────── the OPERATOR's pause (2026-10-07) ─────────────────────
+#
+# Lukas asked for a "pause button" next to Run and Abort: hold the scan (to
+# refill a cryostat, look at the sample, let a colleague use the magnet for a
+# minute) without losing it. This is NOT the fault pause above -- nothing is
+# wrong, and nothing is measured again. It takes effect only BETWEEN points,
+# exactly where Abort is looked at: a point that has started (its setpoints
+# sent, an instrument settling, a detector acquiring) is always finished first,
+# so a held scan never leaves half a point behind.
+
+#: Seconds between looks at the operator's Resume / Abort while held. Short:
+#: the person pressing Resume wants to see the scan carry on at once.
+USER_PAUSE_POLL_S = 0.1
+
+
+def _hold_for_operator(ctx, should_abort, where: str) -> bool:
+    """Wait here while the operator has the scan paused. True = Abort pressed.
+
+    `ctx["should_pause"]` is the caller's callable (None = never paused: the
+    behaviour before 2026-10-07, unchanged). The time spent held is added to
+    `ctx["user_paused_s"]`, so the ETA (time so far / points so far) is not
+    inflated by a coffee break.
+    """
+    should_pause = ctx.get("should_pause")
+    if should_pause is None or not should_pause():
+        return False
+    log = ctx.get("log_fn") or (lambda msg: None)
+    t_hold = time.monotonic()
+    log(f"PAUSED by the operator before {where}")
+    try:
+        while should_pause():
+            # Abort while paused is an ordinary Abort between points: the
+            # caller returns "aborted", the after-scan routine runs and the
+            # points measured so far are kept.
+            if should_abort and should_abort():
+                log("aborted while paused")
+                return True
+            time.sleep(USER_PAUSE_POLL_S)
+    finally:
+        ctx["user_paused_s"] = ctx.get("user_paused_s", 0.0) + (time.monotonic() - t_hold)
+    if should_abort and should_abort():   # Resume and Abort in the same breath
+        return True
+    log("resumed")
+    return False
+
+
 def _used_ids(recipe, compiled, registry) -> set:
     """Every parameter / action id this scan touches, for the fault check.
 
@@ -242,7 +288,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
         pause_poll_s: float = PAUSE_POLL_S, on_window=None,
-        attrs=None, on_pause=None) -> xr.Dataset:
+        attrs=None, on_pause=None, should_pause=None) -> xr.Dataset:
     """Execute `recipe` against `registry` -- ONE scan per instrument at a time.
 
     Before anything moves, every instrument the scan uses is claimed for it
@@ -257,7 +303,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     if claim is None:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window, attrs, on_pause)
+                    pause_poll_s, on_window, attrs, on_pause, should_pause)
     errs = recipe.validate(registry)
     if errs:
         raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
@@ -266,7 +312,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     try:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window, attrs, on_pause)
+                    pause_poll_s, on_window, attrs, on_pause, should_pause)
     finally:
         release()
 
@@ -275,7 +321,7 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
          created_iso: str | None = None, on_point=None,
          on_log=None, data_path=None, on_fault=None, fault_check=None,
          pause_poll_s: float = PAUSE_POLL_S, on_window=None,
-         attrs=None, on_pause=None) -> xr.Dataset:
+         attrs=None, on_pause=None, should_pause=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_pause(message, answer)       : for the `pause` routine step (hooks.py):
@@ -295,6 +341,13 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                       point just measured (see above); a fly
                                       scan reports it once per row.
     should_abort() -> bool          : optional cooperative stop.
+    should_pause() -> bool          : optional OPERATOR pause (2026-10-07).
+                                      While it returns True the scan holds
+                                      BETWEEN points (a fly scan: between
+                                      rows), polling every 0.1 s; the point in
+                                      progress is finished first. Abort while
+                                      held = an ordinary Abort. None = never
+                                      paused (the old behaviour).
     created_iso                     : timestamp string for metadata (time is
                                       injected so runs are reproducible/testable).
     on_point(done, total, snapshot) : called after every point. `snapshot()`
@@ -369,6 +422,9 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
            # the routine steps of 2026-10-04 (hooks.py): wait_until and pause
            # must notice Abort; pause asks the operator through on_pause
            "should_abort": should_abort, "on_pause": on_pause,
+           # the operator's Pause button (_hold_for_operator), and the seconds
+           # spent held so far, which the ETA leaves out
+           "should_pause": should_pause, "user_paused_s": 0.0,
            # the steps add to the SAME ds_attrs as the scan goes: `comments`
            # (comment), `stopped_by` (abort_if, a timed-out wait_until, an
            # Abort answered at a pause), `skipped_points` (skip_if). (Two
@@ -635,6 +691,9 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     for flat in range(total):
         if should_abort and should_abort():
             return True
+        # the operator's Pause: here, between points, where Abort is checked
+        if _hold_for_operator(ctx, should_abort, f"point {flat + 1}"):
+            return True
         idx = _unravel(flat, shape)
         if getattr(recipe, "zigzag", False):
             idx = _zigzag(idx, shape)
@@ -709,8 +768,10 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
         done = flat + 1
         if on_progress:
-            elapsed = time.monotonic() - t0
-            eta = elapsed / done * (total - done)
+            # time spent PAUSED by the operator is not measuring time: leave
+            # it out, or one coffee break would inflate the ETA for the rest
+            elapsed = time.monotonic() - t0 - ctx.get("user_paused_s", 0.0)
+            eta = max(0.0, elapsed) / done * (total - done)
             # `idx` is the index just MEASURED, zig-zag already applied
             on_progress(done, total, eta,
                         where=where_of(dims, idx, flat, registry))

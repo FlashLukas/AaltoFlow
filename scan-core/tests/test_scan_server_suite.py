@@ -177,6 +177,38 @@ def test_stop_queue_button_and_queue_label(qapp, rig):
     pump(qapp, lambda: "1 not run" in b.queue_lbl.text())
 
 
+def test_pause_button_follows_and_drives_the_servers_scan(qapp, rig):
+    srv, win, c = rig()
+    b = win.builder
+    assert not b.pause_btn.isEnabled()                 # nothing runs
+    c.submit(recipe(num=200, dets=("slow",)))
+    pump(qapp, lambda: b.pause_btn.isEnabled() and b.progress.value() >= 2)
+    # Pause -> the server's verb; the button turns into Resume
+    b.pause_btn.click()
+    pump(qapp, lambda: srv.status_payload()["user_paused"])
+    pump(qapp, lambda: "Resume" in b.pause_btn.text())
+    # the header says it once the next status frame has arrived
+    pump(qapp, lambda: (win._tick(), win.run_state.text() == "PAUSED")[1])
+    # paused by SOMEONE ELSE (the client) is followed too: resume, then pause
+    # from the other client
+    b.pause_btn.click()
+    pump(qapp, lambda: not srv.status_payload()["user_paused"])
+    c.pause()
+    pump(qapp, lambda: "Resume" in b.pause_btn.text() and b.pause_btn.isEnabled())
+    c.resume()
+    pump(qapp, lambda: "Resume" not in b.pause_btn.text())
+    # another PC takes control: Pause stays (a safety verb), Resume would be
+    # refused -- so it is not offered
+    from test_scan_server import OTHER_PC, raw
+    raw(srv, {"cmd": "take_control", "force": True, "client": OTHER_PC})
+    raw(srv, {"cmd": "pause", "client": OTHER_PC})
+    pump(qapp, lambda: "Resume" in b.pause_btn.text() and not b.pause_btn.isEnabled())
+    b.abort_btn.click()                                 # Abort still works
+    pump(qapp, lambda: not srv.running, timeout=20)
+    assert srv._entries[0].result == "aborted"
+    pump(qapp, lambda: not b.pause_btn.isEnabled() and "Resume" not in b.pause_btn.text())
+
+
 def test_run_submits_to_this_pcs_server_when_the_setting_is_on(qapp, rig):
     srv, win, c = rig(settings={"run_on_scan_server": True})
     b = win.builder
