@@ -106,6 +106,24 @@ def _ch_color(ch: str) -> QtGui.QColor:
 
 # ------------------------------------------------------------- the indicator
 
+# a box typed in this recently is left alone by the status refresh
+_EDIT_HOLD_S = 2.0
+
+
+class _EditWatch(QtCore.QObject):
+    """Notes when the user types in or scrolls a number box (event filter)."""
+
+    def __init__(self, edited: dict):
+        super().__init__()
+        self._edited = edited
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QtCore.QEvent.KeyPress, QtCore.QEvent.Wheel):
+            spin = obj if isinstance(obj, QtWidgets.QAbstractSpinBox) else obj.parent()
+            self._edited[spin] = time.monotonic()
+        return False
+
+
 class OutputsView(QtWidgets.QWidget):
     """Both outputs against one time axis, like the scope beside the AFG.
 
@@ -204,6 +222,30 @@ class OutputsView(QtWidgets.QWidget):
             p.setPen(QPen(col, 2.0)); p.setBrush(Qt.NoBrush)
             p.drawPath(path)
 
+        # Where each channel's phase 0 sits (a small triangle on top, in the
+        # channel's colour). A 2-degree phase step moves a trace by only 1/180
+        # of a period -- it looks frozen; the marker and the caption show it
+        # (Lukas 2026-10-07, a scan sweeping CH1's phase).
+        for k, c in enumerate(chans):
+            st = self._setting(c)
+            fr = _num(st["frequency_Hz"])
+            if not st["output"] or st["waveform"] in ("dc", "noise") or not fr:
+                continue
+            ph = _num(st["phase_deg"]) or 0.0
+            t_zero = ((-ph / 360.0) % 1.0) / fr        # value(): frac = f t + phase/360
+            if t_zero > span:
+                continue
+            x = x0 + (x1 - x0) * t_zero / span
+            yt = y0 + 1 + 9 * k                         # CH2's a little lower
+            tri = QPainterPath()
+            tri.moveTo(QPointF(x - 5, yt)); tri.lineTo(QPointF(x + 5, yt))
+            tri.lineTo(QPointF(x, yt + 8)); tri.closeSubpath()
+            p.setPen(Qt.NoPen); p.setBrush(_ch_color(c))
+            p.drawPath(tri)
+            col = _ch_color(c); col.setAlpha(70)
+            p.setPen(QPen(col, 1, Qt.DotLine))
+            p.drawLine(QPointF(x, yt + 8), QPointF(x, y1))
+
         # channel markers at the left edge (their offset), like a scope; a
         # marker that would sit on top of the previous one moves below it
         used = []
@@ -222,7 +264,10 @@ class OutputsView(QtWidgets.QWidget):
         div_v = vmax * 1.08 / 4
         p.drawText(QRectF(x0, y1 + 6, x1 - x0, 16), Qt.AlignLeft,
                    f"{span * 1e3 / 10:.4g} ms/div   {div_v:.3g} V/div")
-        caption = "dashed = peak limit"
+        phases = "   ".join(
+            f"{c.upper()} {(_num(self._s.get(f'{c}_phase_deg')) or 0.0):.4g} deg"
+            for c in chans if self._s.get(f"{c}_waveform") not in ("dc", "noise"))
+        caption = (phases + "  (v = phase 0)   " if phases else "") + "dashed = peak limit"
         if self._s.get("follow"):
             caption = ((f"CH2 follows CH1, {self._s.get('phase_offset_deg', 0):g} deg   "
                         if self._s.get("phase_follow") else "CH2 frequency follows CH1   ")
@@ -262,7 +307,13 @@ class ChannelCard(QtWidgets.QFrame):
         lay.addLayout(top)
 
         # big readout: frequency, then amplitude / offset
-        self.freq_value, self.freq_unit = self._readout(lay, "Frequency", "Hz")
+        # (the phase sits beside the frequency: a fourth readout in the row
+        # below does not fit the card's width)
+        top_row = QtWidgets.QHBoxLayout(); top_row.setSpacing(18)
+        self.freq_value, self.freq_unit = self._readout(top_row, "Frequency", "Hz")
+        self.phase_value, _ = self._readout(top_row, "Phase", "deg", small=True)
+        top_row.setStretch(0, 1)
+        lay.addLayout(top_row)
         row = QtWidgets.QHBoxLayout(); row.setSpacing(18)
         self.amp_value, _ = self._readout(row, "Amplitude", "Vpp", small=True)
         self.off_value, _ = self._readout(row, "Offset", "V", small=True)
@@ -332,6 +383,17 @@ class ChannelCard(QtWidgets.QFrame):
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
 
+        # When each box was last typed in / scrolled: a box being edited
+        # (focused, or touched within _EDIT_HOLD_S) is not overwritten by the
+        # refresh. Key and wheel EVENTS, not valueChanged: the code sets the
+        # boxes too (seed, ranges), and that is no user edit.
+        self._edited: dict = {}
+        self._edit_watch = _EditWatch(self._edited)
+        for spin in (self.freq_spin, self.amp_spin, self.off_spin, self.phase_spin,
+                     self.duty_spin, self.sym_spin):
+            spin.installEventFilter(self._edit_watch)
+            spin.lineEdit().installEventFilter(self._edit_watch)
+
         self.note = QtWidgets.QLabel("")
         self.note.setWordWrap(True)
         self.note.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
@@ -395,6 +457,21 @@ class ChannelCard(QtWidgets.QFrame):
             v = _num(s.get(f"{ch}_{key}"))
             if v is not None:
                 spin.setValue(v)
+
+    def _editing(self, spin) -> bool:
+        return spin.hasFocus() or \
+            time.monotonic() - self._edited.get(spin, -1e9) < _EDIT_HOLD_S
+
+    def _track(self, spin, value) -> None:
+        """Show the instrument's setpoint in a box the user is not editing
+        (lab PC 2026-10-07: during a scan of CH1's phase the Phase box stayed
+        at the value seen when the window opened). blockSignals: a refresh is
+        not a user edit and sends nothing (gotcha #13)."""
+        if value is None or self._editing(spin) or abs(spin.value() - value) < 1e-12:
+            return
+        spin.blockSignals(True)
+        spin.setValue(value)
+        spin.blockSignals(False)
 
     def _set_freq_box(self, hz: float):
         self.freq_spin.blockSignals(True)
@@ -465,12 +542,17 @@ class ChannelCard(QtWidgets.QFrame):
         else:
             num, unit = _fmt_hz(hz)
             self.freq_value.setText(num); self.freq_unit.setText(unit)
-            if follows:                         # the box tracks CH1
+            if not self._editing(self.freq_spin) and \
+                    abs(self.current_freq_hz() - hz) > 1e-9 * max(hz, 1.0):
                 self._set_freq_box(hz)
-        if phase_follows:
-            ph = _num(s.get(f"{ch}_phase_deg"))
-            if ph is not None and not self.phase_spin.hasFocus():
-                self.phase_spin.setValue(ph)
+        # every box shows the instrument's setpoint unless it is being edited
+        # (a scan or another client may have changed it)
+        for spin, key in ((self.amp_spin, "amplitude_Vpp"), (self.off_spin, "offset_V"),
+                          (self.phase_spin, "phase_deg"), (self.duty_spin, "duty_pct"),
+                          (self.sym_spin, "symmetry_pct")):
+            self._track(spin, _num(s.get(f"{ch}_{key}")))
+        ph = _num(s.get(f"{ch}_phase_deg"))
+        self.phase_value.setText("-" if ph is None or wf in ("dc", "noise") else f"{ph:.4g}")
         self.amp_value.setText("-" if wf == "dc" else f"{_num(s.get(f'{ch}_amplitude_Vpp')) or 0:.4g}")
         self.off_value.setText(f"{_num(s.get(f'{ch}_offset_V')) or 0:.4g}")
         pk, pkmax = _num(s.get(f"{ch}_peak_V")) or 0.0, _num(s.get(f"{ch}_peak_max_V"))

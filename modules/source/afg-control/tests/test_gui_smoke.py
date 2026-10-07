@@ -113,3 +113,36 @@ def test_settings_dialog_builds_and_applies(app):
         assert gen.status()["ch1_amplitude_Vpp"] == 1.0        # re-clamped and sent
     finally:
         gen.shutdown()
+
+
+def test_boxes_follow_changes_made_elsewhere(app):
+    """Lab PC 2026-10-07, a scan sweeping CH1's phase: the Phase box stayed
+    at the value seen when the window opened. Every box now shows the
+    instrument's setpoint -- except one being edited (typed in < 2 s ago, or
+    focused) -- and the card has a phase readout."""
+    from afg.apps.gui import MainWindow
+    cfg = Config()
+    gen, backend = build_sim_system(cfg)
+    win = MainWindow(gen, cfg)
+    try:
+        win._refresh()
+        c1 = win.cards["ch1"]
+        from PySide6 import QtTest
+        c1.off_spin.selectAll()                   # the user is typing an offset (number part)
+        QtTest.QTest.keyClicks(c1.off_spin, "0.123")
+        assert c1.off_spin.text().startswith("0.123")
+        gen.set_phase("ch1", 47.0)                # a scan / another client
+        gen.set_amplitude("ch1", 0.8)
+        gen.set_offset("ch1", 0.05)
+        _settle(app, gen, win, lambda s: s["ch1_phase_deg"] == 47.0
+                and s["ch1_amplitude_Vpp"] == 0.8 and s["ch1_offset_V"] == 0.05)
+        assert c1.phase_spin.value() == pytest.approx(47.0)
+        assert c1.amp_spin.value() == pytest.approx(0.8)
+        assert c1.phase_value.text() == "47"
+        assert c1.off_spin.text().startswith("0.123")         # being edited: kept
+        gen.set_frequency("ch1", 440.0)
+        _settle(app, gen, win, lambda s: s["ch1_frequency_Hz"] == 440.0)
+        assert c1.current_freq_hz() == pytest.approx(440.0)
+        assert backend.writes.count(("set_phase", 0, 47.0)) <= 1  # the refresh sent nothing
+    finally:
+        win.close()
