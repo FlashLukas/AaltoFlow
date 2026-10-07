@@ -63,6 +63,9 @@ def main() -> int:
         config = str(default_ini)
         print(f"afg service: settings from {default_ini.name}")
     cfg = Config.load(config) if config else Config()
+    if args.visa:
+        # the address really in use goes into afg.ini (gitignored, this PC only)
+        cfg.hardware.visa = args.visa
 
     if args.real:
         from afg.backends.tek_afg import TekAFG
