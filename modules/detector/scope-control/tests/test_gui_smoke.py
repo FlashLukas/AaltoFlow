@@ -75,3 +75,55 @@ def test_settings_dialog_applies_without_touching_the_scope(app):
         assert sim.writes == []
     finally:
         scope.shutdown()
+
+
+def test_two_tabs_swap_cursor_units_and_splitter(app):
+    """Lukas 2026-10-07: two tabs "X(t), Y(t)" and "XY / YX" (with a swap),
+    the cursor readout in the plot's own axis units (it printed volts under an
+    axis in mV), and a resizable left panel whose Set buttons are not clipped."""
+    from PySide6 import QtCore
+    from scope.apps.gui import MainWindow
+    cfg = Config()
+    scope, sim = build_sim_system(cfg, seed=9)
+    win = MainWindow(scope, cfg)
+    win.resize(1500, 900); win.show()
+    try:
+        assert [win.tabs.tabText(i) for i in range(win.tabs.count())] == ["X(t), Y(t)", "XY / YX"]
+        _pump(app, win, lambda s: s["running_n"] >= 3)
+        win.tabs.setCurrentIndex(1)
+        win._force_fetch(); win._refresh(); app.processEvents()
+        x, y = win.loop_curve.getData()
+        assert win.hc_lines[0].angle == 90
+        # the loop Y (CH2, ~0.3..0.7 V) is shown in mV: the readout must be too
+        left = win.xy.getPlotItem().getAxis("left")
+        for _ in range(20):
+            app.processEvents(); time.sleep(0.02)
+        if left.labelUnitPrefix == "m":
+            assert win._axis_text(left, 0.5) == "500 mV"
+        # the cursor goes to the XY readout, in view coordinates of THAT plot
+        vb = win.xy.getPlotItem().vb
+        mid = vb.viewRect().center()
+        win._cursor_xy(vb.mapViewToScene(mid))
+        assert "cursor" in win.xy_cursor.text() and "V" in win.xy_cursor.text()
+        # YX: the signal horizontal, Hc lines horizontal
+        win.swap_xy.setChecked(True)
+        win._refresh()
+        xs, ys = win.loop_curve.getData()
+        # horizontal is now the intensity (~0.3..0.7 V), vertical the field (+-1 V)
+        assert 0.1 < xs.min() and xs.max() < 0.9 and ys.max() - ys.min() > 1.5
+        assert win.hc_lines[0].angle == 0
+        # the splitter: three panes, the left one at least as wide as it needs
+        assert win.body.count() == 3
+        assert win.left_panel.minimumWidth() >= win.left_panel.widget().minimumSizeHint().width()
+        win.body.setSizes([520, 700, 300])
+        win._remember("splitter_sizes", win.body.sizes())
+    finally:
+        win.close()
+    # remembered for the next window on this PC (the test's own settings file)
+    scope2, _ = build_sim_system(Config(), seed=10)
+    win2 = MainWindow(scope2, Config())
+    try:
+        assert win2.tabs.currentIndex() == 1 and win2.swap_xy.isChecked()
+        assert win2._settings.value("splitter_sizes") is not None
+    finally:
+        win2.close()

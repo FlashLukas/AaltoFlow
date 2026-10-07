@@ -33,7 +33,7 @@ _HINTS = {
     "channel_1": _SCOPE_NOTE + "phys_*: what the channel measures -- quantity = "
                  "phys_scale x volts + phys_offset, in phys_unit (module setting).",
     "channel_2": _SCOPE_NOTE + "phys_*: as for CH1.",
-    "timebase": _SCOPE_NOTE + "delay_s: positive shows more time before the trigger.",
+    "timebase": _SCOPE_NOTE + "delay_s: positive moves the window later (more after the trigger).",
     "trigger": _SCOPE_NOTE + "A stopped scope makes no traces; an acquisition is refused.",
     "acquisition": "points: samples per recorded trace (must not change during a scan). "
                    "averages: fresh traces per acquisition. timeout_s / min_trigger_hz set "

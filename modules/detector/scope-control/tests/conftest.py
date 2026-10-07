@@ -11,6 +11,10 @@ find `scope` straight from src/, which is handy while iterating.
 import os as _os
 import tempfile as _tempfile
 _os.environ["AALTOFLOW_SECURITY_DIR"] = _tempfile.mkdtemp(prefix="aaltoflow-nosec-")
+# The GUI's per-PC preferences (tab, splitter widths, XY/YX) go to a throw-away
+# file, never into the user's registry (apps/gui.py `_gui_settings`).
+_os.environ["AALTOFLOW_GUI_SETTINGS"] = _os.path.join(
+    _tempfile.mkdtemp(prefix="aaltoflow-gui-"), "gui.ini")
 
 
 import os

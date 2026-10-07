@@ -196,3 +196,21 @@ def test_the_time_axis_comes_from_the_points_received(fake_visa):
     assert t[1] - t[0] == pytest.approx(11 * 2e-6)
     assert t[0] == pytest.approx(-(20480 // 11) * 11 * 2e-6 / 2)
     b.close()
+
+
+def test_a_positive_delay_moves_the_window_later(fake_visa):
+    """Lab PC 2026-10-07 (1 ms/div, 500 kSa/s, 20480 points): with -TRDL the
+    edge landed at -2 x delay. With +TRDL the trigger stays at t = 0 and the
+    window moves: TRDL +2.02 ms -> about -18.46 .. +22.46 ms."""
+    b = SiglentSDS(RES)
+    b.open()
+    inst = fake_visa[0]
+    inst.st["SARA"], inst.st["SANU"], inst.st["MEM"] = 500e3, 8000, 20480
+    inst.st["TRDL"] = 2.02e-3
+    t, v = b.read_traces(["ch1"], max_points=30000)
+    assert t[0] == pytest.approx(2.02e-3 - 20.48e-3)
+    assert t[-1] == pytest.approx(2.02e-3 + 20.48e-3 - 2e-6)
+    inst.st["TRDL"] = -2e-3
+    t, v = b.read_traces(["ch1"], max_points=30000)
+    assert t[0] == pytest.approx(-2e-3 - 20.48e-3)
+    b.close()

@@ -319,7 +319,7 @@ class ScopeService:
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             if cmd in ("set_points", "set_averages", "set_keep_raw", "set_physical",
-                       "set_channel_enabled", "set_analysis"):
+                       "set_channel_enabled", "set_analysis", "set_loop"):
                 self._rev_at = 0.0          # the manifest moved: recompute at once
             return {"ok": True}
         except (KeyError, ValueError, TypeError) as exc:

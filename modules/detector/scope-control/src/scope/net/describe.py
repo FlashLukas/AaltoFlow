@@ -193,7 +193,8 @@ def build_manifest(scope) -> dict:
                            "scan (the trace length and time axis would)."),
         scope_setting("delay", "Trigger delay", "float", "delay_s", "set_delay", "delay_s",
                       "Timebase", 2, unit="s", decimals=9,
-                      help="Positive shows more time before the trigger."),
+                      help="Positive moves the window later (more after the trigger); "
+                           "the trigger stays at t = 0."),
         _p("sample_rate", "Sample rate", "indicator", "float", unit="Sa/s",
            group="Timebase", order=3, read_path=["sample_rate_Hz"]),
         scope_setting("trigger_source", "Trigger source", "enum", "trigger_source",

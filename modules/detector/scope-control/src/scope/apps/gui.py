@@ -13,9 +13,14 @@ Layout:
           follow the instrument until you edit one; an edited box is outlined
           until you press Set (or Enter) -- so a value nobody chose is never
           sent, and the poll never overwrites what you are typing.
-  centre  Y-t (all channels against time) and XY (the hysteresis loop:
-          loop Y against loop X, background removed when that is on, Hc+ and
-          Hc- marked). Both in the channels' physical units.
+  centre  two tabs (Lukas, 2026-10-07), each the full height:
+          "X(t), Y(t)" -- the channels against time (CH2 on its own axis);
+          "XY / YX"    -- the hysteresis loop: loop Y against loop X, or
+                          swapped, background removed when that is on, Hc+
+                          and Hc- marked. Both in the channels' physical units.
+          A cursor readout under each plot, in THAT plot's axis units.
+  The three columns sit in a splitter: drag the borders to resize; the
+  widths, the tab and the XY/YX choice are remembered per PC (QSettings).
   right   averaging (with "312 / 500" and Restart), the filter, the loop
           settings, the numbers (per channel + loop), Acquire, and the
           generator card -- greyed when the instrument has no generator.
@@ -38,6 +43,18 @@ _TRACE_PERIOD_MS = 120          # how often the live average is fetched
 _LOOP_ROWS = (("hc", "Hc"), ("hc_plus", "Hc+"), ("hc_minus", "Hc-"), ("bias", "bias"),
               ("ms", "Ms"), ("mr", "Mr"), ("squareness", "Mr/Ms"), ("slope", "slope"),
               ("area", "area"))
+
+
+def _gui_settings() -> QtCore.QSettings:
+    """Where this PC keeps the window's preferences (tab, splitter, XY/YX):
+    the user's QSettings (the registry on Windows), or the .ini file named by
+    AALTOFLOW_GUI_SETTINGS -- which the tests set, so they never touch the
+    real one."""
+    import os
+    path = os.environ.get("AALTOFLOW_GUI_SETTINGS")
+    if path:
+        return QtCore.QSettings(path, QtCore.QSettings.IniFormat)
+    return QtCore.QSettings("AaltoFlow", "scope-gui")
 
 
 class Bridge(QtCore.QObject):
@@ -105,11 +122,29 @@ class MainWindow(QtWidgets.QMainWindow):
         outer = QtWidgets.QVBoxLayout(root)
         outer.setContentsMargins(14, 12, 14, 14); outer.setSpacing(12)
         outer.addLayout(self._build_header())
-        body = QtWidgets.QHBoxLayout(); body.setSpacing(12)
-        body.addWidget(self._scroll(self._build_left(), 330))
-        body.addWidget(self._build_centre(), 1)
-        body.addWidget(self._scroll(self._build_right(), 320))
-        outer.addLayout(body, 1)
+        # A splitter, not a fixed layout (Lukas: "i need to be able to slide
+        # enlarge the left panel width"): drag the borders. Each side panel's
+        # minimum is what its widest row needs, so the Set buttons are never
+        # clipped; the sizes are remembered per PC.
+        self._settings = _gui_settings()
+        self.body = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.body.setChildrenCollapsible(False)
+        self.body.setHandleWidth(8)
+        self.left_panel = self._scroll(self._build_left())
+        self.right_panel = self._scroll(self._build_right())
+        self.body.addWidget(self.left_panel)
+        self.body.addWidget(self._build_centre())
+        self.body.addWidget(self.right_panel)
+        self.body.setStretchFactor(1, 1)
+        sizes = self._settings.value("splitter_sizes")
+        try:
+            sizes = [int(x) for x in sizes] if sizes else None
+        except (TypeError, ValueError):
+            sizes = None
+        self.body.setSizes(sizes if sizes and len(sizes) == 3 else [380, 860, 340])
+        self.body.splitterMoved.connect(
+            lambda *_: self._remember("splitter_sizes", self.body.sizes()))
+        outer.addWidget(self.body, 1)
 
         self._control_bar = None
         if remote and hasattr(self.ctrl, "take_control"):
@@ -139,13 +174,23 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---- building ------------------------------------------------------------
 
     @staticmethod
-    def _scroll(widget, width):
+    def _scroll(widget):
+        """A side panel: scrolls vertically, never clips horizontally -- its
+        minimum width is what the content needs (+ the scroll bar)."""
         sc = QtWidgets.QScrollArea()
         sc.setWidget(widget); sc.setWidgetResizable(True)
         sc.setFrameShape(QtWidgets.QFrame.NoFrame)
-        sc.setFixedWidth(width + 14)
         sc.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        bar = sc.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
+        sc.setMinimumWidth(widget.minimumSizeHint().width() + bar + 6)
         return sc
+
+    def _remember(self, key, value):
+        """Per-PC GUI preferences (QSettings). Failures are harmless."""
+        try:
+            self._settings.setValue(key, value)
+        except Exception:
+            pass
 
     @staticmethod
     def _spin(lo, hi, dec, suffix="", step=None):
@@ -271,7 +316,12 @@ class MainWindow(QtWidgets.QMainWindow):
         import pyqtgraph as pg
         w = QtWidgets.QWidget()
         col = QtWidgets.QVBoxLayout(w); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(10)
-        card, lay = _card("Y-t")
+        self.tabs = QtWidgets.QTabWidget()
+        mark_always(self.tabs)          # which view: this window only, fine for a viewer
+
+        # -- tab 1: X(t), Y(t) --------------------------------------------------
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page); lay.setContentsMargins(6, 8, 6, 6)
         self.yt = self._plot("time", "s", "CH1", "")
         # CH2 on its OWN axis (right), as a scope scales each channel by its
         # own V/div: a 0.4 V intensity next to a 100 mT field would otherwise
@@ -293,8 +343,24 @@ class MainWindow(QtWidgets.QMainWindow):
                                          pen=pg.mkPen(COLORS["accent_dim"], style=QtCore.Qt.DashLine))
         self.yt.addItem(self.trig_line)
         lay.addWidget(self.yt, 1)
-        col.addWidget(card, 1)
-        card, lay = _card("XY  -  hysteresis loop")
+        self.yt_cursor = QtWidgets.QLabel(" "); self.yt_cursor.setObjectName("hint")
+        lay.addWidget(self.yt_cursor)
+        self.yt.scene().sigMouseMoved.connect(self._cursor_yt)
+        self.tabs.addTab(page, "X(t), Y(t)")
+
+        # -- tab 2: XY / YX -------------------------------------------------------
+        page = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(page); lay.setContentsMargins(6, 8, 6, 6)
+        bar = QtWidgets.QHBoxLayout()
+        self.swap_xy = QtWidgets.QCheckBox("YX: signal horizontal, field vertical")
+        self.swap_xy.setToolTip("Which channel is horizontal. The loop numbers do not "
+                                "change: they always treat loop X as the field.")
+        mark_always(self.swap_xy)
+        self.swap_xy.setChecked(self._settings.value("swap_xy", False, type=bool))
+        self.swap_xy.toggled.connect(lambda on: (self._remember("swap_xy", bool(on)),
+                                                 self._force_fetch()))
+        bar.addWidget(self.swap_xy); bar.addStretch(1)
+        lay.addLayout(bar)
         self.xy = self._plot("X", "", "Y", "")
         self.loop_curve = self.xy.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
         self.hc_lines = []
@@ -302,12 +368,15 @@ class MainWindow(QtWidgets.QMainWindow):
             ln = pg.InfiniteLine(angle=90, movable=False,
                                  pen=pg.mkPen(COLORS["accent_hi"], style=QtCore.Qt.DashLine))
             self.xy.addItem(ln); self.hc_lines.append(ln)
-        self.cursor = QtWidgets.QLabel(""); self.cursor.setObjectName("hint")
-        self.xy.scene().sigMouseMoved.connect(lambda pos: self._cursor(self.xy, pos))
-        self.yt.scene().sigMouseMoved.connect(lambda pos: self._cursor(self.yt, pos))
         lay.addWidget(self.xy, 1)
-        lay.addWidget(self.cursor)
-        col.addWidget(card, 1)
+        self.xy_cursor = QtWidgets.QLabel(" "); self.xy_cursor.setObjectName("hint")
+        lay.addWidget(self.xy_cursor)
+        self.xy.scene().sigMouseMoved.connect(self._cursor_xy)
+        self.tabs.addTab(page, "XY / YX")
+
+        self.tabs.setCurrentIndex(self._settings.value("tab", 0, type=int))
+        self.tabs.currentChanged.connect(lambda i: self._remember("tab", int(i)))
+        col.addWidget(self.tabs, 1)
         card, lay = _card("Status log")
         self.log = QtWidgets.QPlainTextEdit(); self.log.setObjectName("log")
         self.log.setReadOnly(True); self.log.setMaximumBlockCount(500)
@@ -438,11 +507,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ctrl.get_config()
         SettingsDialog(self.ctrl, self.cfg, lambda: self._sync_inputs(force=True), self).exec()
 
-    def _cursor(self, plot, pos):
-        vb = plot.getPlotItem().vb
-        if plot.sceneBoundingRect().contains(pos):
-            p = vb.mapSceneToView(pos)
-            self.cursor.setText(f"cursor  x = {p.x():.5g}   y = {p.y():.5g}")
+    @staticmethod
+    def _axis_text(axis, value: float) -> str:
+        """`value` (a view coordinate, i.e. in the base unit) written the way
+        the axis shows it: pyqtgraph puts an SI prefix on the axis label (mV,
+        ms) and scales the ticks, so the readout must use the same scale --
+        the first build printed raw volts under an axis in mV."""
+        scale = getattr(axis, "autoSIPrefixScale", 1.0) or 1.0
+        prefix = getattr(axis, "labelUnitPrefix", "") or ""
+        units = getattr(axis, "labelUnits", "") or ""
+        return f"{value * scale:.5g} {prefix}{units}".rstrip()
+
+    def _cursor_yt(self, pos):
+        pi = self.yt.getPlotItem()
+        if not pi.vb.sceneBoundingRect().contains(pos):
+            return
+        p1 = pi.vb.mapSceneToView(pos)
+        p2 = self.vb2.mapSceneToView(pos)
+        self.yt_cursor.setText(
+            f"cursor  t = {self._axis_text(pi.getAxis('bottom'), p1.x())}   "
+            f"CH1 = {self._axis_text(pi.getAxis('left'), p1.y())}   "
+            f"CH2 = {self._axis_text(pi.getAxis('right'), p2.y())}")
+
+    def _cursor_xy(self, pos):
+        pi = self.xy.getPlotItem()
+        if not pi.vb.sceneBoundingRect().contains(pos):
+            return
+        p = pi.vb.mapSceneToView(pos)
+        self.xy_cursor.setText(
+            f"cursor  {pi.getAxis('bottom').labelText or 'x'} = "
+            f"{self._axis_text(pi.getAxis('bottom'), p.x())}   "
+            f"{pi.getAxis('left').labelText or 'y'} = "
+            f"{self._axis_text(pi.getAxis('left'), p.y())}")
 
     def _force_fetch(self):
         self._last_trace_t = 0.0
@@ -576,16 +672,20 @@ class MainWindow(QtWidgets.QMainWindow):
         lx, ly = s.get("loop_x", "ch1"), s.get("loop_y", "ch2")
         x = tr.get(lx)
         y = tr.get("loop_y") if tr.get("loop_y") is not None else tr.get(ly)
+        swap = self.swap_xy.isChecked()           # YX: the signal horizontal
         if x is not None and y is not None and lx != ly:
-            self.loop_curve.setData(x, y)
-            self.xy.setLabel("bottom", f"{s.get(f'{lx}_label', lx.upper())}", units=units[lx])
-            self.xy.setLabel("left", f"{s.get(f'{ly}_label', ly.upper())}", units=units[ly])
+            h, v = (ly, lx) if swap else (lx, ly)
+            self.loop_curve.setData(*((y, x) if swap else (x, y)))
+            self.xy.setLabel("bottom", f"{s.get(f'{h}_label', h.upper())}", units=units[h])
+            self.xy.setLabel("left", f"{s.get(f'{v}_label', v.upper())}", units=units[v])
         loop = tr.get("loop") or {}
         for ln, key in zip(self.hc_lines, ("hc_plus", "hc_minus")):
-            v = _num(loop.get(key))
-            ln.setVisible(v is not None)
-            if v is not None:
-                ln.setValue(v)
+            val = _num(loop.get(key))
+            ln.setVisible(val is not None)
+            # Hc is a FIELD value: a vertical line normally, horizontal in YX
+            ln.setAngle(0 if swap else 90)
+            if val is not None:
+                ln.setValue(val)
 
     def closeEvent(self, ev: QtGui.QCloseEvent):
         self.timer.stop()

@@ -71,8 +71,10 @@ class Timebase:
     tdiv_s   -- time per division (snapped by the scope).
     delay_s  -- the scope's trigger delay (Siglent TRDL). 0 = the trigger in the
                 centre of the record; the record's time axis is
-                t = -delay - span/2 ... span/2 - delay, so a POSITIVE delay
-                shows more of what happened before the trigger. # VERIFY sign"""
+                t = delay - span/2 ... delay + span/2, so a POSITIVE delay
+                moves the window LATER (more of what follows the trigger);
+                the trigger stays at t = 0. Measured on the lab scope
+                2026-10-07."""
 
     tdiv_s: float = 5e-3
     delay_s: float = 0.0

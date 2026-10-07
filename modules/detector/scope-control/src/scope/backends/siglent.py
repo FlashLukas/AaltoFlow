@@ -19,7 +19,7 @@ on the instrument" is the checklist.
     waveform   WFSU SP,<sparse>,NP,0,FP,0   then   C<n>:WF? DAT2
                -> "C1:WF DAT2,#9<9-digit length><int8 codes>\\n\\n"
                volts = code * VDIV / 25 - OFST
-               time  = -TRDL - span/2 + i * SP / SARA,  span = n_received * SP / SARA
+               time  = +TRDL - span/2 + i * SP / SARA,  span = n_received * SP / SARA
                (NOT SANU / SARA: SANU undercounts the memory, see read_traces)
 
 READ-ONLY START (Lukas, 2026-09-27): open() and read_settings() only ask.
@@ -238,7 +238,7 @@ class SiglentSDS:
             get(c, "probe", lambda n=n: _num(self._q(f"C{n}:ATTN?")), f"{ch}.probe")
             out["channels"][ch] = c
         get(out, "tdiv_s", lambda: _num(self._q("TDIV?"), time_unit=True), "tdiv_s")
-        get(out, "delay_s", lambda: _num(self._q("TRDL?"), time_unit=True), "delay_s")  # VERIFY sign
+        get(out, "delay_s", lambda: _num(self._q("TRDL?"), time_unit=True), "delay_s")
         get(out, "sample_rate_Hz", lambda: _num(self._q("SARA?")), "sample_rate_Hz")
         trg = {}
         get(trg, "source", self._read_source, "trigger.source")
@@ -314,8 +314,14 @@ class SiglentSDS:
         SANU does not count it. Building the axis from SANU made 20480 samples
         span 41 ms but start at -8 ms. Now: n points received, SP apart, at
         SARA -> span = n * SP / SARA, centred on the trigger, shifted by the
-        delay. # VERIFY the centring with a signal (trigger edge at t = 0):
-        the record might instead start at -SANU/SARA/2 (trigger near the left)."""
+        delay.
+
+        MEASURED (lab PC 2026-10-07, AFG square on CH2, trigger EXT rising,
+        1 ms/div): with delay 0 the edge sat at +0.058 ms -- centring
+        confirmed. With TRDL +2.02 ms the old formula (-TRDL) put the edge at
+        -3.97 ms, with -2 ms at +4.09 ms: the edge landed at -2 x delay, so the
+        sign was inverted. With +TRDL the edge stays at t = 0 and a POSITIVE
+        delay moves the window LATER (more of what follows the trigger)."""
         sara = _num(self._q("SARA?"))
         delay = _num(self._q("TRDL?"), time_unit=True)
         out = {}
@@ -341,5 +347,5 @@ class SiglentSDS:
         self._n_full = m * sparse                     # the record's real length
         dt = sparse / sara
         span = m * dt
-        t = -delay - span / 2.0 + np.arange(m) * dt                             # VERIFY centring
+        t = delay - span / 2.0 + np.arange(m) * dt         # measured: see docstring
         return t, out

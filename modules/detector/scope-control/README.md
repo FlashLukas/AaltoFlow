@@ -38,6 +38,22 @@ Ports 5633 / 5634.
    amplitude), Mr, squareness, background slope, area per cycle. How each is
    computed is written out at the top of `src/scope/analysis.py`.
 
+## The window
+
+Two tabs, each the full height: **X(t), Y(t)** (the channels against time,
+CH2 on its own axis) and **XY / YX** (the loop; "YX" puts the signal
+horizontal). A cursor readout under each plot, in that plot's axis units. The
+columns sit in a splitter -- drag the borders. Tab, XY/YX and the column
+widths are remembered on this PC (QSettings).
+
+The module's own settings -- the QUANTITY of each channel (label, unit, scale
+per volt, value at 0 V: e.g. the Hall calibration), averaging, points, filter,
+loop -- are saved to `scope.ini` next to the project at every change
+(atomically), so a restart keeps them. The scope's own settings are read from
+the scope at start, as always.
+
+![XY tab](../../../front-panels/scope-xy.png)
+
 ## Scan use: `acquire`
 
 `acquire` restarts the average and completes when N FRESH triggered traces
@@ -119,13 +135,12 @@ following CH1 (`follow on 0`), both at high-Z.
    length plus dead time). 0 Hz = INR does not work that way: tell Claude.
 5. **Waveform** (`WFSU`, `C1:WF? DAT2`, 25 codes/div): CH1 in the Y-t plot
    must have the AFG's amplitude; CH2 a 0..V square.
-6. **Time axis and the trigger point** (`SANU? / SARA? / TRDL?`): the CH2
-   rising edge must sit at t = 0; with a delay set on the scope, check the
-   sign. The time axis is built from the points the scope actually SENDS
-   (at 1 ms/div the block held 20480 points = 41 ms of memory, while SANU?
-   said 8000 and the screen shows 14 ms), centred on the trigger -- the
-   centring is the guess to confirm here: AFG CH1 square -> scope CH1,
-   trigger CH1, the edge must sit at t = 0.
+6. **Time axis and the trigger point** -- MEASURED 2026-10-07: the axis is
+   built from the points the scope actually SENDS (at 1 ms/div the block held
+   20480 points = 41 ms of memory; SANU? said 8000, the screen shows 14 ms),
+   centred on the trigger (edge at +0.06 ms with delay 0), and a POSITIVE
+   delay moves the window later (t = +TRDL - span/2 + ...; the first build had
+   the sign inverted). Re-check: with a delay set, the edge stays at t = 0.
 7. **Writing** each setting from the GUI (V/div, offset, coupling, probe,
    time/div, delay, source, level, slope, mode): the screen follows, the GUI
    shows the snapped value.

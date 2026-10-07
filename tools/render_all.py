@@ -64,6 +64,8 @@ PROJECTS.update({
     # rendered in smb's project because the pose is an smb window
     "control-holder": ("modules/source/smb-control", True),
     "control-viewer": ("modules/source/smb-control", True),
+    # the scope's second tab (the XY / YX loop)
+    "scope-xy": ("modules/detector/scope-control", True),
 })
 
 

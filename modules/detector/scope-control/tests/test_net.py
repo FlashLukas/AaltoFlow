@@ -108,3 +108,44 @@ def test_restart_keeps_the_scope_untouched(pair):
     assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
     svc.stop()
     assert sim.writes == before
+
+
+def test_quantity_survives_a_restart_and_shapes_describe(tmp_path):
+    """Lukas 2026-10-07: the QUANTITY settings (the Hall calibration) "need to
+    be saved". Every change goes to scope.ini at once (atomically); a new
+    service started from that file has them -- and describe's detector units
+    follow at once (describe_rev moves), so a scan records mT, not V."""
+    from scope.config import Config as C
+    ini = tmp_path / "scope.ini"
+    scope, _ = build_sim_system(C(), seed=1)
+    scope.persist_path = str(ini)
+    svc = ScopeService(scope, host="127.0.0.1", cmd_port=17642, pub_port=17643, status_hz=20)
+    svc.start()
+    cli = ScopeClient(host="127.0.0.1", cmd_port=17642, pub_port=17643, timeout_ms=3000)
+    try:
+        cli.start()
+        rev0 = cli._cmd({"cmd": "status"})["status"]["describe_rev"]
+        cli.set_physical("ch1", scale=2500.0, unit="mT", label="Field")
+        cli.set_averages(64)
+        cli.set_filter(lowpass_Hz=1500.0)
+        st = wait_for(cli, lambda s: s["ch1_unit"] == "mT" and s["describe_rev"] != rev0)
+        by = {p["id"]: p for p in cli.describe()["parameters"]}
+        assert by["ch1"]["unit"] == "mT" and by["ch1_mean"]["unit"] == "mT"
+        assert by["loop_hc"]["unit"] == "mT"
+    finally:
+        cli.shutdown()
+        svc.stop()
+        svc._cmd_t.join(timeout=2.0)
+        svc._pub_t.join(timeout=2.0)
+    assert ini.is_file() and not (tmp_path / "scope.ini.tmp").exists()
+    back = C.load(str(ini))                      # what the next start reads
+    assert back.channel_1.phys_scale == 2500.0 and back.channel_1.phys_unit == "mT"
+    assert back.channel_1.phys_label == "Field"
+    assert back.acquisition.averages == 64 and back.filter.lowpass_Hz == 1500.0
+
+
+def test_nothing_is_written_without_a_persist_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    scope, _ = build_sim_system(Config())
+    scope.set_averages(3)
+    assert list(tmp_path.iterdir()) == []

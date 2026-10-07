@@ -67,6 +67,7 @@ SIZES = {
     "smb": (1280, 620),
     "afg": (1320, 820),
     "scope": (1560, 960),
+    "scope-xy": (1560, 960),
     "control-holder": (1280, 660),
     "control-viewer": (1280, 660),
     "stage": (1280, 800),
@@ -1283,7 +1284,11 @@ def _afg(theme):
     return lambda: gui.run_app(gen, cfg), warm_up, 2.0
 
 
-def _scope(theme):
+def _scope(theme, tab: int = 0):
+    import os
+    import tempfile
+    # the window's remembered tab / splitter must not come from this PC
+    os.environ["AALTOFLOW_GUI_SETTINGS"] = os.path.join(tempfile.mkdtemp(), "gui.ini")
     from scope.config import Config
     from scope.sim_system import build_sim_system
     from scope.apps import gui
@@ -1299,6 +1304,7 @@ def _scope(theme):
         win.ctrl.set_physical("ch2", label="Intensity")
         win.ctrl.set_filter(lowpass_Hz=2000.0)
         win.ctrl.set_averages(16)
+        win.tabs.setCurrentIndex(tab)
 
     return lambda: gui.run_app(scope, cfg), warm_up, 3.5
 
@@ -1332,6 +1338,7 @@ TARGETS = {
     "smb": _smb,
     "afg": _afg,
     "scope": _scope,
+    "scope-xy": lambda theme: _scope(theme, tab=1),
     "stage": _stage,
     "piezo": _piezo,
     "camera": _camera,

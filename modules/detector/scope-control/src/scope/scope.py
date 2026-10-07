@@ -107,6 +107,14 @@ class Scope:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._on_event = lambda level, msg: None
+        # Where the MODULE's settings are kept on this PC (physical units --
+        # the Hall calibration --, averaging, points, filter, loop): set by
+        # run_service.py to scope.ini next to the project. Every change is
+        # written there at once, atomically, so a restart (also a Restart that
+        # keeps the instrument's state) does not lose a calibration. None =
+        # nothing is written (tests, a private local GUI).
+        self.persist_path = None
+        self._persist_lock = threading.Lock()
 
     @property
     def simulated(self) -> bool:
@@ -279,6 +287,7 @@ class Scope:
         n = min(max(n, POINTS_RANGE[0]), POINTS_RANGE[1])
         self.cfg.acquisition.points = n
         self._restart(f"{n} points per trace")
+        self._persist()
 
     def set_averages(self, n: int) -> None:
         n = int(round(_finite(n, "averages")))
@@ -290,10 +299,12 @@ class Scope:
             if self._acq is not None:
                 self._acq["want"] = n
         self._emit("info", f"{n} traces averaged")
+        self._persist()
 
     def set_keep_raw(self, on: bool) -> None:
         self.cfg.acquisition.keep_raw = bool(on)
         self._emit("info", "raw traces recorded too" if on else "only filtered traces recorded")
+        self._persist()
 
     def set_filter(self, lowpass_Hz: float | None = None, highpass_Hz: float | None = None,
                    order: int | None = None) -> None:
@@ -306,6 +317,7 @@ class Scope:
             f.order = min(max(int(order), 1), 8)
         self._emit("info", f"filter: low-pass {f.lowpass_Hz:g} Hz, high-pass "
                            f"{f.highpass_Hz:g} Hz, order {f.order} (0 = off; zero phase)")
+        self._persist()
 
     def set_physical(self, ch, scale: float | None = None, offset: float | None = None,
                      unit: str | None = None, label: str | None = None) -> None:
@@ -325,6 +337,7 @@ class Scope:
             c.phys_label = str(label)
         self._restart(f"{ch.upper()} in {c.phys_unit}: {c.phys_scale:g} {c.phys_unit}/V "
                       f"{c.phys_offset:+g} {c.phys_unit}")
+        self._persist()
 
     def set_loop(self, x: str | None = None, y: str | None = None) -> None:
         a = self.cfg.analysis
@@ -333,6 +346,7 @@ class Scope:
         if y is not None:
             a.loop_y = parse_channel(y)
         self._emit("info", f"loop: {a.loop_y.upper()} against {a.loop_x.upper()}")
+        self._persist()
 
     def set_analysis(self, sat_fraction: float | None = None,
                      subtract_background: bool | None = None,
@@ -346,6 +360,7 @@ class Scope:
             a.normalise = bool(normalise)
         self._emit("info", f"loop analysis: ends above {a.sat_fraction:g} of max |X|, "
                            f"background {'subtracted' if a.subtract_background else 'kept'}")
+        self._persist()
 
     def set_sim(self, name: str, value) -> None:
         """SIMULATOR only: change the pretend bench (e.g. the coercive field)."""
@@ -364,6 +379,24 @@ class Scope:
 
     def restart_average(self) -> None:
         self._restart("average restarted")
+
+    def _persist(self) -> None:
+        """Write the whole config to `persist_path`: first to a temporary file
+        in the same folder, then os.replace -- an interrupted write (crash,
+        power cut) leaves the old file whole, never half a file. The scope's
+        own settings are in it too, harmlessly: at start they are READ from the
+        scope and the file's values only stand in for what cannot be read."""
+        path = self.persist_path
+        if not path:
+            return
+        import os
+        tmp = f"{path}.tmp"
+        try:
+            with self._persist_lock:
+                self.cfg.save(tmp)
+                os.replace(tmp, path)
+        except OSError as exc:
+            self._emit("warn", f"could not save the settings to {path}: {exc}")
 
     # ---- the scan-safe read ----------------------------------------------------------
 
@@ -554,6 +587,7 @@ class Scope:
         c.acquisition.averages = int(min(max(int(c.acquisition.averages), 1),
                                          AVERAGES_RANGE[1]))
         self._restart("settings applied")
+        self._persist()
 
     # ---- the trace thread ----------------------------------------------------------------
 

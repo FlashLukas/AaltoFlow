@@ -182,9 +182,10 @@ class SimulatedScope:
     def _make_record(self, phi: float, t_abs: float) -> None:
         s = self.settings
         span = _H_DIV * s["tdiv_s"]
-        # Siglent's convention: time = -delay - span/2 + i / sample_rate, i.e. a
-        # POSITIVE delay shows more time before the trigger
-        t = np.linspace(-span / 2, span / 2, _NATIVE_POINTS, endpoint=False) - s["delay_s"]
+        # the real scope's convention (measured 2026-10-07): time = +delay -
+        # span/2 + i / sample_rate, i.e. a POSITIVE delay moves the window
+        # LATER, the trigger stays at t = 0
+        t = np.linspace(-span / 2, span / 2, _NATIVE_POINTS, endpoint=False) + s["delay_s"]
         phase = phi + 2 * np.pi * self.sim.drive_Hz * t
         sig = self._signals(phase, t_abs + t, noise=True)
         out = {}

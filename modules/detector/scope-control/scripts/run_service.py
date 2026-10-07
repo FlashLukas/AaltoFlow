@@ -67,6 +67,11 @@ def main() -> int:
         cfg.hardware.visa = args.visa
 
     spec = build_scope(cfg, args.real)
+    # The module's settings (physical units = the Hall calibration, averaging,
+    # filter, loop) are saved to scope.ini at every change, so a restart keeps
+    # them (Lukas, 2026-10-07: "need to be saved"). A --config file given on
+    # the command line is the one written.
+    spec.persist_path = config or str(default_ini)
     if args.real:
         print(f"REAL scope at {cfg.hardware.visa}")
     else:
