@@ -498,3 +498,20 @@ def test_a_slow_field_seen_first_is_not_a_front_panel_change(system):
     gen._wake.set()
     time.sleep(0.5)
     assert not any("changed at the instrument" in m for _, m in events)
+
+
+def test_quick_and_full_reads_alternating_report_no_change(system, monkeypatch):
+    """Lab PC: "changed at the instrument: mode = continuous" every ~5 s on an
+    untouched unit -- a quick read REPLACED the stored read-back, so each full
+    read found mode/load "new". Read-backs are merged now; a REAL change of
+    mode or load at the panel is still adopted."""
+    import afg.generator as brain
+    monkeypatch.setattr(brain, "_FULL_READ_S", 1.0)     # a full read every 2nd poll
+    gen, sim, cfg, events = system
+    time.sleep(2.6)                                     # quick and full reads alternate
+    assert sum(1 for r in sim.reads if r[1]) >= 2 and sum(1 for r in sim.reads if not r[1]) >= 2
+    assert not any("changed at the instrument" in m for _, m in events)
+    sim.ch[1]["mode"] = "burst"                         # someone switched burst on
+    sim.ch[1]["load_ohm"] = None                        # and the load to high-Z
+    st = wait(gen, lambda s: s["ch2_mode"] == "burst" and s["ch2_load"] == "high-Z")
+    assert any("changed at the instrument" in m and "mode" in m for _, m in events)

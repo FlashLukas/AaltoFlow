@@ -79,7 +79,12 @@ class SimulatedAFG:
         self.reads.append((ch, bool(full)))
         if self.fail_reads:
             raise OSError("simulated USB timeout")
-        return dict(self.ch[ch], unread=[])
+        got = dict(self.ch[ch], unread=[])
+        if not full:
+            # like the real backend: a quick read leaves the slow fields out
+            got.pop("load_ohm", None)
+            got.pop("mode", None)
+        return got
 
     def output_value(self, ch: int, t: float) -> float:
         """Volts on the connector at time t, into the declared load."""
