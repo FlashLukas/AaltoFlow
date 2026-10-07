@@ -330,9 +330,11 @@ class Generator:
                 notes.append(f"amplitude {w['amplitude_Vpp']:g} Vpp")
             room = env["peak_max_V"] - abs(w["offset_V"])
             if w["amplitude_Vpp"] / 2 > room:
+                asked = w["amplitude_Vpp"]
                 w["amplitude_Vpp"] = max(env["amp_min_Vpp"], 2 * room)
-                notes.append(f"amplitude {w['amplitude_Vpp']:g} Vpp (peak limit "
-                             f"{env['peak_max_V']:g} V)")
+                notes.append(f"amplitude {w['amplitude_Vpp']:g} Vpp for now, of {asked:g} "
+                             f"asked (peak limit {env['peak_max_V']:g} V at offset "
+                             f"{w['offset_V']:g} V; it follows when the offset changes)")
             half = 0.0 if w["waveform"] == "dc" else w["amplitude_Vpp"] / 2
         else:
             half = 0.0
@@ -401,7 +403,7 @@ class Generator:
                 self._mirror_to_ch2(notes_out=notes)
         self._wake.set()
         if notes:
-            self._emit("warn", f"{ch.upper()}: {what} clamped -> " + ", ".join(notes))
+            self._emit("warn", f"{ch.upper()}: {what} -- limited: " + "; ".join(notes))
         else:
             self._emit("info", f"{ch.upper()}: {what}")
 
@@ -866,7 +868,8 @@ class Generator:
             # compared with the PREVIOUS read-back, at the instrument's own
             # resolution: only a real change counts, never a re-reading
             changed = [k for k in _KNOBS + ("output", "mode")
-                       if k in got and not _same(k, prev.get(k), got[k], self._phase_tol())]
+                       if k in got and k in prev
+                       and not _same(k, prev[k], got[k], self._phase_tol())]
             # a phase the instrument holds that is the SAME angle as the
             # setpoint (270 for an asked -90) is not a change at the panel
             if "phase_deg" in changed and _same("phase_deg", want.get("phase_deg"),
@@ -887,7 +890,9 @@ class Generator:
             want = self._want[ch]
             bad = [k for k in _relevant(want)
                    if k in got and not _same(k, want[k], got[k], self._phase_tol())]
-            self._readback[ch] = dict(got)
+            # merge: a quick read leaves the slow fields (load, mode) out; keep
+            # their last values, so the next full read compares against them
+            self._readback[ch] = {**(self._readback[ch] or {}), **got}
             self._read_gen[ch] = gen
             text = ", ".join(f"{k}: asked {want[k]}, instrument {got[k]}" for k in bad)
             # The channel is unsettled AT ONCE (a scan never measures on a

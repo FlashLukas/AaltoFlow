@@ -120,7 +120,7 @@ def test_lab_limit_and_instrument_range(system):
     cfg.limits_1.amplitude_max_Vpp = 3.0
     gen.set_amplitude("ch1", 8.0)
     settled(gen, "ch1", amplitude_Vpp=3.0)
-    assert any("clamped" in m for _, m in events)
+    assert any("limited" in m for _, m in events)
     gen.set_waveform("ch1", "ramp")
     gen.set_frequency("ch1", 5e6)             # ramp stops at 1 MHz
     settled(gen, "ch1", frequency_Hz=1e6, waveform="ramp")
@@ -468,3 +468,33 @@ def test_no_ramp_symmetry_where_the_instrument_has_none():
         assert not any(w[0] == "set_symmetry" for w in sim.writes)
     finally:
         gen.shutdown()
+
+
+def test_the_limit_message_says_what_happened(system):
+    """Lab PC 2026-10-07: amplitude-first logged "amplitude 20 Vpp clamped ->
+    amplitude 1 Vpp" and then "offset 1 V clamped -> amplitude 18 Vpp" -- the
+    final state right, the words misleading. Now the note says it is for now
+    and why."""
+    gen, sim, cfg, events = system
+    cfg.limits_1.peak_max_V = 10.0
+    gen.set_load("ch1", "high-Z")
+    wait(gen, lambda s: s["ch1_load"] == "high-Z" and s["ch1_settled"])
+    gen.set_offset("ch1", 9.5)
+    gen.set_amplitude("ch1", 20.0)
+    msgs = [m for _, m in events if "limited" in m]
+    assert msgs and "for now, of 20 asked" in msgs[-1] and "offset 9.5 V" in msgs[-1]
+    assert "clamped" not in msgs[-1]
+
+
+def test_a_slow_field_seen_first_is_not_a_front_panel_change(system):
+    """Lab PC: "CH2: changed at the instrument: mode = continuous" while nobody
+    touched CH2 -- the 5-s read saw `mode` for the first time after quick
+    reads had left it out."""
+    gen, sim, cfg, events = system
+    for _ in range(3):
+        gen.set_duty("ch1", 30.0); time.sleep(0.4)
+        gen.set_duty("ch1", 60.0); time.sleep(0.4)
+    gen._last_full = {ch: -1e9 for ch in gen.channels}  # force full reads now
+    gen._wake.set()
+    time.sleep(0.5)
+    assert not any("changed at the instrument" in m for _, m in events)

@@ -218,6 +218,9 @@ def build_manifest(scope) -> dict:
         _p("trigger_rate", "Trigger rate", "indicator", "float", unit="Hz",
            group="Trigger", order=5, decimals=2, plottable=True,
            read_path=["trigger_rate_Hz"]),
+        _p("rolling", "Roll mode (no triggered records)", "indicator", "bool",
+           group="Timebase", order=4, read_path=["rolling"],
+           help="At slow time bases the scope rolls; acquisitions are refused there."),
         _p("settings_settled", "Scope settings applied", "indicator", "bool",
            group="Trigger", order=6, read_path=["settings_settled"]),
     ]

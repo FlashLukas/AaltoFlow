@@ -205,12 +205,18 @@ class Hardware:
                    none is waiting (and the status poll of the settings).
     max_points  -- the most points read per channel and trace; the scope's
                    record is thinned to about this before transfer.
+    roll_tdiv_s -- at this time/div and slower the scope ROLLS: the trace
+                   scrolls and no triggered records come (lab PC 2026-10-07:
+                   at 0.5 s/div one record in 120 s). A triggered acquisition
+                   is refused there, with the reason. # VERIFY the threshold
+                   on the RSDS1102CML+ (Siglent: roll from ~50 ms/div).
     """
 
     visa: str = "USB0::0xF4EC::0xEE3A::SERIAL::INSTR"
     timeout_ms: int = 5000
     poll_s: float = 0.01
     max_points: int = 20000
+    roll_tdiv_s: float = 0.05
 
 
 @dataclass

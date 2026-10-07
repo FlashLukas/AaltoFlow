@@ -293,7 +293,16 @@ class TekAFG:
 
     def capabilities(self) -> dict:
         return {"model": "AFG1062", "channels": 2,
-                "waveforms": list(_SHAPE_SET), "phase_align": True,
+                # NOT noise and NOT dc (raw SCPI on FV:V1.0.2, 2026-10-07):
+                #  * SHAP PRN / PRNoise: no error, SHAP? answers "PRN" -- but
+                #    the output stays the previous waveform; NOIS* -> -201.
+                #  * SHAP DC: SHAP? answers "DC", the output is a FIXED ~2.03 V
+                #    whatever OFFS (OFFS? echoes the asked value) or AMPL: the
+                #    DC level seems front-panel only.
+                # Both would be status that lies, so neither is offered (a
+                # shape left on by hand is still READ and shown).
+                "waveforms": [w for w in _SHAPE_SET if w not in ("noise", "dc")],
+                "phase_align": True,
                 # whole degrees, measured 2026-10-07 (see set_phase)
                 "phase_resolution_deg": 1.0,
                 # MEASURED 2026-10-07: FUNC:RAMP:SYMM is not a command of

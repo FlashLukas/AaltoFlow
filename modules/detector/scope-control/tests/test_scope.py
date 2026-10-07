@@ -198,3 +198,28 @@ def test_bench_scene_triggers_on_the_square():
         assert y[i0 + 5] > mid > y[i0 - 5]
     finally:
         scope.shutdown()
+
+
+def test_roll_range_refuses_acquire_and_record_s_follows_tdiv(system):
+    """Lab PC 2026-10-07: at 0.5 s/div the scope rolls, one record came in
+    120 s and an acquire never finished; record_s stayed at the 1 ms/div
+    value. Now: refused with the reason, and record_s follows the time/div."""
+    scope, sim, cfg, events = system
+    wait(scope, lambda s: s["records"] >= 2)
+    st = scope.status()
+    per_div = st["record_s"] / st["tdiv_s"]
+    scope.set_tdiv(0.5)
+    st = wait(scope, lambda s: s["tdiv_s"] == 0.5 and s["settings_settled"])
+    assert st["rolling"] is True
+    assert st["record_s"] == pytest.approx(per_div * 0.5, rel=1e-6)
+    with pytest.raises(ValueError, match="ROLLS"):
+        scope.acquire()
+    t_end = time.monotonic() + 2
+    while not any("ROLLS" in m for _, m in events) and time.monotonic() < t_end:
+        time.sleep(0.02)
+    assert any("ROLLS" in m for _, m in events)
+    scope.set_tdiv(1e-3)
+    st = wait(scope, lambda s: s["tdiv_s"] == 1e-3 and s["settings_settled"])
+    assert st["rolling"] is False
+    scope.set_averages(1)
+    acquire(scope)                                    # fine again

@@ -61,11 +61,12 @@ def main() -> int:
     assert ("align_phase",) in backend.writes
 
     # safety: amplitude above the instrument's 10 Vpp, then an offset that
-    # would push the peak past 5 V -- both clamped, with a warn event
+    # would push the peak past 5 V -- the offset is kept, the amplitude
+    # yields (5 V - 2 V = 3 V half-amplitude: 6 Vpp), with a warn event
     gen.set_amplitude("ch1", 25.0)
     wait_settled(gen, "ch1", amplitude_Vpp=10.0)
     gen.set_offset("ch1", 2.0)
-    s = wait_settled(gen, "ch1", offset_V=0.0)
+    s = wait_settled(gen, "ch1", offset_V=2.0, amplitude_Vpp=6.0)
     print(f"after over-range: CH1 {s['ch1_amplitude_Vpp']} Vpp, offset "
           f"{s['ch1_offset_V']} V, peak {s['ch1_peak_V']} V")
     assert s["ch1_peak_V"] <= 5.0
@@ -74,7 +75,7 @@ def main() -> int:
     assert not backend.ch[0]["output"] and not backend.ch[1]["output"], "output left on!"
     print("after shutdown: both outputs off")
 
-    print(f"\n{len(events)} events; clamps seen: {sum('clamped' in m for _, m in events)}")
+    print(f"\n{len(events)} events; limits seen: {sum('limited' in m for _, m in events)}")
     print("SMOKE TEST PASSED")
     return 0
 

@@ -144,7 +144,10 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
            help="Output on/off. 'All outputs off' switches every channel off."),
         _p(f"{ch}_waveform", f"{C} waveform", "control", "enum", group=grp,
            order=base_order + 2,
-           options=list(gen.caps.get("waveforms", ())) + (["arb"] if wf == "arb" else []),
+           # what can be selected, plus the shape the instrument holds now
+           # even if it cannot be selected from here (left on by hand)
+           options=list(gen.caps.get("waveforms", ()))
+           + ([wf] if wf not in gen.caps.get("waveforms", ()) else []),
            read_path=[f"{ch}_waveform"],
            set={"verb": "set_waveform", "arg": "waveform", "extra": extra},
            settle={"policy": "echoes", "key": f"{ch}_waveform"},

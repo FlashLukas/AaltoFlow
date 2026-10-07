@@ -609,7 +609,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.idn.setText(str(s.get("idn") or ""))
         mode = s.get("trigger_mode")
         self.rate.setText(f"trigger {_fmt(s.get('trigger_rate_Hz'), '.1f')} Hz   mode {mode}"
-                          + ("   STOPPED" if mode == "stop" else ""))
+                          + ("   STOPPED" if mode == "stop" else "")
+                          + ("   ROLL (no triggered records)" if s.get("rolling") else ""))
         self.sara.setText(_si(s.get("sample_rate_Hz"), "Sa/s"))
         self._sync_inputs()
         n, want = int(s.get("running_n") or 0), max(1, int(s.get("averages") or 1))

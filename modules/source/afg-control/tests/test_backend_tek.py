@@ -214,3 +214,23 @@ def test_a_quick_read_skips_load_and_mode(fake_visa):
     full = b.read_channel(0, full=True)
     assert "load_ohm" in full and "mode" in full
     b.close()
+
+
+def test_noise_and_dc_are_not_offered_on_the_afg1062(fake_visa):
+    """Raw SCPI 2026-10-07: SHAP PRN answers "PRN" but the output stays the
+    old waveform; SHAP DC gives a fixed ~2 V whatever OFFS. Not offered."""
+    b = TekAFG(RES)
+    assert "noise" not in b.capabilities()["waveforms"]
+    assert "dc" not in b.capabilities()["waveforms"]
+    gen = Generator(b, Config())
+    gen.start()
+    try:
+        with pytest.raises(ValueError):
+            gen.set_waveform("ch1", "noise")
+        with pytest.raises(ValueError):
+            gen.set_waveform("ch1", "dc")
+        from afg.net.describe import build_manifest
+        opts = {p["id"]: p for p in build_manifest(gen)["parameters"]}["ch1_waveform"]["options"]
+        assert "noise" not in opts and "dc" not in opts and "sine" in opts
+    finally:
+        gen.shutdown()

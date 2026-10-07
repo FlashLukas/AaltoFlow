@@ -104,6 +104,11 @@ class Scope:
         self._live_numbers: dict = {}
         self._last_reread = -1e9
         self._record_s = 0.0                # length of the latest record
+        # how many divisions a record spans (measured: 41 at 1 ms/div on the
+        # RSDS1102CML+); learned from every record, so the expected record
+        # length follows a time/div change at once (`record_s`)
+        self._div_per_record = 14.0
+        self._roll_warned = False
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -401,6 +406,20 @@ class Scope:
 
     # ---- the scan-safe read ----------------------------------------------------------
 
+    def _tdiv(self) -> float:
+        return float(self._actual.get("tdiv_s", self.cfg.timebase.tdiv_s) or 0.0)
+
+    def record_s(self) -> float:
+        """How long one record lasts at the CURRENT time/div: divisions per
+        record (learned from the records seen) x time/div. Follows a time/div
+        change at once (lab PC 2026-10-07: it stayed at the old value until
+        the next record arrived -- which at a slow time base was never)."""
+        return self._div_per_record * self._tdiv()
+
+    def rolling(self) -> bool:
+        """At this time/div the scope rolls and makes no triggered records."""
+        return self._tdiv() >= float(self.cfg.hardware.roll_tdiv_s) > 0
+
     def acquire(self) -> int:
         """Start an acquisition; returns its id at once (see module docstring).
         Refused when the scope cannot deliver: not connected, STOPPED, or in
@@ -411,6 +430,12 @@ class Scope:
         if mode == "stop":
             raise ValueError("the scope is stopped: no new traces will come "
                              "(set the trigger mode to normal or auto)")
+        if self.rolling():
+            raise ValueError(
+                f"at {self._tdiv():g} s/div the scope ROLLS: it makes no triggered "
+                f"records, so there is nothing to average in step (lab PC: one record "
+                f"in 120 s at 0.5 s/div). Use a time/div faster than "
+                f"{self.cfg.hardware.roll_tdiv_s:g} s/div for loops and scans.")
         if mode == "single" and int(self.cfg.acquisition.averages) > 1:
             raise ValueError("single-shot mode gives ONE trace, the acquisition wants "
                              f"{self.cfg.acquisition.averages}: use normal mode")
@@ -512,7 +537,8 @@ class Scope:
                   "channels": list(self.channels),
                   "generator_channels": int(self.caps.get("generator_channels", 0)),
                   "records": self._records,
-                  "record_s": self._record_s,
+                  "record_s": self.record_s(),
+                  "rolling": self.rolling(),
                   "trigger_rate_Hz": self._trigger_rate_locked(),
                   "running_n": len(self._running),
                   "averages": int(c.acquisition.averages),
@@ -618,6 +644,14 @@ class Scope:
             if changed:
                 self._emit("info", "changed at the scope: " + ", ".join(changed))
                 self._restart(None)
+        roll = self.rolling()
+        if roll and not self._roll_warned:
+            self._roll_warned = True
+            self._emit("warn", f"{self._tdiv():g} s/div: the scope ROLLS -- no triggered "
+                               f"records, acquisitions are refused until the time/div "
+                               f"is faster than {self.cfg.hardware.roll_tdiv_s:g} s/div")
+        elif not roll:
+            self._roll_warned = False
         with self._hw:
             ready = self.backend.new_trace_ready()
         if not ready:
@@ -674,6 +708,9 @@ class Scope:
         tr, red = analysis.reduce_points(np.asarray(t, float), phys, int(c.acquisition.points))
         if len(t) > 1:
             self._record_s = float(t[-1] - t[0])   # for the acquisition timeout
+            tdiv = self._tdiv()
+            if tdiv > 0:
+                self._div_per_record = self._record_s / tdiv
         latched = None
         with self._lock:
             if self._rev != rev0:

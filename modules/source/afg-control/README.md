@@ -171,9 +171,12 @@ So, on this firmware:
     (capabilities `ramp_symmetry: False`; refused, not described, not shown).
   - levels within ~2-3 % from 10 mVpp to 20 Vpp, offsets -3..+9.5 V right,
     the limits and their warnings work.
-  - OPEN (need a raw SCPI test, see below): NOISE is not applied (the status
-    said "noise", the scope still showed the previous ramp), and the DC LEVEL
-    came out ~2.0 V for an offset of 1.5 V with 2 Vpp still set.
+  - NOISE and DC are NOT offered for the AFG1062 (raw SCPI, 2026-10-07):
+    `SHAP PRN`/`PRNoise` -> `SHAP?` answers "PRN" but the output stays the
+    previous waveform (`NOIS*` -> -201); `SHAP DC` gives a FIXED ~2.03 V
+    whatever `OFFS` (which `OFFS?` echoes) or `AMPL` -- the DC level seems to
+    be front-panel only. Either would be a status that lies. A shape left on
+    by hand is still read and shown.
 
 ## SCPI commands used (real backend)
 
@@ -238,15 +241,9 @@ the bench. In order; each step names the `# VERIFY` it settles.
    panel says "Instrument differs" -- then put that limit into
    `AFG1062_ENVELOPE` (`tek_afg.py`).
 6. **Pulse duty** works (measured); **ramp symmetry** is not available on
-   FV:V1.0.2 (see "Measured on the instrument"). Still open, raw SCPI with the
-   service stopped (a keep-outputs Restart afterwards), each followed by
-   `SOUR1:FUNC:SHAP?` / the scope and `SYST:ERR?`:
-   - noise: `SOUR1:FUNC:SHAP PRN`, `SOUR1:FUNC:SHAP PRNoise`,
-     `SOUR1:FUNC:SHAP NOIS`, `SOUR1:FUNC:SHAP NOISe` -- which one makes noise,
-     and what does `FUNC:SHAP?` answer then?
-   - DC: `SOUR1:FUNC:SHAP DC`, then `SOUR1:VOLT:LEV:IMM:OFFS 1.5` with the
-     amplitude at 2 Vpp and again at its minimum (`...:AMPL 0.001VPP`): the
-     scope's DC level each time, and `OFFS?` / `AMPL?`.
+   FV:V1.0.2 (see "Measured on the instrument"). Noise and DC, raw SCPI with the
+   service stopped -- DONE 2026-10-07: no working remote noise or DC level on
+   FV:V1.0.2, both are not offered (see "Measured on the instrument").
 7. **CH2 follows CH1, Align phase** (`SOUR1:PHAS:INIT`): CH2 square at +90 deg;
    on the scope the CH2 edge must sit a quarter period after the CH1 zero
    crossing, and stay there after a CH1 frequency change. Note whether the
