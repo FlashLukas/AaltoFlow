@@ -84,6 +84,7 @@ src/dssg/
     service.py           DssgService -- owns the brain, serves it over ZeroMQ
     client.py            DssgClient -- Synthesizer-compatible facade over the socket
   spurs.py               measured harmonics/sub-harmonics for the GUI (reads sg12000l_spurs.json)
+  vernier_cal.py         fine power: attenuator + vernier split, the power Calibration, build_calibration
   apps/                  gui.py (SpectrumIndicator), settings_dialog.py, theme.py
 scripts/
   run_service.py         start the service (simulated by default, --real for the unit)
@@ -91,6 +92,7 @@ scripts/
   dssg_console.py        standalone raw-protocol console (only needs pyzmq)
   smoke_test.py          quick offline check
   extract_spurs.py       harmonics scan (.nc) -> src/dssg/sg12000l_spurs.json (+ docs plot)
+  calibrate_power.py     bench scans with the Signal Hound -> dssg_power_calibration.json (scan-core env)
 tests/                   pytest: config, brain, real backend vs a fake link, net, describe, GUI
 ```
 
@@ -167,11 +169,50 @@ is close to linear), using the dB per count measured above, interpolated in
 frequency (`src/dssg/vernier_cal.py`). So -13.73 dBm at 2 GHz becomes
 attenuator -13.5 dBm + vernier -5, and the module reports -13.73 dBm (the
 attenuator alone is in the status as `attenuator_dBm`). A frequency change
-re-splits the same power. Accuracy: within ~0.05 dB of the model, up to ~0.1 dB
-around 6 GHz and at low power (the power dependence of the slope is not
-modelled) -- far better than 0.5 dB steps, but measure the level when it really
-matters. Scans can ask for any 0.01 dB. `[hardware] fine_power = False` brings
-back the 0.5 dB steps with the vernier as a manual control in raw counts.
+re-splits the same power. Scans can ask for any 0.01 dB. `[hardware]
+fine_power = False` brings back the 0.5 dB steps with the vernier as a manual
+control in raw counts.
+
+Accuracy WITHOUT a power calibration: within ~0.05 dB of the model at 1-2 GHz,
+but the model takes the attenuator steps as exact, and above ~4 GHz they are
+not (bench, 2026-10-07: at 10 GHz "-10.5 dBm" is only 0.32 dB below "-10.0",
+"-13.5" is 0.56 dB short of its nominal 3.5 dB), and the vernier slope also
+depends on power (~0.044 dB/count at -10/0 dBm, ~0.059 at -20 dBm, 2 GHz).
+
+**Power calibration (per unit, measured once).** `dssg_power_calibration.json`
+in the module folder holds, per frequency, the measured deviation of every
+attenuator step from nominal -- RELATIVE to the -10 dBm step, so the pad,
+cables and the analyser's flatness cancel and the absolute level stays the
+unit's factory calibration -- and the vernier's dB per count per frequency and
+power. With it, fine power picks the step whose REAL level is nearest the
+request (at 10 GHz, -13.5 dBm is made from the -14.0 step) and fills the rest
+with the measured slope: the level asked for to ~0.05 dB at every frequency.
+Between the measured frequencies both tables are interpolated linearly; outside
+them the end values are used (the log says so once). The service loads it at
+start (`[hardware] power_calibration`, a path relative to the module folder);
+the log names the file, its date and frequency range, and the status says
+`power_calibrated`. A missing file = the behaviour above; a broken one = a
+warning and no calibration, never a failed start. The file is lab data of ONE
+unit: gitignored (`*calibration*.json`), kept by the installer and by Mission
+Control's settings export.
+
+Measure it on the bench with the Signal Hound (both services running, the
+generator into the analyser through a pad), from scan-core's environment:
+
+```powershell
+cd scan-core
+uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --quick         # the plan only
+uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --quick --yes   # 1, 4, 10 GHz
+uv run python ..\modules\source\dssg-control\scripts\calibrate_power.py --yes           # 16 frequencies, ~1100 points
+```
+
+It switches the generator to step mode, runs two scans (A: every 0.5 dB step at
+vernier 0; B: vernier -8..+8 at -20/-10/0 dBm), keeps both as .nc next to the
+JSON, and at the end -- also after an error or Ctrl+C -- switches the RF OFF and
+puts back fine power, frequency, power, vernier and the analyser's settings
+(`--restore-rf` switches the RF back on if it was on). `--max-power` (default
++5 dBm) caps the power, `--ref-level` (default -10 dBm) suits a 30 dB pad.
+Restart the dssg service to load the new file.
 
 USB: 115200 baud, 8N1, linefeed terminator. Ethernet: TCP port 10001 (fixed for
 all DSI models); the unit uses DHCP unless given a static address.

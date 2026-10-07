@@ -18,6 +18,10 @@ datasheet (V3.6, Dec 2022) where it matters to a caller:
   the real firmware. POWER? keeps reporting the attenuator setting (measured:
   the real POWER? excludes the vernier too), so a power scan's echo is not
   disturbed by a vernier offset.
+* The attenuator steps can be made INEXACT ([sim] attenuator_error_dB), like
+  the real unit's above ~4 GHz; output_dBm() includes it, so the power
+  calibration can be tested end to end (simulated bench -> calibration ->
+  corrected split -> the level asked for).
 * The USB supply sags a little when the RF chain is on (the 12 GHz model draws
   ~0.8 A from USB), which makes the "USB volts" indicator come alive.
 * An external 10 MHz reference is only "detected" if the Sim config says a
@@ -153,10 +157,24 @@ class SimulatedSG12000L:
     def read_vernier(self) -> int:
         return self._vernier
 
+    def attenuator_dev_dB(self, frequency_Hz: float, power_dBm: float) -> float:
+        """How far the simulated attenuator step sits ABOVE its nominal level.
+
+        The real unit's steps are exact at 1-2 GHz but fall short at high
+        frequency (10 GHz: -13.5 dBm is 0.56 dB short of 3.5 dB below -10).
+        Modelled as growing with frequency and with the attenuation below
+        -10 dBm, scaled by [sim] attenuator_error_dB (0 = exact steps)."""
+        err = float(getattr(self._sim, "attenuator_error_dB", 0.0) or 0.0)
+        if not err or power_dBm >= -10.0:
+            return 0.0
+        return err * (float(frequency_Hz) / 10e9) * (-(power_dBm + 10.0) / 3.5)
+
     def output_dBm(self) -> float:
         """What would really come out of the SMA port: the attenuator setting
-        plus the vernier trim (the measured curve, see SIM_VERNIER_CURVE)."""
-        return self._power + self.vernier_dB(self._vernier)
+        (plus its simulated step error), plus the vernier trim (the measured
+        curve, see SIM_VERNIER_CURVE)."""
+        return (self._power + self.attenuator_dev_dB(self._freq, self._power)
+                + self.vernier_dB(self._vernier))
 
     # ---- reference ---------------------------------------------------------
 

@@ -15,3 +15,9 @@ Thumbs.db
 
 # this PC's settings (COM port, ...): lab data, never in git
 dssg.ini
+
+# the unit's measured POWER CALIBRATION (scripts/calibrate_power.py): it
+# belongs to ONE generator on ONE bench, so it is lab data, not code. The
+# installer and Mission Control's settings export keep *calibration*.json.
+# (Its raw scans, *.nc, are ignored by the root .gitignore.)
+*calibration*.json

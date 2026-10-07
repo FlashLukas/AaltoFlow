@@ -150,7 +150,12 @@ def build_manifest(synth) -> dict:
                  f"{hw.power_step_dB:g} dB steps; the vernier fills in between "
                  "(dB per count measured on the lab unit), so the level asked "
                  "for is delivered to about 0.05 dB (0.1 dB around 6 GHz). "
-                 "attenuator_dBm in the status is the step attenuator alone."
+                 + ("The unit's measured power calibration corrects the "
+                    "attenuator steps too (" + synth.power_calibration().describe()
+                    + "). " if synth.power_calibration() is not None else
+                    "Without a power calibration file the attenuator steps are "
+                    "taken as exact (they are not above ~4 GHz: up to ~0.5 dB). ")
+                 + "attenuator_dBm in the status is the step attenuator alone."
                  if fine else
                  "Calibrated output level. The step attenuator moves in "
                  f"{hw.power_step_dB:g} dB steps: a request between two steps is "
@@ -192,6 +197,12 @@ def build_manifest(synth) -> dict:
            set={"verb": "set_reference", "arg": "mode"},
            settle={"policy": "echoes", "key": "reference"},
            help="internal TCXO, the rear MCX input, or auto-detect."),
+        # recorded with a scan, so a data file says whether its power axis
+        # includes the measured attenuator correction
+        _p("power_calibrated", "Power calibrated", "indicator", "bool",
+           group="Signal", order=32, read_path=["power_calibrated"],
+           help="True when the unit's measured power calibration "
+                "(dssg_power_calibration.json) is loaded and in use."),
         _p("ext_ref_detected", "External reference present", "indicator",
            "bool", group="Reference", order=51, read_path=["ext_ref_detected"]),
 

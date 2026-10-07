@@ -11,9 +11,11 @@ The service owns the generator and exposes it over ZeroMQ:
   * status   on tcp://0.0.0.0:<pub-port>   (PUB, 5 Hz)
 
 If a `dssg.ini` sits in the project folder it is loaded automatically (or
-pass --config). At start the service READS the unit's state (RF on/off,
-frequency, power, phase, reference) and adopts it -- it changes nothing. The RF
-output is switched OFF when the service stops.
+pass --config); so is the unit's measured power calibration,
+`dssg_power_calibration.json` (scripts/calibrate_power.py writes it). At
+start the service READS the unit's state (RF on/off, frequency, power, phase,
+reference) and adopts it -- it changes nothing. The RF output is switched OFF
+when the service stops.
 Drive it with:
     uv run scripts/dssg_console.py --connect <host>
 """
@@ -74,6 +76,13 @@ def main() -> int:
     else:
         synth, _ = build_sim_system(cfg)
         print("SIMULATED backend (no hardware needed)")
+
+    # The POWER CALIBRATION file (hardware.power_calibration, default
+    # dssg_power_calibration.json) is looked up next to dssg.ini, in the module
+    # folder, when its path is relative. Only the service does this: tests and
+    # a GUI's private simulation leave calibration_dir unset and never pick up
+    # a unit's calibration by accident.
+    synth.calibration_dir = os.path.abspath(os.path.join(_HERE, ".."))
 
     service = DssgService(synth, host=args.host, cmd_port=args.cmd_port, pub_port=args.pub_port)
     try:

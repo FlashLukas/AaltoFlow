@@ -103,6 +103,12 @@ class Hardware:
     # then the module's business: it is not offered as a control of its own.
     # False = the old behaviour (power in 0.5 dB steps, vernier as raw counts).
     fine_power: bool = True
+    # POWER CALIBRATION of THIS unit (vernier_cal.py, 2026-10-07): the measured
+    # deviation of every attenuator step and the vernier slope, per frequency,
+    # written by scripts/calibrate_power.py. A relative path is relative to the
+    # module folder. Used with fine_power only; a missing file = the nominal
+    # steps (as before). Read at service start (or when this path changes).
+    power_calibration: str = "dssg_power_calibration.json"
     # How close FREQ:CW? must be to the request to count as "arrived". The
     # fractional-N synthesiser's grid is up to ~3 kHz coarse; whether the query
     # returns the request or the grid value is not documented (VERIFY). If it
@@ -140,6 +146,12 @@ class Sim:
     has_phase: bool = True
     has_vernier: bool = True                  # the simulated firmware answers VERNIER?
     external_ref_present: bool = False        # is a 10 MHz cable plugged into the MCX jack?
+    # An attenuator that is NOT exact, like the real one above ~4 GHz: the
+    # attenuation below -10 dBm falls short by this many dB per 3.5 dB of
+    # nominal attenuation at 10 GHz, growing in proportion to the frequency
+    # (0.56 measured on the lab unit at 10 GHz, -13.5 dBm). 0 = exact steps.
+    # Lets the calibration be tested end to end without hardware.
+    attenuator_error_dB: float = 0.0
     # The state the simulated box is IN when the service connects, as if
     # someone had left it like that from the front panel. The module adopts
     # it (never overwrites it), so this is what the GUI shows at start.

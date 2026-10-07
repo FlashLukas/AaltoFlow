@@ -180,6 +180,10 @@ class SettingsDialog(QtWidgets.QDialog):
                   _check("fill the attenuator's steps with the vernier (power to "
                          "~0.05 dB); off = 0.5 dB steps + a manual vernier",
                          hw.fine_power))
+        # Read-only: the calibration is a measured file, not a setting to type
+        # in. Shown from the STATUS, so a GUI connected to a remote service
+        # shows what THAT service loaded.
+        form.addRow("Power calibration", _hint(self._calibration_text()))
         self._add(form, "hardware", "freq_echo_tol_Hz", "Frequency echo tolerance",
                   _dspin(hw.freq_echo_tol_Hz, 0.0, 1e6, 1, 100.0, "Hz"))
         self._add(form, "hardware", "phase_echo_tol_deg", "Phase echo tolerance",
@@ -196,6 +200,16 @@ class SettingsDialog(QtWidgets.QDialog):
                           "restarts. The simulator ignores them."))
         return page
 
+    def _calibration_text(self) -> str:
+        st = self.ctrl.status()
+        what = str(getattr(st, "power_calibration", "") or "")
+        if not what:
+            return ("none -- the attenuator steps are taken as nominal. Measure one "
+                    "with scripts/calibrate_power.py, then restart the service.")
+        if getattr(st, "power_calibrated", False):
+            return f"in use: {what}"
+        return f"loaded, not in use (fine power is off): {what}"
+
     def _sim_tab(self):
         page, form = self._form_widget()
         sm = self.cfg.sim
@@ -211,6 +225,8 @@ class SettingsDialog(QtWidgets.QDialog):
                   _check("the simulated firmware has PHASE", sm.has_phase))
         self._add(form, "sim", "has_vernier", "Vernier control",
                   _check("the simulated firmware has VERNIER", sm.has_vernier))
+        self._add(form, "sim", "attenuator_error_dB", "Attenuator error",
+                  _dspin(sm.attenuator_error_dB, -5.0, 5.0, 2, 0.05, "dB"))
         self._add(form, "sim", "external_ref_present", "External reference",
                   _check("a 10 MHz cable is plugged in", sm.external_ref_present))
         # The state the simulated box is in when the service connects -- the

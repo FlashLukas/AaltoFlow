@@ -35,6 +35,7 @@ own poll thread (read-back). Rules:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -63,6 +64,11 @@ class Status:
     # gaps and power_dBm is attenuator + vernier, the level delivered
     fine_power: bool = False
     attenuator_dBm: float = 0.0     # the step attenuator alone (POWER?)
+    # POWER CALIBRATION (vernier_cal.Calibration): True when a measured
+    # calibration of this unit is loaded AND in use (fine power on), i.e. the
+    # published power_dBm includes the measured step errors
+    power_calibrated: bool = False
+    power_calibration: str = ""     # "file, measured date, f range"; "" = none loaded
     idn: str = ""
     hw_error: str = ""
     # the effective (cfg AND instrument) envelope, published so a client can
@@ -97,6 +103,19 @@ class Synthesizer:
         # The VERNIER is not part of the preset: it is always adopted from the
         # unit, and only a set_vernier changes it.
         self._vernier = 0
+        # the step attenuator's own setting (fine power splits _power into
+        # _att + vernier); adopted at start, kept by every power/frequency set
+        self._att = float(s.power_dBm)
+        # The measured POWER CALIBRATION (vernier_cal.Calibration) or None.
+        # Loaded at start from cfg.hardware.power_calibration; a RELATIVE path
+        # is looked up in `calibration_dir`, which run_service.py sets to the
+        # module folder. None (the default, and what the tests and a local GUI
+        # simulation get) = relative paths are not loaded at all, so a unit's
+        # calibration file lying in the module folder can never change what a
+        # test sees.
+        self._cal: vernier_cal.Calibration | None = None
+        self.calibration_dir: str | None = None
+        self._cal_out_of_range = False      # "outside the table" said once
         self._reference = s.reference if s.reference in REFERENCES else "auto"
         self._rf_on = False                 # adopted at start; never switched ON by us
         # The config values the brain has already acted on. apply_config()
@@ -157,15 +176,75 @@ class Synthesizer:
         return self._has_vernier or not self._connected
 
     def _delivered(self, attenuator: float, counts: int, freq: float) -> float:
-        """The level we believe comes out: attenuator + the vernier's share
-        (rounded to 0.01 dB: the model is not better than that)."""
-        return round(attenuator + vernier_cal.dB_for(counts, freq), 2)
+        """The level we believe comes out: attenuator (+ its measured step
+        error, with a calibration) + the vernier's share (rounded to 0.01 dB:
+        the model is not better than that)."""
+        return round(vernier_cal.delivered(attenuator, counts, freq, self._cal), 2)
+
+    # ---- the power calibration ----------------------------------------------
+
+    def power_calibration(self):
+        """The loaded vernier_cal.Calibration, or None."""
+        return self._cal
+
+    def _calibration_path(self) -> str | None:
+        """Where cfg.hardware.power_calibration points, or None when it is
+        empty, or relative with no calibration_dir to resolve it against."""
+        p = str(getattr(self.cfg.hardware, "power_calibration", "") or "").strip()
+        if not p:
+            return None
+        if os.path.isabs(p):
+            return p
+        if self.calibration_dir is None:
+            return None
+        return os.path.join(self.calibration_dir, p)
+
+    def load_power_calibration(self) -> None:
+        """(Re)load the calibration file. Never raises: a missing file means
+        "nominal steps", a broken one is a WARNING and no calibration -- a bad
+        file must not keep the generator from starting."""
+        self._cal = None
+        self._cal_out_of_range = False
+        path = self._calibration_path()
+        if path is None:
+            return
+        if not os.path.isfile(path):
+            self._emit("info", f"no power calibration ({os.path.basename(path)} not "
+                               f"found): fine power uses the nominal attenuator steps")
+            return
+        try:
+            self._cal = vernier_cal.Calibration.load(path)
+        except Exception as exc:
+            self._emit("warn", f"power calibration {os.path.basename(path)} NOT used: "
+                               f"{type(exc).__name__}: {exc}")
+            return
+        self._emit("info", f"power calibration loaded: {self._cal.describe()}"
+                   + ("" if self.cfg.hardware.fine_power else
+                      " (not used while fine power is off)"))
+
+    def _note_cal_range(self, freq: float) -> None:
+        """Say ONCE when the frequency leaves the calibrated range (the
+        nearest end values are used there); said again only after it came
+        back and left again."""
+        cal = self._cal
+        if cal is None or not self.fine_power():
+            return
+        if cal.in_range(freq):
+            self._cal_out_of_range = False
+        elif not self._cal_out_of_range:
+            self._cal_out_of_range = True
+            self._emit("warn", f"{freq / 1e6:.3f} MHz is outside the power calibration "
+                               f"({cal.freqs_Hz[0] / 1e9:g}-{cal.freqs_Hz[-1] / 1e9:g} GHz): "
+                               f"its nearest end values are used")
 
     # ---- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
         """Open the backend, learn what the unit can do, ADOPT what it is
         doing (read only -- nothing is changed), start the read-back thread."""
+        # the calibration first: adopting a fine-power setting computes the
+        # level it delivers, which depends on it
+        self.load_power_calibration()
         try:
             self._connect_and_adopt()
         except Exception:
@@ -210,7 +289,7 @@ class Synthesizer:
             self._has_phase = bool(b.has_phase())
             self._rf_on = bool(b.read_output())
             self._freq = float(b.read_frequency())
-            self._power = float(b.read_power())
+            self._power = self._att = float(b.read_power())
             if self._has_phase:
                 self._phase = float(b.read_phase())
             # getattr: a backend written before the vernier existed simply
@@ -218,11 +297,13 @@ class Synthesizer:
             self._has_vernier = bool(getattr(b, "has_vernier", lambda: False)())
             if self._has_vernier:
                 self._vernier = int(b.read_vernier())
-            if self.fine_power() and self._vernier:
+            if self.fine_power() and (self._vernier or self._cal is not None):
                 if abs(self._vernier) <= vernier_cal.MAX_FILL_COUNTS:
                     # a fine-power setting left by us (or alike): adopt the
-                    # level it makes, not just the attenuator's
-                    self._power = self._delivered(self._power, self._vernier, self._freq)
+                    # level it makes, not just the attenuator's (with a
+                    # calibration that includes the step's measured error,
+                    # also at vernier 0)
+                    self._power = self._delivered(self._att, self._vernier, self._freq)
                 else:
                     # a big manual trim: its dB is outside the fine-power model
                     self._emit("warn", f"vernier is at {self._vernier:+d} counts (a manual "
@@ -311,11 +392,16 @@ class Synthesizer:
         self._freq = value
         self._push(self.backend.set_frequency, value)
         if self.fine_power():
-            # the vernier's dB per count changes with frequency: re-split the
-            # SAME asked power, so the level stays what was asked
+            # the vernier's dB per count -- and, with a calibration, the real
+            # level of each attenuator step -- change with frequency: re-split
+            # the SAME asked power, so the level stays what was asked
+            self._note_cal_range(value)
             att, n = vernier_cal.split(self._power, self._step(), value,
-                                       *self._power_lims())
-            if n != self._vernier:
+                                       *self._power_lims(), cal=self._cal)
+            if att != self._att:
+                self._att = att
+                self._push(self.backend.set_power, att)
+            if n != self._vernier and self._has_vernier:
                 self._vernier = n
                 self._push(self.backend.set_vernier, n)
         if clamped:
@@ -339,17 +425,30 @@ class Synthesizer:
             # the attenuator to the nearest step, the vernier for the rest
             # (vernier_cal.py): the level asked for, to ~0.05 dB
             value = round(value, 2)
-            att, n = vernier_cal.split(value, self._step(), self._freq, *self._power_lims())
-            self._power, self._vernier = value, n
+            self._note_cal_range(self._freq)
+            att, n = vernier_cal.split(value, self._step(), self._freq, *self._power_lims(),
+                                       cal=self._cal)
+            self._power, self._vernier, self._att = value, n, att
             self._push(self.backend.set_power, att)
             if self._has_vernier:
                 self._push(self.backend.set_vernier, n)
+            got = self._delivered(att, n, self._freq)
             if clamped:
                 self._emit("warn", f"power clamped to {value:g} dBm "
                                    f"(limit {lim['power_min_dBm']:g}..{lim['power_max_dBm']:g})")
+            elif abs(got - value) > 0.05 + 1e-9:
+                # Only with a calibration, at the ends of the range: the
+                # nearest real step is further away than the vernier's
+                # +-MAX_FILL_COUNTS can bridge (e.g. the lowest step at 10 GHz
+                # delivers more than its nominal level). Said, not hidden: a
+                # scan waiting for this level would otherwise just time out.
+                self._emit("warn", f"power {value:g} dBm cannot be delivered at "
+                                   f"{self._freq / 1e6:.3f} MHz: {got:g} dBm is the "
+                                   f"nearest (attenuator {att:g} dBm, vernier {n:+d})")
             else:
                 self._emit("info", f"power = {value:g} dBm (attenuator {att:g} dBm, "
-                                   f"vernier {n:+d})")
+                                   f"vernier {n:+d}"
+                                   + (", calibrated" if self._cal is not None else "") + ")")
             return
         # ROUND to the attenuator step. The SG12000L (firmware V7.84) IGNORES
         # an off-step request -- "POWER -13.75" left it at -20 dBm, and a scan
@@ -364,7 +463,7 @@ class Synthesizer:
                 value += step                           # safety limits
             elif value > lim["power_max_dBm"] + 1e-9:
                 value -= step
-        self._power = value
+        self._power = self._att = value
         self._push(self.backend.set_power, value)
         if clamped:
             self._emit("warn", f"power clamped to {value:g} dBm "
@@ -438,7 +537,9 @@ class Synthesizer:
                       reference=self._reference,
                       connected=False, has_phase=self._has_phase,
                       has_vernier=self._has_vernier, fine_power=self.fine_power(),
-                      attenuator_dBm=self._power,
+                      attenuator_dBm=self._att,
+                      power_calibrated=self._cal is not None and self.fine_power(),
+                      power_calibration=self._cal.describe() if self._cal else "",
                       freq_min_Hz=lim["freq_min_Hz"], freq_max_Hz=lim["freq_max_Hz"],
                       power_min_dBm=lim["power_min_dBm"],
                       power_max_dBm=lim["power_max_dBm"])
@@ -468,6 +569,8 @@ class Synthesizer:
                     phase_deg=float(b.read_phase()) if self._has_phase else 0.0,
                     vernier=vern,
                     fine_power=fine, attenuator_dBm=att,
+                    power_calibrated=fine and self._cal is not None,
+                    power_calibration=self._cal.describe() if self._cal else "",
                     reference=b.read_reference(),
                     ext_ref_detected=bool(b.external_ref_detected()),
                     usb_volts=float(b.usb_volts()),
@@ -550,6 +653,7 @@ class Synthesizer:
         hw = self.cfg.hardware
         return {"signal": asdict(self.cfg.signal),
                 "limits": asdict(self.cfg.limits),
+                "power_calibration": str(getattr(hw, "power_calibration", "")),
                 "mute_buzzer": bool(hw.mute_buzzer),
                 "display_off": bool(hw.display_off)}
 
@@ -596,6 +700,12 @@ class Synthesizer:
                 self.set_vernier(v)
         if sig["reference"] != old["reference"] and sig["reference"] in REFERENCES:
             self.set_reference(sig["reference"])
+        if now["power_calibration"] != prev["power_calibration"]:
+            # a new calibration file: load it and deliver the SAME asked power
+            # with it (a re-split), so the change takes effect at once
+            self.load_power_calibration()
+            if self.fine_power() and sig["power_dBm"] == old["power_dBm"]:
+                self.set_power(self._power)
         if now["mute_buzzer"] != prev["mute_buzzer"]:
             self._push(self.backend.set_buzzer, not now["mute_buzzer"])
             self._emit("info", f"buzzer {'muted' if now['mute_buzzer'] else 'on'}")
