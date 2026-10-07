@@ -328,7 +328,7 @@ def test_vernier_set_and_read_back(synth):
     assert synth.sim.read_vernier() == -4
     # the simulator's output level moves with it; POWER? does not (separate knob)
     assert synth.sim.output_dBm() == pytest.approx(
-        s.power_dBm + synth.sim.SIM_DB_PER_COUNT * -4)
+        s.power_dBm + synth.sim.vernier_dB(-4))
     assert ("info", "vernier = -4") in synth.events
 
 
@@ -363,3 +363,21 @@ def test_narrower_vernier_limits_reclamp_the_unit(synth):
     synth.apply_config()
     assert synth._vernier == 5
     wait_for(synth, lambda s: s.vernier == 5)
+
+
+def test_sim_vernier_follows_the_measured_unit():
+    """The simulator copies what the lab's SG12000L did (2026-10-07): range
+    -800..+100 with SILENT clamping, + = more power, the measured curve."""
+    from dssg.backends.sim import SimulatedSG12000L
+    from dssg.config import Config
+    b = SimulatedSG12000L(Config().sim)
+    b.open()
+    b.set_vernier(1000)
+    assert b.read_vernier() == 100                  # no error, just clamped
+    b.set_vernier(-1000)
+    assert b.read_vernier() == -800
+    assert b.vernier_dB(100) == pytest.approx(4.03)
+    assert b.vernier_dB(-200) == pytest.approx(-12.03)
+    assert b.vernier_dB(10) == pytest.approx(0.44, abs=0.01)   # ~0.044 dB/count
+    lim = Config().limits
+    assert (lim.vernier_min, lim.vernier_max) == (-800, 100)

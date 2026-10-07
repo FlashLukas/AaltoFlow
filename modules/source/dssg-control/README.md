@@ -119,7 +119,7 @@ been checked against the unit.
 | frequency     | `FREQ:CW 2450.000000MHZ`     | `FREQ:CW?` (format VERIFY)    |
 | power         | `POWER -12.50`               | `POWER?`                      |
 | phase         | `PHASE 90.00` (VERIFY)       | `PHASE?` (VERIFY)             |
-| vernier       | `VERNIER -3`                 | `VERNIER?` (format VERIFY)    |
+| vernier       | `VERNIER -3` (-800..+100)    | `VERNIER?`                    |
 | reference     | `*INTERNALREF 1/0/A` + `*REFUPDATE` | `*REFMODE?`, `*EXTREF?` |
 | range         |                              | `FREQ:MIN?/MAX?`, `POWER:MIN?/MAX?` |
 | health        |                              | `*SYSVOLTS?`, `SYST:ERR?`     |
@@ -135,11 +135,34 @@ without it simply has no phase control in `describe`, and `set_phase` is refused
 **Power vernier.** The attenuator moves in 0.5 dB steps; the unit's `VERNIER`
 command trims the level in between. The vendor documents neither its range nor
 its dB per count, so the module offers it as RAW integer counts ("Power
-vernier", `set_vernier{vernier}`), clamped to `[limits] vernier_min/max`
-(default -30..+30, a safe guess). It is probed at connect (`VERNIER?`) and
-adopted like everything else; a unit that does not answer has no vernier in
-`describe` and `set_vernier` is refused. Measure counts -> dB (e.g. with a
-spectrum analyser) before relying on it for a calibrated level.
+vernier", `set_vernier{vernier}`), clamped to `[limits] vernier_min/max`. It is
+probed at connect (`VERNIER?`) and adopted like everything else; a unit that
+does not answer has no vernier in `describe` and `set_vernier` is refused.
+
+Measured on an SG12000L (firmware V7.84) against a spectrum analyser:
+
+- the unit accepts **-800 .. +100** and clamps anything outside SILENTLY (no
+  error in `SYST:ERR?`), so these are the default limits;
+- **+ = more power**; `POWER` and `FREQ` changes keep the vernier, and
+  `POWER?` reports the attenuator setting WITHOUT it (so a power scan's echo is
+  not disturbed);
+- near 0 the slope is about **0.045 dB/count at 1-4 GHz** (-10 and 0 dBm),
+  ~0.06 at 10 GHz or at -20 dBm, and irregular around 6 GHz;
+- the curve is not linear far out: +100 = about +4 dB, -200 = -9 to -17 dB,
+  -800 = -11 to -25 dB, depending on frequency.
+
+| counts | 1 GHz | 2 GHz | 4 GHz | 6 GHz | 10 GHz | (dB vs 0, at -10 dBm) |
+|-------:|------:|------:|------:|------:|-------:|---|
+| -800   | -15.5 | -17.7 | -10.9 | -19.7 | -24.6 | |
+| -200   | -12.1 | -12.0 |  -9.4 |  -9.6 | -17.0 | |
+| -100   |  -5.8 |  -5.2 |  -5.2 |  -4.7 |  -9.5 | |
+| -30    |  -1.5 |  -1.4 |  -1.4 |  -1.8 |  -2.3 | |
+| +30    |  +1.4 |  +1.3 |  +1.3 |  +2.3 |  +1.4 | |
+| +100   |  +4.1 |  +4.0 |  +4.0 |  +3.1 |  +3.9 | |
+
+So it stays RAW counts: one dB-per-count number would be off by up to 0.5 dB
+even within +-30 counts. To set a level precisely, measure it (a short scan of
+the vernier against an analyser) at the frequency and power you use.
 
 USB: 115200 baud, 8N1, linefeed terminator. Ethernet: TCP port 10001 (fixed for
 all DSI models); the unit uses DHCP unless given a static address.

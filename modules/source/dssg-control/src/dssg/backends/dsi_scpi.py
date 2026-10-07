@@ -29,7 +29,11 @@ What they say, and how sure we are
                      "VERNIER 3", "VERNIER -22"                        [CL]
   VERNIER?           "Return vernier setting"                          [CL]
                      range, sign and dB per count NOT documented -> probed at
-                     connect, published as raw integer counts
+                     connect, published as raw integer counts. MEASURED
+                     2026-10-07 (fw V7.84): range -800..+100, clamps SILENTLY
+                     (no SYST:ERR), + = more power, ~0.045 dB/count near 0
+                     at 1-4 GHz (frequency- and power-dependent), kept over
+                     POWER and FREQ changes, POWER? excludes it
   *INTERNALREF 1|0|A internal / external / auto-detect at power-on    [CL]
   *REFMODE?          "Return the current reference setting" -- format unknown
   *EXTREF?           "Is an external reference signal detected?"      [CL]
@@ -376,8 +380,9 @@ class DsiSG12000L:
     def set_vernier(self, n: int) -> None:
         if not self._has_vernier:
             raise RuntimeError("this SG12000L firmware has no vernier control")
-        self._link.write(f"VERNIER {int(n)}")                  # [CL]; VERIFY: range
-                                                               # (examples 3, -22)
+        # measured: -800..+100; the unit clamps outside that WITHOUT an
+        # error, so the brain's limits (config) must keep it inside
+        self._link.write(f"VERNIER {int(n)}")                  # [CL]
 
     def read_vernier(self) -> int:
         if not self._has_vernier:

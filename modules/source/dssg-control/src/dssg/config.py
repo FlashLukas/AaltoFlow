@@ -64,11 +64,15 @@ class Limits:
     phase_min_deg: float = 0.0
     phase_max_deg: float = 360.0
     # VERNIER fine power trim, in raw integer counts (no unit). The vendor
-    # documents neither the range nor the dB per count (its examples are 3
-    # and -22), so +-30 is a SAFE GUESS, not a datasheet value: widen it once
-    # the counts -> dB curve has been measured on the unit (VERIFY).
-    vernier_min: int = -30
-    vernier_max: int = 30
+    # documents neither the range nor the dB per count. MEASURED on the lab's
+    # SG12000L (fw V7.84, 2026-10-07, against a spectrum analyser): the unit
+    # accepts -800 .. +100 and silently clamps anything outside (no error),
+    # so these are the real limits. Near 0 it is ~0.045 dB/count at 1-4 GHz
+    # (+100 = about +4 dB); the negative side gets steeper and then flattens
+    # (-200 = about -12 dB, -800 = -11 to -25 dB depending on frequency).
+    # Not calibrated: see the module README, "Vernier".
+    vernier_min: int = -800
+    vernier_max: int = 100
 
 
 @dataclass

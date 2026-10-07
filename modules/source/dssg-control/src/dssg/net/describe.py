@@ -153,9 +153,10 @@ def build_manifest(synth) -> dict:
                set={"verb": "set_vernier", "arg": "vernier"},
                # an integer echoes exactly; 0.5 only absorbs a float round trip
                settle={"policy": "echoes", "key": "vernier", "tol": 0.5},
-               help="Fine output-power trim in raw counts (no unit). The dB "
-                    "per count is not calibrated yet; measure it before "
-                    "relying on it."))
+               help="Fine output-power trim in raw counts, + = more power. "
+                    "Measured on the lab unit: ~0.045 dB/count near 0 at 1-4 "
+                    "GHz (+100 = about +4 dB, -200 = about -12 dB), but it "
+                    "varies with frequency and power -- not calibrated."))
     if synth.has_phase() or not synth.status().connected:
         # Offered before connect (we do not know yet) and on units that have
         # it; a connected unit without phase control drops it, and the

@@ -13,10 +13,11 @@ datasheet (V3.6, Dec 2022) where it matters to a caller:
   that from the front panel); `open()` only connects, it changes nothing, so
   the brain's adopt-on-start logic is exercised against a non-default state.
 * The VERNIER (fine power trim, integer counts) shifts the simulated OUTPUT
-  level by 0.05 dB per count. That number is an ASSUMPTION for the simulator
-  only -- the vendor documents no dB per count. POWER? keeps reporting the
-  attenuator setting (the vernier is a separate knob), so a power scan's echo
-  is not disturbed by a vernier offset.
+  level along the curve MEASURED on the lab's unit at 2 GHz, -10 dBm
+  (2026-10-07, SIM_VERNIER_CURVE), and clamps silently to -800 .. +100 like
+  the real firmware. POWER? keeps reporting the attenuator setting (measured:
+  the real POWER? excludes the vernier too), so a power scan's echo is not
+  disturbed by a vernier offset.
 * The USB supply sags a little when the RF chain is on (the 12 GHz model draws
   ~0.8 A from USB), which makes the "USB volts" indicator come alive.
 * An external 10 MHz reference is only "detected" if the Sim config says a
@@ -124,23 +125,38 @@ class SimulatedSG12000L:
 
     # ---- vernier -------------------------------------------------------------
 
-    #: dB of output level per vernier count. A plausible guess for the
-    #: SIMULATOR ONLY; the real unit's value is not documented and has to be
-    #: measured (e.g. with a spectrum analyser) before anyone relies on it.
-    SIM_DB_PER_COUNT = 0.05
+    #: (counts, dB) measured on the lab's SG12000L at 2 GHz, -10 dBm against a
+    #: spectrum analyser (2026-10-07). The real dB per count also depends on
+    #: frequency and power (~0.044 at 1-4 GHz, ~0.06 at 10 GHz or -20 dBm,
+    #: irregular at 6 GHz) -- the simulator uses this one curve.
+    SIM_VERNIER_CURVE = ((-800, -17.72), (-200, -12.03), (-100, -5.19), (-50, -2.40),
+                         (-30, -1.38), (-15, -0.65), (0, 0.0), (15, 0.66), (30, 1.27),
+                         (50, 2.06), (100, 4.03))
+    #: the range the real firmware keeps; outside it clamps SILENTLY (measured)
+    VERNIER_RANGE = (-800, 100)
+
+    def vernier_dB(self, n: int) -> float:
+        """The simulated level change for `n` counts (linear between points)."""
+        pts = self.SIM_VERNIER_CURVE
+        n = min(max(int(n), pts[0][0]), pts[-1][0])
+        for (n0, d0), (n1, d1) in zip(pts, pts[1:]):
+            if n <= n1:
+                return d0 + (d1 - d0) * (n - n0) / (n1 - n0)
+        return pts[-1][1]
 
     def set_vernier(self, n: int) -> None:
         if not self.has_vernier():
             raise RuntimeError("this unit has no vernier control")
-        self._vernier = int(n)
+        lo, hi = self.VERNIER_RANGE
+        self._vernier = min(max(int(n), lo), hi)    # like the unit: no error
 
     def read_vernier(self) -> int:
         return self._vernier
 
     def output_dBm(self) -> float:
         """What would really come out of the SMA port: the attenuator setting
-        plus the vernier trim (simulator model only, see SIM_DB_PER_COUNT)."""
-        return self._power + self.SIM_DB_PER_COUNT * self._vernier
+        plus the vernier trim (the measured curve, see SIM_VERNIER_CURVE)."""
+        return self._power + self.vernier_dB(self._vernier)
 
     # ---- reference ---------------------------------------------------------
 

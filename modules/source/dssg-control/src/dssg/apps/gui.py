@@ -387,8 +387,10 @@ class MainWindow(QtWidgets.QMainWindow):
         vlab.setObjectName("hint")
         self.vernier_spin = QtWidgets.QSpinBox()
         self.vernier_spin.setSuffix("  counts")
-        self.vernier_spin.setToolTip("Fine output-power trim in raw counts (no unit). "
-                                     "The dB per count is not calibrated yet.")
+        self.vernier_spin.setToolTip("Fine output-power trim in raw counts, + = more power.\n"
+                                     "Measured: ~0.045 dB/count near 0 at 1-4 GHz\n"
+                                     "(+100 = about +4 dB, -200 = about -12 dB);\n"
+                                     "it varies with frequency and power -- not calibrated.")
         self.vernier_spin.editingFinished.connect(self._set_vernier)
         vrow.addWidget(vlab); vrow.addWidget(self.vernier_spin, 1)
         play.addLayout(vrow)
