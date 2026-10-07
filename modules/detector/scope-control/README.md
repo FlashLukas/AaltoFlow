@@ -61,7 +61,15 @@ the scope at start, as always.
 
 `acquire` restarts the average and completes when N FRESH triggered traces
 are in -- the first trace after the trigger is skipped, because it may have
-been recorded before the thing the scan just changed. 500 averages at 30 Hz
+been recorded before the thing the scan just changed, and so is every record
+that may have BEGUN before the trigger (its pre-trigger part included).
+
+At a slow time/div consecutive records overlap: the scope re-arms once the
+part AFTER the trigger is recorded, and the next record's pre-trigger part
+comes from the buffer that kept running (lab bench, 0.5 s/div, delay 0: a
+16.4 s record every ~8 s). An average of N records there shares samples
+between neighbours -- it is not N independent records. Use a delay that puts
+the trigger near the start of the record if that matters. 500 averages at 30 Hz
 are ~17 s per point; the scan's wait and its timeout know that (the timeout
 grows with the averages AND the record length). One acquisition feeds every
 detector: the two traces (arrays with their own `time` dimension), the

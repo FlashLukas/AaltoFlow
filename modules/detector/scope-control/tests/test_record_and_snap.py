@@ -95,3 +95,40 @@ def test_boxcar_still_used_when_bins_are_short(manual):
     noisy = y + np.random.default_rng(1).normal(0, 0.1, t.size)
     tr, red = A.reduce_points(t, {"y": noisy}, 1000, max_bin_s=1 / (20 * 50))
     assert np.std(red["y"] - np.sin(2 * np.pi * 50 * tr)) < 0.04   # averaged: ~0.1/sqrt(20)
+
+
+def test_overlapping_slow_records_are_not_suspect(manual):
+    """Lab PC 2026-10-07, 0.5 s/div, delay 0: a 16.4 s record every 7.93 s.
+    The scope re-arms after the POST-trigger half (8.2 s); the records
+    overlap and each is still one coherent capture -- no warn."""
+    scope, events = manual
+    scope.set_tdiv(0.5)
+    scope.step()
+    t = np.linspace(-8.19, 8.19, 10240)
+    y = np.sin(2 * np.pi * 50 * t)
+    for k in range(3):
+        scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=100.0 + 7.93 * k)
+    assert not any("fresh record" in m for _, m in events), events
+
+
+def test_acquire_waits_for_a_record_begun_after_it(manual):
+    """A 16 s record found 1 s after acquire() began 15 s before it: not
+    counted, nor is the one ~8 s later (its pre-trigger half predates
+    acquire()); the first counted one began after acquire()."""
+    scope, events = manual
+    scope.set_tdiv(0.5)
+    scope.set_averages(1)
+    scope.step()
+    clock = [1000.0]
+    scope._clock = lambda: clock[0]
+    n = scope.acquire()
+    t0 = clock[0]
+    t = np.linspace(-8.19, 8.19, 10240)
+    y = np.sin(2 * np.pi * 50 * t)
+    for dt in (1.0, 8.9):                      # records ~8 s apart
+        scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=t0 + dt)
+        assert scope.status()["acquiring"], dt
+    # found at +16.9: ended after the previous poll, so began >= +0.0
+    scope._take(t, {"ch1": y, "ch2": y}, scope._rev, now=t0 + 16.9)
+    st = scope.status()
+    assert not st["acquiring"] and st["sample"]["acq_id"] == n

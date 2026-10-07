@@ -819,20 +819,23 @@ class Scope:
                 # the span received AT THIS time/div (a record of another
                 # time/div never teaches this one -- divisions differ)
                 self._span_at[_tdiv_key(tdiv)] = span
-                # a record cannot be longer than the time since the previous
-                # one: if it is, the memory read is NOT one fresh record (lab
-                # PC 2026-10-07, 0.5 s/div NORMAL: a 32 s block, records every
-                # ~8 s, nonsense values). Said once per time/div, with numbers.
-                # (only against the previous record at the SAME settings: the
-                # first slow record after a time/div change came 1.69 s after
-                # the last FAST one -- a false alarm on the lab PC)
+                # Only the POST-trigger part of a record has to be recorded
+                # after the previous one: the pre-trigger part comes from the
+                # buffer, which keeps running while the scope re-arms. Lab PC
+                # 2026-10-07, 0.5 s/div, delay 0: a 16.4 s record (8.2 s after
+                # the trigger) every 7.93 s -- consecutive records OVERLAP by
+                # about half, and each is still one coherent capture. So a
+                # record is suspect only if its post-trigger part (t[-1]) is
+                # longer than the time since the previous record at the SAME
+                # settings (the first after a change is never compared).
                 key = _tdiv_key(tdiv)
+                post = max(0.0, float(t[-1]))
                 prev = self._prev_take
                 if prev is not None and prev[0] == rev0 and prev[1] == key:
                     gap = now - prev[2]
-                    if span > 1.5 * gap + 0.5 and key not in self._suspect_warned:
+                    if 0 < gap and post > 1.5 * gap + 0.5 and key not in self._suspect_warned:
                         self._suspect_warned.add(key)
-                        suspect = (span, gap, info)
+                        suspect = (post, gap, info)
                 self._prev_take = (rev0, key, now)
             self._records += 1
             self._trigger_times.append(now)
@@ -843,9 +846,19 @@ class Scope:
             while len(self._running) > max(1, int(c.acquisition.averages)):
                 self._running.popleft()
             a = self._acq
+            # FRESH = the whole record, pre-trigger part included, was recorded
+            # after acquire(). The record ended before `now` (the poll that
+            # found it) and after the previous poll, so it began no earlier
+            # than now - span - (one poll + margin). At a fast time/div that
+            # is "the next record"; at 0.5 s/div (16 s records that overlap by
+            # half, see above) it waits for one whose pre-trigger part, too,
+            # is new. Plus the old rule: the first record after the trigger is
+            # skipped anyway.
+            late = float(self.cfg.hardware.poll_s) + 0.5
+            fresh = a is not None and now - span - late >= a["t0"]
             if a is not None and now >= a["t0"]:
-                if a["skip"] > 0:
-                    a["skip"] -= 1              # may have begun before the trigger
+                if a["skip"] > 0 or not fresh:
+                    a["skip"] = max(0, a["skip"] - 1)   # may have begun before the trigger
                 else:
                     if a["sum"] is None or a["t"].size != tr.size:
                         a["sum"] = {ch: y.copy() for ch, y in red.items()}
@@ -896,10 +909,10 @@ class Scope:
             self._live_numbers = live
         if suspect is not None:
             span, gap, info = suspect
-            self._emit("warn", f"at {info['tdiv_s']:g} s/div the record read spans "
-                               f"{span:.3g} s but records arrive every {gap:.3g} s: it "
-                               f"cannot be ONE fresh record -- treat these traces as "
-                               f"suspect (details: {_brief(info)})")
+            self._emit("warn", f"at {info['tdiv_s']:g} s/div the record read has "
+                               f"{span:.3g} s after its trigger but records arrive every "
+                               f"{gap:.3g} s: it cannot be ONE fresh record -- treat these "
+                               f"traces as suspect (details: {_brief(info)})")
         if latched is not None and latched["clipped"]:
             self._emit("warn", f"acquisition #{latched['acq_id']}: "
                                f"{', '.join(c.upper() for c in latched['clipped'])} CLIPPED "
