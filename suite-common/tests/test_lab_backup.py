@@ -64,3 +64,49 @@ def test_whatif_copies_nothing(tmp_path):
     assert "would restore: modules\\detector\\zz-control\\CLAUDE.local.md" in out
     assert "nothing was copied" in out
     assert not (flow / "modules" / "detector" / "zz-control" / "CLAUDE.local.md").exists()
+
+
+# ---- suite_local.json is per PC (2026-10-08) ---------------------------------
+# Both PCs used to back it up to the same AaltoFlow/suite_local.json, so each
+# backup overwrote the other PC's ports and remote cards.
+
+def _pc():
+    import os
+    return os.environ.get("COMPUTERNAME", "")
+
+
+def test_restore_takes_this_pcs_suite_local_and_not_another_pcs(tmp_path):
+    flow, lab = _setup(tmp_path)
+    (lab / "AaltoFlow" / f"suite_local.{_pc()}.json").write_text('{"me": 1}', encoding="utf-8")
+    (lab / "AaltoFlow" / "suite_local.OTHERPC.json").write_text('{"other": 1}', encoding="utf-8")
+    (lab / "AaltoFlow" / "suite_local.json").write_text('{"old": 1}', encoding="utf-8")
+    out = _run(flow, "-Mode", "restore", "-Force")
+    assert (flow / "suite_local.json").read_text(encoding="utf-8") == '{"me": 1}'
+    assert f"suite_local.{_pc()}.json" in out
+    # the other PC's file is never copied into the checkout as a file of its own
+    assert not list(flow.glob("suite_local.*.json"))
+
+
+def test_restore_falls_back_to_the_old_shared_file_and_from_pc_picks_one(tmp_path):
+    flow, lab = _setup(tmp_path)
+    (lab / "AaltoFlow" / "suite_local.json").write_text('{"old": 1}', encoding="utf-8")
+    (lab / "AaltoFlow" / "suite_local.OLDPC.json").write_text('{"oldpc": 1}', encoding="utf-8")
+    _run(flow, "-Mode", "restore", "-Force")
+    assert (flow / "suite_local.json").read_text(encoding="utf-8") == '{"old": 1}'
+    _run(flow, "-Mode", "restore", "-Force", "-FromPC", "OLDPC")
+    assert (flow / "suite_local.json").read_text(encoding="utf-8") == '{"oldpc": 1}'
+
+
+def test_backup_writes_suite_local_under_this_pcs_name(tmp_path):
+    flow, lab = _setup(tmp_path)
+    shutil.rmtree(lab)                      # a lab repo with a remote to push to
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "clone", "-q", str(remote), str(lab)], check=True)
+    for k, v in (("user.name", "t"), ("user.email", "t@example.invalid")):
+        subprocess.run(["git", "-C", str(lab), "config", k, v], check=True)
+    (flow / "suite_local.json").write_text('{"office": 1}', encoding="utf-8")
+    _run(flow, "-Mode", "backup")
+    assert (lab / "AaltoFlow" / f"suite_local.{_pc()}.json").read_text(
+        encoding="utf-8") == '{"office": 1}'
+    assert not (lab / "AaltoFlow" / "suite_local.json").exists()

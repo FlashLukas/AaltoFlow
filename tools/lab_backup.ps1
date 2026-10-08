@@ -6,7 +6,8 @@ WHY
 AaltoFlow and AaltoView are public; some files next to them are not meant to be:
   * CLAUDE.local.md (any folder)      personal working notes, loaded by Claude Code
   * suite_local.json                  this PC's ports, real/sim flags, remote
-                                      services, data folder, setup name
+                                      services, data folder, setup name --
+                                      PER PC: stored as suite_local.<PC name>.json
   * mission-control\profiles.json     the launcher profiles of this lab
   * scan-core\suite_layouts.json      saved control-panel layouts
   * Claude Code's project memory      (optional) %USERPROFILE%\.claude\projects\<this checkout>\memory
@@ -28,8 +29,17 @@ USAGE (from the AaltoFlow folder)
              this checkout). Clone it once: git clone <url> ..\aaltoflow-lab
   -ViewerRoot the AaltoView checkout (default: ..\aaltoview, skipped if absent).
   -NoMemory  leave Claude Code's project memory out.
+  -FromPC    restore only: whose suite_local.json to take (default: this PC's
+             name). For a NEW PC that replaces an old one: -FromPC <old name>.
   -WhatIf    restore only: list what WOULD be restored, kept or skipped, and
              copy nothing (e.g. to check for stale copies before -Force).
+
+suite_local.json is PER PC (2026-10-08): it holds that PC's ports, remote cards
+and data folder, so the office's and the lab's must not overwrite each other in
+the repo, as they did when both were stored as AaltoFlow\suite_local.json. A
+backup writes AaltoFlow\suite_local.<COMPUTERNAME>.json; a restore takes this
+PC's (or -FromPC's), and only falls back to the old shared file when there is
+no per-PC one.
 
 Old flat copies: a backup made before 2026-09-27 stored a module's notes as
 AaltoFlow\<key>-control\..., later ones as AaltoFlow\modules\<category>\<key>-control\...
@@ -48,6 +58,7 @@ param(
     [string]$ViewerRoot = "",
     [switch]$NoMemory,
     [switch]$Force,
+    [string]$FromPC = "",
     [switch]$WhatIf
 )
 
@@ -60,7 +71,11 @@ if (-not (Test-Path (Join-Path $LabRepo ".git"))) {
 }
 
 # Named files, relative to a checkout. CLAUDE.local.md is found in any folder.
-$named = @("suite_local.json", "mission-control\profiles.json", "scan-core\suite_layouts.json")
+# suite_local.json is NOT in this list: it is per PC (see above).
+$named = @("mission-control\profiles.json", "scan-core\suite_layouts.json")
+$pcName = $env:COMPUTERNAME
+# suite_local.json and its per-PC copies at the top of the repo's AaltoFlow\
+$suiteLocalPattern = '^suite_local(\.[^\\]+)?\.json$'
 $skipDirs = @(".venv", ".git", "node_modules", "__pycache__", "build", "dist")
 
 function Get-PrivateFiles($root) {
@@ -120,6 +135,10 @@ function Get-StaleFlat($root) {
 $n = 0
 if ($Mode -eq "backup") {
     $stale = Get-StaleFlat $flow
+    $sl = Join-Path $flow "suite_local.json"
+    if (Test-Path $sl) {
+        Copy-One $sl (Join-Path $LabRepo "AaltoFlow\suite_local.$pcName.json"); $n++
+    }
     if ($stale.Count) {
         Write-Warning ("the lab repo still holds old flat copies for: " + ($stale -join ", ") +
                        ". Their modules live under modules\ now; delete AaltoFlow\<key>-control " +
@@ -171,6 +190,8 @@ else {
         $byDest = @{}
         Get-ChildItem $src -Recurse -File | ForEach-Object {
             $srcRel = $_.FullName.Substring($src.Length).TrimStart('\')
+            # per-PC suite_local files are restored separately (below)
+            if ($p.Name -eq "AaltoFlow" -and $srcRel -match $suiteLocalPattern) { return }
             $rel = $srcRel
             if ($p.Name -eq "AaltoFlow") { $rel = Resolve-ModulePath $p.Root $srcRel }
             $item = @{ From = $_.FullName; SrcRel = $srcRel; Mapped = ($rel -ne $srcRel) }
@@ -190,6 +211,23 @@ else {
             if ($WhatIf) { Write-Host "  would restore: $rel"; continue }
             Copy-One $item.From $dest; $n++
         }
+    }
+    # this PC's suite_local.json: its own per-PC copy (or -FromPC's), else the
+    # old shared file a backup made before 2026-10-08
+    $who = if ($FromPC) { $FromPC } else { $pcName }
+    $cands = @((Join-Path $LabRepo "AaltoFlow\suite_local.$who.json"))
+    if (-not $FromPC) { $cands += (Join-Path $LabRepo "AaltoFlow\suite_local.json") }
+    $slSrc = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $slDest = Join-Path $flow "suite_local.json"
+    if (-not $slSrc) {
+        Write-Host "  no suite_local.json for $who in the lab repo"
+    } elseif ((Test-Path $slDest) -and -not $Force) {
+        Write-Host "  kept (exists): suite_local.json"
+    } elseif ($WhatIf) {
+        Write-Host "  would restore: suite_local.json  (from $(Split-Path $slSrc -Leaf))"
+    } else {
+        Copy-One $slSrc $slDest; $n++
+        Write-Host "  suite_local.json from $(Split-Path $slSrc -Leaf)"
     }
     if (-not $NoMemory -and (Test-Path (Join-Path $LabRepo "claude-memory"))) {
         $mem = Get-MemoryDir $flow
