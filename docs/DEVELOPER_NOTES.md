@@ -1222,6 +1222,14 @@ zpiezo has no GUI.
     whole before copying (`MigrateModuleLayout` in `installer/AaltoFlow.iss`),
     and Mission Control's "Add module" moves an old copy instead of making a
     second one.
+    The same trap in a PRIVATE lab repo (2026-10-08): it held a module's notes
+    both as `AaltoFlow\<key>-control\` (a backup from before the move) and as
+    `AaltoFlow\modules\<category>\<key>-control\`. `lab_backup.ps1 -Mode restore
+    -Force` maps the old path onto today's folder, so both landed on one file and
+    the one listed LAST won -- for seven modules the stale notes. Restore now
+    collects by destination and the nested copy always wins ("skipped old flat
+    copy"); `-WhatIf` lists what a restore would do; a backup warns while flat
+    folders remain. Delete them in the lab repo once the nested copy has everything.
 37. **One instrument is one PHYSICAL ADDRESS, not one module** (2026-09-27).
     Two services commanding one supply fight, and neither knows the other
     exists. The first fix listed pairs of module NAMES that must not run

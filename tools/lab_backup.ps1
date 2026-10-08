@@ -28,6 +28,16 @@ USAGE (from the AaltoFlow folder)
              this checkout). Clone it once: git clone <url> ..\aaltoflow-lab
   -ViewerRoot the AaltoView checkout (default: ..\aaltoview, skipped if absent).
   -NoMemory  leave Claude Code's project memory out.
+  -WhatIf    restore only: list what WOULD be restored, kept or skipped, and
+             copy nothing (e.g. to check for stale copies before -Force).
+
+Old flat copies: a backup made before 2026-09-27 stored a module's notes as
+AaltoFlow\<key>-control\..., later ones as AaltoFlow\modules\<category>\<key>-control\...
+A restore maps the old path onto the module's folder of today, so a repo that
+holds BOTH would restore two files onto one destination -- and the stale one
+could win (lab PC, 2026-10-08: pm16's notes came back 65 lines short). The
+nested copy now always wins, the flat one is reported as skipped, and a backup
+warns while the lab repo still holds such flat folders.
 
 Layout inside the lab repo:  AaltoFlow\<same paths>, AaltoView\<same paths>,
 claude-memory\<files>.
@@ -37,7 +47,8 @@ param(
     [string]$LabRepo = "",
     [string]$ViewerRoot = "",
     [switch]$NoMemory,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$WhatIf
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,8 +107,24 @@ function Copy-One($from, $to) {
 $pairs = @(@{ Name = "AaltoFlow"; Root = $flow })
 if (Test-Path $ViewerRoot) { $pairs += @{ Name = "AaltoView"; Root = (Resolve-Path $ViewerRoot).Path } }
 
+# Flat <key>-control folders in the lab repo's AaltoFlow\ for modules that live
+# under modules\ today: stale pre-move copies (see "Old flat copies" above).
+function Get-StaleFlat($root) {
+    $src = Join-Path $LabRepo "AaltoFlow"
+    if (-not (Test-Path $src)) { return @() }
+    return @(Get-ChildItem $src -Directory -Filter "*-control" | Where-Object {
+        (Resolve-ModulePath $root "$($_.Name)\x") -ne "$($_.Name)\x"
+    } | ForEach-Object { $_.Name })
+}
+
 $n = 0
 if ($Mode -eq "backup") {
+    $stale = Get-StaleFlat $flow
+    if ($stale.Count) {
+        Write-Warning ("the lab repo still holds old flat copies for: " + ($stale -join ", ") +
+                       ". Their modules live under modules\ now; delete AaltoFlow\<key>-control " +
+                       "in $LabRepo once the nested copy has everything (a restore skips them).")
+    }
     foreach ($p in $pairs) {
         foreach ($rel in (Get-PrivateFiles $p.Root)) {
             Copy-One (Join-Path $p.Root $rel) (Join-Path $LabRepo (Join-Path $p.Name $rel)); $n++
@@ -138,12 +165,30 @@ else {
     foreach ($p in $pairs) {
         $src = Join-Path $LabRepo $p.Name
         if (-not (Test-Path $src)) { continue }
+        # Collect by DESTINATION first: an old flat copy and the nested one map to
+        # the same file, and the nested (not re-mapped) one must win whatever
+        # order the folders are listed in.
+        $byDest = @{}
         Get-ChildItem $src -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($src.Length).TrimStart('\')
-            if ($p.Name -eq "AaltoFlow") { $rel = Resolve-ModulePath $p.Root $rel }
+            $srcRel = $_.FullName.Substring($src.Length).TrimStart('\')
+            $rel = $srcRel
+            if ($p.Name -eq "AaltoFlow") { $rel = Resolve-ModulePath $p.Root $srcRel }
+            $item = @{ From = $_.FullName; SrcRel = $srcRel; Mapped = ($rel -ne $srcRel) }
+            if ($byDest.ContainsKey($rel)) {
+                $old = $byDest[$rel]
+                if ($old.Mapped -and -not $item.Mapped) {
+                    Write-Host "  skipped old flat copy: $($old.SrcRel)"; $byDest[$rel] = $item
+                } else {
+                    Write-Host "  skipped old flat copy: $($item.SrcRel)"
+                }
+            } else { $byDest[$rel] = $item }
+        }
+        foreach ($rel in ($byDest.Keys | Sort-Object)) {
+            $item = $byDest[$rel]
             $dest = Join-Path $p.Root $rel
-            if ((Test-Path $dest) -and -not $Force) { Write-Host "  kept (exists): $rel"; return }
-            Copy-One $_.FullName $dest; $script:n++
+            if ((Test-Path $dest) -and -not $Force) { Write-Host "  kept (exists): $rel"; continue }
+            if ($WhatIf) { Write-Host "  would restore: $rel"; continue }
+            Copy-One $item.From $dest; $n++
         }
     }
     if (-not $NoMemory -and (Test-Path (Join-Path $LabRepo "claude-memory"))) {
@@ -151,8 +196,10 @@ else {
         Get-ChildItem (Join-Path $LabRepo "claude-memory") -File | ForEach-Object {
             $dest = Join-Path $mem $_.Name
             if ((Test-Path $dest) -and -not $Force) { return }
+            if ($WhatIf) { Write-Host "  would restore: claude-memory\$($_.Name)"; return }
             Copy-One $_.FullName $dest; $script:n++
         }
     }
-    Write-Host "restored $n files (use -Force to overwrite existing ones)"
+    if ($WhatIf) { Write-Host "dry run (-WhatIf): nothing was copied" }
+    else { Write-Host "restored $n files (use -Force to overwrite existing ones)" }
 }
