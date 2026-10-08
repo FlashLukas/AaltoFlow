@@ -183,9 +183,12 @@ def _used_ids(recipe, compiled, registry) -> set:
         for key in ("field", "angle"):
             if isinstance(w.get(key), str):
                 ids.add(w[key])
-    m = getattr(recipe, "mask", None)
-    if isinstance(m, dict) and isinstance(m.get("detector"), str) and not m.get("from"):
-        ids.add(m["detector"])           # the mask pass reads it
+    m = getattr(recipe, "scout", None)
+    if isinstance(m, dict):
+        if isinstance(m.get("detector"), str) and not m.get("from"):
+            ids.add(m["detector"])       # the scout pass reads it
+        if isinstance(m.get("settings"), dict):
+            ids |= set(m["settings"])    # ... and sets these for its duration
     return ids
 
 
@@ -291,7 +294,8 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         created_iso: str | None = None, on_point=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
         pause_poll_s: float = PAUSE_POLL_S, on_window=None,
-        attrs=None, on_pause=None, should_pause=None) -> xr.Dataset:
+        attrs=None, on_pause=None, should_pause=None,
+        on_scout=None) -> xr.Dataset:
     """Execute `recipe` against `registry` -- ONE scan per instrument at a time.
 
     Before anything moves, every instrument the scan uses is claimed for it
@@ -306,7 +310,8 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     if claim is None:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window, attrs, on_pause, should_pause)
+                    pause_poll_s, on_window, attrs, on_pause, should_pause,
+                    on_scout)
     errs = recipe.validate(registry)
     if errs:
         raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
@@ -315,7 +320,8 @@ def run(recipe, registry, on_progress=None, should_abort=None,
     try:
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
-                    pause_poll_s, on_window, attrs, on_pause, should_pause)
+                    pause_poll_s, on_window, attrs, on_pause, should_pause,
+                    on_scout)
     finally:
         release()
 
@@ -324,7 +330,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
          created_iso: str | None = None, on_point=None,
          on_log=None, data_path=None, on_fault=None, fault_check=None,
          pause_poll_s: float = PAUSE_POLL_S, on_window=None,
-         attrs=None, on_pause=None, should_pause=None) -> xr.Dataset:
+         attrs=None, on_pause=None, should_pause=None,
+         on_scout=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
 
     on_pause(message, answer)       : for the `pause` routine step (hooks.py):
@@ -372,6 +379,12 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                       after every point, a dict with the
                                       predicted and fitted f_res, the window,
                                       the Meff in use -- for a live readout.
+    on_scout(state)                 : SCOUT PASS only (recipe.scout): during
+                                      the scout {"phase": "scout", "done",
+                                      "total", "eta_s", "where"} after every
+                                      scout point; once its mask is made
+                                      {"phase": "made", "threshold", "kept",
+                                      "of", "measured", "total", ...}.
     attrs                           : extra FILE attributes {name: str} -- the
                                       suite's run info (sample, operator,
                                       project, tags...). Written into every
@@ -428,6 +441,8 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
            # the operator's Pause button (_hold_for_operator), and the seconds
            # spent held so far, which the ETA leaves out
            "should_pause": should_pause, "user_paused_s": 0.0,
+           # the scout pass's live readout (scout.py)
+           "on_scout": on_scout,
            # the steps add to the SAME ds_attrs as the scan goes: `comments`
            # (comment), `stopped_by` (abort_if, a timed-out wait_until, an
            # Abort answered at a pause), `skipped_points` (skip_if). (Two
@@ -551,13 +566,16 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
             # magnet ramp and reference sweep would otherwise be spread over
             # the points as if every one of them were that slow.
             sweeping = True
-            # The XY MASK (mask.py): pass 1 -- the quick reflectivity map --
-            # and the mask made from it, before the first point of the real
-            # scan. Its readings go into the file even if the scan is aborted
-            # later, so a mask that came out wrong can be looked at.
-            if getattr(recipe, "mask", None):
-                from .mask import prepare as prepare_mask
-                prepare_mask(recipe, registry, compiled, ctx, should_abort)
+            # The SCOUT PASS (scout.py): set up here, RUN by the odometer at
+            # the first point of each block it covers (the whole scan, or each
+            # step of the outer axes) -- so the outer axes are already where
+            # the block is measured. Its readings go into the file even if the
+            # scan is aborted later, so a mask that came out wrong can be
+            # looked at.
+            if getattr(recipe, "scout", None):
+                from .scout import ScoutRunner
+                ctx["scout"] = ScoutRunner(recipe, registry, compiled, ctx,
+                                           should_abort)
             t0 = time.monotonic()
             # A FLY axis (innermost, flyscan.py) is one continuous move per row
             # instead of a point-by-point odometer. Every other scan takes
@@ -702,7 +720,24 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     current = ctx["current"]
     guard = ctx.get("guard") or _Guard(None, (), None, should_abort,
                                        lambda m: None, PAUSE_POLL_S)
-    visit = ctx.get("visit")             # the XY mask, or None = every point
+    scout = ctx.get("scout")             # the SCOUT PASS (scout.py), or None
+
+    def live(done):
+        """A live snapshot for the plot (and the checkpoints). The buffers are
+        COPIED: an xarray.Dataset wraps the arrays it is given, so a snapshot
+        sharing them would keep changing under whoever holds it -- a live plot
+        that redraws later, or a partial file someone saves. The copy costs
+        one array per emission, and the caller controls how often that is by
+        only calling the factory when it actually wants a picture."""
+        if on_point:
+            on_point(done, total,
+                     lambda: _to_dataset(recipe, compiled, registry,
+                                         {k: v.copy() for k, v in data.items()},
+                                         created_iso, time.monotonic() - t0,
+                                         det_axes, det_coords,
+                                         ds_attrs=dict(ctx.get("ds_attrs") or {}),
+                                         extra=ctx.get("ds_extra")))
+
     for flat in range(total):
         if should_abort and should_abort():
             return True
@@ -715,8 +750,24 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         ctx["flat"] = flat
         ctx["index"] = idx
 
+        if scout is not None and scout.due(idx):
+            # A block the scout has not looked at yet: the whole scan (per_outer
+            # once) or this step of the outer axes (each). First the OUTER axes
+            # go to this block's values exactly as the odometer moves them
+            # (with their axis routines), then the scout runs there, then its
+            # mask decides which points of the block are visited. The axes the
+            # scout moved are set again at the next point measured (`resend`),
+            # without firing their axis routines a second time.
+            _set_dims(registry, compiled, dims, idx, prev, ctx, current,
+                      False, upto=min(scout.ks))
+            moved = scout.run_block(idx, current, guard,
+                                    live=lambda: live(flat),
+                                    on_scout=ctx.get("on_scout"))
+            ctx.setdefault("resend", set()).update(moved)
+        visit = ctx.get("visit")         # the scout's mask, or None = every point
+
         if visit is not None and not visit.measured[flat]:
-            # left out by the XY MASK (mask.py): not visited at all -- no
+            # left out by the SCOUT's mask (scout.py): not visited at all -- no
             # move, no settle, no routine -- and its slot keeps the "not
             # measured" value. Progress is reported only for the very last
             # point, so a long masked stretch does not flood the GUI.
@@ -796,8 +847,16 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # time spent PAUSED by the operator is not measuring time: leave
             # it out, or one coffee break would inflate the ETA for the rest
             elapsed = time.monotonic() - t0 - ctx.get("user_paused_s", 0.0)
-            if visit is not None:
-                # with a mask only the MEASURED points cost time
+            if scout is not None:
+                # with a scout only the MEASURED points cost time -- plus the
+                # scouts still to come (per_outer each), each costed as long
+                # as the ones so far took
+                m_done = int(visit.before[flat]) + 1
+                per_pt = max(0.0, elapsed - scout.scout_s) / m_done
+                left, scouts_left = scout.remaining(flat)
+                per_scout = scout.scout_s / max(1, len(scout.done_blocks))
+                eta = per_pt * max(0.0, left) + per_scout * scouts_left
+            elif visit is not None:
                 m_done = int(visit.before[flat]) + 1
                 eta = max(0.0, elapsed) / m_done * (visit.n_measured - m_done)
             else:
@@ -805,20 +864,7 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             # `idx` is the index just MEASURED, zig-zag already applied
             on_progress(done, total, eta,
                         where=where_of(dims, idx, flat, registry))
-        if on_point:
-            # COPY the buffers: an xarray.Dataset wraps the arrays it is given,
-            # so a snapshot sharing them would keep changing under whoever holds
-            # it -- a live plot that redraws later, or a partial file someone
-            # saves. The copy costs one array per emission, and the caller
-            # controls how often that is by only calling the factory when it
-            # actually wants a picture.
-            on_point(done, total,
-                     lambda: _to_dataset(recipe, compiled, registry,
-                                         {k: v.copy() for k, v in data.items()},
-                                         created_iso, time.monotonic() - t0,
-                                         det_axes, det_coords,
-                                         ds_attrs=dict(ctx.get("ds_attrs") or {}),
-                                         extra=ctx.get("ds_extra")))
+        live(done)
     return False
 
 
@@ -875,28 +921,39 @@ def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
         run_hooks(compiled.hooks, "before_point", ctx)
         return _acquire_and_read(registry, dets, det_axes, data, acquire_groups,
                                  ctx, idx, current, guard, shape)
+    _set_dims(registry, compiled, dims, idx, prev, ctx, current, redo)
+    run_hooks(compiled.hooks, "before_point", ctx)
+    return _acquire_and_read(registry, dets, det_axes, data, acquire_groups,
+                             ctx, idx, current, guard, shape)
+
+
+def _set_dims(registry, compiled, dims, idx, prev, ctx, current, redo,
+              upto=None):
+    """The odometer's step for one point: set every dim whose index changed
+    (all of them on a `redo`), with the axis routines, outer first. `upto`
+    stops before that dim (a new SCOUT block moves only its outer axes first,
+    scout.py). Dims in ctx["resend"] -- moved away by the scout -- are set
+    again even if their index did not change, without their routines."""
+    resend = ctx.get("resend") or set()
     outer_changed = False
-    for k, d in enumerate(dims):
+    for k, d in enumerate(dims[:upto]):
         changed = idx[k] != prev[k]
         if changed and d.kind == "repeat":
             # a repeat sets nothing; it may WAIT for its interval (repeat.py),
             # before the dims inside it move to the start of the next run
             pace(ctx, k, d, int(idx[k]), outer_changed)
         outer_changed = outer_changed or changed
-        if not (changed or redo):
+        if not (changed or redo or k in resend):
             continue
         if changed and prev[k] is not None:
             run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
             prev[k] = None                    # fired; not again on a retry
         for pid, values in d.params:
             current[pid] = registry.get(pid).set(float(values[idx[k]]))
+        resend.discard(k)
         if changed:
             run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
         prev[k] = idx[k]
-
-    run_hooks(compiled.hooks, "before_point", ctx)
-    return _acquire_and_read(registry, dets, det_axes, data, acquire_groups,
-                             ctx, idx, current, guard, shape)
 
 
 def _diagonal_point(ctx, registry, dims, idx, prev, redo) -> bool:
@@ -905,8 +962,9 @@ def _diagonal_point(ctx, registry, dims, idx, prev, redo) -> bool:
     only if every knob involved can be sent and waited for separately."""
     if not getattr(ctx.get("recipe"), "diagonal", False):
         return False
+    resend = ctx.get("resend") or set()
     moving = [d for k, d in enumerate(dims)
-              if d.params and (redo or idx[k] != prev[k])]
+              if d.params and (redo or idx[k] != prev[k] or k in resend)]
     if len(moving) < 2:
         return False
     return all(getattr(registry.get(pid), "can_send", False)
@@ -920,12 +978,13 @@ def _set_together(registry, compiled, dims, idx, prev, ctx, current, redo):
     same order among themselves -- only the moves overlap."""
     changing = []
     outer_changed = False
+    resend = ctx.get("resend") or set()
     for k, d in enumerate(dims):
         changed = idx[k] != prev[k]
         if changed and d.kind == "repeat":
             pace(ctx, k, d, int(idx[k]), outer_changed)
         outer_changed = outer_changed or changed
-        if changed or redo:
+        if changed or redo or k in resend:
             changing.append((k, d, changed))
     for k, d, changed in changing:
         if changed and prev[k] is not None:
@@ -939,6 +998,8 @@ def _set_together(registry, compiled, dims, idx, prev, ctx, current, redo):
             waits.append(wait)
     for wait in waits:
         wait()
+    for k, _, _ in changing:
+        resend.discard(k)
     for k, d, changed in changing:
         if changed:
             run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
@@ -1252,8 +1313,8 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         if target is not None and len(target) >= 3:
             target[2].update(extra)
 
-    # Variables on axes of their OWN (the XY mask's pass 1 and the mask
-    # itself, mask.py): {"coords": {name: (dim, values, attrs)},
+    # Variables on axes of their OWN (the scout pass's readings and the mask
+    # itself, scout.py): {"coords": {name: (dim, values, attrs)},
     # "vars": {name: (dims, values, attrs)}}. Copied, so a live snapshot does
     # not share them.
     if extra:

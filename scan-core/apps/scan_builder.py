@@ -138,6 +138,7 @@ class AxisRow(QtWidgets.QFrame):
                 self.num_lbl = tl
 
         self._build_fly(lay, speed_param, move_choices, speed_lookup)
+        self._build_scout(lay)
 
         # A spin box that silently refuses to go above 160 is baffling unless
         # you can see that 160 is the closed-loop ceiling -- and these limits
@@ -237,6 +238,61 @@ class AxisRow(QtWidgets.QFrame):
         self.fly.toggled.connect(self._fly_toggled)
         self.speed.valueChanged.connect(lambda *_: self.changed.emit())
         self._fly_toggled(False)
+
+    def _build_scout(self, lay):
+        """The SCOUT option (scan_core/scout.py): look at this axis quickly
+        first -- every k-th point -- and measure in detail only where the
+        scout saw something. Any axis that moves something can be scouted,
+        one or several; the options (what to look at, how to decide) are in
+        the SCOUT PASS section under the stack.
+
+        The step box is always there, greyed while the tick is off: a box that
+        appeared on ticking would shift the row's buttons under the mouse."""
+        self.scout = QtWidgets.QCheckBox()
+        self.scout.setToolTip(
+            "SCOUT: take a quick look along this axis first (every k-th point,\n"
+            "always including the last one), then measure in detail only where\n"
+            "the scout saw something. Tick it on every axis to scout; what the\n"
+            "scout looks at and how it decides is in the SCOUT PASS section\n"
+            "under the axis stack.")
+        self.scout_step = QtWidgets.QSpinBox()
+        self.scout_step.setRange(1, 1000); self.scout_step.setValue(3)
+        self.scout_step.setFixedWidth(46)
+        self.scout_step.setToolTip(
+            "The scout looks at every k-th point of this axis (3 = every 3rd),\n"
+            "and always at the last one. Something narrower than about k grid\n"
+            "steps can fall between the scout's points: use a smaller k then.")
+        box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
+        tl = QtWidgets.QLabel("scout / every")
+        tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+        box.addWidget(tl)
+        h = QtWidgets.QHBoxLayout(); h.setSpacing(2)
+        h.addWidget(self.scout); h.addWidget(self.scout_step)
+        box.addLayout(h)
+        lay.addLayout(box)
+        self.scout.toggled.connect(self._scout_toggled)
+        self.scout_step.valueChanged.connect(lambda *_: self.changed.emit())
+        self.scout_step.setEnabled(False)
+
+    def _scout_toggled(self, on):
+        self.scout_step.setEnabled(on)
+        self.changed.emit()
+
+    def is_scout(self) -> bool:
+        return self.scout.isChecked()
+
+    def scout_dims(self) -> list[str]:
+        """The scan dims this row makes, X before Y for a raster (a picture's
+        columns are the FIRST scouted axis, scout.picture_xy)."""
+        ax = self.to_axis()
+        if ax.get("type") == "raster":
+            return [ax["x"].get("name") or ax["x"]["param"],
+                    ax["y"].get("name") or ax["y"]["param"]]
+        try:
+            from scan_core.recipe import _compile_axis
+            return [d.name for d in _compile_axis(ax) if d.params]
+        except Exception:
+            return []
 
     def _move_changed(self):
         """The flying stage changed: its speed knob sets the fly speed now."""
@@ -496,6 +552,12 @@ class RepeatRow(QtWidgets.QFrame):
     # the axis-row interface the builder uses
     def is_fly(self) -> bool:
         return False
+
+    def is_scout(self) -> bool:
+        return False                       # a repeat moves nothing to scout
+
+    def scout_dims(self) -> list[str]:
+        return []
 
     def refresh_limits(self):
         pass                               # no parameter, no limits
@@ -1936,6 +1998,9 @@ class ScanWorker(QtCore.QThread):
     paused = QtCore.Signal(object)
     #: RESONANCE WINDOW readout after every point (dict, see WindowRunner.state)
     window = QtCore.Signal(object)
+    #: SCOUT PASS readout (dict, see engine.run's on_scout): after every scout
+    #: point, and once its mask is made
+    scout = QtCore.Signal(object)
     #: A `pause` routine step asks the operator (message, answer); answer is
     #: None when the question is gone. Emitted from the scan thread, queued to
     #: the GUI thread; answer(True/False) may be called from there.
@@ -2059,6 +2124,7 @@ class ScanWorker(QtCore.QThread):
                      # (Lukas, 2026-09-28) instead of ending it
                      on_fault=lambda faults: self.paused.emit(list(faults)),
                      on_window=lambda st: self.window.emit(dict(st)),
+                     on_scout=lambda st: self.scout.emit(dict(st)),
                      attrs=self.attrs,
                      # a `pause` step: the banner asks, the scan waits
                      on_pause=lambda msg, answer: self.ask.emit(msg or "", answer),
@@ -2577,60 +2643,141 @@ class WindowCard(QtWidgets.QFrame):
             f"   ·   {100 * st.get('fraction_measured', float('nan')):.0f} % of the bins measured")
 
 
-class MaskCard(QtWidgets.QFrame):
-    """XY MASK: measure only the elements of a patterned sample.
+class ScoutSettingChip(QtWidgets.QFrame):
+    """One scout-only setting, `RF power [12.000 dBm] x`, compact enough to
+    sit in a line with the others (the open scout section is short; a full
+    condition row per setting would push its options out of sight). The
+    value box is a condition row's: the parameter's live limits, whole numbers
+    for an int parameter."""
 
-    Lukas, 2026-10-07: a quick reflectivity pass at every 3rd point, a mask
-    from it interpolated onto the real grid, then the real scan inside the
-    mask only -- or a mask he makes himself from anything (a grayscale image,
-    a matrix, an earlier scan). Everything here becomes the recipe's `mask`
-    block (scan_core/mask.py), so it travels in the .yaml and in every .nc.
+    changed = QtCore.Signal()
+    remove = QtCore.Signal(object)
 
-    Shown when the scan has two axes that move something (an XY map). The
-    PREVIEW draws the mask a FILE gives over the scan's own grid -- the check
-    that a picture is placed and thresholded as meant, before anything moves.
-    A measured pass 1 cannot be previewed (it does not exist yet): run a
-    quick reflectivity map once, then point `file` at it to tune.
+    def __init__(self, param, value=None):
+        super().__init__()
+        self.param = param
+        self.setObjectName("axis")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(6, 1, 2, 1); lay.setSpacing(4)
+        name = QtWidgets.QLabel(param.label)
+        name.setToolTip(f"{param.id}: held at this value during the scout only,\n"
+                        f"put back for the real scan (also after an Abort)")
+        lay.addWidget(name)
+        self.integer = bool(getattr(param, "integer", False))
+        lo, hi = FixedRow._finite_limits(self)
+        self.value_box = _value_box(param)
+        self.value_box.setRange(lo, hi)
+        self.value_box.setDecimals(0 if self.integer else 3)
+        self.value_box.setFixedWidth(104)
+        if param.unit:
+            self.value_box.setSuffix(f" {param.unit}")
+        self.value_box.setValue(float(value) if value is not None
+                                else FixedRow._default_value(lo, hi))
+        self.value_box.valueChanged.connect(lambda *_: self.changed.emit())
+        lay.addWidget(self.value_box)
+        rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger"); rm.setFixedWidth(22)
+        rm.setStyleSheet("padding: 0px;")
+        rm.clicked.connect(lambda: self.remove.emit(self))
+        lay.addWidget(rm)
+
+    def value(self) -> float:
+        v = self.value_box.value()
+        return int(round(v)) if self.integer else v
+
+
+class ScoutSection(QtWidgets.QFrame):
+    """SCOUT PASS: take a quick look first, then measure in detail only where
+    something is happening (scan_core/scout.py).
+
+    Lukas, 2026-10-08, on the XY MASK card it replaces: it "awkwardly jumps in
+    place when you get two axes" -- a card that appeared with the second axis
+    and squeezed everything around it. So this is a SECTION that is always
+    there, at the bottom of the axis stack, collapsed to one line ("SCOUT PASS
+    · off -- tick 'scout' on the axes to scout") and opening in place. Its
+    height never depends on the number of axes; opening it takes the room
+    from the axis list above (a scroll area), not from the cards below.
+
+    Which axes are scouted is ticked on the axis rows themselves (with their
+    coarse step); everything else -- what the scout looks at, how it decides,
+    the margin, what the outer axes do, the scout-only settings, a mask file --
+    is here. It all becomes the recipe's `scout` block, so it travels in the
+    .yaml and in every .nc.
+
+    The GRID PREVIEW draws which points the scout will visit on the scan's
+    grid (first rig test, 2026-10-08: a coarse row step of 3 fine rows looked
+    like 1 on the camera, "it scans x, jumps one down"). For a mask FILE,
+    "Preview mask" draws the mask it gives over the scan's own grid.
     """
 
     changed = QtCore.Signal()
+    #: opened (True) or closed (False): the builder moves the room for the
+    #: body between the axis list and the section, so the card keeps its height
+    expanded_changed = QtCore.Signal(bool)
 
-    SOURCES = (("measure first (pass 1)", "measure"), ("from a file", "file"))
-    KEEPS = (("measure where it is ABOVE the threshold", "above"),
-             ("measure where it is BELOW the threshold", "below"))
+    SOURCES = (("the scout pass (measure)", "measure"),
+               ("an image or a matrix", "picture"),
+               ("an earlier scan (.nc)", "scan"))
+    KEEPS = (("ABOVE a threshold", "above"),
+             ("BELOW a threshold", "below"),
+             ("DEVIATES from the background", "deviates"))
     THRESHOLDS = (("auto (Otsu)", "auto"), ("value", "value"),
                   ("fraction of the range", "fraction"))
-    FILES = ("Mask source (*.nc *.png *.tif *.tiff *.bmp *.jpg *.jpeg *.csv *.txt "
-             "*.dat *.npy);;All files (*)")
+    PICTURES = ("Image or matrix (*.png *.tif *.tiff *.bmp *.jpg *.jpeg *.csv *.txt "
+                "*.dat *.npy);;All files (*)")
+    SCANS = "Scan (*.nc);;All files (*)"
+    #: the body's height when open: it takes the room from the axis list
+    #: above it, never from the cards below
+    BODY_MAX = 104
+    #: the side of the grid / mask preview, in pixels
+    PREVIEW_PX = 100
 
     def __init__(self, recipe_fn=None):
         super().__init__()
-        self.setObjectName("card")
+        self.setObjectName("scoutSection")
         self.registry = None
-        #: builds the current recipe (the builder's); the preview needs the grid
+        #: builds the current recipe (the builder's); the previews need the grid
         self._recipe_fn = recipe_fn
-        self._dims: list[str] = []
-        self._raster: list[str] | None = None
+        self._axes: dict = {}               # the ticked axes {name: step}
+        self._outer: list[str] = []
+        self._fly = False
+        self._expanded = False
+        self.setStyleSheet(
+            f"QFrame#scoutSection {{ border-top: 1px solid {C['border']}; }}")
         v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
-        head = QtWidgets.QHBoxLayout()
-        tag = QtWidgets.QLabel("XY MASK  ·  measure only the elements")
-        tag.setObjectName("tag")
-        head.addWidget(tag); head.addStretch(1)
-        self.enable = QtWidgets.QCheckBox("on")
-        self.enable.setToolTip(
-            "First a quick pass of ONE detector (the reflectivity) at every N-th\n"
-            "point -- or a mask from a file -- then the scan measures only the\n"
-            "points inside the mask. The others are never visited (no move, no\n"
-            "settle) and are stored as not measured (NaN); the file's\n"
-            "'scan_mask' says which is which. The grid keeps its full shape.")
-        self.enable.toggled.connect(self._on_toggle)
-        head.addWidget(self.enable)
+        v.setContentsMargins(0, 6, 0, 0); v.setSpacing(4)
+
+        # the ONE line that is always there
+        head = QtWidgets.QHBoxLayout(); head.setSpacing(8)
+        self.toggle = QtWidgets.QToolButton()
+        self.toggle.setCheckable(True)
+        self.toggle.setArrowType(QtCore.Qt.RightArrow)
+        self.toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.toggle.setText("SCOUT PASS")
+        self.toggle.setStyleSheet(
+            f"QToolButton {{ border: none; color: {C['accent']}; font-weight: 800;"
+            f" letter-spacing: 1px; }}")
+        self.toggle.setToolTip(
+            "Scout pass: take a quick look first, then measure in detail only\n"
+            "where something is happening. Click to show the options.")
+        self.toggle.toggled.connect(self.set_expanded)
+        head.addWidget(self.toggle)
+        self.state = QtWidgets.QLabel()
+        self.state.setStyleSheet(f"color:{C['muted']};")
+        # cut, never widen the window (the routines card's rule)
+        self.state.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                 QtWidgets.QSizePolicy.Preferred)
+        head.addWidget(self.state, 1)
         v.addLayout(head)
 
+        # The body is WIDE and SHORT on purpose: in the suite the middle
+        # column is ~1100 px wide but the axis stack card only ~260 px tall,
+        # so the options sit in three compact rows with the preview beside
+        # them, and the body is never taller than BODY_MAX.
         self.body = QtWidgets.QWidget()
-        g = QtWidgets.QGridLayout(self.body)
-        g.setContentsMargins(0, 0, 0, 0); g.setHorizontalSpacing(8); g.setVerticalSpacing(4)
+        outer = QtWidgets.QHBoxLayout(self.body)
+        outer.setContentsMargins(4, 0, 4, 2); outer.setSpacing(12)
+        left = QtWidgets.QVBoxLayout(); left.setSpacing(4)
+        outer.addLayout(left, 1)
 
         def lbl(text, tip=""):
             w = QtWidgets.QLabel(text)
@@ -2639,7 +2786,7 @@ class MaskCard(QtWidgets.QFrame):
                 w.setToolTip(tip)
             return w
 
-        def spin(lo, hi, dec, val, width=90):
+        def dspin(lo, hi, dec, val, width=90):
             s = QtWidgets.QDoubleSpinBox()
             s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
             s.setFixedWidth(width)
@@ -2653,79 +2800,111 @@ class MaskCard(QtWidgets.QFrame):
             b.currentIndexChanged.connect(lambda *_: self._edited())
             return b
 
-        # row 0: where the mask comes from
-        self.source_box = combo(self.SOURCES)
-        self.det_box = QtWidgets.QComboBox()
-        self.det_box.setToolTip("What pass 1 records -- one number per point (the\n"
-                                "reflectivity, a power meter). For a .nc file: the\n"
-                                "variable read from it.")
-        self.det_box.currentIndexChanged.connect(lambda *_: self._edited())
-        self.step_spin = QtWidgets.QSpinBox()
-        self.step_spin.setRange(1, 1000); self.step_spin.setValue(3)
-        self.step_spin.setFixedWidth(70)
-        self.step_spin.setToolTip("Pass 1 at every N-th point of the scan's grid, in X\n"
-                                  "and in Y (3 = 1/9 of the points). The last point of\n"
-                                  "each axis is always included. An element smaller than\n"
-                                  "N grid steps can fall between the pass-1 points.")
-        self.step_spin.valueChanged.connect(lambda *_: self._edited())
-        g.addWidget(lbl("mask from"), 0, 0); g.addWidget(self.source_box, 0, 1)
-        self.det_label = lbl("detector")
-        g.addWidget(self.det_label, 0, 2); g.addWidget(self.det_box, 0, 3)
-        self.step_label = lbl("every")
-        g.addWidget(self.step_label, 0, 4); g.addWidget(self.step_spin, 0, 5)
+        def row():
+            h = QtWidgets.QHBoxLayout(); h.setSpacing(6)
+            left.addLayout(h)
+            return h
 
-        # row 1: the file
+        # row 1: where the mask comes from, and what the scout looks at (or
+        # the file)
+        self.source_box = combo(self.SOURCES)
+        self.source_box.setToolTip(
+            "Where the mask comes from: the scout pass measures it (every k-th\n"
+            "point of the ticked axes); or a picture you made (exactly two\n"
+            "scouted axes); or an earlier scan of the same axes (.nc).")
+        self.det_box = QtWidgets.QComboBox()
+        self.det_box.setToolTip("What the scout reads: any detector that gives ONE\n"
+                                "number per point (a reflectivity, a power, a lock-in R).")
+        self.det_box.setMinimumWidth(160)
+        self.det_box.currentIndexChanged.connect(lambda *_: self._edited())
+        self.det_label = lbl("look at")
         self.file_edit = QtWidgets.QLineEdit()
-        self.file_edit.setPlaceholderText("a scan (.nc), an image (.png .tif ...) or a "
-                                          "matrix (.csv .txt .npy)")
         self.file_edit.editingFinished.connect(self._edited)
+        self.file_edit.setToolTip(
+            "An IMAGE: bright = measure (with 'above'); grayscale or colour (read\n"
+            "as brightness). A MATRIX: one row per line. Columns run along the\n"
+            "FIRST scouted axis (X), rows along the second (Y).\n"
+            "An earlier SCAN: its axes are found by name (or by the parameter\n"
+            "they swept); points outside its range are measured.")
         self.browse = QtWidgets.QPushButton("Browse…")
         self.browse.clicked.connect(self._browse)
-        self.file_label = lbl("file", "An IMAGE: bright = measure (with 'above'); grayscale\n"
-                                      "or colour (read as brightness). A MATRIX: one row per\n"
-                                      "line, columns along X, rows along Y. A .nc scan of the\n"
-                                      "SAME X/Y parameters (camera or stage coordinates).")
-        g.addWidget(self.file_label, 1, 0)
-        g.addWidget(self.file_edit, 1, 1, 1, 4)
-        g.addWidget(self.browse, 1, 5)
+        self.var_edit = QtWidgets.QLineEdit()
+        self.var_edit.setPlaceholderText("variable")
+        self.var_edit.setFixedWidth(110)
+        self.var_edit.setToolTip("The variable read from the earlier scan (e.g. lockin_r).")
+        self.var_edit.editingFinished.connect(self._edited)
+        self.file_label = lbl("file")
+        r1 = row()
+        r1.addWidget(lbl("mask from")); r1.addWidget(self.source_box)
+        r1.addWidget(self.det_label); r1.addWidget(self.det_box, 1)
+        r1.addWidget(self.file_label); r1.addWidget(self.file_edit, 1)
+        r1.addWidget(self.var_edit); r1.addWidget(self.browse)
 
-        # row 2: the threshold
+        # row 2: how to decide, and the margin
         self.keep_box = combo(self.KEEPS)
+        self.keep_box.setToolTip(
+            "above / below: a threshold (Otsu's auto splits two groups -- substrate\n"
+            "and elements).\n"
+            "deviates: |reading - median| > k x noise, noise = 1.4826 x the median\n"
+            "absolute deviation. Finds peaks AND dips, on a sample with several\n"
+            "levels or a gradient too. Assumes the background is most of the scout.")
         self.thr_box = combo(self.THRESHOLDS)
         self.thr_box.setToolTip("auto: Otsu's method, the level that best splits the\n"
-                                "readings into two groups (substrate, elements).\n"
+                                "readings into two groups.\n"
                                 "fraction: 0 = the lowest reading, 1 = the highest.")
-        self.thr_spin = spin(-1e12, 1e12, 6, 0.5, 110)
-        g.addWidget(lbl("keep"), 2, 0); g.addWidget(self.keep_box, 2, 1, 1, 3)
-        g.addWidget(lbl("threshold"), 2, 4)
-        th = QtWidgets.QHBoxLayout(); th.setSpacing(4)
-        th.addWidget(self.thr_box); th.addWidget(self.thr_spin)
-        g.addLayout(th, 2, 5, 1, 2)
-
-        # row 3: margin and axes
+        self.thr_spin = dspin(-1e12, 1e12, 6, 0.5, 100)
+        self.k_label = lbl("k", "How many noise widths away from the background a\n"
+                                "reading must be to be measured (default 4).")
+        self.k_spin = dspin(0.1, 100, 1, 4.0, 64)
+        self.thr_label = lbl("threshold")
         self.margin_auto = QtWidgets.QCheckBox("auto")
         self.margin_auto.setChecked(True)
-        self.margin_auto.setToolTip("Half the pitch of pass 1 (or of the file's pixels):\n"
-                                    "about how well the source can place an edge.")
+        self.margin_auto.setToolTip("Half the coarse step on each axis (1.5 points for\n"
+                                    "every 3rd): about how well the scout can place an\n"
+                                    "edge. On the rig it lost no rim (2026-10-08).")
         self.margin_auto.toggled.connect(lambda *_: self._edited())
-        self.margin_spin = spin(0, 1e6, 3, 2.0)
-        self.margin_spin.setToolTip("Grow the mask by this much, in the axes' unit, so the\n"
-                                    "edges of every element are measured too.")
-        self.x_box = QtWidgets.QComboBox(); self.y_box = QtWidgets.QComboBox()
-        for b in (self.x_box, self.y_box):
-            b.currentIndexChanged.connect(lambda *_: self._edited())
-        g.addWidget(lbl("margin"), 3, 0)
-        mg = QtWidgets.QHBoxLayout(); mg.setSpacing(4)
-        mg.addWidget(self.margin_auto); mg.addWidget(self.margin_spin); mg.addStretch(1)
-        g.addLayout(mg, 3, 1)
-        self.axes_label = lbl("X / Y axes", "Which two axes the mask lies on. A raster\n"
-                                            "axis finds them on its own.")
-        g.addWidget(self.axes_label, 3, 2)
-        ax = QtWidgets.QHBoxLayout(); ax.setSpacing(4)
-        ax.addWidget(self.x_box); ax.addWidget(self.y_box)
-        g.addLayout(ax, 3, 3, 1, 3)
+        self.margin_spin = dspin(0, 1000, 1, 2.0, 76)
+        self.margin_spin.setSuffix(" pts")
+        self.margin_spin.setToolTip("Grow the mask by this many GRID POINTS on every\n"
+                                    "scouted axis, so the edges are measured too.")
+        r2 = row()
+        r2.addWidget(lbl("measure where it is")); r2.addWidget(self.keep_box)
+        r2.addWidget(self.thr_label); r2.addWidget(self.thr_box); r2.addWidget(self.thr_spin)
+        r2.addWidget(self.k_label); r2.addWidget(self.k_spin)
+        r2.addSpacing(8)
+        r2.addWidget(lbl("margin")); r2.addWidget(self.margin_auto); r2.addWidget(self.margin_spin)
+        r2.addStretch(1)
 
-        # row 4: where a picture lies
+        # row 3: the outer axes, and settings held during the scout only
+        self.outer_box = combo((("once, at their first values", "once"),
+                                ("again at every step", "each")))
+        self.outer_box.setToolTip(
+            "The axes OUTSIDE (above) the scouted ones:\n"
+            "once -- one scout at their first values, one mask for all of them\n"
+            "  (a patterned sample does not move with the field);\n"
+            "each -- a new scout at every step of them, for a feature that moves\n"
+            "  with them (an FMR line drifting with the angle).\n"
+            "Axes INSIDE a scouted one are held at their first value during the\n"
+            "scout, and the mask holds for all their values.")
+        self.outer_label = lbl("outer axes")
+        self.add_setting = QtWidgets.QComboBox()
+        self.add_setting.setToolTip(
+            "A setting held ONLY during the scout and put back for the real scan\n"
+            "-- also after an Abort or an error: a short lock-in time constant,\n"
+            "one scope average, a higher power. The scout is then fast even with\n"
+            "the same instrument.")
+        self.add_setting.setMaximumWidth(190)
+        self.add_setting.activated.connect(self._add_setting_from_combo)
+        self.settings_box = QtWidgets.QHBoxLayout(); self.settings_box.setSpacing(4)
+        self.setting_rows: list = []
+        r3 = row()
+        r3.addWidget(self.outer_label); r3.addWidget(self.outer_box)
+        r3.addSpacing(8)
+        r3.addWidget(self.add_setting)
+        r3.addLayout(self.settings_box)
+        r3.addStretch(1)
+
+        # row 4 (a picture only): where it lies
         self.extent_box = QtWidgets.QCheckBox("place the picture")
         self.extent_box.setToolTip(
             "Off: the picture covers exactly the scan's area, its first row at the\n"
@@ -2733,39 +2912,72 @@ class MaskCard(QtWidgets.QFrame):
             "first / last row (row 0 = the top of an image), in the axes' unit.\n"
             "Scan points outside the picture are measured.")
         self.extent_box.toggled.connect(lambda *_: self._edited())
-        self.ext = [spin(-1e9, 1e9, 3, v, 80) for v in (-50.0, 50.0, -50.0, 50.0)]
-        g.addWidget(self.extent_box, 4, 0, 1, 2)
-        ex = QtWidgets.QHBoxLayout(); ex.setSpacing(4)
+        self.ext = [dspin(-1e9, 1e9, 3, val, 80) for val in (-50.0, 50.0, -50.0, 50.0)]
+        r4 = row()
+        r4.addWidget(self.extent_box)
+        self._ext_labels = []
         for text, w in zip(("x", "", "y", ""), self.ext):
             if text:
-                ex.addWidget(lbl(text))
-            ex.addWidget(w)
-        ex.addStretch(1)
-        g.addLayout(ex, 4, 2, 1, 5)
-        g.setColumnStretch(6, 1)
-        v.addWidget(self.body)
+                t = lbl(text)
+                self._ext_labels.append(t)
+                r4.addWidget(t)
+            r4.addWidget(w)
+        r4.addStretch(1)
+        left.addStretch(1)
 
-        # the preview
-        pv = QtWidgets.QHBoxLayout()
-        self.preview_btn = QtWidgets.QPushButton("Preview mask")
-        self.preview_btn.setToolTip("Draw the mask this FILE gives on the scan's grid\n"
-                                    "(grey = the source, amber = measured).")
-        self.preview_btn.clicked.connect(self.preview)
-        pv.addWidget(self.preview_btn, 0, QtCore.Qt.AlignTop)
+        # the preview, beside the options: which points the scout looks at
+        # (or the mask a file gives), and the numbers that go with it
         self.picture = QtWidgets.QLabel()
-        self.picture.setMinimumSize(0, 0)
-        pv.addWidget(self.picture, 0)
+        self.picture.setFixedSize(self.PREVIEW_PX, self.PREVIEW_PX)
+        self.picture.setAlignment(QtCore.Qt.AlignCenter)
+        self.picture.setStyleSheet(f"background:{C['code_bg']}; border-radius:4px;")
+        outer.addWidget(self.picture, 0, QtCore.Qt.AlignTop)
+        side = QtWidgets.QVBoxLayout(); side.setSpacing(4)
         self.info = QtWidgets.QLabel("")
         self.info.setWordWrap(True)
         self.info.setStyleSheet(f"color:{C['accent']}; font-size:11px;")
-        pv.addWidget(self.info, 1)
-        v.addLayout(pv)
-        self._sync_enabled()
-        self.hide()
+        self.info.setFixedWidth(230)
+        self.info.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        side.addWidget(self.info)
+        self.preview_btn = QtWidgets.QPushButton("Preview mask")
+        self.preview_btn.setToolTip("Draw the mask this FILE gives on the scan's grid\n"
+                                    "(grey = the source, amber = measured).")
+        self.preview_btn.clicked.connect(self.preview_mask)
+        side.addWidget(self.preview_btn, 0, QtCore.Qt.AlignLeft)
+        side.addStretch(1)
+        outer.addLayout(side, 0)
 
-    # ---- contents -----------------------------------------------------------
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setWidget(self.body)
+        # opened, the body gets its full height: it is the axis list above it
+        # that gives up the room (scrolling if it must), never the cards below
+        self.scroll.setFixedHeight(self.BODY_MAX)
+        v.addWidget(self.scroll)
+        self.scroll.setVisible(False)
+        self._sync()
+
+    # ---- open / closed ---------------------------------------------------------
+    def set_expanded(self, on: bool) -> None:
+        self._expanded = bool(on)
+        self.toggle.blockSignals(True)
+        self.toggle.setChecked(self._expanded)
+        self.toggle.blockSignals(False)
+        self.toggle.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.scroll.setVisible(self._expanded)
+        self.expanded_changed.emit(self._expanded)
+        if on:
+            self.preview_grid()
+
+    def expanded(self) -> bool:
+        return self._expanded
+
+    # ---- contents -------------------------------------------------------------
     def set_registry(self, registry) -> None:
-        """The detectors pass 1 can use: readable, one number per point."""
+        """The detectors the scout can use (readable, one number per point),
+        and the settables a scout-only setting can hold."""
         self.registry = registry
         keep = self.det_box.currentData()
         self.det_box.blockSignals(True)
@@ -2780,128 +2992,202 @@ class MaskCard(QtWidgets.QFrame):
             i = self.det_box.findData(keep)
         self.det_box.setCurrentIndex(max(0, i))
         self.det_box.blockSignals(False)
+        self.add_setting.blockSignals(True)
+        self.add_setting.clear()
+        self.add_setting.addItem("＋ scout-only setting ...", None)
+        for p in registry.settables():
+            self.add_setting.addItem(f"{p.label}  ·  {p.id}", p.id)
+        self.add_setting.blockSignals(False)
+        for row in list(self.setting_rows):
+            self._remove_setting(row)
 
-    def set_dims(self, dim_names: list[str], raster: list[str] | None,
-                 fly: bool) -> None:
-        """The scan's axes (dims); `raster` = the raster's [x, y] names."""
-        self._dims, self._raster = list(dim_names), raster
-        # keep the operator's X / Y only while it is still a pair of two
-        # different axes of this scan; otherwise X = the inner axis, Y = the
-        # one outside it (or the raster's)
-        old = [self.x_box.currentData(), self.y_box.currentData()]
-        if not (old[0] in dim_names and old[1] in dim_names and old[0] != old[1]):
-            old = (raster if raster else
-                   [dim_names[-1], dim_names[-2]] if len(dim_names) > 1 else [None, None])
-        for box, want in ((self.x_box, old[0]), (self.y_box, old[1])):
-            box.blockSignals(True)
-            box.clear()
-            for name in dim_names:
-                box.addItem(name, name)
-            box.setCurrentIndex(max(0, box.findData(want)))
-            box.blockSignals(False)
-        self.setVisible((len(dim_names) >= 2 and not fly) or self.enable.isChecked())
-        self._sync_enabled()
+    def set_axes(self, axes: dict, outer: list[str], fly: bool) -> None:
+        """The ticked axes ({name: step}, X first), the unscouted axes outside
+        them, and whether the stack has a fly axis."""
+        self._axes, self._outer, self._fly = dict(axes), list(outer), fly
+        self._sync()
+        if self._expanded:
+            self.preview_grid()
 
+    # ---- settings held during the scout ------------------------------------------
+    def _add_setting_from_combo(self, i):
+        pid = self.add_setting.itemData(i)
+        self.add_setting.setCurrentIndex(0)
+        if pid:
+            self.add_scout_setting(pid)
+
+    def add_scout_setting(self, pid, value=None):
+        """One row `parameter = value`, held during the scout only."""
+        p = self.registry.get(pid) if self.registry is not None else None
+        if p is None:
+            return None
+        for row in self.setting_rows:
+            if row.param.id == pid:
+                if value is not None:
+                    row.value_box.setValue(float(value))
+                return row
+        if value is None:
+            try:
+                value = float(p.get())     # start from what it is now
+            except Exception:
+                value = None
+        row = ScoutSettingChip(p, value)
+        row.changed.connect(self._edited)
+        row.remove.connect(self._remove_setting)
+        self.setting_rows.append(row)
+        self.settings_box.addWidget(row)
+        self._edited()
+        return row
+
+    def _remove_setting(self, row):
+        if row in self.setting_rows:
+            self.setting_rows.remove(row)
+        self.settings_box.removeWidget(row)
+        row.setParent(None)
+        row.deleteLater()
+        self._edited()
+
+    # ---- the visible state ---------------------------------------------------------
     def _browse(self):
-        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Mask source",
-                                                      self.file_edit.text(), self.FILES)
+        picture = self.source_box.currentData() == "picture"
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Mask source", self.file_edit.text(),
+            self.PICTURES if picture else self.SCANS)
         if fn:
             self.file_edit.setText(fn)
             self._edited()
 
-    def _on_toggle(self, *_):
-        self._sync_enabled()
-        self.changed.emit()
-
     def _edited(self, *_):
-        self._sync_enabled()
+        self._sync()
         self.changed.emit()
 
-    def _sync_enabled(self):
-        on = self.enable.isChecked()
-        self.body.setEnabled(on)
-        from_file = self.source_box.currentData() == "file"
-        path = self.file_edit.text().strip()
-        from scan_core.mask import is_picture
-        picture = from_file and is_picture(path)
-        for w in (self.step_label, self.step_spin):
-            w.setVisible(not from_file)
+    def _sync(self):
+        src = self.source_box.currentData()
+        measure, picture = src == "measure", src == "picture"
         for w in (self.file_label, self.file_edit, self.browse):
-            w.setVisible(from_file)
-        # a picture has no detector: hide the box rather than grey it out,
-        # or "Lock-in R" next to a .png reads as if it mattered
-        self.det_box.setVisible(not picture)
-        self.det_label.setVisible(not picture)
-        self.thr_spin.setEnabled(on and self.thr_box.currentData() != "auto")
-        self.margin_spin.setEnabled(on and not self.margin_auto.isChecked())
+            w.setVisible(not measure)
+        self.var_edit.setVisible(src == "scan")
+        self.file_edit.setPlaceholderText(
+            "an image (.png .tif ...) or a matrix (.csv .txt .npy)" if picture
+            else "an earlier scan of the same axes (.nc)")
+        self.det_box.setVisible(measure)
+        self.det_label.setVisible(measure)
+        dev = self.keep_box.currentData() == "deviates"
+        for w in (self.thr_label, self.thr_box, self.thr_spin):
+            w.setVisible(not dev)
+        self.k_label.setVisible(dev); self.k_spin.setVisible(dev)
+        self.thr_spin.setEnabled(self.thr_box.currentData() != "auto")
+        self.margin_spin.setEnabled(not self.margin_auto.isChecked())
+        self.outer_box.setEnabled(bool(self._outer) and measure)
+        self.outer_label.setToolTip(
+            ", ".join(self._outer) if self._outer else "no unscouted axis outside the scouted ones")
         self.extent_box.setVisible(picture)
         for w in self.ext:
             w.setVisible(picture)
-            w.setEnabled(on and self.extent_box.isChecked())
-        single_raster = bool(self._raster)
-        for w in (self.axes_label, self.x_box, self.y_box):
-            w.setVisible(not single_raster)
-        self.preview_btn.setVisible(from_file)
-        self.preview_btn.setEnabled(on and bool(path))
-        if not on or not from_file:
-            self.picture.clear()
-            self.info.setText("")
+            w.setEnabled(self.extent_box.isChecked())
+        for t in self._ext_labels:
+            t.setVisible(picture)
+        # the scout-only settings belong to a MEASURED scout
+        self.add_setting.setEnabled(measure)
+        self.preview_btn.setVisible(not measure)
+        self.preview_btn.setEnabled(bool(self.file_edit.text().strip()) and bool(self._axes))
+        self.state.setText(self.state_text())
 
-    # ---- recipe round trip --------------------------------------------------
+    def state_text(self) -> str:
+        """The one line shown next to SCOUT PASS, open or closed."""
+        if not self._axes:
+            return "off  —  tick 'scout' on the axes to scout"
+        axes = ", ".join(f"{n} every {s}" for n, s in self._axes.items())
+        src = self.source_box.currentData()
+        if src == "measure":
+            det = self.det_box.currentData() or "?"
+            what = f"look at {det}"
+        else:
+            what = f"mask from {Path(self.file_edit.text().strip() or '?').name}"
+        how = self.keep_box.currentData()
+        if how == "deviates":
+            how = f"where it deviates (k {self.k_spin.value():g})"
+        else:
+            t = self.thr_box.currentData()
+            level = ("auto" if t == "auto" else f"{self.thr_spin.value():g}" if t == "value"
+                     else f"{self.thr_spin.value():g} of the range")
+            how = f"where it is {how} the threshold ({level})"
+        extra = ""
+        if self._outer and src == "measure":
+            extra = ("  ·  again at every " + ", ".join(self._outer)
+                     if self.outer_box.currentData() == "each" else "")
+        if self.setting_rows:
+            extra += f"  ·  {len(self.setting_rows)} scout-only setting(s)"
+        return f"on: {axes}  ·  {what}, measure {how}{extra}"
+
+    # ---- recipe round trip --------------------------------------------------------
     def to_block(self) -> dict | None:
-        if not self.enable.isChecked():
+        if not self._axes:
             return None
-        from scan_core.mask import is_picture
-        b: dict = {}
-        from_file = self.source_box.currentData() == "file"
+        b: dict = {"axes": dict(self._axes)}
+        src = self.source_box.currentData()
         path = self.file_edit.text().strip()
-        if not (from_file and is_picture(path)) and self.det_box.currentData():
-            b["detector"] = self.det_box.currentData()
-        if not self._raster:
-            b["axes"] = [self.x_box.currentData(), self.y_box.currentData()]
-        if from_file:
+        if src == "measure":
+            if self.det_box.currentData():
+                b["detector"] = self.det_box.currentData()
+        elif src == "picture":
             b["from"] = path
         else:
-            b["step"] = int(self.step_spin.value())
-        b["keep"] = self.keep_box.currentData()
-        t = self.thr_box.currentData()
-        b["threshold"] = ("auto" if t == "auto" else float(self.thr_spin.value())
-                          if t == "value" else {"fraction": float(self.thr_spin.value())})
-        b["margin"] = "auto" if self.margin_auto.isChecked() else float(self.margin_spin.value())
-        if from_file and is_picture(path) and self.extent_box.isChecked():
+            b["from"] = {"file": path, "detector": self.var_edit.text().strip()}
+        keep = self.keep_box.currentData()
+        b["keep"] = keep
+        if keep == "deviates":
+            b["k"] = float(self.k_spin.value())
+        else:
+            t = self.thr_box.currentData()
+            b["threshold"] = ("auto" if t == "auto" else float(self.thr_spin.value())
+                              if t == "value" else {"fraction": float(self.thr_spin.value())})
+        b["margin"] = ("auto" if self.margin_auto.isChecked()
+                       else float(self.margin_spin.value()))
+        if src == "measure" and self._outer and self.outer_box.currentData() == "each":
+            b["per_outer"] = "each"
+        if self.setting_rows and src == "measure":
+            b["settings"] = {r.param.id: r.value() for r in self.setting_rows}
+        if src == "picture" and self.extent_box.isChecked():
             x0, x1, y0, y1 = (float(w.value()) for w in self.ext)
             b["extent"] = {"x": [x0, x1], "y": [y0, y1]}
         return b
 
     def load_block(self, block) -> list[str]:
-        """Fill the card from a recipe's `mask` block (None = off). Returns the
-        ids this registry does not have."""
-        from scan_core.mask import spec_of
-        widgets = (self.enable, self.source_box, self.det_box, self.step_spin,
-                   self.file_edit, self.keep_box, self.thr_box, self.thr_spin,
-                   self.margin_auto, self.margin_spin, self.x_box, self.y_box,
+        """Fill the section from a recipe's `scout` block (None = off; the
+        ticks are the builder's). Returns the ids this registry does not have."""
+        from scan_core.scout import is_picture, spec_of
+        widgets = (self.source_box, self.det_box, self.file_edit, self.var_edit,
+                   self.keep_box, self.thr_box, self.thr_spin, self.k_spin,
+                   self.margin_auto, self.margin_spin, self.outer_box,
                    self.extent_box, *self.ext)
         missing: list[str] = []
+        for row in list(self.setting_rows):
+            self._remove_setting(row)
         for w in widgets:
             w.blockSignals(True)
         try:
             if not block:
-                self.enable.setChecked(False)
                 return []
             s = spec_of(block)
-            self.source_box.setCurrentIndex(1 if s["from"] else 0)
-            self.file_edit.setText(str(s["from"] or ""))
+            src = ("measure" if not s["from"] else
+                   "picture" if is_picture(s["from_file"]) else "scan")
+            self.source_box.setCurrentIndex(self.source_box.findData(src))
+            self.file_edit.setText(s["from_file"] or "")
+            self.var_edit.setText(str(s["from_detector"] or "") if src == "scan" else "")
             det = s["detector"]
-            if det:
+            if det and src == "measure":
                 i = self.det_box.findData(det)
                 if i < 0:
-                    if not s["from"]:
-                        missing.append(det)
+                    missing.append(det)
                     self.det_box.addItem(f"(missing)  ·  {det}", det)
                     i = self.det_box.findData(det)
                 self.det_box.setCurrentIndex(i)
-            self.step_spin.setValue(int(s["step"]))
             self.keep_box.setCurrentIndex(max(0, self.keep_box.findData(s["keep"])))
+            try:
+                self.k_spin.setValue(float(s["k"]))
+            except (TypeError, ValueError):
+                pass
             t = s["threshold"]
             if t == "auto":
                 self.thr_box.setCurrentIndex(0)
@@ -2909,27 +3195,29 @@ class MaskCard(QtWidgets.QFrame):
                 self.thr_box.setCurrentIndex(2); self.thr_spin.setValue(float(t["fraction"]))
             else:
                 self.thr_box.setCurrentIndex(1); self.thr_spin.setValue(float(t))
-            self.margin_auto.setChecked(s["margin"] == "auto")
-            if s["margin"] != "auto":
-                self.margin_spin.setValue(float(s["margin"]))
-            for box, name in zip((self.x_box, self.y_box), s["axes"] or ()):
-                i = box.findData(name)
-                if i < 0:
-                    box.addItem(name, name)
-                    i = box.findData(name)
-                box.setCurrentIndex(i)
+            m = s["margin"]
+            if isinstance(m, dict):
+                # one box for every axis: the largest (a margin per axis, e.g.
+                # an old um margin converted, is kept only in the file)
+                vals = [float(x) for x in m.values() if x != "auto"]
+                m = max(vals) if vals else "auto"
+            self.margin_auto.setChecked(m == "auto")
+            if m != "auto":
+                self.margin_spin.setValue(float(m))
+            self.outer_box.setCurrentIndex(1 if s["per_outer"] == "each" else 0)
             e = s["extent"]
             self.extent_box.setChecked(bool(e))
             if e:
                 vals = list(e.get("x") or (-50, 50)) + list(e.get("y") or (-50, 50))
                 for w, val in zip(self.ext, vals):
                     w.setValue(float(val))
-            self.enable.setChecked(True)
         finally:
             for w in widgets:
                 w.blockSignals(False)
-            self._sync_enabled()
-            self.setVisible(len(self._dims) >= 2 or self.enable.isChecked())
+        for pid, value in (s["settings"] or {}).items():
+            if self.add_scout_setting(pid, value) is None:
+                missing.append(pid)
+        self._sync()
         return missing
 
     def describe(self) -> str:
@@ -2937,32 +3225,110 @@ class MaskCard(QtWidgets.QFrame):
         b = self.to_block()
         if not b:
             return ""
-        src = (f"from {Path(b['from']).name}" if b.get("from")
-               else f"pass 1: {b.get('detector', '?')} every {b['step']}. point")
-        return f"XY mask {src}, then only inside it"
+        return "scout pass " + self.state_text()[len("on: "):]
 
-    # ---- preview -------------------------------------------------------------
-    def preview(self) -> None:
+    # ---- previews -------------------------------------------------------------------
+    def preview_grid(self) -> None:
+        """Which points the scout visits, on the scan's grid: every point a
+        dim dot, the scout's points amber. The first two scouted axes as a map
+        (the outer one up the page), one axis as a strip. With the list of
+        indices per axis -- the coarse grid always ends on the LAST point, so
+        the last gap may be shorter."""
+        from scan_core import scout as S
+        if not self._axes or self.source_box.currentData() != "measure":
+            if self.source_box.currentData() == "measure":
+                self.picture.clear()
+                self.info.setText("Tick 'scout' on one or more axes; this shows the "
+                                  "points the scout will look at.")
+            return
+        try:
+            est = S.estimate(self._recipe_fn())
+        except Exception:
+            est = None
+        if not est:
+            self.picture.clear()
+            self.info.setText("")
+            return
+        names, coarse, sizes = est["names"], est["coarse"], est["sizes"]
+        # the map: rows = the outer of the first two scouted axes, columns = the inner
+        if len(names) >= 2:
+            ny, nx = sizes[0], sizes[1]
+            rows, cols = set(coarse[names[0]]), set(coarse[names[1]])
+        else:
+            ny, nx = 1, sizes[0]
+            rows, cols = {0}, set(coarse[names[0]])
+        cell = int(max(2, min(10, (self.PREVIEW_PX - 4) // max(nx, ny, 1))))
+        img = QtGui.QImage(nx * cell, ny * cell, QtGui.QImage.Format_RGB32)
+        img.fill(QtGui.QColor(C["code_bg"]))
+        p = QtGui.QPainter(img)
+        # every grid point a faint dot, the scout's points a full amber cell:
+        # on a big grid the dots merge into a grey ground and the scout's
+        # lattice still stands out
+        dim = QtGui.QColor(C["muted"]); dim.setAlpha(150)
+        hit = QtGui.QColor(C["accent"])
+        dot = max(1, cell // 3)
+        for i in range(ny):
+            for j in range(nx):
+                if i in rows and j in cols:
+                    p.fillRect(j * cell, i * cell, max(1, cell - (cell > 2)),
+                               max(1, cell - (cell > 2)), hit)
+                else:
+                    p.fillRect(j * cell + (cell - dot) // 2, i * cell + (cell - dot) // 2,
+                               dot, dot, dim)
+        p.end()
+        pix = QtGui.QPixmap.fromImage(img)
+        side = self.PREVIEW_PX - 4
+        if pix.width() > side or pix.height() > side:
+            pix = pix.scaled(side, side, QtCore.Qt.KeepAspectRatio,
+                             QtCore.Qt.SmoothTransformation)
+        self.picture.setPixmap(pix)
+
+        def idx_text(c):
+            c = list(c)
+            return (", ".join(map(str, c)) if len(c) <= 7 else
+                    ", ".join(map(str, c[:4])) + ", ..., " + ", ".join(map(str, c[-2:])))
+        lines = [f"{n}: {idx_text(coarse[n])}  ({len(coarse[n])} of {sz})"
+                 for n, sz in zip(names, sizes)]
+        n_pts, blocks = est["points"], est["blocks"]
+        lines.append(f"scout: {n_pts:,} points" + (f" x {blocks} (again at every "
+                                                    f"{', '.join(est['outer'])})"
+                                                    if blocks > 1 else ""))
+        if est["inner"]:
+            lines.append(f"held at their first value during the scout: "
+                         f"{', '.join(est['inner'])}")
+        if len(names) > 2:
+            lines.append(f"(the map shows {names[0]} x {names[1]})")
+        self.info.setText("\n".join(lines))
+
+    def preview_mask(self) -> None:
         """The mask a FILE gives, on the scan's grid, drawn small: grey = the
-        source reading, amber = measured. X to the right, Y UP (as a map)."""
-        from scan_core import mask as M
+        source reading, amber = measured. The first two scouted axes, X (the
+        first) to the right and Y up."""
+        from scan_core import scout as S
         try:
             recipe = self._recipe_fn()
-            if not recipe.mask or not M.spec_of(recipe.mask)["from"]:
+            spec = S.spec_of(recipe.scout or {})
+            if not recipe.scout or not spec["from"]:
                 raise ValueError("choose a file first")
             dims = recipe.compile(self.registry).dims
-            ka, kb, kx, ky = M.mask_dims(recipe, dims)
-            spec = M.spec_of(recipe.mask)
-            ca, cb, V = M.load_source(spec, dims, ka, kb, kx, ky)
-            fa = np.asarray(dims[ka].coord, float)
-            fb = np.asarray(dims[kb].coord, float)
-            res = M.build(spec, ca, cb, V, fa, fb)
+            ks = S.scout_dims(spec, dims)
+            if len(ks) != 2:
+                raise ValueError("the preview draws two scouted axes")
+            coarse, V = S.load_source(spec, dims, ks)
+            fine = [np.asarray(dims[k].coord, float) for k in ks]
+            steps = []
+            for c, f in zip(coarse, fine):
+                pf = S._pitch(f)
+                steps.append(S._pitch(c) / pf if pf > 0 else 0.0)
+            names = [dims[k].name for k in ks]
+            res = S.build(spec, coarse, V, fine, S.margin_radii(spec, names, steps))
+            kx, ky = S.picture_xy(spec, dims)
         except Exception as exc:
             self.picture.clear()
             self.info.setText(f"no preview: {exc}")
             return
         keep, vals = res.keep, res.fine_values
-        if kx == ka:                                  # make it [y, x]
+        if kx < ky:                                   # make it [y, x]
             keep, vals = keep.T, vals.T
         cy = np.asarray(dims[ky].coord, float)
         cx = np.asarray(dims[kx].coord, float)
@@ -2971,26 +3337,25 @@ class MaskCard(QtWidgets.QFrame):
             keep, vals = keep[::-1], vals[::-1]
         if cx[0] > cx[-1]:
             keep, vals = keep[:, ::-1], vals[:, ::-1]
-        lo, hi = np.nanmin(vals) if np.isfinite(vals).any() else 0.0, \
-            np.nanmax(vals) if np.isfinite(vals).any() else 1.0
+        finite = np.isfinite(vals).any()
+        lo = np.nanmin(vals) if finite else 0.0
+        hi = np.nanmax(vals) if finite else 1.0
         grey = np.nan_to_num((vals - lo) / ((hi - lo) or 1.0), nan=0.5)
         grey = (40 + 140 * grey).astype(np.uint8)
         rgb = np.dstack([grey, grey, grey])
         acc = QtGui.QColor(C["accent"])
         a = np.array([acc.red(), acc.green(), acc.blue()], float)
-        mix = (0.45 * rgb[keep].astype(float) + 0.55 * a).astype(np.uint8)
-        rgb[keep] = mix
+        rgb[keep] = (0.45 * rgb[keep].astype(float) + 0.55 * a).astype(np.uint8)
         rgb = np.ascontiguousarray(rgb)
         h, w = keep.shape
         img = QtGui.QImage(rgb.data, w, h, 3 * w, QtGui.QImage.Format_RGB888).copy()
-        side = 180
         self.picture.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
-            side, side, QtCore.Qt.KeepAspectRatio, QtCore.Qt.FastTransformation))
+            self.PREVIEW_PX - 4, self.PREVIEW_PX - 4, QtCore.Qt.KeepAspectRatio,
+            QtCore.Qt.FastTransformation))
         n, total = int(res.keep.sum()), int(res.keep.size)
         self.info.setText(
-            f"{n} of {total} XY points measured ({100.0 * n / max(1, total):.0f} %)"
+            f"{n} of {total} points measured ({100.0 * n / max(1, total):.0f} %)"
             f"   ·   threshold {res.threshold:.6g}"
-            f"   ·   margin {M.margin_of(spec, ca, cb):.4g}"
             f"   ·   X right, Y up")
 
 
@@ -3151,9 +3516,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if hasattr(self, "window_card"):
             self.window_card.load_block(None)
             self.window_card.set_registry(registry)
-        if hasattr(self, "mask_card"):
-            self.mask_card.load_block(None)
-            self.mask_card.set_registry(registry)
+        if hasattr(self, "scout_section"):
+            self.scout_section.load_block(None)
+            self.scout_section.set_registry(registry)
         self._rebuild_summary()
 
     # ---- panels ----------------------------------------------------------
@@ -3362,8 +3727,36 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.stack_lay.setContentsMargins(0, 0, 0, 0); self.stack_lay.setSpacing(8)
         self.stack_lay.addStretch(1)
         scroll.setWidget(holder)
+        self.axis_scroll = scroll
         v.addWidget(scroll, 1)
+        # The SCOUT PASS: always here, one line when closed -- never a card
+        # that pops in with the second axis and squeezes the layout (Lukas,
+        # 2026-10-08). Opened, it takes the room from the axis list above.
+        self.scout_section = ScoutSection(recipe_fn=self.build_recipe)
+        self.scout_section.set_registry(self.registry)
+        self.scout_section.changed.connect(self._rebuild_summary)
+        self.scout_section.expanded_changed.connect(self._size_axis_list)
+        v.addWidget(self.scout_section, 0)
+        self._size_axis_list(False)
         return card
+
+    #: The axis list always shows at least this many axis rows -- also with
+    #: the scout section open: the axes the scout is about must stay in view
+    #: (the first render of the open section showed one row and a scroll bar).
+    AXIS_ROWS_MIN = 2.5
+    #: one axis row plus the spacing between rows, in pixels
+    AXIS_ROW_PX = 64
+
+    def _size_axis_list(self, open_: bool) -> None:
+        """Keep the axis-stack card the SAME height open or closed, so nothing
+        below it moves when the scout section is toggled: closed, the axis
+        list's minimum includes the room the open body would take; open, the
+        body takes that room and the list keeps its 2.5 rows. If the window is
+        too short for that, the middle column scrolls (_build_middle) rather
+        than squeezing the axis list."""
+        rows = int(self.AXIS_ROWS_MIN * self.AXIS_ROW_PX)
+        body = self.scout_section.BODY_MAX + self.scout_section.layout().spacing()
+        self.axis_scroll.setMinimumHeight(rows if open_ else rows + body)
 
     def _build_middle(self) -> QtWidgets.QWidget:
         """The axis stack, with the conditions underneath it.
@@ -3372,7 +3765,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         description of one measurement, and hiding half of it behind a tab is
         how a scan gets run at last week's RF power.
         """
-        page = QtWidgets.QWidget()
+        page = QtWidgets.QWidget(); page.setObjectName("root")
         v = QtWidgets.QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(12)
         v.addWidget(self._build_stack(), 1)
@@ -3383,12 +3776,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.window_card.set_registry(self.registry)
         self.window_card.changed.connect(self._rebuild_summary)
         v.addWidget(self.window_card, 0)
-        # XY MASK: shown when the scan has two axes that move something
-        self.mask_card = MaskCard(recipe_fn=self.build_recipe)
-        self.mask_card.set_registry(self.registry)
-        self.mask_card.changed.connect(self._rebuild_summary)
-        v.addWidget(self.mask_card, 0)
-        return page
+        # The column SCROLLS when the window is too short for all of it
+        # (the axis list keeps its 2.5 rows, the cards their own minimum)
+        # instead of squeezing whichever card gives way first.
+        area = QtWidgets.QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        area.setWidget(page)
+        self.middle_scroll = area
+        return area
 
     def _build_routines(self) -> QtWidgets.QWidget:
         """ROUTINES: what happens once before the scan and once after it.
@@ -4020,8 +4417,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       diagonal=self.diagonal_box.isChecked(),
                       window=(self.window_card.to_block()
                               if hasattr(self, "window_card") else None),
-                      mask=(self.mask_card.to_block()
-                            if hasattr(self, "mask_card") else None))
+                      scout=(self.scout_section.to_block()
+                             if hasattr(self, "scout_section") else None))
 
     def _compose_hooks(self) -> list[dict]:
         """The loaded hooks in their original order, with the card's routines
@@ -4221,9 +4618,30 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self._sync_window_card()
             missing += [m for m in self.window_card.load_block(getattr(recipe, "window", None))
                         if m not in missing]
-        if hasattr(self, "mask_card"):
-            self._sync_mask_card()
-            missing += [m for m in self.mask_card.load_block(getattr(recipe, "mask", None))
+        if hasattr(self, "scout_section"):
+            # the ticks on the rows (and their steps), then the section
+            block = getattr(recipe, "scout", None)
+            axes = (block or {}).get("axes") if isinstance(block, dict) else None
+            if isinstance(axes, dict):
+                for row in self.rows:
+                    hits = [n for n in row.scout_dims() if n in axes]
+                    if hits:
+                        row.scout.blockSignals(True)
+                        row.scout.setChecked(True)
+                        row.scout.blockSignals(False)
+                        row.scout_step.setEnabled(True)
+                        try:
+                            row.scout_step.setValue(int(axes[hits[0]]))
+                        except (TypeError, ValueError):
+                            pass
+                ticked = {n for r in self.rows if r.is_scout() for n in r.scout_dims()}
+                missing += [f"scout axis {n}" for n in axes if n not in ticked]
+            elif block:
+                # an old XY mask over two plain axes named no axes: there is
+                # nothing to tick, and the block would silently be dropped
+                missing.append("the scout's axes (tick 'scout' on the axes to scout)")
+            self._sync_scout_section()
+            missing += [m for m in self.scout_section.load_block(block)
                         if m not in missing]
         self._rebuild_summary()
         return missing
@@ -4261,7 +4679,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.routines_card.arrange()      # a new step may no longer fit side by side
         parked = self._sync_fly_detectors()
         self._sync_window_card()
-        self._sync_mask_card()
+        self._sync_scout_section()
         recipe = self.build_recipe()
         errs = recipe.validate(self.registry)
         conditions = ("   ·   " + ", ".join(
@@ -4278,8 +4696,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 conditions += self._throughout_summary(recipe)
         if hasattr(self, "window_card") and self.window_card.describe():
             conditions += "   ·   " + self.window_card.describe()
-        if hasattr(self, "mask_card") and self.mask_card.describe():
-            conditions += "   ·   " + self.mask_card.describe()
+        if hasattr(self, "scout_section") and self.scout_section.describe():
+            conditions += "   ·   " + self.scout_section.describe()
         if parked:
             conditions += (f"   ·   {parked} detector(s) set aside while flying "
                            f"(they cannot be recorded continuously)")
@@ -4308,6 +4726,25 @@ class ScanBuilder(QtWidgets.QMainWindow):
             eta = n * self.per_pt.value()
             how = f"@ {self.per_pt.value():g}s/pt"
             self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} pts")
+            from scan_core.scout import estimate as scout_estimate
+            est = scout_estimate(recipe)
+            if est is not None:
+                # With a SCOUT PASS only the scout's own points are known
+                # before the run; how many points follow is what the scout
+                # decides. So: the scout's time, and the full grid as the
+                # ceiling. (Rig, 2026-10-08: a scout point costs MORE than a
+                # scan point -- its points are farther apart, a full settle
+                # each -- but this window knows only the dwell.)
+                n_scout = est["points"] * est["blocks"]
+                if n_scout:
+                    self.summary.setText(self.summary.text()
+                                         + f"  ·  scout {n_scout:,} pts first")
+                    how = (f"for the scout ({n_scout:,} pts @ {self.per_pt.value():g}s/pt), "
+                           f"then decided by the scout (at most "
+                           f"{_fmt_duration(eta)} for every point)")
+                    eta = n_scout * self.per_pt.value()
+                else:
+                    how += ", at most -- the mask file decides how many are measured"
         # REPEATS (repeat.py) are in n already -- every repeat is measured. An
         # interval can make the scan longer than its dwell: never shorter than
         # (N-1) x interval per pass.
@@ -4343,29 +4780,32 @@ class ScanBuilder(QtWidgets.QMainWindow):
         clause = pre
         if self._running and self.run_progress is not None:
             clause = f"~{_fmt_duration(self.run_progress[2])} left (measured)"
-        self._detail_shown = head + clause + tail
+        note = getattr(self, "_scout_note", "") if self._running else ""
+        self._detail_shown = head + clause + tail + (f"   ·   {note}" if note else "")
         self.detail.setText(self._detail_shown)
 
-    def _sync_mask_card(self) -> None:
-        """Give the XY mask card the scan's axes (and the raster's, if one)."""
-        if not hasattr(self, "mask_card"):
+    def _scout_axes(self) -> dict:
+        """{dim name: coarse step} of the rows ticked 'scout', X before Y:
+        the INNER axis first (a raster: its x, then its y). A picture's
+        columns are the first scouted axis, so two linear rows Y (outer) and
+        X (inner) give {X, Y} -- the old mask's default."""
+        out = {}
+        for row in reversed(self.rows):
+            if row.is_scout():
+                for name in row.scout_dims():
+                    out[name] = int(row.scout_step.value())
+        return out
+
+    def _sync_scout_section(self) -> None:
+        """Give the SCOUT PASS section the ticked axes and the outer ones."""
+        if not hasattr(self, "scout_section"):
             return
-        axes = [r.to_axis() for r in self.rows]
-        dims = []
-        for ax in axes:
-            try:
-                from scan_core.recipe import _compile_axis
-                dims += [d for d in _compile_axis(ax) if d.params]
-            except Exception:
-                continue
-        rasters = [ax for ax in axes if ax.get("type") == "raster"]
-        raster = None
-        if len(rasters) == 1:
-            r = rasters[0]
-            raster = [r["x"].get("name") or r["x"]["param"],
-                      r["y"].get("name") or r["y"]["param"]]
-        fly = any(ax.get("type") == "fly" for ax in axes)
-        self.mask_card.set_dims([d.name for d in dims if d.kind != "fly"], raster, fly)
+        axes = self._scout_axes()
+        names = self._dim_names()
+        ks = [names.index(n) for n in axes if n in names]
+        outer = names[:min(ks)] if ks else []
+        fly = any(r.is_fly() for r in self.rows)
+        self.scout_section.set_axes(axes, outer, fly)
 
     def _sync_window_card(self) -> None:
         """Offer the resonance window for the TICKED detectors that support it."""
@@ -4450,6 +4890,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             try:
                 ds = run(recipe, self.registry, created_iso="live", on_log=self._on_log,
                          on_window=self.window_card.show_state,
+                         on_scout=self._on_scout,
                          attrs=self.run_info.attrs())
             except RoutineError as exc:
                 if exc.dataset is not None:
@@ -4489,6 +4930,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.worker.paused.connect(self._on_paused)
         self.worker.ask.connect(self._on_ask)
         self.worker.window.connect(self.window_card.show_state)
+        self.worker.scout.connect(self._on_scout)
         self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.save_lbl.setText(f"saving to {path}" if path else
                               "not saving automatically (no data directory set)")
@@ -5170,6 +5612,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """A scan is starting: forget the last one's position."""
         self._running = True
         self.run_where, self.run_progress, self.run_now = None, None, ""
+        self._scout_note, self._scout_var, self._scout_prev = "", None, ""
         self.view.set_marker(None)
         self._show_where()
 
@@ -5379,6 +5822,41 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """A snapshot mid-run: same dataset, points not measured yet are NaN."""
         self.dataset = ds
         self._fill_det_combo(ds)
+        var = getattr(self, "_scout_var", None)
+        if var and var in ds.data_vars and self.view.det_combo.currentText() != var:
+            # while the SCOUT runs its map is what is filling in: show it
+            # (rig, 2026-10-08: the plot stayed empty through the whole scout)
+            self.view.apply_view_state({"detector": var})
+
+    def _on_scout(self, st):
+        """The SCOUT PASS (scan_core/scout.py): its progress in the bar, its
+        map in the live plot while it runs, and -- once the mask is made --
+        the threshold it used and how many points will be measured, kept in
+        the detail line for the rest of the run."""
+        where = f" {st['where']}" if st.get("where") else ""
+        if st.get("phase") == "scout":
+            if getattr(self, "_scout_var", None) is None:
+                self._scout_prev = self.view.det_combo.currentText()
+                self._scout_var = st.get("variable")
+            self.progress.setFormat(
+                f"SCOUT{where}: {st['done']}/{st['total']} points  ·  "
+                f"~{_fmt_duration(st.get('eta_s') or 0.0)} left in the scout")
+            return
+        if st.get("phase") != "made":
+            return
+        self._scout_var = None
+        prev = getattr(self, "_scout_prev", "")
+        if prev and self.view.det_combo.findText(prev) >= 0:
+            self.view.apply_view_state({"detector": prev})
+        unit = f" {st['unit']}" if st.get("unit") else ""
+        how = ("deviation" if st.get("keep") == "deviates" else "threshold")
+        n, of = int(st.get("kept", 0)), max(1, int(st.get("of", 1)))
+        self._scout_note = (f"scout{where}: {how} {st.get('threshold', float('nan')):.4g}{unit} "
+                            f"-> {n:,} of {of:,} points ({100.0 * n / of:.0f} %); "
+                            f"{int(st.get('measured', 0)):,} of {int(st.get('total', 0)):,} "
+                            f"in the scan")
+        self.progress.setFormat("%p%")
+        self._show_detail()
 
     def _fill_det_combo(self, ds):
         """Hand the dataset to the viewer (it keeps the operator's choices)."""

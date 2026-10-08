@@ -562,56 +562,130 @@ while another PC holds control, or another scan uses it), its scans are saved
 with the suite's names in the suite's data folder, and Ctrl+C aborts a scan
 cleanly with the measured points saved.
 
-## Measuring only the elements: the XY mask
+## Smart sampling: measure only where something happens
 
-On a patterned sample much of an XY map is substrate, and measuring it as
-carefully as the magnetic elements wastes most of the time. The `mask` block
-does the map in two passes:
+Two features skip the parts of a scan where nothing happens and still hand
+back the full grid, with NaN (or a baseline) where nothing was measured and a
+mask in the file that says which is which:
 
-1. **Pass 1** reads ONE quick detector (the reflectivity, a power meter) at
-   every `step`-th point of the grid, in X and Y (`step: 3` = 1/9 of the
-   points).
-2. **The mask:** that map is interpolated onto the full grid, split by a
-   threshold (`auto` = Otsu's method, which finds the level between the
-   substrate and the elements), and grown by a `margin` so the edges are
-   measured too. `margin: auto` = half the pass-1 pitch, about how well a coarse
-   map can place an edge.
-3. **Pass 2**, the real scan, visits only the points inside the mask. The others
-   are never moved to (no travel, no settle) and stay NaN, so the result is
-   still the full matrix. `scan_mask` (1 = measured) and pass 1 itself
-   (`mask_<detector>` on its own coarse axes) are in the file.
+- the **scout pass** (below): take a quick look along any axes first, then
+  measure in detail only where the scout saw something. This covers the
+  patterned sample (elements on a substrate) and the FMR line in field x
+  frequency.
+- the **resonance window** (`window:`, `scan_core/window.py`): a slow array
+  detector (a spectrum analyser trace) sweeps only a band around the FMR line
+  that a Kittel model predicts at each point. Spec: `docs/DEVELOPER_NOTES.md`
+  and `INSTRUMENT_MODULE_GUIDE.md`, "Resonance window".
+
+### The scout pass
+
+*Take a quick look first, then measure in detail only where something is
+happening.* It works for any scan with something to measure:
+
+1. **The scout** reads ONE quick, scalar detector (a reflectivity, a power
+   meter, a lock-in R) at every k-th point of the axes ticked **scout** (k per
+   axis, default 3; the last point of each axis is always included, so 30
+   points give 0, 3, ..., 27, 29). Scouting two axes at every 3rd point costs
+   1/9 of the points.
+2. **The mask:** the scout's readings are interpolated onto the full grid and
+   a point is kept where the reading is
+   - `above` / `below` a threshold (`auto` = Otsu's method, which finds the
+     level between two groups such as substrate and elements; a number; or
+     `{fraction: f}` of the range), or
+   - `deviates` from the background: |value - median| > k x noise, with
+     noise = 1.4826 x the median absolute deviation (a robust estimate) and
+     k = 4 by default. This finds peaks AND dips without being told the sign,
+     and works on a sample with several levels or a gradient. It assumes the
+     background is most of what the scout sees.
+
+   The kept area is grown by a `margin` in **grid points** (default `auto` =
+   half the coarse step: 1.5 points for every 3rd), so edges are measured too.
+3. **The scan** then visits only the kept points. The others are never moved to
+   (no travel, no settle) and stay NaN, so the result is still the full matrix.
 
 ```yaml
 axes:
   - {type: raster, x: {param: pos_x, start: -45, stop: 45, num: 61},
                    y: {param: pos_y, start: -45, stop: 45, num: 61}}
 detectors: [lockin_r]
-mask: {detector: reflectivity, step: 3, keep: above, threshold: auto, margin: auto}
+scout: {axes: {pos_x: 3, pos_y: 3}, detector: reflectivity, keep: above}
 ```
 
-**Your own mask:** `from:` takes a file instead of pass 1. It can be a
-grayscale **image** (.png .tif .bmp .jpg; a colour image is read as its
-brightness), a number **matrix** (.csv, .txt/.dat, .npy), or an earlier **scan**
-(.nc; `detector` names the variable). With `keep: above`, bright pixels or large
-numbers mean *measure*. Columns run along X and rows along Y. Without `extent`
-the picture covers exactly the scan's area, with its first row at the start of
-Y. `extent: {x: [x0, x1], y: [y0, y1]}` places it elsewhere: the coordinates
-of the first and last column and row. Give y as [y1, y0] to flip it. Scan
-points outside the picture are measured.
+```yaml
+# not XY: an FMR map measured only around the line (recipes/scout_field_freq.yaml)
+axes:
+  - {type: linear, param: field,   start: 0,   stop: 120,  num: 41}
+  - {type: linear, param: rf_freq, start: 600, stop: 2000, num: 81}
+detectors: [lockin_r, lockin_phi]
+scout: {axes: {field: 2, rf_freq: 3}, detector: lockin_r, keep: deviates, k: 4,
+        settings: {rf_power: 10}}
+```
 
-**Coordinates:** the mask is matched by coordinate value, never by index, so it
-works in camera coordinates (`camera.laser_x/y`, which follow the sample) as well
-as in absolute stage µm. A scan file used as a mask must have been measured in
-the same parameters as the scan. A stage-µm mask on a camera-coordinate scan is
-refused, because the two differ by the stage's drift.
+**The other axes.** Unscouted axes OUTSIDE the scouted ones follow
+`per_outer`: `once` (default) scouts once at their first values and uses the
+same mask for all of them, because a patterned sample does not move with the
+field. `each` scouts again at every step of them, right before that step is
+measured, for a feature that moves with them (an FMR line drifting with the
+angle). Unscouted axes INSIDE a scouted one are held at their **first value**
+during the scout, and the mask then holds for all their values. For example,
+an XY scout on reflectivity with a field sweep at every point measures the
+whole field sweep on the elements and none of it on the substrate. If the
+feature depends on such an axis, scout that axis too.
 
-**Limits:** an element smaller than about one pass-1 pitch can fall between the
-coarse points entirely, so use a smaller `step` for such a sample. Fly scans
-cannot use a mask, because a row is one continuous move. Routines "at the start
-of each row" run at the first *measured* point of the row, and "every n points"
-counts measured points. In the Scan Builder, the XY MASK card appears for any
-scan with two moving axes. For a mask from a file, **Preview mask** draws it on
-the scan's grid before anything moves. Example: `recipes/xy_mask.yaml`.
+**Scout-only settings.** `settings: {hf2.tc1: 0.001}` holds those values only
+during the scout and puts the old ones back for the real scan, also after an
+Abort or an error. A short lock-in time constant or one scope average makes the
+scout fast even on the same instrument.
+
+**Your own mask.** `from:` takes a file instead of the scout:
+- an **image** (.png .tif .bmp .jpg; a colour image is read as its
+  brightness) or a number **matrix** (.csv, .txt/.dat, .npy). This needs
+  exactly two scouted axes: columns run along the FIRST axis in `axes` (X),
+  rows along the second (Y). With `keep: above`, bright pixels or large
+  numbers mean *measure*. Without `extent` the picture covers exactly the
+  scan's area, with its first row at the start of Y.
+  `extent: {x: [x0, x1], y: [y0, y1]}` places it elsewhere (give y as
+  [y1, y0] to flip it).
+- an **earlier scan**: `from: {file: run1.nc, detector: lockin_r}`. Its
+  detector is interpolated onto the new grid of the scouted axes. Each axis
+  is matched by coordinate NAME (or by the parameter it swept), and a missing
+  one is an error.
+
+Points outside the file's range are measured. Matching is by coordinate value,
+never by index, so a mask works in camera coordinates (`camera.laser_x/y`,
+which follow the sample) as well as in absolute stage µm. A stage-µm scan used
+on a camera-coordinate scan is refused, because the two differ by the stage's
+drift.
+
+**In the file:** `scan_mask` (int8, 1 = measured) on the scouted axes, plus
+the outer ones with `per_outer: each`; the scout's own readings `mask_<detector>`
+on coarse axes `mask_<axis>`; and the attributes `mask_json` (the block, also as
+`scout_json`), `mask_threshold`, `mask_points`, `mask_source`,
+`mask_margin_points` and `mask_margin` (in the axes' unit, when that is one
+length). These are the names the XY mask of 2026-10-07 used, so old and new files
+read the same way. An old recipe's `mask:` block still loads: it is translated
+to `scout:` (its margin in the axes' unit becomes grid points), and only
+`scout:` is written.
+
+**In the Scan Builder:** tick **scout** on each axis row to scout, with its
+step ("every"). The **SCOUT PASS** line at the bottom of the axis stack is
+always there. Click it to open the options and a preview of the points the
+scout will visit (or, for a file, **Preview mask**). The summary shows the
+scout's points and its time. How many points follow is "decided by the
+scout", and the estimate becomes the measured remaining time once it has run.
+During the run the scout's map fills in the live plot, the progress bar counts
+its points, and afterwards the threshold used and the number of points kept
+stay in the status line.
+
+![the scout pass on the Scan tab](../front-panels/suite-scout-scan.png)
+
+**Limits:** something narrower than about one coarse step can fall between the
+scout's points, so use a smaller step for it. A fly axis cannot be combined
+with a scout, because a row is one continuous move. A repeat axis cannot be
+scouted, and `per_outer: each` cannot sit inside an averaging repeat.
+Routines "at the start of each row" run at the first *measured* point of the
+row, and "every n points" counts measured points. Examples:
+`recipes/scout_xy.yaml`, `recipes/scout_field_freq.yaml`.
 
 **Diagonal row change** (`diagonal: true`, the "diagonal" box next to
 zig-zag): at a point where several axes change at once (a new row), every new
@@ -621,8 +695,8 @@ before going to the first column. The first rig test of the mask measured that
 as one wasted ~3 s settle per row. It is off by default because two moves at
 once must be allowed by the hardware: this is fine for the camera's array
 point, but a KIM101 moving two channels together is not verified yet. It
-applies to pass 1 of a mask too. A knob that cannot be sent without waiting is
-set the old way.
+applies to the scout too. A knob that cannot be sent without waiting is set
+the old way.
 
 ## Repeating and averaging: the `repeat` axis
 
@@ -798,7 +872,7 @@ recalling.
 ## Tests
 
 ```bash
-uv run pytest -q        # 819 pass + 3 skipped (2026-10-05), all offline
+uv run pytest -q        # 990 pass + 5 skipped (2026-10-08), all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so

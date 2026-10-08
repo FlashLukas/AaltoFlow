@@ -1,5 +1,11 @@
 """The XY MASK (Lukas, 2026-10-07): measure only the magnetic parts of a map.
 
+Since 2026-10-08 the mask is the 2-D case of the SCOUT PASS (scout.py). These
+tests still write the OLD `mask:` block -- every recipe here goes through the
+translation (scout.from_mask) -- so they pin both that old recipes behave
+exactly as they did and the scout's numbers on an XY map. The N-D features
+are in test_scout.py.
+
 "In the XY scan we could perform a quick scan where we only look on the
 reflectivity and then create a mask ... and measure again", the quick scan at
 every 3rd point with the mask interpolated onto the real grid, the mask in
@@ -24,7 +30,7 @@ import numpy as np
 import pytest
 
 from scan_core import Recipe, run
-from scan_core import mask as M
+from scan_core import scout as M
 from scan_core.errors import ScanAborted
 from scan_core.registry import Gettable, build_sim_registry
 
@@ -75,9 +81,11 @@ def test_otsu_splits_two_populations():
         M.otsu([np.nan])
 
 
-def test_auto_margin_is_half_the_source_pitch():
-    assert M.auto_margin(np.arange(0, 10, 3.0), np.arange(0, 10, 2.0)) == 1.5
-    assert M.margin_of(M.spec_of({"margin": 0.7}), [0, 9], [0, 9]) == 0.7
+def test_auto_margin_is_half_the_source_step_in_grid_points():
+    names = ["a", "b"]
+    assert M.margin_radii(M.spec_of({}), names, [3, 2]) == [1.5, 1.0]
+    assert M.margin_radii(M.spec_of({"margin": 0.7}), names, [3, 2]) == [0.7, 0.7]
+    assert M.margin_radii(M.spec_of({"margin": {"a": 2}}), names, [3, 2]) == [2.0, 1.0]
 
 
 def test_threshold_forms():
@@ -90,7 +98,7 @@ def test_interpolation_is_exact_on_the_coarse_points_and_linear_between():
     ca, cb = np.array([0.0, 3.0]), np.array([0.0, 3.0, 6.0])
     V = np.array([[0.0, 3.0, 6.0], [3.0, 6.0, 9.0]])          # = a + b
     fa, fb = np.arange(4.0), np.arange(7.0)
-    Vf, unknown = M.interpolate(ca, cb, V, fa, fb)
+    Vf, unknown = M.interpolate([ca, cb], V, [fa, fb])
     assert np.allclose(Vf, fa[:, None] + fb[None, :])
     assert not unknown.any()
 
@@ -101,7 +109,7 @@ def test_a_nan_reading_and_the_outside_are_unknown():
     V[1, 1] = np.nan
     fa = np.array([0.0, 0.5, 1.0, 2.0, 3.0])                  # 3.0: outside
     fb = np.array([0.0, 1.0, 2.0])
-    _, unknown = M.interpolate(ca, cb, V, fa, fb)
+    _, unknown = M.interpolate([ca, cb], V, [fa, fb])
     assert unknown[2, 1] and unknown[1, 1]                    # on / next to the NaN
     assert not unknown[0, 0]
     assert unknown[4].all()                                   # outside the source
@@ -110,21 +118,26 @@ def test_a_nan_reading_and_the_outside_are_unknown():
 def test_unknown_points_are_always_measured():
     ca = cb = np.array([0.0, 1.0])
     V = np.array([[0.0, np.nan], [0.0, 0.0]])
-    res = M.build(M.spec_of({"threshold": 0.5}), ca, cb, V, ca, cb)
+    res = M.build(M.spec_of({"threshold": 0.5}), [ca, cb], V, [ca, cb], [0, 0])
     assert res.keep[0, 1] and not res.keep[1, 0]
 
 
-def test_grow_is_a_disc_in_the_axes_units():
+def test_grow_is_an_ellipse_in_grid_points():
     keep = np.zeros((11, 11), bool)
     keep[5, 5] = True
-    f = np.arange(11.0)                                       # pitch 1
-    g = M.grow(keep, f, f, 2.0)
+    g = M.grow(keep, [2, 2])
     assert g[5, 3] and g[5, 7] and g[3, 5] and g[7, 5]        # 2 along an axis
     assert g[4, 4] and not g[3, 3]                            # sqrt 8 > 2: a disc
-    # a coarser second axis: 2.0 of margin is ONE step of 2
-    g2 = M.grow(keep, f, np.arange(11.0) * 2, 2.0)
+    # one point of margin on the second axis
+    g2 = M.grow(keep, [2, 1])
     assert g2[5, 6] and not g2[5, 7]
-    assert (M.grow(keep, f, f, 0.0) == keep).all()
+    assert (M.grow(keep, [0, 0]) == keep).all()
+    # an old margin of 2.0 um on axes stepped 1 and 2 um is [2, 1] points --
+    # the same disc in micrometres the old mask grew
+    old = M.from_mask({"detector": "r", "margin": 2.0, "axes": ["x", "y"]},
+                      [{"type": "linear", "param": "y", "start": 0, "stop": 20, "num": 11},
+                       {"type": "linear", "param": "x", "start": 0, "stop": 10, "num": 11}])
+    assert old["margin"] == {"x": 2.0, "y": 1.0}
 
 
 # ───────────────────────────── the engine ───────────────────────────────────
@@ -238,11 +251,11 @@ def test_routines_fire_on_measured_points():
 
 def test_visit_counts_measured_points():
     keep = np.array([[False, True, False], [False, False, False], [True, True, False]])
-    v = M.visit_of(keep, (3, 3), 0, 1, zigzag=False)
+    v = M.visit_of(keep, M.visiting_order((3, 3), False))
     assert v.measured.tolist() == keep.ravel().tolist()
     assert v.before.tolist() == [0, 0, 1, 1, 1, 1, 1, 2, 3]
     assert v.any_in(0, 3) and not v.any_in(3, 6) and not v.any_in(2, 2)
-    z = M.visit_of(keep, (3, 3), 0, 1, zigzag=True)
+    z = M.visit_of(keep, M.visiting_order((3, 3), True))
     # row 1 is reversed in visiting order
     assert z.measured.tolist() == [False, True, False, False, False, False,
                                    True, True, False]
@@ -349,7 +362,7 @@ def test_a_mask_from_other_coordinates_is_refused(tmp_path):
     ({"detector": "nope"}, "not known"),
     ({"detector": "sample_region"}, "not a number"),
     ({"extent": {"x": [0, 1]}}, "extent"),
-    ({"axes": ["pos_x", "pos_x"]}, "two different"),
+    ({"axes": ["pos_x", "pos_x"]}, "different axes"),
     ({"axes": ["pos_x", "nope"]}, "no axis"),
     ({"from": "C:/does/not/exist.png", "detector": None}, "does not exist"),
 ])
@@ -364,7 +377,7 @@ def test_two_linear_axes_need_axes_named():
                detectors=["lockin_r"], mask={"detector": "reflectivity"})
     reg = build_sim_registry()
     assert any("say which axes" in e for e in r.validate(reg))
-    r.mask["axes"] = ["pos_x", "pos_y"]
+    r.scout["axes"] = {"pos_x": 3, "pos_y": 3}
     assert r.validate(reg) == []
     run(r, reg)
 
@@ -380,11 +393,13 @@ def test_a_fly_scan_is_refused():
 
 def test_a_recipe_without_a_mask_is_unchanged():
     r = Recipe(axes=[_raster(5)], detectors=["lockin_r"])
-    assert "mask" not in r.to_dict()
+    assert "mask" not in r.to_dict() and "scout" not in r.to_dict()
     ds = run(r, build_sim_registry())
     assert "scan_mask" not in ds and "mask_json" not in ds.attrs
+    # an old `mask` block is written back as `scout`, and reads back the same
     d = _recipe().to_dict()
-    assert Recipe.from_dict(d).mask == d["mask"]
+    assert "mask" not in d and d["scout"]["axes"] == {"pos_x": 3, "pos_y": 3}
+    assert Recipe.from_dict(d).scout == d["scout"]
 
 
 def test_the_schema_accepts_a_mask():
@@ -394,6 +409,7 @@ def test_the_schema_accepts_a_mask():
     d = _recipe({"threshold": {"fraction": 0.4}, "from": "a.png",
                  "extent": {"x": [0, 1], "y": [1, 0]}}).to_dict()
     jsonschema.validate(d, schema)
-    d["mask"]["nonsense"] = 1
+    assert "scout" in d
+    d["scout"]["nonsense"] = 1
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(d, schema)

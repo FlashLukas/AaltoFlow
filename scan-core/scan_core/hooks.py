@@ -756,7 +756,7 @@ def sweep_block(shape, dim_names, axis) -> int | None:
 def _each_sweep_fires(h, moment, flat, total, block, visit=None) -> bool:
     every = max(1, int(h.get("every") or 1))
     if visit is not None:
-        # With an XY MASK (mask.py) the points left out are never visited, so
+        # With a SCOUT PASS (scout.py) the points left out are never visited, so
         # the edges of a sweep are its first and last MEASURED points: an
         # autofocus "at the start of each row" still runs on a row whose first
         # point is substrate, and not at all on a row that is all substrate.
@@ -820,7 +820,7 @@ def run_hooks(hooks, moment, ctx, axis_name=None):
     flat = ctx.get("flat", 0)
     shape = ctx.get("shape") or ()
     total = int(math.prod(shape)) if shape else 0
-    # the XY mask's visiting record (mask.Visit), or None: "every n points"
+    # the scout pass's visiting record (scout.Visit), or None: "every n points"
     # then counts MEASURED points, the ones that cost time
     visit = ctx.get("visit")
     nth = int(visit.before[flat]) if visit is not None else flat

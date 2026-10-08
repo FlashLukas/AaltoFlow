@@ -21,8 +21,11 @@ zigzag:    bool              # serpentine order (off by default)
 diagonal:  bool              # at a row change send all setpoints, then wait
 window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
                              # array detector only around the predicted FMR line
-mask:      {...}             # optional XY MASK (mask.py): a quick reflectivity
-                             # pass first, then measure only inside the mask
+scout:     {...}             # optional SCOUT PASS (scout.py): a quick look at
+                             # every k-th point of the ticked axes first, then
+                             # measure only where something is happening
+                             # (the old `mask:` block of 2026-10-07 is read
+                             # and translated; only `scout` is written)
 
 A ROUTINE is a hook with action `call` (see hooks.py):
   {when: before_scan, action: call,
@@ -168,18 +171,30 @@ class Recipe:
     #: each trace is filled from the last full sweep's baseline and marked in a
     #: `<det>_measured` mask. Opt-in: a recipe without it runs exactly as before.
     window: dict | None = None
-    #: XY MASK (mask.py, 2026-10-07), or None = off. A quick pass of one
-    #: detector (the reflectivity) at every `step`-th point first; the real
-    #: scan then visits only the points inside the mask made from it, and the
+    #: SCOUT PASS (scout.py, 2026-10-08), or None = off. A quick look -- one
+    #: scalar detector at every k-th point of the scouted axes -- first; the
+    #: real scan then visits only the points where it saw something, and the
     #: rest are stored as not measured. Opt-in, like the window.
+    scout: dict | None = None
+    #: The XY MASK of 2026-10-07, READ ONLY: a recipe (a .yaml, or the
+    #: recipe_json inside an older .nc) that still says `mask:` is translated
+    #: into `scout` when it is made (scout.from_mask), and `mask` is then None
+    #: -- so a definition saved again says `scout:`, and nothing reads two
+    #: blocks that could disagree.
     mask: dict | None = None
+
+    def __post_init__(self):
+        if self.mask and not self.scout:
+            from .scout import from_mask
+            self.scout = from_mask(self.mask, self.axes)
+        self.mask = None
 
     # ---- (de)serialization ------------------------------------------------
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
                                    "hooks", "output", "settle", "zigzag", "window",
-                                   "mask", "diagonal")
+                                   "scout", "mask", "diagonal")
                  if f in d}
         return cls(**known)
 
@@ -189,8 +204,9 @@ class Recipe:
         # written (and stored in every .nc as recipe_json) exactly as before.
         if not d.get("window"):
             d.pop("window", None)
-        if not d.get("mask"):
-            d.pop("mask", None)            # the same for the mask
+        if not d.get("scout"):
+            d.pop("scout", None)           # the same for the scout pass
+        d.pop("mask", None)                # only ever READ (translated to scout)
         if not d.get("diagonal"):
             d.pop("diagonal", None)        # ... and for diagonal row changes
         return d
@@ -277,8 +293,8 @@ class Recipe:
         errs += validate_window(self, registry)
         from .repeat import validate as validate_repeat
         errs += validate_repeat(self, registry)
-        from .mask import validate as validate_mask
-        errs += validate_mask(self, registry)
+        from .scout import validate as validate_scout
+        errs += validate_scout(self, registry)
         # range check against each settable's limits
         try:
             for dim in self.compile(registry).dims:

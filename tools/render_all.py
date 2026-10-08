@@ -54,6 +54,8 @@ PROJECTS.update({
     "suite-queue-dialog": ("scan-core", True),
     "suite-fly-scan": ("scan-core", True),
     "suite-repeat-scan": ("scan-core", True),
+    "suite-scout-scan": ("scan-core", True),
+    "suite-scout": ("scan-core", True),
     "suite-fly": ("scan-core", True),
     # the data viewer (AaltoView successor), on simulated measurements
     "viewer-map": ("scan-core", True),

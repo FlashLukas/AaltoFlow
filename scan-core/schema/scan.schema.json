@@ -38,7 +38,9 @@
     "diagonal": {"type": "boolean",
                  "description": "where several axes change at once (a new row), send every setpoint first, then wait for all"},
     "window": {"$ref": "#/$defs/window"},
-    "mask": {"$ref": "#/$defs/mask"}
+    "scout": {"$ref": "#/$defs/scout"},
+    "mask": {"$ref": "#/$defs/mask",
+             "description": "DEPRECATED (2026-10-07 form, XY only): still read, translated into `scout` on load; never written"}
   },
   "required": ["axes", "detectors"],
   "$defs": {
@@ -237,8 +239,45 @@
       "required": ["detector", "field"],
       "additionalProperties": false
     },
+    "scout": {
+      "title": "SCOUT PASS: take a quick look first (one scalar detector at every k-th point of the scouted axes, or a file), then measure in detail only where something is happening (optional; stepped scans only)",
+      "type": "object",
+      "properties": {
+        "axes": {"type": "object", "minProperties": 1,
+                 "additionalProperties": {"type": "integer", "minimum": 1},
+                 "description": "{axis name: coarse step} for every scouted axis; for a picture the first is X (columns), the second Y (rows)"},
+        "detector": {"type": "string", "description": "what the scout reads (ONE number per point)"},
+        "keep": {"enum": ["above", "below", "deviates"],
+                 "description": "measure where the reading is above / below the threshold, or deviates from the median by more than k x noise (MAD x 1.4826)"},
+        "threshold": {"oneOf": [{"const": "auto"}, {"type": "number"},
+                                {"type": "object", "properties": {"fraction": {"type": "number", "minimum": 0, "maximum": 1}},
+                                 "required": ["fraction"], "additionalProperties": false}],
+                      "description": "above/below: auto (Otsu) | a number | {fraction}"},
+        "k": {"type": "number", "exclusiveMinimum": 0, "description": "deviates: how many noise widths (default 4)"},
+        "margin": {"oneOf": [{"const": "auto"}, {"type": "number", "minimum": 0},
+                             {"type": "object", "additionalProperties": {
+                                 "oneOf": [{"const": "auto"}, {"type": "number", "minimum": 0}]}}],
+                   "description": "grow the mask by this many GRID POINTS (per axis with a mapping); auto = half the coarse step"},
+        "per_outer": {"enum": ["once", "each"],
+                      "description": "the unscouted axes outside the scouted ones: one scout at their first values (once), or a new scout at every step (each)"},
+        "settings": {"type": "object", "additionalProperties": {"type": "number"},
+                     "description": "{parameter: value} held during the scout only, put back for the real scan"},
+        "from": {"oneOf": [
+                   {"type": "string", "description": "an image (.png .tif .bmp .jpg) or matrix (.csv .txt .dat .npy) -- exactly two scouted axes -- or an earlier .nc scan (with `detector`)"},
+                   {"type": "object", "properties": {"file": {"type": "string"}, "detector": {"type": "string"}},
+                    "required": ["file"], "additionalProperties": false,
+                    "description": "an earlier .nc scan and the variable to read from it"}]},
+        "extent": {"type": "object",
+                   "properties": {"x": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                                  "y": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}},
+                   "additionalProperties": false,
+                   "description": "where a picture lies: X of the first/last column, Y of the first/last row"}
+      },
+      "required": ["axes"],
+      "additionalProperties": false
+    },
     "mask": {
-      "title": "XY MASK: a quick pass of one detector (or a file) first; the scan then visits only the points inside the mask (optional; stepped scans only)",
+      "title": "XY MASK (2026-10-07, deprecated -- see scout): a quick pass of one detector (or a file) first; the scan then visits only the points inside the mask (optional; stepped scans only)",
       "type": "object",
       "properties": {
         "detector": {"type": "string", "description": "what pass 1 records (one number per point), or the variable read from a .nc in `from`"},

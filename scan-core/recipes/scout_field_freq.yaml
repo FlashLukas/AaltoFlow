@@ -1,0 +1,22 @@
+name: scout_field_freq
+comment: FMR map (field x frequency) measured only around the resonance line -- the scout finds the line without being told its sign.
+# Not an XY map: the scout works on ANY axes. It reads the lock-in at every
+# 2nd field and every 3rd frequency (21 x 28 of 41 x 81). keep: deviates
+# marks the points whose reading differs from the background (the median of
+# the scout) by more than k = 4 noise widths (noise = 1.4826 x the median
+# absolute deviation) -- a peak or a dip, whichever the line is. The mask is
+# grown by half the coarse step on each axis (auto), and only those points
+# are measured in detail.
+# settings: the scout runs at a higher RF power (a bigger signal, quickly
+# seen); the scan itself at 0 dBm. The power is put back after the scout, also
+# after an Abort.
+fixed: {rf_power: 0}
+axes:
+  - {type: linear, param: field,   start: 0,   stop: 120,  num: 41}   # outer / slowest
+  - {type: linear, param: rf_freq, start: 600, stop: 2000, num: 81}   # inner / fastest
+detectors: [lockin_r, lockin_phi]
+scout: {axes: {field: 2, rf_freq: 3}, detector: lockin_r, keep: deviates, k: 4,
+        margin: auto, settings: {rf_power: 10}}
+hooks: []
+output: {dir: ., basename: scout_field_freq, format: netcdf}
+settle: {default_timeout_s: 20.0}

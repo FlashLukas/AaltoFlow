@@ -1,0 +1,22 @@
+name: scout_xy_map
+comment: XY map measured only on the elements -- a quick reflectivity scout first, then the lock-in where the scout saw an element.
+# The SCOUT reads the reflectivity at every 3rd point of X and of Y (21 x 21 of
+# 61 x 61, always including the last point). Its map is interpolated onto the
+# 61 x 61 grid, split by Otsu's threshold (the islands reflect more than the
+# substrate) and grown by half the coarse step (1.5 grid points). The lock-in
+# is then read only inside that mask; the rest is never visited and is stored
+# as NaN, with `scan_mask` in the file saying which is which.
+# A mask of your own: replace `detector` by e.g. `from: mask.png`
+# (exactly two scouted axes: the first is X = the picture's columns).
+fixed: {rf_freq: 850, rf_power: 8, field: 40}
+axes:
+  - {type: raster,
+     x: {param: pos_x, start: -45, stop: 45, num: 61},
+     y: {param: pos_y, start: -45, stop: 45, num: 61},
+     fast: x}
+detectors: [lockin_r]
+scout: {axes: {pos_x: 3, pos_y: 3}, detector: reflectivity, keep: above,
+        threshold: auto, margin: auto}
+hooks: []
+output: {dir: ., basename: scout_xy_map, format: netcdf}
+settle: {default_timeout_s: 20.0}

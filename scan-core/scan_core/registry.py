@@ -530,8 +530,8 @@ class SimState:
     def reflectivity(self) -> float:
         """The fraction of the laser reflected HERE: the metal islands reflect
         more than the substrate between them, with the same soft-edged outline
-        as their magnetic response (2026-10-07, for the XY mask's quick pass,
-        mask.py). Not a step at the rim: a real spot of finite size sees a
+        as their magnetic response (2026-10-07, for the scout pass,
+        scout.py). Not a step at the rim: a real spot of finite size sees a
         smooth transition, which is what the mask's interpolation is for."""
         cover = 0.0
         for x0, y0, r, aspect, _df, _amp in ISLANDS:

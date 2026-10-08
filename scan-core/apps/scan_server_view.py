@@ -395,8 +395,15 @@ def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str,
         out.append(("axes", "zig-zag"))
     if recipe.get("diagonal"):
         out.append(("axes", "diagonal row change"))
-    if recipe.get("mask"):
-        m = recipe["mask"]
-        out.append(("axes", f"XY mask from {m['from']}" if m.get("from")
-                    else f"XY mask: {m.get('detector')} every {m.get('step', 3)}. point"))
+    # the scout pass (and an older definition's XY mask, which is the same thing)
+    m = recipe.get("scout") or recipe.get("mask")
+    if isinstance(m, dict):
+        src = m.get("from")
+        if isinstance(src, dict):
+            src = src.get("file")
+        axes = m.get("axes")
+        where = (", ".join(f"{n} every {k}" for n, k in axes.items())
+                 if isinstance(axes, dict) else f"every {m.get('step', 3)}. point")
+        out.append(("axes", f"scout pass: mask from {src}" if src
+                    else f"scout pass: {m.get('detector')}, {where}"))
     return out

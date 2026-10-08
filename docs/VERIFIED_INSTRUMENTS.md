@@ -428,7 +428,10 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
   is above the threshold, so no bright rim was cut off. 13.2 min in all (pass 1
   5.4 min, pass 2 7.9 min at 2.3 s per point) against ~32 min for the full grid.
   Tests: [`test_mask.py`](../scan-core/tests/test_mask.py),
-  [`test_mask_builder.py`](../scan-core/tests/test_mask_builder.py).
+  [`test_scout_builder.py`](../scan-core/tests/test_scout_builder.py). (Since
+  2026-10-08 the XY mask is the 2-D case of the SCOUT PASS,
+  `scan_core/scout.py`; an old `mask:` block is translated to `scout:` on load,
+  and the file names are unchanged.)
   Caveat: at a row change the outer axis (Y) is set before X, so the camera first
   settles at the corner below the row's last point (not recorded) -- one extra
   settle per row, in pass 1 and in the stepped scan alike. Fixed (opt-in) by
@@ -443,7 +446,9 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
   [`test_diagonal.py`](../scan-core/tests/test_diagonal.py). Not checked: two KIM
   axes moved at once (kim.position_x/y as the raster axes).
 - Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
-  loaded from a file (`from:`).
+  loaded from a file (`from:`); the scout pass on axes other than XY,
+  `keep: deviates`, `per_outer: each` and scout-only `settings` (2026-10-08,
+  simulator only).
 
 ## Simulation only (no hardware pass yet)
 

@@ -108,6 +108,8 @@ SIZES = {
     "suite-fly-scan": (1500, 950),
     "suite-repeat-scan": (1500, 950),
     "suite-fly": (1500, 950),
+    "suite-scout-scan": (1500, 950),
+    "suite-scout": (1500, 950),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
 }
@@ -534,6 +536,38 @@ def _scan_then_show_run(win):
     b.add_axis("rf_freq")
     b.rows[1].start.setValue(500.0); b.rows[1].stop.setValue(2500.0)
     b.rows[1].num.setValue(61)
+    b.per_pt.setValue(0.0)
+    b.run_scan(block=True)
+
+
+def _scout_scan(win):
+    """The SCOUT PASS opened on the Scan tab (2026-10-08): an XY map at
+    several frequencies, X and Y ticked 'scout' (every 3rd point), the
+    reflectivity as what the scout looks at, a scout-only setting -- and the
+    frequency OUTSIDE the scouted axes, so the 'outer axes' choice is live."""
+    _stack_two_axes(win)
+    b = win.builder
+    for row in b.rows:
+        if row.param.id in ("pos_x", "pos_y"):
+            row.scout.setChecked(True)
+            row.scout_step.setValue(3)
+    sec = b.scout_section
+    sec.det_box.setCurrentIndex(max(0, sec.det_box.findData("reflectivity")))
+    if b.registry.get("rf_power") is not None:
+        sec.add_scout_setting("rf_power", 12.0)
+    sec.set_expanded(True)
+    b._rebuild_summary()
+
+
+def _scout_run(win):
+    """A field x frequency map measured only around the resonance line
+    (recipes/scout_field_freq.yaml), on the simulator: the live plot shows
+    the result, NaN where the scout said 'nothing here'."""
+    from scan_core import Recipe
+    win.use_simulator()
+    b = win.builder
+    b.load_recipe(Recipe.load(ROOT / "scan-core" / "recipes" / "scout_field_freq.yaml"))
+    b.name_edit.setCursorPosition(0)
     b.per_pt.setValue(0.0)
     b.run_scan(block=True)
 
@@ -1361,6 +1395,8 @@ TARGETS = {
     "suite-fly-scan": _suite("Scan", _fly(run=False), settle=2.0),
     "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),
     "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
+    "suite-scout-scan": _suite("Scan", _scout_scan, settle=2.0),
+    "suite-scout": _suite("Measurement", _scout_run, settle=3.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,
