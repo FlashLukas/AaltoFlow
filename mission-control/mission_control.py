@@ -2229,7 +2229,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.suite_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
         self.suite_btn.setToolTip("scan-core: define and run scans. It connects to the "
                                   "services running here (Settings tab: follow the launcher).")
-        self.suite_btn.clicked.connect(self.open_suite)
+        # a lambda, not the method: clicked() passes checked=False, which
+        # open_suite would take as the file to recall ("--recall False")
+        self.suite_btn.clicked.connect(lambda: self.open_suite())
         self.viewer_btn = QtWidgets.QPushButton("  Data viewer")
         self.viewer_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon))
         self.viewer_btn.setToolTip("scan-core: look at saved measurements -- maps, 1-D "
@@ -2988,7 +2990,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log(f"the measurement suite is already open: recall the settings of "
                      f"{Path(recall).name} there (Data tab > Recall settings...).", "warn")
             return
-        extra = ["--recall", str(recall)] if recall is not None else []
+        # only a real path: a stray bool (a Qt signal's "checked") is not a file
+        extra = ["--recall", str(recall)] if isinstance(recall, (str, Path)) and str(recall) else []
         self.suite_proc = self._open_app(SUITE_SCRIPT, "suite", "measurement suite",
                                          self.suite_proc, extra_args=extra)
 

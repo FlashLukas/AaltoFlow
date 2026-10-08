@@ -395,3 +395,20 @@ def test_the_suite_gets_the_recall_argument(win_env, monkeypatch):
     win.suite_proc = None
     win.open_suite(recall="C:/data/map.nc")
     assert seen["args"] == ["--recall", "C:/data/map.nc"]
+
+
+def test_the_suite_button_does_not_pass_a_recall(win_env, monkeypatch):
+    """The Measurement suite button's clicked(checked=False) arrived as
+    recall=False and the suite logged "recall: could not read False"."""
+    mc, win, root, app = win_env
+    seen = {}
+
+    def fake_open_app(script, tag, what, running, extra_args=None):
+        seen["args"] = list(extra_args or [])
+        return None
+    monkeypatch.setattr(win, "_open_app", fake_open_app)
+    win.suite_proc = None
+    win.suite_btn.click()
+    assert seen["args"] == []
+    win.open_suite(recall=False)
+    assert seen["args"] == []
