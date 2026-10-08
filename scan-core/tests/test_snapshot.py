@@ -47,12 +47,15 @@ def test_diff_finds_only_real_differences():
                       "steps": [1, 2, 4], "deep": {"x": 2.0}},
            "ui": {"theme": "dark", "on": True, "new": 7}}
     d = {p: (a, b) for p, a, b in diff_config(SAVED, cur)}
-    assert ("motion", "speed") not in d                  # float within 1e-12
+    assert ("motion", "speed") not in d                  # float within REL_TOL
     assert d[("motion", "preset")] == ("slow", "fast")
     assert d[("motion", "steps")] == ([1, 2, 3], [1, 2, 4])  # list = one setting
     assert d[("motion", "deep", "x")] == (1.0, 2.0)      # nested groups walked
     assert d[("gone", "old")] == (4, MISSING)            # only in the file
-    assert d[("ui", "new")] == (MISSING, 7)              # only live now
+    # only live now = newer than the file: nothing to recall, not a difference
+    # (it is still listed by all_settings, the dialog's "show all")
+    assert ("ui", "new") not in d
+    assert any(p == ("ui", "new") for p, _a, _b in all_settings(SAVED, cur))
     assert ("ui", "theme") not in d
     assert len(all_settings(SAVED, cur)) > len(d)
 
@@ -61,7 +64,7 @@ def test_type_changes_are_differences():
     assert not same_value(True, 1)
     assert not same_value(1, "1")
     assert same_value(1, 1.0)
-    assert not same_value(1.0, 1.0 + 1e-9)
+    assert not same_value(1.0, 1.0 + 1e-5)       # beyond REL_TOL (1e-6)
     assert same_value([1.0, "a"], (1.0, "a"))
     assert not same_value([1], [1, 2])
     d = diff_config({"g": {"k": 1}}, {"g": {"k": True}})
@@ -166,3 +169,12 @@ def test_run_info_persists_in_the_settings_file(tmp_path):
     again = run_info.load(root=tmp_path)
     assert again["sample"] == "S1" and again["tags"] == "a, b"
     assert again["project"] == ""
+
+
+def test_an_instrument_round_trip_is_not_a_difference():
+    """The AFG reads its phase back in radians: 178 deg came back as
+    177.99999607 and was listed as a difference (lab 2026-10-08)."""
+    d = diff_config({"ch": {"phase_deg": 178.0}}, {"ch": {"phase_deg": 177.99999607237967}})
+    assert d == []
+    # a real change is still one
+    assert diff_config({"ch": {"phase_deg": 178.0}}, {"ch": {"phase_deg": 177.9}})

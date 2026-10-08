@@ -68,8 +68,12 @@ SESSION_KEYS = frozenset({"control", "clients"})
 #: Seconds one instrument may take per request while a snapshot is taken.
 REQUEST_TIMEOUT_MS = 2000
 #: Two floats closer than this (relative) are "the same setting": a value
-#: that went through the .ini and JSON may come back a rounding error away.
-REL_TOL = 1e-12
+#: that went through the .ini and JSON, or through the INSTRUMENT, may come
+#: back a rounding error away. 1e-12 was too strict: the AFG reads its phase
+#: back in radians, so 178 deg returns as 177.99999607 (2e-8 relative) and
+#: showed as a difference (lab, 2026-10-08). No real setting change is that
+#: small.
+REL_TOL = 1e-6
 
 
 class _Missing:
@@ -349,14 +353,20 @@ def same_value(a, b, rel_tol: float = REL_TOL) -> bool:
 def diff_config(saved: dict, current: dict, rel_tol: float = REL_TOL) -> list:
     """[(path, saved_value, current_value)] for every setting that differs.
 
-    `path` is a tuple ("motion", "speed_fast"); a key present on one side only
-    has MISSING on the other. Sorted by path, so the dialog is stable.
+    `path` is a tuple ("motion", "speed_fast"); a key the module still has
+    but the file does not gets MISSING as the saved value -- EXCEPT a key that
+    is newer than the file (the module gained it after the scan): there is
+    nothing to recall, so it is not a difference and only shows under "show
+    all" (lab 2026-10-08: dssg's power_calibration listed for a file of the
+    day before). Sorted by path, so the dialog is stable.
     """
     fs, fc = _flatten(saved or {}), _flatten(current or {})
     out = []
     for path in sorted(set(fs) | set(fc)):
         a, b = fs.get(path, MISSING), fc.get(path, MISSING)
-        if a is MISSING or b is MISSING or not same_value(a, b, rel_tol):
+        if a is MISSING:
+            continue                   # a setting newer than the file
+        if b is MISSING or not same_value(a, b, rel_tol):
             out.append((path, a, b))
     return out
 
