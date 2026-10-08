@@ -29,7 +29,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`dssg`](../modules/source/dssg-control) | DS Instruments SG12000L (fw V7.84) | **verified** (vernier measured, fine power, per-unit power calibration) | 2026-10-07 |
 | [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
-| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates) | 2026-09-28 |
+| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask | 2026-10-08 |
 | all others | -- | simulation only | -- |
 
 ## pm16 -- Thorlabs PM16-121 power meter (first module on real hardware)
@@ -406,7 +406,22 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
   come from (even with "stable within" 0.05 um); kim's step counter drifts ~2.7 um
   per row against the sample, which flying in camera coordinates absorbs; with
   0.1 um pixels at 1 um/s only 1 -- 3 pm16 samples fall into a pixel.
-- Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28.
+- 2026-10-08: **XY mask on the rig** (camera + kim + pm16,
+  [609619c](https://github.com/FlashLukas/AaltoFlow/commit/609619c)): the camera's
+  30 x 28 scan array (camera.scan_ix / scan_iy, placed by the stabiliser) across a
+  dark-film / bright edge; pass 1 = pm16 at every 3rd point (10 x 11), automatic
+  threshold, keep the bright side, automatic margin (1.5 points). 203 of 840 points
+  measured (24 %), every one of them finite, none outside the mask; the pass-1 map
+  matches the camera image; of the 39 measured points on the mask's boundary only 1
+  is above the threshold, so no bright rim was cut off. 13.2 min in all (pass 1
+  5.4 min, pass 2 7.9 min at 2.3 s per point) against ~32 min for the full grid.
+  Tests: [`test_mask.py`](../scan-core/tests/test_mask.py),
+  [`test_mask_builder.py`](../scan-core/tests/test_mask_builder.py).
+  Caveat: at a row change the outer axis (Y) is set before X, so the camera first
+  settles at the corner below the row's last point (not recorded) -- one extra
+  settle per row, in pass 1 and in the stepped scan alike.
+- Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
+  loaded from a file (`from:`).
 
 ## Simulation only (no hardware pass yet)
 
