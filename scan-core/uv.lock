@@ -16,7 +16,7 @@ resolution-markers = [
 [[package]]
 name = "aaltoview"
 version = "0.1.0"
-source = { git = "https://github.com/FlashLukas/AaltoView?branch=main#a54e2fcf5631d34cf8cd03d280a4f51328e9fd13" }
+source = { git = "https://github.com/FlashLukas/AaltoView?branch=main#478d1c2b8b23b904b5074d1786f9ff749ac1161d" }
 dependencies = [
     { name = "h5netcdf" },
     { name = "h5py" },
