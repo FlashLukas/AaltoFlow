@@ -198,6 +198,16 @@ class DwfDevice:
             raise DwfError(f"cannot open {self.name}: {self.last_error()} (WaveForms "
                            f"itself, or another program, may have it open)")
         self._h = h
+        # DYNAMIC auto-configure (3): a parameter change is applied to a
+        # running instrument WITHOUT stopping it. With the default (1) every
+        # *Set on a running output STOPPED it (lab AD2, raw dwf, 2026-10-08),
+        # and Configure(ch, 3) afterwards returned success but did NOT start it
+        # again. A driver mode, not an output: the device was just reset by
+        # the open anyway (outputs off). AnalogIn works under it (measured).
+        try:
+            self._dll.FDwfDeviceAutoConfigureSet(h, ctypes.c_int(3))
+        except Exception:
+            pass
 
     def close(self) -> None:
         with self.lock:
@@ -701,16 +711,14 @@ class DwfWaveGen:
         return sts.value in (1, 3, 7)
 
     def _apply(self, ch: int) -> None:
-        """A parameter changed on a RUNNING output must be applied, or the
-        output STOPS (lab AD2 2026-10-08, WaveForms 3.24.4: a new frequency or
-        amplitude while W1 ran left it off, "output: asked True, instrument
-        False"). Configure 3 = apply to the running channel (newer runtimes);
-        where that is refused, 1 = (re)start it."""
+        """After a parameter change: an output that was RUNNING must still be
+        running. With dynamic auto-configure (DwfDevice open) it is; should it
+        have stopped anyway (an older runtime), it is started again. Decided
+        by READING the status: on the lab AD2, Configure(ch, 3) returned
+        success and the output stayed off (2026-10-08)."""
         if not self._on.get(ch):
             return
-        try:
-            self.dev.call("FDwfAnalogOutConfigure", ctypes.c_int(ch), ctypes.c_int(3))
-        except DwfError:
+        if not self._running(ch):
             self.dev.call("FDwfAnalogOutConfigure", ctypes.c_int(ch), ctypes.c_int(1))
 
     def _sync_start(self) -> None:
@@ -720,10 +728,13 @@ class DwfWaveGen:
         moments). Only when both run: a single output needs no partner."""
         if self._n < 2 or not (self._on.get(0) and self._on.get(1)):
             return
+        # the sequence measured GOOD on the lab AD2 (4566d00: follow + align
+        # = 89.99 deg): W2 slaved to W1, then W1 (re)started -- which starts
+        # W2 with it. (cc46ac7 also started W2 on its own first: W2 then ran
+        # free, -78 deg.)
         d = self.dev
         d.call("FDwfAnalogOutMasterSet", ctypes.c_int(1), ctypes.c_int(0))      # VERIFY
-        d.call("FDwfAnalogOutConfigure", ctypes.c_int(1), ctypes.c_int(1))      # W2 armed
-        d.call("FDwfAnalogOutConfigure", ctypes.c_int(0), ctypes.c_int(1))      # W1 starts both
+        d.call("FDwfAnalogOutConfigure", ctypes.c_int(0), ctypes.c_int(1))
 
     def set_output(self, ch: int, on: bool) -> None:
         d = self.dev

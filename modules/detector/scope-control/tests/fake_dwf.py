@@ -41,6 +41,8 @@ class FakeDwf:
         base = {"func": 1, "freq": 1000.0, "amp": 1.0, "offset": 0.0, "phase": 0.0,
                 "sym": 50.0, "running": False, "enabled": 0, "stopped_by_set": False}
         self.hysteresis = None
+        self.autoconfigure = 1
+        self.synced_starts = 0
         self.aout = [dict(base), dict(base)]
         self.master = None
         # AnalogIO: (name, label, nodes, units), node values (set / measured)
@@ -87,6 +89,9 @@ class FakeDwf:
     def _FDwfDeviceOpen(self, i, h):
         self.handle = 1
         _put(h, 1)
+
+    def _FDwfDeviceAutoConfigureSet(self, h, v):
+        self.autoconfigure = _v(v)
 
     def _FDwfDeviceClose(self, h):
         self.handle = 0
@@ -202,17 +207,21 @@ class FakeDwf:
     def _FDwfAnalogOutConfigure(self, h, ch, start):
         chans = range(2) if _v(ch) < 0 else [_v(ch)]
         for c in chans:
-            if _v(start) == 3:                 # apply: keeps a running output running
-                self.aout[c]["running"] = self.aout[c]["running"] or self.aout[c]["stopped_by_set"]
-            else:
-                self.aout[c]["running"] = bool(_v(start))
+            if _v(start) == 3:
+                # measured on the AD2: "success", and a stopped output stays stopped
+                continue
+            self.aout[c]["running"] = bool(_v(start))
             self.aout[c]["stopped_by_set"] = False
+            if c == 0 and _v(start) and self.master == (1, 0):
+                self.aout[1]["running"] = True     # the slave starts with its master
+                self.synced_starts += 1
 
     def _stop_on_set(self, ch):
-        """Like the lab's AD2 (2026-10-08): a node parameter set while the
-        output runs STOPS it until it is applied / restarted."""
+        """Like the lab's AD2 (2026-10-08): with auto-configure 1 (the
+        default) a node parameter set while the output runs STOPS it; with 3
+        (dynamic) it keeps running."""
         o = self.aout[_v(ch)]
-        if o["running"]:
+        if o["running"] and self.autoconfigure != 3:
             o["running"] = False
             o["stopped_by_set"] = True
 

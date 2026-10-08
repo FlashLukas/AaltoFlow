@@ -49,7 +49,9 @@ def test_start_is_read_only_and_shares_one_handle(fake):
     scope, dev, events = build(fake)
     scope.start(run=False)
     try:
-        assert fake.sent() == [], fake.sent()              # nothing changed at start
+        # nothing changed at start -- except the driver's mode (dynamic
+        # auto-configure: how later changes are applied, not a setting)
+        assert fake.sent() == ["FDwfDeviceAutoConfigureSet"], fake.sent()
         assert [c[0] for c in fake.calls].count("FDwfDeviceOpen") == 1
         held = hwlock.held()
         assert len(held) == 1 and "FAKE0001" in str(held[0])
@@ -143,14 +145,26 @@ def test_generator_maps_amplitude_and_output(fake):
         assert g.read_channel(0)["output"] is True
         assert g.envelope("sine")["freq_max_Hz"] == 20e6   # the bandwidth, not 100 MHz
         # LAB AD2: a change while running stopped the output -- it must keep running
+        assert fake.autoconfigure == 3                    # dynamic, set at open
         g.set_frequency(0, 2000.0); g.set_amplitude(0, 0.4)
         assert fake.aout[0]["running"] and fake.aout[0]["freq"] == 2000.0
+        # an older runtime without dynamic mode: the status is READ and a stopped
+        # output started again (Configure 3 "succeeds" but does nothing there)
+        fake.autoconfigure = 1
+        g.set_frequency(0, 3000.0)
+        assert fake.aout[0]["running"] and fake.aout[0]["freq"] == 3000.0
+        fake.autoconfigure = 3
         # a phase between two running outputs: a synced start (W2 slaved to W1)
         g.set_output(1, True)
         assert fake.master == (1, 0)
         fake.master = None
+        n0, k0 = fake.synced_starts, len(fake.calls)
         g.set_phase(1, 90.0)
         assert fake.master == (1, 0) and fake.aout[0]["running"] and fake.aout[1]["running"]
+        # the sequence measured good: W2 slaved, W1 (re)started -- never W2 on its own
+        # (cc46ac7 started W2 first: it ran free, -78 deg on the AD2)
+        cfg = [c for c in fake.calls[k0:] if c[0] == "FDwfAnalogOutConfigure"]
+        assert [c[2] for c in cfg] == [0] and fake.synced_starts == n0 + 1
         fake.master = None
         g.align_phase()
         assert fake.master == (1, 0)
@@ -196,3 +210,14 @@ def test_service_prints_events(capsys):
     svc = ScopeService(scope, host="127.0.0.1", cmd_port=17648, pub_port=17649)
     svc._event("info", "supplies found: V+ off µ")
     assert "[info] supplies found: V+ off ?" in capsys.readouterr().out
+
+
+def test_a_quantised_level_is_not_a_change():
+    """Lab AD2: trigger level 0 read back as -0.0017 V -> "changed at the
+    scope: trigger_level_V" and "asked 0, the scope set -0.0017"."""
+    from scope.scope import _differs
+    actual = {"trigger_source": "ch1", "ch1_vdiv_V": 0.625}
+    assert not _differs("trigger_level_V", 0.0, -0.00170385, actual)
+    assert _differs("trigger_level_V", 0.0, 0.2, actual)
+    assert not _differs("ch1_offset_V", 0.1, 0.1031, actual)
+    assert _differs("tdiv_s", 0.02, 0.01, actual)

@@ -146,8 +146,10 @@ the device resets when it is opened again (measured on the lab AD2,
 2026-10-08), so the next start finds them off -- the service says so.
 
 On the AD2 (measured 2026-10-08): changing a setting of a RUNNING output
-stopped it -- the backend now applies every change to a running output
-(FDwfAnalogOutConfigure 3, else a restart). A phase between W1 and W2 needs a
+stopped it (dwf auto-configure 1, the default). The device is opened in
+DYNAMIC auto-configure (3): changes apply without stopping; after every change
+the output's status is read, and a running output found stopped is started
+again (Configure 3 "succeeded" but did not restart it). A phase between W1 and W2 needs a
 common start: setting a phase, or switching an output on while the other
 runs, restarts both together (W2 slaved to W1). The CH1/CH2 trigger has a
 hysteresis (`hardware.dwf_trigger_hysteresis_div`, 0.05 division): without

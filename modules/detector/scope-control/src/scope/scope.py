@@ -57,6 +57,27 @@ _SCREEN_DIV = 14.0
 _SUPPLY_NAMES = {"vplus": "V+", "vminus": "V-"}
 
 
+def _differs(key: str, a, b, actual: dict) -> bool:
+    """Are two values of a scope setting really different? Numbers within
+    0.1 % are the same; a VOLTAGE (trigger level, offset) also within 1 % of
+    a division -- the instrument quantises it (lab AD2 2026-10-08: level 0
+    read back as -0.0017 V, reported as "changed at the scope" and as
+    "asked 0, the scope set -0.0017")."""
+    if not (isinstance(a, (int, float)) and isinstance(b, (int, float))) \
+            or isinstance(a, bool) or isinstance(b, bool):
+        return a != b
+    tol = 1e-3 * max(abs(a), abs(b), 1e-12)
+    if key.endswith("level_V") or key.endswith("offset_V"):
+        if key.startswith("trigger_"):
+            src = actual.get("trigger_source", "ch1")
+            vdiv = actual.get(f"{src}_vdiv_V") if src in ("ch1", "ch2") else None
+        else:
+            vdiv = actual.get(f"{key.split('_')[0]}_vdiv_V")
+        if isinstance(vdiv, (int, float)) and vdiv > 0:
+            tol = max(tol, 0.01 * vdiv)
+    return abs(a - b) > tol
+
+
 def _tdiv_key(tdiv: float) -> str:
     """A time/div as a dict key (0.5 and 0.5000000001 are the same setting)."""
     return f"{float(tdiv):.6g}"
@@ -282,7 +303,7 @@ class Scope:
                 if v is not None:
                     flat[f"trigger_{k}"] = v
             for key, v in flat.items():
-                if key in old and old[key] != v and not at_start:
+                if key in old and _differs(key, old[key], v, old) and not at_start:
                     changed.append(key)
                 self._actual[key] = v
             # into cfg, so get_config / a saved .ini / the Settings dialog tell the truth
@@ -967,7 +988,7 @@ class Scope:
                 # stick): say so, the value it HOLDS is what is shown
                 if (isinstance(asked, float) and isinstance(held, (int, float))
                         and not isinstance(held, bool)
-                        and abs(held - asked) > 1e-3 * max(abs(asked), 1e-12)):
+                        and _differs(key, asked, held, self._actual)):
                     snapped.append(f"{key.replace('_', ' ')}: asked {asked:g}, "
                                    f"the scope set {held:g}")
         for msg in snapped:
