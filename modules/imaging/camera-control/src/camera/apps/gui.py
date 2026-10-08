@@ -379,6 +379,7 @@ class MainWindow(QMainWindow):
         self.ctrl = ctrl
         self.cfg = cfg
         self.remote = remote
+        self._switch_t: dict[int, float] = {}  # on/off box -> when the user last clicked it
         self._getters: dict[str, dict] = {}   # group -> {field: getter}
         self._form_widgets: dict[str, dict] = {}   # group -> {field: widget}
         self._forms: dict[str, QFormLayout] = {}   # group -> its form
@@ -574,7 +575,8 @@ class MainWindow(QMainWindow):
         r3.addStretch(1); r3.addWidget(QLabel("Best")); self.lab_best = QLabel("0.00 V")
         r3.addWidget(self.lab_best); l.addLayout(r3)
         self.chk_cont = QCheckBox("Continuous focus")
-        self.chk_cont.toggled.connect(lambda v: self.ctrl.set_continuous_focus(v))
+        self.chk_cont.toggled.connect(
+            lambda v: self._switch(self.chk_cont, self.ctrl.set_continuous_focus, v))
         l.addWidget(self.chk_cont)
         cards.append(f)
 
@@ -582,7 +584,8 @@ class MainWindow(QMainWindow):
         f, l = _card("Pattern tracking")
         r = QHBoxLayout()
         self.chk_track = QCheckBox("Allow tracking")
-        self.chk_track.toggled.connect(lambda v: self.ctrl.set_tracking(v))
+        self.chk_track.toggled.connect(
+            lambda v: self._switch(self.chk_track, self.ctrl.set_tracking, v))
         r.addWidget(self.chk_track)
         r.addStretch(1); r.addWidget(QLabel("Match")); self.led_match = _led(T.OK)
         r.addWidget(self.led_match); l.addLayout(r)
@@ -608,7 +611,8 @@ class MainWindow(QMainWindow):
         f, l = _card("Stabiliser")
         r = QHBoxLayout()
         self.chk_stab = QCheckBox("Stabilise")
-        self.chk_stab.toggled.connect(lambda v: self.ctrl.set_stabilize(v))
+        self.chk_stab.toggled.connect(
+            lambda v: self._switch(self.chk_stab, self.ctrl.set_stabilize, v))
         r.addWidget(self.chk_stab)
         r.addStretch(1); r.addWidget(QLabel("Stable")); self.led_stable = _led(T.OK)
         r.addWidget(self.led_stable); l.addLayout(r)
@@ -2083,13 +2087,14 @@ class MainWindow(QMainWindow):
         else:
             self.lab_patterns.setText("no backups")
         _set_led(self.led_stable, s.stable, T.OK)
-        # The stabiliser can be switched by something else -- placing the laser
-        # switches it off, a scan or a console may switch it -- so the box
-        # follows the brain (blockSignals: the change must not be sent back).
-        if self.chk_stab.isChecked() != bool(s.stabilize_on):
-            self.chk_stab.blockSignals(True)
-            self.chk_stab.setChecked(bool(s.stabilize_on))
-            self.chk_stab.blockSignals(False)
+        # The on/off switches FOLLOW the service: placing the laser switches the
+        # stabiliser off, a scan or a console may switch any of them, and a
+        # restarted service starts with all of them off while this window still
+        # shows the old ticks (lab PC 2026-10-08: "Allow tracking" stayed ticked
+        # over a restart, so a new template was never matched).
+        self._follow_switch(self.chk_track, s.tracking_on)
+        self._follow_switch(self.chk_stab, s.stabilize_on)
+        self._follow_switch(self.chk_cont, getattr(s, "continuous_focus_on", False))
         self._refresh_laser(s)
         _set_led(self.led_af, not s.af_running and s.af_error == "OK", T.OK)
         zcal_on = bool(getattr(s, "zcal_running", False))
@@ -2309,6 +2314,30 @@ class MainWindow(QMainWindow):
                         box.setValue(v)
         finally:
             self._idx_syncing = False
+
+    #: after a click, status frames older than this may still show the old
+    #: state; the box is not corrected back during that time
+    SWITCH_GRACE_S = 1.0
+
+    def _switch(self, box, setter, on: bool) -> None:
+        """A user click on an on/off box: send it, and remember when."""
+        self._switch_t[id(box)] = time.monotonic()
+        try:
+            setter(on)
+        except Exception as exc:          # refused: the next status puts the box back
+            self._log_event("warn", f"{box.text()}: {exc}")
+
+    def _follow_switch(self, box, on) -> None:
+        """Make the box show the service's state (blockSignals: gotcha #13 --
+        the correction must not be sent back as a command)."""
+        on = bool(on)
+        if box.isChecked() == on:
+            return
+        if time.monotonic() - self._switch_t.get(id(box), -1e9) < self.SWITCH_GRACE_S:
+            return                        # our own click is still on its way
+        box.blockSignals(True)
+        box.setChecked(on)
+        box.blockSignals(False)
 
     def _local_index_change(self) -> None:
         """Something done in THIS window may move the index: a change seen in

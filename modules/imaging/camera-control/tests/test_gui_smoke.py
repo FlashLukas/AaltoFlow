@@ -450,3 +450,56 @@ def test_fault_banner_shows_the_fault_and_clears_it():
         assert isinstance(w, QCheckBox)
     finally:
         win.close()
+
+
+def test_on_off_boxes_follow_the_service():
+    """Lab PC 2026-10-08: the camera service was restarted under an open GUI;
+    the new service had tracking off, the GUI still showed "Allow tracking"
+    ticked, and a drawn template was never matched. The on/off boxes must show
+    the service's state -- but a status frame from just BEFORE the user's own
+    click must not flip the box back."""
+    from PySide6.QtWidgets import QApplication
+    from camera.apps.gui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    brain, cam, xy, z = build_sim_system(cfg)
+    brain.start()
+    try:
+        time.sleep(0.1)
+        win = MainWindow(brain, cfg, remote=False)
+
+        def settle():
+            for _ in range(10):
+                win._refresh(); app.processEvents(); time.sleep(0.02)
+
+        # the user ticks tracking: the brain follows, the box stays ticked
+        win.chk_track.setChecked(True)
+        assert brain.status().tracking_on or brain._tracking_on
+        settle()
+        assert win.chk_track.isChecked()
+
+        # something else switches tracking, the stabiliser and continuous
+        # focus behind the GUI's back (a restart, a scan, a console)
+        win._switch_t.clear()                 # no recent click of ours
+        brain.set_tracking(False)
+        brain.set_stabilize(True)
+        brain.set_continuous_focus(True)
+        time.sleep(0.05)
+        settle()
+        assert not win.chk_track.isChecked()
+        assert win.chk_stab.isChecked()
+        assert win.chk_cont.isChecked()
+        # ... and following did NOT send anything back
+        assert not brain._tracking_on and brain._stabilize_on
+
+        # a stale status (from before a click) does not undo the click
+        brain.set_continuous_focus(False)
+        win.chk_track.setChecked(True)        # user click -> brain tracking on
+        brain._tracking_on = False            # pretend the frame lags behind
+        win._refresh(); app.processEvents()
+        assert win.chk_track.isChecked()      # inside the grace time: left alone
+        win.close()
+    finally:
+        brain.shutdown()
