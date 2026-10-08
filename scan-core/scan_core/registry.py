@@ -44,10 +44,16 @@ class Parameter:
 
 
 class Settable(Parameter):
-    def __init__(self, id, label, unit, limits, set_fn, get_fn):
+    def __init__(self, id, label, unit, limits, set_fn, get_fn, send_fn=None):
         super().__init__(id, label, unit, "settable")
         self.limits = tuple(limits)     # (min, max) in `unit`
         self._set, self._get = set_fn, get_fn
+        #: optional SPLIT set (2026-10-08): send_fn(value) sends the command
+        #: and returns a function that waits until it has settled. Lets the
+        #: engine send two setpoints before waiting for either -- the camera
+        #: going DIAGONALLY to the first point of the next row instead of
+        #: settling at (last column, next row) on the way. None = set only.
+        self._send = send_fn
         import inspect
         try:
             self._takes_timeout = "timeout_s" in inspect.signature(set_fn).parameters
@@ -62,6 +68,14 @@ class Settable(Parameter):
         "set" is a slow move across the whole row, which can take far longer
         than the module's default wait for an ordinary step.
         """
+        value = self._clamped(value)
+        if timeout_s is not None and self._takes_timeout:
+            self._set(value, timeout_s=timeout_s)
+        else:
+            self._set(value)                      # (real adapter blocks until settled)
+        return value
+
+    def _clamped(self, value) -> float:
         lo, hi = self.limits
         value = float(value)
         if not np.isfinite(value):
@@ -70,12 +84,18 @@ class Settable(Parameter):
             # UPPER LIMIT (the fly scan's "stop where you are" on Abort would
             # have sent the stage to the end of its travel). 2026-09-28.
             raise ValueError(f"{self.id}: refusing to set a non-finite value ({value})")
-        value = max(lo, min(hi, value))          # clamp: the safety envelope lives here
-        if timeout_s is not None and self._takes_timeout:
-            self._set(value, timeout_s=timeout_s)
-        else:
-            self._set(value)                      # (real adapter blocks until settled)
-        return value
+        return max(lo, min(hi, value))           # clamp: the safety envelope lives here
+
+    @property
+    def can_send(self) -> bool:
+        """True if this knob can be SENT now and waited for later."""
+        return self._send is not None
+
+    def send(self, value: float):
+        """Send the (clamped) setpoint WITHOUT waiting. Returns (value, wait):
+        call wait() to block until it has settled. Only if can_send."""
+        value = self._clamped(value)
+        return value, self._send(value)
 
     def get(self) -> float:
         return self._get()
@@ -707,11 +727,20 @@ def build_sim_registry() -> Registry:
     settable("device_v",  "Device voltage", "V",   (-10, 10),   "device_V")
     # X and Y go through s.move(): instant at stage_speed 0 (as always), a real
     # timed travel above it -- which is what a fly scan needs to fly over.
+    # Both can also be SENT and waited for later (a thread per move): the
+    # engine's `diagonal` row change moves X and Y at the same time.
+    def send_move(a, v):
+        import threading
+        t = threading.Thread(target=s.move, args=(a, v), daemon=True)
+        t.start()
+        return t.join
+
     for pid, label, attr in (("pos_x", "Position X", "x_um"),
                              ("pos_y", "Position Y", "y_um")):
         reg.add(Settable(pid, label, "um", (-100, 100),
                          set_fn=lambda v, a=attr: s.move(a, v),
-                         get_fn=lambda a=attr: getattr(s, a)))
+                         get_fn=lambda a=attr: getattr(s, a),
+                         send_fn=lambda v, a=attr: send_move(a, v)))
     settable("pos_z",     "Position Z",     "um",  (-50, 50),   "z_um")
     settable("stage_speed", "Stage speed (0 = instant)", "um/s", (0, 500),
              "stage_speed_um_s")

@@ -613,6 +613,17 @@ counts measured points. In the Scan Builder, the XY MASK card appears for any
 scan with two moving axes. For a mask from a file, **Preview mask** draws it on
 the scan's grid before anything moves. Example: `recipes/xy_mask.yaml`.
 
+**Diagonal row change** (`diagonal: true`, the "diagonal" box next to
+zig-zag): at a point where several axes change at once (a new row), every new
+setpoint is sent first and only then are they all waited for. Without it the
+outer axis moves first, so a camera scan settles at (last column, next row)
+before going to the first column. The first rig test of the mask measured that
+as one wasted ~3 s settle per row. It is off by default because two moves at
+once must be allowed by the hardware: this is fine for the camera's array
+point, but a KIM101 moving two channels together is not verified yet. It
+applies to pass 1 of a mask too. A knob that cannot be sent without waiting is
+set the old way.
+
 ## Repeating and averaging: the `repeat` axis
 
 A `repeat` axis sets nothing: everything INSIDE it is done N times. Where it

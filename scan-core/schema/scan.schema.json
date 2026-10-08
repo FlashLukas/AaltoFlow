@@ -35,6 +35,8 @@
     },
     "zigzag": {"type": "boolean",
                "description": "serpentine order: reverse inner axes on every other pass"},
+    "diagonal": {"type": "boolean",
+                 "description": "where several axes change at once (a new row), send every setpoint first, then wait for all"},
     "window": {"$ref": "#/$defs/window"},
     "mask": {"$ref": "#/$defs/mask"}
   },

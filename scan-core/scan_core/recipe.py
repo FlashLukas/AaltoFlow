@@ -18,6 +18,7 @@ axes:      [Axis, ...]      # OUTER→INNER. axes[0] is the slowest (outermost) 
 detectors: [param_id, ...]  # gettables recorded at every point
 hooks:     [Hook, ...]       # optional actions bound to a level/cadence
 zigzag:    bool              # serpentine order (off by default)
+diagonal:  bool              # at a row change send all setpoints, then wait
 window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
                              # array detector only around the predicted FMR line
 mask:      {...}             # optional XY MASK (mask.py): a quick reflectivity
@@ -152,6 +153,16 @@ class Recipe:
     #: 40 % direction asymmetry, or any axis with backlash or hysteresis (the
     #: magnet), reaches a slightly different place coming the other way.
     zigzag: bool = False
+    #: At a point where SEVERAL axes change (the start of a new row), send
+    #: every new setpoint first and only then wait for them all, instead of
+    #: one axis after the other (2026-10-08, from the first rig test of the XY
+    #: mask): the camera then goes diagonally to (first column, next row)
+    #: instead of settling at (last column, next row) on the way -- one
+    #: wasted stabiliser settle per row. OFF by default: two moves at once is
+    #: only safe where the instruments allow it (a KIM101 moving two channels
+    #: together is not verified). Knobs that cannot split send/wait are set
+    #: one after the other as before.
+    diagonal: bool = False
     #: RESONANCE WINDOW (window.py, 2026-09-28), or None = off. A slow array
     #: detector sweeps only a band around the predicted FMR line; the rest of
     #: each trace is filled from the last full sweep's baseline and marked in a
@@ -168,7 +179,7 @@ class Recipe:
     def from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
                                    "hooks", "output", "settle", "zigzag", "window",
-                                   "mask")
+                                   "mask", "diagonal")
                  if f in d}
         return cls(**known)
 
@@ -180,6 +191,8 @@ class Recipe:
             d.pop("window", None)
         if not d.get("mask"):
             d.pop("mask", None)            # the same for the mask
+        if not d.get("diagonal"):
+            d.pop("diagonal", None)        # ... and for diagonal row changes
         return d
 
     @classmethod

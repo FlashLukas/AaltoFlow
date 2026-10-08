@@ -288,9 +288,13 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # thing). In the module's own unit, i.e. on the WIRE value.
             res = _resolution(d)
 
-            def setter(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
+            def sender(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
                        _id=pid, _u=unit, _bool=(dtype == "bool"), _scale=scale,
                        _int=(dtype == "int"), timeout_s=None, _gen=gen, _d=d, _res=res):
+                """SEND the command now; return the function that WAITS for
+                it to settle. setter() below is the two in a row; the engine's
+                `diagonal` row change sends two knobs before waiting for
+                either (2026-10-08)."""
                 extra = dict(_s.get("extra") or {})
                 scale = _scale
                 # Send a bool as a bool. Settable hands us 0.0/1.0 after its
@@ -315,15 +319,21 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                     mine = _gen[0]
                 _inst.command(_s["verb"], **{_s["arg"]: wire}, **extra)
                 shown = wire if _bool else f"{value:g} {_u}".strip()
-                # timeout_s: a fly scan's row is ONE long move, far slower
-                # than the ordinary step this timeout was declared for
-                _inst.wait_until(_clamp_guard(_settle(wire), _inst, _d, wire, _id, _bool),
-                                 timeout_s=_t if timeout_s is None else timeout_s,
-                                 what=f"{_id} = {shown}",
-                                 cancel=lambda: _gen[0] != mine)
+
+                def wait():
+                    # timeout_s: a fly scan's row is ONE long move, far slower
+                    # than the ordinary step this timeout was declared for
+                    _inst.wait_until(_clamp_guard(_settle(wire), _inst, _d, wire, _id, _bool),
+                                     timeout_s=_t if timeout_s is None else timeout_s,
+                                     what=f"{_id} = {shown}",
+                                     cancel=lambda: _gen[0] != mine)
+                return wait
+
+            def setter(value, timeout_s=None, _send=sender):
+                _send(value, timeout_s=timeout_s)()
 
             param = reg.add(Settable(pid, label, unit, (lo, hi),
-                                     set_fn=setter, get_fn=getter))
+                                     set_fn=setter, get_fn=getter, send_fn=sender))
             _attach_stream(param, d, inst, module, streams, on_warn)
             # An INT control only has whole-number settings (a scan-array index,
             # a filter order). The builder reads this to offer whole points

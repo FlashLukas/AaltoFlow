@@ -551,8 +551,24 @@ def measure_pass(recipe, registry, dims, ka, kb, ctx, should_abort):
                 raise ScanAborted("aborted during the mask pass")
             redo = False
             while True:
-                for k, (d, n) in enumerate(((da, i), (db, j))):
-                    if redo or last[k] != n:
+                todo = [(k, d, n) for k, (d, n) in enumerate(((da, i), (db, j)))
+                        if redo or last[k] != n]
+                knobs = [registry.get(pid) for _, d, _ in todo for pid, _ in d.params]
+                if (getattr(recipe, "diagonal", False) and len(todo) == 2
+                        and all(getattr(p, "can_send", False) for p in knobs)):
+                    # a row change with `diagonal`: both setpoints sent, then
+                    # both waited for -- no settle at (last column, next row)
+                    waits = []
+                    for k, d, n in todo:
+                        for pid, values in d.params:
+                            current[pid], w = registry.get(pid).send(float(values[n]))
+                            waits.append(w)
+                    for w in waits:
+                        w()
+                    for k, _, n in todo:
+                        last[k] = n
+                else:
+                    for k, d, n in todo:
                         for pid, values in d.params:
                             current[pid] = registry.get(pid).set(float(values[n]))
                         last[k] = n

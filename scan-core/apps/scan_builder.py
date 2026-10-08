@@ -3668,6 +3668,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
             "or magnetic hysteresis all land somewhere slightly different coming back.")
         self.zigzag_box.toggled.connect(lambda *_: self._rebuild_summary())
         row.addWidget(self.zigzag_box)
+        self.diagonal_box = QtWidgets.QCheckBox("diagonal")
+        self.diagonal_box.setToolTip(
+            "At the start of a new row, send BOTH new coordinates and then wait,\n"
+            "so the stage (or the camera's stabiliser) goes straight to the first\n"
+            "point of the next row -- instead of first settling at (last column,\n"
+            "next row), one wasted settle per row.\n\n"
+            "Off by default: two moves at once must be allowed by the hardware.\n"
+            "Fine for the camera's array point (one target); a KIM101 moving two\n"
+            "channels together is not verified yet.")
+        self.diagonal_box.toggled.connect(lambda *_: self._rebuild_summary())
+        row.addWidget(self.diagonal_box)
         row.addStretch(1)
         self.run_btn = QtWidgets.QPushButton("▶  Run scan"); self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self.run_scan)
@@ -4006,6 +4017,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       # ONE comment: the run info's is the recipe's
                       comment=self.run_info.values()["comment"],
                       zigzag=self.zigzag_box.isChecked(),
+                      diagonal=self.diagonal_box.isChecked(),
                       window=(self.window_card.to_block()
                               if hasattr(self, "window_card") else None),
                       mask=(self.mask_card.to_block()
@@ -4137,6 +4149,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.zigzag_box.blockSignals(True)
         self.zigzag_box.setChecked(bool(getattr(recipe, "zigzag", False)))
         self.zigzag_box.blockSignals(False)
+        self.diagonal_box.blockSignals(True)
+        self.diagonal_box.setChecked(bool(getattr(recipe, "diagonal", False)))
+        self.diagonal_box.blockSignals(False)
         if getattr(recipe, "name", ""):
             self.name_edit.setText(recipe.name)
         if getattr(recipe, "comment", ""):
@@ -4314,7 +4329,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._detail_parts = (
             f"dims: {', '.join(d.name for d in comp.dims)}   ·   ",
             f"ETA ≈ {int(eta // 60):d}m {int(eta % 60):02d}s {how} (dwell only)",
-            ("   ·   zig-zag" if self.zigzag_box.isChecked() else "") + conditions)
+            ("   ·   zig-zag" if self.zigzag_box.isChecked() else "")
+            + ("   ·   diagonal row change" if self.diagonal_box.isChecked() else "")
+            + conditions)
         self._show_detail()
 
     def _show_detail(self):

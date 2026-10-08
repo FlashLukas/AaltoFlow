@@ -870,6 +870,11 @@ def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
     # `prev` is the caller's list and is updated IN PLACE, dim by dim, as each
     # dim's hooks run: if this attempt fails half-way (a settle that raises),
     # the next attempt must neither fire an axis hook twice nor skip one.
+    if _diagonal_point(ctx, registry, dims, idx, prev, redo):
+        _set_together(registry, compiled, dims, idx, prev, ctx, current, redo)
+        run_hooks(compiled.hooks, "before_point", ctx)
+        return _acquire_and_read(registry, dets, det_axes, data, acquire_groups,
+                                 ctx, idx, current, guard, shape)
     outer_changed = False
     for k, d in enumerate(dims):
         changed = idx[k] != prev[k]
@@ -890,7 +895,59 @@ def _measure_point(registry, compiled, dims, shape, dets, det_axes, data,
         prev[k] = idx[k]
 
     run_hooks(compiled.hooks, "before_point", ctx)
+    return _acquire_and_read(registry, dets, det_axes, data, acquire_groups,
+                             ctx, idx, current, guard, shape)
 
+
+def _diagonal_point(ctx, registry, dims, idx, prev, redo) -> bool:
+    """Does this point take the `diagonal` path? Only with recipe.diagonal,
+    only where at least TWO moving axes change at once (a row change), and
+    only if every knob involved can be sent and waited for separately."""
+    if not getattr(ctx.get("recipe"), "diagonal", False):
+        return False
+    moving = [d for k, d in enumerate(dims)
+              if d.params and (redo or idx[k] != prev[k])]
+    if len(moving) < 2:
+        return False
+    return all(getattr(registry.get(pid), "can_send", False)
+               for d in moving for pid, _ in d.params)
+
+
+def _set_together(registry, compiled, dims, idx, prev, ctx, current, redo):
+    """The `diagonal` row change: the axis hooks of every changing axis that
+    has left its value (outer first), then EVERY new setpoint sent, then all
+    of them waited for, then the hooks of the axes' new values. Same hooks,
+    same order among themselves -- only the moves overlap."""
+    changing = []
+    outer_changed = False
+    for k, d in enumerate(dims):
+        changed = idx[k] != prev[k]
+        if changed and d.kind == "repeat":
+            pace(ctx, k, d, int(idx[k]), outer_changed)
+        outer_changed = outer_changed or changed
+        if changed or redo:
+            changing.append((k, d, changed))
+    for k, d, changed in changing:
+        if changed and prev[k] is not None:
+            run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
+            prev[k] = None                    # fired; not again on a retry
+    waits = []
+    for k, d, _ in changing:
+        for pid, values in d.params:
+            value, wait = registry.get(pid).send(float(values[idx[k]]))
+            current[pid] = value
+            waits.append(wait)
+    for wait in waits:
+        wait()
+    for k, d, changed in changing:
+        if changed:
+            run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
+        prev[k] = idx[k]
+
+
+def _acquire_and_read(registry, dets, det_axes, data, acquire_groups, ctx, idx,
+                      current, guard, shape):
+    """Trigger, wait and read one point's detectors (the window too)."""
     # Slow detectors must be TRIGGERED and WAITED ON before they are read.
     # Trigger every group first and only then wait for them, so several
     # instruments acquire concurrently instead of one after another -- and

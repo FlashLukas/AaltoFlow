@@ -393,4 +393,10 @@ def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str,
         out.append(("detectors", ", ".join(dets)))
     if recipe.get("zigzag"):
         out.append(("axes", "zig-zag"))
+    if recipe.get("diagonal"):
+        out.append(("axes", "diagonal row change"))
+    if recipe.get("mask"):
+        m = recipe["mask"]
+        out.append(("axes", f"XY mask from {m['from']}" if m.get("from")
+                    else f"XY mask: {m.get('detector')} every {m.get('step', 3)}. point"))
     return out
