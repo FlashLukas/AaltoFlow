@@ -78,6 +78,21 @@ module. **Exclusive** first stops launcher-started services that are not in
 the profile. **Edit…** adds, renames and removes profiles. A member that is not
 found on this PC today is kept and skipped.
 
+## Start for a data file
+
+**Start for a data file…** (or drop a `.nc` on the window) brings up the
+modules a scan was measured with. Every scan file lists the instruments that
+were connected (the instrument snapshot; an older file only has its scan
+definition). The launcher cannot read a `.nc` itself, so it asks scan-core
+(`python -m scan_core.file_modules FILE`, in scan-core's environment, in the
+background) and then shows each module: its card here and what that card is
+doing, *not installed on this PC*, or *on another PC*. Stopped modules are
+ticked; **Start ticked** starts them in dependency order as a profile does,
+**Start + open GUIs** opens their GUIs too, **Save as profile…** makes a chip
+of them. The file's real/simulated mode is shown next to each card's `real`
+box, with a warning when they differ, but never changed from here: ticking
+`real` moves hardware, so that stays a click on the card.
+
 ## Run it
 
 ```bash

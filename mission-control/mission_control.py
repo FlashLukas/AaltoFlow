@@ -66,6 +66,8 @@ from suite_common.modules import (CATEGORIES, LOCAL_FILE, MANIFEST, ManifestErro
 # IN PLACE at startup, so every C[...] read follows the active theme.
 from theme import COLORS as C, DARK, set_theme, build_stylesheet, apply_palette  # noqa: E402
 from security_window import SecurityDialog, style_badge  # noqa: E402
+from datafile_start import plan_rows, run_helper  # noqa: E402
+from datafile_dialog import DataFileDialog  # noqa: E402
 
 DEFAULT_THEME = "dark"
 
@@ -391,6 +393,7 @@ class Bridge(QtCore.QObject):
     probed = QtCore.Signal(dict)                  # id -> up?
     held = QtCore.Signal(list)                    # hwlock.held(): addresses claimed on this PC
     described = QtCore.Signal(str, object)        # id, manifest or None
+    file_modules = QtCore.Signal(str, object)     # data file, scan-core helper's answer
 
 
 # ───────────────────── physical addresses (hwlock) ─────────────────────────
@@ -2186,6 +2189,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge.probed.connect(self._on_probed)
         self.bridge.held.connect(self._on_held)
         self.bridge.described.connect(self._on_described)
+        self.bridge.file_modules.connect(self._on_file_modules)
+        self._file_reading: str | None = None   # the data file being read, if any
+        self.setAcceptDrops(True)               # a .nc dropped on the window
         self.prober = Prober(self.bridge)
         self.suite_proc: QtCore.QProcess | None = None   # scan-core, opened at most once
         self.viewer_proc: QtCore.QProcess | None = None  # the data viewer, likewise
@@ -2239,7 +2245,19 @@ class MainWindow(QtWidgets.QMainWindow):
         stop_all = QtWidgets.QPushButton("  Stop all"); stop_all.setObjectName("danger")
         stop_all.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaStop))
         stop_all.clicked.connect(self.stop_all)
-        bar.addWidget(start_all); bar.addWidget(guis_all); bar.addWidget(self.suite_btn)
+        # A scan file records which modules it was measured with, so it can
+        # bring them up again like a profile (datafile_start.py). Dropping a
+        # .nc on the window does the same. Next to "Start all": it is a start.
+        # (Not in the PROFILES row: with the default chips that row already
+        # sets the window's minimum width.)
+        self.file_btn = QtWidgets.QPushButton("  Start for a data file…")
+        self.file_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
+        self.file_btn.setToolTip("Start the modules a scan file (.nc) was measured with:\n"
+                                 "shows them first, with what each card is doing now.\n"
+                                 "You can also drop a .nc file on this window.")
+        self.file_btn.clicked.connect(lambda: self.start_for_data_file())
+        bar.addWidget(start_all); bar.addWidget(self.file_btn)
+        bar.addWidget(guis_all); bar.addWidget(self.suite_btn)
         bar.addWidget(self.viewer_btn); bar.addWidget(self.catalogue_btn)
         bar.addStretch(1); bar.addWidget(stop_all)
         col.addLayout(bar)
@@ -2762,6 +2780,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 if c.spec.id not in ids and c.owns_service:
                     self.log(f"exclusive: stopping {c.spec.name}")
                     c.stop_service()
+        self._bring_up(members, open_guis)
+
+    def _bring_up(self, members: list[ModuleCard], open_guis: bool):
+        """Start these cards' services (dependency order, staggered) and then,
+        if asked, open their GUIs once the services had time to bind. The ONE
+        path for a profile chip and for "From data file...", so both behave
+        the same way."""
         for c in members:
             c.set_active(True)
         QtCore.QTimer.singleShot(1600, lambda cs=list(members): [c.set_active(False) for c in cs])
@@ -2778,6 +2803,134 @@ class MainWindow(QtWidgets.QMainWindow):
         ordered = start_order([c.spec for c in cards])
         for i, spec in enumerate(ordered):
             QtCore.QTimer.singleShot(i * 500, by_id[spec.id].start_service)
+
+    def add_profile(self, name: str, members: list[str]) -> dict:
+        """Add a profile (or replace the one with this name) and save it."""
+        prof = dict(name=name, members=list(members))
+        self.profiles = [p for p in self.profiles if p["name"] != name] + [prof]
+        try:
+            save_profiles(self.profiles)
+            self.log(f"saved profile '{name}' ({len(members)} module(s)) to {PROFILES_FILE.name}.")
+        except OSError as e:
+            self.log(f"could not save profiles.json: {e}", "error")
+        self.build_profile_bar()
+        return prof
+
+    # ---- start the modules a data file used ------------------------------
+    # The file is read by scan-core (this launcher has no netCDF reader and
+    # must not import scan-core): datafile_start.run_helper runs
+    # `python -m scan_core.file_modules FILE` in scan-core's environment, in a
+    # thread, and the answer comes back through the Bridge (gotcha #21: the
+    # window must never wait for another process).
+
+    @staticmethod
+    def _dropped_nc(event) -> str | None:
+        md = event.mimeData()
+        if not md.hasUrls():
+            return None
+        for url in md.urls():
+            path = url.toLocalFile()
+            if path and path.lower().endswith(".nc"):
+                return path
+        return None
+
+    def dragEnterEvent(self, event):                    # noqa: N802 (Qt name)
+        if self._dropped_nc(event):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):                         # noqa: N802 (Qt name)
+        path = self._dropped_nc(event)
+        if path:
+            event.acceptProposedAction()
+            self.start_for_data_file(path)
+        else:
+            super().dropEvent(event)
+
+    def start_for_data_file(self, path: str | None = None, runner=None) -> bool:
+        """Read which modules `path` (asked for when None) was measured with,
+        in the background; the dialog opens when the answer arrives. False if
+        nothing was started (cancelled, or a file is still being read).
+        `runner` replaces subprocess.run (tests)."""
+        if self._file_reading:
+            self.log(f"still reading {Path(self._file_reading).name} -- one file at a time.", "warn")
+            return False
+        if path is None:
+            start = get_setting("data_dir", None, ROOT) or str(ROOT)
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Start the modules a data file used", str(start),
+                "Scan data (*.nc);;All files (*)")
+            if not path:
+                return False
+        self._file_reading = path
+        self.file_btn.setEnabled(False)
+        self.log(f"reading which modules {Path(path).name} used (scan-core)...")
+        kwargs = {"runner": runner} if runner is not None else {}
+
+        def work():
+            try:
+                result = run_helper(ROOT, path, find_uv, **kwargs)
+            except Exception as exc:              # never lose the button to a crash
+                result = {"file": path, "modules": [], "error": str(exc)}
+            self.bridge.file_modules.emit(path, result)
+
+        threading.Thread(target=work, daemon=True, name="file-modules").start()
+        return True
+
+    def _on_file_modules(self, path: str, result):
+        self._file_reading = None
+        self.file_btn.setEnabled(True)
+        self.show_file_modules(path, result)
+
+    def show_file_modules(self, path: str, result: dict, modal: bool = True):
+        """The dialog for the helper's answer. modal=False returns it unopened
+        (tests); otherwise runs it and acts on the choice."""
+        name = Path(path).name
+        if result.get("error") and not result.get("modules"):
+            self.log(f"{name}: {result['error']}", "error")
+            if modal:
+                QtWidgets.QMessageBox.warning(
+                    self, "Start for a data file",
+                    f"Could not tell which modules {name} used:\n\n{result['error']}")
+            return None
+        up = {mid: c.up for mid, c in self.cards.items()}
+        owned = {mid for mid, c in self.cards.items() if c.owns_service}
+        rows = plan_rows(result, self.found.modules, up, owned)
+        self.log(f"{name} used: " + ", ".join(f"{r.slug} ({r.state})" for r in rows))
+        for r in rows:
+            if r.warning:
+                self.log(f"[{r.card_id}] {r.warning}", "warn")
+        dlg = DataFileDialog(path, result, rows, self)
+        if not modal:
+            return dlg
+        if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.action:
+            self.apply_file_choice(dlg.action, dlg.ticked_ids(), Path(path).stem)
+        return dlg
+
+    def apply_file_choice(self, action: str, ids: list[str], stem: str,
+                          profile_name: str | None = None):
+        """Do what the data-file dialog chose with the ticked card ids:
+        "start" (services), "start_guis" (services, then GUIs) or "profile"."""
+        cards = [self.cards[i] for i in ids if i in self.cards]
+        if not cards:
+            self.log("nothing ticked.", "warn")
+            return
+        if action in ("start", "start_guis"):
+            self.log(f"data file {stem} -> {', '.join(c.spec.name for c in cards)}")
+            self._bring_up(cards, open_guis=action == "start_guis")
+        elif action == "profile":
+            name = profile_name
+            if name is None:
+                name, ok = QtWidgets.QInputDialog.getText(
+                    self, "Save as profile", "Profile name:", text=stem)
+                if not ok:
+                    return
+            name = (name or "").strip()
+            if not name or name == FULL_SUITE:
+                self.log(f"'{name}' cannot be a profile name.", "warn")
+                return
+            self.add_profile(name, [c.spec.id for c in cards])
 
     def edit_profiles(self):
         dlg = ProfileEditor(self.profiles, self.found.modules, self)
