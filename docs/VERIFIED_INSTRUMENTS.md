@@ -22,7 +22,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 |---|---|---|---|
 | [`pm16`](../modules/detector/pm16-control) | Thorlabs PM16-121 USB power meter | **verified**, incl. a scan-core scan | 2026-09-15 |
 | [`kim`](../modules/motion/kim-control) | Thorlabs KIM101 + 3x PIA25 inertia stage | **verified** (moves, datum, camera calibration, rasters) | 2026-09-25 |
-| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma / D86 / Gauss, AF exposure, auto exposure) | 2026-09-29 |
+| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma / D86 / Gauss, AF exposure, auto exposure, re-drawn template keeps the scan array) | 2026-10-08 |
 | [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **verified** (spectrum mode, TG CW + TG sweep via shsg / shsna) | 2026-09-28 |
 | [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
 | [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
@@ -241,6 +241,14 @@ before/after routines.
     and the controller's drive settings are untouched (85 V, 1500 steps/s,
     20000 steps/s^2, counter kept). During an autofocus at the AF exposure the
     view label reads "threshold check paused (autofocus exposure)".
+  - 2026-10-08, after fd044a0: drawing a SECOND, different template keeps the
+    scan array where it was on the image (array centre (1188, 636) px, the new
+    template at (1585, 221), the spot at (972, 465); before the fix the array
+    jumped onto the spot / the template). Test:
+    [`test_redraw_template.py`](../modules/imaging/camera-control/tests/test_redraw_template.py).
+    Found on the way: after a camera-service restart the open GUI's "Allow
+    tracking" box still showed ticked while the new service had tracking off
+    (the box is never read back from the status) -- untick + tick again; reported.
 - Not yet checked on the rig: the lost-pattern fault of 2026-09-28, 12-bit spot
   frames.
 
@@ -419,7 +427,17 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
   [`test_mask_builder.py`](../scan-core/tests/test_mask_builder.py).
   Caveat: at a row change the outer axis (Y) is set before X, so the camera first
   settles at the corner below the row's last point (not recorded) -- one extra
-  settle per row, in pass 1 and in the stepped scan alike.
+  settle per row, in pass 1 and in the stepped scan alike. Fixed (opt-in) by
+  `diagonal: true`, below.
+- 2026-10-08: **diagonal row change on the rig**
+  ([01b9b6a](https://github.com/FlashLukas/AaltoFlow/commit/01b9b6a)), the same
+  masked camera-array scan with `diagonal: true`: the camera goes from (29, row)
+  straight to (0, next row) -- logged from its status, (29, next row) never
+  selected, and seen in the GUI. Pass 1 279 s instead of 321 s (~4.8 s per row
+  change), pass 2 2.13 s instead of 2.32 s per point; 199 of 840 points, 11.7 min
+  in all (full diagonal grid ~30 min). Test:
+  [`test_diagonal.py`](../scan-core/tests/test_diagonal.py). Not checked: two KIM
+  axes moved at once (kim.position_x/y as the raster axes).
 - Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
   loaded from a file (`from:`).
 
