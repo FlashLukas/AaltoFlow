@@ -248,7 +248,11 @@ before/after routines.
     [`test_redraw_template.py`](../modules/imaging/camera-control/tests/test_redraw_template.py).
     Found on the way: after a camera-service restart the open GUI's "Allow
     tracking" box still showed ticked while the new service had tracking off
-    (the box is never read back from the status) -- untick + tick again; reported.
+    (the box is never read back from the status) -- untick + tick again. Fixed
+    in f50172f: with tracking + stabiliser on, the service was restarted under the
+    open GUI, and a few seconds after it came back "Allow tracking", "Stabilise"
+    and "Continuous focus" were all unticked, matching the new service. Test:
+    `test_gui_smoke.py::test_on_off_boxes_follow_the_service`.
 - Not yet checked on the rig: the lost-pattern fault of 2026-09-28, 12-bit spot
   frames.
 
