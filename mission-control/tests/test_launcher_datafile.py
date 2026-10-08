@@ -251,7 +251,11 @@ def test_the_dialog_lists_every_module_and_greys_what_cannot_start(win_env):
     assert "SIMULATOR" in dlg.table.item(1, 6).text()     # stage's mismatch
     assert dlg.warn.text() and dlg.start_btn.isEnabled()
     dlg.set_ticked([])
-    assert not dlg.start_btn.isEnabled() and not dlg.profile_btn.isEnabled()
+    assert not dlg.start_btn.isEnabled()
+    # a profile of the file's setup is useful even with nothing to start
+    assert dlg.profile_btn.isEnabled()
+    assert set(dlg.profile_ids()) == {r.card_id for r in dlg.rows if r.card_id}
+    assert dlg.recall is True                 # recall offered by default
     dlg.set_ticked(["cam"])
     dlg.choose("start_guis")
     from PySide6 import QtWidgets
@@ -357,3 +361,37 @@ def test_an_unreadable_file_is_logged_not_shown(win_env):
     assert win.show_file_modules("x.nc", {"modules": [], "error": "cannot read"},
                                  modal=False) is None
     assert "cannot read" in win.logbox.toPlainText()
+
+
+def test_recall_opens_the_suite_with_the_file(win_env, monkeypatch):
+    """Lukas 2026-10-08: "add that" -- after the start, the measurement suite
+    opens with --recall FILE (its own list; nothing is sent from here)."""
+    mc, win, root, app = win_env
+    asked = []
+    monkeypatch.setattr(win, "open_suite", lambda recall=None: asked.append(recall))
+    for card in win.cards.values():
+        monkeypatch.setattr(card, "start_service", lambda: None)
+    win.apply_file_choice("recall", [], "map", path="C:/data/map.nc")
+    assert asked == ["C:/data/map.nc"]
+    asked.clear()
+    win.apply_file_choice("start", ["stage"], "map", path="C:/data/map.nc", recall=True)
+    assert asked == []                         # not before the services had time
+    _pump(app, 3.0)
+    assert asked == ["C:/data/map.nc"]
+    asked.clear()
+    win.apply_file_choice("start", ["stage"], "map", path="C:/data/map.nc", recall=False)
+    _pump(app, 3.0)
+    assert asked == []
+
+
+def test_the_suite_gets_the_recall_argument(win_env, monkeypatch):
+    mc, win, root, app = win_env
+    seen = {}
+
+    def fake_open_app(script, tag, what, running, extra_args=None):
+        seen["args"] = list(extra_args or [])
+        return None
+    monkeypatch.setattr(win, "_open_app", fake_open_app)
+    win.suite_proc = None
+    win.open_suite(recall="C:/data/map.nc")
+    assert seen["args"] == ["--recall", "C:/data/map.nc"]

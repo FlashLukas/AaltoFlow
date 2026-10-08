@@ -2905,20 +2905,39 @@ class MainWindow(QtWidgets.QMainWindow):
         if not modal:
             return dlg
         if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.action:
-            self.apply_file_choice(dlg.action, dlg.ticked_ids(), Path(path).stem)
+            ids = dlg.profile_ids() if dlg.action == "profile" else dlg.ticked_ids()
+            self.apply_file_choice(dlg.action, ids, Path(path).stem,
+                                   path=path, recall=dlg.recall)
         return dlg
 
     def apply_file_choice(self, action: str, ids: list[str], stem: str,
-                          profile_name: str | None = None):
+                          profile_name: str | None = None, path=None,
+                          recall: bool = False):
         """Do what the data-file dialog chose with the ticked card ids:
-        "start" (services), "start_guis" (services, then GUIs) or "profile"."""
+        "start" (services), "start_guis" (services, then GUIs), "profile", or
+        "recall" (only open the suite's recall list). With `recall` (and a
+        path) the suite is opened with --recall after a start, once the
+        services had time to come up; the suite itself then waits until they
+        are connected."""
+        if action == "recall":
+            if path is not None:
+                self.open_suite(recall=path)
+            return
         cards = [self.cards[i] for i in ids if i in self.cards]
+        if not cards and action in ("start", "start_guis") and recall and path is not None:
+            # everything already runs: nothing to start, just the recall
+            self.open_suite(recall=path)
+            return
         if not cards:
             self.log("nothing ticked.", "warn")
             return
         if action in ("start", "start_guis"):
             self.log(f"data file {stem} -> {', '.join(c.spec.name for c in cards)}")
             self._bring_up(cards, open_guis=action == "start_guis")
+            if recall and path is not None:
+                n_local = sum(c.spec.can_start for c in cards)
+                QtCore.QTimer.singleShot(n_local * 500 + 2000,
+                                         lambda p=path: self.open_suite(recall=p))
         elif action == "profile":
             name = profile_name
             if name is None:
@@ -2954,14 +2973,24 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, card in enumerate([c for c in self.cards.values() if c.spec.has_gui]):
             QtCore.QTimer.singleShot(i * 400, card.open_gui)
 
-    def open_suite(self):
+    def open_suite(self, recall=None):
         """Open scan-core's measurement suite (one instance).
 
         No ZeroMQ of our own: the suite discovers the same modules we do and
-        connects to the ones that are running.
+        connects to the ones that are running. `recall` = a measurement whose
+        "Recall settings" list the suite opens once its instruments are
+        connected (--recall). An already open suite cannot be handed a file,
+        so then the log says where to find it there.
         """
+        running = self.suite_proc is not None and \
+            self.suite_proc.state() != QtCore.QProcess.NotRunning
+        if recall is not None and running:
+            self.log(f"the measurement suite is already open: recall the settings of "
+                     f"{Path(recall).name} there (Data tab > Recall settings...).", "warn")
+            return
+        extra = ["--recall", str(recall)] if recall is not None else []
         self.suite_proc = self._open_app(SUITE_SCRIPT, "suite", "measurement suite",
-                                         self.suite_proc)
+                                         self.suite_proc, extra_args=extra)
 
     def open_viewer(self):
         """Open the data viewer (one instance). It needs no running service."""
@@ -2975,7 +3004,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                              self.catalogue_proc)
 
     def _open_app(self, script: str, tag: str, what: str,
-                  running: QtCore.QProcess | None) -> QtCore.QProcess | None:
+                  running: QtCore.QProcess | None,
+                  extra_args: list | None = None) -> QtCore.QProcess | None:
         """Start one of scan-core's applications, its output piped into the log
         as [tag]. Returns the process to keep (the running one if already open)."""
         project = ROOT / SUITE_DIR
@@ -2985,7 +3015,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if running is not None and running.state() != QtCore.QProcess.NotRunning:
             self.log(f"the {what} is already open.")
             return running
-        prog, args = build_command(project, script, [], gui=True, prefer_venv=False)
+        prog, args = build_command(project, script, list(extra_args or []), gui=True,
+                                   prefer_venv=False)
         proc = QtCore.QProcess(self)
         proc.setWorkingDirectory(str(project))
         proc.setProgram(prog)

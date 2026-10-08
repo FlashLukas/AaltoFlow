@@ -19,8 +19,11 @@ from datafile_start import (MISSING, OTHER_PC, REAL_TEXT, REMOTE, RUNNING, STOPP
 class DataFileDialog(QtWidgets.QDialog):
     """Lists the modules a data file used and asks what to do with them.
 
-    After exec(): `action` is "start", "start_guis", "profile" or None
-    (Cancel), and `ticked_ids()` the card ids that were ticked.
+    After exec(): `action` is "start", "start_guis", "profile", "recall" or
+    None (Cancel), `ticked_ids()` the card ids that were ticked (for a profile
+    with nothing ticked: every row that has a card, see profile_ids), and
+    `recall` whether the file's settings should be offered for recall after
+    the start.
     """
 
     COLS = ("", "Module", "In the file as", "Here", "File used", "Card", "Note")
@@ -49,8 +52,19 @@ class DataFileDialog(QtWidgets.QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        # The tick boxes: a visible frame and an accent fill when ticked -- the
+        # default indicator was dark-on-dark and hard to see (lab, 2026-10-08)
+        self.table.setStyleSheet(
+            f"QTableWidget::indicator {{ width: 16px; height: 16px; "
+            f"border: 1px solid {C['muted']}; border-radius: 3px; "
+            f"background: {C['panel_hi']}; }}"
+            f"QTableWidget::indicator:checked {{ background: {C['accent']}; "
+            f"border: 1px solid {C['accent_hi']}; }}"
+            f"QTableWidget::indicator:disabled {{ border: 1px solid {C['border']}; "
+            f"background: {C['panel']}; }}")
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        hh.setMinimumSectionSize(34)
         hh.setSectionResizeMode(len(self.COLS) - 1, QtWidgets.QHeaderView.Stretch)
         self._fill()
         self.table.itemChanged.connect(lambda _item: self._sync_buttons())
@@ -66,6 +80,16 @@ class DataFileDialog(QtWidgets.QDialog):
             self.warn.hide()
         lay.addWidget(self.warn)
 
+        # Recall: the settings stored in the file, offered in the measurement
+        # suite's "Recall settings" dialog once the modules are up. Nothing is
+        # sent from here or automatically: the operator ticks there what to
+        # set back (a recall can switch an output on or move a stage).
+        self.recall_box = QtWidgets.QCheckBox(
+            "Then recall the file's instrument settings (opens the measurement suite "
+            "with its 'Recall settings' list; nothing is sent until you choose)")
+        self.recall_box.setChecked(True)
+        lay.addWidget(self.recall_box)
+
         bar = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("Start ticked")
         self.start_btn.setObjectName("primary")
@@ -74,15 +98,20 @@ class DataFileDialog(QtWidgets.QDialog):
         self.guis_btn = QtWidgets.QPushButton("Start + open GUIs")
         self.guis_btn.setToolTip("As 'Start ticked', then open the GUI of every ticked module")
         self.profile_btn = QtWidgets.QPushButton("Save as profile...")
-        self.profile_btn.setToolTip("Make a profile chip of the ticked modules, to bring "
-                                    "them up again with one click")
+        self.profile_btn.setToolTip("Make a profile chip of the ticked modules (none "
+                                    "ticked: all of the file's modules found here), to "
+                                    "bring them up again with one click")
+        self.recall_btn = QtWidgets.QPushButton("Recall settings only")
+        self.recall_btn.setToolTip("Start nothing: open the measurement suite with this "
+                                   "file's 'Recall settings' list")
         cancel = QtWidgets.QPushButton("Cancel")
         for b, act in ((self.start_btn, "start"), (self.guis_btn, "start_guis"),
-                       (self.profile_btn, "profile")):
+                       (self.profile_btn, "profile"), (self.recall_btn, "recall")):
             b.clicked.connect(lambda _=False, a=act: self.choose(a))
         cancel.clicked.connect(self.reject)
         bar.addWidget(self.start_btn); bar.addWidget(self.guis_btn)
-        bar.addWidget(self.profile_btn); bar.addStretch(1); bar.addWidget(cancel)
+        bar.addWidget(self.profile_btn); bar.addWidget(self.recall_btn)
+        bar.addStretch(1); bar.addWidget(cancel)
         lay.addLayout(bar)
         self._sync_buttons()
 
@@ -134,12 +163,22 @@ class DataFileDialog(QtWidgets.QDialog):
                 item.setCheckState(QtCore.Qt.Checked if row.card_id in ids
                                    else QtCore.Qt.Unchecked)
 
+    @property
+    def recall(self) -> bool:
+        return self.recall_box.isChecked()
+
+    def profile_ids(self) -> list[str]:
+        """A profile of the ticked modules, or -- nothing ticked, e.g. because
+        they all run already -- of every module of the file that has a card
+        here: "the setup of this file" is useful as a chip either way."""
+        return self.ticked_ids() or [r.card_id for r in self.rows if r.card_id]
+
     def _sync_buttons(self):
         ids = set(self.ticked_ids())
         startable = any(r.can_start for r in self.rows if r.card_id in ids)
         self.start_btn.setEnabled(startable)
         self.guis_btn.setEnabled(bool(ids))
-        self.profile_btn.setEnabled(bool(ids))
+        self.profile_btn.setEnabled(bool(self.profile_ids()))
 
     def choose(self, action: str):
         self.action = action

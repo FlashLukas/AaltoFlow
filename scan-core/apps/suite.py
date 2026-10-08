@@ -370,6 +370,60 @@ class Suite(QtWidgets.QMainWindow):
             return
         self.data_view.set_dataset(ds, self.builder.last_saved)
 
+    #: how long recall_when_ready waits for the file's instruments to connect
+    RECALL_WAIT_S = 30.0
+
+    def recall_when_ready(self, path) -> None:
+        """Open the file in the Data tab and its "Recall settings" dialog once
+        the instruments the file used are connected (or after RECALL_WAIT_S).
+
+        What Mission Control's "Start for a data file..." asks for with
+        --recall (Lukas 2026-10-08): it has just started the modules, which
+        take a few seconds to come up and to be followed here. Nothing is
+        SENT: the dialog shows the file's settings next to the instruments'
+        and the operator ticks what to set back."""
+        path = Path(path)
+        try:
+            from scan_core.snapshot import read_snapshot
+            wanted = set(read_snapshot(str(path)))
+        except Exception as exc:
+            self.log(f"recall: could not read {path.name}: {exc}")
+            return
+        t0 = time.monotonic()
+        self.log(f"recall: waiting for {', '.join(sorted(wanted)) or 'nothing'} "
+                 f"to connect, then the settings of {path.name}")
+
+        def connected() -> set:
+            from scan_core.lab import module_prefix
+            out = set()
+            for name, inst in list(getattr(self.lab, "instruments", {}).items()):
+                try:
+                    out.add(module_prefix(inst))
+                except Exception:
+                    out.add(name)
+            return out
+
+        def poll():
+            have = connected() if self.lab is not None else set()
+            waited = time.monotonic() - t0
+            if not wanted <= have and waited < self.RECALL_WAIT_S:
+                QtCore.QTimer.singleShot(500, poll)
+                return
+            missing = sorted(wanted - have)
+            if missing:
+                self.log(f"recall: not connected after {waited:.0f} s: "
+                         f"{', '.join(missing)} -- their settings are shown, not sendable")
+            names = [self.tabs.tabText(i) for i in range(self.tabs.count())]
+            self.tabs.setCurrentIndex(names.index("Data"))
+            try:
+                self.data_view.load_file(path)
+            except Exception as exc:
+                self.log(f"recall: {path.name} not shown in the Data tab: {exc}")
+            from apps.recall import open_recall
+            self._recall_dlg = open_recall(self, self.lab, str(path))
+
+        QtCore.QTimer.singleShot(500, poll)
+
     def _recall_from_data(self):
         """Recall from the file open in the Data tab, else ask for one."""
         from apps.recall import open_recall
@@ -1207,6 +1261,10 @@ def main(argv=None) -> int:
     ap.add_argument("--scan-server", default=None, metavar="HOST[:CMD[:PUB]]",
                     help="watch the scan server there on the Measurement tab "
                          "(what the 'Scan server' card opens)")
+    ap.add_argument("--recall", default=None, metavar="FILE.nc",
+                    help="open this measurement's 'Recall settings' once its "
+                         "instruments are connected (Mission Control's "
+                         "'Start for a data file...')")
     args = ap.parse_args(argv)
 
     set_theme(args.theme or DEFAULT_THEME)      # BEFORE any widget is built
@@ -1227,6 +1285,8 @@ def main(argv=None) -> int:
                 follow=not args.no_follow and not modules,
                 scan_server=args.scan_server)
     win.show()
+    if args.recall:
+        win.recall_when_ready(args.recall)
     return app.exec()
 
 

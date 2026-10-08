@@ -344,3 +344,32 @@ def test_run_info_fields_list_the_values_in_the_data_folder(tmp_path):
     card.edits["tags"].setText("fmr")
     card.add_tag("map"); card.add_tag("FMR")               # appended once, not twice
     assert card.values()["tags"] == "fmr, map"
+
+
+def test_suite_recall_when_ready_opens_the_list_for_the_file(qapp, tmp_path, monkeypatch):
+    """Mission Control's "Start for a data file..." opens the suite with
+    --recall FILE (2026-10-08): the Data tab shows the file and the recall
+    dialog opens -- after its instruments connected, or after the wait."""
+    import numpy as np
+    from apps import recall as recall_mod
+    from apps.suite import Suite
+    path = tmp_path / "m.nc"
+    ds = xr.Dataset({"y": ("x", np.arange(3.0))}, coords={"x": np.arange(3.0)})
+    ds.attrs["snapshot_modules"] = "demo"
+    ds.attrs["snapshot_demo"] = json.dumps({"module": "demo", "config": {}})
+    ds.to_netcdf(path)
+    opened = []
+    monkeypatch.setattr(recall_mod, "open_recall",
+                        lambda parent, lab, p=None, **k: opened.append(p) or "dlg")
+    win = Suite(root=tmp_path, follow=False)
+    win.RECALL_WAIT_S = 0.6                    # nothing will connect here
+    win.recall_when_ready(path)
+    import time
+    from PySide6 import QtWidgets
+    end = time.monotonic() + 5
+    while not opened and time.monotonic() < end:
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.02)
+    assert opened == [str(path)]
+    assert win.tabs.tabText(win.tabs.currentIndex()) == "Data"
+    win.close()
