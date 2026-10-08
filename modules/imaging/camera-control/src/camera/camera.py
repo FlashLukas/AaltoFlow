@@ -3301,11 +3301,23 @@ class Camera:
         """Grab the template patch from the last frame and pin the scan array.
 
         ``roi`` = (cx, cy, w, h) in pixels marks the template.  ``array_center_px``
-        is where the scanning-array centre should sit (defaults to the current
-        spot, so the centre point starts on the spot = 'lock image to pattern').
+        is where the scanning-array centre should sit. Default: if an array is
+        already pinned (an earlier template), it STAYS where it is on the image
+        -- a new template is a new handle on the same sample, not a new array
+        (Lukas, 2026-10-08: re-drawing the template made the array jump onto
+        it). Only the very first template places the array: on the spot
+        ('lock image to pattern'), or on the template without a calibrated spot.
         """
         with self._lock:
             frame = None if self._last_frame is None else self._last_frame.copy()
+            # where the existing array centre is NOW, in image px: the main
+            # template's position (possibly off-screen while a backup drives)
+            # plus the stored template->array offset
+            old_center = None
+            if self.reference is not None and self._last_template_xy is not None:
+                ax, ay = self._last_template_xy
+                ox, oy = self.reference.array_center_offset_px
+                old_center = (ax + ox, ay + oy)
         spot_xy = self.spot_position()
         if frame is None:
             raise RuntimeError("no frame yet")
@@ -3315,7 +3327,10 @@ class Camera:
         tpl = frame[y0:y1, x0:x1].copy()
         tpl_center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
         if array_center_px is None:
-            array_center_px = spot_xy if spot_xy is not None else tpl_center
+            if old_center is not None:
+                array_center_px = old_center
+            else:
+                array_center_px = spot_xy if spot_xy is not None else tpl_center
         offset = (array_center_px[0] - tpl_center[0], array_center_px[1] - tpl_center[1])
         self.reference = Reference(template=tpl, array_center_offset_px=offset,
                                    meta=self._reference_meta())
