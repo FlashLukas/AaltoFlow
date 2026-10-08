@@ -220,11 +220,16 @@ class Hardware:
                    the n-th one WaveForms lists, or empty = the first one that
                    is free. (A serial is this PC's business: it stays in
                    scope.ini, never in tracked files.)
+    dwf_trigger_hysteresis_div -- the Analog Discovery's trigger hysteresis,
+                   in divisions of the source channel (0.05 = 31 mV at the 5 V
+                   range). Without it the input noise re-triggers on the wrong
+                   edge (lab AD2 2026-10-08: the slope looked ignored).
     """
 
     driver: str = "siglent"
     visa: str = "USB0::0xF4EC::0xEE3A::SERIAL::INSTR"
     dwf_device: str = ""
+    dwf_trigger_hysteresis_div: float = 0.05
     timeout_ms: int = 5000
     poll_s: float = 0.01
     max_points: int = 20000

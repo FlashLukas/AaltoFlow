@@ -39,7 +39,8 @@ class FakeDwf:
                     "level": 0.0, "position": 0.0, "cond": 0, "auto": 0.0,
                     "acquiring": False, "polls": 0}
         base = {"func": 1, "freq": 1000.0, "amp": 1.0, "offset": 0.0, "phase": 0.0,
-                "sym": 50.0, "running": False, "enabled": 0}
+                "sym": 50.0, "running": False, "enabled": 0, "stopped_by_set": False}
+        self.hysteresis = None
         self.aout = [dict(base), dict(base)]
         self.master = None
         # AnalogIO: (name, label, nodes, units), node values (set / measured)
@@ -137,6 +138,7 @@ class FakeDwf:
     def _FDwfAnalogInTriggerChannelSet(self, h, v): self.ain["trig_ch"] = _v(v)
     def _FDwfAnalogInTriggerConditionSet(self, h, v): self.ain["cond"] = _v(v)
     def _FDwfAnalogInTriggerAutoTimeoutSet(self, h, v): self.ain["auto"] = _v(v)
+    def _FDwfAnalogInTriggerHysteresisSet(self, h, v): self.hysteresis = _v(v)
     def _FDwfAnalogInAcquisitionModeSet(self, h, v): pass
 
     def _FDwfAnalogInConfigure(self, h, reconf, start):
@@ -184,18 +186,35 @@ class FakeDwf:
     def _FDwfAnalogOutNodeSymmetryGet(self, h, ch, node, out): _put(out, self.aout[_v(ch)]["sym"])
 
     def _FDwfAnalogOutNodeEnableSet(self, h, ch, node, v): self.aout[_v(ch)]["enabled"] = _v(v)
-    def _FDwfAnalogOutNodeFunctionSet(self, h, ch, node, v): self.aout[_v(ch)]["func"] = _v(v)
-    def _FDwfAnalogOutNodeFrequencySet(self, h, ch, node, v): self.aout[_v(ch)]["freq"] = _v(v)
-    def _FDwfAnalogOutNodeAmplitudeSet(self, h, ch, node, v): self.aout[_v(ch)]["amp"] = _v(v)
-    def _FDwfAnalogOutNodeOffsetSet(self, h, ch, node, v): self.aout[_v(ch)]["offset"] = _v(v)
-    def _FDwfAnalogOutNodePhaseSet(self, h, ch, node, v): self.aout[_v(ch)]["phase"] = _v(v)
-    def _FDwfAnalogOutNodeSymmetrySet(self, h, ch, node, v): self.aout[_v(ch)]["sym"] = _v(v)
+
+    def _node_set(self, ch, key, v):
+        self._stop_on_set(ch)
+        self.aout[_v(ch)][key] = _v(v)
+
+    def _FDwfAnalogOutNodeFunctionSet(self, h, ch, node, v): self._node_set(ch, "func", v)
+    def _FDwfAnalogOutNodeFrequencySet(self, h, ch, node, v): self._node_set(ch, "freq", v)
+    def _FDwfAnalogOutNodeAmplitudeSet(self, h, ch, node, v): self._node_set(ch, "amp", v)
+    def _FDwfAnalogOutNodeOffsetSet(self, h, ch, node, v): self._node_set(ch, "offset", v)
+    def _FDwfAnalogOutNodePhaseSet(self, h, ch, node, v): self._node_set(ch, "phase", v)
+    def _FDwfAnalogOutNodeSymmetrySet(self, h, ch, node, v): self._node_set(ch, "sym", v)
     def _FDwfAnalogOutMasterSet(self, h, ch, master): self.master = (_v(ch), _v(master))
 
     def _FDwfAnalogOutConfigure(self, h, ch, start):
         chans = range(2) if _v(ch) < 0 else [_v(ch)]
         for c in chans:
-            self.aout[c]["running"] = bool(_v(start))
+            if _v(start) == 3:                 # apply: keeps a running output running
+                self.aout[c]["running"] = self.aout[c]["running"] or self.aout[c]["stopped_by_set"]
+            else:
+                self.aout[c]["running"] = bool(_v(start))
+            self.aout[c]["stopped_by_set"] = False
+
+    def _stop_on_set(self, ch):
+        """Like the lab's AD2 (2026-10-08): a node parameter set while the
+        output runs STOPS it until it is applied / restarted."""
+        o = self.aout[_v(ch)]
+        if o["running"]:
+            o["running"] = False
+            o["stopped_by_set"] = True
 
     # ---- AnalogIO ------------------------------------------------------------------
     def _FDwfAnalogIOStatus(self, h): pass

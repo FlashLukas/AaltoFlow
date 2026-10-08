@@ -103,6 +103,9 @@ def test_scope_settings_map_to_dwf(fake):
         assert fake.ain["trig_src"] == 7 and fake.ain["auto"] > 0
         sc.set_trigger(source="ch2")
         assert fake.ain["trig_src"] == 2 and fake.ain["trig_ch"] == 1
+        # hysteresis: 0.05 division of the source (lab AD2: noise made the
+        # trigger fire on the wrong edge without it)
+        assert fake.hysteresis == pytest.approx(0.05 * 5.0 / 8)
     finally:
         sc.close()
 
@@ -139,6 +142,16 @@ def test_generator_maps_amplitude_and_output(fake):
         assert fake.aout[0]["running"] and fake.aout[0]["enabled"] == 1
         assert g.read_channel(0)["output"] is True
         assert g.envelope("sine")["freq_max_Hz"] == 20e6   # the bandwidth, not 100 MHz
+        # LAB AD2: a change while running stopped the output -- it must keep running
+        g.set_frequency(0, 2000.0); g.set_amplitude(0, 0.4)
+        assert fake.aout[0]["running"] and fake.aout[0]["freq"] == 2000.0
+        # a phase between two running outputs: a synced start (W2 slaved to W1)
+        g.set_output(1, True)
+        assert fake.master == (1, 0)
+        fake.master = None
+        g.set_phase(1, 90.0)
+        assert fake.master == (1, 0) and fake.aout[0]["running"] and fake.aout[1]["running"]
+        fake.master = None
         g.align_phase()
         assert fake.master == (1, 0)
     finally:
@@ -165,3 +178,21 @@ def test_supplies_by_name_and_keep_on_restart(fake, monkeypatch):
         assert (f.on_close == 0) is keep                    # "keep running" on close
         assert bool(f.io_set[(0, 0)]) is keep               # supply left on only on restart
         assert f.aout[0]["running"] is keep
+
+
+def test_frequency_rounding_is_not_a_mismatch():
+    """Lab AD2: 1000 Hz read back as 1000.0000222 -- w1_settled never came."""
+    from scope.generator.brain import _same
+    assert _same("frequency_Hz", 1000.0, 1000.0000221897726)
+    assert not _same("frequency_Hz", 1000.0, 1000.1)
+
+
+def test_service_prints_events(capsys):
+    """Start-up events reach the launcher log (a GUI connecting later never
+    sees them on PUB) -- ASCII only."""
+    from scope.net.service import ScopeService
+    from scope.sim_system import build_sim_system
+    scope, _ = build_sim_system(Config())
+    svc = ScopeService(scope, host="127.0.0.1", cmd_port=17648, pub_port=17649)
+    svc._event("info", "supplies found: V+ off µ")
+    assert "[info] supplies found: V+ off ?" in capsys.readouterr().out

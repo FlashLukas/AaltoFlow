@@ -21,7 +21,7 @@ def build_real_system(cfg: Config, gen_cfg=None) -> Scope:
         from .generator.brain import Generator
         from .generator.config import GenConfig
         dev = DwfDevice(cfg.hardware.dwf_device)
-        return Scope(DwfScope(dev), cfg,
+        return Scope(DwfScope(dev, cfg.hardware.dwf_trigger_hysteresis_div), cfg,
                      gen=Generator(DwfWaveGen(dev), gen_cfg or GenConfig()))
     if driver != "siglent":
         raise ValueError(f"unknown hardware.driver {driver!r} (use 'siglent' or 'dwf')")

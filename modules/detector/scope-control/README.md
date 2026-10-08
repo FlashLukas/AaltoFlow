@@ -140,9 +140,18 @@ service, three parts sharing one connection:
   off when the service stops. Status: setpoint, measured V and A, and the
   device's other monitors (USB voltage / current).
 
-Outputs and supplies are switched off on the way out, except on a restart
-(`shutdown {keep_outputs: true}`, which also asks the device to keep running
-when the handle closes -- `# VERIFY` on the AD2).
+Outputs and supplies are switched off on the way out. A restart
+(`shutdown {keep_outputs: true}`) does NOT keep them on the Analog Discovery:
+the device resets when it is opened again (measured on the lab AD2,
+2026-10-08), so the next start finds them off -- the service says so.
+
+On the AD2 (measured 2026-10-08): changing a setting of a RUNNING output
+stopped it -- the backend now applies every change to a running output
+(FDwfAnalogOutConfigure 3, else a restart). A phase between W1 and W2 needs a
+common start: setting a phase, or switching an output on while the other
+runs, restarts both together (W2 slaved to W1). The CH1/CH2 trigger has a
+hysteresis (`hardware.dwf_trigger_hysteresis_div`, 0.05 division): without
+it the input noise fired the trigger on the wrong edge.
 
 Generator tab of the window: the AFG's output cards, the drawing of both
 outputs, the coupling row and the supplies. `--driver dwf` and the simulator

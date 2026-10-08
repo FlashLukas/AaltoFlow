@@ -93,7 +93,9 @@ def _same(key: str, a, b, phase_tol: float = 0.05) -> bool:
     if a is None or b is None:
         return False
     if key == "frequency_Hz":
-        return abs(a - b) <= 2e-6 + 1e-9 * abs(a)
+        # 1e-6 relative: the Analog Discovery's DDS holds 1000 Hz as
+        # 1000.0000222 (lab AD2, 2026-10-08) -- a rounding, not a coercion
+        return abs(a - b) <= 2e-6 + 1e-6 * abs(a)
     if key == "amplitude_Vpp":
         return abs(a - b) <= 1e-4 + 5e-4 * abs(a)
     if key == "offset_V":

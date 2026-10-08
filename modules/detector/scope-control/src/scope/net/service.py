@@ -132,7 +132,7 @@ class ScopeService:
             raise PortInUse(
                 f"cannot listen on {self.cmd_addr} / {self.pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
-        self.scope._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
+        self.scope._on_event = self._event
         try:
             self.scope.start()
         except BaseException:
@@ -146,6 +146,17 @@ class ScopeService:
         self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
         self._pub_t.start()
         self._cmd_t.start()
+
+    def _event(self, level: str, msg: str) -> None:
+        """An event goes out on PUB AND into the service's own output (the
+        launcher log): a GUI that connects later never sees the start-up
+        events ("found ...", "supplies found ...") on PUB -- lab PC
+        2026-10-08. ASCII only (gotcha #14)."""
+        self._events.put({"level": level, "msg": msg})
+        try:
+            print(f"[{level}] {msg}".encode("ascii", "replace").decode("ascii"), flush=True)
+        except Exception:
+            pass
 
     def serve_forever(self) -> None:
         self.start()

@@ -212,10 +212,18 @@ class DwfDevice:
         try:
             if self._dll is not None and self._h.value:
                 if self.keep_running:
-                    # a RESTART (keep_outputs): the outputs and supplies keep
-                    # running when the handle closes          # VERIFY on the AD2
+                    # a RESTART (keep_outputs): ask the device to keep running
+                    # when the handle closes (per device where the runtime has
+                    # it, else the global parameter). MEASURED on the lab AD2
+                    # (2026-10-08): the next start found W1 OFF -- opening the
+                    # device resets it, so on the AD2 a restart cannot keep the
+                    # outputs whatever happens here (README).        # VERIFY
                     try:
-                        self._dll.FDwfParamSet(ctypes.c_int(_PARAM_ON_CLOSE), ctypes.c_int(0))
+                        if hasattr(self._dll, "FDwfDeviceParamSet"):
+                            self._dll.FDwfDeviceParamSet(self._h, ctypes.c_int(_PARAM_ON_CLOSE),
+                                                         ctypes.c_int(0))
+                        else:
+                            self._dll.FDwfParamSet(ctypes.c_int(_PARAM_ON_CLOSE), ctypes.c_int(0))
                     except Exception:
                         pass
                 self._dll.FDwfDeviceClose(self._h)
@@ -263,9 +271,16 @@ class DwfScope:
 
     simulated = False
     keeps_outputs_on_close = True          # the brain passes keep_outputs to close()
+    # measured on the lab AD2 (2026-10-08): opening the device resets it, so
+    # outputs / supplies do NOT survive a restart (keep_outputs) -- said at shutdown
+    resets_on_open = True
 
-    def __init__(self, device: DwfDevice):
+    def __init__(self, device: DwfDevice, hysteresis_div: float = 0.05):
         self.dev = device
+        # trigger hysteresis as a fraction of the source's V/div (lab AD2:
+        # without it the 4.7 mV input noise made rising crossings on the
+        # FALLING edge -- the slope was ignored and averages cancelled out)
+        self.hysteresis_div = float(hysteresis_div)
         self._n_ch = 2
         self._buf_max = 8192
         self._f_range = (0.05, 100e6)
@@ -423,6 +438,10 @@ class DwfScope:
         if chan is not None:
             d.call("FDwfAnalogInTriggerTypeSet", ctypes.c_int(_TRIGTYPE_EDGE))
             d.call("FDwfAnalogInTriggerChannelSet", ctypes.c_int(chan))
+            if d.has("FDwfAnalogInTriggerHysteresisSet"):
+                vdiv = d.get_double("FDwfAnalogInChannelRangeGet", ctypes.c_int(chan)) / 8.0
+                d.call("FDwfAnalogInTriggerHysteresisSet",
+                       ctypes.c_double(self.hysteresis_div * vdiv))
         d.call("FDwfAnalogInTriggerConditionSet",
                ctypes.c_int(_SLOPE_FALL if self._slope == "falling" else _SLOPE_RISE))  # VERIFY
         d.call("FDwfAnalogInTriggerAutoTimeoutSet",
@@ -587,6 +606,7 @@ class DwfWaveGen:
         self._n = 2
         self._info: list[dict] = []
         self._shape_extra: dict = {}            # (ch) -> {"duty_pct", "symmetry_pct"} last set
+        self._on: dict = {}                      # (ch) -> running, as last read / set
 
     def open(self) -> None:
         d = self.dev
@@ -647,6 +667,7 @@ class DwfWaveGen:
             d.call("FDwfAnalogOutStatus", ctypes.c_int(ch), ctypes.byref(sts))
             # running (3) or armed / waiting (1, 7) = the output is ON  # VERIFY states
             got["output"] = sts.value in (1, 3, 7)
+            self._on[ch] = got["output"]
             fn = ctypes.c_ubyte()
             d.call("FDwfAnalogOutNodeFunctionGet", ctypes.c_int(ch),
                    ctypes.c_int(_NODE_CARRIER), ctypes.byref(fn))
@@ -672,6 +693,37 @@ class DwfWaveGen:
     # ---- writing ----------------------------------------------------------------------
     def _set(self, fn, ch, value) -> None:
         self.dev.call(fn, ctypes.c_int(ch), ctypes.c_int(_NODE_CARRIER), ctypes.c_double(value))
+        self._apply(ch)
+
+    def _running(self, ch: int) -> bool:
+        sts = ctypes.c_ubyte()
+        self.dev.call("FDwfAnalogOutStatus", ctypes.c_int(ch), ctypes.byref(sts))
+        return sts.value in (1, 3, 7)
+
+    def _apply(self, ch: int) -> None:
+        """A parameter changed on a RUNNING output must be applied, or the
+        output STOPS (lab AD2 2026-10-08, WaveForms 3.24.4: a new frequency or
+        amplitude while W1 ran left it off, "output: asked True, instrument
+        False"). Configure 3 = apply to the running channel (newer runtimes);
+        where that is refused, 1 = (re)start it."""
+        if not self._on.get(ch):
+            return
+        try:
+            self.dev.call("FDwfAnalogOutConfigure", ctypes.c_int(ch), ctypes.c_int(3))
+        except DwfError:
+            self.dev.call("FDwfAnalogOutConfigure", ctypes.c_int(ch), ctypes.c_int(1))
+
+    def _sync_start(self) -> None:
+        """Both outputs restarted TOGETHER (W2 slaved to W1), so the phase
+        between them is the phase set (lab AD2: W2 phase 90 set on its own
+        while both ran gave -56 deg -- the two had started at different
+        moments). Only when both run: a single output needs no partner."""
+        if self._n < 2 or not (self._on.get(0) and self._on.get(1)):
+            return
+        d = self.dev
+        d.call("FDwfAnalogOutMasterSet", ctypes.c_int(1), ctypes.c_int(0))      # VERIFY
+        d.call("FDwfAnalogOutConfigure", ctypes.c_int(1), ctypes.c_int(1))      # W2 armed
+        d.call("FDwfAnalogOutConfigure", ctypes.c_int(0), ctypes.c_int(1))      # W1 starts both
 
     def set_output(self, ch: int, on: bool) -> None:
         d = self.dev
@@ -679,6 +731,9 @@ class DwfWaveGen:
             d.call("FDwfAnalogOutNodeEnableSet", ctypes.c_int(ch), ctypes.c_int(_NODE_CARRIER),
                    ctypes.c_int(1))
         d.call("FDwfAnalogOutConfigure", ctypes.c_int(ch), ctypes.c_int(1 if on else 0))
+        self._on[ch] = bool(on)
+        if on:
+            self._sync_start()
 
     def set_waveform(self, ch: int, waveform: str) -> None:
         if waveform not in _FUNC:
@@ -690,6 +745,8 @@ class DwfWaveGen:
             self._set("FDwfAnalogOutNodeSymmetrySet", ch, extra["duty_pct"])
         elif waveform == "ramp":
             self._set("FDwfAnalogOutNodeSymmetrySet", ch, extra["symmetry_pct"])
+        else:
+            self._apply(ch)
 
     def set_frequency(self, ch: int, hz: float) -> None:
         self._set("FDwfAnalogOutNodeFrequencySet", ch, float(hz))
@@ -702,6 +759,7 @@ class DwfWaveGen:
 
     def set_phase(self, ch: int, deg: float) -> None:
         self._set("FDwfAnalogOutNodePhaseSet", ch, float(deg) % 360.0)
+        self._sync_start()          # a phase between two outputs needs a common start
 
     def set_duty(self, ch: int, pct: float) -> None:
         self._shape_extra.setdefault(ch, {"duty_pct": 50.0, "symmetry_pct": 50.0})["duty_pct"] = pct
@@ -715,13 +773,11 @@ class DwfWaveGen:
         raise ValueError("the Analog Discovery's outputs have no load setting")
 
     def align_phase(self) -> None:
-        """W2 slaved to W1 (FDwfAnalogOutMasterSet), then the running outputs
-        restarted together: their phases then count from the same instant."""
-        d = self.dev
-        d.call("FDwfAnalogOutMasterSet", ctypes.c_int(1), ctypes.c_int(0))      # VERIFY
-        running = [ch for ch in range(self._n) if self.read_channel(ch).get("output")]
-        if running:
-            d.call("FDwfAnalogOutConfigure", ctypes.c_int(0), ctypes.c_int(1))
+        """W2 slaved to W1, both restarted together: their phases then count
+        from the same instant (lab AD2: follow at +90 + align -> 89.99 deg)."""
+        for ch in range(self._n):
+            self._on[ch] = self._running(ch)
+        self._sync_start()
 
     def drain_errors(self) -> list[str]:
         return []

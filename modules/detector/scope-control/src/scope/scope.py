@@ -228,6 +228,10 @@ class Scope:
             self._thread.join(timeout=3.0)
         self._thread = None
         was = self._connected
+        if keep_outputs and getattr(self.backend, "resets_on_open", False):
+            self._emit("warn", "restart: this instrument resets when it is opened again "
+                               "(Analog Discovery) -- the next start will find the "
+                               "generator outputs and supplies OFF")
         try:
             if self.gen is not None:
                 # outputs OFF on the way out (unless a restart keeps them)
