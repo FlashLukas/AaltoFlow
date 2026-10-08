@@ -18,6 +18,16 @@ Verbs (a reply means ACCEPTED; poll status for the effect):
                    restart_average {}  set_sim {name, value} (simulator)
   measuring        acquire {} -> {acq_id}   abort {} (safety)   stop {} (safety, = abort)
                    get_trace {which: "live"|"sample"}   get_time {}   get_sample {}
+  supplies         set_supply {supply: "vplus"|"vminus", on?, volts?}
+                   supplies_off {} (safety)                (an instrument with supplies)
+  generator        gen_<verb> = afg-control's verbs for the outputs W1/W2
+                   (an instrument with a generator, e.g. the Analog Discovery):
+                   gen_set_output {channel: "w1"|"w2", on}  gen_set_waveform
+                   gen_set_frequency  gen_set_amplitude  gen_set_offset  gen_set_phase
+                   gen_set_duty  gen_set_symmetry  gen_set_follow {on, phase_offset_deg?,
+                   phase?}  gen_set_phase_follow {on}  gen_set_phase_offset {deg}
+                   gen_align_phase {} -> {op_id}  gen_outputs_off {} -> {op_id} (safety)
+                   gen_get_config {}  gen_set_config {config}  gen_info {}
   + status, info, get_config, set_config, describe, shutdown.
 """
 
@@ -34,6 +44,7 @@ from ..control import ControlLease
 from .. import secure
 from ..scope import Scope
 from .describe import build_manifest
+from ..generator import wire
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, status_to_dict, config_to_dict,
                        apply_config_dict, json_safe, trace_to_wire)
@@ -75,9 +86,14 @@ class ScopeService:
         #   `restart_average` empties what someone else is watching: not safety.
         #   READ: none beyond get_/read_/list_ and the universal verbs
         #   (get_trace, get_time, get_sample are reads by their names).
+        # With a generator / supplies (the Analog Discovery) the "make it
+        # safe" actions are theirs too: every output off, every supply off --
+        # verbs that can ONLY switch off, so a viewer may always send them.
         self.control = ControlLease(
-            safety={"abort", "stop"},
-            read=set(),
+            safety={"abort", "stop", "gen_outputs_off", "supplies_off"},
+            # the generator's reads carry the gen_ prefix, so the get_/read_
+            # rule does not see them: named here
+            read={"gen_info", "gen_envelope", "gen_get_config"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -229,9 +245,18 @@ class ScopeService:
             return gate
         cmd = msg.get("cmd")
         v = self.scope
+        gv = wire.verb(str(cmd or ""))
+        if gv is not None:
+            return self._gen_dispatch(gv, msg)
         try:
             ch = msg.get("channel")
-            if cmd == "set_channel_enabled":
+            if cmd == "set_supply":
+                on = msg.get("on")
+                v.set_supply(str(msg["supply"]), on=None if on is None else _bool(on),
+                             volts=_opt_float(msg, "volts"))
+            elif cmd == "supplies_off":
+                v.supplies_off()
+            elif cmd == "set_channel_enabled":
                 v.set_channel_enabled(ch, _bool(msg["on"]))
             elif cmd == "set_vdiv":
                 v.set_vdiv(ch, float(msg["vdiv_V"]))
@@ -311,11 +336,74 @@ class ScopeService:
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             if cmd in ("set_points", "set_averages", "set_keep_raw", "set_physical",
-                       "set_channel_enabled"):
+                       "set_channel_enabled", "set_trigger_source"):
                 self._rev_at = 0.0          # the manifest moved: recompute at once
             return {"ok": True}
         except (KeyError, ValueError, TypeError) as exc:
             return {"ok": False, "error": f"{cmd}: {exc}"}
+
+    def _gen_dispatch(self, cmd: str, msg: dict) -> dict:
+        """A generator verb (gen_ prefix removed): afg-control's dispatch,
+        copied, on the scope's generator brain."""
+        g = self.scope.gen
+        if g is None:
+            return {"ok": False, "error": "this instrument has no generator"}
+        try:
+            ch = msg.get("channel")
+            if cmd == "set_output":
+                g.set_output(ch, _bool(msg["on"]))
+            elif cmd == "set_waveform":
+                g.set_waveform(ch, str(msg["waveform"]))
+            elif cmd == "set_frequency":
+                g.set_frequency(ch, float(msg["frequency_Hz"]))
+            elif cmd == "set_amplitude":
+                g.set_amplitude(ch, float(msg["amplitude_Vpp"]))
+            elif cmd == "set_offset":
+                g.set_offset(ch, float(msg["offset_V"]))
+            elif cmd == "set_phase":
+                g.set_phase(ch, float(msg["phase_deg"]))
+            elif cmd == "set_duty":
+                g.set_duty(ch, float(msg["duty_pct"]))
+            elif cmd == "set_symmetry":
+                g.set_symmetry(ch, float(msg["symmetry_pct"]))
+            elif cmd == "set_load":
+                g.set_load(ch, msg["load"])
+            elif cmd == "set_follow":
+                off, ph = msg.get("phase_offset_deg"), msg.get("phase")
+                g.set_follow(_bool(msg["on"]), None if off is None else float(off),
+                             None if ph is None else _bool(ph))
+            elif cmd == "set_phase_follow":
+                g.set_phase_follow(_bool(msg["on"]))
+            elif cmd == "set_phase_offset":
+                g.set_phase_offset(float(msg["deg"]))
+            elif cmd == "align_phase":
+                return {"ok": True, "op_id": g.align_phase()}
+            elif cmd == "outputs_off":
+                return {"ok": True, "op_id": g.outputs_off()}
+            elif cmd == "get_config":
+                return {"ok": True, "config": config_to_dict(g.cfg)}
+            elif cmd == "set_config":
+                apply_config_dict(g.cfg, msg["config"])
+                g.apply_config()
+                self._rev_at = 0.0
+            elif cmd == "info":
+                return {"ok": True, "info": json_safe({
+                    "model": g.caps.get("model", ""), "channels": list(g.channels),
+                    "waveforms": list(g.caps.get("waveforms", ())),
+                    "ramp_symmetry": bool(g.caps.get("ramp_symmetry", True)),
+                    "load_settable": bool(g.caps.get("load_settable", False)),
+                    "phase_align": bool(g.caps.get("phase_align", False)),
+                    "limits": {c: dict(vars(g.cfg.limits(c))) for c in g.channels},
+                    "envelope": {c: g.envelope(c) for c in g.channels}})}
+            elif cmd == "envelope":
+                return {"ok": True, "envelope": json_safe(g.envelope(ch))}
+            else:
+                return {"ok": False, "error": f"unknown command: gen_{cmd!s}"}
+            if cmd in ("set_waveform", "set_follow", "set_phase_follow"):
+                self._rev_at = 0.0          # the manifest's shape follows these
+            return {"ok": True}
+        except (KeyError, ValueError, TypeError) as exc:
+            return {"ok": False, "error": f"gen_{cmd}: {exc}"}
 
     def _info(self) -> dict:
         v = self.scope
@@ -323,6 +411,11 @@ class ScopeService:
         return {"idn": st["idn"], "simulated": v.simulated, "model": st["model"],
                 "channels": st["channels"], "generator_channels": st["generator_channels"],
                 "ext_trigger": bool(v.caps.get("ext_trigger", False)),
+                "trigger_sources": v.trigger_sources(),
+                "trigger_options": {s: v.trigger_options(s) for s in v.trigger_sources()},
+                "couplings": v.couplings(),
+                "supplies": ({k: list(v.supply_limits(k)) for k in ("vplus", "vminus")}
+                             if v.has_supplies() else {}),
                 "units": {ch: st[f"{ch}_unit"] for ch in st["channels"]}}
 
 

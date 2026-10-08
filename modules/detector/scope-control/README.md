@@ -1,4 +1,4 @@
-# scope-control -- Oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+)
+# scope-control -- Oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+, Digilent Analog Discovery)
 
 A two-channel oscilloscope as an AaltoFlow detector: averaged, triggered
 traces of both channels in physical units, with per-channel numbers, so a scan
@@ -20,8 +20,9 @@ read and put every later reply out of step; SI prefixes such as "500.0KSa" and
 "0.00us" were dropped). Not yet re-run on the instrument after the fix; the
 other unconfirmed commands are `# VERIFY`, and
 [First run on the instrument](#first-run-on-the-instrument) is the checklist.
-The Analog Discovery 3 backend (with its two generator outputs) comes later;
-the module is generic over the backend's capabilities.
+The module is generic over the backend's capabilities: the second backend is
+the **Digilent Analog Discovery 2 / 3** (see [Analog Discovery](#analog-discovery)),
+which adds a generator (W1/W2) and power supplies (V+/V-).
 
 Ports 5633 / 5634.
 
@@ -111,6 +112,56 @@ The trace length, the time base and the units must not change during a scan
   a plain stop does -- a scope's shutdown writes nothing either way -- and
   replies `kept_outputs`.
 
+## Analog Discovery
+
+`hardware.driver = dwf` (or `--driver dwf`): a Digilent Analog Discovery 2 or
+3 through the WaveForms runtime's `dwf` library (`backends/dwf.py`, ctypes, the
+only file that loads it; every unconfirmed call `# VERIFY`). ONE device, ONE
+service, three parts sharing one connection:
+
+* **Scope** (CH1/CH2): DC-coupled; V/div follows the device's ranges (AD2: 5
+  or 50 V over 8 divisions); time/div = record / 10, the record is the
+  device's buffer (AD2: 8192 points) at the rate the time/div needs; no
+  "roll". Trigger sources: `ch1`/`ch2` (level + slope), `ext1`/`ext2` (the T1
+  / T2 pins: slope only), `w1`/`w2` (the generator starting a period: neither).
+  The GUI and describe show level / slope only where they mean something.
+* **Generator** W1/W2: afg-control's generator brain, COPIED
+  (`src/scope/generator/`, same rules: read-only start, clamps to lab limits,
+  settled = pushed and read back, W2 follows W1 with a phase offset). Verbs
+  `gen_set_output|waveform|frequency|amplitude|offset|phase|duty|symmetry
+  {channel: w1|w2, ...}`, `gen_set_follow`, `gen_set_phase_follow`,
+  `gen_set_phase_offset`, `gen_align_phase`, `gen_outputs_off` (safety);
+  describe ids `w1_frequency`, `gen_follow`, ... Its settings (coupling,
+  limits) are saved in `scope-generator.ini`. No load setting on the AD.
+* **Supplies** V+/V- (Lukas 2026-10-08: controlled): `set_supply {supply:
+  vplus|vminus, on?, volts?}`, `supplies_off` (safety). Never switched on at
+  start; clamped to `supplies.vplus_max_V` / `vminus_min_V` and the device's
+  range (AD2: 0..+5 / -5..0 V) with a warn; describe marks "on" as `danger`;
+  off when the service stops. Status: setpoint, measured V and A, and the
+  device's other monitors (USB voltage / current).
+
+Outputs and supplies are switched off on the way out, except on a restart
+(`shutdown {keep_outputs: true}`, which also asks the device to keep running
+when the handle closes -- `# VERIFY` on the AD2).
+
+Generator tab of the window: the AFG's output cards, the drawing of both
+outputs, the coupling row and the supplies. `--driver dwf` and the simulator
+`sim.model = ad` (W1 looped back to CH1, W2 to CH2, like the lab bench)
+show it.
+
+![Analog Discovery](../../../front-panels/scope-ad.png)
+
+**Self-test on the lab bench** (W1 -> scope input 1, W2 -> input 2):
+
+```powershell
+uv run scripts/ad_selftest.py --connect localhost
+```
+
+It measures each input's zero with the outputs off (they sit at 0 V), then W1
+sine at 100 Hz / 1 kHz / 10 kHz on CH1 (amplitude, frequency, offset against
+the zero), then W2 at +90 deg on CH2 (amplitude, phase CH2 - CH1), and
+switches both outputs off. Supplies untouched. PASS / FAIL per check.
+
 ## Verbs
 
 Scope settings: `set_channel_enabled`, `set_vdiv`, `set_offset`,
@@ -122,6 +173,12 @@ Scope settings: `set_channel_enabled`, `set_vdiv`, `set_offset`,
 Plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 
 ## Setup (lab PC)
+
+Analog Discovery: install WaveForms (it brings the `dwf` runtime; the lab PC
+has 3.24.4), close the WaveForms program (one process per device), set
+`hardware.driver = dwf` in scope.ini (or `--driver dwf`), `--real`.
+
+Siglent:
 
 1. NI-VISA. The scope is USB-TMC (`USB0::0xF4EC::0xEE3A::<serial>::INSTR`,
    Siglent's vendor id) -- or GPIB through Siglent's USB-GPIB adapter at the
@@ -176,6 +233,7 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q        # 71 tests, offline: the simulated bench + a fake SDS1000CML+
+uv run pytest -q        # 109 tests, offline: the simulated bench, a simulated
+                        # Analog Discovery, a fake SDS1000CML+ and a fake dwf library
 python ..\..\..\tools\check_modules.py scope --live
 ```

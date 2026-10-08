@@ -159,6 +159,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ctrl._on_event = lambda lvl, msg: self.bridge.event.emit(lvl, msg)
         # start: opens the scope and READS its settings (nothing changes on it)
         self.ctrl.start()
+        self._after_start()
         self._sync_inputs(force=True)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(60)
@@ -166,6 +167,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.start()
         if self._control_bar is not None:
             self._control_bar.claim_if_free()
+
+    def _after_start(self):
+        """What only the instrument can tell, known once it is open: its trigger
+        sources and couplings (the Analog Discovery has T1/T2 and W1/W2 as
+        sources, DC only), and whether it has a generator -- then a Generator
+        tab (W1/W2 + supplies) appears."""
+        def refill(combo, items):
+            cur = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear(); combo.addItems(list(items))
+            i = combo.findText(cur)
+            combo.setCurrentIndex(max(i, 0))
+            combo.blockSignals(False)
+        try:
+            refill(self.tsrc, self.ctrl.trigger_sources())
+            for i in self.inp.values():
+                refill(i["coupling"], self.ctrl.couplings())
+        except AttributeError:
+            pass
+        self.gen_panel = None
+        gen = getattr(self.ctrl, "gen", None)
+        if gen is not None:
+            from .gen_panel import GeneratorPanel
+            self.gen_panel = GeneratorPanel(gen, self.ctrl, self._call)
+            self.tabs.addTab(self.gen_panel, "Generator")
 
     # ---- building ------------------------------------------------------------
 
@@ -596,9 +622,19 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.avg_label.setText(f"{n} / {want}")
             self.avg_bar.setValue(int(100 * n / want))
+        if self.gen_panel is not None:
+            self.gen_panel.refresh(s, self.ctrl.gen.status())
+        # trigger level / slope only where they mean something for the source
+        try:
+            opt = self.ctrl.trigger_options(s.get("trigger_source"))
+        except AttributeError:
+            opt = {"level": True, "slope": True}
+        self.tlevel.setEnabled(bool(opt.get("level", True)))
+        self.tslope.setEnabled(bool(opt.get("slope", True)))
         gens = int(s.get("generator_channels") or 0)
         self.gen_card.setEnabled(gens > 0)
-        self.gen_note.setText(f"{gens} generator output(s)." if gens else
+        self.gen_note.setText(f"{gens} generator outputs (W1, W2): see the Generator tab."
+                              if gens else
                               "This instrument has no generator. (The Analog Discovery "
                               "backend will have two; the AFG1062 is its own module.)")
         self._fill_table(s)

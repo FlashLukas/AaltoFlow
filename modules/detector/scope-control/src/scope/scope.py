@@ -54,6 +54,7 @@ from .config import (Config, CHANNEL_NAMES, COUPLINGS, TRIGGER_SOURCES, TRIGGER_
 _NAN = float("nan")
 #: divisions across the scope's screen (RSDS1102CML+: 14; the memory holds more)
 _SCREEN_DIV = 14.0
+_SUPPLY_NAMES = {"vplus": "V+", "vminus": "V-"}
 
 
 def _tdiv_key(tdiv: float) -> str:
@@ -105,9 +106,17 @@ def parse_channel(ch) -> str:
 
 
 class Scope:
-    def __init__(self, backend, cfg: Config | None = None, clock=time.monotonic):
+    def __init__(self, backend, cfg: Config | None = None, clock=time.monotonic,
+                 gen=None):
         self.backend = backend
         self.cfg = cfg or Config()
+        # The instrument's GENERATOR, if it has one (the Analog Discovery's
+        # W1/W2): afg-control's generator brain, copied (generator/brain.py),
+        # on the same device. Its status is merged into ours, namespaced
+        # (generator/wire.py); the service routes the gen_* verbs to it.
+        self.gen = gen
+        # the power supplies (Analog Discovery V+ / V-), as last read
+        self._supplies: dict = {}
         self._clock = clock
         self.caps = dict(backend.capabilities())
         self._hw = threading.RLock()        # serialises every backend call
@@ -180,6 +189,9 @@ class Scope:
         `run=False` skips the thread so a test can call step() by hand."""
         with self._hw:
             self.backend.open()
+            # a device backend knows its numbers only once open (the Analog
+            # Discovery: channels, buffer, model name)
+            self.caps = dict(self.backend.capabilities())
             self._idn = self.backend.idn()
             got = self.backend.read_settings()
         self._connected = True
@@ -187,6 +199,18 @@ class Scope:
             self._emit("warn", f"scope: {w}")
         self._emit("info", f"connected: {self._idn or 'scope'}  (settings read, nothing changed)")
         self._adopt(got, at_start=True)
+        if self.has_supplies():
+            self._read_supplies()
+            sp = self._supplies
+            self._emit("info", "supplies found: " + ", ".join(
+                f"{_SUPPLY_NAMES[k]} {'ON' if sp.get(k, {}).get('on') else 'off'} "
+                f"{sp.get(k, {}).get('V', 0.0):g} V" for k in _SUPPLY_NAMES)
+                + "  (left as they are)")
+        if self.gen is not None:
+            # the generator's events go out with ours; it adopts its outputs
+            # (read-only start, outputs never switched on here)
+            self.gen._on_event = lambda lvl, msg: self._emit(lvl, msg)
+            self.gen.start()
         if run:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="scope-traces",
@@ -205,8 +229,27 @@ class Scope:
         self._thread = None
         was = self._connected
         try:
+            if self.gen is not None:
+                # outputs OFF on the way out (unless a restart keeps them)
+                try:
+                    self.gen.shutdown(keep_outputs=keep_outputs)
+                except Exception as exc:
+                    self._emit("error", f"generator shutdown: {exc}")
+            if was and not keep_outputs and self.has_supplies():
+                # supplies OFF on the way out, like the outputs
+                for k in _SUPPLY_NAMES:
+                    if self._supplies.get(k, {}).get("on"):
+                        try:
+                            with self._hw:
+                                self.backend.set_supply(k, on=False)
+                            self._emit("info", f"{_SUPPLY_NAMES[k]} supply OFF")
+                        except Exception as exc:
+                            self._emit("error", f"{_SUPPLY_NAMES[k]} off: {exc}")
             with self._hw:
-                self.backend.close()
+                if getattr(self.backend, "keeps_outputs_on_close", False):
+                    self.backend.close(keep_outputs=keep_outputs)
+                else:
+                    self.backend.close()
         finally:
             self._connected = False
             with self._lock:
@@ -294,8 +337,8 @@ class Scope:
 
     def set_coupling(self, ch, coupling: str) -> None:
         ch = parse_channel(ch)
-        if coupling not in COUPLINGS:
-            raise ValueError(f"coupling must be one of {', '.join(COUPLINGS)}")
+        if coupling not in self.couplings():
+            raise ValueError(f"coupling must be one of {', '.join(self.couplings())}")
         self._queue(ch, f"{ch.upper()} coupling {coupling}", coupling=coupling)
 
     def set_probe(self, ch, factor: float) -> None:
@@ -315,9 +358,27 @@ class Scope:
         self._queue("timebase", f"trigger delay {seconds:g} s",
                     delay_s=_finite(seconds, "delay"))
 
+    def trigger_sources(self) -> list:
+        """The trigger sources THIS instrument has (its capabilities), in the
+        order it lists them; the Siglent's when it does not say."""
+        return list(self.caps.get("trigger_sources") or ("ch1", "ch2", "ext", "ext5", "line"))
+
+    def trigger_options(self, source: str | None = None) -> dict:
+        """Does a level / a slope mean something for `source` (default: the
+        current one)? A channel has both; a digital trigger pin a slope; a
+        generator starting neither."""
+        if source is None:
+            with self._lock:
+                source = self._shown("trigger_source", self.cfg.trigger.source)
+        return dict((self.caps.get("trigger_options") or {}).get(
+            source, {"level": True, "slope": True}))
+
+    def couplings(self) -> list:
+        return list(self.caps.get("couplings") or COUPLINGS)
+
     def set_trigger_source(self, source: str) -> None:
-        if source not in TRIGGER_SOURCES:
-            raise ValueError(f"trigger source must be one of {', '.join(TRIGGER_SOURCES)}")
+        if source not in self.trigger_sources():
+            raise ValueError(f"trigger source must be one of {', '.join(self.trigger_sources())}")
         self._queue("trigger", f"trigger source {source}", source=source)
 
     def set_trigger_level(self, volts: float) -> None:
@@ -333,6 +394,61 @@ class Scope:
         if mode not in TRIGGER_MODES:
             raise ValueError(f"trigger mode must be one of {', '.join(TRIGGER_MODES)}")
         self._queue("trigger", f"trigger mode {mode}", mode=mode)
+
+    # ---- power supplies (the Analog Discovery's V+ / V-) -------------------------------
+
+    def has_supplies(self) -> bool:
+        return bool(self.caps.get("supplies")) and hasattr(self.backend, "set_supply")
+
+    def supply_limits(self, which: str) -> tuple[float, float]:
+        """The range a supply may be SET to: the device's own range narrowed
+        by the lab's limits (config group `supplies`)."""
+        lo, hi = self.backend.supply_range(which)
+        lim = self.cfg.supplies
+        if which == "vplus":
+            return max(lo, 0.0), min(hi, float(lim.vplus_max_V))
+        return max(lo, float(lim.vminus_min_V)), min(hi, 0.0)
+
+    def set_supply(self, which: str, on: bool | None = None, volts: float | None = None) -> None:
+        """Switch a supply and / or set its voltage. Clamped to supply_limits
+        (said in a warn event). Never called by the module at start."""
+        if not self.has_supplies():
+            raise ValueError("this instrument has no power supplies")
+        which = {"v+": "vplus", "vplus": "vplus", "v-": "vminus", "vminus": "vminus"}.get(
+            str(which).strip().lower())
+        if which is None:
+            raise ValueError("supply must be 'vplus' (V+) or 'vminus' (V-)")
+        name = _SUPPLY_NAMES[which]
+        if volts is not None:
+            v = _finite(volts, f"{name} voltage")
+            lo, hi = self.supply_limits(which)
+            if not lo <= v <= hi:
+                self._emit("warn", f"{name} {v:g} V clamped to {min(max(v, lo), hi):g} V "
+                                   f"(allowed {lo:g} .. {hi:g} V; Settings > Supplies)")
+                v = min(max(v, lo), hi)
+            volts = v
+        with self._hw:
+            self.backend.set_supply(which, on=None if on is None else bool(on), volts=volts)
+        self._read_supplies()
+        sp = self._supplies.get(which, {})
+        self._emit("info", f"{name} supply {'ON' if sp.get('on') else 'off'}, "
+                           f"{sp.get('V', 0.0):g} V")
+
+    def supplies_off(self) -> None:
+        """Every supply OFF (the safety action)."""
+        if self.has_supplies():
+            for k in _SUPPLY_NAMES:
+                self.set_supply(k, on=False)
+
+    def _read_supplies(self) -> None:
+        try:
+            with self._hw:
+                got = self.backend.read_supplies()
+        except Exception as exc:
+            self._emit("warn", f"supplies not read: {exc}")
+            return
+        with self._lock:
+            self._supplies = got
 
     # ---- the module's own settings (immediate) ----------------------------------------
 
@@ -454,6 +570,11 @@ class Scope:
         return best
 
     def rolling(self) -> bool:
+        if self.caps.get("rolls", True) is False:
+            return False                    # (the Analog Discovery does not roll)
+        return self._rolling_siglent()
+
+    def _rolling_siglent(self) -> bool:
         """AUTO trigger mode at a slow time/div: the scope free-runs / rolls and
         makes no triggered records (lab PC 2026-10-07: one record in 120 s at
         0.5 s/div in AUTO). In NORMAL mode triggered records still come at
@@ -568,8 +689,13 @@ class Scope:
             out[f"{ch}_values"] = analysis.channel_values(t, y)
             out[f"{ch}_unit"] = self.cfg.channel(ch).phys_unit
             fr = out[f"{ch}_values"]["frequency"]
+            # a frequency counts for the trace reduction / alias check only if
+            # the spectrum agrees: the crossings of NOISE (a generator still
+            # off) give a meaningless "frequency" and a false alias warning
             if fr > 0:
-                freqs.append(fr)
+                pk = analysis.peak_frequency(t, y)
+                if pk > 0 and abs(pk - fr) <= 0.1 * fr:
+                    freqs.append(fr)
         if "ch1" in filt and "ch2" in filt:
             out["phase_21_deg"], out["phase_21_reason"] = analysis.phase_detail(
                 t, filt["ch1"], filt["ch2"])
@@ -602,7 +728,9 @@ class Scope:
             st = {"connected": self._connected, "idn": self._idn, "hw_error": self._hw_error,
                   "simulated": self.simulated, "model": self.caps.get("model", ""),
                   "channels": list(self.channels),
-                  "generator_channels": int(self.caps.get("generator_channels", 0)),
+                  "generator_channels": (len(self.gen.channels) if self.gen is not None
+                                         else int(self.caps.get("generator_channels", 0))),
+                  "trigger_sources": self.trigger_sources(),
                   "records": self._records,
                   "record_s": self.record_s(),
                   "last_record": dict(self._last_record),
@@ -640,6 +768,19 @@ class Scope:
                 st[f"trigger_{k}"] = self._shown(f"trigger_{k}", getattr(c.trigger, k))
                 st[f"trigger_{k}_set"] = self._requested.get(f"trigger_{k}",
                                                              getattr(c.trigger, k))
+            sp = dict(self._supplies)
+        st["supplies"] = self.has_supplies()
+        if self.has_supplies():
+            for k in _SUPPLY_NAMES:
+                d = sp.get(k, {})
+                st[f"supply_{k}_on"] = bool(d.get("on", False))
+                st[f"supply_{k}_V"] = d.get("V", _NAN)
+                st[f"supply_{k}_meas_V"] = d.get("V_meas", _NAN)
+                st[f"supply_{k}_meas_A"] = d.get("A_meas", _NAN)
+            st["monitors"] = dict(sp.get("monitors") or {})
+        if self.gen is not None:
+            from .generator import wire
+            st.update(wire.status(self.gen.status()))
         return st
 
     def _shown(self, key: str, default):
@@ -716,6 +857,8 @@ class Scope:
             if changed:
                 self._emit("info", "changed at the scope: " + ", ".join(changed))
                 self._restart(None)
+            if self.has_supplies():
+                self._read_supplies()
         roll = self.rolling()
         if roll and not self._roll_warned:
             self._roll_warned = True

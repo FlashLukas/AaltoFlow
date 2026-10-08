@@ -164,7 +164,7 @@ def build_manifest(scope) -> dict:
             scope_setting(f"{ch}_offset", f"{C} offset", "float", f"{ch}_offset_V",
                           "set_offset", "offset_V", g, base + 3, ex, unit="V", decimals=4),
             scope_setting(f"{ch}_coupling", f"{C} coupling", "enum", f"{ch}_coupling",
-                          "set_coupling", "coupling", g, base + 4, ex, options=list(COUPLINGS)),
+                          "set_coupling", "coupling", g, base + 4, ex, options=scope.couplings()),
             scope_setting(f"{ch}_probe", f"{C} probe", "float", f"{ch}_probe", "set_probe",
                           "probe", g, base + 5, ex, unit="x", decimals=0, min=1.0, max=1000.0),
             _p(f"{ch}_phys_scale", f"{C} {unit[ch]} per volt", "control", "float",
@@ -195,12 +195,23 @@ def build_manifest(scope) -> dict:
            group="Timebase", order=3, read_path=["sample_rate_Hz"]),
         scope_setting("trigger_source", "Trigger source", "enum", "trigger_source",
                       "set_trigger_source", "source", "Trigger", 1,
-                      options=list(TRIGGER_SOURCES)),
-        scope_setting("trigger_level", "Trigger level", "float", "trigger_level_V",
-                      "set_trigger_level", "level_V", "Trigger", 2, unit="V", decimals=4),
-        scope_setting("trigger_slope", "Trigger slope", "enum", "trigger_slope",
-                      "set_trigger_slope", "slope", "Trigger", 3,
-                      options=list(TRIGGER_SLOPES)),
+                      options=scope.trigger_sources(),
+                      help="What starts a record. Analog Discovery: ch1 / ch2 (an "
+                           "input crossing the level), ext1 / ext2 (its T1 / T2 pins, an "
+                           "edge), w1 / w2 (its own generator output starting a period)."),
+    ]
+    # level / slope only where they mean something for the CURRENT source (a
+    # trigger pin has an edge but no level; a generator start has neither)
+    topt = scope.trigger_options()
+    if topt.get("level", True):
+        params.append(scope_setting("trigger_level", "Trigger level", "float",
+                                    "trigger_level_V", "set_trigger_level", "level_V",
+                                    "Trigger", 2, unit="V", decimals=4))
+    if topt.get("slope", True):
+        params.append(scope_setting("trigger_slope", "Trigger slope", "enum", "trigger_slope",
+                                    "set_trigger_slope", "slope", "Trigger", 3,
+                                    options=list(TRIGGER_SLOPES)))
+    params += [
         scope_setting("trigger_mode", "Trigger mode", "enum", "trigger_mode",
                       "set_trigger_mode", "mode", "Trigger", 4, options=list(TRIGGER_MODES),
                       help="auto / normal / single / stop. A stopped scope makes no "
@@ -313,10 +324,46 @@ def build_manifest(scope) -> dict:
         _p("hw_error", "Error", "indicator", "string", group="Status", order=3,
            read_path=["hw_error"]),
     ]
+    # -- power supplies (an instrument that has them: the Analog Discovery) -----------------
+    if scope.has_supplies():
+        for i, (k, name) in enumerate((("vplus", "V+"), ("vminus", "V-"))):
+            lo, hi = scope.supply_limits(k)
+            params += [
+                _p(f"supply_{k}_on", f"{name} supply on", "control", "bool",
+                   group="Supplies", order=10 * i + 1, read_path=[f"supply_{k}_on"],
+                   set={"verb": "set_supply", "arg": "on", "extra": {"supply": k}},
+                   settle={"policy": "echoes", "key": f"supply_{k}_on"}, danger=True,
+                   help=f"Switches the {name} supply pin. Never switched on at start; "
+                        f"off when the service stops. 'All supplies off' is the safety "
+                        f"action."),
+                _p(f"supply_{k}_V", f"{name} voltage", "control", "float", unit="V",
+                   group="Supplies", order=10 * i + 2, decimals=3, step=0.1,
+                   min=lo, max=hi, read_path=[f"supply_{k}_V"],
+                   set={"verb": "set_supply", "arg": "volts", "extra": {"supply": k}},
+                   settle={"policy": "echoes", "key": f"supply_{k}_V", "tol": 0.01},
+                   help=f"Clamped to {lo:g} .. {hi:g} V (the device's range and the "
+                        f"lab's limit, Settings > Supplies)."),
+                _p(f"supply_{k}_meas_V", f"{name} measured", "indicator", "float",
+                   unit="V", group="Supplies", order=10 * i + 3, decimals=3, plottable=True,
+                   read_path=[f"supply_{k}_meas_V"]),
+                _p(f"supply_{k}_meas_A", f"{name} current", "indicator", "float",
+                   unit="A", group="Supplies", order=10 * i + 4, decimals=4, plottable=True,
+                   read_path=[f"supply_{k}_meas_A"]),
+            ]
+        params.append(_p("supplies_off", "All supplies off", "action", "action",
+                         group="Supplies", order=30, wait={"ready": {"policy": "immediate"}},
+                         help="Switch V+ and V- off. Allowed for anyone, also a viewer."))
+    # -- the generator (W1 / W2): afg-control's descriptors, namespaced ------------------
+    if scope.gen is not None:
+        from ..generator import wire
+        from ..generator.describe import generator_params
+        params += wire.params(generator_params(scope.gen))
     if scope.simulated:
-        for i, (name, label, u) in enumerate((("frequency_Hz", "Test signal frequency", "Hz"),
-                                               ("ch2_phase_deg", "CH2 phase shift", "deg"),
-                                               ("noise_V", "Noise", "V"))):
+        sim_knobs = ((("noise_V", "Noise", "V"),) if scope.gen is not None else
+                     (("frequency_Hz", "Test signal frequency", "Hz"),
+                      ("ch2_phase_deg", "CH2 phase shift", "deg"),
+                      ("noise_V", "Noise", "V")))
+        for i, (name, label, u) in enumerate(sim_knobs):
             params.append(_p(f"sim_{name}", f"{label} (simulation)", "control", "float",
                              unit=u, group="Simulated bench", order=i + 1,
                              read_path=[f"sim_{name}"],

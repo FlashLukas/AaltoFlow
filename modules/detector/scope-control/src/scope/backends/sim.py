@@ -198,3 +198,174 @@ class SimulatedScope:
         t, data = self._record
         step = max(1, int(math.ceil(t.size / max(1, int(max_points)))))
         return t[::step].copy(), {ch: data[ch][::step].copy() for ch in channels}
+
+
+# ======================================================================================
+# the Analog Discovery, simulated
+# ======================================================================================
+
+_AD_POINTS = 8192                 # the AD2's buffer (default device configuration)
+_AD_RANGES = (5.0, 50.0)          # input ranges, peak-to-peak: V/div = range / 8
+_AD_SOURCES = ("ch1", "ch2", "ext1", "ext2", "w1", "w2")
+_AD_TRIGGER_OPTIONS = {"ch1": {"level": True, "slope": True},
+                       "ch2": {"level": True, "slope": True},
+                       "ext1": {"level": False, "slope": True},
+                       "ext2": {"level": False, "slope": True},
+                       "w1": {"level": False, "slope": False},
+                       "w2": {"level": False, "slope": False}}
+
+
+class SimulatedADScope(SimulatedScope):
+    """An Analog Discovery 2 on the lab bench: its generator W1 looped back to
+    its scope input 1, W2 to input 2 (Lukas, 2026-10-08). `gen` is the
+    simulated generator (generator/sim.py); whatever the generator brain makes
+    it output is what this scope sees, plus a little noise and a small input
+    offset per channel (`ch_zero_V`, so a self-test has a zero to measure).
+    T1 / T2 (ext1, ext2) are not connected: they never trigger (auto then
+    free-runs). The V+ / V- supplies are simulated too (no load: they read
+    back what they are set to)."""
+
+    keeps_outputs_on_close = True
+
+    def __init__(self, sim_cfg, gen, clock=time.monotonic, seed: int | None = None):
+        super().__init__(sim_cfg, clock=clock, seed=seed)
+        self.gen = gen
+        self.ch_zero_V = {"ch1": 0.004, "ch2": -0.006}
+        self.settings = {
+            # the device's state at open (WaveForms' defaults): both inputs on,
+            # 5 V range, auto, trigger on CH1 at 0 V
+            "channels": {ch: {"enabled": True, "vdiv_V": _AD_RANGES[0] / 8.0,
+                              "offset_V": 0.0, "coupling": "dc", "probe": 1.0}
+                         for ch in ("ch1", "ch2")},
+            "tdiv_s": 1e-3, "delay_s": 0.0,
+            "trigger": {"source": "ch1", "level_V": 0.0, "slope": "rising", "mode": "auto"},
+        }
+        self.supplies = {"vplus": {"on": False, "V": 0.0}, "vminus": {"on": False, "V": 0.0}}
+
+    def close(self, keep_outputs: bool = False) -> None:
+        self._open = False
+
+    def capabilities(self) -> dict:
+        return {"model": "Analog Discovery 2 (simulated)", "channels": ["ch1", "ch2"],
+                "ext_trigger": True, "generator_channels": 2, "max_points": _AD_POINTS,
+                "couplings": ["dc"], "rolls": False,
+                "trigger_sources": list(_AD_SOURCES),
+                "trigger_options": _AD_TRIGGER_OPTIONS, "supplies": True}
+
+    def idn(self) -> str:
+        return "Digilent,Analog Discovery 2,SIMULATED" if self._open else ""
+
+    def read_settings(self) -> dict:
+        s = self.settings
+        rate = _AD_POINTS / (10.0 * s["tdiv_s"])
+        return {"channels": {c: dict(v) for c, v in s["channels"].items()},
+                "tdiv_s": s["tdiv_s"], "delay_s": s["delay_s"],
+                "sample_rate_Hz": rate, "record_points": _AD_POINTS,
+                "trigger": dict(s["trigger"]), "unread": []}
+
+    def set_channel(self, ch: str, **values) -> None:
+        if values.get("coupling", "dc") != "dc":
+            raise ValueError("the Analog Discovery's inputs are DC-coupled only")
+        self.writes.append(("set_channel", ch, dict(values)))
+        c = self.settings["channels"][ch]
+        for k, v in values.items():
+            if k == "vdiv_V":
+                want = 8.0 * float(v)
+                v = next((r for r in _AD_RANGES if r >= want * 0.999), _AD_RANGES[-1]) / 8.0
+            c[k] = v
+
+    def set_timebase(self, tdiv_s=None, delay_s=None) -> None:
+        self.writes.append(("set_timebase", tdiv_s, delay_s))
+        if tdiv_s is not None:
+            # no steps: the rate follows the time/div (within 0.05 Hz .. 100 MHz)
+            rate = min(max(_AD_POINTS / (10.0 * float(tdiv_s)), 0.05), 100e6)
+            self.settings["tdiv_s"] = _AD_POINTS / rate / 10.0
+        if delay_s is not None:
+            self.settings["delay_s"] = float(delay_s)
+
+    def set_trigger(self, **values) -> None:
+        if values.get("source") is not None and values["source"] not in _AD_SOURCES:
+            raise ValueError(f"the Analog Discovery has no trigger source {values['source']!r}")
+        super().set_trigger(**values)
+
+    # ---- the loopback -------------------------------------------------------------------
+    def _volts(self, ch: str, t_abs, noise: bool):
+        v = self.gen.output_value(0 if ch == "ch1" else 1, t_abs) + self.ch_zero_V[ch]
+        if noise and self.sim.noise_V > 0:
+            v = v + self._rng.normal(0.0, self.sim.noise_V, np.shape(t_abs))
+        return v
+
+    def _trigger_time(self, t_now: float, span: float):
+        trg = self.settings["trigger"]
+        src = trg["source"]
+        if src in ("ext1", "ext2"):
+            return None                               # nothing wired to T1 / T2
+        idx = 0 if src in ("ch1", "w1") else 1
+        c = self.gen.ch[idx]
+        if not c["output"]:
+            return None
+        f = float(c["frequency_Hz"]) if c["waveform"] not in ("dc", "noise") else 0.0
+        if src in ("w1", "w2"):
+            if f <= 0:
+                return None
+            k = math.ceil((t_now - self.gen.t0) * f)
+            return self.gen.t0 + k / f                # the generator's period start
+        window = 2.0 / f if f > 0 else max(span, 1e-3)
+        t = t_now + np.linspace(0.0, window, 4001)
+        y = self._volts(src, t, noise=False)
+        lvl = float(trg["level_V"])
+        if trg["slope"] == "rising":
+            hit = np.flatnonzero((y[:-1] < lvl) & (y[1:] >= lvl))
+        else:
+            hit = np.flatnonzero((y[:-1] > lvl) & (y[1:] <= lvl))
+        return float(t[hit[0] + 1]) if hit.size else None
+
+    def new_trace_ready(self) -> bool:
+        trg = self.settings["trigger"]
+        mode = trg["mode"]
+        if mode == "stop":
+            return False
+        now = self._clock()
+        span = 10.0 * self.settings["tdiv_s"]
+        if now - self._last_record_t < span + 0.005:
+            return False
+        t_abs = now - self._t_start
+        t_trig = self._trigger_time(t_abs, span)
+        if t_trig is None:
+            if mode != "auto" or now - self._last_record_t < 0.2:
+                return False
+            t_trig = t_abs                            # auto: free-runs
+        self._last_record_t = now
+        s = self.settings
+        t = (np.arange(_AD_POINTS) - _AD_POINTS / 2.0) * (span / _AD_POINTS) + s["delay_s"]
+        out = {}
+        for ch in ("ch1", "ch2"):
+            c = s["channels"][ch]
+            v = self._volts(ch, t_trig + t, noise=True)
+            lsb = 8.0 * c["vdiv_V"] / 16384.0          # 14 bit over the range
+            lo, hi = -4 * c["vdiv_V"] - c["offset_V"], 4 * c["vdiv_V"] - c["offset_V"]
+            out[ch] = np.round(np.clip(v, lo, hi) / lsb) * lsb
+        self._record = (t, out)
+        if mode == "single":
+            trg["mode"] = "stop"
+        return True
+
+    # ---- V+ / V- -----------------------------------------------------------------------
+    def read_supplies(self) -> dict:
+        out = {k: {"on": s["on"], "V": s["V"], "V_meas": s["V"] if s["on"] else 0.0,
+                   "A_meas": 0.0} for k, s in self.supplies.items()}
+        out["monitors"] = {"USB Monitor Voltage V": 5.02, "USB Monitor Current A": 0.31}
+        return out
+
+    def set_supply(self, which: str, on: bool | None = None, volts: float | None = None) -> None:
+        if which not in self.supplies:
+            raise ValueError(f"no {which} supply")
+        self.writes.append(("set_supply", which, on, volts))
+        lo, hi = self.supply_range(which)
+        if volts is not None:
+            self.supplies[which]["V"] = min(max(float(volts), lo), hi)
+        if on is not None:
+            self.supplies[which]["on"] = bool(on)
+
+    def supply_range(self, which: str) -> tuple:
+        return (0.0, 5.0) if which == "vplus" else (-5.0, 0.0)

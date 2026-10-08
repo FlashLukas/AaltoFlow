@@ -126,3 +126,36 @@ def test_two_tabs_swap_cursor_units_and_splitter(app):
         assert win2._settings.value("splitter_sizes") is not None
     finally:
         win2.close()
+
+
+def test_analog_discovery_window_has_generator_and_supplies(app):
+    """sim.model "ad": a Generator tab (W1/W2 cards, the AFG's) and the
+    supplies; the trigger list is the AD's; the cards send gen_* commands."""
+    from scope.apps.gui import MainWindow
+    cfg = Config()
+    cfg.sim.model = "ad"
+    scope, sim = build_sim_system(cfg, seed=8)
+    win = MainWindow(scope, cfg)
+    try:
+        assert win.gen_panel is not None
+        assert [win.tabs.tabText(i) for i in range(win.tabs.count())][-1] == "Generator"
+        assert [win.tsrc.itemText(i) for i in range(win.tsrc.count())] == \
+            ["ch1", "ch2", "ext1", "ext2", "w1", "w2"]
+        assert [win.inp["ch1"]["coupling"].itemText(i)
+                for i in range(win.inp["ch1"]["coupling"].count())] == ["dc"]
+        _pump(app, win, lambda s: s.get("gen_connected") and s["running_n"] >= 1)
+        card = win.gen_panel.cards["w1"]
+        assert card.load_combo.isHidden()                      # no load on the AD
+        assert sim.gen.writes == [] and sim.writes == []       # start only read
+        card.out_btn.click()
+        _pump(app, win, lambda s: s["w1_output"] and s["w1_settled"])
+        win.gen_panel.sup["vplus"]["spin"].setValue(2.5)
+        # the V+ "Set" button is the third widget of its grid row
+        win.gen_panel.refresh(scope.status(), scope.gen.status())
+        scope.set_supply("vplus", on=True, volts=2.5)
+        _pump(app, win, lambda s: s["supply_vplus_on"])
+        win.gen_panel.refresh(scope.status(), scope.gen.status())
+        assert win.gen_panel.sup["vplus"]["on"].text() == "V+ off"
+        assert win.gen_panel.supplies_card.isVisibleTo(win.gen_panel)
+    finally:
+        win.close()

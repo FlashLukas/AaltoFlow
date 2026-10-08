@@ -34,15 +34,14 @@ from scope.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT
 EXIT_HARDWARE_BUSY = 4
 
 
-def build_scope(cfg: Config, real: bool):
-    """The brain on the simulator, or on the real Siglent backend (imported
-    only then: the simulator path never touches pyvisa)."""
-    from scope.scope import Scope
+def build_scope(cfg: Config, real: bool, gen_cfg=None):
+    """The brain on the simulator, or on the real instrument chosen by
+    hardware.driver (siglent / dwf; its library imported only then)."""
     if real:
-        from scope.backends.siglent import SiglentSDS
-        return Scope(SiglentSDS(cfg.hardware.visa, timeout_ms=cfg.hardware.timeout_ms), cfg)
+        from scope.real_system import build_real_system
+        return build_real_system(cfg, gen_cfg)
     from scope.sim_system import build_sim_system
-    return build_sim_system(cfg)[0]
+    return build_sim_system(cfg, gen_cfg=gen_cfg)[0]
 
 
 def main() -> int:
@@ -53,6 +52,10 @@ def main() -> int:
     ap.add_argument("--real", action="store_true",
                     help="drive the real scope (pyvisa + a VISA library) instead of simulating")
     ap.add_argument("--visa", default=None, help="VISA resource of the real scope")
+    ap.add_argument("--driver", choices=["siglent", "dwf"], default=None,
+                    help="which real instrument (default: hardware.driver in scope.ini)")
+    ap.add_argument("--dwf-device", default=None,
+                    help="dwf: the Analog Discovery's serial (or #n); default the first free")
     ap.add_argument("--config", default=None, help="path to a .ini config to load")
     args = ap.parse_args()
 
@@ -65,15 +68,31 @@ def main() -> int:
     cfg = Config.load(config) if config else Config()
     if args.visa:
         cfg.hardware.visa = args.visa
+    if args.driver:
+        cfg.hardware.driver = args.driver
+    if args.dwf_device is not None:
+        cfg.hardware.dwf_device = args.dwf_device
+    # The GENERATOR's settings (an instrument with one: the Analog Discovery's
+    # W1/W2 -- coupling, limits) live in their own file next to scope.ini.
+    from scope.generator.config import GenConfig
+    gen_ini = Path(config or default_ini).with_name("scope-generator.ini")
+    gen_cfg = GenConfig.load(str(gen_ini)) if gen_ini.is_file() else GenConfig()
 
-    spec = build_scope(cfg, args.real)
+    spec = build_scope(cfg, args.real, gen_cfg)
+    if spec.gen is not None:
+        spec.gen.persist_path = str(gen_ini)
     # The module's settings (physical units = a probe's calibration, averaging,
     # filter, loop) are saved to scope.ini at every change, so a restart keeps
     # them (Lukas, 2026-10-07: "need to be saved"). A --config file given on
     # the command line is the one written.
     spec.persist_path = config or str(default_ini)
-    if args.real:
+    if args.real and cfg.hardware.driver == "dwf":
+        print("REAL Analog Discovery (dwf) "
+              + (f"'{cfg.hardware.dwf_device}'" if cfg.hardware.dwf_device else "(first free)"))
+    elif args.real:
         print(f"REAL scope at {cfg.hardware.visa}")
+    elif cfg.sim.model == "ad":
+        print("SIMULATED Analog Discovery (W1/W2 looped back to CH1/CH2, V+/V-)")
     else:
         print("SIMULATED scope (two test signals + a sync square)")
     try:

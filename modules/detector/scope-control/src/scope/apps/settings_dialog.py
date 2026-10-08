@@ -22,7 +22,7 @@ from ..config import Config, _cast
 
 _TABS = [("channel_1", "CH1"), ("channel_2", "CH2"), ("timebase", "Timebase"),
          ("trigger", "Trigger"), ("acquisition", "Acquisition"), ("filter", "Filter"),
-         ("sim", "Sim"), ("hardware", "Hardware"),
+         ("sim", "Sim"), ("hardware", "Hardware"), ("supplies", "Supplies"),
          ("ui", "Appearance")]
 
 _SCOPE_NOTE = ("The SCOPE's own settings: read from it at start; a value you CHANGE "
@@ -44,9 +44,14 @@ _HINTS = {
     "filter": "Zero phase, the same on every channel. 0 = off. order: of one pass "
               "(the zero-phase response is its square).",
     "sim": "SIMULATOR only: CH1 a sine; CH2 the same frequency, phase-shifted, with "
-           "some 2nd harmonic and an offset; EXT a sync square.",
+           "some 2nd harmonic and an offset; EXT a sync square. model ad = an Analog "
+           "Discovery (its W1/W2 looped back to CH1/CH2); restart the service after a change.",
     "hardware": "REAL scope only (--real), read when the service starts: restart it "
-                "after a change. visa: usually passed by Mission Control (--visa).",
+                "after a change. driver: siglent (VISA) or dwf (Analog Discovery). "
+                "visa: usually passed by Mission Control (--visa). dwf_device: serial, "
+                "#n, or empty = the first free one.",
+    "supplies": "Safety limits of the power supplies (Analog Discovery V+ / V-): a "
+                "request beyond them is clamped. Off at start; off when the service stops.",
     "ui": "theme: dark or light. Applies the next time the GUI starts.",
 }
 
@@ -55,7 +60,7 @@ _HINTS = {
 # of a text box, so a typo cannot reach the config. The lists come from the
 # code that checks the value, so they cannot drift apart.
 from ..config import (COUPLINGS, FRESHNESS, TRIGGER_SOURCES, TRIGGER_SLOPES,  # noqa: E402
-                      TRIGGER_MODES)
+                      TRIGGER_MODES, SIM_MODELS, DRIVERS)
 
 _CHOICES = {
     ("ui", "theme"): ["dark", "light"],
@@ -65,6 +70,8 @@ _CHOICES = {
     ("trigger", "slope"): list(TRIGGER_SLOPES),
     ("trigger", "mode"): list(TRIGGER_MODES),
     ("acquisition", "freshness"): list(FRESHNESS),
+    ("sim", "model"): list(SIM_MODELS),
+    ("hardware", "driver"): list(DRIVERS),
 }
 
 

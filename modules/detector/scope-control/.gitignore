@@ -15,3 +15,5 @@ Thumbs.db
 
 # this PC's own settings (resource, calibration), loaded by run_service.py
 scope.ini
+scope-generator.ini
+*.ini.tmp

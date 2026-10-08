@@ -51,11 +51,10 @@ def main() -> int:
     if args.theme:
         cfg.ui.theme = args.theme
     if args.real:
-        from scope.scope import Scope
-        from scope.backends.siglent import SiglentSDS
+        from scope.real_system import build_real_system
         if args.visa:
             cfg.hardware.visa = args.visa
-        return run_app(Scope(SiglentSDS(cfg.hardware.visa, cfg.hardware.timeout_ms), cfg), cfg)
+        return run_app(build_real_system(cfg), cfg)
     from scope.sim_system import build_sim_system
     spec, _ = build_sim_system(cfg)
     return run_app(spec, cfg)

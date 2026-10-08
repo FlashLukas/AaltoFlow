@@ -66,6 +66,7 @@ PROJECTS.update({
     "control-viewer": ("modules/source/smb-control", True),
     # the scope's second tab (the XY / YX loop)
     "scope-xy": ("modules/detector/scope-control", True),
+    "scope-ad": ("modules/detector/scope-control", True),
 })
 
 

@@ -68,6 +68,7 @@ SIZES = {
     "afg": (1320, 820),
     "scope": (1560, 960),
     "scope-xy": (1560, 960),
+    "scope-ad": (1560, 960),
     "control-holder": (1280, 660),
     "control-viewer": (1280, 660),
     "stage": (1280, 800),
@@ -1309,6 +1310,34 @@ def _scope(theme, tab: int = 0):
     return lambda: gui.run_app(scope, cfg), warm_up, 3.5
 
 
+def _scope_ad(theme):
+    """The scope module on a (simulated) Analog Discovery: the Generator tab
+    with W1 a 1 kHz sine and W2 a square following it, a quarter period later
+    (looped back to CH1/CH2), and V+ on at 3.3 V."""
+    import os
+    import tempfile
+    os.environ["AALTOFLOW_GUI_SETTINGS"] = os.path.join(tempfile.mkdtemp(), "gui.ini")
+    from scope.config import Config
+    from scope.sim_system import build_sim_system
+    from scope.apps import gui
+
+    cfg = Config()
+    cfg.ui.theme = theme
+    cfg.sim.model = "ad"
+    scope, _ = build_sim_system(cfg, seed=3)
+
+    def warm_up(win):
+        g = win.ctrl.gen
+        g.set_frequency("w1", 1000.0); g.set_amplitude("w1", 2.0); g.set_output("w1", True)
+        g.set_waveform("w2", "square"); g.set_amplitude("w2", 1.0)
+        g.set_follow(True, 90.0, True); g.set_output("w2", True)
+        win.ctrl.set_supply("vplus", on=True, volts=3.3)
+        win.ctrl.set_tdiv(2e-4)
+        win.tabs.setCurrentIndex(win.tabs.count() - 1)
+
+    return lambda: gui.run_app(scope, cfg), warm_up, 3.5
+
+
 TARGETS = {
     "control-holder": _control(as_viewer=False),
     "control-viewer": _control(as_viewer=True),
@@ -1339,6 +1368,7 @@ TARGETS = {
     "afg": _afg,
     "scope": _scope,
     "scope-xy": lambda theme: _scope(theme, tab=1),
+    "scope-ad": _scope_ad,
     "stage": _stage,
     "piezo": _piezo,
     "camera": _camera,

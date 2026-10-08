@@ -906,7 +906,7 @@
     {
       "key": "scope",
       "name": "Oscilloscope",
-      "description": "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+): averaged triggered traces in physical units, zero-phase filter, XY view",
+      "description": "Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+, or a Digilent Analog Discovery 2/3 with its W1/W2 generator and V+/V- supplies): averaged triggered traces in physical units, zero-phase filter, XY view",
       "category": "detector",
       "category_label": "Detectors & analyzers",
       "tags": [
@@ -915,7 +915,11 @@
         "waveform",
         "XY",
         "Siglent",
-        "RS PRO"
+        "RS PRO",
+        "Analog Discovery",
+        "Digilent",
+        "function generator",
+        "power supply"
       ],
       "folder": "scope-control",
       "version": "0.2.0",

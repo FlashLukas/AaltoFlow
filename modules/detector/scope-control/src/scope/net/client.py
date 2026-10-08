@@ -66,7 +66,14 @@ class ScopeClient(ControlClient):
             self.channels = tuple(info["channels"])
             self.simulated = bool(info.get("simulated", True))
             self.caps = {"channels": list(info["channels"]), "model": info.get("model", ""),
-                         "generator_channels": int(info.get("generator_channels", 0))}
+                         "generator_channels": int(info.get("generator_channels", 0)),
+                         "trigger_sources": info.get("trigger_sources"),
+                         "trigger_options": info.get("trigger_options") or {},
+                         "couplings": info.get("couplings"),
+                         "supplies": info.get("supplies") or {}}
+            # the generator (W1/W2), if the instrument has one: a stand-in
+            # with the generator brain's methods, speaking the gen_* verbs
+            self.gen = _RemoteGen(self) if self.caps["generator_channels"] else None
         self.start_heartbeat()   # "still here": counted as a viewer / keeps control
         self.get_config()
         return info
@@ -89,8 +96,40 @@ class ScopeClient(ControlClient):
     simulated = True
     caps: dict = {"channels": ["ch1", "ch2"], "generator_channels": 0}
 
+    gen = None
+
     def status(self) -> dict:
         return self._status_dict()
+
+    # -- what this instrument has (from `info`; a local Scope has the same methods)
+    def trigger_sources(self) -> list:
+        return list(self.caps.get("trigger_sources") or ("ch1", "ch2", "ext", "ext5", "line"))
+
+    def trigger_options(self, source=None) -> dict:
+        if source is None:
+            source = self.status().get("trigger_source")
+        return dict((self.caps.get("trigger_options") or {}).get(
+            source, {"level": True, "slope": True}))
+
+    def couplings(self) -> list:
+        return list(self.caps.get("couplings") or ("dc", "ac", "gnd"))
+
+    def has_supplies(self) -> bool:
+        return bool(self.caps.get("supplies"))
+
+    def supply_limits(self, which):
+        return tuple((self.caps.get("supplies") or {}).get(which, (0.0, 0.0)))
+
+    def set_supply(self, which, on=None, volts=None):
+        d = {"cmd": "set_supply", "supply": which}
+        if on is not None:
+            d["on"] = bool(on)
+        if volts is not None:
+            d["volts"] = float(volts)
+        return self._cmd(d)
+
+    def supplies_off(self):
+        return self._cmd({"cmd": "supplies_off"})
 
     # -- the scope's settings
     def _ch(self, verb, channel, **kw):
@@ -270,3 +309,54 @@ class ScopeClient(ControlClient):
                     self._control_from_status(d)
                 elif topic == TOPIC_EVENT:
                     self._on_event(d.get("level", "info"), d.get("msg", ""))
+
+
+class _RemoteGen:
+    """The scope service's generator (W1/W2) with the generator brain's
+    methods, so the Generator tab's cards (afg-control's) work the same on a
+    local scope and over the network. Commands go out as gen_<verb>; status()
+    is the generator's own status taken out of the scope's (generator/wire.py)."""
+
+    def __init__(self, client):
+        self._c = client
+        info = client._cmd({"cmd": "gen_info"}).get("info", {}) or {}
+        self.channels = tuple(info.get("channels") or ("w1", "w2"))
+        self.caps = {"model": info.get("model", ""), "channels": len(self.channels),
+                     "waveforms": list(info.get("waveforms") or ()),
+                     "ramp_symmetry": bool(info.get("ramp_symmetry", True)),
+                     "load_settable": bool(info.get("load_settable", False)),
+                     "phase_align": bool(info.get("phase_align", False))}
+
+    def _g(self, verb, **kw):
+        return self._c._cmd({"cmd": "gen_" + verb, **kw})
+
+    def status(self) -> dict:
+        from ..generator import wire
+        return wire.unstatus(self._c.status())
+
+    def envelope(self, ch, waveform=None, load_ohm="current"):
+        r = self._g("envelope", channel=ch)
+        return r.get("envelope") or {}
+
+    def set_output(self, ch, on):        return self._g("set_output", channel=ch, on=bool(on))
+    def set_waveform(self, ch, wf):      return self._g("set_waveform", channel=ch, waveform=wf)
+    def set_frequency(self, ch, hz):     return self._g("set_frequency", channel=ch, frequency_Hz=float(hz))
+    def set_amplitude(self, ch, vpp):    return self._g("set_amplitude", channel=ch, amplitude_Vpp=float(vpp))
+    def set_offset(self, ch, v):         return self._g("set_offset", channel=ch, offset_V=float(v))
+    def set_phase(self, ch, deg):        return self._g("set_phase", channel=ch, phase_deg=float(deg))
+    def set_duty(self, ch, pct):         return self._g("set_duty", channel=ch, duty_pct=float(pct))
+    def set_symmetry(self, ch, pct):     return self._g("set_symmetry", channel=ch, symmetry_pct=float(pct))
+    def set_load(self, ch, load):        return self._g("set_load", channel=ch, load=load)
+
+    def set_follow(self, on, phase_offset_deg=None, phase=None):
+        d = {"on": bool(on)}
+        if phase_offset_deg is not None:
+            d["phase_offset_deg"] = float(phase_offset_deg)
+        if phase is not None:
+            d["phase"] = bool(phase)
+        return self._g("set_follow", **d)
+
+    def set_phase_follow(self, on):      return self._g("set_phase_follow", on=bool(on))
+    def set_phase_offset(self, deg):     return self._g("set_phase_offset", deg=float(deg))
+    def align_phase(self):               return self._g("align_phase")
+    def outputs_off(self):               return self._g("outputs_off")

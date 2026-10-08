@@ -25,7 +25,13 @@ from dataclasses import dataclass, asdict, fields
 
 CHANNEL_NAMES = ("ch1", "ch2")
 COUPLINGS = ("dc", "ac", "gnd")
-TRIGGER_SOURCES = ("ch1", "ch2", "ext", "ext5", "line")
+# Every trigger source any backend offers; each backend says which of them
+# it HAS (capabilities "trigger_sources"): Siglent ch1/ch2/ext/ext5/line,
+# Analog Discovery ch1/ch2, ext1/ext2 (its T1/T2 pins) and w1/w2 (its own
+# generator outputs starting).
+TRIGGER_SOURCES = ("ch1", "ch2", "ext", "ext5", "line", "ext1", "ext2", "w1", "w2")
+SIM_MODELS = ("sds", "ad")
+DRIVERS = ("siglent", "dwf")
 TRIGGER_SLOPES = ("rising", "falling")
 # when the first record of an acquisition counts (Acquisition.freshness)
 FRESHNESS = ("strict", "trigger")
@@ -178,6 +184,11 @@ class Sim:
     ch2_offset_V: float = 0.5
     noise_V: float = 0.01
     square_V: float = 1.0
+    # which instrument the simulator pretends to be: "sds" (the Siglent
+    # bench above) or "ad" (an Analog Discovery 2: its generator W1/W2 looped
+    # back to its scope CH1/CH2, as on the lab bench, plus V+/V- supplies --
+    # the signals then come from the generator, not from the fields above)
+    model: str = "sds"
 
 
 @dataclass
@@ -201,13 +212,39 @@ class Hardware:
                    keep coming at every time/div, just slowly (measured: one
                    per ~8 s at 0.1 - 0.5 s/div), and the acquisition simply
                    waits long enough. # VERIFY where AUTO starts rolling.
+                   (The Analog Discovery does not roll: not used there.)
+    driver      -- the real instrument behind --real: "siglent" (the RS PRO
+                   RSDS1102CML+, over VISA) or "dwf" (a Digilent Analog
+                   Discovery 2 / 3 through the WaveForms runtime's dwf library).
+    dwf_device  -- which Analog Discovery: its serial number, "#<n>" for
+                   the n-th one WaveForms lists, or empty = the first one that
+                   is free. (A serial is this PC's business: it stays in
+                   scope.ini, never in tracked files.)
     """
 
+    driver: str = "siglent"
     visa: str = "USB0::0xF4EC::0xEE3A::SERIAL::INSTR"
+    dwf_device: str = ""
     timeout_ms: int = 5000
     poll_s: float = 0.01
     max_points: int = 20000
     roll_tdiv_s: float = 0.05
+
+
+@dataclass
+class Supplies:
+    """The SAFETY limits of an instrument's power supplies (the Analog
+    Discovery's V+ / V-). A request beyond them is clamped (with a warn
+    event); the device's own range narrows them further (AD2: 0..+5 V and
+    -5..0 V). The supplies are never switched on at start, and are switched
+    OFF when the service stops (unless it is a restart that keeps outputs).
+
+    vplus_max_V   -- highest V+ setting.
+    vminus_min_V  -- lowest (most negative) V- setting.
+    """
+
+    vplus_max_V: float = 5.0
+    vminus_min_V: float = -5.0
 
 
 @dataclass
@@ -227,6 +264,7 @@ class Config:
     filter: Filter = None
     sim: Sim = None
     hardware: Hardware = None
+    supplies: Supplies = None
     ui: UI = None
 
     def __post_init__(self):
@@ -238,6 +276,7 @@ class Config:
         self.filter = self.filter or Filter()
         self.sim = self.sim or Sim()
         self.hardware = self.hardware or Hardware()
+        self.supplies = self.supplies or Supplies()
         self.ui = self.ui or UI()
 
     def channel(self, ch: str) -> Channel:
@@ -245,7 +284,7 @@ class Config:
 
     _GROUPS = {"channel_1": Channel, "channel_2": Channel, "timebase": Timebase,
                "trigger": Trigger, "acquisition": Acquisition, "filter": Filter,
-               "sim": Sim, "hardware": Hardware, "ui": UI}
+               "sim": Sim, "hardware": Hardware, "supplies": Supplies, "ui": UI}
 
     def save(self, path: str) -> None:
         parser = configparser.ConfigParser()
