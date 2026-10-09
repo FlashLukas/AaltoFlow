@@ -73,6 +73,14 @@ class Limits:
     # Not calibrated: see the module README, "Vernier".
     vernier_min: int = -800
     vernier_max: int = 100
+    # The FREQUENCY SWEEP (ramp_frequency, fly scans, 2026-10-09): the pace a
+    # sweep may be asked for, Hz per second. 1 kHz/s is slower than any scan
+    # would want; 10 GHz/s crosses the whole band in about a second -- the
+    # steps (one every hardware.ramp_dt_s) then get large, which the fly scan
+    # does not mind (it bins by the value each step SENT), but a lock-in
+    # behind it can only follow at its own time constant.
+    ramp_rate_min_Hz_per_s: float = 1.0e3
+    ramp_rate_max_Hz_per_s: float = 1.0e10
 
 
 @dataclass
@@ -93,6 +101,11 @@ class Hardware:
     tcp_port: int = 10001
     timeout_s: float = 1.0                    # per query
     poll_hz: float = 5.0                      # how often the worker reads the box back
+    # A frequency SWEEP sends one FREQ:CW every ramp_dt_s (softramp.py). 50 ms
+    # = 20 steps a second: a FREQ:CW is ~25 bytes, ~2 ms at 115200 baud, plus
+    # the unit's own handling (VERIFY on the unit). A step that comes late
+    # does not slow the sweep down: each value is computed from the time.
+    ramp_dt_s: float = 0.05
     # The calibrated step attenuator moves in 0.5 dB steps (datasheet). The
     # read-back power may therefore differ from the request by up to half a
     # step, and the scan's echo tolerance is derived from this number.

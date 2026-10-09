@@ -52,6 +52,11 @@ class RemoteStatus:
         self.power_min_dBm = d.get("power_min_dBm", 0.0)
         self.power_max_dBm = d.get("power_max_dBm", 0.0)
         self.polls = d.get("polls", 0)
+        # the frequency SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = d.get("ramp_id", 0)
+        self.ramp_target_Hz = d.get("ramp_target_Hz", 0.0)
+        self.ramp_rate_Hz_per_s = d.get("ramp_rate_Hz_per_s", 0.0)
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -138,6 +143,15 @@ class DssgClient(ControlClient):
 
     def set_frequency(self, hz: float):
         self._checked({"cmd": "set_frequency", "frequency_Hz": float(hz)})
+
+    def ramp_frequency(self, hz: float, rate_Hz_per_s: float):
+        """Sweep the frequency (fly scans, the GUI's Sweep button)."""
+        return self._checked({"cmd": "ramp_frequency", "frequency_Hz": float(hz),
+                              "rate_Hz_per_s": float(rate_Hz_per_s)}).get("ramp_id")
+
+    def ramp_stop(self):
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._checked({"cmd": "ramp_stop"}).get("stopped")
 
     def set_phase(self, deg: float):
         self._checked({"cmd": "set_phase", "phase_deg": float(deg)})

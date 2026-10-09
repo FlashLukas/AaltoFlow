@@ -38,11 +38,12 @@ from __future__ import annotations
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from . import vernier_cal
 from .backends.base import MicrowaveSource
 from .config import Config, REFERENCES
+from .softramp import SoftRamp
 
 
 @dataclass
@@ -78,6 +79,14 @@ class Status:
     power_min_dBm: float = 0.0
     power_max_dBm: float = 0.0
     polls: int = 0                  # increments every read-back cycle
+    # The FREQUENCY SWEEP (ramp_frequency, for fly scans, 2026-10-09). Live
+    # values of the software ramp, laid over the snapshot by status() (they
+    # are in memory: no hardware is read for them). ramp_id = the newest
+    # sweep started; "ramp_id >= mine and not ramping" = my sweep is over.
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_target_Hz: float = 0.0
+    ramp_rate_Hz_per_s: float = 0.0
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -132,6 +141,20 @@ class Synthesizer:
         self._connected = False
 
         self._io = threading.RLock()        # guards every backend call
+        # Guards the DESIRED signal (_freq, _power, _att, _vernier) against the
+        # sweep thread: a power set during a frequency sweep and a sweep step
+        # must not interleave their attenuator/vernier split halfway.
+        self._sig = threading.RLock()
+        # THE FREQUENCY SWEEP (suite_common/softramp.py, copied as softramp.py).
+        # The SERVICE walks the frequency: the SG12000L has no sweep of its
+        # own that a fly scan could follow. Every step is one FREQ:CW command
+        # (plus the fine-power re-split when the level must stay put).
+        self._ramp = SoftRamp(self._ramp_step, lambda: self._freq,
+                              limits=lambda: (self.limits()["freq_min_Hz"],
+                                              self.limits()["freq_max_Hz"]),
+                              dt_s=float(getattr(self.cfg.hardware, "ramp_dt_s", 0.05)),
+                              on_done=self._ramp_done, channel="frequency",
+                              name="dssg-sweep")
         self._stop = threading.Event()
         self._poke = threading.Event()      # "read back NOW": set after a command
         self._poll_t: threading.Thread | None = None
@@ -341,6 +364,7 @@ class Synthesizer:
         disconnect and release the port the same, but leave the RF output as
         it is -- the next start adopts it."""
         self._stop.set()
+        self._ramp.stop()            # no sweep step may follow the RF off below
         t, self._poll_t = self._poll_t, None
         if t is not None and t is not threading.current_thread():
             t.join(timeout=2.0)
@@ -387,6 +411,14 @@ class Synthesizer:
         self.set_rf(False)
 
     def set_frequency(self, hz: float) -> None:
+        # a set is a new instruction: it takes the knob over from a sweep
+        # (stopped BEFORE the lock below, which a sweep step may be waiting for)
+        if self._ramp.stop():
+            self._emit("info", "frequency sweep stopped by a frequency set")
+        with self._sig:
+            self._set_frequency(hz)
+
+    def _set_frequency(self, hz: float) -> None:
         lim = self.limits()
         value, clamped = _clamp(float(hz), lim["freq_min_Hz"], lim["freq_max_Hz"])
         self._freq = value
@@ -419,6 +451,10 @@ class Synthesizer:
         return lim["power_min_dBm"], lim["power_max_dBm"]
 
     def set_power(self, dBm: float) -> None:
+        with self._sig:
+            self._set_power(dBm)
+
+    def _set_power(self, dBm: float) -> None:
         lim = self.limits()
         value, clamped = _clamp(float(dBm), lim["power_min_dBm"], lim["power_max_dBm"])
         if self.fine_power():
@@ -490,6 +526,10 @@ class Synthesizer:
             self._emit("info", f"phase = {value:g} deg")
 
     def set_vernier(self, n) -> None:
+        with self._sig:
+            self._set_vernier(n)
+
+    def _set_vernier(self, n) -> None:
         """Fine output-power trim, in raw integer counts (no unit).
 
         The step attenuator only makes 0.5 dB steps; the vernier trims in
@@ -524,11 +564,100 @@ class Synthesizer:
         self._push(self.backend.set_reference, mode)
         self._emit("info", f"10 MHz reference = {mode}")
 
+    # ---- the frequency SWEEP (fly scans) ------------------------------------
+
+    def ramp_frequency(self, hz: float, rate_Hz_per_s: float) -> int:
+        """Sweep the frequency to `hz` at `rate_Hz_per_s`; returns the sweep's
+        number. The target is clamped to the envelope (warned), the rate to
+        the configured limits (warned) -- like every setter here.
+
+        Why the record is the COMMANDED frequency (describe: measured false):
+        the box could be asked FREQ:CW? on every step, but over the serial
+        link that query costs as much as the step itself and would halve the
+        steps a second -- and a synthesiser that has acknowledged FREQ:CW is
+        at that frequency within its lock time (well under a step), so the
+        command IS the frequency to far better than a pixel.
+        """
+        # VERIFY on the unit: how long one FREQ:CW takes on the serial link
+        # (it bounds ramp_dt_s), and whether the output glitches (relocks) on
+        # every step -- a lock-in would then see a small dip per step.
+        lim = self.limits()
+        lo_r = float(self.cfg.limits.ramp_rate_min_Hz_per_s)
+        hi_r = float(self.cfg.limits.ramp_rate_max_Hz_per_s)
+        rate = abs(float(rate_Hz_per_s))
+        if not rate > 0:
+            raise ValueError("rate must be > 0")
+        r, rclamped = _clamp(rate, lo_r, hi_r)
+        value, clamped = _clamp(float(hz), lim["freq_min_Hz"], lim["freq_max_Hz"])
+        rid = self._ramp.start(value, r)
+        if clamped or rclamped:
+            self._emit("warn", f"sweep clamped to {value / 1e6:.6f} MHz at "
+                               f"{r / 1e6:g} MHz/s")
+        self._emit("info", f"frequency sweep -> {value / 1e6:.6f} MHz at {r / 1e6:g} MHz/s")
+        return rid
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is. True if one was running."""
+        was = self._ramp.stop()
+        if was:
+            self._emit("info", f"frequency sweep stopped at {self._freq / 1e6:.6f} MHz")
+        return was
+
+    def _ramp_step(self, hz: float) -> None:
+        """One step of the sweep, on the sweep's thread: the frequency (and,
+        with fine power, the attenuator/vernier split that keeps the LEVEL
+        what was asked -- the vernier's dB per count changes with frequency).
+        Quiet (no event per step) and without the read-back poke: a sweep is
+        tens of steps a second, the poller keeps its own pace."""
+        with self._sig:
+            self._freq = float(hz)
+            if not self._connected:
+                return
+            with self._io:
+                self.backend.set_frequency(self._freq)
+                if self.fine_power():
+                    att, n = vernier_cal.split(self._power, self._step(), self._freq,
+                                               *self._power_lims(), cal=self._cal)
+                    if att != self._att:
+                        self._att = att
+                        self.backend.set_power(att)
+                    if n != self._vernier and self._has_vernier:
+                        self._vernier = n
+                        self.backend.set_vernier(n)
+
+    def _ramp_done(self, rid: int, reason: str) -> None:
+        self._poke.set()                     # read the box back now
+        if reason == "done":
+            self._emit("info", f"frequency sweep done at {self._freq / 1e6:.6f} MHz")
+        elif reason.startswith("error"):
+            self._emit("error", f"frequency sweep ended: {reason}")
+
+    # the stream verbs: the sweep's record of every frequency it sent
+    def stream_start(self) -> int:
+        return self._ramp.stream_start()
+
+    def stream_read(self) -> dict:
+        return self._ramp.stream_read()
+
+    def stream_stop(self) -> dict:
+        return self._ramp.stream_stop()
+
     # ---- status ----------------------------------------------------------
 
     def status(self) -> Status:
-        """The latest snapshot. Never touches the hardware (see module doc)."""
-        return self._status
+        """The latest snapshot. Never touches the hardware (see module doc).
+
+        The sweep's fields are laid over it LIVE (in memory, no hardware): the
+        snapshot is only rebuilt at poll_hz, and a fly scan waiting for the
+        end of a sweep should not wait a poll period for nothing."""
+        r = self._ramp.status()
+        st = self._status
+        live = {"ramping": r["ramping"], "ramp_id": r["ramp_id"],
+                "ramp_target_Hz": r["ramp_target"] or 0.0,
+                "ramp_rate_Hz_per_s": r["ramp_rate"] or 0.0}
+        if all(getattr(st, k) == v for k, v in live.items()):
+            return st                        # nothing to lay over: the snapshot itself
+        return replace(st, **live)           # a COPY: the snapshot is never edited
 
     def _offline_snapshot(self) -> Status:
         lim = self.limits()

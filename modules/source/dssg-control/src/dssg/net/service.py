@@ -66,9 +66,11 @@ class DssgService:
         #   switches the RF ON. This module drives no sweep, so there is
         #   nothing else to stop.
         #   READ: none beyond get_/read_/list_ and the universal verbs.
+        # `ramp_stop` ends a frequency sweep where it is: a stop, so a viewer
+        # may send it. `stream_read` only reads the sweep's record.
         self.control = ControlLease(
-            safety={"rf_off"},
-            read=set(),
+            safety={"rf_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -237,6 +239,19 @@ class DssgService:
                 self.synth.set_power(float(msg["power_dBm"]))
             elif cmd == "set_frequency":
                 self.synth.set_frequency(float(msg["frequency_Hz"]))
+            elif cmd == "ramp_frequency":
+                # the frequency SWEEP (fly scans); the reply's ramp_id is what
+                # status `ramp_id` shows while and after this sweep runs
+                return {"ok": True, "ramp_id": self.synth.ramp_frequency(
+                    float(msg["frequency_Hz"]), float(msg["rate_Hz_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": self.synth.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.synth.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.synth.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.synth.stream_stop()}
             elif cmd == "set_phase":
                 self.synth.set_phase(float(msg["phase_deg"]))
             elif cmd == "set_vernier":

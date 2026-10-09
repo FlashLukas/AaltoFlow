@@ -31,11 +31,15 @@ from ..config import REFERENCES
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
+#: The sweep pace a client is offered first (Hz/s): 10 MHz/s -- a 100 MHz FMR
+#: line in 10 s, slow enough for a lock-in at a few ms time constant.
+SWEEP_RATE_DEFAULT_HZ_PER_S = 10.0e6
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help="", resolution=None):
+       settle=None, args=None, danger=False, help="", resolution=None, ramp=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -47,7 +51,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("resolution", resolution),
                  ("decimals", decimals), ("options", options), ("scale", scale),
-                 ("set", set), ("settle", settle), ("args", args),
+                 ("set", set), ("settle", settle), ("args", args), ("ramp", ramp),
                  ("help", help)):
         if v is not None and v != "":
             d[k] = v
@@ -133,6 +137,25 @@ def build_manifest(synth) -> dict:
            set={"verb": "set_frequency", "arg": "frequency_Hz"},
            settle={"policy": "echoes", "key": "frequency_Hz",
                    "tol": float(hw.freq_echo_tol_Hz)},
+           # A CONTINUOUS SWEEP for fly scans (2026-10-09; guide 6b, "Ramps").
+           # The SERVICE walks the frequency (softramp.py) and records every
+           # value it sent: the fly scan bins by that COMMANDED frequency
+           # (measured: false -- reading FREQ:CW? back on every step would
+           # halve the step rate on the serial link; see ramp_frequency).
+           # `to` and the rate are scaled like the set: MHz here, Hz on the wire.
+           ramp={"kind": "software",
+                 "start": {"verb": "ramp_frequency",
+                           "args": {"to": "frequency_Hz", "rate": "rate_Hz_per_s"}},
+                 "stop": {"verb": "ramp_stop"},
+                 "rate": {"unit": "MHz/s",
+                          "min": float(synth.cfg.limits.ramp_rate_min_Hz_per_s) / 1e6,
+                          "max": float(synth.cfg.limits.ramp_rate_max_Hz_per_s) / 1e6,
+                          "default": max(float(synth.cfg.limits.ramp_rate_min_Hz_per_s),
+                                         min(float(synth.cfg.limits.ramp_rate_max_Hz_per_s),
+                                             SWEEP_RATE_DEFAULT_HZ_PER_S)) / 1e6},
+                 "readback": {"stream": {"group": "ramp", "channel": "frequency"},
+                              "measured": False},
+                 "done": {"key": "ramping", "id_key": "ramp_id"}},
            help="CW frequency. Range = your limits AND the unit's own range."),
 
         _p("power", "Power", "control", "float", unit="dBm", group="Signal",
@@ -206,6 +229,9 @@ def build_manifest(synth) -> dict:
         _p("ext_ref_detected", "External reference present", "indicator",
            "bool", group="Reference", order=51, read_path=["ext_ref_detected"]),
 
+        _p("ramping", "Sweeping", "indicator", "bool", group="Signal", order=21,
+           read_path=["ramping"],
+           help="True while a frequency sweep (ramp_frequency) walks the frequency."),
         _p("usb_volts", "USB supply", "indicator", "float", unit="V",
            group="Status", order=3, decimals=2, plottable=True,
            read_path=["usb_volts"],

@@ -365,6 +365,27 @@ class MainWindow(QtWidgets.QMainWindow):
         set_freq.clicked.connect(self._set_frequency)
         frow.addWidget(self.freq_spin, 1); frow.addWidget(self.unit_combo); frow.addWidget(set_freq)
         flay.addLayout(frow)
+        # SWEEP (2026-10-09): walk the frequency CONTINUOUSLY to the value
+        # above at a set pace -- what a fly scan does row by row, by hand.
+        srow = QtWidgets.QHBoxLayout()
+        self.sweep_rate = QtWidgets.QDoubleSpinBox()
+        lim = self.cfg.limits
+        self.sweep_rate.setRange(lim.ramp_rate_min_Hz_per_s / 1e6,
+                                 lim.ramp_rate_max_Hz_per_s / 1e6)
+        self.sweep_rate.setDecimals(3); self.sweep_rate.setValue(10.0)
+        self.sweep_rate.setSuffix("  MHz/s")
+        self.sweep_rate.setToolTip("Sweep pace: the service steps the frequency "
+                                   f"every {self.cfg.hardware.ramp_dt_s * 1e3:g} ms")
+        sweep_btn = QtWidgets.QPushButton("Sweep to")
+        sweep_btn.setToolTip("Sweep the frequency continuously to the value above")
+        sweep_btn.clicked.connect(
+            lambda: self._do(self.ctrl.ramp_frequency, self._current_freq_hz(),
+                             self.sweep_rate.value() * 1e6))
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where it is")
+        sweep_stop.clicked.connect(lambda: self._do(self.ctrl.ramp_stop))
+        srow.addWidget(self.sweep_rate, 1); srow.addWidget(sweep_btn); srow.addWidget(sweep_stop)
+        flay.addLayout(srow)
         col.addWidget(fcard)
 
         # power
