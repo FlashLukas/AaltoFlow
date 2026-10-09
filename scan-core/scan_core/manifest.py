@@ -335,6 +335,13 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             param = reg.add(Settable(pid, label, unit, (lo, hi),
                                      set_fn=setter, get_fn=getter, send_fn=sender))
             _attach_stream(param, d, inst, module, streams, on_warn)
+            # A knob the module can SWEEP CONTINUOUSLY (its `ramp` block):
+            # a fly scan can fly it (ramp.py). Its readback stream shares
+            # this module's stream cache, so a group recorded for detectors
+            # too is started and read once.
+            from .ramp import ramp_from_descriptor
+            param.ramp = ramp_from_descriptor(d, inst, module, streams, _stream_from,
+                                              pid, on_warn)
             # An INT control only has whole-number settings (a scan-array index,
             # a filter order). The builder reads this to offer whole points
             # rather than 21 samples across 0..19.

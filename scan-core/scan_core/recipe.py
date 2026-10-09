@@ -50,6 +50,11 @@ fly    : {type, param, start, stop, num, speed, [speed_param, readback,
           lag_correction, name]}                          -> 1 dim, INNERMOST only:
           one continuous move per row, binned by the measured position
           (flyscan.py). Same coordinates as a linear axis with that start/stop/num.
+          Since 2026-10-09 `param` may be ANY knob whose module declares a
+          `ramp` block (field, frequency, ...): the module sweeps it at
+          `speed` (its unit/s) -- or at the pace that makes a row last
+          `row_time_s`, or at its default rate -- and the samples are binned
+          by the ramp's readback (measured, or commanded; ramp.py).
 repeat : {type, num, [mode: keep|average, interval_s, name]} -> 1 dim that sets
           NOTHING: everything inside it is done `num` times (repeat.py). `keep`
           keeps every repeat as a dimension; `average` stores mean/_std/_n.

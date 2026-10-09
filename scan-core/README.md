@@ -536,6 +536,52 @@ row (logged). A stage axis that does not move the camera coordinate stops the
 scan with "does not move ... the other axis?" -- on the KIM rig the camera is
 mounted 90 deg to the stage, so camera x is kim Y.
 
+### Flying any knob: field, frequency, ... (2026-10-09)
+
+A fly axis is not only for stages. A module that can SWEEP a knob at a set
+pace declares a `ramp` block on it in `describe` (INSTRUMENT_MODULE_GUIDE.md
+6b, "Ramps"), and the fly axis then flies that knob: the module sweeps it from
+one end of each row to the other, the detectors stream, and every sample is
+binned by the ramp's readback.
+
+```yaml
+axes:
+  - {type: linear, param: dssg.frequency, start: 2000, stop: 6000, num: 41}   # stepped
+  - {type: fly, param: clMag.field, start: -50, stop: 50, num: 201,          # flown
+     speed: 2}                       # mT/s -- or row_time_s: 60, or nothing: the module's default
+detectors: [hf2.r1]
+zigzag: true
+```
+
+**Binned by measurement, or by command.** Each ramp says what its readback is:
+
+| knob (pilot) | who sweeps | readback | `fly_binned_by` |
+|---|---|---|---|
+| clMag field | the service's control loop (setpoint moves, PI follows) | the Hall probe, every reading | `measurement` |
+| ppms field | MultiVu itself (linear approach at the rate) | the measured field, read fast during the sweep | `measurement` |
+| dssg frequency | the service, in steps (`suite_common/softramp.py`) | every frequency it SENT, with its time | `command` |
+
+The fly coordinate in the data file carries `fly_binned_by`, so anyone can
+tell later whether an axis is what the instrument reported or only what it was
+told. A knob that can do neither (no stream of its value, no ramp block) is
+refused before anything moves: "cannot be flown -- step it with a linear
+axis". The row ends when the module says its numbered sweep is over (never on
+a settle rule); Abort stops the sweep where it is; `zigzag` sweeps every other
+row backwards; the lag correction works as for a stage.
+
+```bash
+uv run python run_fly_any_demo.py      # a field x frequency map: stepped, field flown, frequency flown
+```
+
+![any-knob fly](fly_any_demo.png)
+
+*The same simulated FMR map stepped (one reading per point), with the FIELD
+flown (binned by the measured field) and with the FREQUENCY flown (binned by
+the commanded frequency). The flown maps average ~15 samples per pixel.*
+
+Which other modules could get a ramp: `docs/ROADMAP.md`, "Fly scans over any
+knob".
+
 ## Scripts: set, wait, scan in a loop
 
 For what a fixed recipe cannot say -- "at each temperature, wait until it has

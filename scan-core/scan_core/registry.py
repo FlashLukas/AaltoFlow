@@ -35,6 +35,10 @@ class Parameter:
     #: Storage built from the module's describe (type, min/max, bits, options,
     #: store). None = undeclared, stored as a float64 as it always was.
     storage = None
+    #: A knob that can SWEEP CONTINUOUSLY at a set pace (ramp.RampSpec, from
+    #: the module's `ramp` block in describe): a fly scan can then fly it --
+    #: field, frequency, power -- not only a stage. None = it can only be SET.
+    ramp = None
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
@@ -813,8 +817,68 @@ def build_sim_registry() -> Registry:
                                "trying a THROUGHOUT routine without the rig."))
 
     _attach_sim_streams(reg, s)
+    _attach_sim_ramps(reg, s)
     reg._state = s     # handy for tests
     return reg
+
+
+def _attach_sim_ramps(reg: Registry, s: SimState) -> None:
+    """Give the simulator two knobs that SWEEP CONTINUOUSLY (ramp.py), so a
+    fly scan over a field or a frequency runs without the lab -- one of each
+    kind a module can declare:
+
+      * `field`: binned by MEASUREMENT. The simulated magnet follows the
+        software ramp, and a simulated Hall probe streams the ACTUAL field
+        (with a little noise) at 250 Hz -- as clMag streams its probe.
+      * `rf_freq`: binned by COMMAND. A generator cannot report its frequency
+        while it sweeps, so the record is the ramp's own: every value it sent,
+        with the time it was sent (suite_common/softramp.py, the same code the
+        dssg module walks its frequency with).
+
+    The setters of both knobs STOP a running ramp first: a set is a new
+    instruction and takes the knob over (the rule every module follows).
+    """
+    from suite_common.softramp import SoftRamp
+
+    from .ramp import RampSpec, Readback
+    from .sim_stream import SimStreamer
+
+    def ramp_of(attr, lo_hi):
+        return SoftRamp(lambda v, a=attr: setattr(s, a, float(v)),
+                        lambda a=attr: getattr(s, a), limits=lo_hi, dt_s=0.01,
+                        name=f"sim-ramp-{attr}")
+
+    rng = np.random.default_rng(7)
+    for pid, attr, unit, rate_lim, default, measured in (
+            ("field", "field_mT", "mT", (0.01, 200.0), 10.0, True),
+            ("rf_freq", "rf_freq_MHz", "MHz", (0.01, 5000.0), 100.0, False)):
+        p = reg.get(pid)
+        walk = ramp_of(attr, p.limits)
+
+        def setter(v, _w=walk, _a=attr):
+            _w.stop()
+            setattr(s, _a, float(v))
+
+        p._set = setter
+        if measured:
+            probe = SimStreamer(f"sim.{pid}_probe",
+                                lambda _a=attr: {"value": getattr(s, _a)
+                                                 + 0.02 * float(rng.standard_normal())},
+                                rate_hz=250.0)
+            rb = Readback(f"{pid}#readback", f"{p.label} (measured)", unit,
+                          probe.spec(), "value", get_fn=lambda _a=attr: getattr(s, _a))
+        else:
+            rb = Readback(f"{pid}#readback", f"{p.label} (commanded)", unit,
+                          StreamSpec(f"sim.{pid}_ramp", walk.stream_start,
+                                     walk.stream_read, walk.stream_stop),
+                          walk.channel, get_fn=lambda _a=attr: getattr(s, _a))
+        p.ramp = RampSpec(
+            start_fn=lambda to, rate, _w=walk: _w.start(to, rate),
+            stop_fn=lambda _w=walk: _w.stop(),
+            done_fn=lambda rid, _w=walk: _w.ramp_id != rid or not _w.running,
+            kind="software", rate_unit=f"{unit}/s", rate_limits=rate_lim,
+            rate_default=default, measured=measured, readback=rb)
+        p._sim_ramp = walk                       # tests
 
 
 def _attach_sim_streams(reg: Registry, s: SimState) -> None:

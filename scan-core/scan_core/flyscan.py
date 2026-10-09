@@ -41,6 +41,31 @@ How it plugs in (everything stepped stays exactly as it was):
     SEES the far edge, and the direction is learned from the first row (a
     first guess that proves wrong is logged, and the row is flown again).
 
+  * FLYING ANY KNOB THAT CAN SWEEP (2026-10-09, Lukas: "not just XY
+    scanning ... magnetic field, RF frequency, RF power, phase"). A module
+    that can sweep a control continuously declares a `ramp` block on it in
+    describe (ramp.py has the contract). Then
+
+        {type: fly, param: clMag.field, start: -50, stop: 50, num: 201,
+         speed: 2}                          # mT/s; or row_time_s: 60
+
+    asks the MODULE to sweep the field over each row (ramp verbs, not the
+    ordinary set), and bins the samples by the ramp's readback: the MEASURED
+    field when the module can report it while sweeping (clMag's Hall probe),
+    the COMMANDED value with its time stamp when not (a generator's
+    frequency) -- the coordinate's attribute `fly_binned_by` says which.
+    The row ends when the module says its sweep is over (a numbered done,
+    never a settle rule: gotcha #35); Abort stops the sweep. Without
+    `speed`, `row_time_s` gives the pace, else the module's default rate.
+
+    Why the stage keeps its own path and is not squeezed into the ramp
+    contract: a stage has no "sweep to x at v" verb -- its speed is a
+    persistent setting and the move is an ordinary set -- and that path
+    carries rig-verified fixes (the approach checked on the measured
+    position, flying in the camera's coordinates). A shim would re-route a
+    proven path through new code for no gain; ramp_of() picks the path
+    (`speed_param` or `move` named = stage, else a ramp block = ramp).
+
   * The recipe's `zigzag` flag means what it means for a stepped scan: every
     other row is flown BACKWARDS. That is the fly-back saved -- and also the
     best check that the lag correction is right: a forward and a backward row
@@ -96,6 +121,11 @@ STALL_S = 1.0
 #: ... and ends normally once the readback has sat at the far end, unchanged,
 #: for this long: arrived and stopped, not merely passing close to the end.
 SETTLED_S = 0.15
+
+#: RAMP path: after the module says its sweep is over, how long a MEASURED
+#: readback may take to come within half a pixel of the end (a coil lags
+#: its setpoint) before the row ends anyway.
+ARRIVE_S = 2.0
 
 
 # ───────────────────────────── pure functions ────────────────────────────────
@@ -202,13 +232,65 @@ def find_speed_param(registry, pid: str) -> str | None:
     return best
 
 
-def row_seconds(ax: dict) -> float:
+def ramp_of(ax: dict, registry):
+    """The RampSpec a fly axis flies with, or None for the STAGE path.
+
+    Two ways to fly, chosen by what the axis names (2026-10-09):
+      * the STAGE path (unchanged since 2026-09-27): a position knob that
+        moves at a speed of its own -- `speed_param` sets that speed and the
+        ordinary set is the move; or `move` flies another stage in this
+        parameter's coordinates (the camera's);
+      * the RAMP path: any knob whose module declares a `ramp` block (field,
+        frequency, ...): the module sweeps it at the row's rate.
+    A knob with a ramp block flown with `speed_param` or `move` still takes
+    the stage path: the recipe asked for that mechanism by name.
+    """
+    if ax.get("speed_param") or ax.get("move"):
+        return None
+    p = registry.get(ax.get("param")) if registry is not None else None
+    return getattr(p, "ramp", None) if p is not None else None
+
+
+def fly_rate(ax: dict, registry=None) -> float:
+    """The pace of a fly row, in the knob's unit per second.
+
+    `speed` when the axis gives one (as it always has); else `row_time_s`, the
+    time one row should take -- the pace is then what covers the run-in to
+    run-out distance in that time; else, for a knob with a ramp block, the
+    module's default rate. NaN when none of these is known.
+    """
+    def num(key):
+        try:
+            v = float(ax.get(key))
+        except (TypeError, ValueError):
+            return float("nan")
+        return v if math.isfinite(v) else float("nan")
+
+    sp = num("speed")
+    if math.isfinite(sp):
+        return sp
+    rt = num("row_time_s")
+    if math.isfinite(rt) and rt > 0:
+        try:
+            n = int(ax.get("num") or 0)
+            span = abs(float(ax["stop"]) - float(ax["start"]))
+        except (KeyError, TypeError, ValueError):
+            return float("nan")
+        w = span / (n - 1) if n > 1 else 0.0
+        return (span + w) / rt
+    ramp = ramp_of(ax, registry) if registry is not None else None
+    if ramp is not None and ramp.rate_default is not None:
+        return float(ramp.rate_default)
+    return float("nan")
+
+
+def row_seconds(ax: dict, registry=None) -> float:
     """How long one fly row takes, from the recipe alone (for the ETA)."""
     try:
         num = int(ax.get("num") or 0)
         span = abs(float(ax["stop"]) - float(ax["start"]))
         w = span / (num - 1) if num > 1 else 0.0
-        return (span + w) / float(ax["speed"])
+        return (span + w) / fly_rate(ax, registry)
     except (KeyError, TypeError, ValueError, ZeroDivisionError):
         return float("nan")
 
@@ -242,12 +324,15 @@ def validate_fly(recipe, registry) -> list[str]:
         num = 0
     if num < 2:
         errs.append(f"fly axis '{pid}' needs at least 2 pixels (num)")
-    try:
-        speed = float(ax.get("speed"))
-    except (TypeError, ValueError):
-        speed = float("nan")
+    ramp = ramp_of(ax, registry)
+    speed = fly_rate(ax, registry)
     if not (math.isfinite(speed) and speed > 0):
-        errs.append(f"fly axis '{pid}' needs a speed > 0")
+        errs.append(f"fly axis '{pid}' needs a speed > 0 (or row_time_s > 0)")
+    elif ramp is not None:
+        lo, hi = ramp.rate_limits
+        if not lo <= speed <= hi:
+            errs.append(f"fly rate {speed:g} {ramp.rate_unit} is outside what "
+                        f"'{pid}' can sweep [{lo:g},{hi:g}]")
     sp = ax.get("speed_param")
     if sp:
         q = registry.get(sp)
@@ -271,11 +356,20 @@ def validate_fly(recipe, registry) -> list[str]:
             errs.append("fly axis `move` names the axis parameter itself; leave it out")
     rb = ax.get("readback") or pid
     q = registry.get(rb)
-    if q is None:
+    if ramp is not None and not ax.get("readback"):
+        pass            # the ramp brings its own readback (or the command)
+    elif q is None:
         errs.append(f"fly axis readback '{rb}' is not available")
     elif getattr(q, "stream", None) is None:
-        errs.append(f"'{rb}' cannot be recorded continuously (its module does "
-                    f"not stream it), so there is no measured position to bin by")
+        if rb == pid and getattr(registry.get(pid), "kind", "") == "settable":
+            errs.append(f"'{rb}' cannot be recorded continuously and cannot "
+                        f"sweep: its module neither streams it (as a stage "
+                        f"streams its position) nor declares a `ramp` block "
+                        f"for it (a knob it can sweep at a set pace), so it "
+                        f"cannot be flown -- step it with a linear axis")
+        else:
+            errs.append(f"'{rb}' cannot be recorded continuously (its module does "
+                        f"not stream it), so there is no measured position to bin by")
     for det in getattr(recipe, "detectors", None) or []:
         q = registry.get(det)
         if q is None:
@@ -338,8 +432,28 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     log = ctx.get("log_fn") or (lambda msg: None)
 
     pos_p = registry.get(fly.params[0][0])
-    rb = registry.get(ax.get("readback") or pos_p.id)
-    speed = float(ax["speed"])
+    # THE RAMP PATH (any knob with a `ramp` block: field, frequency, ...) or
+    # the STAGE path (ramp_of explains the choice). In ramp mode the module
+    # sweeps the knob from one end of the row to the other at the row's rate,
+    # and the row is binned by the ramp's READBACK: the measured value when
+    # the module can report it while sweeping, else the commanded one.
+    ramp = ramp_of(ax, registry)
+    track = None
+    if ramp is not None:
+        if ax.get("readback"):
+            rb = registry.get(ax["readback"])
+        elif ramp.readback is not None:
+            rb = ramp.readback
+        else:
+            # nothing streamed at all: compute the commanded value from the
+            # start time and the rate (ramp.CommandTrack)
+            from .ramp import CommandTrack, Readback
+            track = CommandTrack(f"{pos_p.id}.command")
+            rb = Readback(f"{pos_p.id}#command", f"{pos_p.label} (commanded)",
+                          pos_p.unit, track.spec(), track.channel)
+    else:
+        rb = registry.get(ax.get("readback") or pos_p.id)
+    speed = fly_rate(ax, registry)
     speed_p = registry.get(ax["speed_param"]) if ax.get("speed_param") else None
     # `move`: another stage flies the row, the grid stays in param's coordinates
     move_p = registry.get(ax["move"]) if ax.get("move") else None
@@ -353,8 +467,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
 
     # One stream per group, however many parameters share it.
     groups: dict = {}
-    for pid in [rb.id] + list(dets):
-        spec = registry.get(pid).stream
+    # (the readback by object: a ramp's readback is not a registry parameter)
+    for spec in [rb.stream] + [registry.get(pid).stream for pid in dets]:
         groups.setdefault(id(spec), spec)
 
     params = {det: registry.get(det) for det in dets}
@@ -364,7 +478,14 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         # 3 and 4 is 3.5 (engine._storage_for).
         data[f"{det}_n"] = np.full(shape, np.nan)
         data[f"{det}_std"] = np.full(shape, np.nan)
-    ctx["var_attrs"] = _var_attrs(params, fly, ax, rb.id)
+    binned_by = ("measurement" if (ramp is None or ax.get("readback")) else ramp.binned_by)
+    ctx["var_attrs"] = _var_attrs(params, fly, ax, rb.id, speed, ramp, binned_by)
+    if ramp is not None:
+        log(f"fly: {pos_p.id} SWEPT by its module ({ramp.kind} ramp) at "
+            f"{speed:g} {ramp.rate_unit}; binned by "
+            + ("the MEASURED value" if binned_by == "measurement" else
+               "the COMMANDED value and its time stamp (the module cannot "
+               "report the real one while sweeping)"))
 
     # The speed the stage had before: the approach to each row runs at it (a
     # fly speed is usually slow, and crawling back across the sample to the
@@ -404,9 +525,12 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         coordinates.
         """
         value = pos_p.set(target)
-        if move_p is None:
+        if move_p is None and ramp is None:
             _await_position(rb, value, 0.5 * width, row_timeout, log,
                             should_abort=should_abort)
+        # (a ramp knob: its own settle rule has said "arrived" -- a field
+        # seek's field_stable, a generator's echo -- and a measured readback
+        # is noisy, so waiting for it to rest would wait for nothing)
         return value
 
     def snapshot():
@@ -446,8 +570,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         # tenth of a second back along the row -- 0.25 um at 2 um/s, just
         # outside half a pixel, so the round-trip came back (rig, 2026-09-28).
         end = state.get("rb_end")
-        at_runin = (move_p is None and state["fly_speed"] and end is not None
-                    and abs(end - a) <= 0.5 * width)
+        at_runin = (move_p is None and (state["fly_speed"] or ramp is not None)
+                    and end is not None and abs(end - a) <= 0.5 * width)
         if not at_runin:
             if state["fly_speed"]:
                 use_speed(orig_speed)
@@ -494,21 +618,28 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         if not state["fly_speed"]:
             use_speed(speed)
 
-        while True:
-            aborted, chunks, again = _fly_one_row(
-                pos_p, b, row_timeout, groups, should_abort, row, npix, total,
-                # the ETA clock leaves out the time the operator held the scan
-                t0 + ctx.get("user_paused_s", 0.0), on_progress, rb, params,
-                edges, lag, data, oidx, snapshot,
-                on_point, log, a=a, move_p=move_p, drive=drive, speed=speed)
-            if not again:
-                break
-            # the first guess of the direction was wrong: back to the start
-            # of the row (at the approach speed) and fly it again
-            if state["fly_speed"]:
-                use_speed(orig_speed)
-            current[pos_p.id] = approach(a)
-            use_speed(speed)
+        if ramp is not None:
+            # THE RAMP PATH: the module sweeps the knob over the row
+            aborted, chunks = _ramp_one_row(
+                ramp, a, b, speed, row_timeout, groups, should_abort, row, npix,
+                total, t0 + ctx.get("user_paused_s", 0.0), on_progress, rb,
+                params, edges, lag, data, oidx, snapshot, on_point, log, track)
+        else:
+            while True:
+                aborted, chunks, again = _fly_one_row(
+                    pos_p, b, row_timeout, groups, should_abort, row, npix, total,
+                    # the ETA clock leaves out the time the operator held the scan
+                    t0 + ctx.get("user_paused_s", 0.0), on_progress, rb, params,
+                    edges, lag, data, oidx, snapshot,
+                    on_point, log, a=a, move_p=move_p, drive=drive, speed=speed)
+                if not again:
+                    break
+                # the first guess of the direction was wrong: back to the start
+                # of the row (at the approach speed) and fly it again
+                if state["fly_speed"]:
+                    use_speed(orig_speed)
+                current[pos_p.id] = approach(a)
+                use_speed(speed)
         current[pos_p.id] = b
         state["rb_end"] = _last_value(chunks, rb)   # where the stream saw it stop
         _bin_into(chunks, rb, params, edges, lag, data, oidx)
@@ -758,6 +889,118 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
     return aborted, chunks, again
 
 
+def _ramp_one_row(ramp, a, b, rate, timeout, groups, should_abort, row, npix,
+                  total, t0, on_progress, rb, params, edges, lag, data, oidx,
+                  snapshot, on_point, log, track=None):
+    """One row of the RAMP path: the module sweeps the knob from a to b.
+
+    Same shape as _fly_one_row: start the streams, record at rest for the
+    lead-in, start the ramp, drain the streams every POLL_S (live plot,
+    progress, Abort), then the tail. Returns (aborted, {group id: [chunks]}).
+
+    WHEN IS THE ROW OVER? When the MODULE says its ramp is over (the numbered
+    done check of ramp.RampSpec -- never a settle rule, gotcha #35), and, for
+    a measured readback, once the reading has also come within half a pixel
+    of the end (a coil lags its setpoint) or ARRIVE_S has passed since the
+    module said done (a noisy reading may never sit inside half a small
+    pixel; the pixels it did not reach stay empty and are logged).
+    """
+    chunks = {g: [] for g in groups}
+    if track is not None:
+        track.rest(a)
+    for spec in groups.values():
+        spec.start()
+    handle = None
+    try:
+        time.sleep(LEAD_S)
+        for g, spec in groups.items():
+            chunks[g].append(spec.read())
+        lead = max((d for cs in chunks.values() for c in cs
+                    for d in c["delay_s"].values()), default=0.0)
+        if lead > 0:
+            time.sleep(min(lead, 5.0))
+        handle = ramp.start(b, rate)
+        if track is not None:
+            track.go(a, b, rate)
+        tol = 0.5 * abs(edges[1] - edges[0]) if len(edges) > 1 else 0.0
+        t_deadline = time.monotonic() + timeout
+        done_at = None
+        aborted = False
+        last_live = 0.0
+        while True:
+            # sleep POLL_S in short slices: Abort is seen within ~50 ms
+            end = time.monotonic() + POLL_S
+            while time.monotonic() < end:
+                if should_abort and should_abort():
+                    break
+                time.sleep(0.05)
+            for g, spec in groups.items():
+                chunks[g].append(spec.read())
+            if should_abort and should_abort():
+                aborted = True
+                _stop_ramp(ramp, track, log, "aborted mid-row")
+                break
+            _bin_into(chunks, rb, params, edges, lag, data, oidx)
+            first = next(iter(params), None)
+            n_done = (int(np.count_nonzero(data[f"{first}_n"][tuple(oidx)] > 0))
+                      if first else 0)
+            done = row * npix + min(n_done, npix - 1)
+            now = time.monotonic()
+            if on_progress and done > 0:
+                on_progress(done, total, (now - t0) / done * (total - done))
+            if on_point and now - last_live >= POLL_S:
+                last_live = now
+                on_point(done, total, snapshot)
+            if ramp.done(handle):
+                if done_at is None:
+                    done_at = now
+                here = _last_value(chunks, rb)
+                if (not ramp.measured or rb is not ramp.readback or here is None
+                        or abs(here - b) <= tol or now - done_at >= ARRIVE_S):
+                    if (ramp.measured and here is not None and abs(here - b) > tol):
+                        log(f"fly: the sweep ended with the reading at {here:g}, "
+                            f"short of {b:g} (more than half a pixel)")
+                    break
+            if now >= t_deadline:
+                _stop_ramp(ramp, track, log, "row timed out")
+                raise TimeoutError(f"fly: the sweep to {b:g} did not end within "
+                                   f"{timeout:g} s")
+        if not aborted:
+            # THE TAIL: a lagging detector records the end of the row late
+            tail = max((d for cs in chunks.values() for c in cs
+                        for d in c["delay_s"].values()), default=0.0)
+            if tail > 0:
+                time.sleep(min(tail + 0.02, 5.0))
+    except BaseException:
+        # whatever went wrong (a fault, a refused command, Ctrl-C), the knob
+        # must not keep sweeping on its own after the scan has let go of it
+        if handle is not None:
+            _stop_ramp(ramp, track, log, "error mid-row")
+        for spec in groups.values():
+            try:
+                spec.stop()
+            except Exception:
+                pass
+        raise
+    for g, spec in groups.items():
+        try:
+            chunks[g].append(spec.stop())
+        except Exception as exc:
+            log(f"fly: stopping stream {spec.group} failed ({exc})")
+    return aborted, chunks
+
+
+def _stop_ramp(ramp, track, log, why):
+    """Stop a sweep where it is (Abort, a timeout, an error)."""
+    try:
+        ramp.stop()
+        log(f"fly: {why}, sweep stopped")
+    except Exception as exc:                  # noqa: BLE001
+        log(f"fly: {why}, could not stop the sweep ({exc})")
+    if track is not None:
+        track.stopped()
+
+
 def _drive_check(drive, here, target, move_p, rb, speed, th, track, now, log):
     """Where is a row flown by ANOTHER stage (fly axis with `move`)?
 
@@ -944,8 +1187,18 @@ def _bin_into(chunks, rb, params, edges, lag, data, oidx):
         data[f"{det}_std"][tuple(oidx)] = s
 
 
-def _var_attrs(params, fly, ax, rb_id) -> dict:
-    """Attributes for the dataset: what each variable is, and how it was flown."""
+def _var_attrs(params, fly, ax, rb_id, speed, ramp=None,
+               binned_by="measurement") -> dict:
+    """Attributes for the dataset: what each variable is, and how it was flown.
+
+    `fly_binned_by` on the fly coordinate (Lukas, 2026-10-09) says what the
+    samples were sorted into pixels by: "measurement" (the instrument's own
+    reading of where it was -- a stage's position, a Hall probe) or "command"
+    (the value the module SENT, with its time stamp -- a generator that cannot
+    report its frequency while sweeping). Someone reading the file a year on
+    must be able to tell the two apart: a commanded axis is only as good as
+    the instrument's obedience.
+    """
     out = {}
     for det, p in params.items():
         label = getattr(p, "label", det)
@@ -955,10 +1208,16 @@ def _var_attrs(params, fly, ax, rb_id) -> dict:
         out[f"{det}_std"] = {"units": getattr(p, "unit", ""),
                              "label": f"{label}: spread within the pixel",
                              "fly_stat": "std"}
-    out[fly.name] = {"fly": "true", "readback": rb_id,
-                     "speed": float(ax["speed"]),
-                     "lag_correction": "true" if ax.get("lag_correction", True)
-                     is not False else "false"}
+    attrs = {"fly": "true", "readback": rb_id,
+             "speed": float(speed),
+             "lag_correction": "true" if ax.get("lag_correction", True)
+             is not False else "false",
+             "fly_binned_by": binned_by,
+             "fly_mode": "ramp" if ramp is not None else "move"}
+    if ramp is not None:
+        attrs["fly_ramp"] = ramp.kind
+        attrs["rate_unit"] = ramp.rate_unit
+    out[fly.name] = attrs
     return out
 
 

@@ -119,24 +119,26 @@
           "required": ["type", "x", "y"]
         },
         {
-          "title": "fly (INNERMOST only: one continuous move per row, binned by the measured position)",
+          "title": "fly (INNERMOST only: one continuous move or sweep per row; binned by the measured position, or by the commanded value for a knob that cannot report it while sweeping)",
           "type": "object",
           "properties": {
             "type": {"const": "fly"},
-            "param": {"type": "string", "description": "the position that is moved"},
+            "param": {"type": "string", "description": "the knob that is flown: a stage position (moved at speed_param's speed), or any knob whose module declares a `ramp` block (swept by the module: field, frequency, ...)"},
             "start": {"type": "number"},
             "stop": {"type": "number"},
             "num": {"type": "integer", "minimum": 2, "description": "pixels"},
             "speed": {"type": "number", "exclusiveMinimum": 0,
-                      "description": "fly speed, in the position's unit per second"},
+                      "description": "fly speed / sweep rate, in the knob's unit per second (mT/s for a field). Optional for a knob with a ramp block: row_time_s, else the module's default rate"},
+            "row_time_s": {"type": "number", "exclusiveMinimum": 0,
+                           "description": "instead of speed: how long one row should take (run-in to run-out); the rate follows"},
             "speed_param": {"type": "string", "description": "the settable the speed is set on"},
-            "readback": {"type": "string", "description": "the streamed position to bin by (default: param)"},
+            "readback": {"type": "string", "description": "the streamed position to bin by (default: param; for a ramp knob, the readback its module declares)"},
             "move": {"type": "string", "description": "the stage that flies the row when param is a coordinate measured by something else (camera.laser_x); the grid, placement and binning stay in param's coordinates"},
             "lag_correction": {"type": "boolean", "description": "move each sample back by its channel's declared delay (default true)"},
             "timeout_s": {"type": "number", "description": "longest one row may take (default 3x the expected time + 30 s)"},
             "name": {"type": "string"}
           },
-          "required": ["type", "param", "start", "stop", "num", "speed"]
+          "required": ["type", "param", "start", "stop", "num"]
         },
         {
           "title": "repeat (sets nothing: everything inside it is done num times; any depth, but not inside a fly axis)",
