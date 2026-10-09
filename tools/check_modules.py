@@ -25,7 +25,8 @@ Static checks, per module:
   * src/<pkg>/control.py and src/<pkg>/apps/control_bar.py (one controller,
     many viewers), src/<pkg>/secure.py (CurveZMQ encryption -- being
     rolled out module by module) and src/<pkg>/follow.py (a setting that
-    follows another module through a formula), WHERE PRESENT, are byte-identical to the
+    follows another module through a formula) and src/<pkg>/softramp.py (a knob
+    walked at a set pace, for fly scans), WHERE PRESENT, are byte-identical to the
     masters in suite-common/src/suite_common/
   * src/<pkg>/hwlock.py exists and is byte-identical to the master copy
     suite-common/src/suite_common/hwlock.py (FAIL otherwise: a stale copy may
@@ -54,6 +55,10 @@ Live checks (--live), per module with a .venv:
   * if any parameter declares a `stream` (for fly scans), the service answers
     stream_start / stream_read / stream_stop, and the reply carries every
     declared channel with as many values as time stamps
+  * if a control declares a `ramp` (a knob the module sweeps, for fly scans
+    over any knob), a short sweep is started on the scratch service: its
+    number must show up finished in status, its readback stream must have
+    recorded it, and the stop verb must answer
   * a MALFORMED request (bytes that are not JSON, then a JSON array instead of
     an object) is ANSWERED with {"ok": false, ...}, and `describe` still
     answers afterwards on a fresh socket. A REP socket that received a request
@@ -100,6 +105,9 @@ SECURE_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "secure.py"
 # Follow (a setting follows another module's value through a formula): optional,
 # copied into the modules that use it (hf2 first).
 FOLLOW_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "follow.py"
+# The software ramp (a knob walked at a set pace, for fly scans over any knob):
+# optional, copied into the modules that sweep a knob themselves (dssg first).
+SOFTRAMP_MASTER = ROOT / "suite-common" / "src" / "suite_common" / "softramp.py"
 
 # Asks a service to describe itself, run by the MODULE's own python (which has
 # pyzmq) so this checker needs nothing beyond the standard library.
@@ -134,6 +142,72 @@ try:
     print(json.dumps(out))
 except zmq.Again:
     print("null")
+"""
+
+# A declared `ramp` (a knob the module sweeps continuously, for fly scans):
+# start the readback stream, start a SHORT sweep (~0.5 s at the module's
+# default rate, towards the middle of the knob's range), wait for the status
+# to show that sweep's number finished, read the stream, and stop. argv:
+# port, JSON {id, read_path, scale, min, max, ramp}. Prints one JSON line.
+_RAMP = r"""
+import json, sys, time, zmq
+port, d = sys.argv[1], json.loads(sys.argv[2])
+r = d["ramp"]; scale = float(d.get("scale") or 1.0)
+s = zmq.Context.instance().socket(zmq.REQ)
+s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 5000)
+s.connect(f"tcp://127.0.0.1:{port}")
+def ask(**m):
+    s.send_json(m); return s.recv_json()
+def at(st, path):
+    for k in path or []:
+        st = st[k] if isinstance(st, list) else st.get(k)
+    return st
+out = {"ok": False, "why": "", "samples": 0}
+try:
+    st = ask(cmd="status")["status"]
+    here = float(at(st, d["read_path"])) / scale
+    lo = d.get("min"); hi = d.get("max")
+    rate = float(r["rate"].get("default") or r["rate"].get("max") or 1.0)
+    span = rate * 0.5
+    mid = (lo + hi) / 2 if lo is not None and hi is not None else here + span
+    to = here + span if mid >= here else here - span
+    rb = (r.get("readback") or {}).get("stream") or {}
+    if rb:
+        ask(cmd=rb.get("start_verb", "stream_start"))
+    a = r["start"]["args"]
+    rep = ask(cmd=r["start"]["verb"], **{a["to"]: to * scale, a["rate"]: rate * scale},
+              **(r["start"].get("extra") or {}))
+    if not rep.get("ok"):
+        out["why"] = f"start refused: {rep.get('error')}"
+    else:
+        rid = rep.get("ramp_id")
+        dn = r.get("done") or {}
+        key, idk = dn.get("key", "ramping"), dn.get("id_key", "ramp_id")
+        t0 = time.monotonic(); done = False
+        while time.monotonic() - t0 < 10.0:
+            st = ask(cmd="status")["status"]
+            if (rid is None or (st.get(idk) or 0) >= rid) and not st.get(key):
+                done = True; break
+            time.sleep(0.05)
+        n = 0
+        if rb:
+            c = ask(cmd=rb.get("stop_verb", "stream_stop")).get("stream") or {}
+            n = len((c.get("values") or {}).get(rb.get("channel"), []))
+        stop = ask(cmd=r["stop"]["verb"], **(r["stop"].get("extra") or {}))
+        out["samples"] = n
+        if not done:
+            out["why"] = "the sweep did not end (status never showed its ramp_id finished)"
+        elif rb and n < 2:
+            out["why"] = f"the readback stream recorded {n} sample(s)"
+        elif not stop.get("ok"):
+            out["why"] = f"stop refused: {stop.get('error')}"
+        else:
+            out["ok"] = True
+except zmq.Again:
+    out["why"] = "no reply"
+except Exception as exc:
+    out["why"] = f"{type(exc).__name__}: {exc}"
+print(json.dumps(out))
 """
 
 # Three `status` replies ~0.4 s apart (a value may only appear once the
@@ -274,7 +348,8 @@ def control_check(rep: Report, m):
     for rel, master, required in (("control.py", CONTROL_MASTER, True),
                                   ("apps/control_bar.py", CONTROL_BAR_MASTER, False),
                                   ("secure.py", SECURE_MASTER, True),
-                                  ("follow.py", FOLLOW_MASTER, False)):
+                                  ("follow.py", FOLLOW_MASTER, False),
+                                  ("softramp.py", SOFTRAMP_MASTER, False)):
         copy = pkg / rel
         name = f"{rel} is the master copy"
         if not copy.is_file():
@@ -451,6 +526,35 @@ def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
     rep.add(m.key, "live: stream verbs work", "FAIL" if problems else "PASS",
             "; ".join(sorted(set(problems))) if problems
             else f"{len(channels)} channel(s), {len(chunks[0]['t'])} samples in 0.3 s")
+
+
+def ramp_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
+    """A declared `ramp` must work: scan-core flies the knob through it.
+    Each one: the block names its verbs and rate, a short sweep starts, its
+    number shows up finished in status, the readback stream recorded it, and
+    the stop verb answers."""
+    for d in manifest.get("parameters", []):
+        r = d.get("ramp")
+        if not isinstance(r, dict):
+            continue
+        name = f"live: ramp of '{d.get('id')}' works"
+        missing = [k for k in ("start", "stop", "rate") if not r.get(k)]
+        args = (r.get("start") or {}).get("args") or {}
+        if missing or not args.get("to") or not args.get("rate"):
+            rep.add(m.key, name, "FAIL", "ramp block needs start{verb, args{to, rate}}, "
+                    "stop{verb} and rate{unit, min, max}")
+            continue
+        info = {k: d.get(k) for k in ("id", "read_path", "scale", "min", "max")}
+        info["ramp"] = r
+        res = subprocess.run([str(py), "-c", _RAMP, str(cmd), json.dumps(info)],
+                             capture_output=True, text=True, timeout=60)
+        try:
+            out = json.loads(res.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            out = {"ok": False, "why": (res.stderr or "no output").strip()[-200:]}
+        rep.add(m.key, name, "PASS" if out.get("ok") else "FAIL",
+                f"{out.get('samples', 0)} readback samples" if out.get("ok")
+                else out.get("why", ""))
 
 
 def malformed_check(rep: Report, m, py: Path, cmd: int) -> bool:
@@ -749,6 +853,7 @@ def live_check(rep: Report, m, py: Path):
         n = len(manifest.get("parameters", []))
         rep.add(m.key, "live: describe has parameters", "PASS" if n else "FAIL", f"{n}")
         stream_check(rep, m, py, cmd, manifest)
+        ramp_check(rep, m, py, cmd, manifest)
         types_check(rep, m, py, cmd, manifest)
         if not malformed_check(rep, m, py, cmd):
             rep.add(m.key, "live: stops cleanly on `shutdown`", "SKIP",
