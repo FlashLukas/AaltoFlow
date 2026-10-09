@@ -462,7 +462,12 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
     `mask_threshold` per wavelength in the file; 19.1 min.
   Caveat: Otsu's threshold took two values on near-identical scout maps (0.0073
   or 0.0080 -- 0.0084 mW, maps 1 % apart): the rim points sit in the gap where its
-  score is flat, so the mask moves by ~20 rim points between runs.
+  score is flat, so the mask moves by ~20 rim points between runs. Fixed in
+  [a8f47a6](https://github.com/FlashLukas/AaltoFlow/commit/a8f47a6) (the middle of the
+  flat range): after a fresh autofocus two scouts of the same area gave 0.008506 /
+  0.008533 mW (0.027 uW apart), 293 / 293 points, masks 6 rim points apart; the new
+  attrs `mask_threshold_kind` and `created` are written. (The threshold depends on
+  focus: 0.0073 mW at the morning's focus, 0.0085 mW after the refocus.)
   Tests: [`test_scout.py`](../scan-core/tests/test_scout.py),
   [`test_scout_builder.py`](../scan-core/tests/test_scout_builder.py).
 - Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
