@@ -83,6 +83,13 @@ class Limits:
     field_tolerance_mT: float = 0.1   # full tolerance band for "on target"
     field_step_mT: float = 2.0        # deliberate undershoot before the PI seek
     stable_time_s: float = 0.2        # must hold within tolerance this long
+    # The field SWEEP (ramp_field, for fly scans, 2026-10-09): the pace a
+    # sweep may be asked for. The upper end is what the PI follows on the
+    # SIMULATED magnet with room to spare; the real coil's inductance and the
+    # Kepco's voltage compliance decide the true limit (VERIFY on the rig:
+    # sweep at increasing rates and watch the field error in status).
+    sweep_rate_min_mT_per_s: float = 0.01
+    sweep_rate_max_mT_per_s: float = 20.0
 
 
 @dataclass

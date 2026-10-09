@@ -70,6 +70,17 @@ class AcquisitionThread(threading.Thread):
         # the last GOOD field meanwhile, so without this flag a dead DAQ
         # looked exactly like a perfectly steady magnet.
         self.hw_error = ""
+        # Optional hook on_reading(t_wall, field_mT), called for EVERY good
+        # reading (2026-10-09, the field ramp's stream for fly scans). t_wall
+        # is time.time() at the MIDDLE of the averaging window: a reading is
+        # the mean over samples/rate seconds, so it describes the field half
+        # a window before it was finished (stamping the end would add that
+        # half window as an uncorrected lag -- INSTRUMENT_MODULE_GUIDE 6b).
+        # The middle is taken between the MEASURED start and end of the read
+        # (not end - samples/rate/2): a simulator that does not wait, or a
+        # DAQ with overhead, would otherwise stamp readings out of order.
+        # It runs on this thread, so it must stay cheap (one deque append).
+        self.on_reading = None
 
     def set_profile(self, name: str) -> None:
         assert name in ("fast", "precise")
@@ -86,6 +97,7 @@ class AcquisitionThread(threading.Thread):
     def run(self) -> None:
         while not self._stop.is_set():
             samples, rate = self._current_profile()
+            t_begin = time.time()     # the averaging window opens here
             try:
                 volts = self._probe.read_voltage(samples, rate)   # blocks ~samples/rate
             except Exception as exc:                              # noqa: BLE001
@@ -101,9 +113,16 @@ class AcquisitionThread(threading.Thread):
                 continue
             field = self._hall.volts_to_field(volts)
             t = time.monotonic()
+            t_wall = time.time()
             self.latest.set(t, field, samples)
             self.ring.append((t, field))
             self.hw_error = ""       # a good read: the probe works again
+            hook = self.on_reading
+            if hook is not None:
+                try:
+                    hook(0.5 * (t_begin + t_wall), field)
+                except Exception:                                 # noqa: BLE001
+                    pass             # a recorder must never stop the field readings
 
     def stop(self) -> None:
         self._stop.set()

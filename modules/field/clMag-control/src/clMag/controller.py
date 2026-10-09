@@ -27,6 +27,15 @@ STABLE    : field reached and verified; the slow long-term stabilizer trims
             flag says whether a measurement may trust the field right now.
 HOLD      : holding a field set by calibration only (no PI verification);
             the stabilizer trims here too, field_stable stays False.
+SWEEP     : the field SWEEPS at a set pace (mT/s) towards a target, for a fly
+            scan (ramp_field, 2026-10-09). The setpoint moves along a straight
+            line in time; the current follows it through the calibration
+            (feed-forward) plus a PI on the MEASURED field, and never steps
+            back against the sweep direction (the hysteresis rule of gotcha
+            #11: a current that dithers flips the iron's branch). No freeze
+            while sweeping -- a frozen output cannot follow a moving setpoint.
+            At the target the usual endgame takes over: freeze within tol/2,
+            or a one-way PI seek for the rest, -> STABLE as for set_field.
 DEMAG     : walking exponentially decaying +/- current steps down to zero.
 CALIBRATE : sweeping current, dwelling, measuring, building a fresh B(I) curve.
 
@@ -50,6 +59,7 @@ from .calibration import FieldCalibration
 from .config import Config
 from .pid import PI
 from .ramp import Ramper
+from .stream import StreamRecorder
 
 
 class State(str, Enum):
@@ -60,6 +70,7 @@ class State(str, Enum):
     HOLD = "HOLD"
     DEMAG = "DEMAG"
     CALIBRATE = "CALIBRATE"
+    SWEEP = "SWEEP"
 
 
 @dataclass
@@ -90,6 +101,14 @@ class Status:
     loop_error: str = ""
     stabilizer: bool = True           # long-term stabilizer switched on
     stabilizer_trim_A: float = 0.0    # current it has added since STABLE/HOLD
+    # The field SWEEP (ramp_field). `ramp_id` = the number of the newest sweep
+    # the control thread has TAKEN UP (ramp_field returns its own number), so
+    # "ramp_id >= mine and not ramping" is the honest "my sweep is over" --
+    # a ramping=False frame from before the sweep began cannot pass for it.
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_target_mT: Optional[float] = None
+    ramp_rate_mT_per_s: Optional[float] = None
 
 
 def _finite(name: str, value) -> float:
@@ -205,6 +224,26 @@ class Controller:
         self._cal_dwell_s = 0.5
         self._cal_after: Optional[Callable[[FieldCalibration], None]] = None
 
+        # the field SWEEP (state SWEEP; see the module doc). Plain attributes
+        # the control thread owns; status() copies them (gotcha #1).
+        self._ramp_seq = 0             # handed out by ramp_field (caller thread)
+        self._ramp_taken = 0           # newest sweep the control thread took up
+        self._sweep_from = 0.0
+        self._sweep_to = 0.0
+        self._sweep_rate = 0.0
+        self._sweep_sign = 1
+        self._sweep_t0 = 0.0
+        self._sweep_off = 0.0          # supply current minus calibration at the start
+        self._ramp_target: Optional[float] = None
+        self._ramp_rate: Optional[float] = None
+
+        # THE STREAM (fly scans): every Hall-probe reading with its time,
+        # the setpoint and the current at that moment. The acquisition thread
+        # appends to it (cheap: one lock, one deque append); the service's
+        # stream verbs hand it out. Recording only while a stream is started.
+        self.recorder = StreamRecorder(["field", "setpoint", "current"])
+        self.acq.on_reading = self._record_reading
+
         # logging
         self._on_event = on_event or (lambda level, msg: None)
         self._csv_path = csv_path
@@ -307,6 +346,60 @@ class Controller:
             raise ValueError(f"dwell_s must be >= 0, got {dwell_s}")
         return self._enqueue("calibrate", n_per_leg, dwell_s, on_done)
 
+    def ramp_field(self, field_mT: float, rate_mT_per_s: float) -> int:
+        """SWEEP the field to `field_mT` at `rate_mT_per_s`; returns the sweep's
+        number (status `ramp_id` reaches it when the control thread has taken
+        it up, and `ramping` goes False when the setpoint has arrived).
+
+        Checked HERE, in the caller's thread, so the service can answer
+        ok:false: no calibration, or a target outside the calibrated range,
+        is REFUSED (a sweep cannot be asked to go where set_field may not).
+        A rate outside the configured limits is clamped, with a warning,
+        like every other setter of this module."""
+        field_mT = _finite("field_mT", field_mT)
+        rate = abs(_finite("rate_mT_per_s", rate_mT_per_s))
+        cal = self.calibration
+        if cal is None or not cal.currents_A:
+            raise ValueError("no calibration loaded; cannot sweep the field")
+        lo, hi = cal.range_mT
+        if not lo <= field_mT <= hi:
+            raise ValueError(f"field {field_mT:.3f} mT is outside the calibrated "
+                             f"range {lo:.3f}..{hi:.3f} mT")
+        lim = self.cfg.limits
+        r = max(lim.sweep_rate_min_mT_per_s, min(lim.sweep_rate_max_mT_per_s, rate))
+        if r != rate:
+            self._event("warn", f"sweep rate {rate:g} mT/s clamped to {r:g} mT/s "
+                                f"(limits {lim.sweep_rate_min_mT_per_s:g}.."
+                                f"{lim.sweep_rate_max_mT_per_s:g})")
+        with self._cmd_seq_lock:
+            self._ramp_seq += 1
+            rid = self._ramp_seq
+        self._enqueue("ramp", rid, field_mT, r)
+        return rid
+
+    def ramp_stop(self) -> int:
+        """End a sweep WHERE IT IS: the current is held, the state goes IDLE
+        (a scan's Abort). Does nothing when no sweep runs."""
+        return self._enqueue("ramp_stop")
+
+    # the stream verbs (fly scans): see self.recorder
+    def stream_start(self) -> int:
+        return self.recorder.start()
+
+    def stream_read(self) -> dict:
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        return self.recorder.stop()
+
+    def _record_reading(self, t_wall: float, field: float) -> None:
+        """The acquisition thread's hook: one reading into the stream. Reads
+        two floats the control thread writes -- each read is atomic, and a
+        setpoint one tick (10 ms) old is as good as the reading itself."""
+        sp = self._setpoint_field
+        self.recorder.append(t_wall, (field, float("nan") if sp is None else sp,
+                                      self.ramper.setpoint))
+
     def set_lock(self, locked: bool) -> int:
         return self._enqueue("lock", locked)
 
@@ -340,6 +433,9 @@ class Controller:
         # THEN advances cmd_done, so a count read before the state can never
         # be newer than the state published with it.
         cmd_done = self._cmd_done
+        # the same for the sweep number: the control thread enters SWEEP and
+        # only THEN publishes the number it took up
+        ramp_taken = self._ramp_taken
         _, field = self.acq.latest.get()
         return Status(
             state=self._state.value,
@@ -355,6 +451,10 @@ class Controller:
             loop_error=self._loop_error,
             stabilizer=bool(self.stabilizer_enabled),
             stabilizer_trim_A=self._stab_trim,
+            ramping=self._state == State.SWEEP,
+            ramp_id=ramp_taken,
+            ramp_target_mT=self._ramp_target,
+            ramp_rate_mT_per_s=self._ramp_rate,
         )
 
     def _hw_error_text(self) -> str:
@@ -480,6 +580,15 @@ class Controller:
             self._begin_demag(cmd[1])
         elif kind == "calibrate":
             self._begin_calibrate(cmd[1], cmd[2], cmd[3], now)
+        elif kind == "ramp":
+            try:
+                self._begin_sweep(cmd[2], cmd[3], now)
+            finally:
+                # published even if refused (the calibration went away since
+                # ramp_field checked): a waiting client must see it "over"
+                self._ramp_taken = cmd[1]
+        elif kind == "ramp_stop":
+            self._stop_sweep()
 
     # ----------------------------------------------------- command beginnings
 
@@ -707,6 +816,119 @@ class Controller:
             self._tick_demag()
         elif st == State.CALIBRATE:
             self._tick_calibrate(now, field)
+        elif st == State.SWEEP:
+            self._tick_sweep(now, dt, field)
+
+    # ---- the field SWEEP (ramp_field) --------------------------------------
+
+    def _begin_sweep(self, to: float, rate: float, now: float) -> None:
+        if not self._require_calibration():
+            return
+        cal = self.calibration
+        # Start from the field we HAVE: the setpoint when it was reached (a
+        # STABLE/HOLD field is the setpoint, without the probe's noise), the
+        # measured field otherwise.
+        _, measured = self.acq.latest.get()
+        if self._state in (State.STABLE, State.HOLD) and self._setpoint_field is not None:
+            start = self._setpoint_field
+        else:
+            start = measured
+        self._take_control()
+        self._sweep_from, self._sweep_to, self._sweep_rate = start, to, rate
+        self._sweep_sign = 1 if to >= start else -1
+        self._sweep_t0 = now
+        # The calibration is the AVERAGE of the up and down legs; the iron is
+        # on one branch of the loop, off that average by a few tenths of a mT
+        # in current terms. Keep the present difference as an offset, so the
+        # feed-forward starts where the magnet really is (the PI trims the
+        # rest, including the branch change if the sweep reverses direction).
+        self._sweep_off = self.ramper.setpoint - cal.current_for_field(start)
+        self.pi.reset()
+        self._setpoint_field = start
+        self._field_stable = False
+        self._settling = False
+        self._output_frozen = False
+        self._approach_sign = self._sweep_sign
+        self._ramp_target, self._ramp_rate = to, rate
+        # fast readings: a fly scan bins by them, and 4 ms readings follow a
+        # moving field far better than 100 ms means
+        self.acq.set_profile("fast")
+        self._state = State.SWEEP
+        self._event("info", f"field sweep {start:.3f} -> {to:.3f} mT at {rate:g} mT/s")
+
+    def _tick_sweep(self, now: float, dt: float, field: float) -> None:
+        span = abs(self._sweep_to - self._sweep_from)
+        travelled = self._sweep_rate * (now - self._sweep_t0)
+        arrived = travelled >= span
+        b_cmd = (self._sweep_to if arrived
+                 else self._sweep_from + self._sweep_sign * travelled)
+        self._setpoint_field = b_cmd
+        error = b_cmd - field
+        corr = self.pi.update(error, dt)       # two-sided while the setpoint moves
+        amps = self.calibration.current_for_field(b_cmd) + self._sweep_off + corr
+        # NEVER step back against the sweep (gotcha #11): a current that
+        # reverses, even by a few mA, flips the iron onto the other branch of
+        # its loop and the field jumps by 2h. So the commanded current only
+        # moves the sweep's way -- if the field runs ahead, the current waits
+        # for the setpoint to catch up. While it waits the integral must not
+        # keep growing (anti-windup), or the field would lag behind afterwards.
+        last = self.ramper.target
+        if (amps - last) * self._sweep_sign < 0:
+            amps = last
+            self.pi.unwind(error, dt)
+        lim = self.cfg.limits.current_max_A
+        amps = max(-lim, min(lim, amps))       # quiet: the target is in range
+        self.ramper.go_to(amps)
+        if arrived:
+            self._end_sweep(now, field)
+
+    def _end_sweep(self, now: float, field: float) -> None:
+        """The setpoint has reached the target: settle there exactly as a
+        set_field would end, without going back."""
+        to, sign = self._sweep_to, self._sweep_sign
+        tol = self.cfg.limits.field_tolerance_mT
+        error = to - field
+        self._setpoint_field = to
+        self._approach_sign = sign
+        self._event("info", f"field sweep reached {to:.3f} mT; settling")
+        if abs(error) <= tol / 2:
+            # already there: freeze now (the field approached from the sweep's
+            # side, so the branch is the right one)
+            self.ramper.go_to(self.ramper.setpoint)
+            self._settling = True
+            self._output_frozen = True
+            self._freeze_current = self.ramper.setpoint
+            self._stable_since = now
+            self.acq.set_profile("precise")
+            self._state = State.SEEK
+        elif error * sign > 0:
+            # behind (the coil lags): a one-way PI seek for the rest, starting
+            # from the present current. Its overshoot cap must not lie BELOW
+            # the current already flowing, or the seek would pull it back.
+            here = self.ramper.setpoint
+            est = self.calibration.current_for_field(to) + self._sweep_off
+            self._jump_current = here
+            self._target_current_est = max(est, here) if sign > 0 else min(est, here)
+            self.pi.reset()
+            self._stable_since = None
+            self._state = State.SEEK
+        else:
+            # ran past the target by more than tol/2: the ordinary set_field
+            # (undershoot, then a one-way seek) brings it back properly
+            self._event("info", f"sweep overshot ({field:.3f} mT); re-seeking")
+            self._begin_set_field(to, True, now)
+
+    def _stop_sweep(self) -> None:
+        if self._state != State.SWEEP:
+            return
+        _, field = self.acq.latest.get()
+        self._state = State.IDLE
+        self._setpoint_field = None
+        self._field_stable = False
+        self.ramper.go_to(self.ramper.setpoint)     # hold the current we have
+        self.acq.set_profile("precise")
+        self._event("info", f"field sweep stopped at {field:.3f} mT "
+                            f"({self.ramper.setpoint:.3f} A held, IDLE)")
 
     def _tick_ramping(self, now: float) -> None:
         if not self.ramper.done:

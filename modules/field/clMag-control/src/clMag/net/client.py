@@ -51,6 +51,11 @@ class RemoteStatus:
         self.loop_error = d.get("loop_error", "")
         self.stabilizer = d.get("stabilizer")        # None from an older service
         self.stabilizer_trim_A = d.get("stabilizer_trim_A", 0.0)
+        # the field SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = d.get("ramp_id", 0)
+        self.ramp_target_mT = d.get("ramp_target_mT")
+        self.ramp_rate_mT_per_s = d.get("ramp_rate_mT_per_s")
 
 
 def _taken_up(st, seq) -> bool:
@@ -159,6 +164,19 @@ class ClMagClient(ControlClient):
     def ramp_to_zero(self):
         """Ramp to 0 A -- the safety verb, allowed also while viewing."""
         return self._queued({"cmd": "ramp_to_zero"})
+
+    def ramp_field(self, field_mT: float, rate_mT_per_s: float):
+        """Sweep the field (fly scans, the GUI's Sweep button). Returns the
+        sweep's number; raises ValueError when the service refuses it."""
+        r = self._cmd({"cmd": "ramp_field", "field_mT": field_mT,
+                       "rate_mT_per_s": rate_mT_per_s})
+        if not r.get("ok"):
+            raise ValueError(r.get("error", "ramp_field refused"))
+        return r.get("ramp_id")
+
+    def ramp_stop(self):
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._queued({"cmd": "ramp_stop"})
 
     def demag(self, amplitude_A: float):
         return self._queued({"cmd": "demag", "amplitude_A": amplitude_A})

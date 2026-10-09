@@ -43,7 +43,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, set=None, settle=None,
-       args=None, danger=False, help=""):
+       args=None, danger=False, help="", ramp=None, stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -54,7 +54,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     }
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("set", set),
-                 ("settle", settle), ("args", args), ("help", help)):
+                 ("settle", settle), ("args", args), ("help", help),
+                 ("ramp", ramp), ("stream", stream)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -87,6 +88,13 @@ def build_manifest(ctrl) -> dict:
            settle={"policy": "adopt_then_flag",
                    "setpoint_key": "setpoint_field_mT",
                    "flag_key": "field_stable"},
+           # A CONTINUOUS SWEEP for fly scans (2026-10-09; the contract is in
+           # INSTRUMENT_MODULE_GUIDE.md 6b, "Ramps"). The setpoint moves at
+           # the rate and the closed loop follows it; the fly scan bins by the
+           # MEASURED field (the Hall-probe stream), not by the setpoint.
+           # Offered only with a calibration -- without one the service
+           # refuses a sweep as it refuses a setpoint.
+           ramp=_field_ramp(lim) if f_lo is not None else None,
            help="Closed-loop setpoint. The service ramps, runs a PI seek and "
                 "raises field_stable when it has held within tolerance."
            if f_lo is not None else
@@ -129,7 +137,12 @@ def build_manifest(ctrl) -> dict:
            group="Status", order=2, decimals=3, read_path=["setpoint_field_mT"]),
         _p("measured_field", "Measured field", "indicator", "float", unit="mT",
            group="Status", order=3, decimals=3, plottable=True,
-           read_path=["measured_field_mT"]),
+           read_path=["measured_field_mT"],
+           # every Hall-probe reading, stamped at the middle of its window
+           stream={"group": "field", "channel": "field"}),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Status", order=9,
+           read_path=["ramping"],
+           help="True while a field sweep (ramp_field) moves the setpoint."),
         _p("field_stable", "Field stable", "indicator", "bool",
            group="Status", order=4, read_path=["field_stable"]),
         _p("hw_error", "Hardware error", "indicator", "string",
@@ -184,6 +197,30 @@ def build_manifest(ctrl) -> dict:
     }
     manifest["revision"] = manifest_revision(manifest)
     return manifest
+
+
+#: The sweep pace a client is offered first (mT/s): slow enough for any lock-in
+#: time constant in use, fast enough that a 100 mT row takes under 2 minutes.
+SWEEP_RATE_DEFAULT_MT_PER_S = 1.0
+
+
+def _field_ramp(lim) -> dict:
+    """The `ramp` block of the field control (guide 6b, "Ramps")."""
+    lo, hi = lim.sweep_rate_min_mT_per_s, lim.sweep_rate_max_mT_per_s
+    return {
+        # the SERVICE walks the setpoint (its control thread); the closed
+        # loop makes the field follow
+        "kind": "software",
+        "start": {"verb": "ramp_field",
+                  "args": {"to": "field_mT", "rate": "rate_mT_per_s"}},
+        "stop": {"verb": "ramp_stop"},
+        "rate": {"unit": "mT/s", "min": lo, "max": hi,
+                 "default": max(lo, min(hi, SWEEP_RATE_DEFAULT_MT_PER_S))},
+        # bin by the Hall probe: the MEASURED field, every reading
+        "readback": {"stream": {"group": "field", "channel": "field"},
+                     "measured": True},
+        "done": {"key": "ramping", "id_key": "ramp_id"},
+    }
 
 
 def _aux_params(cfg) -> list:

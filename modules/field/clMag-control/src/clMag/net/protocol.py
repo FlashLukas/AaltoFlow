@@ -37,6 +37,10 @@ def status_to_dict(status) -> dict:
         "stabilizer": status.stabilizer,
         "stabilizer_trim_A": status.stabilizer_trim_A,
         "aux": status.aux,
+        "ramping": status.ramping,
+        "ramp_id": status.ramp_id,
+        "ramp_target_mT": status.ramp_target_mT,
+        "ramp_rate_mT_per_s": status.ramp_rate_mT_per_s,
     }
 
 

@@ -148,6 +148,7 @@ STATE_COLOR_KEY = {
     "HOLD": "text",
     "DEMAG": "accent_hi",
     "CALIBRATE": "accent_hi",
+    "SWEEP": "accent",
 }
 
 
@@ -291,6 +292,24 @@ class MainWindow(QtWidgets.QMainWindow):
         set_field_btn = QtWidgets.QPushButton("Set Field"); set_field_btn.setObjectName("primary")
         set_field_btn.clicked.connect(self._set_field)
         flay.addWidget(set_field_btn)
+        # SWEEP (2026-10-09): move the field CONTINUOUSLY to the value above
+        # at a set pace -- what a fly scan does row by row, here by hand.
+        srow = QtWidgets.QHBoxLayout()
+        self.sweep_rate = QtWidgets.QDoubleSpinBox()
+        self.sweep_rate.setRange(self.cfg.limits.sweep_rate_min_mT_per_s,
+                                 self.cfg.limits.sweep_rate_max_mT_per_s)
+        self.sweep_rate.setDecimals(2); self.sweep_rate.setValue(1.0)
+        self.sweep_rate.setSuffix("  mT/s")
+        self.sweep_rate.setToolTip("Sweep pace. The field follows a moving setpoint "
+                                   "(calibration + PI) and settles at the end.")
+        sweep_btn = QtWidgets.QPushButton("Sweep to")
+        sweep_btn.setToolTip("Sweep the field continuously to the value above")
+        sweep_btn.clicked.connect(self._sweep)
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where it is (current held)")
+        sweep_stop.clicked.connect(self._sweep_stop)
+        srow.addWidget(self.sweep_rate, 1); srow.addWidget(sweep_btn); srow.addWidget(sweep_stop)
+        flay.addLayout(srow)
         col.addWidget(fcard)
 
         # --- current control
@@ -388,6 +407,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_field(self):
         self.ctrl.set_field(self.field_spin.value(), use_pid=self.pid_check.isChecked())
+
+    def _sweep(self):
+        try:
+            self.ctrl.ramp_field(self.field_spin.value(), self.sweep_rate.value())
+        except ValueError as exc:
+            self._on_event("error", f"sweep refused: {exc}")
+
+    def _sweep_stop(self):
+        self.ctrl.ramp_stop()
 
     def _set_current(self):
         self.ctrl.set_current(self.current_spin.value())

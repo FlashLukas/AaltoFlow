@@ -50,3 +50,9 @@ class PI:
             self._integral -= error_mT * dt_s
             return 0.0
         return u
+
+    def unwind(self, error_mT: float, dt_s: float) -> None:
+        """Take back the last update's integration: the caller clamped the
+        output itself (the field sweep holds the current when the field runs
+        ahead), and an integral that kept growing meanwhile would wind up."""
+        self._integral -= error_mT * dt_s

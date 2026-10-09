@@ -73,9 +73,11 @@ class ClMagService:
         #   through large alternating values before it ends at zero.
         #   READ = read-only verbs whose names do not start with get_/read_/
         #   list_: `aux_read_ai` only reads a DAQ input.
+        #   `ramp_stop` (end a field sweep where it is, current held) is a
+        #   stop: a viewer may send it. `stream_read` only reads the record.
         self.control = ControlLease(
-            safety={"ramp_to_zero"},
-            read={"aux_read_ai"},
+            safety={"ramp_to_zero", "ramp_stop"},
+            read={"aux_read_ai", "stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -248,6 +250,19 @@ class ClMagService:
             elif cmd == "calibrate":
                 return {"ok": True, "seq": self.ctrl.calibrate(
                     int(msg.get("n_per_leg", 50)), float(msg.get("dwell_s", 0.5)))}
+            elif cmd == "ramp_field":
+                # the field SWEEP (fly scans): the reply's ramp_id is what
+                # status `ramp_id` reaches when the sweep is taken up
+                return {"ok": True, "ramp_id": self.ctrl.ramp_field(
+                    float(msg["field_mT"]), float(msg["rate_mT_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "seq": self.ctrl.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.ctrl.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.ctrl.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.ctrl.stream_stop()}
             elif cmd == "set_lock":
                 return {"ok": True, "seq": self.ctrl.set_lock(bool(msg["locked"]))}
             elif cmd == "set_stabilizer":
