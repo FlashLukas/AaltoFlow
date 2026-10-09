@@ -53,9 +53,19 @@ once (no catching up). The wait can be aborted. Useful for a time series:
 Limits (refused by validate, with the reason): N must be a whole number
 >= 1; only ONE average repeat per scan (several averages would multiply into
 one anyway); a repeat cannot sit INSIDE a fly axis (a fly row is one
-continuous move); `average` cannot be combined with a fly axis or with the
-resonance window (both add per-point variables of their own whose average
-would mean something else) -- use `keep` there and average in the viewer.
+continuous move); `average` cannot be combined with the resonance window
+(its mask and per-point record would average into something meaningless) --
+use `keep` there and average in the viewer.
+
+AVERAGE WITH A FLY AXIS (2026-10-09, Lukas: "build the averaging of flown
+axis"). Each repeat flies the rows again, and the stored result combines the
+repeats PIXEL BY PIXEL, weighted by how many samples each repeat put into the
+pixel: <det> the pooled mean, <det>_n the samples of all repeats, <det>_std
+the spread of every one of those samples around the pooled mean (between-
+repeat spread included). The exact formulas are in _pool_fly. It works for
+single values and for whole traces (a VNA sweep), with zig-zag and the lag
+correction, which act on each row before anything is pooled. This is NOT
+"one mean per row" (collapsing the flown axis itself): the pixels stay.
 """
 
 from __future__ import annotations
@@ -140,10 +150,8 @@ def validate(recipe, registry) -> list[str]:
     if flies and any(i > flies[0] for i in reps):
         errs.append("a repeat axis cannot sit inside a fly axis: a fly row is one "
                     "continuous move. Put the repeat OUTSIDE (above) the fly axis")
-    if averages and flies:
-        errs.append("a repeat in mode 'average' cannot be combined with a fly axis "
-                    "(a fly pixel is already a mean with its own _n/_std): use "
-                    "mode 'keep' and average the runs in the viewer")
+    # (average + a fly axis: allowed since 2026-10-09 -- each repeat flies the
+    # rows again and the pixels are POOLED, see collapse())
     if averages and getattr(recipe, "window", None):
         errs.append("a repeat in mode 'average' cannot be combined with the "
                     "resonance window (its mask and record are per measurement): "
@@ -246,10 +254,19 @@ def collapse(data: dict, axis: int, dets, det_axes: dict, registry):
 
     Returns (data', det_axes', var_attrs') with <det> = mean, <det>_std and
     <det>_n for every detector in `dets`; anything else in `data` is passed
-    through (validation keeps window/fly variables out of an average scan).
+    through (validation keeps the window's variables out of an average scan).
+
+    A FLY scan's detectors already carry <det>_n and <det>_std per pixel;
+    they are POOLED over the repeats instead (_pool_fly).
     """
     out, axes_out, attrs = {}, dict(det_axes), {}
+    fly = {name for name in dets
+           if f"{name}_n" in data and f"{name}_std" in data and name in data}
+    for name in fly:
+        _pool_fly(name, data, axis, det_axes, registry, out, axes_out, attrs)
     for name, arr in data.items():
+        if name in out:
+            continue                          # pooled above (a fly detector's three)
         if name not in dets:
             out[name] = arr
             continue
@@ -285,3 +302,63 @@ def collapse(data: dict, axis: int, dets, det_axes: dict, registry):
         attrs[f"{name}_n"] = {"units": "", "label": f"{label}: repeats averaged",
                               "repeat_stat": "count"}
     return out, axes_out, attrs
+
+
+def _pool_fly(name, data, axis, det_axes, registry, out, axes_out, attrs) -> None:
+    """Combine the repeats of a FLY detector pixel by pixel (2026-10-09).
+
+    Every repeat flew the rows again, and for every pixel it left
+        n_i   the samples that fell into the pixel,
+        m_i   their mean (coherent for complex; element-wise for a trace),
+        s_i   their spread, sqrt(mean |z - m_i|^2)  (ddof = 0, flyscan.bin_samples).
+    The repeats are combined EXACTLY as if all their samples had fallen into
+    one pixel:
+        N   = sum_i n_i
+        M   = sum_i n_i m_i / N                      (weighted by the samples)
+        std = sqrt( sum_i n_i (s_i^2 + |m_i - M|^2) / N )
+    The second term in the std is the spread BETWEEN the repeats (drift, a
+    bump in the lab): the pooled std is the spread of every sample around
+    the final mean, not the average of the per-repeat spreads. Its error bar
+    on the mean is std / sqrt(N), as long as the samples are independent
+    (a lock-in's samples within one time constant are not: then sqrt(N)
+    over-promises, and the spread of the repeat means is the honest one).
+
+    A repeat whose pixel stayed EMPTY (n_i = 0, NaN mean -- a row cut short,
+    a pixel the stage skipped) simply does not contribute: the pixel uses the
+    repeats that have it, and N says how many samples that was. A row not
+    flown yet (n_i NaN in memory) counts as empty, which is what makes the
+    live plot and an aborted scan show the RUNNING mean.
+    """
+    x = np.asarray(data[name])
+    n_i = np.nan_to_num(np.asarray(data[f"{name}_n"], dtype=float), nan=0.0)
+    s_i = np.asarray(data[f"{name}_std"], dtype=float)
+    k = x.ndim - n_i.ndim                     # a trace's own dims (freq)
+    n_b = n_i.reshape(n_i.shape + (1,) * k)
+    cplx = np.iscomplexobj(x)
+    ok = np.isfinite(x) & (n_b > 0)
+    w = np.where(ok, n_b, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        big_n = w.sum(axis=axis)
+        mean = (np.where(ok, x, 0) * w).sum(axis=axis) / big_n
+        dev2 = np.abs(np.where(ok, x, 0) - np.expand_dims(mean, axis)) ** 2
+        within = np.where(ok, np.nan_to_num(s_i, nan=0.0) ** 2, 0.0)
+        var = (w * (within + dev2)).sum(axis=axis) / big_n
+    empty = big_n <= 0
+    nan = complex(np.nan, np.nan) if cplx else np.nan
+    out[name] = np.where(empty, nan, mean).astype(np.complex128 if cplx else np.float64)
+    out[f"{name}_std"] = np.where(empty, np.nan, np.sqrt(np.maximum(var, 0.0)))
+    # the count is per PIXEL, like a single fly row's (not per trace point)
+    out[f"{name}_n"] = n_i.sum(axis=axis).astype(np.float64)
+    axes_out[f"{name}_std"] = det_axes.get(name, [])
+    axes_out[f"{name}_n"] = []
+    p = registry.get(name)
+    label = getattr(p, "label", name)
+    attrs[name] = {"fly_stat": "mean", "repeat_stat": "mean"}
+    attrs[f"{name}_std"] = {
+        "units": getattr(p, "unit", "") or "",
+        "label": f"{label}: spread of every sample in the pixel, all repeats pooled"
+                 + (" (rms |z - mean|)" if cplx else ""),
+        "fly_stat": "std", "repeat_stat": "std"}
+    attrs[f"{name}_n"] = {"units": "",
+                          "label": f"{label}: samples per pixel, all repeats",
+                          "fly_stat": "count", "repeat_stat": "count"}

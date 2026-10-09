@@ -305,8 +305,9 @@ def test_repeat_inside_a_fly_axis_is_refused_outside_allowed():
     errs = Recipe(axes=[fly, rep(3)], detectors=["lockin_r"]).validate(reg)
     assert any("cannot sit inside a fly axis" in e for e in errs)
     assert Recipe(axes=[rep(2), fly], detectors=["lockin_r"]).validate(reg) == []
-    errs = Recipe(axes=[rep(2, "average"), fly], detectors=["lockin_r"]).validate(reg)
-    assert any("fly axis" in e and "average" in e for e in errs)
+    # average + fly: allowed since 2026-10-09 (the pixels are pooled over the
+    # repeats; tests/test_fly_average.py)
+    assert Recipe(axes=[rep(2, "average"), fly], detectors=["lockin_r"]).validate(reg) == []
 
 
 def test_keep_repeat_outside_a_fly_axis_runs():
