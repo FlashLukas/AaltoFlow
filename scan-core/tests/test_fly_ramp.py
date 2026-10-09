@@ -27,9 +27,14 @@ from scan_core.registry import build_sim_registry
 
 
 def _peak_rows(ds, det, dim):
-    """Index of the maximum along `dim`, per row."""
+    """Where the resonance sits along `dim`, per row, in PIXELS: the centroid
+    of the response above its row minimum. Not the argmax: the simulated R
+    has two lobes either side of the line, and noise picks either one."""
     da = ds[det].transpose(..., dim)
-    return np.nanargmax(np.nan_to_num(da.values, nan=-np.inf), axis=-1)
+    v = np.nan_to_num(da.values, nan=0.0)
+    w = np.clip(v - v.min(axis=-1, keepdims=True), 0, None)
+    idx = np.arange(v.shape[-1])
+    return (w * idx).sum(axis=-1) / w.sum(axis=-1)
 
 
 def _field_fly(**kw):
@@ -173,3 +178,16 @@ def test_command_track_is_exact_between_reads():
     assert t[0] == t_go and v[0] == 5.0
     assert v[1] == 6.0 and t[1] == pytest.approx(t_go + 0.5)   # the corner
     assert v[-1] == 6.0
+
+
+def test_axis_attrs_says_how_a_ramp_knob_was_flown():
+    from scan_core.recipe import axis_attrs
+    reg = build_sim_registry()
+    ax = {"type": "fly", "param": "rf_freq", "start": 700, "stop": 1100, "num": 41,
+          "row_time_s": 4.1}
+    a = axis_attrs(_recipe([ax]), lambda pid: "MHz", registry=reg)["rf_freq"]
+    assert a["fly_binned_by"] == "command" and a["fly_mode"] == "ramp"
+    assert a["fly_speed"] == pytest.approx(100.0) and a["fly_speed_units"] == "MHz/s"
+    assert a["fly_row_time_s"] == 4.1 and a["fly_ramp"] == "software"
+    a = axis_attrs(_recipe([_field_fly()]), registry=reg)["field"]
+    assert a["fly_binned_by"] == "measurement" and a["fly_speed_units"] == "mT/s"

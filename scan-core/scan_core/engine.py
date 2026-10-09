@@ -1250,7 +1250,8 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
     # Never allowed to cost the data: a problem here only loses the labels.
     try:
         from .recipe import axis_attrs
-        for name, extra_a in axis_attrs(recipe, lambda pid: _units(registry, pid)).items():
+        for name, extra_a in axis_attrs(recipe, lambda pid: _units(registry, pid),
+                                   registry=registry).items():
             if name in coords:
                 coords[name][2].update(extra_a)
     except Exception:

@@ -557,7 +557,7 @@ def _compile_axis(ax: dict) -> list[Dim]:
 
 # ─────────────────────── per-axis settings, in the file ───────────────────────
 
-def axis_attrs(recipe, units=None) -> dict:
+def axis_attrs(recipe, units=None, registry=None) -> dict:
     """{dimension name: {attribute: value}} -- each axis's ADVANCED settings
     (fly, scout), to be put on its coordinate in the data file.
 
@@ -570,6 +570,15 @@ def axis_attrs(recipe, units=None) -> dict:
     `units(pid) -> str` gives a parameter's unit (the engine passes the
     registry's); without it the speed unit is left out.
 
+    `registry` (the engine passes it) lets a fly axis over a knob with a RAMP
+    block (flyscan.ramp_of, 2026-10-09) say how it was flown: its pace may
+    come from row_time_s or the module's default (`fly_speed`), its rate unit
+    is the ramp's, and `fly_binned_by` is "command" when the module could only
+    record what it SENT. Every fly axis carries `fly_binned_by` (Lukas,
+    2026-10-09): "measurement" (a stage's position, a Hall probe) or
+    "command" (a generator's frequency) -- what the samples were sorted into
+    pixels by, which a reader of the file must be able to tell apart.
+
     netCDF attributes cannot be booleans, so on/off is written as 1/0 -- except
     `fly`, which the fly engine has always written as the string "true" and
     readers already test for.
@@ -579,13 +588,20 @@ def axis_attrs(recipe, units=None) -> dict:
     for ax in getattr(recipe, "axes", None) or []:
         if not isinstance(ax, dict) or ax.get("type") != "fly":
             continue
-        try:
-            a = {"fly": "true", "fly_speed": float(ax["speed"])}
-        except (KeyError, TypeError, ValueError):
+        from .flyscan import fly_rate, ramp_of
+        ramp = ramp_of(ax, registry) if registry is not None else None
+        speed = fly_rate(ax, registry)
+        if not np.isfinite(speed):
             continue                      # validate() reports a bad fly axis
+        a = {"fly": "true", "fly_speed": float(speed)}
         moving = ax.get("move") or ax.get("param")
         unit = units(moving) if moving else ""
-        if unit:
+        if ramp is not None:
+            # flown by the MODULE's sweep, at the ramp's rate unit
+            a["fly_speed_units"] = ramp.rate_unit
+            a["fly_mode"] = "ramp"
+            a["fly_ramp"] = ramp.kind
+        elif unit:
             # the speed is in the MOVING stage's unit per second (the stage
             # named by `move`, when the grid is in someone else's coordinates)
             a["fly_speed_units"] = f"{unit}/s"
@@ -595,6 +611,10 @@ def axis_attrs(recipe, units=None) -> dict:
             a["fly_move"] = str(ax["move"])
         if ax.get("readback"):
             a["fly_readback"] = str(ax["readback"])
+        a["fly_binned_by"] = (ramp.binned_by if (ramp is not None and not ax.get("readback"))
+                              else "measurement")
+        if ax.get("row_time_s"):
+            a["fly_row_time_s"] = float(ax["row_time_s"])
         a["fly_lag_correction"] = int(ax.get("lag_correction", True) is not False)
         if ax.get("timeout_s"):
             a["fly_timeout_s"] = float(ax["timeout_s"])

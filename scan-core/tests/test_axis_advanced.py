@@ -403,7 +403,7 @@ def test_axis_attrs_only_what_is_set():
     assert set(a) == {"pos_x"}
     assert a["pos_x"] == {"fly": "true", "fly_speed": 3.0, "fly_speed_units": "um/s",
                           "fly_speed_param": "stage_speed", "fly_lag_correction": 1,
-                          "fly_zigzag": 1}
+                          "fly_zigzag": 1, "fly_binned_by": "measurement"}
 
 
 def test_the_coordinates_carry_the_fly_settings_in_the_file(tmp_path):

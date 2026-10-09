@@ -479,7 +479,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         data[f"{det}_n"] = np.full(shape, np.nan)
         data[f"{det}_std"] = np.full(shape, np.nan)
     binned_by = ("measurement" if (ramp is None or ax.get("readback")) else ramp.binned_by)
-    ctx["var_attrs"] = _var_attrs(params, fly, ax, rb.id, speed, ramp, binned_by)
+    ctx["var_attrs"] = _var_attrs(params, fly, ax, rb.id, speed)
     if ramp is not None:
         log(f"fly: {pos_p.id} SWEPT by its module ({ramp.kind} ramp) at "
             f"{speed:g} {ramp.rate_unit}; binned by "
@@ -1187,18 +1187,10 @@ def _bin_into(chunks, rb, params, edges, lag, data, oidx):
         data[f"{det}_std"][tuple(oidx)] = s
 
 
-def _var_attrs(params, fly, ax, rb_id, speed, ramp=None,
-               binned_by="measurement") -> dict:
+def _var_attrs(params, fly, ax, rb_id, speed) -> dict:
     """Attributes for the dataset: what each variable is, and how it was flown.
-
-    `fly_binned_by` on the fly coordinate (Lukas, 2026-10-09) says what the
-    samples were sorted into pixels by: "measurement" (the instrument's own
-    reading of where it was -- a stage's position, a Hall probe) or "command"
-    (the value the module SENT, with its time stamp -- a generator that cannot
-    report its frequency while sweeping). Someone reading the file a year on
-    must be able to tell the two apart: a commanded axis is only as good as
-    the instrument's obedience.
-    """
+    (How the AXIS was flown -- speed, mode, `fly_binned_by` -- is written by
+    recipe.axis_attrs, one mechanism for every advanced axis setting.)"""
     out = {}
     for det, p in params.items():
         label = getattr(p, "label", det)
@@ -1208,16 +1200,10 @@ def _var_attrs(params, fly, ax, rb_id, speed, ramp=None,
         out[f"{det}_std"] = {"units": getattr(p, "unit", ""),
                              "label": f"{label}: spread within the pixel",
                              "fly_stat": "std"}
-    attrs = {"fly": "true", "readback": rb_id,
-             "speed": float(speed),
-             "lag_correction": "true" if ax.get("lag_correction", True)
-             is not False else "false",
-             "fly_binned_by": binned_by,
-             "fly_mode": "ramp" if ramp is not None else "move"}
-    if ramp is not None:
-        attrs["fly_ramp"] = ramp.kind
-        attrs["rate_unit"] = ramp.rate_unit
-    out[fly.name] = attrs
+    out[fly.name] = {"fly": "true", "readback": rb_id,
+                     "speed": float(speed),
+                     "lag_correction": "true" if ax.get("lag_correction", True)
+                     is not False else "false"}
     return out
 
 
