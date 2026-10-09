@@ -243,6 +243,38 @@ frame (`last_deep()`).
 
 ## Open work
 
+- **Fly scans over any knob -- the remaining modules** (the contract and three
+  pilots DONE 2026-10-09: a `ramp` block in describe, guide 6b "Ramps";
+  `suite_common/softramp.py`; clMag field, dssg frequency, ppms field).
+  Lukas: "when it makes sense". Candidates, module by module, each with its
+  ramp block, verbs, readback stream, status `ramping`, a Sweep control in
+  the GUI and a sim test:
+  * **mag2d / mag2dcal**: field magnitude (closed loop, measured by the Hall
+    probes) and the ROTATING ANGLE (a sweep of `angle_deg` at deg/s -- the
+    angular FMR scan as a fly axis); mag2dcal's freeze must stand aside while
+    the setpoint moves, as clMag's does.
+  * **kepco**: current (software ramp at A/s; readback = the measured current).
+  * **smb / windfreak / hp8648 / shsg**: frequency, power, phase (software
+    ramps via softramp.py; measured false unless a read-back is cheap -- the
+    smb over GPIB may be fast enough to read `FREQ?` per step; check).
+  * **afg** and the **AD2** waveform generator: frequency / amplitude / offset.
+  * **superk** (Fianium + SELECT): wavelength (software ramp over the RF
+    driver's frequency; measured false) -- and the **cs260** monochromator
+    (a hardware scan if its firmware has one; else stepped stays).
+  * **tc200 / ls455 / ppms temperature**: temperature ramps (hardware: the
+    controllers ramp their setpoint themselves; readback = the measured
+    temperature, slow -- a fly axis of minutes per row).
+  * **stages / rotators**: smaract, agilis, ddr25, elliptec, piezo, zpiezo --
+    those that stream a position fly on the STAGE path already (speed_param);
+    the rest need either a stream + a speed knob, or a ramp block where the
+    controller can move at a set velocity (ddr25, elliptec).
+  * **k2450**: source voltage / current sweeps (the SMU's own sweep is a
+    hardware ramp; readback = the measured value).
+  * **chopper**: frequency (software ramp; measured = the chopper's own
+    frequency reading).
+  The Scan Builder side: the FLY group of the per-axis Advanced panel must
+  offer fly on a ramp knob (see the report of 2026-10-09).
+
 - **Scan server, phase 2** (phase 1 DONE 2026-10-05, branch `scan-server`:
   the scan engine as a service, `scan_core/scan_server.py`; start a scan on
   the lab PC, watch / abort / answer it from any PC -- scan-core README "The

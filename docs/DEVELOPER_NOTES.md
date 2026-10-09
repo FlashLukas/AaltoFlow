@@ -181,6 +181,23 @@ still assumes piezo/zpiezo.
   camera's, the stage only moves; rows end when the camera sees the far edge. Values travel in WIRE units; the descriptor's `scale` applies.
   Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
   checks the verbs wherever a stream is declared.
+- **Ramps (optional, 2026-10-09) -- fly scans over ANY knob.** A control the
+  module can sweep at a set pace carries a `ramp` block: `kind`
+  (software|hardware), `start` {verb, args {to, rate}} (scan units x `scale`
+  on the wire), `stop` {verb} (ends it where it is; a safety verb), `rate`
+  {unit, min, max, default}, `readback` {stream | read_path, measured} and
+  `done` {key "ramping", id_key "ramp_id"}: the start reply's `ramp_id`, and
+  the status shows that number taken up and `ramping` false when the sweep is
+  over (numbered: gotcha #17). scan-core's fly axis on such a knob asks the
+  module to sweep each row and bins by the readback -- by MEASUREMENT when
+  `measured` is true, by the COMMANDED value + time stamp when not; the data
+  file's fly coordinate says which (`fly_binned_by`). A set of the knob takes
+  over (stops the sweep). Software ramps use `suite_common/softramp.py`,
+  copied byte for byte into the module (check_modules compares it). Pilots:
+  clMag field (closed loop, measured), dssg frequency (software, command),
+  ppms field (MultiVu sweeps, measured). Spec: `INSTRUMENT_MODULE_GUIDE.md`,
+  "Ramps"; `check_modules.py --live` runs a short sweep for every declared
+  ramp. Candidates for later: `docs/ROADMAP.md`.
 - **Can the readings be trusted? `hw_error` and `fault` (2026-09-28).** Two
   optional status keys, both strings, both `""` when all is well (a missing key
   also means "fine", so older modules need no change):

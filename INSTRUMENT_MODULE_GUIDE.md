@@ -749,6 +749,83 @@ The recorder is `stream.py` (`StreamRecorder`), copied into each module that
 streams, as `theme.py` is. `tools/check_modules.py --live` checks the verbs for
 every module that declares a stream.
 
+### Ramps — a knob the module can SWEEP, so a fly scan can fly it (2026-10-09)
+
+A stage moves continuously by itself; most knobs do not -- a generator jumps
+to the frequency it is told. A control that the module CAN sweep at a set pace
+(field, frequency, power, phase, wavelength, temperature) declares a `ramp`
+block, and scan-core's fly axis then flies it like a stage: the module sweeps
+the knob over each row, the detectors stream, and every sample is binned by
+the ramp's readback. Pilots: clMag `field`, dssg `frequency`, ppms `field`.
+
+```python
+"ramp": {
+  "kind":     "software",                 # or "hardware": who walks the value --
+                                          # the SERVICE (its own thread/loop) or the
+                                          # INSTRUMENT itself (MultiVu, a VNA sweep)
+  "start":    {"verb": "ramp_field",      # sweep from where it is now ...
+               "args": {"to": "field_mT", # ... the wire NAMES of the target and
+                        "rate": "rate_mT_per_s"},   # the pace
+               "extra": {}},              # optional fixed arguments
+  "stop":     {"verb": "ramp_stop"},      # end it WHERE IT IS (Abort)
+  "rate":     {"unit": "mT/s",            # the knob's unit per second
+               "min": 0.01, "max": 20, "default": 1},   # live, from cfg
+  "readback": {"stream": {"group": "field", "channel": "field"},
+               "measured": True},         # what a fly row is BINNED BY
+  "done":     {"key": "ramping", "id_key": "ramp_id"}   # status keys
+}
+```
+
+Rules that matter:
+
+* **Units are the descriptor's SCAN units.** `to` and the rate are multiplied
+  by the descriptor's `scale` on the wire, exactly like a set (dssg: MHz and
+  MHz/s in the scan, Hz and Hz/s on the wire). The readback stream carries
+  wire units, like every stream.
+* **The start reply carries the sweep's number** (`{"ok": true, "ramp_id": n}`),
+  and the status publishes `ramp_id` (the newest sweep TAKEN UP) and `ramping`.
+  The sweep is over when the status shows OUR number and `ramping` false --
+  numbered for the reason acquisitions are (gotcha #17): a "not ramping" frame
+  from before the start must not pass for the end. A module whose control
+  thread takes commands up later (clMag) publishes the number only after the
+  state has changed, and its status() reads the number FIRST (as `cmd_done`).
+* **`readback.measured`** says what the samples are binned by -- and the data
+  file's fly coordinate says it too (`fly_binned_by`):
+  * `true` -- the instrument's REAL value while it sweeps (clMag's Hall probe,
+    the PPMS magnet's field from MultiVu): binned by measurement;
+  * `false` -- the value the service COMMANDED, recorded with the time it was
+    sent (a generator: reading FREQ:CW? back on every step would halve the
+    step rate on a serial line): binned by command.
+  The readback is a `stream` (as for any streamed parameter, same verbs, same
+  group rules), or a status key (`"read_path": [...]`, scan-core samples it
+  itself -- coarse: the status rate), or absent with `measured: false`
+  (scan-core then computes the commanded value from the start time and rate).
+* **A set takes the knob over**: any ordinary set of the knob (and the
+  module's shutdown) stops a running sweep first. A new start replaces a
+  running sweep from wherever it got to.
+* **`ramp_stop` is a stop**: put it in the control lease's `safety` set (a
+  viewer may send it), and `stream_read` in `read`.
+* **Clamp, never refuse silently**: a target or a rate outside the limits is
+  clamped and warned like every setter; a target the module cannot reach at
+  all (clMag without a calibration) is REFUSED in the caller's thread
+  (ok:false), and the block is then better not declared at all.
+* **A software ramp computes each value from the ELAPSED TIME**, not one step
+  per tick: a late tick then just sends a value further along and the pace
+  stays exact. Use `suite_common/softramp.py` (`SoftRamp`, copied byte for
+  byte into the module as `softramp.py`, like `hwlock.py`; check_modules
+  compares the copies): deadline timing (gotcha #34), clamped to live limits,
+  stoppable, and it records every value it sent in the stream format, so the
+  stream verbs can hand its record out as is. Call `stop()` BEFORE taking the
+  lock its setter needs.
+* **A closed loop follows a moving setpoint** (clMag): no freeze while it
+  moves, the drive never steps back against the sweep (hysteresis, gotcha
+  #11), and at the end the ordinary endgame (freeze, seek, STABLE) settles it.
+
+Add a small **Sweep** control to the GUI where it fits (rate, "Sweep to",
+"Stop"). `tools/check_modules.py --live` starts a short sweep on the scratch
+service for every declared ramp: its number must show up finished, the
+readback stream must have recorded it, and the stop verb must answer.
+
 ### Settle policies
 
 A control declares how a caller knows it has arrived. This is the module's
