@@ -499,10 +499,15 @@ What it takes care of:
   smeared, and the run log says so after the first row.
 * **Only streamable parameters.** Every detector, and the position, must be one
   its module can record continuously (a `stream` block in `describe`; hf2's scan
-  detectors, the PM16's power and kim's positions so far). Anything else is refused before the
-  stage moves.
+  detectors, the PM16's power, kim's positions, the camera's laser position and
+  the VNA's traces and points so far). Anything else is refused before the
+  stage moves -- including a trace whose module cannot stream it, and anything
+  with more than one dimension of its own.
 * **Samples per pixel** (`<det>_n`) and their spread (`<det>_std`) are stored
-  next to every detector; a pixel no sample fell into is NaN, never 0.
+  next to every detector; a pixel no sample fell into is NaN, never 0. A
+  complex detector is averaged COHERENTLY (the mean of the complex values,
+  never of |z|) and its `_std` is the RMS distance of the samples from that
+  mean, `sqrt(mean |z - mean|^2)`.
 * **Rows end on the measured position**, not on the settle rule: a stage that
   reports "not moving" from a stale status frame cannot cut a row short.
 * **The speed is put back** for the approach to each row and at the end; an
@@ -581,6 +586,65 @@ the commanded frequency). The flown maps average ~15 samples per pixel.*
 
 Which other modules could get a ramp: `docs/ROADMAP.md`, "Fly scans over any
 knob".
+
+### Flying with a VNA: whole traces or single frequency points (2026-10-09)
+
+A VNA sweeps its frequencies itself, so in a fly scan it streams every
+completed sweep as ONE sample. Two ways to record it:
+
+| detector | what one sample is | time stamp | in the file |
+|----------|--------------------|------------|-------------|
+| `vna.s` (also `u`, `ln_ratio`) | the whole complex trace | the MIDDLE of its sweep | `(..., pixel, freq)`; `_n` per pixel |
+| `vna.point_1`, `point_2`, ... | S at ONE frequency of the sweep | the moment THAT point was measured | `(..., pixel)`, a scalar |
+
+    axes:
+      - {type: fly, param: clMag.field, start: 20, stop: 90, num: 36, speed: 5}
+    detectors: [vna.s, vna.point_1, vna.point_2]
+
+* **Traces** are binned pixel by pixel as the element-wise COHERENT mean of the
+  traces whose time stamp fell into the pixel; `<det>_n` counts traces (one
+  number per pixel, not per frequency), `<det>_std` is the element-wise spread.
+  The trace's frequency coordinate is read once at the start, exactly as for a
+  stepped scan, and must not change: a different S-parameter, band or point
+  count during the scan stops it (the VNA refuses mid-stream, scan-core
+  between rows).
+* **Why the middle, and why points.** A sweep takes time (points x ~1.2/IFBW),
+  and while the field moves every point sees a different field. Filed at the
+  sweep's middle, a trace is right ON AVERAGE (lag 0: the mean moment of the
+  sweep is its middle), but point 0 belongs half a sweep earlier and the last
+  point half a sweep later -- the run log warns when one sweep spans more than
+  a pixel. A **point channel** is stamped at `t_start + (i + 0.5) T / n`, the
+  centre of its own dwell, so it has neither lag nor smear: fly fast and
+  record the few frequencies you need. Choose them in the VNA's GUI ("Fly
+  points", in GHz), in its Settings > Stream (`points_Hz`), or with
+  `set_stream_points`; the nearest grid point is used and the label says
+  which (`S21 at 3.01 GHz`).
+* **u and ln_ratio** need the VNA's reference exactly as in a stepped scan:
+  with none, one that does not match the sweep, or one replaced mid-scan, the
+  scan stops with the VNA's reason rather than filing NaN.
+* The data viewer opens the file as any other (a trace map per pixel; `_n`
+  and the point channels as lines).
+
+### Averaging a flown axis: repeat + fly
+
+A `repeat` axis in mode **average** above a fly axis flies every row again N
+times and stores, per pixel, the combination of the repeats WEIGHTED BY THE
+SAMPLES each put into the pixel:
+
+    N   = sum_i n_i                                   <det>_n
+    M   = sum_i n_i m_i / N                           <det>   (coherent for complex)
+    std = sqrt( sum_i n_i (s_i^2 + |m_i - M|^2) / N ) <det>_std
+
+-- exactly the mean and the spread of all those samples together, the spread
+BETWEEN repeats (drift) included. A pixel empty in one repeat uses the
+repeats that have it. Works for single values and VNA traces, with zig-zag
+and the lag correction (both act on each row before anything is pooled); the
+live plot and an aborted scan show the running mean. Use `keep` instead to see
+the repeats one by one.
+
+Not the same thing: "collapse the flown axis into one mean per row" (a
+1-D result per outer step). That is not built; today, average over the fly
+axis in the viewer.
 
 ## Scripts: set, wait, scan in a loop
 
@@ -814,8 +878,10 @@ Details: the mean of a bool is the fraction of True and of an int a float
 (attr `declared_type` keeps the declared type); a complex detector (a VNA
 trace) is averaged coherently and its `_std` is the spread of |z|; traces
 average element-wise. Not allowed with `average`: enum/string detectors
-(there is no mean of two states), a fly axis, the resonance window -- use
-`keep` there. Only one `average` repeat per scan.
+(there is no mean of two states) and the resonance window -- use `keep`
+there. With a FLY axis the pixels are pooled over the repeats instead (see
+"Averaging a flown axis" above: `_n` counts samples, `_std` is their spread).
+Only one `average` repeat per scan.
 
 **interval_s** (optional) paces the repeats: repeat k of a pass starts no
 earlier than k x interval after repeat 0 began -- a time series ("a sweep
@@ -949,7 +1015,7 @@ recalling.
 ## Tests
 
 ```bash
-uv run pytest -q        # 990 pass + 5 skipped (2026-10-08), all offline
+uv run pytest -q        # 1072 pass + 5 skipped (2026-10-09), all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so

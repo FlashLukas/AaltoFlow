@@ -75,6 +75,20 @@ How it plugs in (everything stepped stays exactly as it was):
     a `stream` block in describe; registry.StreamSpec). A detector that can
     only be read one value at a time cannot be binned by position.
 
+  * WHOLE TRACES (2026-10-09, the VNA). A detector with one dimension of its
+    own (a VNA sweep) can fly when its module streams every sweep as one
+    sample: the traces whose time stamp falls in a pixel are averaged element
+    by element, coherently for complex values, into (..., pixel, freq); the
+    count `<det>_n` is per pixel (sweeps), the spread `<det>_std` per element.
+    A trace is stamped at its sweep's middle, so its ends belong to the
+    neighbouring moments (logged when a sweep spans more than a pixel); single
+    frequency points of the same sweeps are scalar channels with their own
+    stamps (the moment each point was measured) and bin like any scalar.
+
+  * AVERAGING (2026-10-09): a `repeat` axis in mode 'average' above the fly
+    axis flies every row N times; the pixels are pooled over the repeats when
+    the dataset is built (repeat._pool_fly), weighted by their samples.
+
 THE LAG. A lock-in's output is its input averaged over the last few time
 constants, so the value recorded at time t belongs to where the stage was a
 little EARLIER. Moving at speed v, that shifts the image by v * delay, in

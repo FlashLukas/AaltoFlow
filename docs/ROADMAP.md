@@ -309,8 +309,9 @@ frame (`last_deep()`).
   `interval_s` for a time series; scan-core README, "Repeating and
   averaging"). Still open: a real TIME axis / a per-point timestamp recorded
   with every point (today only the interval pacing exists, the time each
-  point was measured is not stored), and averaging with a fly axis (refused
-  with `average`; `keep` + the viewer works).
+  point was measured is not stored). (`average` with a fly axis: DONE
+  2026-10-09, pixels pooled over the repeats. Not built: collapsing the flown
+  axis into one mean per row.)
 
 - **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
   `warn` for kim + camera. Next: widen the lab policy to `"*"` (restart the

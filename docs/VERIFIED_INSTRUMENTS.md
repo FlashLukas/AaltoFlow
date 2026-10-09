@@ -473,6 +473,15 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
 - Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
   loaded from a file (`from:`); the scout pass on axes other than XY, and its GUI
   (preview, live coarse map, ETA).
+- 2026-10-09, SIMULATION ONLY: **fly scans with VNA traces and single frequency
+  points, and `repeat: average` over a fly axis.** Verified with the simulator
+  in-process (`tests/test_fly_traces.py`, `tests/test_fly_average.py`) and live in
+  two processes (clMag sim + vna sim with the field from clMag, encrypted): the
+  field flown 20 -- 90 mT at 5 mT/s with `vna.s` (201 points, 25 MHz bins) and two
+  point channels -- the Kittel line within one bin at every field, the 3 / 4 GHz
+  points dip at 52 / 80 mT (Kittel 51.6 / 79.9 mT), ~29 sweeps per pixel. Not on a
+  real VNA: the per-point timing (trigger latency, even spacing, the C1209's sweep
+  time) is `# VERIFY` in `pna.py` / `cmt.py`.
 
 ## Simulation only (no hardware pass yet)
 

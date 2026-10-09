@@ -179,6 +179,15 @@ still assumes piezo/zpiezo.
   so far. A fly axis with `move: <stage>` flies in ANOTHER parameter's
   coordinates (camera.laser_x): the grid, row placement and binning are the
   camera's, the stage only moves; rows end when the camera sees the far edge. Values travel in WIRE units; the descriptor's `scale` applies.
+  Optional extra keys (2026-10-09, the vna): a channel's value per sample may
+  be a whole 1-D TRACE (an array detector with `dims`), complex values travel
+  as `{"re", "im"}`, `t_ch` {channel: [...]} gives a channel its own time
+  stamps (the VNA's single frequency points, each measured at its own moment),
+  `errors` {channel: why} names a channel that cannot be streamed now (a scan
+  recording it stops with that reason), `settings` must stay identical for a
+  whole scan (scan-core pins it across rows), `t_start` / `t_end` say how long
+  a sample took (scan-core waits that long at a row's end). Traces are binned
+  as the element-wise coherent mean; `<det>_n` counts traces per pixel.
   Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
   checks the verbs wherever a stream is declared.
 - **Ramps (optional, 2026-10-09) -- fly scans over ANY knob.** A control the
@@ -614,8 +623,13 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
   interval wait (`repeat.pace`) runs where the repeat dim changes, before the
   inner dims move, in `_measure_point` and in the fly row loop. Refused by
   validation: num not a whole number >= 1, two `average` repeats, a repeat
-  inside a fly axis, `average` with a fly axis or the window, enum/string
-  detectors under `average`.
+  inside a fly axis, `average` with the window, enum/string detectors under
+  `average`. `average` WITH a fly axis (2026-10-09): `collapse` sees a fly
+  detector by its `<det>_n` / `<det>_std` buffers and POOLS them
+  (`repeat._pool_fly`): N = sum n_i, M = sum n_i m_i / N, std = sqrt(sum n_i
+  (s_i^2 + |m_i - M|^2) / N) -- the exact population stats of all samples of
+  all repeats in the pixel; `_n` stays per pixel (also for a trace); a NaN
+  count (row not flown yet) is 0, which gives the running mean.
 - **Compression:** zlib level 4 with shuffle on every data variable, including
   the window's mask and record variables; coordinates stay uncompressed;
   strings are not filtered. A 100x100 scan of bool + 12-bit + enum + one float

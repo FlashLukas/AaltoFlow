@@ -749,6 +749,42 @@ The recorder is `stream.py` (`StreamRecorder`), copied into each module that
 streams, as `theme.py` is. `tools/check_modules.py --live` checks the verbs for
 every module that declares a stream.
 
+**Array streams -- a whole trace per sample (2026-10-09, `vna-control`).** An
+ARRAY detector (one with `dims`, a VNA trace) can stream too: declare the same
+`stream` block on it, and send one whole trace per sample. A few optional keys
+in the reply make that honest (all optional; a module that needs none sends
+none):
+
+    "values":   {"s":  {"re": [[...], [...]], "im": [[...], [...]]},   # (samples, points), complex
+                 "p1": {"re": [...], "im": [...]}},                    # a scalar complex channel
+    "t":        [...],                 # one stamp per sample: the sweep's MIDDLE
+    "t_start":  [...], "t_end": [...], # when each sweep began and ended
+    "t_ch":     {"p1": [...]},         # a channel's OWN stamps (default: "t")
+    "errors":   {"u": "u needs a reference and there is none: ..."},
+    "settings": {"sparam": "S21", "start_Hz": 1e9, "stop_Hz": 6e9,
+                 "points": 1601, "channels": {"p1": 640}}
+
+* **Complex** travels as `{"re", "im"}` (JSON has no complex numbers), nested
+  one level deeper for a trace. scan-core bins it COHERENTLY.
+* **Stamp a trace at the middle of its sweep and declare delay 0.** The points
+  are measured one after another; while the knob moves at a constant pace the
+  mean position over the sweep is the position at its middle. What remains is
+  smearing over one sweep, which scan-core logs (from `t_start` / `t_end`).
+* **Single points of the same measurement** are scalar channels of the same
+  group with their own stamps in `t_ch` -- the VNA stamps point i at
+  `t_start + (i + 0.5) T / n`, the centre of its dwell. They are 0-D, so they
+  bin like any scalar, with no smear.
+* **`errors`, not silence.** A channel that cannot be produced now (u without
+  a reference) is NAMED in `errors` with the reason, and left out of `values`;
+  a scan that records it stops with that message. Never send a row of NaN.
+* **`settings` = what the samples are only comparable under.** scan-core pins
+  the first `settings` it sees and refuses any change for the rest of the scan
+  (the stream is restarted every row, so a change between rows would
+  otherwise go unnoticed). Within one stream the module itself should fail the
+  read (`ok: false` with the reason) when they change.
+* The trace's coordinate still comes from the `dims` block (`coord_verb`), read
+  once per scan; the streamed traces must have exactly that many points.
+
 ### Ramps — a knob the module can SWEEP, so a fly scan can fly it (2026-10-09)
 
 A stage moves continuously by itself; most knobs do not -- a generator jumps

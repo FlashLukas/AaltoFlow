@@ -119,6 +119,43 @@ cd ..\..\..\scan-core
 uv run python run_vna_demo.py                    # -90..90 mT x 801 points -> out/vna_fmr_map.nc + .png
 ```
 
+## Fly scans: streaming every sweep (2026-10-09)
+
+In a scan-core **fly scan** (a knob flown continuously, e.g. `clMag.field`
+with its ramp) the VNA does not wait for triggers: `stream_start` makes it
+sweep back to back, and every completed sweep is one sample.
+
+| detector | streamed as | time stamp |
+|---|---|---|
+| `vna.s`, `vna.u`, `vna.ln_ratio` | the whole complex trace | the MIDDLE of its sweep |
+| `vna.point_1`, `vna.point_2`, ... | the S-parameter at ONE frequency, complex | the moment that point was measured |
+
+- **Point channels** are the frequencies in `stream.points_Hz` (GUI: the
+  **Fly points** box in the ACQUIRE card, in GHz; Settings > Stream, in Hz;
+  verb `set_stream_points{points_Hz: [...]}`). The nearest point of the sweep
+  grid is used and the detector's label says which (`S21 at 3.01 GHz`); a
+  frequency outside the sweep is skipped. Point i of a sweep that started at
+  `t0` and takes `T` is stamped `t0 + (i + 0.5) T / n` -- the centre of its
+  dwell -- so a point channel has no smear even when one sweep spans several
+  pixels. In a stepped scan the same detectors read the acquired trace
+  (`get_point`).
+- **The trace** is stamped at the middle of its sweep with lag 0 (its mean
+  moment); scan-core averages traces per pixel coherently, element by element.
+- **u / ln_ratio** stream against the reference, refused (the scan stops with
+  the reason) without a reference, with one that does not match, or when a new
+  one is taken during the stream.
+- **Do not change S-parameter, start, stop or points during a fly scan**: the
+  stream fails (and scan-core refuses a change between rows). IFBW and power
+  may change.
+- A stream nobody reads for 120 s is dropped (its scan is gone).
+- Wire: `stream_start` / `stream_read` / `stream_stop` in the suite's stream
+  format, complex as `{"re", "im"}`, point channels with their own stamps
+  (`t_ch`), u / ln problems in `errors` (INSTRUMENT_MODULE_GUIDE.md, "Streams").
+- The simulator's sweep takes `points x point_dwell_ifbw / IFBW` (Settings >
+  Line), and a sweep taken while the field moves sees, segment by segment, the
+  field of its moment. On the real analysers the per-point timing is
+  `# VERIFY` (trigger latency, even spacing; the C1209 has no sweep-time query).
+
 ## The simulator's data
 
 - `s` is **raw**: line loss rising as sqrt(f), connector ripple, 2.5 ns of
@@ -137,7 +174,7 @@ uv run python run_vna_demo.py                    # -90..90 mT x 801 points -> ou
 ## Tests
 
 ```powershell
-uv run pytest -q          # 110 tests, offline (both real backends against fake instruments)
+uv run pytest -q          # 161 tests, offline (both real backends against fake instruments)
 uv run scripts/smoke_test.py
 python ../../../tools/check_modules.py vna --live
 ```

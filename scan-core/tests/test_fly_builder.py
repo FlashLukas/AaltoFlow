@@ -106,6 +106,22 @@ def test_running_from_the_builder_flies(builder):
     assert np.all(np.isfinite(ds["lockin_r"].values))
 
 
+def test_running_a_fly_scan_with_a_vna_trace_and_a_point_from_the_builder(builder):
+    """The live result pane and the dataset with a streamed TRACE (2026-10-09)."""
+    from PySide6 import QtCore
+    items = {it.data(0, QtCore.Qt.UserRole): it for it in builder._det_items()}
+    for pid in ("s21", "s21_pt1"):
+        items[pid].setCheckState(0, QtCore.Qt.Checked)
+    builder.registry._state.vna_sweep_s = 0.01
+    _fly_row(builder, speed=40.0)
+    builder.per_pt.setValue(0.0)
+    builder.run_scan(block=True)
+    ds = builder.dataset
+    assert ds["s21_real"].dims == ("pos_x", "vna_freq")
+    assert ds["s21_n"].dims == ("pos_x",) and np.nanmedian(ds["s21_n"].values) >= 1
+    assert ds["s21_pt1_real"].dims == ("pos_x",)
+
+
 def _camera_rig():
     """A registry shaped like the KIM rig: a MEASURED camera coordinate (it
     streams, has no speed knob) and a KIM stage whose axes do."""
