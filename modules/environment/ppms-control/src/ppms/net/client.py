@@ -58,6 +58,11 @@ class RemoteStatus:
         self.chamber = d.get("chamber", "")
         self.readings = int(d.get("readings") or 0)
         self.poll_ms = _f(d, "poll_ms")
+        # the field SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = int(d.get("ramp_id") or 0)
+        self.ramp_target_mT = _f(d, "ramp_target_mT")
+        self.ramp_rate_mT_per_s = _f(d, "ramp_rate_mT_per_s")
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -132,6 +137,15 @@ class PpmsClient(ControlClient):
 
     def set_field(self, field_mT: float):
         return self._checked({"cmd": "set_field", "field_mT": float(field_mT)})
+
+    def ramp_field(self, field_mT: float, rate_mT_per_s: float):
+        """Sweep the field (fly scans; the GUI's Sweep button)."""
+        return self._checked({"cmd": "ramp_field", "field_mT": float(field_mT),
+                              "rate_mT_per_s": float(rate_mT_per_s)}).get("ramp_id")
+
+    def ramp_stop(self):
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._checked({"cmd": "ramp_stop"}).get("stopped")
 
     def set_field_rate(self, rate_mT_per_s: float):
         return self._checked({"cmd": "set_field_rate", "rate_mT_per_s": float(rate_mT_per_s)})

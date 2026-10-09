@@ -30,11 +30,16 @@ from ..config import FIELD_APPROACHES, TEMPERATURE_APPROACHES
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
+#: The sweep pace a client is offered first (mT/s): 5 mT/s = 0.5 T in under
+#: two minutes, a quarter of the magnet's top rate.
+SWEEP_RATE_DEFAULT_MT_PER_S = 5.0
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, timeout_s=None, args=None, danger=False, help=""):
+       settle=None, timeout_s=None, args=None, danger=False, help="", ramp=None,
+       stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -46,7 +51,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("timeout_s", timeout_s),
-                 ("args", args),
+                 ("args", args), ("ramp", ramp), ("stream", stream),
                  ("help", help)):
         if v is not None and v != "":
             d[k] = v
@@ -137,6 +142,22 @@ def build_manifest(cryo) -> dict:
            settle={"policy": "adopt_then_flag", "setpoint_key": "setpoint_field_mT",
                    "flag_key": "field_stable"},
            timeout_s=field_t,
+           # A CONTINUOUS SWEEP for fly scans (2026-10-09; guide 6b,
+           # "Ramps"): a HARDWARE ramp -- MultiVu drives the magnet at the
+           # asked rate itself (linear approach). Binned by the MEASURED
+           # field the poll thread reads every ramp_poll_s during a sweep.
+           ramp={"kind": "hardware",
+                 "start": {"verb": "ramp_field",
+                           "args": {"to": "field_mT", "rate": "rate_mT_per_s"}},
+                 "stop": {"verb": "ramp_stop"},
+                 "rate": {"unit": "mT/s", "min": lim.field_rate_min_mT_per_s,
+                          "max": lim.field_rate_max_mT_per_s,
+                          "default": max(lim.field_rate_min_mT_per_s,
+                                         min(lim.field_rate_max_mT_per_s,
+                                             SWEEP_RATE_DEFAULT_MT_PER_S))},
+                 "readback": {"stream": {"group": "field", "channel": "field"},
+                              "measured": True},
+                 "done": {"key": "ramping", "id_key": "ramp_id"}},
            help=f"Setpoint. Reached = within {f.tolerance_mT:g} mT and MultiVu holding, "
                 f"for {f.stable_time_s:g} s. Ramps at the field rate."),
         _p("field_rate", "Field rate", "control", "float", unit="mT/s", group="Field",
@@ -153,7 +174,11 @@ def build_manifest(cryo) -> dict:
                 "Applies from the next field setpoint."),
         _p("measured_field", "Measured field", "indicator", "float", unit="mT",
            group="Field", order=40, decimals=2, plottable=True,
-           read_path=["measured_field_mT"]),
+           read_path=["measured_field_mT"],
+           stream={"group": "field", "channel": "field"}),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Field", order=75,
+           read_path=["ramping"],
+           help="True while a field sweep (ramp_field) is on its way."),
         _p("field_error", "Field error", "indicator", "float", unit="mT",
            group="Field", order=50, decimals=3, plottable=True,
            read_path=["field_error_mT"]),

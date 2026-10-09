@@ -70,7 +70,12 @@ class PpmsService:
         #   take-over).
         #   READ = none: every read-only verb here is already status/info/
         #   describe/get_config.
+        #   Since 2026-10-09 there IS a verb that only stops: `ramp_stop`
+        #   ends a field SWEEP (fly scans) where the field is, so a viewer
+        #   may send it; `stream_read` only reads the poll thread's record.
         self.control = ControlLease(
+            safety={"ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -229,6 +234,18 @@ class PpmsService:
         try:
             if cmd == "set_field":
                 self.cryo.set_field(float(msg["field_mT"]))
+            elif cmd == "ramp_field":
+                # the field SWEEP (fly scans): MultiVu sweeps at this rate
+                return {"ok": True, "ramp_id": self.cryo.ramp_field(
+                    float(msg["field_mT"]), float(msg["rate_mT_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": self.cryo.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.cryo.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.cryo.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.cryo.stream_stop()}
             elif cmd == "set_field_rate":
                 self.cryo.set_field_rate(float(msg["rate_mT_per_s"]))
             elif cmd == "set_field_approach":

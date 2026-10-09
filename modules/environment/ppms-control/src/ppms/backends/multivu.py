@@ -174,6 +174,11 @@ class MultiVuDynaCool:
         # DynaCool magnet is always driven.
         # VERIFY on the DynaCool: MultiVu's accepted rate range, and that a
         # setpoint beyond the magnet's rating is refused rather than clipped.
+        # Also used by the field SWEEP of a fly scan (Cryostat.ramp_field:
+        # approach "linear", the sweep's own rate) and to stop one (a new
+        # setpoint at the present field). VERIFY: the linear approach holds
+        # the rate to the end without overshoot, and a setpoint sent mid-ramp
+        # turns the magnet over smoothly, without a step.
         c.set_field(float(field_mT) * OE_PER_MT, float(rate_mT_per_s) * OE_PER_MT, mode)
 
     # ---- temperature ------------------------------------------------------------

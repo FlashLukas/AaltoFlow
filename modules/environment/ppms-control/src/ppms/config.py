@@ -116,6 +116,12 @@ class Hardware:
     mpv_port: int = 5000
     scaffolding: bool = False
     poll_s: float = 0.5
+    # While a field SWEEP runs (ramp_field, fly scans, 2026-10-09) the field
+    # is read this often -- a fly scan bins by these readings, and 2 a second
+    # would give a pixel of a fast sweep no reading at all. Temperature and
+    # chamber stay at poll_s. VERIFY on the DynaCool: what one get_field
+    # costs through MultiPyVu (local socket + COM); 50 ms assumes a few ms.
+    ramp_poll_s: float = 0.05
 
 
 @dataclass

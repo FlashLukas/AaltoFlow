@@ -296,6 +296,21 @@ class MainWindow(QtWidgets.QMainWindow):
         zero_f.clicked.connect(self._zero_field)
         row.addWidget(set_f, 1); row.addWidget(zero_f)
         flay.addLayout(row)
+        # SWEEP (2026-10-09): a linear sweep to the setpoint at the rate above,
+        # as a fly scan runs it -- MultiVu drives the magnet, "Stop" ends it
+        # where the field is.
+        srow = QtWidgets.QHBoxLayout()
+        sweep_f = QtWidgets.QPushButton("Sweep to setpoint")
+        sweep_f.setToolTip("Linear sweep at the rate above; the field is read fast "
+                           "while it runs")
+        sweep_f.clicked.connect(lambda: self._call(self.ctrl.ramp_field,
+                                                   self.field_spin.value(),
+                                                   self.frate_spin.value()))
+        stop_f = QtWidgets.QPushButton("Stop")
+        stop_f.setToolTip("End the sweep where the field is")
+        stop_f.clicked.connect(lambda: self._call(self.ctrl.ramp_stop))
+        srow.addWidget(sweep_f, 1); srow.addWidget(stop_f)
+        flay.addLayout(srow)
         col.addWidget(fcard)
 
         # ---- temperature card ------------------------------------------------
