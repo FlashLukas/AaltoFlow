@@ -1491,7 +1491,9 @@ class RepeatRow(_StackRow):
             "drift or one spoiled run is still visible afterwards.\n\n"
             "average: only the mean, its spread (_std) and how many repeats\n"
             "were averaged (_n) are stored -- a file N times smaller. Numbers\n"
-            "only (not with a state/text detector, a fly axis or the window).")
+            "only (not with a state/text detector or the window). With a fly\n"
+            "axis every repeat flies the rows again and each pixel pools the\n"
+            "samples of all repeats (_n = samples, _std = their spread).")
         self.interval = QtWidgets.QDoubleSpinBox()
         self.interval.setRange(0.0, 1e6); self.interval.setDecimals(1)
         self.interval.setSuffix(" s"); self.interval.setFixedWidth(96)
@@ -4661,7 +4663,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
         A fly scan records its detectors continuously and bins them by
         position, so only a detector its module can STREAM qualifies -- not a
-        one-value-at-a-time read, and not a whole trace (a VNA). Rather than
+        one-value-at-a-time read. A whole 1-D trace qualifies when its module
+        streams every sweep (the VNA, 2026-10-09): it is binned trace by
+        trace; one with more dimensions of its own does not. Rather than
         let a ticked one turn the whole scan "invalid", it is unticked and
         greyed while any axis flies, and REMEMBERED: switch fly off and it is
         ticked again, so trying fly on and off does not lose a detector
@@ -4676,14 +4680,15 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 pid = it.data(0, QtCore.Qt.UserRole)
                 p = self.registry.get(pid) if pid else None
                 ok = (not fly) or (p is not None and getattr(p, "stream", None) is not None
-                                   and not getattr(p, "axes", None))
+                                   and len(getattr(p, "axes", None) or []) <= 1)
                 if not ok:
                     if it.checkState(0) == QtCore.Qt.Checked:
                         parked.add(pid)
                         it.setCheckState(0, QtCore.Qt.Unchecked)
                     if not it.isDisabled():
                         it.setDisabled(True)
-                        why = ("returns a whole trace" if getattr(p, "axes", None)
+                        why = ("it has more than one dimension of its own"
+                               if len(getattr(p, "axes", None) or []) > 1
                                else "its module does not stream it")
                         it.setToolTip(0, f"{pid}" + chr(10) + f"cannot be recorded in a FLY scan: {why}")
                 else:

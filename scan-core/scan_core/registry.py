@@ -203,11 +203,61 @@ class StreamSpec:
     where the stage WAS, not where it is; flyscan.py moves each sample back by
     this much before looking up the position. A module states it because only
     the module knows its filter settings as they are right now.
+
+    TRACES AND PER-CHANNEL TIMES (2026-10-09, the VNA). A channel's value per
+    sample need not be one number: a VNA streams every completed sweep as ONE
+    sample whose value is the whole complex trace, so its array is (samples,
+    points). And the channels of one group need not share their time stamps:
+    the VNA also streams single frequency points of the same sweeps, each
+    stamped at the moment THAT point was measured. The extra keys a chunk may
+    carry (all optional; the older modules send none of them):
+
+        "t_ch":     {channel: [...]}   that channel's own time stamps (else "t")
+        "errors":   {channel: "why"}   this channel cannot be streamed now
+                                       ("u needs a reference"); a scan that
+                                       records it stops with that message
+        "settings": {...}              what the samples are only comparable
+                                       under (the VNA: S-parameter, start,
+                                       stop, points, the point channels); must
+                                       not change while a scan records -- see
+                                       pin_reset()
+        "t_start", "t_end": [...]      when each sample's measurement began and
+                                       ended (a sweep takes time)
+
+    Complex values travel as {"re": [...], "im": [...]} (JSON has no complex
+    numbers), nested one level deeper for a trace.
     """
 
     def __init__(self, group: str, start_fn, read_fn, stop_fn=None):
         self.group = group
         self._start, self._read, self._stop = start_fn, read_fn, stop_fn
+        # the `settings` the first chunk of this scan carried (pin_reset)
+        self._pinned = None
+
+    def pin_reset(self) -> None:
+        """Forget the pinned settings; called once at the start of every fly
+        scan. The first chunk that carries `settings` then pins them, and any
+        later chunk -- in this row or a later one -- with different ones
+        raises. Why: the stream is restarted for every row, so a VNA whose
+        sweep was changed BETWEEN two rows would hand over traces of another
+        frequency grid without any error of its own, and they would be filed
+        under the coordinate read at the start of the scan."""
+        self._pinned = None
+
+    def _check(self, chunk: dict) -> dict:
+        s = chunk.get("settings")
+        if s is None:
+            return chunk
+        if self._pinned is None:
+            self._pinned = s
+        elif s != self._pinned:
+            diff = [f"{k}: {self._pinned.get(k)!r} -> {s.get(k)!r}"
+                    for k in sorted(set(s) | set(self._pinned))
+                    if s.get(k) != self._pinned.get(k)]
+            raise ValueError(f"{self.group}: the instrument's settings changed during "
+                             f"the scan ({'; '.join(diff)}); its samples would no "
+                             f"longer match the ones already recorded")
+        return chunk
 
     def start(self):
         """Clear anything recorded and start recording."""
@@ -215,32 +265,71 @@ class StreamSpec:
 
     def read(self) -> dict:
         """Everything recorded since the last read (or the start); drains it."""
-        return normalize_chunk(self._read())
+        return self._check(normalize_chunk(self._read()))
 
     def stop(self) -> dict:
         """Stop recording; returns whatever was recorded since the last read."""
         if self._stop is None:
-            return normalize_chunk(self._read())
-        return normalize_chunk(self._stop())
+            return self._check(normalize_chunk(self._read()))
+        return self._check(normalize_chunk(self._stop()))
+
+
+def _num_array(xs) -> np.ndarray:
+    """A JSON list -- nested for a trace per sample -- as a float array, with
+    None (JSON's NaN) -> nan. A ragged list (traces of different lengths in one
+    chunk) raises: such samples cannot be averaged element by element."""
+    if xs is None:
+        return np.array([], dtype=float)
+    if isinstance(xs, np.ndarray):
+        return xs if xs.dtype.kind in "fc" else xs.astype(float)
+    try:
+        return np.array(xs, dtype=float)       # the fast path: no None in it
+    except (TypeError, ValueError):
+        pass
+    a = np.array(xs, dtype=object)
+    if a.ndim == 0:
+        raise ValueError("a stream value is not a list of numbers")
+    a[np.equal(a, None)] = np.nan
+    try:
+        return a.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"a stream channel has samples of different lengths "
+                         f"({exc})") from None
+
+
+def _values(v) -> np.ndarray:
+    """One channel's values: {"re", "im"} -> complex, anything else -> float."""
+    if isinstance(v, dict) and "re" in v and "im" in v:
+        return _num_array(v["re"]) + 1j * _num_array(v["im"])
+    return _num_array(v)
 
 
 def normalize_chunk(chunk) -> dict:
-    """A stream reply as numpy arrays; None (JSON's NaN) becomes nan."""
+    """A stream reply as numpy arrays; None (JSON's NaN) becomes nan.
+
+    Always returns t, values, delay_s, overflow, t_ch and errors (both possibly
+    empty) and settings (None when the module sends none); t_start / t_end
+    only when the module sent them."""
     chunk = chunk or {}
-
-    def arr(xs):
-        return np.array([np.nan if v is None else v for v in (xs if xs is not None else [])],
-                        dtype=float)
-
-    t = arr(chunk.get("t"))
-    values = {str(k): arr(v) for k, v in (chunk.get("values") or {}).items()}
+    t = _num_array(chunk.get("t"))
+    t_ch = {str(k): _num_array(v) for k, v in (chunk.get("t_ch") or {}).items()}
+    values = {str(k): _values(v) for k, v in (chunk.get("values") or {}).items()}
     for k, v in values.items():
-        if len(v) != len(t):
+        n = len(t_ch.get(k, t))
+        if len(v) != n:
             raise ValueError(f"stream channel {k!r} has {len(v)} samples for "
-                             f"{len(t)} time stamps")
+                             f"{n} time stamps")
     delay = {str(k): float(v or 0.0) for k, v in (chunk.get("delay_s") or {}).items()}
-    return {"t": t, "values": values, "delay_s": delay,
-            "overflow": bool(chunk.get("overflow", False))}
+    settings = chunk.get("settings")
+    out = {"t": t, "values": values, "delay_s": delay,
+           "overflow": bool(chunk.get("overflow", False)),
+           "t_ch": t_ch,
+           "errors": {str(k): str(v) for k, v in (chunk.get("errors") or {}).items()},
+           "settings": settings if isinstance(settings, dict) else None}
+    for key in ("t_start", "t_end"):
+        if chunk.get(key) is not None:
+            out[key] = _num_array(chunk[key])
+    return out
 
 
 class Gettable(Parameter):
@@ -442,6 +531,13 @@ class SimState:
         self._vna_freqs = np.linspace(500e6, 6.0e9, 401)
         self._vna_buffer = None
         self._vna_ref = None          # the stored reference trace (take_vna_reference)
+        # The VNA's STREAM (fly scans with a trace detector, 2026-10-09): one
+        # sweep takes this long -- its points are measured one after another,
+        # so a field that moves meanwhile is seen differently by each -- and
+        # these frequencies are also streamed as single-point channels
+        # (s21_pt1, s21_pt2), each stamped at the moment it was measured.
+        self.vna_sweep_s = 0.02
+        self.vna_stream_points_Hz = (900e6, 1100e6)
         # A stage that takes TIME to move, for fly scans. 0 = the old
         # behaviour: a position setpoint is reached instantly. Above 0 a set
         # of pos_x / pos_y blocks while the position travels there at this
@@ -546,10 +642,12 @@ class SimState:
                 cover = max(cover, float(np.exp(-(rr ** 3))))
         return 0.30 + 0.45 * cover + 0.005 * float(self._rng.standard_normal())
 
-    def _f_res(self) -> float:
+    def _f_res(self, field_mT=None):
         """The resonance HERE: the film's Kittel line on the bare substrate, the
-        island's own line wherever an island is."""
-        B = abs(self.field_mT)
+        island's own line wherever an island is. `field_mT` (a number or an
+        array) instead of the present field: a VNA sweep under a moving field
+        sees a different field at every point (SimSweepStreamer)."""
+        B = np.abs(self.field_mT if field_mT is None else np.asarray(field_mT, dtype=float))
         film = 500.0 + 3.0 * np.sqrt(B * (B + 300.0)) + 25.0 * self.device_V  # MHz
         return film + self._pattern()[1]
 
@@ -628,8 +726,13 @@ class SimState:
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.log(trace / self._vna_ref)
 
-    def vna_trace(self, freqs_Hz):
+    def vna_trace(self, freqs_Hz, fields_mT=None):
         """A VNA-FMR style complex S21 trace over `freqs_Hz`.
+
+        `fields_mT`: the field AT EACH POINT (same length), for a sweep taken
+        while the field moves -- a real VNA measures point after point, and
+        the line sits where the field was when its frequency came up.
+        None = the present field for the whole trace (a stepped scan).
 
         One scan point, one whole trace: this is what a real VNA gives you,
         because the frequency sweep happens in the instrument. A complex
@@ -639,7 +742,7 @@ class SimState:
         magnitude-only simulator would hide.
         """
         f = np.asarray(freqs_Hz, dtype=float)
-        f_res = self._f_res() * 1e6                      # MHz -> Hz
+        f_res = self._f_res(fields_mT) * 1e6             # MHz -> Hz (per point if given)
         linewidth = self._linewidth_MHz() * 1e6          # Hz (HWHM)
         amp = 0.6 * self._amp()
         # Standard notch/absorption form: 1 - A / (1 + 2i(f - f0)/G).
@@ -793,6 +896,14 @@ def build_sim_registry() -> Registry:
                      axes=[freq_axis], dtype="complex", acquire=vna_sweep))
     reg.add(Gettable("ln_ratio", "ln(S21 / ref)", "", s.read_vna_ln,
                      axes=[freq_axis], dtype="complex", acquire=vna_sweep))
+    # SINGLE FREQUENCY POINTS of the same sweep, as SCALAR complex detectors:
+    # the VNA module's `point_k` (2026-10-09). A stepped scan reads them from
+    # the acquired trace; a fly scan streams them, each with its own moment.
+    for k, f_want in enumerate(s.vna_stream_points_Hz, start=1):
+        i = int(np.argmin(np.abs(s._vna_freqs - f_want)))
+        reg.add(Gettable(f"s21_pt{k}", f"S21 at {s._vna_freqs[i] / 1e9:.4f} GHz", "",
+                         lambda _i=i: complex(s.read_vna()[_i]), dtype="complex",
+                         acquire=vna_sweep))
 
     # A SLOW SWEPT detector that supports the RESONANCE WINDOW (window.py):
     # the spectrum-analyser-with-tracking-generator case. `window` in the
@@ -918,3 +1029,38 @@ def _attach_sim_streams(reg: Registry, s: SimState) -> None:
                     ("lockin_phi", "phi"), ("aux_in", "aux")):
         p = reg.get(pid)
         p.stream, p.stream_channel = lockin_spec, ch
+
+    # The VNA: whole traces (s21, u, ln_ratio) and single points (s21_ptN),
+    # all from ONE stream of back-to-back sweeps (sim_stream.SimSweepStreamer).
+    # u and ln need the stored reference, exactly as their one-trace reads do
+    # -- but a fly scan cannot file a row of NaN quietly, so the stream says
+    # WHY instead and the scan stops with that message.
+    from .sim_stream import SimSweepStreamer
+
+    def needs_ref(fn, name):
+        def q(z):
+            if s._vna_ref is None:
+                raise ValueError(f"{name} needs a reference and there is none: "
+                                 f"take one first (vna_reference)")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                return fn(z, s._vna_ref)
+        return q
+
+    points = {}
+    for k in range(1, len(s.vna_stream_points_Hz) + 1):
+        p = reg.get(f"s21_pt{k}")
+        if p is not None:
+            points[f"p{k}"] = int(np.argmin(np.abs(s._vna_freqs
+                                                   - s.vna_stream_points_Hz[k - 1])))
+    sweeps = SimSweepStreamer(
+        "sim.vna", lambda: s._vna_freqs, s.vna_trace, lambda: s.field_mT,
+        lambda: s.vna_sweep_s,
+        quantities={"s": lambda z: z,
+                    "u": needs_ref(lambda z, r: (z - r) / r, "u"),
+                    "ln": needs_ref(lambda z, r: np.log(z / r), "ln")},
+        points=lambda: dict(points))
+    vna_spec = sweeps.spec()
+    for pid, ch in (("s21", "s"), ("u", "u"), ("ln_ratio", "ln"),
+                    *((f"s21_pt{k[1:]}", k) for k in points)):
+        p = reg.get(pid)
+        p.stream, p.stream_channel = vna_spec, ch

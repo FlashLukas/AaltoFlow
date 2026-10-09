@@ -151,13 +151,19 @@ def test_a_stage_position_gets_no_move_with_box(builder):
 def test_ticking_fly_greys_the_detectors_that_cannot_fly_and_gives_them_back(builder):
     from PySide6 import QtCore
     items = {it.data(0, QtCore.Qt.UserRole): it for it in builder._det_items()}
-    items["s21"].setCheckState(0, QtCore.Qt.Checked)        # a whole trace: cannot fly
+    # `fmr` is a trace its "module" does not stream: it cannot fly. `s21` is
+    # a trace that IS streamed sweep by sweep (the VNA, 2026-10-09): it can.
+    items["fmr"].setCheckState(0, QtCore.Qt.Checked)
+    items["s21"].setCheckState(0, QtCore.Qt.Checked)
+    items["s21_pt1"].setCheckState(0, QtCore.Qt.Checked)     # a single VNA point
     row = _fly_row(builder)
-    assert items["s21"].isDisabled() and items["s21"].checkState(0) == QtCore.Qt.Unchecked
-    assert "cannot be recorded in a FLY scan" in items["s21"].toolTip(0)
+    assert items["fmr"].isDisabled() and items["fmr"].checkState(0) == QtCore.Qt.Unchecked
+    assert "cannot be recorded in a FLY scan" in items["fmr"].toolTip(0)
     assert not items["lockin_r"].isDisabled()                # streams: stays available
+    assert not items["s21"].isDisabled() and items["s21"].checkState(0) == QtCore.Qt.Checked
+    assert not items["s21_pt1"].isDisabled()
     assert "set aside while flying" in builder.detail.text()
     assert builder.build_recipe().validate(builder.registry) == []
     row.fly.setChecked(False)                                # back to stepping
-    assert not items["s21"].isDisabled()
-    assert items["s21"].checkState(0) == QtCore.Qt.Checked   # the selection came back
+    assert not items["fmr"].isDisabled()
+    assert items["fmr"].checkState(0) == QtCore.Qt.Checked   # the selection came back

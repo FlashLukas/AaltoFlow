@@ -442,7 +442,13 @@ def decode_wire_value(value, complex_: bool = False):
         return np.array([np.nan if v is None else v for v in xs], dtype=float)
 
     if isinstance(value, dict) and "re" in value and "im" in value:
-        return arr(value["re"]) + 1j * arr(value["im"])
+        re, im = value["re"], value["im"]
+        if not isinstance(re, (list, tuple)) and not isinstance(im, (list, tuple)):
+            # ONE complex number (a VNA's single frequency point, 2026-10-09)
+            def num(v):
+                return float("nan") if v is None else float(v)
+            return complex(num(re), num(im))
+        return arr(re) + 1j * arr(im)
     if isinstance(value, (list, tuple)):
         out = arr(value)
         return out.astype(complex) if complex_ else out
@@ -648,8 +654,17 @@ def _stream_from(group: str, spec: dict, inst: Instrument) -> StreamSpec:
             samples.append((t1 - t0, float(now) - 0.5 * (t0 + t1)))
             del samples[:-20]
         offset = min(samples)[1] if samples else 0.0
-        if offset and chunk.get("t"):
-            chunk["t"] = [None if t is None else t - offset for t in chunk["t"]]
+        if offset:
+            def shift(ts):
+                return [None if t is None else t - offset for t in ts]
+            for key in ("t", "t_start", "t_end"):
+                if chunk.get(key):
+                    chunk[key] = shift(chunk[key])
+            # a channel with time stamps of its own (a VNA's single
+            # frequency points, each measured at its own moment in the sweep)
+            # is on the module's clock too
+            if isinstance(chunk.get("t_ch"), dict):
+                chunk["t_ch"] = {k: shift(v or []) for k, v in chunk["t_ch"].items()}
         return chunk
 
     return StreamSpec(group,

@@ -161,27 +161,54 @@ def bin_samples(t_pos, pos, t_det, values, edges, delay_s: float = 0.0,
     way round: the stage moves smoothly between two position samples, a
     detector signal need not. A detector sample outside the time span of the
     position record is dropped (extrapolating a position is guessing).
+
+    A sample may be COMPLEX (a VNA's S at one frequency) and/or a whole 1-D
+    TRACE (a VNA sweep: `values` is (samples, points), 2026-10-09):
+      * the mean is COHERENT: the mean of the complex values, never of |z| --
+        averaging magnitudes would turn noise into a positive bias and wash
+        out a resonance's phase roll, exactly what a VNA's own averaging
+        avoids. A trace is averaged element by element: mean[pixel, k] is the
+        mean of point k of every trace that fell into the pixel;
+      * n counts SAMPLES (traces) per pixel, one number per pixel, not per
+        frequency point: "how many sweeps went into this pixel" is the
+        question it answers;
+      * std is the spread of the samples around that mean, element by
+        element: sqrt(mean |z - mean|^2), the population standard deviation
+        (ddof = 0, as for real numbers here). For complex values it is the
+        RMS distance from the mean in the complex plane -- one real number,
+        the radius of the noise cloud, which is what an error bar on a
+        complex quantity can honestly mean.
     """
     edges = np.asarray(edges, dtype=float)
     npix = len(edges) - 1
-    mean = np.full(npix, np.nan)
-    std = np.full(npix, np.nan)
-    n = np.zeros(npix, dtype=int)
+    vals = np.asarray(values)
+    cplx = np.iscomplexobj(vals)
+    if not cplx:
+        vals = vals.astype(float)
+    inner = tuple(vals.shape[1:]) if vals.ndim > 1 else ()
+    mean = np.full((max(npix, 0),) + inner, np.nan, dtype=complex if cplx else float)
+    if cplx:
+        mean[...] = complex(np.nan, np.nan)
+    std = np.full((max(npix, 0),) + inner, np.nan)
+    n = np.zeros(max(npix, 0), dtype=int)
     t_pos = np.asarray(t_pos, dtype=float) - float(pos_delay_s)
     pos = np.asarray(pos, dtype=float)
     ok = np.isfinite(t_pos) & np.isfinite(pos)
     t_pos, pos = t_pos[ok], pos[ok]
     t_eff = np.asarray(t_det, dtype=float) - float(delay_s)
-    vals = np.asarray(values, dtype=float)
     if npix < 1 or len(t_pos) < 2 or len(t_eff) == 0:
         return mean, n, std
     order = np.argsort(t_pos, kind="stable")
     t_pos, pos = t_pos[order], pos[order]
-    inside = (t_eff >= t_pos[0]) & (t_eff <= t_pos[-1]) & np.isfinite(vals)
+    fin = np.isfinite(vals)                      # complex: both parts finite
+    # a scalar sample counts if it is a number; a trace if ANY of its points
+    # is (a trace with a few NaN points still says something about the rest)
+    sample_ok = fin if not inner else fin.reshape(len(vals), -1).any(axis=1)
+    inside = (t_eff >= t_pos[0]) & (t_eff <= t_pos[-1]) & sample_ok
     if not inside.any():
         return mean, n, std
     x = np.interp(t_eff[inside], t_pos, pos)
-    v = vals[inside]
+    v, f = vals[inside], fin[inside]
 
     # Bin on ASCENDING edges, then map back if the axis runs downwards.
     flip = edges[-1] < edges[0]
@@ -189,18 +216,56 @@ def bin_samples(t_pos, pos, t_det, values, edges, delay_s: float = 0.0,
     idx = np.searchsorted(asc, x, side="right") - 1
     idx[x == asc[-1]] = npix - 1                 # the far edge belongs to the last pixel
     keep = (idx >= 0) & (idx < npix)
-    idx, v = idx[keep], v[keep]
-    cnt = np.bincount(idx, minlength=npix)
-    s1 = np.bincount(idx, weights=v, minlength=npix)
-    s2 = np.bincount(idx, weights=v * v, minlength=npix)
-    has = cnt > 0
-    m = np.full(npix, np.nan)
-    m[has] = s1[has] / cnt[has]
-    var = np.full(npix, np.nan)
-    var[has] = np.maximum(s2[has] / cnt[has] - m[has] ** 2, 0.0)
+    idx, v, f = idx[keep], v[keep], f[keep]
+    cnt = np.bincount(idx, minlength=npix)       # samples (traces) per pixel
+    if not inner and not cplx:
+        # the plain case, kept exactly as it always was
+        s1 = np.bincount(idx, weights=v, minlength=npix)
+        s2 = np.bincount(idx, weights=v * v, minlength=npix)
+        has = cnt > 0
+        m = np.full(npix, np.nan)
+        m[has] = s1[has] / cnt[has]
+        var = np.full(npix, np.nan)
+        var[has] = np.maximum(s2[has] / cnt[has] - m[has] ** 2, 0.0)
+        if flip:
+            m, var, cnt = m[::-1], var[::-1], cnt[::-1]
+        return m, cnt.astype(int), np.sqrt(var)
+
+    # complex and/or traces: sum per pixel, element by element, leaving out
+    # the elements that are NaN (their own count, `ce`)
+    v2 = v.reshape(len(v), -1)
+    f2 = f.reshape(len(f), -1)
+    vz = np.where(f2, v2, 0)
+    ce = _sum_by_pixel(idx, f2.astype(float), npix)
+    s1 = _sum_by_pixel(idx, vz, npix)
+    s2 = _sum_by_pixel(idx, np.abs(vz) ** 2, npix)
+    has = ce > 0
+    with np.errstate(invalid="ignore", divide="ignore"):
+        m = np.where(has, s1 / np.where(has, ce, 1), np.nan)
+        var = np.where(has, np.maximum(s2 / np.where(has, ce, 1) - np.abs(m) ** 2, 0.0),
+                       np.nan)
+    if cplx:
+        m = np.where(has, m, complex(np.nan, np.nan))
+    m = m.reshape((npix,) + inner)
+    var = var.reshape((npix,) + inner)
     if flip:
         m, var, cnt = m[::-1], var[::-1], cnt[::-1]
     return m, cnt.astype(int), np.sqrt(var)
+
+
+def _sum_by_pixel(idx, arr, npix):
+    """Row sums of `arr` (samples x elements) grouped by pixel index `idx`:
+    (npix x elements). Sorting once and summing each run with add.reduceat is
+    O(samples x elements) -- this runs on every live refresh of a row, over a
+    few hundred 1601-point traces."""
+    out = np.zeros((npix, arr.shape[1]), dtype=arr.dtype)
+    if len(idx) == 0:
+        return out
+    order = np.argsort(idx, kind="stable")
+    si, sa = idx[order], arr[order]
+    starts = np.flatnonzero(np.r_[True, si[1:] != si[:-1]])
+    out[si[starts]] = np.add.reduceat(sa, starts, axis=0)
+    return out
 
 
 def find_speed_param(registry, pid: str) -> str | None:
@@ -375,9 +440,20 @@ def validate_fly(recipe, registry) -> list[str]:
         if q is None:
             continue                         # the generic check reports it
         kind = getattr(getattr(q, "storage", None), "kind", "float")
-        if getattr(q, "axes", None):
-            errs.append(f"detector '{det}' returns a whole trace; a fly scan "
-                        f"records single values only")
+        axes_q = getattr(q, "axes", None) or []
+        if len(axes_q) > 1:
+            errs.append(f"detector '{det}' returns a {len(axes_q)}-D array per "
+                        f"reading; a fly scan bins single values and 1-D traces "
+                        f"(a VNA sweep), nothing with more dimensions")
+        elif axes_q and getattr(q, "stream", None) is None:
+            # since 2026-10-09 a whole TRACE can fly, when its module streams
+            # every completed sweep (vna); what cannot is a trace that can
+            # only be fetched one acquisition at a time
+            errs.append(f"detector '{det}' returns a whole trace and its module "
+                        f"does not stream traces. A fly scan records what a "
+                        f"module streams: single values (a lock-in, a power "
+                        f"meter, single VNA frequency points) and whole 1-D "
+                        f"traces from a module that streams every sweep (vna)")
         elif kind in ("enum", "string"):
             # a pixel of a fly row is the MEAN of the samples that fell in it,
             # and there is no mean of "IDLE" and "BUSY"
@@ -470,14 +546,26 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     # (the readback by object: a ramp's readback is not a registry parameter)
     for spec in [rb.stream] + [registry.get(pid).stream for pid in dets]:
         groups.setdefault(id(spec), spec)
+    for spec in groups.values():
+        # a stream whose chunks carry `settings` (the VNA's grid) must keep
+        # them for the whole scan, across rows (registry.StreamSpec.pin_reset)
+        reset = getattr(spec, "pin_reset", None)
+        if reset is not None:
+            reset()
 
     params = {det: registry.get(det) for det in dets}
     for det in dets:
         # NaN = row not flown yet (in memory). On disk the count is a uint32
         # and the mean a float64 even for an int/bool detector -- the mean of
         # 3 and 4 is 3.5 (engine._storage_for).
+        # A TRACE detector (a VNA sweep): the mean and the spread are traces
+        # per pixel, (..., pixel, freq); the count is one number per pixel --
+        # how many sweeps went into it.
+        inner = tuple(data[det].shape[len(shape):])
         data[f"{det}_n"] = np.full(shape, np.nan)
-        data[f"{det}_std"] = np.full(shape, np.nan)
+        data[f"{det}_std"] = np.full(tuple(shape) + inner, np.nan)
+        if det_axes.get(det):
+            det_axes[f"{det}_std"] = det_axes[det]
     binned_by = ("measurement" if (ramp is None or ax.get("readback")) else ramp.binned_by)
     ctx["var_attrs"] = _var_attrs(params, fly, ax, rb.id, speed)
     if ramp is not None:
@@ -865,9 +953,10 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
         # THE TAIL. A lagging channel's last samples belong to the end of the
         # row but are only RECORDED up to its delay after the stage stops, so
         # keep recording that long -- otherwise the last pixel of every row
-        # comes out empty.
+        # comes out empty. (Plus one sample's own duration -- a VNA sweep
+        # under way when the stage stopped: _sample_span.)
         tail = max((d for cs in chunks.values() for c in cs
-                    for d in c["delay_s"].values()), default=0.0)
+                    for d in c["delay_s"].values()), default=0.0) + _sample_span(chunks)
         if tail > 0:
             time.sleep(min(tail + 0.02, 5.0))
     for g, spec in groups.items():
@@ -966,9 +1055,10 @@ def _ramp_one_row(ramp, a, b, rate, timeout, groups, should_abort, row, npix,
                 raise TimeoutError(f"fly: the sweep to {b:g} did not end within "
                                    f"{timeout:g} s")
         if not aborted:
-            # THE TAIL: a lagging detector records the end of the row late
+            # THE TAIL: a lagging detector records the end of the row late,
+            # and a sweep under way at the end finishes one sweep later
             tail = max((d for cs in chunks.values() for c in cs
-                        for d in c["delay_s"].values()), default=0.0)
+                        for d in c["delay_s"].values()), default=0.0) + _sample_span(chunks)
             if tail > 0:
                 time.sleep(min(tail + 0.02, 5.0))
     except BaseException:
@@ -1162,16 +1252,43 @@ def _joined(chunks, p):
     scale = float(getattr(p, "stream_scale", 1.0) or 1.0)
     ts, vs, delay = [], [], 0.0
     for c in chunks.get(id(spec), []):
+        why = (c.get("errors") or {}).get(channel)
+        if why:
+            # the module says this channel cannot be streamed now (a VNA's u
+            # with no reference): stop, with ITS reason -- never a silent
+            # row of NaN
+            raise RuntimeError(f"{getattr(p, 'id', channel)}: {why}")
         v = c["values"].get(channel)
-        if v is None:
+        if v is None or len(v) == 0:
             continue
-        ts.append(c["t"])
+        ts.append((c.get("t_ch") or {}).get(channel, c["t"]))
         vs.append(v)
         delay = c["delay_s"].get(channel, delay)
     if not ts:
         return np.array([]), np.array([]), 0.0
-    vals = np.concatenate(vs)
+    try:
+        vals = np.concatenate(vs)
+    except ValueError:
+        raise ValueError(f"{getattr(p, 'id', channel)}: the streamed traces changed "
+                         f"length during the row") from None
     return np.concatenate(ts), (vals / scale if scale != 1.0 else vals), float(delay)
+
+
+def _sample_span(chunks) -> float:
+    """The longest time one streamed sample took to measure (t_end - t_start;
+    a VNA sweep), 0 when no stream says. A row must keep recording that long
+    after the knob stops, or the sweep under way at the end -- whose time
+    stamp may still lie inside the row -- is lost."""
+    span = 0.0
+    for cs in chunks.values():
+        for c in cs:
+            a, b = c.get("t_start"), c.get("t_end")
+            if a is not None and b is not None and len(a) and len(a) == len(b):
+                d = np.asarray(b, dtype=float) - np.asarray(a, dtype=float)
+                d = d[np.isfinite(d)]
+                if d.size:
+                    span = max(span, float(d.max()))
+    return span
 
 
 def _bin_into(chunks, rb, params, edges, lag, data, oidx):
@@ -1179,6 +1296,13 @@ def _bin_into(chunks, rb, params, edges, lag, data, oidx):
     t_pos, pos, pos_delay = _joined(chunks, rb)
     for det, p in params.items():
         t, v, delay = _joined(chunks, p)
+        want = data[det].shape[len(oidx) + 1:]
+        if len(v) and tuple(v.shape[1:]) != tuple(want):
+            # the trace no longer matches the coordinate read at the start of
+            # the scan (points changed) -- refuse rather than misfile it
+            raise ValueError(f"{det}: the streamed trace has {v.shape[1:] or 'no'} "
+                             f"points, the scan's coordinate {want or 'none'}: the "
+                             f"instrument's sweep changed")
         m, n, s = bin_samples(t_pos, pos, t, v, edges,
                               delay_s=delay if lag else 0.0,
                               pos_delay_s=pos_delay if lag else 0.0)
@@ -1194,11 +1318,15 @@ def _var_attrs(params, fly, ax, rb_id, speed) -> dict:
     out = {}
     for det, p in params.items():
         label = getattr(p, "label", det)
+        trace = bool(getattr(p, "axes", None))
+        cplx = getattr(p, "dtype", "") == "complex"
         out[det] = {"fly_stat": "mean"}
-        out[f"{det}_n"] = {"units": "", "label": f"{label}: samples per pixel",
+        out[f"{det}_n"] = {"units": "",
+                           "label": f"{label}: {'traces' if trace else 'samples'} per pixel",
                            "fly_stat": "count"}
         out[f"{det}_std"] = {"units": getattr(p, "unit", ""),
-                             "label": f"{label}: spread within the pixel",
+                             "label": f"{label}: spread within the pixel"
+                                      + (" (rms |z - mean|)" if cplx else ""),
                              "fly_stat": "std"}
     out[fly.name] = {"fly": "true", "readback": rb_id,
                      "speed": float(speed),
@@ -1217,6 +1345,16 @@ def _warn_quality(chunks, rb, params, data, oidx, speed, width, log):
                 f"{getattr(rb, 'unit', '')} at this speed ({smear / width:.1f} "
                 f"pixels). The shift is corrected, but detail finer than that "
                 f"is smeared: fly slower or use a shorter time constant.")
+    span = _sample_span(chunks)
+    if width > 0 and speed * span > width:
+        # a whole trace is filed at the MIDDLE of its sweep: point 0 was
+        # measured half a sweep earlier, the last point half a sweep later
+        log(f"fly: one sweep takes {span * 1e3:.3g} ms = {speed * span:.3g} "
+            f"{getattr(rb, 'unit', '')} at this speed ({speed * span / width:.1f} "
+            f"pixels): each trace is filed at its sweep's middle, so its ends "
+            f"belong to neighbouring pixels. Fly slower, sweep fewer points, or "
+            f"record single frequency points (each stamped at its own moment).")
+    for det, p in params.items():
         n = data[f"{det}_n"][tuple(oidx)]
         med = float(np.nanmedian(n)) if np.size(n) else 0.0
         if med < 3:

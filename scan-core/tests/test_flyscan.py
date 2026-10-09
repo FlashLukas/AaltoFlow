@@ -122,7 +122,7 @@ def test_a_well_formed_fly_scan_validates(reg):
     ([_fly(speed=900)], ("lockin_r",), (), "outside the limits"),
     ([_fly(num=1)], ("lockin_r",), (), "at least 2 pixels"),
     ([_fly(param="pos_z")], ("lockin_r",), (), "cannot be recorded continuously"),
-    ([_fly()], ("s21",), (), "whole trace"),
+    ([_fly()], ("fmr",), (), "does not stream traces"),
     ([_fly()], ("lockin_r",), ({"when": "before_point", "action": "wait_ms"},),
      "stage does not stop"),
     ([_fly()], ("lockin_r",), ({"when": "every_n_points", "n": 5, "action": "wait_ms"},),

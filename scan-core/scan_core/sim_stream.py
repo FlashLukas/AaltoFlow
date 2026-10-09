@@ -144,3 +144,122 @@ class SimStreamer:
                 time.sleep(delay)
             else:
                 next_t = time.monotonic()           # fell behind: do not burst
+
+
+class SimSweepStreamer:
+    """A simulated VNA that sweeps back to back and streams every sweep.
+
+    The module-side twin is vna-control's stream (Analyzer.stream_read); this
+    is the same thing in-process for build_sim_registry(), so a fly scan with
+    a TRACE detector runs without the lab (2026-10-09).
+
+    What makes it worth simulating is TIME. A sweep is not instantaneous: its
+    points are measured one after another over `sweep_s_fn()` seconds, and if
+    the field moves meanwhile, point i sees the field of ITS moment. So each
+    sweep reads the field when it starts and when it ends, and gives point i
+    the field in between at the centre of its dwell:
+
+        t_i = t_start + (i + 0.5) / n * (t_end - t_start)
+
+    (linear in time, which is what a ramp is between two readings). A whole
+    trace is time-stamped at its MIDDLE -- the mean of the t_i -- and a single
+    frequency point channel at its own t_i: the point of streaming single
+    points is exactly this sharper timing.
+
+    quantities: {channel: fn(trace) -> trace}; a fn raising ValueError puts its
+                message into the chunk's `errors` (u with no reference)
+    points:     fn() -> {channel: index into the frequency grid}
+    """
+
+    def __init__(self, group: str, freqs_fn, trace_fn, field_fn, sweep_s_fn,
+                 quantities=None, points=None, max_sweeps: int = 5000):
+        self.group = group
+        self._freqs = freqs_fn
+        self._trace = trace_fn
+        self._field = field_fn
+        self._sweep_s = sweep_s_fn
+        self._quantities = dict(quantities or {})
+        self._points = points or (lambda: {})
+        self._buf: deque = deque(maxlen=int(max_sweeps))
+        self._overflow = False
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        self.stop()
+        with self._lock:
+            self._buf.clear()
+            self._overflow = False
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name=f"sim-sweep-{self.group}",
+                                        daemon=True)
+        self._thread.start()
+
+    def read(self) -> dict:
+        with self._lock:
+            rows = list(self._buf)
+            self._buf.clear()
+            overflow, self._overflow = self._overflow, False
+        return self._chunk(rows, overflow)
+
+    def stop(self) -> dict:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        return self.read()
+
+    def spec(self) -> StreamSpec:
+        return StreamSpec(self.group, self.start, self.read, self.stop)
+
+    def _run(self):
+        import numpy as np
+        while not self._stop.is_set():
+            dur = max(float(self._sweep_s()), 1e-3)
+            t0, b0 = time.time(), float(self._field())
+            end = time.monotonic() + dur
+            while not self._stop.is_set():
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                time.sleep(min(left, 0.01))     # high-resolution sleep (gotcha #34)
+            if self._stop.is_set():
+                return                          # a sweep cut short is no sweep
+            t1, b1 = time.time(), float(self._field())
+            f = np.asarray(self._freqs(), dtype=float)
+            frac = (np.arange(f.size) + 0.5) / max(f.size, 1)
+            z = self._trace(f, b0 + (b1 - b0) * frac)
+            with self._lock:
+                if len(self._buf) == self._buf.maxlen:
+                    self._overflow = True
+                self._buf.append((t0, t1, z))
+
+    def _chunk(self, rows, overflow) -> dict:
+        import numpy as np
+        f = np.asarray(self._freqs(), dtype=float)
+        n = f.size
+        t0 = np.array([r[0] for r in rows], dtype=float)
+        t1 = np.array([r[1] for r in rows], dtype=float)
+        traces = (np.array([r[2] for r in rows], dtype=complex) if rows
+                  else np.zeros((0, n), dtype=complex))
+        values, errors, t_ch = {}, {}, {}
+        for ch, fn in self._quantities.items():
+            try:
+                values[ch] = np.array([fn(z) for z in traces], dtype=complex).reshape(-1, n)
+            except ValueError as exc:
+                errors[ch] = str(exc)
+        pts = dict(self._points())
+        for ch, i in pts.items():
+            values[ch] = traces[:, i]
+            t_ch[ch] = t0 + (i + 0.5) / max(n, 1) * (t1 - t0)
+        return {"t": 0.5 * (t0 + t1), "t_start": t0, "t_end": t1,
+                "values": values, "t_ch": t_ch, "errors": errors,
+                # the samples mean the same thing only while these hold
+                "settings": {"points": int(n),
+                             "start": float(f[0]) if n else None,
+                             "stop": float(f[-1]) if n else None,
+                             "channels": {k: int(v) for k, v in pts.items()}},
+                # 0: every time stamp is already the CENTRE of its measurement
+                "delay_s": {ch: 0.0 for ch in values},
+                "overflow": overflow}
