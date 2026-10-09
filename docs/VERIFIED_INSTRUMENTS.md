@@ -29,7 +29,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`dssg`](../modules/source/dssg-control) | DS Instruments SG12000L (fw V7.84) | **verified** (vernier measured, fine power, per-unit power calibration) | 2026-10-07 |
 | [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
-| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask | 2026-10-08 |
+| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass | 2026-10-09 |
 | all others | -- | simulation only | -- |
 
 ## pm16 -- Thorlabs PM16-121 power meter (first module on real hardware)
@@ -445,10 +445,29 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
   in all (full diagonal grid ~30 min). Test:
   [`test_diagonal.py`](../scan-core/tests/test_diagonal.py). Not checked: two KIM
   axes moved at once (kim.position_x/y as the raster axes).
+- 2026-10-09: **Scout pass on the rig**
+  ([8ac622d](https://github.com/FlashLukas/AaltoFlow/commit/8ac622d)), camera array
+  28 x 24 (0.61 x 0.46 um pitch) around the dark spur, pm16, scout every 3rd point
+  (9 x 10, last index included), diagonal row change; run in-process, not from the
+  suite's GUI:
+  - keep above (Otsu): 320 of 672 points, 3 of 41 boundary points above the
+    threshold; 10.0 min (scout 168 s, pass 2 1.35 s per point);
+  - keep deviates (k 4): median 0.00357 mW, noise 0.00083 mW, 327 points -- every
+    point of the Otsu mask plus 7 (the dark side is just over half of the scout;
+    with more bright area the median would be the bright level);
+  - a scout-only setting (`pm16.acq_readings` 1 instead of 5): on for the scout,
+    back to 5 before pass 2 (logged independently); scout 151 s instead of 168 s;
+  - `per_outer: each` with pm16.wavelength 610 / 620 nm outside: a fresh scout
+    and its own mask per wavelength (304 / 320 points), `scan_mask` and
+    `mask_threshold` per wavelength in the file; 19.1 min.
+  Caveat: Otsu's threshold took two values on near-identical scout maps (0.0073
+  or 0.0080 -- 0.0084 mW, maps 1 % apart): the rim points sit in the gap where its
+  score is flat, so the mask moves by ~20 rim points between runs.
+  Tests: [`test_scout.py`](../scan-core/tests/test_scout.py),
+  [`test_scout_builder.py`](../scan-core/tests/test_scout_builder.py).
 - Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
-  loaded from a file (`from:`); the scout pass on axes other than XY,
-  `keep: deviates`, `per_outer: each` and scout-only `settings` (2026-10-08,
-  simulator only).
+  loaded from a file (`from:`); the scout pass on axes other than XY, and its GUI
+  (preview, live coarse map, ETA).
 
 ## Simulation only (no hardware pass yet)
 
