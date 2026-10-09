@@ -99,6 +99,20 @@ def limit_envelope(cfg: Config) -> None:
 class CmtVna:
     simulated = False
 
+    # FLY-SCAN TIMING (the brain's stream, analyzer.py, 2026-10-09). The brain
+    # stamps a sweep as starting when start_sweep returns plus this, and gives
+    # point i the moment t_start + (i + 0.5) * T / n with T = sweep_time_s()
+    # -- here only the rule of thumb, because S2VNA has no sweep-time query in
+    # the manual. All of it is UNVERIFIED on the C1209:
+    # VERIFY: the delay between `:TRIG:SING` and the first point -- measure it
+    #   and put it here;
+    # VERIFY: the real sweep time (finish_sweep's meta `sweep_s` measures
+    #   trigger -> *OPC? done, an upper bound): if it differs from the rule of
+    #   thumb, sweep_time_s() must return the measured figure, or every point
+    #   channel is stamped at the wrong moment;
+    # VERIFY: that the points are evenly spaced in time across the sweep.
+    trigger_latency_s = 0.0
+
     def __init__(self, cfg: Config, resource=None, clock=time.monotonic, sleep=time.sleep):
         """`resource` = an already-open VISA resource. Tests pass a FAKE one
         (anything with write / query / query_ascii_values / query_binary_values

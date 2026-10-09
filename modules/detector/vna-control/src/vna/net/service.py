@@ -22,7 +22,7 @@ from .. import secure
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, status_to_dict, config_to_dict,
-                       apply_config_dict, json_safe, trace_to_wire)
+                       apply_config_dict, json_safe, trace_to_wire, stream_to_wire)
 
 
 class PortInUse(RuntimeError):
@@ -59,11 +59,14 @@ class VnaService:
         #   set_continuous (the same verb also switches sweeping ON), nor
         #   acquire / take_reference (a trigger replaces the sample another
         #   client -- a scan -- is waiting on).
-        #   READ: none beyond get_/read_/list_ and the universal verbs (the
-        #   trace, frequencies and sample are all get_*).
+        #   READ: `stream_read` (it only drains the recorded fly-scan sweeps)
+        #   beyond get_/read_/list_ and the universal verbs (the trace,
+        #   frequencies, sample and get_point are all get_*). stream_start /
+        #   stream_stop are not read verbs: they change what the analyser does
+        #   (it sweeps back to back while a stream runs).
         self.control = ControlLease(
             safety={"abort"},
-            read=set(),
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -257,6 +260,26 @@ class VnaService:
                     # request, so no "bad request" prefix -- the reason is the message
                     return {"ok": False, "error": str(exc)}
                 return {"ok": True, **trace_to_wire(t)}
+            elif cmd == "stream_start":
+                # a fly scan: sweep back to back and keep every sweep (analyzer.py)
+                return {"ok": True, "stream_id": v.stream_start()}
+            elif cmd in ("stream_read", "stream_stop"):
+                try:
+                    chunk = v.stream_read() if cmd == "stream_read" else v.stream_stop()
+                except ValueError as exc:
+                    # the sweep changed under the stream: the reason is the message
+                    return {"ok": False, "error": str(exc)}
+                return {"ok": True, "stream": stream_to_wire(chunk)}
+            elif cmd == "set_stream_points":
+                pts = v.set_stream_points(msg["points_Hz"])
+                return {"ok": True, "points": json_safe(pts)}
+            elif cmd == "get_point":
+                try:
+                    z = v.get_point(str(msg["channel"]), str(msg.get("which", "sample")),
+                                    str(msg.get("quantity", "s")))
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
+                return {"ok": True, "value": json_safe({"re": z.real, "im": z.imag})}
             elif cmd == "get_frequencies":
                 f = v.frequencies()
                 return {"ok": True, "values": f.tolist(), "values_GHz": (f / 1e9).tolist()}

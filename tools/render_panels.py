@@ -1212,6 +1212,8 @@ def _vna(theme):
     # around the 45 mT line keeps the ~15 MHz resonance wider than a pixel.
     cfg.field.manual_mT, cfg.field.manual_angle_deg = 0.0, 45.0
     cfg.sweep.start_Hz, cfg.sweep.stop_Hz, cfg.sweep.points = 2.2e9, 3.4e9, 1201
+    # two fly-scan stream points, so the "Fly points" box shows what it is for
+    cfg.stream.points_Hz = "2.6e9, 2.8e9"
     vna, _ = build_sim_system(cfg, seed=5)
 
     def warm_up(win):

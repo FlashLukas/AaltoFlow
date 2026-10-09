@@ -184,3 +184,28 @@ def test_settings_fixed_choices_are_drop_downs(app):
     dlg._refresh_widgets_from_cfg()
     assert theme.currentData() == "sepia" and "not a known value" in theme.currentText()
     assert dlg._pull_into_cfg() and cfg.ui.theme == "sepia"
+    # the fly-scan stream has its own tab, generated from the config group
+    assert ("stream", "points_Hz") in dlg.w
+
+
+def test_fly_points_box_sets_the_stream_points_in_ghz(app):
+    """The sidebar's 'Fly points' box: GHz in, Hz in the config, and the box
+    then shows the grid points the analyser really uses."""
+    from vna.apps.gui import MainWindow
+    cfg = Config()
+    cfg.field.source = "manual"
+    cfg.sweep.start_Hz, cfg.sweep.stop_Hz, cfg.sweep.points = 1e9, 5e9, 401
+    vna, _ = build_sim_system(cfg, realtime=False, seed=3)
+    win = MainWindow(_NoThreadVna(vna), cfg)
+    try:
+        win.points_edit.setText("2.5, 3.0049")
+        win._apply_stream_points()
+        assert [p["channel"] for p in vna.stream_points()] == ["p1", "p2"]
+        assert cfg.stream.points_Hz.startswith("2500000000")
+        win._sync_inputs()
+        assert win.points_edit.text() == "2.5, 3"           # snapped to the 10 MHz grid
+        win.points_edit.setText("2.5, two")
+        win._apply_stream_points()                           # refused, logged, unchanged
+        assert len(vna.stream_points()) == 2
+    finally:
+        win.close()

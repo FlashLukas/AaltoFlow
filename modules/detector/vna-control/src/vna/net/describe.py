@@ -20,6 +20,14 @@ traces with their own hardware-swept dimension, `freq`:
 Scalar detectors in the same acquire group (dip frequency, dip depth, the field
 and angle the sweep saw) cost no extra sweep: one trigger, one wait, several reads.
 
+STREAMS (fly scans, 2026-10-09). `s`, `u` and `ln_ratio` also carry a `stream`
+block (group "trace"): in a fly scan every completed sweep is one sample, the
+whole trace, stamped at the sweep's middle (delay 0). The `point_<k>` detectors
+-- one per frequency in cfg.stream.points_Hz -- are SCALAR complex channels of
+the same stream, each stamped at the moment its point was measured. The point
+detectors come and go with that list (and their labels with the grid), so the
+manifest revision moves when either changes.
+
 ACTIONS WITH A `wait` BLOCK. `take_reference` is safe to run from a scan routine
 ("go to 150 mT at 45 deg, take the reference, then sweep"), and the `wait` block
 is how the module says so AND how a caller knows it finished: take the id from
@@ -100,6 +108,33 @@ def read_path(status: dict, path):
     return cur
 
 
+def _point_channels(vna, acquire, sparam) -> list[dict]:
+    """One SCALAR complex detector per stream point (cfg.stream.points_Hz).
+
+    In a FLY scan it streams the S-parameter at that one frequency, stamped at
+    the moment the point was measured within each sweep (analyzer.py, THE
+    STREAM); in a STEPPED scan it is read from the acquired trace like the
+    other measurement detectors (same acquire group: no extra sweep). The
+    label names the grid point really used (the nearest to what was asked),
+    and it changes -- with the manifest revision -- when the sweep does."""
+    out = []
+    for p in vna.stream_points():
+        ch = p["channel"]
+        out.append(_p(
+            f"point_{ch[1:]}", f"{sparam} at {p['freq_Hz'] / 1e9:.6g} GHz", "indicator",
+            "float", group="Measurement", order=13, dtype="complex",
+            acquire=acquire, stream={"group": "trace", "channel": ch},
+            read={"verb": "get_point", "key": "value",
+                  "args": {"channel": ch, "which": "sample", "quantity": "s"}},
+            point_Hz=p["freq_Hz"], requested_Hz=p["requested_Hz"],
+            help=f"{sparam} at one frequency of the sweep: grid point "
+                 f"{p['index']} of {int(vna.cfg.sweep.points)} "
+                 f"(asked for {p['requested_Hz'] / 1e9:.6g} GHz). Complex; stored "
+                 f"as _real / _imag. In a fly scan each value carries the moment "
+                 f"its point was measured. Set the list in Settings > stream."))
+    return out
+
+
 def build_manifest(vna) -> dict:
     cfg = vna.cfg
     lim = cfg.limits
@@ -172,6 +207,7 @@ def build_manifest(vna) -> dict:
            order=10, acquire=acquire, dtype="complex", shape=["freq"], dims=freq_dim,
            read={"verb": "get_trace", "key": "s",
                  "args": {"which": "sample", "quantity": "s"}},
+           stream={"group": "trace", "channel": "s"},
            help="Complex S-parameter as measured (raw: line loss and delay included). "
                 "Stored as s_real / s_imag."),
         # The label carries the word the old LabVIEW program used ("Permeability,
@@ -182,6 +218,7 @@ def build_manifest(vna) -> dict:
            order=11, acquire=acquire, dtype="complex", shape=["freq"], dims=freq_dim,
            read={"verb": "get_trace", "key": "u",
                  "args": {"which": "sample", "quantity": "u"}},
+           stream={"group": "trace", "channel": "u"},
            help="The trace relative to the brain's reference: the cables cancel and "
                 "only the sample remains. Refused (the scan stops) with no reference "
                 "or one taken with another S-parameter or sweep."),
@@ -194,10 +231,16 @@ def build_manifest(vna) -> dict:
            order=12, acquire=acquire, dtype="complex", shape=["freq"], dims=freq_dim,
            read={"verb": "get_trace", "key": "ln",
                  "args": {"which": "sample", "quantity": "ln"}},
+           stream={"group": "trace", "channel": "ln"},
            help="Complex logarithm of the trace over the reference: proportional "
                 "to the susceptibility at any line depth (u is its small-signal "
                 "limit). Principal branch, so the imaginary part wraps at +-pi. "
                 "Refused, like u, with no matching reference."),
+        *_point_channels(vna, acquire, sparam),
+        _p("streaming", "Streaming (fly scan)", "indicator", "bool", group="Measurement",
+           order=19, read_path=["streaming"],
+           help="A fly scan is recording every sweep (the analyser sweeps back "
+                "to back meanwhile)."),
         _p("dip_freq", "Dip frequency", "indicator", "float", unit="GHz",
            group="Measurement", order=20, decimals=6, scale=1e9,
            read_path=["sample", "dip_Hz"], acquire=acquire,

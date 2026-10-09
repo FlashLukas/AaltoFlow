@@ -229,9 +229,9 @@ def s21_measured(freqs_Hz, field_mT: float, s: Sample, line: Line,
                             + 1j * rng.standard_normal(clean.shape))
 
 
-def sweep_time_s(points: int, ifbw_Hz: float) -> float:
-    """Roughly what a real VNA takes: ~1.2 / IFBW per point."""
-    return 1.2 * int(points) / float(ifbw_Hz)
+def sweep_time_s(points: int, ifbw_Hz: float, dwell_ifbw: float = 1.2) -> float:
+    """Roughly what a real VNA takes: ~1.2 / IFBW per point (`dwell_ifbw`)."""
+    return float(dwell_ifbw) * int(points) / float(ifbw_Hz)
 
 
 def find_dip(freqs_Hz, s21) -> tuple[float, float]:

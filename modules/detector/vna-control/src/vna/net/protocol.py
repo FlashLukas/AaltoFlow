@@ -88,6 +88,22 @@ def trace_from_wire(d: dict) -> dict:
     return out
 
 
+def stream_to_wire(chunk: dict) -> dict:
+    """A stream chunk from the Analyzer (numpy arrays) -> JSON-safe.
+
+    Complex values become {"re": [...], "im": [...]} -- nested per sweep for a
+    whole trace ({"re": [[...], ...]}), flat for a single-point channel; real
+    arrays become lists; NaN becomes null. The key layout is the suite's
+    stream format (INSTRUMENT_MODULE_GUIDE.md, "Streams")."""
+    def enc(v):
+        if isinstance(v, np.ndarray):
+            return encode_complex(v) if np.iscomplexobj(v) else json_safe(v.tolist())
+        if isinstance(v, dict):
+            return {k: enc(x) for k, x in v.items()}
+        return json_safe(v)
+    return {k: enc(v) for k, v in chunk.items()}
+
+
 # ---- config (Settings) over the wire ---------------------------------------
 
 def config_to_dict(cfg: Config) -> dict:

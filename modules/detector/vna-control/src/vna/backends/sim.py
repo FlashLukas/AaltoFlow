@@ -66,8 +66,17 @@ class SimulatedVna:
         return "AaltoFlow simulated VNA, S-parameters of a YIG film (not a real instrument)"
 
     # ---- sweeping ------------------------------------------------------------
+    #: finish_sweep takes the field at the END of the sweep too (the brain asks
+    #: only a backend that says so; a real analyser has no use for it)
+    uses_field_end = True
+
+    #: a sweep under a MOVING field is computed in this many segments, each at
+    #: the field of its own moment (see finish_sweep)
+    FIELD_SEGMENTS = 64
+
     def sweep_time_s(self, points: int, ifbw_Hz: float) -> float:
-        return model.sweep_time_s(points, ifbw_Hz) * self.time_scale
+        return (model.sweep_time_s(points, ifbw_Hz, self.cfg.line.point_dwell_ifbw)
+                * self.time_scale)
 
     def start_sweep(self, freqs_Hz, ifbw_Hz: float, power_dBm: float,
                     sparam: str = "S21", field: FieldReading | None = None) -> None:
@@ -89,14 +98,44 @@ class SimulatedVna:
             "field": field,
         }
 
-    def finish_sweep(self) -> tuple[np.ndarray, dict]:
+    def finish_sweep(self, field_end: FieldReading | None = None) -> tuple[np.ndarray, dict]:
+        """The trace of the sweep just finished.
+
+        `field_end` = the field when the sweep ENDED. A real VNA measures its
+        points one after another, so when the field moves during a sweep (a
+        fly scan ramping the magnet) the early points see the field of the
+        start, the late ones that of the end. With both readings the sweep is
+        computed in FIELD_SEGMENTS pieces, each at the field of its moment
+        (linear in time between the two readings -- what a ramp is). Without
+        one (a stepped scan: the magnet has settled) it is the start field
+        throughout, as it always was."""
         p, self._pending = self._pending, None
         if p is None:
             raise RuntimeError("finish_sweep without start_sweep")
         fr = p["field"]
-        z = model.s21_measured(p["freqs"], fr.field_mT, p["sample"], p["line"],
-                               p["ifbw"], p["power"], self._rng,
-                               angle_deg=fr.angle_deg, sparam=p["sparam"])
+        f = p["freqs"]
+        moving = (field_end is not None and np.isfinite(field_end.field_mT)
+                  and np.isfinite(fr.field_mT) and field_end.field_mT != fr.field_mT)
+        if not moving:
+            z = model.s21_measured(f, fr.field_mT, p["sample"], p["line"],
+                                   p["ifbw"], p["power"], self._rng,
+                                   angle_deg=fr.angle_deg, sparam=p["sparam"])
+        else:
+            z = np.empty(f.size, dtype=complex)
+            bounds = np.linspace(0, f.size, min(self.FIELD_SEGMENTS, f.size) + 1).astype(int)
+            # the short way round: 179 -> -179 deg is 2 deg, not 358
+            d_ang = (field_end.angle_deg - fr.angle_deg + 180.0) % 360.0 - 180.0
+            if not np.isfinite(d_ang):
+                d_ang = 0.0
+            for a, b in zip(bounds[:-1], bounds[1:]):
+                if b <= a:
+                    continue
+                frac = (0.5 * (a + b)) / f.size             # the segment's moment
+                b_mT = fr.field_mT + (field_end.field_mT - fr.field_mT) * frac
+                ang = fr.angle_deg + d_ang * frac
+                z[a:b] = model.s21_measured(f[a:b], b_mT, p["sample"], p["line"],
+                                            p["ifbw"], p["power"], self._rng,
+                                            angle_deg=ang, sparam=p["sparam"])
         return z, {"f_res_model_Hz": model.kittel_Hz(fr.field_mT, p["sample"], fr.angle_deg)}
 
     def abort_sweep(self) -> None:

@@ -40,6 +40,28 @@ THE FIELD. The brain -- not the simulator -- reads the magnet service (mag2d by
 default), so the field, its angle and whether it was live are latched into
 every sample in real mode too.
 
+THE STREAM (fly scans, 2026-10-09; Lukas: "streaming on vna both the complete
+trace or individual frequency points"). `stream_start` makes the sweep thread
+sweep back to back (whatever `continuous` says) and keep every completed
+sweep; `stream_read` hands over what has accumulated, `stream_stop` the rest.
+One sweep = one sample:
+  * the whole trace of each quantity (s; u and ln against the reference),
+    time-stamped at the MIDDLE of its sweep. Why the middle: the points are
+    measured one after another, so a trace has no single moment -- but its
+    mean moment is the middle, and while the knob moves at a constant pace the
+    mean position over the sweep is the position at the middle. So the
+    declared lag is 0; what is left is SMEARING (point 0 belongs half a sweep
+    earlier), which scan-core logs when it exceeds a pixel;
+  * single frequency points (cfg.stream.points_Hz, the nearest grid point),
+    each a scalar channel stamped at the moment THAT point was measured,
+        t_i = t_start + (i + 0.5) * T / n      (the centre of its dwell),
+    so it has neither lag nor smear: the sharp timing a fast fly needs.
+A stream must not mix grids: a change of S-parameter, start, stop or points
+while it runs makes every later read FAIL (the scan stops, with the reason);
+IFBW and power may change (the timing is per sweep). u and ln are listed in
+the reply's `errors` -- not silently left out -- when there is no reference,
+when it does not match the sweep, or when it changed while streaming.
+
 Threads and locks, the pm16/hf2 rules:
   * ONE sweep thread talks to the backend. `status()` only copies what it
     stored and never touches the hardware.
@@ -79,6 +101,10 @@ SAMPLE_LIMITS = {
 }
 GEOMETRIES = ("in_plane", "out_of_plane")
 ANGLE_LIMIT_DEG = 360.0
+
+#: a stream nobody has read for this long is dropped (its scan is gone): the
+#: analyser stops sweeping back to back for it. A fly scan reads every 0.25 s.
+STREAM_ABANDON_S = 120.0
 
 
 def _no_reference() -> dict:
@@ -145,6 +171,10 @@ class Status:
     # never written): start_Hz ... sparam, sweep_mode / trigger_source,
     # averaging_on, correction_on. Empty before start.
     instrument: dict = field(default_factory=dict)
+    # the fly-scan stream: running, and the single-point channels it would
+    # stream ([{"channel": "p1", "freq_Hz": ...}, ...] on the CURRENT grid)
+    streaming: bool = False
+    stream_points: list = field(default_factory=list)
 
 
 def _clamp(value, lo, hi):
@@ -201,6 +231,8 @@ class Analyzer:
         self._sample_trace: dict | None = None
         self._reference: dict | None = None  # a latched sample trace + "taken_at"
         self._instrument: dict = {}          # what the analyser held at start (read_state)
+        self._stream: dict | None = None     # the fly-scan stream while it runs (stream_start)
+        self._stream_id = 0
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -490,6 +522,193 @@ class Analyzer:
         s = self.cfg.sweep
         return np.linspace(s.start_Hz, s.stop_Hz, int(s.points))
 
+    # ---- the fly-scan stream (see the module docstring) ---------------------------
+
+    def stream_points(self) -> list[dict]:
+        """The single-point channels on the CURRENT grid, in the order of
+        cfg.stream.points_Hz: [{"channel": "p1", "index": i, "requested_Hz": f,
+        "freq_Hz": grid[i]}, ...]. The nearest grid point is used; a request
+        more than half a grid step outside the sweep is skipped (a point that
+        is not swept cannot be streamed). Reads cfg only -- no lock -- because
+        status() calls it with the snapshot lock held."""
+        try:
+            wanted = parse_points(self.cfg.stream.points_Hz)
+        except ValueError:
+            return []
+        grid = self.frequencies()
+        if grid.size == 0:
+            return []
+        step = (grid[-1] - grid[0]) / max(grid.size - 1, 1)
+        out = []
+        for k, f in enumerate(wanted, start=1):
+            if f < grid[0] - step / 2 or f > grid[-1] + step / 2:
+                continue
+            i = int(np.argmin(np.abs(grid - f)))
+            out.append({"channel": f"p{k}", "index": i, "requested_Hz": float(f),
+                        "freq_Hz": float(grid[i])})
+        return out
+
+    def set_stream_points(self, points_Hz) -> list[dict]:
+        """Choose the single-point channels (a list of Hz, or the config's
+        comma-separated text). Returns the channels as stream_points() sees
+        them now, and says which grid point each one really is."""
+        if isinstance(points_Hz, str):
+            values = parse_points(points_Hz)
+        else:
+            values = [_finite(f, "stream point") for f in (points_Hz or [])]
+        self.cfg.stream.points_Hz = ", ".join(f"{f:.12g}" for f in values)
+        pts = self.stream_points()
+        if values:
+            used = {p["channel"] for p in pts}
+            skipped = [f for k, f in enumerate(values, start=1) if f"p{k}" not in used]
+            self._emit("warn" if skipped else "info",
+                       "stream points: " + (", ".join(
+                           f"{p['channel']} = {p['freq_Hz'] / 1e9:.6g} GHz" for p in pts)
+                           or "none in the sweep")
+                       + (f" (outside the sweep, skipped: "
+                          f"{', '.join(f'{f / 1e9:.6g} GHz' for f in skipped)})"
+                          if skipped else ""))
+        else:
+            self._emit("info", "stream points: none")
+        return pts
+
+    def stream_start(self) -> int:
+        """Start recording every completed sweep (and sweeping back to back).
+        Returns the stream id. Pins what the samples must keep meaning: the
+        S-parameter, the grid and the point channels -- see stream_read."""
+        with self._lock:
+            self._stream_id += 1
+            ref = self._reference
+            self._stream = {
+                "id": self._stream_id, "buf": [], "overflow": False, "error": "",
+                "settings": self._stream_settings(),
+                "ref_id": None if ref is None else ref["acq_id"],
+                "last_read": self._clock(),
+            }
+            return self._stream_id
+
+    def stream_read(self) -> dict:
+        """Everything recorded since the last read (see the module docstring
+        for what one sample is). Raises ValueError -- an `ok: false` reply on
+        the wire -- once the sweep has changed under the stream."""
+        with self._lock:
+            st = self._stream
+            if st is None:
+                return self._empty_chunk()
+            rows, st["buf"] = st["buf"], []
+            overflow, st["overflow"] = st["overflow"], False
+            st["last_read"] = self._clock()
+            err, settings, ref_id0 = st["error"], st["settings"], st["ref_id"]
+            sid, ref = st["id"], self._reference
+        if err:
+            raise ValueError(err)
+        return self._chunk(rows, overflow, settings, ref_id0, ref, sid)
+
+    def stream_stop(self) -> dict:
+        """Stop recording; returns what was left (the error, if there was one,
+        is raised as for a read -- and the stream is stopped either way)."""
+        with self._lock:
+            st, self._stream = self._stream, None
+            if st is None:
+                return self._empty_chunk()
+            rows, err = st["buf"], st["error"]
+            ref = self._reference
+        if err:
+            raise ValueError(err)
+        return self._chunk(rows, st["overflow"], st["settings"], st["ref_id"], ref, st["id"])
+
+    def get_point(self, channel: str, which: str = "sample", quantity: str = "s") -> complex:
+        """One point channel's complex value from a trace (a STEPPED scan
+        reads `point_k` this way: from the acquired sample)."""
+        pts = {p["channel"]: p for p in self.stream_points()}
+        if channel not in pts:
+            raise ValueError(f"no stream point {channel!r}; there are "
+                             f"{', '.join(pts) or 'none'} (stream.points_Hz)")
+        t = self.get_trace(which, quantity)
+        key = {"s": "s", "u": "u", "ln": "ln"}[quantity]
+        i = pts[channel]["index"]
+        if int(t["points"]) != int(self.cfg.sweep.points) or i >= len(t[key]):
+            raise ValueError("the trace was taken on another grid than the current one")
+        return complex(t[key][i])
+
+    def _stream_settings(self) -> dict:
+        """What the samples of one stream are only comparable under."""
+        sw = self.cfg.sweep
+        return {"sparam": sw.sparam, "start_Hz": float(sw.start_Hz),
+                "stop_Hz": float(sw.stop_Hz), "points": int(sw.points),
+                "channels": {p["channel"]: p["index"] for p in self.stream_points()}}
+
+    def _empty_chunk(self) -> dict:
+        return {"id": self._stream_id, "t": [], "values": {}, "delay_s": {},
+                "overflow": False, "now": time.time()}
+
+    def _chunk(self, rows, overflow, settings, ref_id0, ref, sid) -> dict:
+        """Build one stream reply from the recorded sweeps. Numpy arrays; the
+        service turns them into JSON (protocol.stream_to_wire)."""
+        n = int(settings["points"])
+        t0 = np.array([r["t0"] for r in rows], dtype=float)
+        dt = np.array([r["dt"] for r in rows], dtype=float)
+        s = (np.array([r["s"] for r in rows], dtype=complex) if rows
+             else np.zeros((0, n), dtype=complex))
+        values = {"s": s}
+        errors = {}
+        why = ""
+        if ref is None:
+            why = "needs a reference and there is none: take a reference first (take_reference)"
+        elif ref_id0 != ref["acq_id"]:
+            why = ("the reference changed while streaming (a new one was taken or it "
+                   "was cleared): the traces of this stream would mix two references")
+        else:
+            diffs = _reference_mismatch({"sparam": settings["sparam"],
+                                         "start_Hz": settings["start_Hz"],
+                                         "stop_Hz": settings["stop_Hz"],
+                                         "points": n}, ref)
+            if diffs:
+                why = ("refused: the reference does not match this sweep ("
+                       + "; ".join(diffs) + "). Take a new reference.")
+        if why:
+            errors["u"], errors["ln"] = f"u {why}", f"ln {why}"
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                values["u"] = (s - ref["s"]) / ref["s"]
+                values["ln"] = np.log(s / ref["s"])
+        # the single points, each at the moment it was measured
+        t_ch = {}
+        for ch, i in settings["channels"].items():
+            values[ch] = s[:, i] if len(s) else np.zeros(0, dtype=complex)
+            t_ch[ch] = t0 + (i + 0.5) / max(n, 1) * dt
+        return {"id": sid, "t": t0 + dt / 2, "t_start": t0, "t_end": t0 + dt,
+                "values": values, "t_ch": t_ch, "errors": errors,
+                # every stamp is the CENTRE of its measurement: no lag to undo
+                "delay_s": {ch: 0.0 for ch in list(values) + list(errors)},
+                "settings": settings, "overflow": bool(overflow),
+                "field_mT": np.array([r["field_mT"] for r in rows], dtype=float),
+                "now": time.time()}
+
+    def _record_for_stream_locked(self, trace: dict, t0_wall: float, dt: float) -> None:
+        """Called with _lock held for every completed sweep: keep it for the
+        stream if one runs and the sweep still means what the stream pinned."""
+        st = self._stream
+        if st is None or st["error"]:
+            return
+        pin = st["settings"]
+        now = {"sparam": trace["sparam"], "start_Hz": trace["start_Hz"],
+               "stop_Hz": trace["stop_Hz"], "points": trace["points"]}
+        diff = [f"{k} {pin[k]!r} -> {now[k]!r}" for k in now
+                if (not math.isclose(float(pin[k]), float(now[k]), rel_tol=1e-12, abs_tol=1e-3)
+                    if k != "sparam" else pin[k] != now[k])]
+        if diff:
+            st["error"] = ("the sweep changed while streaming (" + "; ".join(diff)
+                           + "): a fly row cannot mix traces of two sweeps. "
+                           "Start the stream again.")
+            return
+        st["buf"].append({"t0": t0_wall, "dt": dt, "s": trace["s"],
+                          "field_mT": trace.get("field_mT", _NAN)})
+        cap = max(4, int(self.cfg.stream.buffer_points) // max(int(trace["points"]), 1))
+        if len(st["buf"]) > cap:
+            del st["buf"][:len(st["buf"]) - cap]
+            st["overflow"] = True
+
     # ---- status ---------------------------------------------------------------------------
 
     def status(self) -> Status:
@@ -532,6 +751,9 @@ class Analyzer:
                 sample=dict(self._sample),
                 reference=self._reference_status_locked(),
                 instrument=dict(self._instrument),
+                streaming=self._stream is not None,
+                stream_points=[{"channel": p["channel"], "freq_Hz": p["freq_Hz"]}
+                               for p in self.stream_points()],
             )
 
     def _reference_status_locked(self) -> dict:
@@ -568,8 +790,20 @@ class Analyzer:
         sweep if there is a reason to sweep. Returns True if a sweep finished.
         Public so tests can drive the analyser without the thread."""
         self._refresh_live()
+        abandoned = False
         with self._lock:
-            wanted = self._acq is not None or self.cfg.acquisition.continuous
+            st = self._stream
+            if st is not None and self._clock() - st["last_read"] > STREAM_ABANDON_S:
+                # nobody has read the stream for a long time: the scan that
+                # started it is gone (crashed, killed). Stop sweeping back to
+                # back for it.
+                self._stream, abandoned = None, True
+            # a running stream wants sweeps back to back, whatever
+            # `continuous` says: a fly row records every one of them
+            wanted = (self._acq is not None or self.cfg.acquisition.continuous
+                      or self._stream is not None)
+        if abandoned:
+            self._emit("warn", f"stream stopped: not read for {STREAM_ABANDON_S:g} s")
         if not wanted:
             self._stop.wait(0.1)
             return False
@@ -595,6 +829,13 @@ class Analyzer:
         with self._hw:
             self.backend.start_sweep(freqs, sw.ifbw_Hz, sw.power_dBm, sparam, fr)
             dt = self.backend.sweep_time_s(freqs.size, sw.ifbw_Hz)
+            # The WALL-clock moment the sweep began, for the fly-scan stream
+            # (time.time(): scan-core lines it up with the magnet's stream,
+            # possibly on another PC). Taken once start_sweep has returned,
+            # i.e. the trigger has gone out; a real analyser may need a moment
+            # more before its first point (trigger_latency_s, # VERIFY in the
+            # real backends).
+            t0_wall = time.time() + float(getattr(self.backend, "trigger_latency_s", 0.0))
         with self._lock:
             self._sweeping, self._sweep_t0, self._sweep_dt = True, t0, dt
 
@@ -613,10 +854,23 @@ class Analyzer:
                 return False
             if left <= 0:
                 break
-            self._stop.wait(min(0.02, left))
+            if left > 0.02:
+                self._stop.wait(0.02)
+            else:
+                # the last slice with time.sleep: a timed Event.wait rounds up
+                # to the 15.6 ms Windows tick (gotcha #34), and every sweep of
+                # a stream would end that much late
+                time.sleep(left)
 
-        with self._hw:
-            z, meta = self.backend.finish_sweep()
+        if getattr(self.backend, "uses_field_end", False):
+            # the simulator computes the physics of a sweep under a MOVING
+            # field from the field at both ends (sim.finish_sweep)
+            fr_end = self._read_field()
+            with self._hw:
+                z, meta = self.backend.finish_sweep(field_end=fr_end)
+        else:
+            with self._hw:
+                z, meta = self.backend.finish_sweep()
         dip_Hz, dip_dB = model.find_dip(freqs, z)
         trace = {"start_Hz": float(freqs[0]), "stop_Hz": float(freqs[-1]),
                  "points": int(freqs.size), "ifbw_Hz": float(sw.ifbw_Hz),
@@ -634,6 +888,7 @@ class Analyzer:
             self._sweeps += 1
             self._trace_id += 1
             self._last = {**trace, "trace_id": self._trace_id}
+            self._record_for_stream_locked(trace, t0_wall, dt)
             a = self._acq
             if a is not None and t0 >= a["t0"]:
                 a["sum"] = z.copy() if a["sum"] is None else a["sum"] + z
@@ -861,6 +1116,17 @@ class Analyzer:
             self.cfg.sample.geometry = "in_plane"
         if self.cfg.field.source not in FIELD_SOURCES:
             self.cfg.field.source = "mag2d"
+        try:
+            parse_points(self.cfg.stream.points_Hz)
+        except ValueError as exc:
+            # a typo in the .ini / Settings must not leave the module with
+            # point channels nobody can see: say so, and stream none
+            self._emit("warn", f"{exc}; no stream points")
+            self.cfg.stream.points_Hz = ""
+        self.cfg.stream.buffer_points = max(10_000, int(self.cfg.stream.buffer_points))
+        if not (math.isfinite(float(self.cfg.line.point_dwell_ifbw))
+                and float(self.cfg.line.point_dwell_ifbw) > 0):
+            self.cfg.line.point_dwell_ifbw = 1.2
 
     def _report_hw_error(self, exc: Exception) -> None:
         msg = f"{type(exc).__name__}: {exc}"
@@ -873,6 +1139,24 @@ class Analyzer:
 
     def _emit(self, level: str, msg: str) -> None:
         self._on_event(level, msg)
+
+
+def parse_points(text) -> list[float]:
+    """The stream point list "1.5e9, 2.25e9" (commas, semicolons or spaces)
+    as floats in Hz. Raises ValueError naming the entry that is not a number."""
+    out = []
+    for part in str(text or "").replace(";", ",").replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            f = float(part)
+        except ValueError:
+            raise ValueError(f"stream point {part!r} is not a frequency in Hz") from None
+        if not math.isfinite(f) or f <= 0:
+            raise ValueError(f"stream point {part!r} must be a positive frequency in Hz")
+        out.append(f)
+    return out
 
 
 def _reference_mismatch(trace: dict, ref: dict) -> list[str]:

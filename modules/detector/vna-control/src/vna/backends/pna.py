@@ -86,6 +86,24 @@ _SETTERS = {
 class PnaVna:
     simulated = False
 
+    # FLY-SCAN TIMING (the brain's stream, analyzer.py, 2026-10-09). The brain
+    # stamps a sweep as starting when start_sweep returns plus this, and gives
+    # point i the moment t_start + (i + 0.5) * T / n with T = sweep_time_s()
+    # (the instrument's own SENS:SWE:TIME? once read). All three assumptions
+    # are UNVERIFIED on the PNA-X:
+    # VERIFY: the delay between `SENS1:SWE:MODE SING` and the first point
+    #   (trigger latency, source settling) -- measure it (e.g. sweep a known
+    #   field ramp twice in opposite directions and line the dips up) and put
+    #   it here;
+    # VERIFY: that SENS:SWE:TIME? is the time from the first to the last point
+    #   (not including retrace / band-crossing pauses), and that the points are
+    #   evenly spaced in time over it (a stepped sweep with dwell and band
+    #   crossings is not; SENS:SWE:TYPE / the sweep-time mode decide);
+    # VERIFY: back-to-back single sweeps: the dead time between two
+    #   (data transfer + re-arm) only leaves gaps between samples, it does not
+    #   shift time stamps -- but check nothing is re-armed during a sweep.
+    trigger_latency_s = 0.0
+
     def __init__(self, cfg: Config, resource=None, clock=time.monotonic, sleep=time.sleep):
         """`resource` = an already-open VISA resource. Tests pass a FAKE one
         (anything with write / query / query_binary_values / query_ascii_values

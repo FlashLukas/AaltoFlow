@@ -18,6 +18,13 @@ physics; the real analyser ignores it -- the brain files it with the trace.
 
 Averaging is the brain's too: it asks for single sweeps and averages the
 complex traces itself, so "N averages" means the same thing on both backends.
+
+Two OPTIONAL attributes, read with getattr (2026-10-09, the fly-scan stream):
+  uses_field_end     True = finish_sweep accepts `field_end` (the field when
+                     the sweep ended); the simulator uses it to compute a sweep
+                     taken under a moving field. A real analyser leaves it out.
+  trigger_latency_s  seconds between start_sweep returning and the first
+                     point being measured; the stream's time stamps add it.
 """
 
 from __future__ import annotations

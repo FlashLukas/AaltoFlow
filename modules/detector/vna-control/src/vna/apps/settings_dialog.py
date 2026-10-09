@@ -22,7 +22,7 @@ from ..field import FIELD_SOURCES
 from ..model import SPARAMS
 
 _TABS = [("sweep", "Sweep"), ("acquisition", "Acquisition"), ("field", "Field"),
-         ("sample", "Sample"), ("line", "Line"), ("hardware", "Hardware"),
+         ("sample", "Sample"), ("line", "Line"), ("stream", "Stream"), ("hardware", "Hardware"),
          ("limits", "Limits"), ("ui", "Appearance")]
 
 _HINTS = {
@@ -37,7 +37,13 @@ _HINTS = {
               "in-plane uniaxial anisotropy. dip_dB is the coupling, the depth 50 mT above "
               "saturation.",
     "line": "SIMULATOR only. The cables and waveguide: loss rising as sqrt(f), electrical "
-            "delay, standing-wave ripple, and the trace noise at 10 kHz / -10 dBm.",
+            "delay, standing-wave ripple, and the trace noise at 10 kHz / -10 dBm. "
+            "point dwell ifbw: one point takes this / IFBW seconds (sets the sweep time).",
+    "stream": "FLY SCANS. While a fly scan streams, every sweep is one sample (the whole "
+              "trace, stamped at the middle of its sweep). points Hz: frequencies in Hz, "
+              "comma separated (1.5e9, 2.25e9), each also streamed on its own as detector "
+              "point_1, point_2, ... and stamped at the moment it was measured; the nearest "
+              "grid point is used. buffer points: what is kept between two reads.",
     "hardware": "REAL analyser only (--real), read when it connects: restart the service "
                 "after a change. visa_resource: alias or address. cal_set: empty = leave the "
                 "correction as it is. data_format: REAL,64 or ASCII.",

@@ -377,6 +377,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.acq_bar = QtWidgets.QProgressBar(); self.acq_bar.setRange(0, 100)
         self.acq_bar.setTextVisible(False); self.acq_bar.setFixedHeight(6)
         alay.addWidget(self.acq_bar)
+        # FLY-SCAN STREAM POINTS (2026-10-09): single frequencies a fly scan
+        # can record as their own channels (detectors point_1, point_2, ...),
+        # each stamped at the moment it was measured. Typed in GHz here (the
+        # config keeps Hz, like every frequency in it); Set or Enter sends it.
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Fly points"))
+        self.points_edit = QtWidgets.QLineEdit()
+        self.points_edit.setPlaceholderText("GHz, e.g. 2.5, 3.1")
+        self.points_edit.setToolTip(
+            "Frequencies (GHz, comma separated) a FLY scan can record as single\n"
+            "points: detectors point_1, point_2, ... -- each value stamped at the\n"
+            "moment that point was measured within the sweep (sharper timing than\n"
+            "the whole trace, which is stamped at the middle of its sweep).\n"
+            "The nearest point of the sweep grid is used. Empty = none.")
+        self.points_edit.returnPressed.connect(self._apply_stream_points)
+        pset = QtWidgets.QPushButton("Set")
+        pset.clicked.connect(self._apply_stream_points)
+        row.addWidget(self.points_edit, 1); row.addWidget(pset)
+        alay.addLayout(row)
         self.sample_label = QtWidgets.QLabel("no acquisition yet"); self.sample_label.setObjectName("hint")
         self.sample_label.setWordWrap(True)
         alay.addWidget(self.sample_label)
@@ -527,6 +546,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # back by the next poll, and the log says why)
         self._clear_dirty(*self._sweep_spins)
 
+    def _apply_stream_points(self):
+        """Parse the GHz list with float() (not a locale-bound validator,
+        gotcha #18) and send it in Hz; the log says which grid points they are."""
+        text = self.points_edit.text().replace(";", ",")
+        try:
+            ghz = [float(p) for p in text.replace(" ", ",").split(",") if p.strip()]
+        except ValueError:
+            self._on_event("warn", f"fly points: {self.points_edit.text()!r} is not a list "
+                                   f"of frequencies in GHz")
+            return
+        self._call(self.ctrl.set_stream_points, [g * 1e9 for g in ghz])
+        self.points_edit.clearFocus()     # let the box show what the analyser took
+
     def _apply_manual_field(self):
         self._call(self.ctrl.set_manual_field, self.manual_spin.value(),
                    self.manual_angle_spin.value())
@@ -600,6 +632,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cont_chk.blockSignals(True)
         self.cont_chk.setChecked(bool(s.continuous))
         self.cont_chk.blockSignals(False)
+        # the fly points as the ANALYSER uses them (snapped to its grid), unless
+        # the box is being typed in
+        pts = getattr(s, "stream_points", None) or []
+        if force or not self.points_edit.hasFocus():
+            text = ", ".join(f"{p['freq_Hz'] / 1e9:.6g}" for p in pts
+                             if isinstance(p, dict) and p.get("freq_Hz") is not None)
+            if self.points_edit.text() != text:
+                self.points_edit.setText(text)
+        streaming = bool(getattr(s, "streaming", False))
+        self.points_edit.setStyleSheet(f"border: 1px solid {COLORS['ok']};" if streaming else "")
+        self.points_edit.setToolTip(self.points_edit.toolTip().split("\n\nNOW")[0]
+                                    + ("\n\nNOW: a fly scan is streaming every sweep"
+                                       if streaming else ""))
 
     def _force_fetch(self):
         self._trace_id = -1

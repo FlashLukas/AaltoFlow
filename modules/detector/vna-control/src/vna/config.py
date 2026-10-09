@@ -140,6 +140,36 @@ class Line:
     ripple_dB: float = 0.15
     ripple_period_MHz: float = 350.0
     noise: float = 2e-3               # rms of complex noise at 10 kHz IFBW and -10 dBm
+    # how long the pretend analyser dwells on ONE point: this / IFBW seconds
+    # (a real VNA takes ~1.2 / IFBW plus overheads). It sets the sweep time,
+    # and in a fly scan the sweep time is what decides how many traces land
+    # in each pixel -- so a simulator with instant sweeps would prove nothing.
+    point_dwell_ifbw: float = 1.2
+
+
+@dataclass
+class Stream:
+    """The FLY-SCAN stream (stream_start / stream_read / stream_stop).
+
+    While a stream runs the analyser sweeps back to back, and every completed
+    sweep is one sample: the whole trace (detectors s, u, ln_ratio), time-
+    stamped at the MIDDLE of its sweep. On top of that, single frequency
+    points of the same sweeps can be streamed as scalar channels, each stamped
+    at the moment THAT point was measured -- sharper timing for a fast fly.
+
+    points_Hz     -- the frequencies of those point channels, comma separated,
+                     in Hz ("1.5e9, 2.25e9"). Each becomes detector `point_<k>`
+                     (k from 1, in this order), using the NEAREST point of the
+                     sweep grid; the label says which frequency that really is.
+                     A frequency outside the sweep is skipped (and said so).
+                     Empty = no point channels.
+    buffer_points -- bound on what is kept between two reads, in trace points
+                     (a 1601-point sweep counts 1601): the oldest sweeps go
+                     first and the reply says `overflow`.
+    """
+
+    points_Hz: str = ""
+    buffer_points: int = 2_000_000
 
 
 @dataclass
@@ -216,6 +246,7 @@ class Config:
     field: Field = None
     sample: Sample = None
     line: Line = None
+    stream: Stream = None
     hardware: Hardware = None
     limits: Limits = None
     ui: UI = None
@@ -227,6 +258,7 @@ class Config:
         self.field = self.field or Field()
         self.sample = self.sample or Sample()
         self.line = self.line or Line()
+        self.stream = self.stream or Stream()
         self.hardware = self.hardware or Hardware()
         self.limits = self.limits or Limits()
         self.ui = self.ui or UI()
@@ -239,6 +271,7 @@ class Config:
         "field": Field,
         "sample": Sample,
         "line": Line,
+        "stream": Stream,
         "hardware": Hardware,
         "limits": Limits,
         "ui": UI,

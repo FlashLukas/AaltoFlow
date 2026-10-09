@@ -162,6 +162,32 @@ class VnaClient(ControlClient):
     def frequencies(self) -> np.ndarray:
         return np.asarray(self._checked({"cmd": "get_frequencies"})["values"], dtype=float)
 
+    # -- the fly-scan stream (same names as the Analyzer's) --------------------
+    def stream_points(self) -> list:
+        """The point channels as the service sees them (from the status)."""
+        return list(self._status_dict().get("stream_points") or [])
+
+    def set_stream_points(self, points_Hz) -> list:
+        pts = points_Hz if isinstance(points_Hz, str) else [float(f) for f in points_Hz]
+        return self._checked({"cmd": "set_stream_points", "points_Hz": pts}).get("points", [])
+
+    def stream_start(self) -> int:
+        return int(self._checked({"cmd": "stream_start"})["stream_id"])
+
+    def stream_read(self) -> dict:
+        """The raw wire chunk (lists; complex as {"re", "im"}): scan-core is
+        the consumer that turns it into arrays."""
+        return self._checked({"cmd": "stream_read"})["stream"]
+
+    def stream_stop(self) -> dict:
+        return self._checked({"cmd": "stream_stop"})["stream"]
+
+    def get_point(self, channel: str, which: str = "sample", quantity: str = "s") -> complex:
+        v = self._checked({"cmd": "get_point", "channel": channel, "which": which,
+                           "quantity": quantity})["value"]
+        nan = float("nan")
+        return complex(nan if v["re"] is None else v["re"], nan if v["im"] is None else v["im"])
+
     def acquire_blocking(self, timeout_s: float | None = None, poll_s: float = 0.02) -> dict:
         """Trigger, wait for THIS acquisition to finish, return its trace.
 
