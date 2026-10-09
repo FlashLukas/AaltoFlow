@@ -507,6 +507,17 @@ def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
     except (ValueError, IndexError):
         chunks = None
     problems = []
+
+    def n_samples(v):
+        # a complex channel travels as {"re": [...], "im": [...]} (a VNA
+        # trace: one list per sample inside), anything else as a plain list
+        if isinstance(v, dict):
+            re, im = v.get("re"), v.get("im")
+            if not isinstance(re, list) or not isinstance(im, list) or len(re) != len(im):
+                return -1
+            return len(re)
+        return len(v) if isinstance(v, list) else -1
+
     if not chunks:
         problems.append("stream_start / stream_read / stream_stop not answered ok")
     else:
@@ -514,18 +525,23 @@ def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
             c = c or {}
             t = c.get("t") or []
             vals = c.get("values") or {}
-            missing = channels - set(vals)
+            t_ch = c.get("t_ch") or {}
+            # a channel the module cannot stream right now (a VNA's u with no
+            # reference) must be named in `errors`, never silently left out
+            errors = c.get("errors") or {}
+            missing = channels - set(vals) - set(errors)
             if missing:
                 problems.append(f"channels missing from the reply: {sorted(missing)}")
-            if any(len(v) != len(t) for v in vals.values()):
+            if any(n_samples(v) != len(t_ch.get(k, t)) for k, v in vals.items()):
                 problems.append("a channel has a different length than its time stamps")
             if "now" not in c:
                 problems.append("no `now` in the reply (clock offset cannot be estimated)")
-        if not problems and not (chunks[0] or {}).get("t"):
-            problems.append("recorded nothing in 0.3 s")
+        if not problems and not any((c or {}).get("t") for c in chunks):
+            problems.append("recorded nothing in 0.6 s")
     rep.add(m.key, "live: stream verbs work", "FAIL" if problems else "PASS",
             "; ".join(sorted(set(problems))) if problems
-            else f"{len(channels)} channel(s), {len(chunks[0]['t'])} samples in 0.3 s")
+            else f"{len(channels)} channel(s), "
+                 f"{sum(len((c or {}).get('t') or []) for c in chunks)} samples in 0.6 s")
 
 
 def ramp_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
