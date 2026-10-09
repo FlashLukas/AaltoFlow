@@ -78,31 +78,302 @@ def group_by_module(params) -> dict[str, list]:
     return groups
 
 
-class AxisRow(QtWidgets.QFrame):
+def _axis_tag(text: str, tip: str = "") -> QtWidgets.QLabel:
+    """A small amber TAG on an axis row: one setting that is not the default.
+
+    Lukas's rule for the Advanced panel (2026-10-09): nothing may be hidden
+    silently. A row whose fly speed or scout step is tucked away in a closed
+    panel still SAYS so, in its own line, where the eye already is."""
+    t = QtWidgets.QLabel(text)
+    t.setObjectName("axisTag")
+    t.setStyleSheet(
+        f"QLabel#axisTag {{ color:{C['accent']}; border:1px solid {C['accent_dim']};"
+        f" border-radius:8px; padding:1px 7px; font-size:10px; font-weight:600; }}")
+    t.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+    if tip:
+        t.setToolTip(tip)
+    return t
+
+
+def _gear_icon() -> QtGui.QIcon:
+    """A small gear, drawn in the theme's text colour (read at call time, so
+    it follows the theme set before the widgets are built)."""
+    px = QtGui.QPixmap(32, 32)
+    px.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(px)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    col = QtGui.QColor(C["text"])
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(col)
+    p.translate(16, 16)
+    for k in range(8):                    # eight teeth
+        p.save()
+        p.rotate(45 * k)
+        p.drawRoundedRect(QtCore.QRectF(-3.2, -15, 6.4, 8), 1.2, 1.2)
+        p.restore()
+    p.drawEllipse(QtCore.QPointF(0, 0), 10.5, 10.5)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+    p.drawEllipse(QtCore.QPointF(0, 0), 4.5, 4.5)   # the hole
+    p.end()
+    return QtGui.QIcon(px)
+
+
+def _muted(text: str, small: bool = False) -> QtWidgets.QLabel:
+    w = QtWidgets.QLabel(text)
+    w.setStyleSheet(f"color:{C['muted']};" + (" font-size:10px;" if small else ""))
+    return w
+
+
+class AdvancedPanel(QtWidgets.QFrame):
+    """The ADVANCED panel of one axis row: opened IN PLACE under its row.
+
+    An expander, not a dialog (Lukas approved the mockup, 2026-10-09): the
+    settings stay next to the axis they belong to, and the rows below are
+    pushed down rather than squeezed. The groups (FLY, SCOUT, POINT) sit side
+    by side and fall into one column when the card is too narrow for that --
+    the same rule as the routines card, decided from the groups' MEASURED
+    widths, so a translated or longer label cannot cut a group off.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("axisAdvanced")
+        self.setStyleSheet(
+            f"QFrame#axisAdvanced {{ border-top: 1px dashed {C['border']}; }}")
+        outer = QtWidgets.QHBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 4); outer.setSpacing(14)
+        self.groups_box = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.LeftToRight)
+        self.groups_box.setSpacing(16)
+        outer.addLayout(self.groups_box, 1)
+        self.side = QtWidgets.QVBoxLayout(); self.side.setSpacing(4)
+        outer.addLayout(self.side, 0)
+        self.groups: list = []
+
+    def add_group(self, title: str):
+        """A titled group; returns (frame, grid) -- fill the grid."""
+        box = QtWidgets.QFrame()
+        v = QtWidgets.QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(3)
+        head = QtWidgets.QLabel(title)
+        head.setStyleSheet(f"color:{C['accent']}; font-weight:800; font-size:10px;"
+                           f" letter-spacing:1px;")
+        v.addWidget(head)
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(6); grid.setVerticalSpacing(3)
+        v.addLayout(grid)
+        v.addStretch(1)
+        self.groups.append(box)
+        # left-aligned: stacked in one column, a group keeps its own width
+        # instead of being stretched across the card
+        self.groups_box.addWidget(box, 0, QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        return box, grid
+
+    def arrange(self) -> None:
+        """Side by side if the groups fit, else one column."""
+        shown = [g for g in self.groups if not g.isHidden()]
+        if not shown:
+            return
+        need = (sum(g.sizeHint().width() for g in shown)
+                + self.groups_box.spacing() * (len(shown) - 1))
+        side = self.layout().itemAt(1).sizeHint().width() + self.layout().spacing()
+        wide = need <= self.width() - side
+        want = (QtWidgets.QBoxLayout.LeftToRight if wide
+                else QtWidgets.QBoxLayout.TopToBottom)
+        if self.groups_box.direction() != want:
+            self.groups_box.setDirection(want)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.arrange()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.arrange()
+
+
+class _StackRow(QtWidgets.QFrame):
+    """What every row of the axis stack shares: the loop-level number, the
+    indentation, the amber TAGS and the "Advanced" expander.
+
+    Layout: the frame's own layout is a column -- the row line on top, the
+    Advanced panel (hidden until opened) under it. The INDENT is the column's
+    left margin, so the panel is indented with its row and reads as part of it.
+    """
     changed = QtCore.Signal()
     remove = QtCore.Signal(object)
     move = QtCore.Signal(object, int)      # (self, +1/-1)
     preview = QtCore.Signal(object)        # double-click: show the actual setpoints
+    #: the Advanced panel opened (True) or closed (False); the builder keeps
+    #: only one open at a time
+    advanced_toggled = QtCore.Signal(object, bool)
+    #: a line for the suite's log (what "Copy from axis" did and skipped)
+    log = QtCore.Signal(str)
 
-    def __init__(self, param, level_getter, speed_param=None, move_choices=(),
-                 speed_lookup=None):
-        super().__init__()
-        self.param = param
-        self.raw = None                    # set for non-editable (raster/zip) rows
-        self._level_getter = level_getter
+    #: Pixels of indent per nesting level, and how many levels get one. Loop
+    #: depth is the thing an operator misreads most often -- "which of these is
+    #: the slow one?" -- and a number in a column is easy to skim past, while a
+    #: staircase is not. Capped: at five axes an uncapped indent would push the
+    #: spin boxes off the card.
+    INDENT_PX = 16
+    INDENT_MAX = 4
+    #: closed: a gear icon + "Advanced" (the gear is DRAWN, _gear_icon: the
+    #: Windows UI font has no glyph for U+2699 and showed an empty box)
+    ADV_CLOSED = "Advanced"
+    ADV_OPEN = "^ Advanced"
+
+    def _start_layout(self) -> QtWidgets.QHBoxLayout:
         self.setObjectName("axis")
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(10, 6, 10, 6); lay.setSpacing(8)
-
+        self._root = QtWidgets.QVBoxLayout(self)
+        self._root.setContentsMargins(10, 0, 10, 0); self._root.setSpacing(0)
+        lay = QtWidgets.QHBoxLayout()
+        lay.setContentsMargins(0, 6, 0, 6); lay.setSpacing(8)
+        self._root.addLayout(lay)
+        self.line = lay
         self.level_lbl = QtWidgets.QLabel("0")
         self.level_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:800;")
         self.level_lbl.setFixedWidth(16)
         lay.addWidget(self.level_lbl)
+        return lay
 
-        # Name on top, the live limit envelope as a caption beneath it. The
-        # caption goes HERE rather than further along the row because the row is
-        # already at the width of its column -- anything added on the right is
-        # simply pushed out of sight.
+    def _finish_line(self, lay) -> None:
+        """Tags (taking the free room), Advanced, and the row's own buttons."""
+        # The tags take the stretch: they CLIP when there is no room and never
+        # widen the row (the from/to/pts boxes keep their width), and nothing
+        # to their right moves when one appears.
+        self.tags = QtWidgets.QWidget()
+        self.tags.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                QtWidgets.QSizePolicy.Preferred)
+        self.tags_box = QtWidgets.QHBoxLayout(self.tags)
+        self.tags_box.setContentsMargins(4, 0, 0, 0); self.tags_box.setSpacing(4)
+        self.tags_box.addStretch(1)
+        lay.addWidget(self.tags, 1)
+        self.adv_btn = QtWidgets.QPushButton(self.ADV_CLOSED)
+        self._gear = _gear_icon()
+        self.adv_btn.setIcon(self._gear)
+        self.adv_btn.setCheckable(True)
+        self.adv_btn.setFixedWidth(104)
+        self.adv_btn.setToolTip("Advanced settings of this axis: fly, scout, its name\n"
+                                "in the file. Opens under the row.")
+        self.adv_btn.toggled.connect(self.set_advanced_open)
+        lay.addWidget(self.adv_btn)
+        up = QtWidgets.QPushButton("↑"); dn = QtWidgets.QPushButton("↓")
+        rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger")
+        for b in (up, dn, rm):
+            b.setFixedWidth(30)
+        up.clicked.connect(lambda: self.move.emit(self, -1))
+        dn.clicked.connect(lambda: self.move.emit(self, +1))
+        rm.clicked.connect(lambda: self.remove.emit(self))
+        lay.addWidget(up); lay.addWidget(dn); lay.addWidget(rm)
+        self.advanced = AdvancedPanel()
+        self.advanced.setVisible(False)
+        self._root.addWidget(self.advanced)
+        self.adv_note = _muted("", small=True)
+        self.adv_note.setWordWrap(True)
+        self.adv_note.setFixedWidth(112)
+
+    def _point_group(self, with_name: bool = True):
+        """POINT: the per-axis extras the recipe really has -- the name of the
+        axis in the data file, and the routines bound to this axis (shown;
+        they are edited in ROUTINES > THROUGHOUT). Deliberately short: there
+        is no per-axis dwell or settle timeout in the engine, so none is
+        offered here."""
+        self.point_group, g = self.advanced.add_group("POINT")
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setFixedWidth(120)
+        self.name_edit.setToolTip(
+            "The name of this axis in the data file (its dimension and\n"
+            "coordinate). Empty = the parameter's id. Two axes may not share\n"
+            "a name.")
+        self.name_edit.editingFinished.connect(self.changed.emit)
+        self.name_lbl = _muted("name in the file")
+        if with_name:
+            g.addWidget(self.name_lbl, 0, 0); g.addWidget(self.name_edit, 0, 1)
+        else:
+            self.name_lbl.hide(); self.name_edit.hide()
+        g.addWidget(_muted("routines"), 1, 0, QtCore.Qt.AlignTop)
+        self.routines_lbl = QtWidgets.QLabel("")
+        self.routines_lbl.setWordWrap(True)
+        self.routines_lbl.setFixedWidth(170)
+        self.routines_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
+        g.addWidget(self.routines_lbl, 1, 1)
+        self.set_axis_routines([])
+
+    # ---- the expander -------------------------------------------------------
+    def set_advanced_open(self, on: bool) -> None:
+        on = bool(on)
+        self.adv_btn.blockSignals(True)
+        self.adv_btn.setChecked(on)
+        self.adv_btn.blockSignals(False)
+        self.adv_btn.setText(self.ADV_OPEN if on else self.ADV_CLOSED)
+        self.adv_btn.setIcon(QtGui.QIcon() if on else self._gear)
+        was = self.advanced.isVisibleTo(self)
+        self.advanced.setVisible(on)
+        if on:
+            self.advanced.arrange()
+        if was != on:
+            self.advanced_toggled.emit(self, on)
+
+    def advanced_open(self) -> bool:
+        return self.advanced.isVisibleTo(self)
+
+    def set_axis_routines(self, texts: list[str]) -> None:
+        self.routines_lbl.setText(
+            "\n".join(texts) if texts else
+            "none on this axis (ROUTINES > THROUGHOUT: start or end of each sweep)")
+
+    # ---- tags -----------------------------------------------------------------
+    def tag_texts(self) -> list[str]:
+        return []
+
+    def refresh_tags(self) -> None:
+        texts = self.tag_texts()
+        have = [self.tags_box.itemAt(i).widget() for i in range(self.tags_box.count() - 1)]
+        if [w.text() for w in have] == texts:
+            return
+        for w in have:
+            self.tags_box.removeWidget(w)
+            w.setParent(None)
+            w.deleteLater()
+        for i, t in enumerate(texts):
+            self.tags_box.insertWidget(i, _axis_tag(t, "set in Advanced"), 0,
+                                       QtCore.Qt.AlignVCenter)
+
+    def dim_name(self) -> str:
+        """The name typed in POINT ("" = the default)."""
+        return self.name_edit.text().strip()
+
+    def _indent(self, level: int) -> None:
+        _, top, right, bottom = self._root.getContentsMargins()
+        self._root.setContentsMargins(10 + self.INDENT_PX * min(level, self.INDENT_MAX),
+                                      top, right, bottom)
+
+
+class AxisRow(_StackRow):
+    """One axis of the stack: parameter, from / to / pts -- and, behind
+    "Advanced", how it is swept (fly, scout, its name in the file)."""
+
+    #: the keys of a linear / fly axis the row models; anything else a loaded
+    #: axis carries is kept in `extra` and written back unchanged
+    MODELLED = {"type", "param", "start", "stop", "num", "step", "speed",
+                "speed_param", "move", "readback", "lag_correction", "timeout_s",
+                "name"}
+
+    def __init__(self, param, level_getter, speed_param=None, move_choices=(),
+                 speed_lookup=None, registry=None):
+        super().__init__()
+        self.param = param
+        self._raw = None                   # set for non-editable (raster/zip) rows
+        self._level_getter = level_getter
+        self._registry = registry
+        self._zigzag = False
+        #: unmodelled keys of a loaded axis (written back as they came)
+        self.extra: dict = {}
+        #: a loaded scout margin that differs between the dims of one row (a
+        #: raster's x and y): kept as loaded until the margin is edited
+        self._loaded_margins: dict | None = None
+        lay = self._start_layout()
+
+        # Name on top, the live limit envelope as a caption beneath it.
         namebox = QtWidgets.QVBoxLayout(); namebox.setSpacing(0)
         name = QtWidgets.QLabel(f"{param.label}")
         name.setStyleSheet("font-weight:700;"); name.setFixedWidth(164)
@@ -123,6 +394,7 @@ class AxisRow(QtWidgets.QFrame):
         self.start = self._spin(lo, hi, start)
         self.stop = self._spin(lo, hi, stop)
         self.num = QtWidgets.QSpinBox(); self.num.setRange(1, 100000)
+        self.num.setFixedWidth(84)
         # An INT parameter (a scan-array index, a filter order) gets ONE POINT
         # PER VALUE by default. The old fixed 21 points across 0..19 asked for
         # 0.95, 1.9, ... which the service rounds -- so the setpoint it echoes
@@ -137,80 +409,84 @@ class AxisRow(QtWidgets.QFrame):
             if w is self.num:
                 self.num_lbl = tl
 
-        self._build_fly(lay, speed_param, move_choices, speed_lookup)
-        self._build_scout(lay)
-
         # A spin box that silently refuses to go above 160 is baffling unless
         # you can see that 160 is the closed-loop ceiling -- and these limits
         # MOVE (piezo CL/OL, kim's leash, clMag's calibration), so showing the
         # number beats making the operator guess.
         self._sync_limits_label()
+        self._finish_line(lay)
 
-        lay.addStretch(1)
-        up = QtWidgets.QPushButton("↑"); dn = QtWidgets.QPushButton("↓")
-        rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger")
-        for b in (up, dn, rm):
-            b.setFixedWidth(30)
-        up.clicked.connect(lambda: self.move.emit(self, -1))
-        dn.clicked.connect(lambda: self.move.emit(self, +1))
-        rm.clicked.connect(lambda: self.remove.emit(self))
-        lay.addWidget(up); lay.addWidget(dn); lay.addWidget(rm)
+        self._build_fly(speed_param, move_choices, speed_lookup)
+        self._build_scout()
+        self._point_group(with_name=True)
+        self.name_edit.setPlaceholderText(param.id)
+        self._build_side()
+        self.changed.connect(self.refresh_tags)
+        self._fly_toggled(False)
+        self._scout_toggled(False)
 
-    def _build_fly(self, lay, speed_param, move_choices=(), speed_lookup=None):
-        """The FLY option: move continuously across this axis instead of
-        stopping at every point (scan_core/flyscan.py).
+    # ---- raw (raster / zip / array) rows ------------------------------------
+    @property
+    def raw(self):
+        return self._raw
+
+    @raw.setter
+    def raw(self, value):
+        """A loaded raster / zip / array axis is passed through as it was:
+        it cannot fly and has no top-level name to edit here (a raster names
+        its x and y inside), so those parts of Advanced are hidden."""
+        self._raw = value
+        plain = value is None
+        self.fly_group.setVisible(plain)
+        self.name_lbl.setVisible(plain)
+        self.name_edit.setVisible(plain)
+        self.refresh_tags()
+
+    # ---- FLY ---------------------------------------------------------------------
+    def _build_fly(self, speed_param, move_choices=(), speed_lookup=None):
+        """FLY: move continuously across this axis instead of stopping at every
+        point (scan_core/flyscan.py). Every fly-related setting of the recipe
+        is here: on/off, speed, the knob that sets the speed, the stage that
+        flies a MEASURED coordinate, the direction of the rows, the row timeout,
+        the lag correction and the position the samples are binned by.
 
         Offered only for a position whose module STREAMS it -- binning by the
         measured position is the whole idea, so without a recorded position
         there is nothing to bin by -- and only meaningful on the innermost
         axis (the summary says so if it is ticked anywhere else). With it
-        ticked, `pts` become pixels and a speed box appears.
+        ticked, `pts` become pixels.
 
         A MEASURED COORDINATE (camera.laser_x: where the laser is on the sample)
         streams but is not a stage: `move_choices` lists the stages that could
-        fly it, and a "move with" box appears. The speed then belongs to the
-        chosen stage (`speed_lookup(stage_id)` finds its speed knob).
+        fly it, and the "move with" box picks one. The speed then belongs to
+        the chosen stage (`speed_lookup(stage_id)` finds its speed knob).
+
+        Every box is always there, greyed while fly is off: a panel that grew
+        a line on ticking would move the controls under the mouse.
         """
         self.move_choices = list(move_choices or [])
         self._speed_lookup = speed_lookup or (lambda _id: None)
-        #: the settable that sets this position's speed (find_speed_param);
-        #: None = the module offers none
-        self.speed_param = speed_param
-        self.fly = QtWidgets.QCheckBox()
-        streams = getattr(self.param, "stream", None) is not None
-        self.fly.setEnabled(streams)
+        self._knob_objs: dict = {}
+        self.streams = getattr(self.param, "stream", None) is not None
+        self.fly_group, g = self.advanced.add_group("FLY")
+
+        self.fly = QtWidgets.QCheckBox("fly this axis")
+        self.fly.setEnabled(self.streams)
         self.fly.setToolTip(
             "FLY: move continuously from 'from' to 'to' at the speed given,\n"
             "recording the detectors and the MEASURED position all the way,\n"
             "then average the samples per pixel. Innermost axis only; every\n"
             "detector must be one its module can stream."
-            if streams else
+            if self.streams else
             f"{self.param.label} cannot be flown: its module does not record\n"
             f"the position continuously (no stream in its describe).")
-        unit = self.param.unit or ""
         self.speed = QtWidgets.QDoubleSpinBox()
         self.speed.setDecimals(3)
-        lo, hi = 0.001, 1e4
-        if speed_param is not None:
-            slo, shi = speed_param.limits
-            lo = max(lo, float(slo)) if math.isfinite(slo) else lo
-            hi = min(hi, float(shi)) if math.isfinite(shi) else hi
-        self.speed.setRange(lo, max(lo, hi))
-        current = float("nan")
-        if speed_param is not None:
-            try:
-                current = float(speed_param.get())
-            except Exception:
-                pass
-        self.speed.setValue(current if math.isfinite(current) and current > 0
-                            else min(max(1.0, lo), hi))
         self.speed.setFixedWidth(84)
-        self.speed.setToolTip(
-            (f"Set on {speed_param.id} for the fly move; the old speed is put\n"
-             f"back for the approach to each row and at the end.")
-            if speed_param is not None else
-            "The module offers no speed setting: the stage moves at whatever\n"
-            "speed it has. This number is then only used for the time estimate.")
+        self.speed_lbl = _muted("")
+        sp_box = QtWidgets.QHBoxLayout(); sp_box.setSpacing(4)
+        sp_box.addWidget(self.speed); sp_box.addWidget(self.speed_lbl)
+
         self.move_box = QtWidgets.QComboBox()
         for mid in self.move_choices:
             self.move_box.addItem(mid, mid)
@@ -220,62 +496,299 @@ class AxisRow(QtWidgets.QFrame):
             "stage has to go is learned on the first row. If the scan stops with\n"
             "'does not move', pick the other axis (the camera may be mounted\n"
             "rotated against the stage).")
-        widgets = [(self.fly, "fly")]
-        if self.move_choices:
-            widgets.append((self.move_box, "move with"))
-        widgets.append((self.speed, f"{unit}/s"))
-        for w, t in widgets:
-            box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
-            tl = QtWidgets.QLabel(t); tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
-            box.addWidget(tl); box.addWidget(w); lay.addLayout(box)
-            if w is self.speed:
-                self.speed_lbl = tl
-            if w is self.move_box:
-                self.move_lbl = tl
+        self.move_lbl = _muted("move with")
+
+        self.knob_box = QtWidgets.QComboBox()
+        self.knob_box.setMinimumWidth(110)
+        self.knob_box.setToolTip(
+            "The setting that sets the stage's speed. It is set to the fly speed\n"
+            "for each row and put back for the approach and at the end.\n"
+            "(none): the stage moves at whatever speed it has; the number is\n"
+            "then only used for the time estimate.")
+
+        self.dir_box = QtWidgets.QComboBox()
+        self.dir_box.addItem("one-way", False)
+        self.dir_box.addItem("zig-zag", True)
+        self.dir_box.setToolTip(
+            "zig-zag: every other row is flown BACKWARDS -- the fly-back saved,\n"
+            "and the best check of the lag correction (a forward and a backward\n"
+            "row must put an edge in the same place).\n"
+            "This is the scan's zig-zag setting (the box next to Run): it also\n"
+            "reverses every other pass of stepped inner axes.")
+        self.dir_box.currentIndexChanged.connect(
+            lambda *_: self._dir_changed())
+
+        self.timeout_auto = QtWidgets.QCheckBox("auto")
+        self.timeout_auto.setChecked(True)
+        self.timeout_spin = QtWidgets.QDoubleSpinBox()
+        self.timeout_spin.setRange(1.0, 1e6); self.timeout_spin.setDecimals(0)
+        self.timeout_spin.setSuffix(" s"); self.timeout_spin.setValue(120.0)
+        self.timeout_spin.setFixedWidth(84)
+        tip = ("How long one row may take before the scan stops with an error.\n"
+               "auto: 3 x (row length / speed) + 30 s.")
+        self.timeout_auto.setToolTip(tip); self.timeout_spin.setToolTip(tip)
+        to_box = QtWidgets.QHBoxLayout(); to_box.setSpacing(4)
+        to_box.addWidget(self.timeout_auto); to_box.addWidget(self.timeout_spin)
+
+        self.lag_box = QtWidgets.QCheckBox("lag correction")
+        self.lag_box.setChecked(True)
+        self.lag_box.setToolTip(
+            "A lock-in's output belongs to where the stage was a moment EARLIER\n"
+            "(its filter delay). On: each sample is moved back by the delay its\n"
+            "module declares before its position is looked up. Off only to see\n"
+            "the raw, shifted rows.")
+
+        self.readback_box = QtWidgets.QComboBox()
+        self.readback_box.addItem("(this axis)", None)
+        if self._registry is not None:
+            for q in [*self._registry.settables(), *self._registry.gettables()]:
+                if (q.id != self.param.id and getattr(q, "stream", None) is not None
+                        and q.unit == self.param.unit
+                        and self.readback_box.findData(q.id) < 0):
+                    self.readback_box.addItem(q.id, q.id)
+        self.readback_box.setToolTip(
+            "The measured position the samples are binned by. Normally the axis\n"
+            "itself; another streamed position in the same unit if that is the\n"
+            "better measurement (a sensor rather than a step counter).")
+
+        self.fly_hint = _muted("", small=True)
+        self.fly_hint.setWordWrap(True)
+        g.addWidget(self.fly, 0, 0, 1, 2)
+        g.addWidget(_muted("speed"), 0, 2); g.addLayout(sp_box, 0, 3)
+        g.addWidget(_muted("speed knob"), 1, 0); g.addWidget(self.knob_box, 1, 1)
+        g.addWidget(self.move_lbl, 1, 2); g.addWidget(self.move_box, 1, 3)
+        g.addWidget(_muted("direction"), 2, 0); g.addWidget(self.dir_box, 2, 1)
+        g.addWidget(_muted("row timeout"), 2, 2); g.addLayout(to_box, 2, 3)
+        g.addWidget(self.lag_box, 3, 0, 1, 2)
+        g.addWidget(_muted("readback"), 3, 2); g.addWidget(self.readback_box, 3, 3)
+        g.addWidget(self.fly_hint, 4, 0, 1, 4)
+        if not self.move_choices:
+            # a stage flies itself: nothing to choose
+            self.move_lbl.setText("")
+            self.move_box.hide()
+        if not self.streams:
+            self.fly_hint.setText("Cannot fly: its module does not record this "
+                                  "position continuously.")
+        else:
+            self.fly_hint.hide()
+
+        #: the knob find_speed_param proposed (the default to compare against)
+        self._default_knob = speed_param.id if speed_param is not None else None
+        if speed_param is not None:
+            self._knob_objs[speed_param.id] = speed_param
+        self._fill_knobs(self._default_knob)
+        current = float("nan")
+        if speed_param is not None:
+            try:
+                current = float(speed_param.get())
+            except Exception:
+                pass
+        lo, hi = self.speed.minimum(), self.speed.maximum()
+        self.speed.setValue(current if math.isfinite(current) and current > 0
+                            else min(max(1.0, lo), hi))
+        self._default_speed = self.speed.value()
         if self.move_choices:
             self.move_box.currentIndexChanged.connect(lambda *_: self._move_changed())
             self._move_changed()
+        self.knob_box.currentIndexChanged.connect(lambda *_: self._knob_changed())
         self.fly.toggled.connect(self._fly_toggled)
         self.speed.valueChanged.connect(lambda *_: self.changed.emit())
-        self._fly_toggled(False)
+        self.timeout_auto.toggled.connect(lambda *_: self._fly_toggled(self.is_fly()))
+        self.timeout_spin.valueChanged.connect(lambda *_: self.changed.emit())
+        self.lag_box.toggled.connect(lambda *_: self.changed.emit())
+        self.readback_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
 
-    def _build_scout(self, lay):
-        """The SCOUT option (scan_core/scout.py): look at this axis quickly
-        first -- every k-th point -- and measure in detail only where the
-        scout saw something. Any axis that moves something can be scouted,
-        one or several; the options (what to look at, how to decide) are in
-        the SCOUT PASS section under the stack.
+    def _moving_id(self) -> str:
+        return self.move_param() or self.param.id
 
-        The step box is always there, greyed while the tick is off: a box that
-        appeared on ticking would shift the row's buttons under the mouse."""
-        self.scout = QtWidgets.QCheckBox()
+    def speed_unit(self) -> str:
+        """The fly speed's unit: the MOVING stage's unit per second."""
+        mid = self._moving_id()
+        p = self._registry.get(mid) if self._registry is not None else None
+        unit = (getattr(p, "unit", None) if p is not None else None)
+        if unit is None:
+            unit = self.param.unit if mid == self.param.id else ""
+        return f"{unit or ''}/s"
+
+    def _knob_candidates(self, moving: str) -> list:
+        """Settables that could set the speed of `moving`: same module, unit
+        '<unit>/s' (find_speed_param's rule, without its axis-letter guess)."""
+        reg = self._registry
+        if reg is None:
+            return []
+        mp = reg.get(moving)
+        if mp is None:
+            return []
+        unit = f"{getattr(mp, 'unit', '') or ''}/s"
+        module = moving.rsplit(".", 1)[0] if "." in moving else ""
+        return [q for q in reg.settables()
+                if q.id != moving and (getattr(q, "unit", "") or "") == unit
+                and (q.id.rsplit(".", 1)[0] if "." in q.id else "") == module]
+
+    def _fill_knobs(self, select: str | None) -> None:
+        self.knob_box.blockSignals(True)
+        self.knob_box.clear()
+        for q in self._knob_candidates(self._moving_id()):
+            self._knob_objs[q.id] = q
+            self.knob_box.addItem(q.id, q.id)
+        if select is not None and self.knob_box.findData(select) < 0:
+            self.knob_box.addItem(select if select in self._knob_objs
+                                  else f"(missing) {select}", select)
+        self.knob_box.addItem("(none)", None)
+        self.knob_box.setCurrentIndex(max(0, self.knob_box.findData(select)))
+        self.knob_box.blockSignals(False)
+        self._knob_changed(emit=False)
+
+    def set_speed_param(self, sp_id: str | None) -> None:
+        """Select the speed knob (a loaded recipe's `speed_param`)."""
+        if sp_id is not None and self.knob_box.findData(sp_id) < 0:
+            p = self._registry.get(sp_id) if self._registry is not None else None
+            if p is not None:
+                self._knob_objs[sp_id] = p
+            self.knob_box.insertItem(self.knob_box.count() - 1,
+                                     sp_id if p is not None else f"(missing) {sp_id}",
+                                     sp_id)
+        self.knob_box.setCurrentIndex(max(0, self.knob_box.findData(sp_id)))
+
+    @property
+    def speed_param(self):
+        """The Parameter that sets the fly speed (None = none, or missing)."""
+        return self._knob_objs.get(self.knob_box.currentData())
+
+    def speed_param_id(self) -> str | None:
+        return self.knob_box.currentData()
+
+    def _knob_changed(self, emit: bool = True) -> None:
+        """The speed box's range follows the chosen knob's limits."""
+        sp = self.speed_param
+        lo, hi = 0.001, 1e4
+        if sp is not None:
+            slo, shi = sp.limits
+            lo = max(lo, float(slo)) if math.isfinite(slo) else lo
+            hi = min(hi, float(shi)) if math.isfinite(shi) else hi
+        self.speed.setRange(lo, max(lo, hi))
+        self.speed.setToolTip(
+            (f"Set on {sp.id} for the fly move; the old speed is put\n"
+             f"back for the approach to each row and at the end.")
+            if sp is not None else
+            "No speed setting: the stage moves at whatever speed it has.\n"
+            "This number is then only used for the time estimate.")
+        self.speed_lbl.setText(self.speed_unit())
+        if emit:
+            self.changed.emit()
+
+    def _move_changed(self):
+        """The flying stage changed: its speed knob sets the fly speed now."""
+        sp = self._speed_lookup(self.move_box.currentData())
+        if sp is not None:
+            self._knob_objs[sp.id] = sp
+        self._fill_knobs(sp.id if sp is not None else None)
+        self.changed.emit()
+
+    def move_param(self) -> str | None:
+        return self.move_box.currentData() if self.move_choices else None
+
+    def _fly_toggled(self, on):
+        on = bool(on)
+        for w in (self.speed, self.move_box, self.knob_box, self.dir_box,
+                  self.timeout_auto, self.lag_box, self.readback_box):
+            w.setEnabled(on and self.streams)
+        self.timeout_spin.setEnabled(on and self.streams and not self.timeout_auto.isChecked())
+        self.num_lbl.setText("pixels" if on else "pts")
+        self.changed.emit()
+
+    def is_fly(self) -> bool:
+        return self._raw is None and self.fly.isChecked()
+
+    def _dir_changed(self):
+        self._zigzag = bool(self.dir_box.currentData())
+        self.zigzag_changed.emit(self._zigzag)
+        self.changed.emit()
+
+    #: the direction box was changed here: the builder sets the scan's zig-zag
+    zigzag_changed = QtCore.Signal(bool)
+
+    def set_zigzag(self, on: bool) -> None:
+        """The scan's zig-zag, shown in this row's direction box."""
+        on = bool(on)
+        if on == self._zigzag and self.dir_box.currentData() == on:
+            return
+        self._zigzag = on
+        self.dir_box.blockSignals(True)
+        self.dir_box.setCurrentIndex(1 if on else 0)
+        self.dir_box.blockSignals(False)
+        self.refresh_tags()
+
+    # ---- SCOUT -------------------------------------------------------------------
+    def _build_scout(self):
+        """SCOUT (scan_core/scout.py): look at this axis quickly first -- every
+        k-th point -- and measure in detail only where the scout saw
+        something. Any axis that moves something can be scouted, one or
+        several. The margin is PER AXIS here (auto = half this axis's step);
+        what the scout looks at and how it decides are scan-wide, in the SCOUT
+        PASS section under the stack.
+
+        The boxes are always there, greyed while the tick is off."""
+        self.scout_group, g = self.advanced.add_group("SCOUT")
+        self.scout = QtWidgets.QCheckBox("scout this axis")
         self.scout.setToolTip(
             "SCOUT: take a quick look along this axis first (every k-th point,\n"
             "always including the last one), then measure in detail only where\n"
-            "the scout saw something. Tick it on every axis to scout; what the\n"
-            "scout looks at and how it decides is in the SCOUT PASS section\n"
-            "under the axis stack.")
+            "the scout saw something. Tick it on every axis to scout.")
         self.scout_step = QtWidgets.QSpinBox()
         self.scout_step.setRange(1, 1000); self.scout_step.setValue(3)
-        self.scout_step.setFixedWidth(46)
+        self.scout_step.setSuffix(" pts")
+        self.scout_step.setFixedWidth(72)
         self.scout_step.setToolTip(
             "The scout looks at every k-th point of this axis (3 = every 3rd),\n"
             "and always at the last one. Something narrower than about k grid\n"
             "steps can fall between the scout's points: use a smaller k then.")
-        box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
-        tl = QtWidgets.QLabel("scout / every")
-        tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
-        box.addWidget(tl)
-        h = QtWidgets.QHBoxLayout(); h.setSpacing(2)
-        h.addWidget(self.scout); h.addWidget(self.scout_step)
-        box.addLayout(h)
-        lay.addLayout(box)
+        self.margin_auto = QtWidgets.QCheckBox("auto")
+        self.margin_auto.setChecked(True)
+        self.margin_auto.setToolTip(
+            "Half this axis's scout step (1.5 points for every 3rd): about how\n"
+            "well the scout can place an edge. On the rig it lost no rim\n"
+            "(2026-10-08).")
+        self.margin_spin = QtWidgets.QDoubleSpinBox()
+        self.margin_spin.setRange(0, 1000); self.margin_spin.setDecimals(1)
+        self.margin_spin.setValue(2.0); self.margin_spin.setSuffix(" pts")
+        self.margin_spin.setFixedWidth(84)
+        self.margin_spin.setToolTip(
+            "Grow the mask by this many GRID POINTS along this axis, so the\n"
+            "edges are measured too.")
+        g.addWidget(self.scout, 0, 0, 1, 3)
+        g.addWidget(_muted("coarse step"), 1, 0); g.addWidget(self.scout_step, 1, 1)
+        mbox = QtWidgets.QHBoxLayout(); mbox.setSpacing(4)
+        mbox.addWidget(self.margin_auto); mbox.addWidget(self.margin_spin)
+        g.addWidget(_muted("margin"), 2, 0); g.addLayout(mbox, 2, 1, 1, 2)
+        self.scout_note = _muted("", small=True)
+        self.scout_note.setWordWrap(True)
+        self.scout_note.setFixedWidth(170)
+        self.scout_note.hide()
+        g.addWidget(self.scout_note, 3, 0, 1, 3)
+        # two fixed lines, not word-wrapped: a wrapped label's height is
+        # guessed before its width is known, and the last line was cut off
+        hint = _muted("what it looks at, how it decides:\n"
+                      "the SCOUT PASS section below", small=True)
+        g.addWidget(hint, 4, 0, 1, 3)
         self.scout.toggled.connect(self._scout_toggled)
         self.scout_step.valueChanged.connect(lambda *_: self.changed.emit())
-        self.scout_step.setEnabled(False)
+        self.margin_auto.toggled.connect(lambda *_: self._margin_edited())
+        self.margin_spin.valueChanged.connect(lambda *_: self._margin_edited())
 
     def _scout_toggled(self, on):
+        on = bool(on)
         self.scout_step.setEnabled(on)
+        self.margin_auto.setEnabled(on)
+        self.margin_spin.setEnabled(on and not self.margin_auto.isChecked())
+        self.changed.emit()
+
+    def _margin_edited(self):
+        # an edit sets the margin of every dim of this row: a loaded margin
+        # that differed between them (a raster's x and y) is replaced
+        self._loaded_margins = None
+        self.scout_note.hide()
+        self.margin_spin.setEnabled(self.is_scout() and not self.margin_auto.isChecked())
         self.changed.emit()
 
     def is_scout(self) -> bool:
@@ -294,32 +807,222 @@ class AxisRow(QtWidgets.QFrame):
         except Exception:
             return []
 
-    def _move_changed(self):
-        """The flying stage changed: its speed knob sets the fly speed now."""
-        sp = self._speed_lookup(self.move_box.currentData())
-        self.speed_param = sp
-        if sp is not None:
-            slo, shi = sp.limits
-            lo = max(0.001, float(slo)) if math.isfinite(slo) else 0.001
-            hi = min(1e4, float(shi)) if math.isfinite(shi) else 1e4
-            self.speed.setRange(lo, max(lo, hi))
-        self.changed.emit()
+    def _ui_margin(self):
+        return "auto" if self.margin_auto.isChecked() else float(self.margin_spin.value())
 
-    def move_param(self) -> str | None:
-        return self.move_box.currentData() if self.move_choices else None
+    def scout_margins(self) -> dict:
+        """{dim: "auto" | grid points} for the dims of this row."""
+        dims = self.scout_dims()
+        if self._loaded_margins is not None:
+            return {d: self._loaded_margins.get(d, "auto") for d in dims}
+        return {d: self._ui_margin() for d in dims}
 
-    def _fly_toggled(self, on):
-        self.speed.setVisible(on)
-        self.speed_lbl.setVisible(on)
+    def set_scout_margin(self, margin) -> None:
+        """Show a recipe's `margin` (auto | n | {dim: n}) for this row."""
+        dims = self.scout_dims()
+        vals = {d: (margin.get(d, "auto") if isinstance(margin, dict) else margin)
+                for d in dims}
+        uniq = list(dict.fromkeys(str(v) for v in vals.values()))
+        first = next(iter(vals.values()), "auto")
+        for w in (self.margin_auto, self.margin_spin):
+            w.blockSignals(True)
+        try:
+            self.margin_auto.setChecked(first == "auto")
+            if first != "auto":
+                try:
+                    self.margin_spin.setValue(float(first))
+                except (TypeError, ValueError):
+                    pass
+        finally:
+            for w in (self.margin_auto, self.margin_spin):
+                w.blockSignals(False)
+        if len(uniq) > 1:
+            self._loaded_margins = vals
+            self.scout_note.setText(
+                "margin from the file: " + ", ".join(
+                    f"{d} {v if v == 'auto' else f'{float(v):g} pts'}"
+                    for d, v in vals.items()) + " -- an edit sets all of them")
+            self.scout_note.show()
+        else:
+            self._loaded_margins = None
+            self.scout_note.hide()
+        self._scout_toggled(self.is_scout())
+
+    # ---- copy / reset ----------------------------------------------------------
+    def _build_side(self):
+        self.copy_btn = QtWidgets.QToolButton()
+        self.copy_btn.setText("Copy from axis…")
+        self.copy_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.copy_btn.setToolTip(
+            "Take the fly and scout settings of another axis. Only what makes\n"
+            "sense here is copied (no um/s speed onto a frequency axis); what\n"
+            "is skipped is said below and in the log.")
+        menu = QtWidgets.QMenu(self.copy_btn)
+        menu.aboutToShow.connect(lambda m=menu: self._fill_copy_menu(m))
+        self.copy_btn.setMenu(menu)
+        self.reset_btn = QtWidgets.QPushButton("Reset")
+        self.reset_btn.setToolTip("Back to plain stepping: fly and scout off, every\n"
+                                  "advanced setting to its default, the name cleared.")
+        self.reset_btn.clicked.connect(self.reset_advanced)
+        for w in (self.copy_btn, self.reset_btn):
+            w.setFixedWidth(112)
+        self.advanced.side.addWidget(self.copy_btn)
+        self.advanced.side.addWidget(self.reset_btn)
+        self.advanced.side.addWidget(self.adv_note)
+        self.advanced.side.addStretch(1)
+
+    def _siblings(self) -> list:
+        """The rows around this one, outer first."""
+        getter = getattr(self._level_getter, "__self__", None)
+        return list(getattr(getter, "rows", []) or [])
+
+    def _fill_copy_menu(self, menu) -> None:
+        menu.clear()
+        others = [r for r in self._siblings() if r is not self
+                  and isinstance(r, AxisRow)]
+        if not others:
+            a = menu.addAction("(no other axis)")
+            a.setEnabled(False)
+            return
+        for r in others:
+            a = menu.addAction(f"{r.level_lbl.text()}  {r.param.label}")
+            a.triggered.connect(lambda _=False, src=r: self.copy_from(src))
+
+    def copy_from(self, src) -> str:
+        """Copy the fly and scout settings of row `src` -- only those that make
+        sense for THIS axis. Returns the line that is shown and logged.
+
+        Skipped, and said so: fly onto an axis that cannot fly; a fly speed
+        whose unit does not fit (um/s onto a frequency axis); a 'move with'
+        stage this axis does not offer; anything from or onto a repeat row
+        (it moves nothing). The name is never copied (two axes may not share
+        one), nor the speed knob (it belongs to the stage that moves)."""
+        copied, skipped = [], []
+        if not isinstance(src, AxisRow):
+            msg = (f"{self.param.label}: nothing copied -- a repeat row has no "
+                   f"fly or scout settings")
+            self._say(msg)
+            return msg
+        # FLY
+        if self._raw is None:
+            if src.is_fly():
+                if not self.streams:
+                    skipped.append("fly (this axis is not recorded continuously)")
+                else:
+                    self.fly.setChecked(True)
+                    copied.append("fly")
+                    su, tu = src.speed_unit(), self.speed_unit()
+                    if su == tu:
+                        self.speed.setValue(src.speed.value())
+                        copied.append(f"speed {src.speed.value():g} {tu}")
+                    else:
+                        skipped.append(f"speed ({src.speed.value():g} {su} does not "
+                                       f"fit an axis in {tu})")
+                    self.lag_box.setChecked(src.lag_box.isChecked())
+                    self.timeout_auto.setChecked(src.timeout_auto.isChecked())
+                    self.timeout_spin.setValue(src.timeout_spin.value())
+                    mv = src.move_param()
+                    if mv and mv in self.move_choices:
+                        self.move_box.setCurrentIndex(self.move_box.findData(mv))
+                        copied.append(f"move with {mv}")
+                    elif mv:
+                        skipped.append(f"move with {mv} (not offered here)")
+            elif self.is_fly():
+                self.fly.setChecked(False)
+                copied.append("fly off")
+        elif src.is_fly():
+            skipped.append("fly (a raster / zip row cannot fly)")
+        # SCOUT
+        if src.is_scout():
+            self.scout.setChecked(True)
+            self.scout_step.setValue(src.scout_step.value())
+            self.margin_auto.setChecked(src.margin_auto.isChecked())
+            self.margin_spin.setValue(src.margin_spin.value())
+            self._margin_edited()
+            m = src._ui_margin()
+            copied.append(f"scout every {src.scout_step.value()}, margin "
+                          + ("auto" if m == "auto" else f"{m:g} pts"))
+        elif self.is_scout():
+            self.scout.setChecked(False)
+            copied.append("scout off")
+        msg = (f"{self.param.label}: copied from {src.param.label}: "
+               + (", ".join(copied) if copied else "nothing (same settings)"))
+        if skipped:
+            msg += "; skipped: " + ", ".join(skipped)
+        self._say(msg)
+        return msg
+
+    def _say(self, msg: str) -> None:
+        self.adv_note.setText(msg.split(": ", 1)[-1])
+        self.log.emit(msg)
+
+    def reset_advanced(self) -> None:
+        """Back to plain stepping."""
+        widgets = (self.fly, self.speed, self.lag_box, self.timeout_auto,
+                   self.timeout_spin, self.readback_box, self.scout,
+                   self.scout_step, self.margin_auto, self.margin_spin,
+                   self.name_edit)
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self.fly.setChecked(False)
+            self.speed.setValue(self._default_speed)
+            self.lag_box.setChecked(True)
+            self.timeout_auto.setChecked(True)
+            self.timeout_spin.setValue(120.0)
+            self.readback_box.setCurrentIndex(0)
+            self.scout.setChecked(False)
+            self.scout_step.setValue(3)
+            self.margin_auto.setChecked(True)
+            self.margin_spin.setValue(2.0)
+            self.name_edit.clear()
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
         if self.move_choices:
-            self.move_box.setVisible(on)
-            self.move_lbl.setVisible(on)
-        self.num_lbl.setText("pixels" if on else "pts")
-        self.changed.emit()
+            self.move_box.setCurrentIndex(0)      # refills the knobs
+        else:
+            self._fill_knobs(self._default_knob)
+        self._loaded_margins = None
+        self.scout_note.hide()
+        self._fly_toggled(False)
+        self._scout_toggled(False)
+        self._say(f"{self.param.label}: reset to plain stepping")
 
-    def is_fly(self) -> bool:
-        return self.fly.isChecked()
+    # ---- tags ------------------------------------------------------------------
+    def tag_texts(self) -> list[str]:
+        out = []
+        if self.is_fly():
+            out.append(f"fly {self.speed.value():g} {self.speed_unit()}")
+            if self.move_param():
+                out.append(f"moves {self.move_param()}")
+            if self._zigzag:
+                out.append("zig-zag")
+            if not self.lag_box.isChecked():
+                out.append("no lag correction")
+            if not self.timeout_auto.isChecked():
+                out.append(f"row max {self.timeout_spin.value():g} s")
+            if self.readback_box.currentData():
+                out.append(f"readback {self.readback_box.currentData()}")
+            knob = self.speed_param_id()
+            default = (self._speed_lookup(self.move_param()) if self.move_param()
+                       else None)
+            default = default.id if default is not None else self._default_knob
+            if knob != default:
+                out.append(f"speed knob {knob or 'none'}")
+        if self.is_scout():
+            t = f"scout x{self.scout_step.value()}"
+            m = set(str(v) for v in self.scout_margins().values())
+            if self._loaded_margins is not None and len(m) > 1:
+                t += ", margin per axis"
+            elif not self.margin_auto.isChecked():
+                t += f", margin {self.margin_spin.value():g}"
+            out.append(t)
+        if self._raw is None and self.dim_name() and self.dim_name() != self.param.id:
+            out.append(f"name {self.dim_name()}")
+        return out
 
+    # ---- the plain row -----------------------------------------------------------
     def _finite_limits(self):
         """The parameter's limits, with infinities replaced by a usable span.
 
@@ -408,22 +1111,11 @@ class AxisRow(QtWidgets.QFrame):
             f"{self.param.label} takes whole numbers only, so this sweep has at "
             f"most {span} points")
 
-    #: Pixels of indent per nesting level, and how many levels get one. Loop
-    #: depth is the thing an operator misreads most often -- "which of these is
-    #: the slow one?" -- and a number in a column is easy to skim past, while a
-    #: staircase is not. Capped: at five axes an uncapped indent would push the
-    #: spin boxes off the card.
-    INDENT_PX = 16
-    INDENT_MAX = 4
-
     def refresh_level(self):
         """Show the loop depth: the number, and the row's own indentation."""
         level = self._level_getter(self)
         self.level_lbl.setText(str(level))
-        lay = self.layout()
-        _, top, right, bottom = lay.getContentsMargins()
-        lay.setContentsMargins(10 + self.INDENT_PX * min(level, self.INDENT_MAX),
-                               top, right, bottom)
+        self._indent(level)
         self.setToolTip(f"loop level {level} — "
                         + ("the OUTERMOST (slowest) axis" if level == 0
                            else "inside " + ", ".join(
@@ -436,26 +1128,72 @@ class AxisRow(QtWidgets.QFrame):
         self.preview.emit(self)
         ev.accept()
 
-    def _siblings(self) -> list:
-        """The rows around this one, outer first (for the tooltip)."""
-        getter = getattr(self._level_getter, "__self__", None)
-        return list(getattr(getter, "rows", []) or [])
-
     def to_axis(self) -> dict:
-        if self.raw is not None:                 # loaded raster/zip: pass through
-            return self.raw
+        if self._raw is not None:                # loaded raster/zip: pass through
+            return self._raw
         if self.is_fly():
             ax = {"type": "fly", "param": self.param.id,
                   "start": self.start.value(), "stop": self.stop.value(),
                   "num": self.num.value(), "speed": self.speed.value()}
             if self.move_param():
                 ax["move"] = self.move_param()
-            if self.speed_param is not None:
-                ax["speed_param"] = self.speed_param.id
-            return ax
-        return {"type": "linear", "param": self.param.id,
-                "start": self.start.value(), "stop": self.stop.value(),
-                "num": self.num.value()}
+            if self.speed_param_id() is not None:
+                ax["speed_param"] = self.speed_param_id()
+            if self.readback_box.currentData():
+                ax["readback"] = self.readback_box.currentData()
+            if not self.lag_box.isChecked():
+                ax["lag_correction"] = False
+            if not self.timeout_auto.isChecked():
+                ax["timeout_s"] = float(self.timeout_spin.value())
+        else:
+            ax = {"type": "linear", "param": self.param.id,
+                  "start": self.start.value(), "stop": self.stop.value(),
+                  "num": self.num.value()}
+        if self.dim_name() and self.dim_name() != self.param.id:
+            ax["name"] = self.dim_name()
+        for k, v in self.extra.items():
+            ax.setdefault(k, v)
+        return ax
+
+    def load_axis(self, ax: dict) -> list[str]:
+        """Fill the row from a loaded linear / fly axis. Returns ids this
+        registry does not have (a speed knob, a 'move with' stage, a
+        readback)."""
+        missing = []
+        if "start" in ax: self.start.setValue(float(ax["start"]))
+        if "stop" in ax: self.stop.setValue(float(ax["stop"]))
+        if ax.get("num"): self.num.setValue(int(ax["num"]))
+        self.extra = {k: v for k, v in ax.items() if k not in self.MODELLED}
+        if ax.get("name") and ax["name"] != self.param.id:
+            self.name_edit.setText(str(ax["name"]))
+        if ax.get("type") != "fly":
+            return missing
+        self.fly.setChecked(True)
+        if ax.get("move"):
+            i = self.move_box.findData(ax["move"])
+            if i >= 0:
+                self.move_box.setCurrentIndex(i)
+            else:
+                missing.append(ax["move"])
+        sp = ax.get("speed_param")
+        if sp and (self._registry is None or self._registry.get(sp) is None):
+            missing.append(sp)
+        self.set_speed_param(sp or None)
+        if ax.get("speed") is not None:
+            self.speed.setValue(float(ax["speed"]))
+        rb = ax.get("readback")
+        if rb and rb != self.param.id:
+            if self.readback_box.findData(rb) < 0:
+                self.readback_box.addItem(f"(missing) {rb}" if self._registry is None
+                                          or self._registry.get(rb) is None else rb, rb)
+                if self._registry is None or self._registry.get(rb) is None:
+                    missing.append(rb)
+            self.readback_box.setCurrentIndex(self.readback_box.findData(rb))
+        self.lag_box.setChecked(ax.get("lag_correction", True) is not False)
+        if ax.get("timeout_s"):
+            self.timeout_auto.setChecked(False)
+            self.timeout_spin.setValue(float(ax["timeout_s"]))
+        return missing
 
 
 class _RepeatParam:
@@ -468,7 +1206,7 @@ class _RepeatParam:
     limits = (float("-inf"), float("inf"))
 
 
-class RepeatRow(QtWidgets.QFrame):
+class RepeatRow(_StackRow):
     """An axis row that sets NOTHING: everything inside it is done N times
     (scan_core/repeat.py). Where it sits in the stack decides what repeats:
     on top = whole scans, at the bottom = every point N times in a row.
@@ -477,26 +1215,18 @@ class RepeatRow(QtWidgets.QFrame):
     average them); average stores only the mean, its spread and the count.
     `interval` (0 = none) starts repeat k no earlier than k x interval after
     the first -- a time series.
+
+    Its Advanced panel shows only what applies to a repeat: its name in the
+    file and the routines bound to it (it cannot fly or be scouted).
     """
-    changed = QtCore.Signal()
-    remove = QtCore.Signal(object)
-    move = QtCore.Signal(object, int)
-    preview = QtCore.Signal(object)        # (never emitted: nothing to preview)
 
     def __init__(self, level_getter, num: int = 5, mode: str = "keep",
                  interval_s: float | None = None, name: str | None = None):
         super().__init__()
         self.param = _RepeatParam()
         self.raw = None
-        self.name = name                   # kept from a loaded recipe, else default
         self._level_getter = level_getter
-        self.setObjectName("axis")
-        lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(10, 6, 10, 6); lay.setSpacing(8)
-        self.level_lbl = QtWidgets.QLabel("0")
-        self.level_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:800;")
-        self.level_lbl.setFixedWidth(16)
-        lay.addWidget(self.level_lbl)
+        lay = self._start_layout()
 
         namebox = QtWidgets.QVBoxLayout(); namebox.setSpacing(0)
         title = QtWidgets.QLabel("Repeat")
@@ -539,15 +1269,36 @@ class RepeatRow(QtWidgets.QFrame):
         self.mode.currentIndexChanged.connect(lambda *_: self.changed.emit())
         self.interval.valueChanged.connect(lambda *_: self.changed.emit())
 
-        lay.addStretch(1)
-        up = QtWidgets.QPushButton("↑"); dn = QtWidgets.QPushButton("↓")
-        rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger")
-        for b in (up, dn, rm):
-            b.setFixedWidth(30)
-        up.clicked.connect(lambda: self.move.emit(self, -1))
-        dn.clicked.connect(lambda: self.move.emit(self, +1))
-        rm.clicked.connect(lambda: self.remove.emit(self))
-        lay.addWidget(up); lay.addWidget(dn); lay.addWidget(rm)
+        self._finish_line(lay)
+        self._point_group(with_name=True)
+        self.name_edit.setPlaceholderText("repeat")
+        if name:
+            self.name_edit.setText(str(name))
+        self.reset_btn = QtWidgets.QPushButton("Reset")
+        self.reset_btn.setFixedWidth(112)
+        self.reset_btn.setToolTip("Clear the name (the file then calls it 'repeat').")
+        self.reset_btn.clicked.connect(self.reset_advanced)
+        self.advanced.side.addWidget(self.reset_btn)
+        self.advanced.side.addWidget(self.adv_note)
+        self.advanced.side.addStretch(1)
+        self.changed.connect(self.refresh_tags)
+        self.refresh_tags()
+
+    @property
+    def name(self) -> str | None:
+        return self.dim_name() or None
+
+    @name.setter
+    def name(self, value) -> None:
+        self.name_edit.setText(str(value or ""))
+
+    def reset_advanced(self) -> None:
+        self.name_edit.clear()
+        self.adv_note.setText("name cleared")
+        self.changed.emit()
+
+    def tag_texts(self) -> list[str]:
+        return [f"name {self.dim_name()}"] if self.dim_name() else []
 
     # the axis-row interface the builder uses
     def is_fly(self) -> bool:
@@ -559,16 +1310,19 @@ class RepeatRow(QtWidgets.QFrame):
     def scout_dims(self) -> list[str]:
         return []
 
+    def scout_margins(self) -> dict:
+        return {}
+
+    def set_zigzag(self, on: bool) -> None:
+        pass                               # nothing to fly
+
     def refresh_limits(self):
         pass                               # no parameter, no limits
 
     def refresh_level(self):
         level = self._level_getter(self)
         self.level_lbl.setText(str(level))
-        lay = self.layout()
-        _, top, right, bottom = lay.getContentsMargins()
-        lay.setContentsMargins(10 + AxisRow.INDENT_PX * min(level, AxisRow.INDENT_MAX),
-                               top, right, bottom)
+        self._indent(level)
         getter = getattr(self._level_getter, "__self__", None)
         rows = list(getattr(getter, "rows", []) or [])
         inner = rows[level + 1:] if self in rows else []
@@ -2738,6 +3492,7 @@ class ScoutSection(QtWidgets.QFrame):
         #: builds the current recipe (the builder's); the previews need the grid
         self._recipe_fn = recipe_fn
         self._axes: dict = {}               # the ticked axes {name: step}
+        self._margins: dict = {}            # their margins {name: auto | points}
         self._outer: list[str] = []
         self._fly = False
         self._expanded = False
@@ -2857,22 +3612,19 @@ class ScoutSection(QtWidgets.QFrame):
                                 "reading must be to be measured (default 4).")
         self.k_spin = dspin(0.1, 100, 1, 4.0, 64)
         self.thr_label = lbl("threshold")
-        self.margin_auto = QtWidgets.QCheckBox("auto")
-        self.margin_auto.setChecked(True)
-        self.margin_auto.setToolTip("Half the coarse step on each axis (1.5 points for\n"
-                                    "every 3rd): about how well the scout can place an\n"
-                                    "edge. On the rig it lost no rim (2026-10-08).")
-        self.margin_auto.toggled.connect(lambda *_: self._edited())
-        self.margin_spin = dspin(0, 1000, 1, 2.0, 76)
-        self.margin_spin.setSuffix(" pts")
-        self.margin_spin.setToolTip("Grow the mask by this many GRID POINTS on every\n"
-                                    "scouted axis, so the edges are measured too.")
+        # The MARGIN is per axis since 2026-10-09 (Advanced > SCOUT on each
+        # row): one box here could only show the largest of several. This
+        # label says where it went.
+        self.margin_lbl = lbl("margin: per axis, in Advanced",
+                              "How far the mask is grown, in grid points, is set\n"
+                              "on each scouted axis: Advanced > SCOUT > margin\n"
+                              "(auto = half that axis's scout step).")
         r2 = row()
         r2.addWidget(lbl("measure where it is")); r2.addWidget(self.keep_box)
         r2.addWidget(self.thr_label); r2.addWidget(self.thr_box); r2.addWidget(self.thr_spin)
         r2.addWidget(self.k_label); r2.addWidget(self.k_spin)
         r2.addSpacing(8)
-        r2.addWidget(lbl("margin")); r2.addWidget(self.margin_auto); r2.addWidget(self.margin_spin)
+        r2.addWidget(self.margin_lbl)
         r2.addStretch(1)
 
         # row 3: the outer axes, and settings held during the scout only
@@ -3001,10 +3753,13 @@ class ScoutSection(QtWidgets.QFrame):
         for row in list(self.setting_rows):
             self._remove_setting(row)
 
-    def set_axes(self, axes: dict, outer: list[str], fly: bool) -> None:
+    def set_axes(self, axes: dict, outer: list[str], fly: bool,
+                 margins: dict | None = None) -> None:
         """The ticked axes ({name: step}, X first), the unscouted axes outside
-        them, and whether the stack has a fly axis."""
+        them, whether the stack has a fly axis, and each ticked axis's margin
+        ({name: "auto" | grid points}; missing = auto) -- set on the rows."""
         self._axes, self._outer, self._fly = dict(axes), list(outer), fly
+        self._margins = {n: (margins or {}).get(n, "auto") for n in self._axes}
         self._sync()
         if self._expanded:
             self.preview_grid()
@@ -3077,7 +3832,6 @@ class ScoutSection(QtWidgets.QFrame):
             w.setVisible(not dev)
         self.k_label.setVisible(dev); self.k_spin.setVisible(dev)
         self.thr_spin.setEnabled(self.thr_box.currentData() != "auto")
-        self.margin_spin.setEnabled(not self.margin_auto.isChecked())
         self.outer_box.setEnabled(bool(self._outer) and measure)
         self.outer_label.setToolTip(
             ", ".join(self._outer) if self._outer else "no unscouted axis outside the scouted ones")
@@ -3097,7 +3851,10 @@ class ScoutSection(QtWidgets.QFrame):
         """The one line shown next to SCOUT PASS, open or closed."""
         if not self._axes:
             return "off  —  tick 'scout' on the axes to scout"
-        axes = ", ".join(f"{n} every {s}" for n, s in self._axes.items())
+        def margin(n):
+            m = self._margins.get(n, "auto")
+            return "" if m == "auto" else f" (margin {float(m):g})"
+        axes = ", ".join(f"{n} every {s}{margin(n)}" for n, s in self._axes.items())
         src = self.source_box.currentData()
         if src == "measure":
             det = self.det_box.currentData() or "?"
@@ -3142,8 +3899,7 @@ class ScoutSection(QtWidgets.QFrame):
             t = self.thr_box.currentData()
             b["threshold"] = ("auto" if t == "auto" else float(self.thr_spin.value())
                               if t == "value" else {"fraction": float(self.thr_spin.value())})
-        b["margin"] = ("auto" if self.margin_auto.isChecked()
-                       else float(self.margin_spin.value()))
+        b["margin"] = self.margin_value()
         if src == "measure" and self._outer and self.outer_box.currentData() == "each":
             b["per_outer"] = "each"
         if self.setting_rows and src == "measure":
@@ -3153,13 +3909,27 @@ class ScoutSection(QtWidgets.QFrame):
             b["extent"] = {"x": [x0, x1], "y": [y0, y1]}
         return b
 
+    def margin_value(self):
+        """The block's `margin` from the per-axis margins: `auto` when every
+        axis is auto, ONE number when they all agree (the form every recipe
+        before 2026-10-09 has, so such a definition saves back unchanged),
+        otherwise {axis: auto | points} for every scouted axis."""
+        vals = [self._margins.get(n, "auto") for n in self._axes]
+        if all(v == "auto" for v in vals):
+            return "auto"
+        if len({str(v) for v in vals}) == 1:
+            return float(vals[0])
+        return {n: (v if v == "auto" else float(v))
+                for n, v in zip(self._axes, vals)}
+
     def load_block(self, block) -> list[str]:
         """Fill the section from a recipe's `scout` block (None = off; the
-        ticks are the builder's). Returns the ids this registry does not have."""
+        ticks AND the per-axis margins are the builder's, on the rows).
+        Returns the ids this registry does not have."""
         from scan_core.scout import is_picture, spec_of
         widgets = (self.source_box, self.det_box, self.file_edit, self.var_edit,
                    self.keep_box, self.thr_box, self.thr_spin, self.k_spin,
-                   self.margin_auto, self.margin_spin, self.outer_box,
+                   self.outer_box,
                    self.extent_box, *self.ext)
         missing: list[str] = []
         for row in list(self.setting_rows):
@@ -3195,15 +3965,6 @@ class ScoutSection(QtWidgets.QFrame):
                 self.thr_box.setCurrentIndex(2); self.thr_spin.setValue(float(t["fraction"]))
             else:
                 self.thr_box.setCurrentIndex(1); self.thr_spin.setValue(float(t))
-            m = s["margin"]
-            if isinstance(m, dict):
-                # one box for every axis: the largest (a margin per axis, e.g.
-                # an old um margin converted, is kept only in the file)
-                vals = [float(x) for x in m.values() if x != "auto"]
-                m = max(vals) if vals else "auto"
-            self.margin_auto.setChecked(m == "auto")
-            if m != "auto":
-                self.margin_spin.setValue(float(m))
             self.outer_box.setCurrentIndex(1 if s["per_outer"] == "each" else 0)
             e = s["extent"]
             self.extent_box.setChecked(bool(e))
@@ -4266,12 +5027,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
         row = AxisRow(p, self._level_of,
                       speed_param=self.registry.get(sp) if sp else None,
-                      move_choices=choices, speed_lookup=lookup)
+                      move_choices=choices, speed_lookup=lookup,
+                      registry=self.registry)
         row.raw = raw
+        if hasattr(self, "zigzag_box"):
+            row.set_zigzag(self.zigzag_box.isChecked())
         row.changed.connect(self._rebuild_summary)
         row.remove.connect(self._remove_row)
         row.move.connect(self._move_row)
         row.preview.connect(self.preview_row)
+        self._wire_advanced(row)
+        row.zigzag_changed.connect(self._zigzag_from_row)
         self.rows.append(row)
         self.stack_lay.insertWidget(self.stack_lay.count() - 1, row)  # before stretch
         self._relevel(); self._rebuild_summary()
@@ -4286,6 +5052,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         row.changed.connect(self._rebuild_summary)
         row.remove.connect(self._remove_row)
         row.move.connect(self._move_row)
+        self._wire_advanced(row)
         if index is None or not 0 <= index < len(self.rows):
             self.rows.append(row)
             self.stack_lay.insertWidget(self.stack_lay.count() - 1, row)
@@ -4294,6 +5061,87 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.stack_lay.insertWidget(index, row)
         self._relevel(); self._rebuild_summary()
         return row
+
+    # ---- the Advanced panels of the axis rows -----------------------------
+    def _wire_advanced(self, row) -> None:
+        row.advanced_toggled.connect(self._advanced_toggled)
+        row.log.connect(self._advanced_log)
+
+    def _advanced_toggled(self, row, on: bool) -> None:
+        """Only ONE Advanced panel open at a time (the approved design): two
+        open panels would push the axes being edited out of the small axis
+        list. The opened one is scrolled into view, its row line first."""
+        if not on:
+            return
+        for r in self.rows:
+            if r is not row and r.advanced_open():
+                r.set_advanced_open(False)
+
+        def show(r=row, tries=6):
+            # the row line at the TOP of the axis list: the panel under it
+            # then gets all the room there is (the list is only ~2.5 rows
+            # tall). The scroll range grows only once Qt has laid the opened
+            # panel out, so try again a few times until it reaches the row.
+            if r not in self.rows or not r.advanced_open():
+                return
+            bar = self.axis_scroll.verticalScrollBar()
+            want = max(0, r.y() - 2)
+            bar.setValue(min(bar.maximum(), want))
+            if bar.value() < want and tries > 0:
+                QtCore.QTimer.singleShot(40, lambda: show(r, tries - 1))
+        QtCore.QTimer.singleShot(0, show)
+
+    def open_advanced(self, row) -> None:
+        """Open `row`'s Advanced panel (and close any other)."""
+        row.set_advanced_open(True)
+
+    def _advanced_log(self, msg: str) -> None:
+        if self.on_log is not None:
+            self.on_log(msg)
+
+    def _zigzag_from_row(self, on: bool) -> None:
+        """A fly row's direction box IS the scan's zig-zag: one setting, two
+        places to reach it (the run pane, and the fly axis it matters most for)."""
+        if self.zigzag_box.isChecked() != bool(on):
+            self.zigzag_box.setChecked(bool(on))
+
+    def _axis_routines(self, recipe) -> list[list[str]]:
+        """Per row, the routines bound to its axis (each_sweep / before_axis /
+        after_axis naming one of its dims), as short lines for POINT."""
+        from scan_core.hooks import describe_trigger, routine_steps
+        from scan_core.recipe import _compile_axis
+        out = []
+        dims_of = []
+        try:
+            for r in self.rows:
+                ax = r.to_axis()
+                n = len(_compile_axis(ax))
+                dims_of.append(n)
+            names = [d.name for d in recipe.compile(self.registry).dims]
+        except Exception:
+            return [[] for _ in self.rows]
+        k = 0
+        for r, n in zip(self.rows, dims_of):
+            mine = set(names[k:k + n]); k += n
+            lines = []
+            for h in recipe.hooks or []:
+                if not isinstance(h, dict) or h.get("axis") not in mine or \
+                        h.get("when") not in ("each_sweep", "before_axis", "after_axis"):
+                    continue
+                what = h.get("action")
+                if what == "call":
+                    try:
+                        parts = [f"set {s[1]}" if s[0] == "set" else
+                                 f"run {s[1]}" if s[0] == "action" else s[0]
+                                 for s in routine_steps(h.get("args") or {})]
+                        what = ", ".join(parts) or "call"
+                    except ValueError:
+                        what = "call"
+                trig = (describe_trigger(h) if h.get("when") == "each_sweep"
+                        else f"{h['when'].replace('_', ' ')} {h.get('axis')}")
+                lines.append(f"{trig}: {what}")
+            out.append(lines)
+        return out
 
     def _add_selected_fixed(self):
         it = self.set_tree.currentItem()
@@ -4582,28 +5430,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 continue
             if ax.get("type") in ("linear", "fly"):
                 self.add_axis(pid)
-                row = self.rows[-1]
-                if "start" in ax: row.start.setValue(float(ax["start"]))
-                if "stop" in ax: row.stop.setValue(float(ax["stop"]))
-                if ax.get("num"): row.num.setValue(int(ax["num"]))
-                if ax.get("type") == "fly":
-                    sp = ax.get("speed_param")
-                    if sp and self.registry.get(sp) is None:
-                        missing.append(sp)
-                    row.fly.setChecked(True)
-                    if ax.get("move"):
-                        i = row.move_box.findData(ax["move"])
-                        if i >= 0:
-                            row.move_box.setCurrentIndex(i)
-                        else:
-                            missing.append(ax["move"])
-                    if ax.get("speed") is not None:
-                        row.speed.setValue(float(ax["speed"]))
-                    if (ax.get("readback") or ax.get("lag_correction") is False
-                            or ax.get("timeout_s") or (sp and row.speed_param is not None
-                                                       and sp != row.speed_param.id)):
-                        # options the row has no box for: keep the axis as it was
-                        row.raw = dict(ax)
+                # every fly option has its box in Advanced now (the speed
+                # knob, readback, lag correction, row timeout ...), so a fly
+                # axis is no longer passed through as raw to keep them
+                missing += self.rows[-1].load_axis(ax)
             else:
                 # raster/zip/array: keep as a pass-through row on the first member
                 self.add_axis(pid, raw=ax)
@@ -4634,6 +5464,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                             row.scout_step.setValue(int(axes[hits[0]]))
                         except (TypeError, ValueError):
                             pass
+                        # the margin is per axis, on the row (Advanced > SCOUT)
+                        row.set_scout_margin(block.get("margin", "auto"))
                 ticked = {n for r in self.rows if r.is_scout() for n in r.scout_dims()}
                 missing += [f"scout axis {n}" for n in axes if n not in ticked]
             elif block:
@@ -4681,6 +5513,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._sync_window_card()
         self._sync_scout_section()
         recipe = self.build_recipe()
+        zig = self.zigzag_box.isChecked()
+        for row, lines in zip(self.rows, self._axis_routines(recipe)):
+            row.set_zigzag(zig)               # a fly row's direction box
+            row.set_axis_routines(lines)      # POINT: routines on this axis
         errs = recipe.validate(self.registry)
         conditions = ("   ·   " + ", ".join(
             f"{r.param.label} = {r.value():g}{(' ' + r.param.unit) if r.param.unit else ''}"
@@ -4805,7 +5641,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         ks = [names.index(n) for n in axes if n in names]
         outer = names[:min(ks)] if ks else []
         fly = any(r.is_fly() for r in self.rows)
-        self.scout_section.set_axes(axes, outer, fly)
+        margins = {}
+        for row in self.rows:
+            if row.is_scout():
+                margins.update(row.scout_margins())
+        self.scout_section.set_axes(axes, outer, fly,
+                                    {n: margins.get(n, "auto") for n in axes})
 
     def _sync_window_card(self) -> None:
         """Offer the resonance window for the TICKED detectors that support it."""

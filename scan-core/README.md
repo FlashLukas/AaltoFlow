@@ -465,8 +465,10 @@ the samples are averaged per pixel. The result is the same regular grid a
 stepped scan gives -- same coordinates, same file -- built from where the stage
 really was.
 
-In the Scan Builder, tick **fly** on the innermost axis and give a speed; `pts`
-become pixels. In a recipe:
+In the Scan Builder, open **Advanced** on the innermost axis row and tick
+**fly this axis** in its FLY group; give a speed, and `pts` become pixels. The
+same group holds the speed knob, the direction (one-way or zig-zag), the row
+timeout, the lag correction and the readback. In a recipe:
 
 ```yaml
 axes:
@@ -667,8 +669,9 @@ read the same way. An old recipe's `mask:` block still loads: it is translated
 to `scout:` (its margin in the axes' unit becomes grid points), and only
 `scout:` is written.
 
-**In the Scan Builder:** tick **scout** on each axis row to scout, with its
-step ("every"). The **SCOUT PASS** line at the bottom of the axis stack is
+**In the Scan Builder:** open **Advanced** on each axis row to scout and tick
+**scout this axis** in its SCOUT group, with its coarse step and its own
+margin (auto = half that step). The **SCOUT PASS** line at the bottom of the axis stack is
 always there. Click it to open the options and a preview of the points the
 scout will visit (or, for a file, **Preview mask**). The summary shows the
 scout's points and its time. How many points follow is "decided by the
@@ -678,6 +681,34 @@ its points, and afterwards the threshold used and the number of points kept
 stay in the status line.
 
 ![the scout pass on the Scan tab](../front-panels/suite-scout-scan.png)
+
+### Advanced axis settings
+
+Each axis row shows only what you edit all the time: the parameter, from, to
+and pts. Everything else about the axis sits behind its **Advanced** button,
+which opens a panel under the row (one row at a time):
+
+- **FLY**: fly this axis, its speed and speed knob, the stage that moves it
+  (for a measured coordinate), the direction, the row timeout, the lag
+  correction and the readback;
+- **SCOUT**: scout this axis, its coarse step and its margin in grid points;
+- **POINT**: the axis's name in the data file, and the routines bound to it
+  (edited under ROUTINES > THROUGHOUT).
+
+**Copy from axis...** takes the fly and scout settings of another row, except
+what does not fit (a speed in um/s onto an axis in deg, fly onto an axis that
+is not streamed); the skipped parts are named in the panel and in the log.
+**Reset** goes back to plain stepping. Anything that is not the default shows
+as an amber tag on the row ("fly 60 um/s", "zig-zag", "scout x3"), so a closed
+panel hides nothing.
+
+The data file carries these settings on each axis's coordinate as well as in
+`recipe_json`: `fly`, `fly_speed`, `fly_speed_units`, `fly_speed_param`,
+`fly_move`, `fly_readback`, `fly_lag_correction`, `fly_timeout_s`,
+`fly_zigzag`, `scout_every`, `scout_margin` (`auto`) and
+`scout_margin_points`. Only what is set is written.
+
+![an axis row's Advanced panel](../front-panels/suite-axis-advanced.png)
 
 **Limits:** something narrower than about one coarse step can fall between the
 scout's points, so use a smaller step for it. A fly axis cannot be combined

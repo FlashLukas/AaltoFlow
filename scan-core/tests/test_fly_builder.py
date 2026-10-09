@@ -1,4 +1,5 @@
-"""The fly option in the Scan Builder: a checkbox on an axis row.
+"""The fly option in the Scan Builder: "fly this axis" in the row's Advanced
+panel (FLY group; it was a tick on the row itself until 2026-10-09).
 
 Ticked, the row becomes a `type: fly` axis with a speed (and the module's
 speed knob, found by name), `pts` read as pixels, and the summary estimates
@@ -45,6 +46,7 @@ def _fly_row(builder, pid="pos_x", speed=40.0):
     row.start.setValue(-10.0)
     row.stop.setValue(10.0)
     row.num.setValue(21)
+    builder.open_advanced(row)                 # FLY lives in Advanced now
     row.fly.setChecked(True)
     row.speed.setValue(speed)
     return row
@@ -52,8 +54,10 @@ def _fly_row(builder, pid="pos_x", speed=40.0):
 
 def test_ticking_fly_makes_a_fly_axis_with_the_speed_knob(builder):
     row = _fly_row(builder)
-    assert row.fly.isEnabled() and row.speed.isVisibleTo(row)
+    assert row.fly.isEnabled() and row.speed.isEnabled()
+    assert row.advanced.isVisibleTo(row) and row.speed.isVisibleTo(row)
     assert row.num_lbl.text() == "pixels"
+    assert "fly 40 um/s" in row.tag_texts()
     ax = builder.build_recipe().axes[-1]
     assert ax == {"type": "fly", "param": "pos_x", "start": -10.0, "stop": 10.0,
                   "num": 21, "speed": 40.0, "speed_param": "stage_speed"}
@@ -61,7 +65,9 @@ def test_ticking_fly_makes_a_fly_axis_with_the_speed_knob(builder):
     assert "row(s)" in builder.detail.text()
     row.fly.setChecked(False)
     assert builder.build_recipe().axes[-1]["type"] == "linear"
-    assert row.num_lbl.text() == "pts" and not row.speed.isVisibleTo(row)
+    # the box stays where it is (greyed), so nothing moves under the mouse
+    assert row.num_lbl.text() == "pts" and not row.speed.isEnabled()
+    assert not any(t.startswith("fly") for t in row.tag_texts())
 
 
 def test_fly_is_offered_only_where_the_position_is_streamed(builder):
@@ -121,8 +127,9 @@ def test_a_measured_coordinate_gets_a_move_with_box(builder):
     builder.add_axis("camera.laser_x")
     row = builder.rows[-1]
     assert row.move_choices == ["kim.position_x", "kim.position_y"]
+    builder.open_advanced(row)
     row.fly.setChecked(True)
-    assert row.move_box.isVisibleTo(row)
+    assert row.move_box.isVisibleTo(row) and row.move_box.isEnabled()
     row.move_box.setCurrentIndex(1)            # the rig's camera is rotated 90 deg
     row.speed.setValue(3.0)
     ax = builder.build_recipe().axes[-1]

@@ -548,3 +548,86 @@ def _compile_axis(ax: dict) -> list[Dim]:
         return [xdim, ydim] if fast == "y" else [ydim, xdim]
 
     raise ValueError(f"unknown axis type {t!r}")
+
+
+# ─────────────────────── per-axis settings, in the file ───────────────────────
+
+def axis_attrs(recipe, units=None) -> dict:
+    """{dimension name: {attribute: value}} -- each axis's ADVANCED settings
+    (fly, scout), to be put on its coordinate in the data file.
+
+    The whole recipe is in every file already (`recipe_json`), but a JSON blob
+    is not what anyone reads in ncdump, MATLAB or Igor. "Was this row flown,
+    and how fast?" should be answerable from the coordinate itself, next to
+    its units. Only what is SET is written: a plain stepped axis gets nothing,
+    so files of ordinary scans look exactly as before.
+
+    `units(pid) -> str` gives a parameter's unit (the engine passes the
+    registry's); without it the speed unit is left out.
+
+    netCDF attributes cannot be booleans, so on/off is written as 1/0 -- except
+    `fly`, which the fly engine has always written as the string "true" and
+    readers already test for.
+    """
+    out: dict = {}
+    units = units or (lambda _pid: "")
+    for ax in getattr(recipe, "axes", None) or []:
+        if not isinstance(ax, dict) or ax.get("type") != "fly":
+            continue
+        try:
+            a = {"fly": "true", "fly_speed": float(ax["speed"])}
+        except (KeyError, TypeError, ValueError):
+            continue                      # validate() reports a bad fly axis
+        moving = ax.get("move") or ax.get("param")
+        unit = units(moving) if moving else ""
+        if unit:
+            # the speed is in the MOVING stage's unit per second (the stage
+            # named by `move`, when the grid is in someone else's coordinates)
+            a["fly_speed_units"] = f"{unit}/s"
+        if ax.get("speed_param"):
+            a["fly_speed_param"] = str(ax["speed_param"])
+        if ax.get("move"):
+            a["fly_move"] = str(ax["move"])
+        if ax.get("readback"):
+            a["fly_readback"] = str(ax["readback"])
+        a["fly_lag_correction"] = int(ax.get("lag_correction", True) is not False)
+        if ax.get("timeout_s"):
+            a["fly_timeout_s"] = float(ax["timeout_s"])
+        # zig-zag is scan-wide in the recipe; on a fly row it decides whether
+        # every other row was flown backwards, so it belongs here too
+        a["fly_zigzag"] = int(bool(getattr(recipe, "zigzag", False)))
+        out.setdefault(ax.get("name") or ax.get("param"), {}).update(a)
+    block = getattr(recipe, "scout", None)
+    if isinstance(block, dict) and block:
+        from .scout import spec_of
+        try:
+            spec = spec_of(block)
+        except Exception:
+            spec = None
+        axes = spec.get("axes") if spec else None
+        if isinstance(axes, dict):
+            m = spec["margin"]
+            measured = not spec["from"]
+            for name, step in axes.items():
+                a = out.setdefault(name, {})
+                try:
+                    k = int(step)
+                except (TypeError, ValueError):
+                    continue
+                if measured:
+                    # a picture or an earlier scan is not looked at every k-th
+                    # point: its own pitch sets the grid, so no `every` then
+                    a["scout_every"] = k
+                v = m.get(name, "auto") if isinstance(m, dict) else m
+                if v == "auto":
+                    a["scout_margin"] = "auto"
+                    if measured:
+                        # what auto amounts to (scout.margin_radii): half the
+                        # coarse step, in grid points
+                        a["scout_margin_points"] = 0.5 * k
+                else:
+                    try:
+                        a["scout_margin_points"] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+    return {k: v for k, v in out.items() if v}

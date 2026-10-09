@@ -1245,6 +1245,16 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                 "units": "", "long_name": "repeat number (0 = first)",
                 "repeat_mode": d.mode or "keep",
                 **({"interval_s": float(d.interval_s)} if d.interval_s else {})})
+    # Each axis's ADVANCED settings (fly speed, scout step and margin ...) on
+    # its own coordinate, so a reader sees them without parsing recipe_json.
+    # Never allowed to cost the data: a problem here only loses the labels.
+    try:
+        from .recipe import axis_attrs
+        for name, extra_a in axis_attrs(recipe, lambda pid: _units(registry, pid)).items():
+            if name in coords:
+                coords[name][2].update(extra_a)
+    except Exception:
+        pass
     # zip / raster secondary members ride along as extra (non-index) coords
     for d in dims:
         for pid, vals in d.params[1:]:

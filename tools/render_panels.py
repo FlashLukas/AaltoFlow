@@ -110,6 +110,8 @@ SIZES = {
     "suite-fly": (1500, 950),
     "suite-scout-scan": (1500, 950),
     "suite-scout": (1500, 950),
+    "suite-axis-advanced": (1500, 950),
+    "suite-axis-advanced-scout": (1500, 950),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
 }
@@ -556,6 +558,34 @@ def _scout_scan(win):
     if b.registry.get("rf_power") is not None:
         sec.add_scout_setting("rf_power", 12.0)
     sec.set_expanded(True)
+    b._rebuild_summary()
+
+
+def _axis_advanced(win):
+    """The Advanced panel of an axis row opened in place (2026-10-09): the
+    fly row of the fly pose, its FLY group filled in (speed, knob, zig-zag),
+    the amber tags on the row, and the rows below pushed down."""
+    _fly(run=False)(win)
+    b = win.builder
+    row = b.rows[1]
+    row.timeout_auto.setChecked(False)
+    row.timeout_spin.setValue(300.0)
+    b.open_advanced(row)
+    b._rebuild_summary()
+
+
+def _axis_advanced_scout(win):
+    """The scout pose with the Advanced panel of Position X open: the SCOUT
+    group with a margin of its own (per axis since 2026-10-09), and the tags
+    'scout x3' on both scouted rows. The Scout pass section stays closed, so
+    the panel has the room of the axis list."""
+    _scout_scan(win)
+    b = win.builder
+    b.scout_section.set_expanded(False)
+    row = next(r for r in b.rows if r.param.id == "pos_x")
+    row.margin_auto.setChecked(False)
+    row.margin_spin.setValue(2.0)
+    b.open_advanced(row)
     b._rebuild_summary()
 
 
@@ -1397,6 +1427,8 @@ TARGETS = {
     "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
     "suite-scout-scan": _suite("Scan", _scout_scan, settle=2.0),
     "suite-scout": _suite("Measurement", _scout_run, settle=3.0),
+    "suite-axis-advanced": _suite("Scan", _axis_advanced, settle=2.0),
+    "suite-axis-advanced-scout": _suite("Scan", _axis_advanced_scout, settle=2.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,
