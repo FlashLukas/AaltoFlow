@@ -17,6 +17,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
+from datetime import datetime
 
 import numpy as np
 import xarray as xr
@@ -1335,7 +1336,9 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         name=recipe.name,
         comment=recipe.comment,
         recipe_json=recipe.to_json(),
-        created=created_iso or "",
+        # a script calling run() without created_iso still gets a timestamp
+        # (it was "" -- lab, 2026-10-09); the GUI and the server pass their own
+        created=created_iso or datetime.now().isoformat(timespec="seconds"),
         n_points=int(compiled.n_points),
         seconds=float(seconds),
         dims=",".join(dim_names),

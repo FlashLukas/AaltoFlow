@@ -523,12 +523,29 @@ def otsu(values) -> float:
         mu1 = (m0[-1] - m0) / w1
         between = w0 * w1 * (mu0 - mu1) ** 2
     between = np.nan_to_num(between, nan=-1.0)[:-1]
-    # Every cut inside an EMPTY gap separates the two groups equally well, and
-    # argmax alone would take the first of them -- right at the top of the
-    # lower group's noise, where its next reading crosses. Take the MIDDLE of
-    # the tied cuts: half way across the gap.
-    best = np.flatnonzero(between >= between.max() * (1 - 1e-12))
+    # Every cut inside the GAP between the two groups separates them almost
+    # equally well: the score is FLAT there. argmax alone picks one of those
+    # cuts by the noise of this particular scout, so two scouts of the same
+    # area gave 0.0073 and 0.0084 mW and the mask moved by ~20 rim points
+    # (lab rig, 2026-10-09). Take the MIDDLE of every cut within OTSU_FLAT of
+    # the best score instead: half way across the gap, and the same answer
+    # for two scouts that agree to a percent.
+    best = np.flatnonzero(between >= between.max() * (1 - OTSU_FLAT))
     return float(0.5 * (edges[best[0] + 1] + edges[best[-1] + 1]))
+
+
+#: cuts scoring within this fraction of Otsu's best count as "as good" (see otsu)
+OTSU_FLAT = 0.01
+
+
+def background_fraction(values, median, half_width) -> float:
+    """The share of the readings that `deviates` calls BACKGROUND
+    (|value - median| <= half_width)."""
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return 1.0
+    return float(np.mean(np.abs(v - median) <= half_width))
 
 
 def threshold_of(spec: dict, values) -> float:
@@ -678,7 +695,13 @@ def decide(spec, source, fine_values):
         thr = float(spec["k"]) * noise
         with np.errstate(invalid="ignore"):
             inside = np.abs(fine_values - med) > thr
-        return inside, thr, {"median": med, "noise": noise}
+        # `deviates` assumes the BACKGROUND is most of what the scout saw: the
+        # median sits in it and its scatter sets the noise. On the rig
+        # (2026-10-09) dark film was just over half the scout -- it worked,
+        # but a bit more bright area would have flipped the median and the
+        # scan would have measured the dark film. Say so when it is close.
+        return inside, thr, {"median": med, "noise": noise,
+                             "background": background_fraction(source, med, thr)}
     thr = threshold_of(spec, source)
     with np.errstate(invalid="ignore"):
         inside = fine_values > thr if keep == "above" else fine_values < thr
@@ -1032,6 +1055,11 @@ class ScoutRunner:
                f" ({spec['k']:g} x noise {res.info['noise']:.3g})"
                if spec["keep"] == "deviates"
                else f"threshold {res.threshold:.6g}{(' ' + unit) if unit else ''}, keep {spec['keep']}")
+        bg = res.info.get("background")
+        if bg is not None and bg < 0.6:
+            ctx["log_fn"](f"scout{where}: WARNING -- only {100 * bg:.0f} % of the scout looks "
+                          f"like background; `deviates` assumes it is most of it. If the "
+                          f"mask picked the wrong side, use keep above or below")
         radii = margin_radii(spec, self.names, self._source_steps(coarse))
         ctx["log_fn"](f"scout{where}: {how}, margin "
                       f"{', '.join(f'{r:g}' for r in radii)} pts -> {n_keep} of {n_all} "
@@ -1040,9 +1068,15 @@ class ScoutRunner:
         attrs["mask_points"] = f"{self.kept} of {self.decided}"
         if not self.each:
             attrs["mask_threshold"] = float(res.threshold)
+        # what mask_threshold MEANS: a level (above / below) or, for deviates,
+        # the half-width around the median -- a reader must not compare the
+        # two (lab, 2026-10-09)
+        attrs["mask_threshold_kind"] = "deviation" if spec["keep"] == "deviates" else "level"
         if res.info:
             attrs["mask_median"] = float(res.info["median"])
             attrs["mask_noise"] = float(res.info["noise"])
+            if not self.each:
+                attrs["mask_deviation"] = float(res.threshold)
         attrs["mask_margin_points"] = json.dumps(dict(zip(self.names, radii)))
         length = self._margin_length(radii)
         if length is not None:

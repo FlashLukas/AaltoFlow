@@ -430,3 +430,32 @@ def test_the_example_recipes_run(name):
     ds = run(r, reg)
     keep = ds.scan_mask.values.astype(bool)
     assert 0 < keep.sum() < 0.5 * keep.size
+
+
+# ---- rig findings 2026-10-09 ---------------------------------------------------
+
+def test_otsu_takes_the_middle_of_the_flat_gap():
+    """Two scouts of the same area agreeing to ~1 % gave Otsu thresholds
+    0.0073 and 0.0084 mW: the score is flat across the gap. The middle of the
+    near-best cuts is stable."""
+    import numpy as np
+    from scan_core import scout as S
+    rng = np.random.default_rng(1)
+    dark = rng.normal(0.0035, 0.0002, 300)
+    bright = rng.normal(0.012, 0.0005, 300)
+    rim = np.linspace(0.005, 0.010, 12)          # a few readings in the gap
+    a = S.otsu(np.r_[dark, bright, rim])
+    b = S.otsu(np.r_[dark * 1.01, bright * 0.99, rim[::-1] * 1.005])
+    assert abs(a - b) < 0.0004                    # was ~0.001 apart on the rig
+    assert 0.006 < a < 0.009
+
+
+def test_deviates_warns_when_the_background_is_not_the_majority():
+    import numpy as np
+    from scan_core import scout as S
+    v = np.r_[np.full(45, 1.0), np.full(55, 5.0)] + np.random.default_rng(2).normal(0, 0.01, 100)
+    med, noise = S.robust_noise(v)
+    assert S.background_fraction(v, med, 4 * noise) < 0.6
+    v2 = np.r_[np.full(85, 1.0), np.full(15, 5.0)] + np.random.default_rng(3).normal(0, 0.01, 100)
+    med2, noise2 = S.robust_noise(v2)
+    assert S.background_fraction(v2, med2, 4 * noise2) > 0.6
