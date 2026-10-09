@@ -210,13 +210,15 @@ def test_copy_from_a_compatible_axis(builder):
 def test_copy_skips_what_does_not_fit_and_says_so(builder):
     logged = []
     builder.on_log = logged.append
-    builder.add_axis("rf_freq")
+    builder.add_axis("pos_z")
     builder.add_axis("pos_x")
     f, x = builder.rows
     x.fly.setChecked(True); x.speed.setValue(5.0)
     x.scout.setChecked(True); x.scout_step.setValue(2)
     msg = f.copy_from(x)
-    assert not f.is_fly()                              # a frequency does not stream
+    # pos_z neither streams nor sweeps (the sim's rf_freq SWEEPS since
+    # 2026-10-09, so it can fly: tests/test_fly_ramp_builder.py)
+    assert not f.is_fly()
     assert "skipped: fly" in msg
     assert f.is_scout() and f.scout_step.value() == 2  # the scout fits any axis
     assert logged and logged[-1] == msg

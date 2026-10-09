@@ -112,6 +112,7 @@ SIZES = {
     "suite-scout": (1500, 950),
     "suite-axis-advanced": (1500, 950),
     "suite-axis-advanced-scout": (1500, 950),
+    "suite-axis-advanced-ramp": (1500, 950),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
 }
@@ -585,6 +586,36 @@ def _axis_advanced_scout(win):
     row = next(r for r in b.rows if r.param.id == "pos_x")
     row.margin_auto.setChecked(False)
     row.margin_spin.setValue(2.0)
+    b.open_advanced(row)
+    b._rebuild_summary()
+
+
+def _axis_advanced_ramp(win):
+    """A FIELD axis flown (2026-10-09): the frequency steps, the magnet's
+    field is SWEPT by its module each row (the simulator's field has a ramp
+    block, as clMag's does). Its FLY group shows what a ramp needs -- the
+    pace in mT/s from the ramp's limits, the row-time alternative, "binned by
+    measurement" -- and none of a stage's boxes (no speed knob, no readback)."""
+    from PySide6 import QtCore
+    win.use_simulator()
+    b = win.builder
+    b.name_edit.setText("FMR map, field flown")
+    b.name_edit.setCursorPosition(0)
+    b.add_fixed("pos_x", 30.0)
+    b.add_fixed("pos_y", 50.0)
+    b.add_axis("rf_freq")
+    b.rows[0].start.setValue(700.0); b.rows[0].stop.setValue(1300.0)
+    b.rows[0].num.setValue(21)
+    b.add_axis("field")
+    row = b.rows[1]
+    row.start.setValue(10.0); row.stop.setValue(90.0); row.num.setValue(41)
+    row.fly.setChecked(True)
+    row.speed.setValue(30.0)
+    b.zigzag_box.setChecked(True)
+    for it in b._det_items():
+        it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole)
+                         == "lockin_r" else QtCore.Qt.Unchecked)
+    b.per_pt.setValue(0.05)
     b.open_advanced(row)
     b._rebuild_summary()
 
@@ -1429,6 +1460,7 @@ TARGETS = {
     "suite-scout": _suite("Measurement", _scout_run, settle=3.0),
     "suite-axis-advanced": _suite("Scan", _axis_advanced, settle=2.0),
     "suite-axis-advanced-scout": _suite("Scan", _axis_advanced_scout, settle=2.0),
+    "suite-axis-advanced-ramp": _suite("Scan", _axis_advanced_ramp, settle=2.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,

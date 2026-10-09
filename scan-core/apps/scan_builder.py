@@ -355,7 +355,7 @@ class AxisRow(_StackRow):
     #: the keys of a linear / fly axis the row models; anything else a loaded
     #: axis carries is kept in `extra` and written back unchanged
     MODELLED = {"type", "param", "start", "stop", "num", "step", "speed",
-                "speed_param", "move", "readback", "lag_correction", "timeout_s",
+                "row_time_s", "speed_param", "move", "readback", "lag_correction", "timeout_s",
                 "name"}
 
     def __init__(self, param, level_getter, speed_param=None, move_choices=(),
@@ -467,27 +467,65 @@ class AxisRow(_StackRow):
         self.move_choices = list(move_choices or [])
         self._speed_lookup = speed_lookup or (lambda _id: None)
         self._knob_objs: dict = {}
-        self.streams = getattr(self.param, "stream", None) is not None
+        #: the module records this value continuously (a stage position, a
+        #: camera coordinate): a fly row can be binned by it
+        self.streamed = getattr(self.param, "stream", None) is not None
+        #: the module can SWEEP this knob itself at a set pace (a `ramp` block
+        #: in describe: clMag's field, dssg's frequency -- scan_core/ramp.py).
+        #: Such a knob can be flown even when nothing streams it: the ramp
+        #: brings its own record (the Hall probe, or the values it sent).
+        self.ramp = getattr(self.param, "ramp", None)
+        #: either way this axis can fly
+        self.streams = self.streamed or self.ramp is not None
         self.fly_group, g = self.advanced.add_group("FLY")
 
         self.fly = QtWidgets.QCheckBox("fly this axis")
         self.fly.setEnabled(self.streams)
         self.fly.setToolTip(
+            (f"FLY: the module sweeps {self.param.label} continuously from\n"
+             "'from' to 'to' at the pace given, the detectors recording all\n"
+             "the way; the samples are then averaged per pixel. Innermost axis\n"
+             "only; every detector must be one its module can stream.")
+            if self.ramp is not None else
             "FLY: move continuously from 'from' to 'to' at the speed given,\n"
             "recording the detectors and the MEASURED position all the way,\n"
             "then average the samples per pixel. Innermost axis only; every\n"
             "detector must be one its module can stream."
             if self.streams else
-            f"{self.param.label} cannot be flown: its module does not record\n"
-            f"the position continuously (no stream in its describe).")
+            f"{self.param.label} cannot be flown: this knob can neither stream\n"
+            f"nor sweep (no stream and no ramp block in its module's describe):\n"
+            f"step it.")
         self.speed = QtWidgets.QDoubleSpinBox()
         self.speed.setDecimals(3)
         self.speed.setFixedWidth(84)
         self.speed_lbl = _muted("")
+        # ROW TIME: the other way to give the pace. A physicist often knows
+        # "one field sweep should take a minute" better than "x mT/s"; the
+        # engine turns row_time_s into the pace (flyscan.fly_rate). Exactly
+        # one of speed / row time is written -- or neither, for a knob whose
+        # module has a default sweep rate.
+        self.row_time = QtWidgets.QDoubleSpinBox()
+        self.row_time.setRange(0.1, 1e6); self.row_time.setDecimals(1)
+        self.row_time.setSuffix(" s"); self.row_time.setValue(60.0)
+        self.row_time.setFixedWidth(84)
+        self.row_time.setToolTip("How long ONE row (from 'from' to 'to', half a pixel\n"
+                                 "past each end) should take; the pace follows.")
+        self.pace_box = QtWidgets.QComboBox()
+        self.pace_box.setToolTip(
+            "speed: the pace in the knob's unit per second.\n"
+            "row time: how long one row takes; the pace follows from the span.\n"
+            "module default: the sweep rate the module declares (written as\n"
+            "neither, so the module's own default is used).")
         sp_box = QtWidgets.QHBoxLayout(); sp_box.setSpacing(4)
-        sp_box.addWidget(self.speed); sp_box.addWidget(self.speed_lbl)
+        sp_box.addWidget(self.speed); sp_box.addWidget(self.row_time)
+        sp_box.addWidget(self.speed_lbl)
+        self.row_time.hide()
 
         self.move_box = QtWidgets.QComboBox()
+        if self.ramp is not None and self.move_choices:
+            # a knob the module sweeps itself: its own ramp comes first; a
+            # stage flying it in these coordinates is still offered
+            self.move_box.addItem("(its module sweeps it)", None)
         for mid in self.move_choices:
             self.move_box.addItem(mid, mid)
         self.move_box.setToolTip(
@@ -551,24 +589,39 @@ class AxisRow(_StackRow):
             "itself; another streamed position in the same unit if that is the\n"
             "better measurement (a sensor rather than a step counter).")
 
+        # What the samples of a row are sorted into pixels by. "measurement":
+        # a value the instrument MEASURED while moving (a stage's position, a
+        # Hall probe); "command": only what was SENT, with its time stamp (a
+        # generator cannot report its frequency mid-sweep). A reader of the
+        # data must be able to tell the two apart, so it is shown here, on
+        # the row's tag and in the file (fly_binned_by).
+        self.binned_lbl = _muted("", small=True)
+        self.binned_lbl.setToolTip(
+            "binned by measurement: each sample is placed by the value the\n"
+            "instrument MEASURED at that moment.\n"
+            "binned by command: by the value the module SENT at that moment --\n"
+            "right when the instrument follows its commands quickly.")
         self.fly_hint = _muted("", small=True)
         self.fly_hint.setWordWrap(True)
+        self.knob_lbl = _muted("speed knob")
+        self.readback_lbl = _muted("readback")
         g.addWidget(self.fly, 0, 0, 1, 2)
-        g.addWidget(_muted("speed"), 0, 2); g.addLayout(sp_box, 0, 3)
-        g.addWidget(_muted("speed knob"), 1, 0); g.addWidget(self.knob_box, 1, 1)
+        g.addWidget(self.pace_box, 0, 2); g.addLayout(sp_box, 0, 3)
+        g.addWidget(self.knob_lbl, 1, 0); g.addWidget(self.knob_box, 1, 1)
         g.addWidget(self.move_lbl, 1, 2); g.addWidget(self.move_box, 1, 3)
         g.addWidget(_muted("direction"), 2, 0); g.addWidget(self.dir_box, 2, 1)
         g.addWidget(_muted("row timeout"), 2, 2); g.addLayout(to_box, 2, 3)
         g.addWidget(self.lag_box, 3, 0, 1, 2)
-        g.addWidget(_muted("readback"), 3, 2); g.addWidget(self.readback_box, 3, 3)
-        g.addWidget(self.fly_hint, 4, 0, 1, 4)
+        g.addWidget(self.readback_lbl, 3, 2); g.addWidget(self.readback_box, 3, 3)
+        g.addWidget(self.binned_lbl, 4, 0, 1, 4)
+        g.addWidget(self.fly_hint, 5, 0, 1, 4)
         if not self.move_choices:
             # a stage flies itself: nothing to choose
             self.move_lbl.setText("")
             self.move_box.hide()
         if not self.streams:
-            self.fly_hint.setText("Cannot fly: its module does not record this "
-                                  "position continuously.")
+            self.fly_hint.setText("Cannot fly: this knob can neither stream nor "
+                                  "sweep -- step it.")
         else:
             self.fly_hint.hide()
 
@@ -576,6 +629,10 @@ class AxisRow(_StackRow):
         self._default_knob = speed_param.id if speed_param is not None else None
         if speed_param is not None:
             self._knob_objs[speed_param.id] = speed_param
+        #: which way this row flies now: "ramp" (its module sweeps it) or
+        #: "stage" (a position moving at a speed of its own) -- None until set
+        self._path = None
+        self._fill_pace("speed")
         self._fill_knobs(self._default_knob)
         current = float("nan")
         if speed_param is not None:
@@ -583,9 +640,8 @@ class AxisRow(_StackRow):
                 current = float(speed_param.get())
             except Exception:
                 pass
-        lo, hi = self.speed.minimum(), self.speed.maximum()
-        self.speed.setValue(current if math.isfinite(current) and current > 0
-                            else min(max(1.0, lo), hi))
+        self._stage_speed0 = current
+        self._sync_path()                        # sets the speed box's default
         self._default_speed = self.speed.value()
         if self.move_choices:
             self.move_box.currentIndexChanged.connect(lambda *_: self._move_changed())
@@ -593,16 +649,129 @@ class AxisRow(_StackRow):
         self.knob_box.currentIndexChanged.connect(lambda *_: self._knob_changed())
         self.fly.toggled.connect(self._fly_toggled)
         self.speed.valueChanged.connect(lambda *_: self.changed.emit())
+        self.row_time.valueChanged.connect(lambda *_: self.changed.emit())
+        self.pace_box.currentIndexChanged.connect(lambda *_: self._pace_changed())
         self.timeout_auto.toggled.connect(lambda *_: self._fly_toggled(self.is_fly()))
         self.timeout_spin.valueChanged.connect(lambda *_: self.changed.emit())
         self.lag_box.toggled.connect(lambda *_: self.changed.emit())
-        self.readback_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        self.readback_box.currentIndexChanged.connect(lambda *_: self._readback_changed())
+
+    def _readback_changed(self) -> None:
+        # another measured value to bin by makes a ramp "binned by measurement"
+        self.binned_lbl.setText(f"binned by {self.binned_by()}")
+        self.changed.emit()
 
     def _moving_id(self) -> str:
         return self.move_param() or self.param.id
 
+    def is_ramp(self) -> bool:
+        """True when this row flies by its MODULE'S SWEEP (a `ramp` block),
+        not as a stage. The engine decides the same way (flyscan.ramp_of): a
+        knob with a ramp block flown with a 'move with' stage takes the stage
+        path, because the recipe asked for that mechanism by name."""
+        return self.ramp is not None and not self.move_param()
+
+    def binned_by(self) -> str:
+        """What the samples will be sorted into pixels by: "measurement" or
+        "command" -- the engine's rule (flyscan.fly_sweep): a stage flies by
+        its measured position; a ramp by its own readback, unless a readback
+        override names another measured value."""
+        if not self.is_ramp() or self.readback_box.currentData():
+            return "measurement"
+        return self.ramp.binned_by
+
+    def pace(self) -> str:
+        """How the pace is given: "speed", "row_time" or "default"."""
+        return self.pace_box.currentData() or "speed"
+
+    def _fill_pace(self, select: str) -> None:
+        """The pace choices this row offers. "module default" only for a knob
+        whose module sweeps it AND declares a default rate: a stage has none
+        (a fly row there must say how fast)."""
+        items = [("speed", "speed"), ("row time", "row_time")]
+        if self.is_ramp() and self.ramp.rate_default is not None:
+            items.append(("module default", "default"))
+        self.pace_box.blockSignals(True)
+        self.pace_box.clear()
+        for text, key in items:
+            self.pace_box.addItem(text, key)
+        i = self.pace_box.findData(select)
+        self.pace_box.setCurrentIndex(i if i >= 0 else 0)
+        self.pace_box.blockSignals(False)
+
+    def set_pace(self, mode: str) -> None:
+        """Choose how the pace is given ("speed" / "row_time" / "default")."""
+        i = self.pace_box.findData(mode)
+        if i >= 0:
+            self.pace_box.setCurrentIndex(i)
+
+    def _pace_changed(self) -> None:
+        self._update_pace_widgets()
+        self.changed.emit()
+
+    def _update_pace_widgets(self) -> None:
+        """Show the box of the chosen pace; the unit label says what it means."""
+        mode = self.pace()
+        on = self.is_fly() and self.streams
+        self.speed.setVisible(mode == "speed")
+        self.row_time.setVisible(mode == "row_time")
+        self.speed.setEnabled(on and mode == "speed")
+        self.row_time.setEnabled(on and mode == "row_time")
+        self.pace_box.setEnabled(on)
+        if mode == "default":
+            self.speed_lbl.setText(f"{self.ramp.rate_default:g} {self.speed_unit()}")
+        elif mode == "row_time":
+            self.speed_lbl.setText("per row")
+        else:
+            self.speed_lbl.setText(self.speed_unit())
+
+    def _path_default_speed(self) -> float:
+        """The speed box's starting value: the module's default sweep rate
+        for a ramp, the stage's current speed for a stage (else 1)."""
+        lo, hi = self.speed.minimum(), self.speed.maximum()
+        if self.is_ramp():
+            v = self.ramp.rate_default
+        else:
+            v = self._stage_speed0
+            if not math.isfinite(v) and self.speed_param is not None:
+                try:
+                    v = float(self.speed_param.get())
+                except Exception:
+                    v = None
+        v = float("nan") if v is None else float(v)
+        return v if math.isfinite(v) and v > 0 else min(max(1.0, lo), hi)
+
+    def _sync_path(self) -> None:
+        """Show the boxes of the way this row flies.
+
+        A RAMP has no use for the stage's boxes: no "speed knob" (the module
+        sweeps at the rate it is given; naming a knob would even make the
+        engine take the stage path), and no readback override unless the knob
+        is itself streamed (the ramp brings its own record). The speed box
+        takes the ramp's rate unit, limits and default."""
+        path = "ramp" if self.is_ramp() else "stage"
+        changed = path != self._path
+        self._path = path
+        ramp = path == "ramp"
+        self.knob_lbl.setVisible(not ramp)
+        self.knob_box.setVisible(not ramp)
+        rb_show = self.streamed or self.readback_box.currentData() is not None
+        self.readback_lbl.setVisible(rb_show)
+        self.readback_box.setVisible(rb_show)
+        self._fill_pace(self.pace())
+        self._knob_changed(emit=False)           # range + unit
+        if changed:
+            self.speed.blockSignals(True)
+            self.speed.setValue(self._path_default_speed())
+            self.speed.blockSignals(False)
+        self._update_pace_widgets()
+        self.binned_lbl.setText(f"binned by {self.binned_by()}")
+
     def speed_unit(self) -> str:
-        """The fly speed's unit: the MOVING stage's unit per second."""
+        """The fly speed's unit: the ramp's rate unit when the module sweeps
+        the knob, else the MOVING stage's unit per second."""
+        if self.is_ramp():
+            return self.ramp.rate_unit or f"{self.param.unit or ''}/s"
         mid = self._moving_id()
         p = self._registry.get(mid) if self._registry is not None else None
         unit = (getattr(p, "unit", None) if p is not None else None)
@@ -659,7 +828,20 @@ class AxisRow(_StackRow):
         return self.knob_box.currentData()
 
     def _knob_changed(self, emit: bool = True) -> None:
-        """The speed box's range follows the chosen knob's limits."""
+        """The speed box's range follows the chosen knob's limits -- or, for
+        a knob its module sweeps, the ramp's rate limits."""
+        if self.is_ramp():
+            rlo, rhi = self.ramp.rate_limits
+            lo = max(0.001, rlo) if math.isfinite(rlo) else 0.001
+            hi = min(1e6, rhi) if math.isfinite(rhi) else 1e6
+            self.speed.setRange(lo, max(lo, hi))
+            self.speed.setToolTip(
+                f"The pace of the module's sweep, {self.speed_unit()}; it can sweep\n"
+                f"between {rlo:g} and {rhi:g} {self.speed_unit()}.")
+            self._update_pace_widgets()
+            if emit:
+                self.changed.emit()
+            return
         sp = self.speed_param
         lo, hi = 0.001, 1e4
         if sp is not None:
@@ -673,7 +855,7 @@ class AxisRow(_StackRow):
             if sp is not None else
             "No speed setting: the stage moves at whatever speed it has.\n"
             "This number is then only used for the time estimate.")
-        self.speed_lbl.setText(self.speed_unit())
+        self._update_pace_widgets()
         if emit:
             self.changed.emit()
 
@@ -683,6 +865,9 @@ class AxisRow(_StackRow):
         if sp is not None:
             self._knob_objs[sp.id] = sp
         self._fill_knobs(sp.id if sp is not None else None)
+        # a knob its module sweeps can also be flown by a stage: picking one
+        # (or going back to the module's own sweep) changes the boxes shown
+        self._sync_path()
         self.changed.emit()
 
     def move_param(self) -> str | None:
@@ -690,10 +875,11 @@ class AxisRow(_StackRow):
 
     def _fly_toggled(self, on):
         on = bool(on)
-        for w in (self.speed, self.move_box, self.knob_box, self.dir_box,
+        for w in (self.move_box, self.knob_box, self.dir_box,
                   self.timeout_auto, self.lag_box, self.readback_box):
             w.setEnabled(on and self.streams)
         self.timeout_spin.setEnabled(on and self.streams and not self.timeout_auto.isChecked())
+        self._update_pace_widgets()               # speed / row time / default
         self.num_lbl.setText("pixels" if on else "pts")
         self.changed.emit()
 
@@ -907,12 +1093,29 @@ class AxisRow(_StackRow):
         if self._raw is None:
             if src.is_fly():
                 if not self.streams:
-                    skipped.append("fly (this axis is not recorded continuously)")
+                    skipped.append("fly (this axis can neither stream nor sweep)")
                 else:
                     self.fly.setChecked(True)
                     copied.append("fly")
+                    # The PACE. A speed is a number in a unit -- um/s means
+                    # nothing to a field sweep -- so it is copied only when
+                    # the units match. A ROW TIME is seconds per row whatever
+                    # the knob, so it always fits.
+                    self.row_time.setValue(src.row_time.value())
+                    mode = src.pace()
                     su, tu = src.speed_unit(), self.speed_unit()
-                    if su == tu:
+                    if mode == "row_time":
+                        self.set_pace("row_time")
+                        copied.append(f"row time {src.row_time.value():g} s")
+                    elif mode == "default":
+                        if self.pace_box.findData("default") >= 0:
+                            self.set_pace("default")
+                            copied.append("the module's default rate")
+                        else:
+                            skipped.append("the module's default rate (this axis "
+                                           "has none)")
+                    elif su == tu:
+                        self.set_pace("speed")
                         self.speed.setValue(src.speed.value())
                         copied.append(f"speed {src.speed.value():g} {tu}")
                     else:
@@ -958,7 +1161,8 @@ class AxisRow(_StackRow):
 
     def reset_advanced(self) -> None:
         """Back to plain stepping."""
-        widgets = (self.fly, self.speed, self.lag_box, self.timeout_auto,
+        widgets = (self.fly, self.speed, self.row_time, self.pace_box,
+                   self.lag_box, self.timeout_auto,
                    self.timeout_spin, self.readback_box, self.scout,
                    self.scout_step, self.margin_auto, self.margin_spin,
                    self.name_edit)
@@ -967,6 +1171,8 @@ class AxisRow(_StackRow):
         try:
             self.fly.setChecked(False)
             self.speed.setValue(self._default_speed)
+            self.row_time.setValue(60.0)
+            self.pace_box.setCurrentIndex(0)          # speed
             self.lag_box.setChecked(True)
             self.timeout_auto.setChecked(True)
             self.timeout_spin.setValue(120.0)
@@ -993,7 +1199,18 @@ class AxisRow(_StackRow):
     def tag_texts(self) -> list[str]:
         out = []
         if self.is_fly():
-            out.append(f"fly {self.speed.value():g} {self.speed_unit()}")
+            mode = self.pace()
+            if mode == "row_time":
+                t = f"fly {self.row_time.value():g} s/row"
+            elif mode == "default":
+                t = f"fly {self.ramp.rate_default:g} {self.speed_unit()} (default)"
+            else:
+                t = f"fly {self.speed.value():g} {self.speed_unit()}"
+            if self.binned_by() == "command":
+                # say it on the row: a map binned by what was SENT is right
+                # only as far as the instrument followed its commands
+                t += " (by command)"
+            out.append(t)
             if self.move_param():
                 out.append(f"moves {self.move_param()}")
             if self._zigzag:
@@ -1008,7 +1225,7 @@ class AxisRow(_StackRow):
             default = (self._speed_lookup(self.move_param()) if self.move_param()
                        else None)
             default = default.id if default is not None else self._default_knob
-            if knob != default:
+            if knob != default and not self.is_ramp():
                 out.append(f"speed knob {knob or 'none'}")
         if self.is_scout():
             t = f"scout x{self.scout_step.value()}"
@@ -1134,10 +1351,19 @@ class AxisRow(_StackRow):
         if self.is_fly():
             ax = {"type": "fly", "param": self.param.id,
                   "start": self.start.value(), "stop": self.stop.value(),
-                  "num": self.num.value(), "speed": self.speed.value()}
+                  "num": self.num.value()}
+            # exactly ONE of speed / row_time_s -- or neither: the module's
+            # default rate (flyscan.fly_rate reads them in that order)
+            mode = self.pace()
+            if mode == "speed":
+                ax["speed"] = self.speed.value()
+            elif mode == "row_time":
+                ax["row_time_s"] = float(self.row_time.value())
             if self.move_param():
                 ax["move"] = self.move_param()
-            if self.speed_param_id() is not None:
+            # A speed knob only on the STAGE path: on a knob with a ramp block
+            # a `speed_param` would make the engine fly it as a stage
+            if self.speed_param_id() is not None and not self.is_ramp():
                 ax["speed_param"] = self.speed_param_id()
             if self.readback_box.currentData():
                 ax["readback"] = self.readback_box.currentData()
@@ -1176,11 +1402,25 @@ class AxisRow(_StackRow):
             else:
                 missing.append(ax["move"])
         sp = ax.get("speed_param")
+        if sp and self.is_ramp():
+            # a knob with a ramp block, flown as a STAGE by name: this row
+            # has no box for that (a ramp has no speed knob), so the key rides
+            # along unchanged -- and the engine still takes the stage path
+            self.extra["speed_param"] = sp
+            sp = None
         if sp and (self._registry is None or self._registry.get(sp) is None):
             missing.append(sp)
         self.set_speed_param(sp or None)
+        # The pace: speed, else row_time_s, else (a ramp) the module default.
+        # Read as written, so what was loaded is what is saved.
         if ax.get("speed") is not None:
+            self.set_pace("speed")
             self.speed.setValue(float(ax["speed"]))
+        elif ax.get("row_time_s") is not None:
+            self.set_pace("row_time")
+            self.row_time.setValue(float(ax["row_time_s"]))
+        elif self.pace_box.findData("default") >= 0:
+            self.set_pace("default")
         rb = ax.get("readback")
         if rb and rb != self.param.id:
             if self.readback_box.findData(rb) < 0:
@@ -5554,9 +5794,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if fly is not None:
             # A fly row is one move: its time is distance / speed, plus the
             # approach to its start (a settle, costed like one point).
+            # The registry matters: the pace may be a row time, or (a knob its
+            # module sweeps) the module's default rate -- fly_rate knows both.
             rows = max(1, n // max(1, comp.dims[-1].size))
-            eta = rows * (row_seconds(fly) + self.per_pt.value())
-            how = f"fly: {rows} row(s) × {row_seconds(fly):.3g} s"
+            t_row = row_seconds(fly, self.registry)
+            eta = rows * (t_row + self.per_pt.value())
+            how = f"fly: {rows} row(s) × {t_row:.3g} s"
             self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} px (fly)")
         else:
             eta = n * self.per_pt.value()
