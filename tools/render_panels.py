@@ -117,6 +117,7 @@ SIZES = {
     "suite-axis-advanced": (1500, 950),
     "suite-axis-advanced-scout": (1500, 950),
     "suite-axis-advanced-ramp": (1500, 950),
+    "suite-routine-args": (1500, 950),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
 }
@@ -589,6 +590,30 @@ def _axis_advanced(win):
     # picture shows both boxes and the "row mean" tag
     row.collapse_box.setChecked(True)
     b.open_advanced(row)
+    b._rebuild_summary()
+
+
+def _routine_args(win):
+    """A routine step's Advanced options (2026-10-10): the Scan pose, plus a
+    THROUGHOUT routine "focus at the AF position at the start of each row"
+    whose step has its gear open -- built from the action's declared args,
+    two of them ticked (sent) and shown as tags on the step."""
+    _stack_two_axes(win)
+    b = win.builder
+    for sec in list(getattr(b, "throughout", [])):
+        b.remove_throughout(sec)
+    sec = b.add_throughout()
+    row = sec.add_action("sim_focus_at")
+    if row is None:
+        return
+    for name, value in (("ix", 0), ("routine", "one_way")):
+        tick, ed, _spec = row.args_panel.lines[name]
+        tick.setChecked(True)
+        if hasattr(ed, "setCurrentText"):
+            ed.setCurrentText(value)
+        else:
+            ed.setValue(value)
+    row.set_advanced_open(True)
     b._rebuild_summary()
 
 
@@ -1555,6 +1580,7 @@ TARGETS = {
     "suite-image-scan": _suite("Scan", _image_scan(run=False), settle=2.0),
     "suite-image": _suite("Measurement", _image_scan(run=True), settle=3.0),
     "camera-settings": lambda theme: _camera(theme, tab="Camera settings"),
+    "suite-routine-args": _suite("Scan", _routine_args, settle=2.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,
