@@ -381,6 +381,9 @@ uses its own setting. The values set are shown as small tags on the step, so
 a closed step still says what it does differently. In the recipe they are the
 step's `args`:
 
+![a routine step's Advanced options](../front-panels/suite-routine-args.png)
+
+
 ```yaml
   - {when: each_sweep, axis: pos_x, edge: start, every: 1, on_error: continue,
      action: call, args: {action: camera.autofocus_at_position,

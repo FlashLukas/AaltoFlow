@@ -1928,7 +1928,9 @@ class ActionArgsPanel(QtWidgets.QFrame):
         grid = QtWidgets.QGridLayout(self)
         grid.setContentsMargins(24, 4, 6, 4)
         grid.setHorizontalSpacing(6); grid.setVerticalSpacing(2)
-        grid.setColumnStretch(1, 1)
+        # the NAME takes the free room (cut, never widening the ~350 px
+        # column); the editors keep one fixed width, so they line up
+        grid.setColumnStretch(0, 1)
         #: name -> (tick box, editor, spec)
         self.lines: dict = {}
         for r, spec in enumerate(specs):
@@ -1941,6 +1943,7 @@ class ActionArgsPanel(QtWidgets.QFrame):
             tick.setMinimumWidth(90)
             editor = self._editor(spec, values.get(name))
             editor.setToolTip(tick.toolTip())
+            editor.setFixedWidth(120)
             tick.setChecked(name in values)
             editor.setEnabled(name in values)
             tick.toggled.connect(lambda on, e=editor: (e.setEnabled(on), self.changed.emit()))
@@ -2039,6 +2042,9 @@ class ActionStepRow(QtWidgets.QFrame):
     remove = QtCore.Signal(object)
     move = QtCore.Signal(object, int)
     changed = QtCore.Signal()
+    #: the step changed HEIGHT (Advanced opened / closed, tags appeared): a
+    #: section that sizes its step list to the steps must measure again
+    resized = QtCore.Signal()
 
     def __init__(self, action, args: dict | None = None):
         super().__init__()
@@ -2105,6 +2111,7 @@ class ActionStepRow(QtWidgets.QFrame):
         self.adv_btn.setChecked(on)
         self.adv_btn.blockSignals(False)
         self.args_panel.setVisible(on)
+        self.resized.emit()
 
     def advanced_open(self) -> bool:
         return self.args_panel is not None and self.args_panel.isVisibleTo(self)
@@ -2129,6 +2136,7 @@ class ActionStepRow(QtWidgets.QFrame):
                                        _axis_tag(args_text({k: v}), args_text(vals)))
         self.tags.setVisible(bool(vals))
         self.tags.setToolTip(args_text(vals))
+        self.resized.emit()
 
     def set_number(self, k: int) -> None:
         self.marker.setText(str(k))
@@ -2563,6 +2571,8 @@ class RoutineSection(QtWidgets.QFrame):
         row.move.connect(self.move_step)
         if isinstance(row, (SetStepRow, GenericStepRow, ActionStepRow)):
             row.changed.connect(self._changed)
+        if isinstance(row, ActionStepRow):
+            row.resized.connect(self._relayout)
         at = len(self.steps) if at is None else at
         self.steps.insert(at, row)
         self.lay.insertWidget(at, row)            # the stretch stays last
@@ -2619,6 +2629,10 @@ class RoutineSection(QtWidgets.QFrame):
             focus = row.cond or row.text_edit
             if focus is not None:
                 focus.setFocus()
+
+    def _relayout(self) -> None:
+        """A step changed height (its Advanced options opened): measure again."""
+        self.updateGeometry()
 
     def remove_step(self, row) -> None:
         if row in self.steps:
@@ -2926,6 +2940,19 @@ class ThroughoutSection(RoutineSection):
         self.rows_scroll.setVisible(bool(shown))
         self.rows_scroll.setFixedHeight(
             sum(s.sizeHint().height() for s in shown) + 4 * len(shown) + 6 if shown else 0)
+
+    def _relayout(self) -> None:
+        # the step list is sized to its steps (_sync_trigger_widgets); again
+        # once the event loop has laid the step out (a tag row that has just
+        # appeared is in the step's size hint only after that pass)
+        if hasattr(self, "trigger_combo"):
+            self._sync_trigger_widgets()
+            QtCore.QTimer.singleShot(0, self._sync_trigger_widgets)
+        self.updateGeometry()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        QtCore.QTimer.singleShot(0, self._sync_trigger_widgets)
 
     def _changed(self):
         if hasattr(self, "trigger_combo"):          # not during the base __init__

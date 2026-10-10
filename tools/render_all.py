@@ -66,6 +66,7 @@ PROJECTS.update({
     # an axis row's Advanced panel opened in place (fly, and scout)
     "suite-axis-advanced": ("scan-core", True),
     "suite-axis-advanced-scout": ("scan-core", True),
+    "suite-routine-args": ("scan-core", True),
     # the data viewer (AaltoView successor), on simulated measurements
     "viewer-map": ("scan-core", True),
     "viewer-1d": ("scan-core", True),

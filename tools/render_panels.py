@@ -117,7 +117,7 @@ SIZES = {
     "suite-axis-advanced": (1500, 950),
     "suite-axis-advanced-scout": (1500, 950),
     "suite-axis-advanced-ramp": (1500, 950),
-    "suite-routine-args": (1500, 950),
+    "suite-routine-args": (1500, 1150),
     "viewer-map": (1600, 960),
     "viewer-1d": (1600, 960),
 }
@@ -605,26 +605,33 @@ def _axis_advanced(win):
 
 
 def _routine_args(win):
-    """A routine step's Advanced options (2026-10-10): the Scan pose, plus a
-    THROUGHOUT routine "focus at the AF position at the start of each row"
-    whose step has its gear open -- built from the action's declared args,
-    two of them ticked (sent) and shown as tags on the step."""
-    _stack_two_axes(win)
+    """A routine step's Advanced options (2026-10-10): "focus at the AF
+    position" before the scan with its gear open -- built from the action's
+    declared args, two of them ticked (sent) and shown as tags -- and the same
+    action at the start of each row, closed, its tags saying what it sends."""
+    # ONE axis and no conditions: the routines card gets the room to show
+    # the opened step (the full Scan pose squeezes it to a few lines)
     b = win.builder
-    for sec in list(getattr(b, "throughout", [])):
-        b.remove_throughout(sec)
-    sec = b.add_throughout()
-    row = sec.add_action("sim_focus_at")
-    if row is None:
-        return
-    for name, value in (("ix", 0), ("routine", "one_way")):
-        tick, ed, _spec = row.args_panel.lines[name]
-        tick.setChecked(True)
-        if hasattr(ed, "setCurrentText"):
-            ed.setCurrentText(value)
-        else:
-            ed.setValue(value)
-    row.set_advanced_open(True)
+    b.name_edit.setText("map with focus at the AF position")
+    if not b.rows and b.registry.get("pos_x") is not None:
+        b.add_axis("pos_y")
+        b.add_axis("pos_x")
+    # the opened step BEFORE the scan (that column has the most room); a
+    # THROUGHOUT routine with the same action, closed, shows its tags
+    for where in ("before_scan", "throughout"):
+        sec = b.routines["before_scan"] if where == "before_scan" else b.add_throughout()
+        row = sec.add_action("sim_focus_at")
+        if row is None:
+            return
+        for name, value in (("ix", 0), ("routine", "one_way")):
+            tick, ed, _spec = row.args_panel.lines[name]
+            tick.setChecked(True)
+            if hasattr(ed, "setCurrentText"):
+                ed.setCurrentText(value)
+            else:
+                ed.setValue(value)
+        if where == "before_scan":
+            row.set_advanced_open(True)
     b._rebuild_summary()
 
 
