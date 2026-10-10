@@ -43,6 +43,22 @@ class Limits:
     freq_max_Hz: float = 4_400_000_000.0     # VERIFY: TG44A upper end (4.4 GHz)
     power_min_dBm: float = -30.0             # VERIFY: TG44A minimum level
     power_max_dBm: float = -10.0             # VERIFY: TG44A maximum level (tested: -30, -20)
+    # SWEEPS (ramp_frequency / ramp_power, for fly scans, 2026-10-10): the pace
+    # a sweep may be asked for, in the knob's unit per second. A pace outside
+    # these is clamped and warned, like a setpoint.
+    #   frequency: 1 kHz/s .. 1 GHz/s. The top end crosses the whole TG band
+    #     in under 5 s; with one step every hardware.ramp_dt_s (100 ms) each
+    #     step is then 100 MHz -- a fly scan does not mind (it bins by the
+    #     value each step SENT), but whatever detects the tone must keep up.
+    #     VERIFY the smallest frequency step saSetTg honours: at the bottom
+    #     end (1 kHz/s) a step is only 100 Hz;
+    #   level: 0.01 .. 20 dB/s (the TG's whole -30..-10 dBm range in 1 s).
+    #     VERIFY on the rig how the TG44A changes level: if it switches an
+    #     attenuator at fixed points, the tone may jump or dip there.
+    ramp_rate_min_Hz_per_s: float = 1.0e3
+    ramp_rate_max_Hz_per_s: float = 1.0e9
+    ramp_rate_min_dB_per_s: float = 0.01
+    ramp_rate_max_dB_per_s: float = 20.0
 
 
 @dataclass
@@ -73,6 +89,17 @@ class Hardware:
     # its own grid. # VERIFY on the rig: set odd values, compare the echo.
     echo_tol_Hz: float = 1.0
     echo_tol_dB: float = 0.05
+    # A SWEEP sends one tg_cw (frequency or level) every ramp_dt_s
+    # (softramp.py). 100 ms = 10 steps a second -- twice smb's 50 ms, because
+    # every step here is a ZeroMQ round trip to the signalhound service PLUS
+    # that service's USB call: saSetTg took ~0.03 s on the lab's SA44B + TG44A
+    # (measured 2026-09-28), and the owner first waits (up to 0.2 s) for its
+    # hardware lock if it is in the middle of fetching a spectrum. 100 ms
+    # leaves about 3x headroom over the measured call. VERIFY on the rig that
+    # the steps keep this pace (the stream's time stamps show it) while the
+    # analyser also sweeps spectra. A late step does not slow the sweep: each
+    # value is computed from the elapsed time, a late one is just further on.
+    ramp_dt_s: float = 0.1
 
 
 @dataclass

@@ -14,7 +14,9 @@ tested offline, including the awkward cases:
   * tg_mode "unknown": the TG state cannot be read; a tg_cw makes it known;
   * "off" is a PARK (the TG44A cannot be silenced): tg_cw {on: false} puts
     it in tg_mode "parked" at tg_park_hz (10 kHz) and the minimum level;
-  * `hw_error`: the owner's own hardware read failed.
+  * `hw_error`: the owner's own hardware read failed;
+  * `defer` True: the reply says "deferred": true (the real owner's answer
+    when its hardware lock is busy: accepted, applied a little later).
 
 Contract (as agreed with the signalhound module, 2026-09-28):
   tg_cw {on?, freq_hz?, level_dbm?} -> {"ok": true, "tg_cw": {on, freq_hz, level_dbm}}
@@ -41,6 +43,7 @@ class FakeOwner:
                  apply_delay_s: float = 0.0, status_hz: float = 20.0):
         self.cmd_port, self.pub_port = cmd_port, pub_port
         self.apply_delay_s = apply_delay_s
+        self.defer = False
         self.status_dt = 1.0 / status_hz
         self.lock = threading.Lock()
         self.state = {
@@ -134,6 +137,8 @@ class FakeOwner:
             threading.Timer(self.apply_delay_s, self._apply, args=(new,)).start()
         else:
             self._apply(new)
+        if self.defer:
+            return {"ok": True, "tg_cw": new, "deferred": True}
         return {"ok": True, "tg_cw": new}
 
     def _apply(self, new: dict) -> None:

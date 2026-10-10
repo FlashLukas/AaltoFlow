@@ -32,8 +32,10 @@ def status_to_dict(status) -> dict:
     folds all of it into the one flag a scan's settle rule waits on.
     `parked`: the TG44A cannot be silenced, so "off" parks it at `park_Hz`,
     `park_dBm`; `rf_on` is False then, but the TG is NOT silent.
+    The sweeps' flat keys (`ramping`, `frequency_ramp_id`, ...) go on the
+    top level, because a ramp block's `done` names them as plain status keys.
     """
-    return {
+    d = {
         "rf_on": status.rf_on,
         "power_dBm": status.power_dBm,
         "frequency_Hz": status.frequency_Hz,
@@ -47,6 +49,8 @@ def status_to_dict(status) -> dict:
         "tg_ready": status.tg_ready,
         "hw_error": status.hw_error,
     }
+    d.update(getattr(status, "sweep", None) or {})
+    return d
 
 
 # ---- config (Settings) over the wire ---------------------------------------

@@ -36,12 +36,15 @@ class TGSource(Protocol):
         stop is the Generator's decision, see Hardware.off_on_shutdown)."""
 
     def set_cw(self, on: bool | None = None, freq_hz: float | None = None,
-               level_dbm: float | None = None) -> None:
+               level_dbm: float | None = None) -> dict | None:
         """Command the CW output; None = keep that part as it is.
 
         RAISES when the command is refused (TG busy with a sweep, no TG
         attached, out of range, owner not reachable). Returning means the
-        command was ACCEPTED -- the applied value shows up in read_state()."""
+        command was ACCEPTED -- the applied value shows up in read_state().
+        May return the owner's reply (a dict) or None; the only key anyone
+        reads is `deferred` (True: accepted, applied a little later -- the
+        owner's hardware was busy). The simulator applies at once (None)."""
 
     def read_state(self) -> dict:
         """One consistent snapshot. Never raises. Keys:

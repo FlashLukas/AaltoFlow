@@ -255,7 +255,7 @@ class RemoteTG:
         return st
 
     # ---- the interface -----------------------------------------------------
-    def set_cw(self, on=None, freq_hz=None, level_dbm=None) -> None:
+    def set_cw(self, on=None, freq_hz=None, level_dbm=None) -> dict:
         if self._fresh() is None and not self._probe_other_mode():
             # fail fast: no frame for ALIVE_S -> the owner is down
             raise ConnectionError(_is_owner_down_msg(self.host, self.cmd_port))
@@ -277,6 +277,12 @@ class RemoteTG:
         # We deliberately do NOT copy reply["tg_cw"] into our state: a reply
         # means ACCEPTED (the wire contract), and our status must only ever show
         # what the owner PUBLISHES as applied.
+        # The reply is RETURNED (2026-10-10) for one flag only: `deferred`
+        # True = the owner accepted the value but could not apply it yet (its
+        # hardware lock was busy); it applies it a little later. A SWEEP
+        # counts those steps (generator.py "the SWEEPS"): for such a step the
+        # TG got the value later than the sweep's record says.
+        return reply
 
     def read_state(self) -> dict:
         st = self._fresh()

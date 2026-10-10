@@ -39,6 +39,10 @@ class RemoteStatus:
         self.tg_unknown = d.get("tg_unknown", False)
         self.tg_ready = d.get("tg_ready", False)
         self.hw_error = d.get("hw_error", "")
+        # the SWEEPS (an older service has none: never sweeping); the flat
+        # per-knob keys are kept as a dict, e.g. sweep["power_ramp_id"]
+        self.ramping = bool(d.get("ramping", False))
+        self.sweep = {k: v for k, v in d.items() if "ramp" in k}
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -128,6 +132,24 @@ class ShsgClient(ControlClient):
 
     def set_frequency(self, hz: float):
         self._checked({"cmd": "set_frequency", "frequency_Hz": float(hz)})
+
+    # ---- the SWEEPS (fly scans, the GUI's Sweep card) --------------------
+
+    def ramp_frequency(self, hz: float, rate_Hz_per_s: float):
+        return self._checked({"cmd": "ramp_frequency", "frequency_Hz": float(hz),
+                              "rate_Hz_per_s": float(rate_Hz_per_s)}).get("ramp_id")
+
+    def ramp_power(self, dBm: float, rate_dB_per_s: float):
+        return self._checked({"cmd": "ramp_power", "power_dBm": float(dBm),
+                              "rate_dB_per_s": float(rate_dB_per_s)}).get("ramp_id")
+
+    def ramp_stop(self, knob: str | None = None):
+        """End a sweep where it is (all of them without `knob`). A safety
+        verb: allowed also while viewing."""
+        d = {"cmd": "ramp_stop"}
+        if knob:
+            d["knob"] = knob
+        return self._checked(d).get("stopped")
 
     def _checked(self, d: dict) -> dict:
         r = self._cmd(d)
