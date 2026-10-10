@@ -29,6 +29,8 @@ def main() -> int:
     ap.add_argument("--real", action="store_true",
                     help="without --connect: drive the real scope from this process")
     ap.add_argument("--visa", default=None, help="VISA resource for --real")
+    ap.add_argument("--driver", choices=["siglent", "dwf"], default="siglent",
+                    help="with --real: siglent (default) or dwf (an Analog Discovery)")
     ap.add_argument("--theme", choices=["dark", "light"], default=None,
                     help="override the start-up theme for this launch")
     args = ap.parse_args()
@@ -54,6 +56,7 @@ def main() -> int:
         from scope.real_system import build_real_system
         if args.visa:
             cfg.hardware.visa = args.visa
+        cfg.hardware.driver = args.driver
         return run_app(build_real_system(cfg), cfg)
     from scope.sim_system import build_sim_system
     spec, _ = build_sim_system(cfg)

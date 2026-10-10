@@ -239,3 +239,65 @@ def test_a_quantised_level_is_not_a_change():
     assert _differs("trigger_level_V", 0.0, 0.2, actual)
     assert not _differs("ch1_offset_V", 0.1, 0.1031, actual)
     assert _differs("tdiv_s", 0.02, 0.01, actual)
+
+
+def test_supply_voltage_shows_the_value_set(fake):
+    """Lab AD2 2026-10-10: V- set to -2 V read back -2.2014 right after (and
+    -2.0 later): status shows the value SET, the node is read only at start."""
+    orig = FakeDwf._FDwfAnalogIOChannelNodeGet
+
+    def skewed(self, h, ch, nd, out):
+        orig(self, h, ch, nd, out)
+        if ch.value == 1 and nd.value == 1:
+            out._obj.value *= 1.1
+    FakeDwf._FDwfAnalogIOChannelNodeGet = skewed
+    try:
+        scope, dev, events = build(fake)
+        scope.start(run=False)
+        assert scope.status()["supply_vminus_V"] == pytest.approx(-0.55)   # adopted
+        scope.set_supply("vminus", on=True, volts=-2.0)
+        assert scope.status()["supply_vminus_V"] == pytest.approx(-2.0)
+        assert any("-2 V" in m for _, m in events)
+        scope.shutdown()
+    finally:
+        FakeDwf._FDwfAnalogIOChannelNodeGet = orig
+
+
+def test_outputs_resync_after_a_frequency_change(fake):
+    """Lab AD2 2026-10-10: W1 2 kHz -> 1 kHz while W2 ran -> the phase between
+    them was +86 deg with both at 0. A frequency SET re-syncs both; a sweep
+    STEP does not (no restart per step)."""
+    dev = D.DwfDevice()
+    g = D.DwfWaveGen(dev)
+    g.open()
+    try:
+        g.set_output(0, True); g.set_output(1, True)
+        n = fake.synced_starts
+        g.set_frequency(0, 2000.0)
+        assert fake.synced_starts == n + 1
+        g.ramp_set_frequency(0, 2100.0)
+        assert fake.synced_starts == n + 1 and fake.aout[0]["freq"] == 2100.0
+    finally:
+        g.close()
+
+
+def test_a_phase_set_is_sent_even_when_unchanged(fake):
+    """...and the way back in phase is to ask for the phase again: a set of
+    the same value goes to the instrument (and re-syncs there)."""
+    scope, dev, events = build(fake)
+    scope.start()
+    try:
+        g = scope.gen
+        g.set_output("w1", True); g.set_output("w2", True)
+        deadline = time.monotonic() + 5
+        while not (fake.aout[0]["running"] and fake.aout[1]["running"]) \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.5)
+        n = fake.synced_starts
+        g.set_phase("w2", 0.0)                         # already 0
+        while fake.synced_starts == n and time.monotonic() < deadline + 5:
+            time.sleep(0.02)
+        assert fake.synced_starts > n
+    finally:
+        scope.shutdown()

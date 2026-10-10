@@ -203,8 +203,19 @@ Plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 ## Setup (lab PC)
 
 Analog Discovery: install WaveForms (it brings the `dwf` runtime; the lab PC
-has 3.24.4), close the WaveForms program (one process per device), set
-`hardware.driver = dwf` in scope.ini (or `--driver dwf`), `--real`.
+has 3.24.4), close the WaveForms program (one process per device), and start
+`--real --driver dwf` on ports of its own, e.g.
+
+```powershell
+uv run scripts/run_service.py --real --driver dwf --cmd-port 5635 --pub-port 5636
+```
+
+The Siglent and the Analog Discovery are TWO services of this module, each
+with its own settings file next to the project: `scope.ini` (siglent, the
+default) and `scope-dwf.ini` + `scope-dwf-generator.ini` (dwf). The driver is
+chosen on the command line only, never saved: a `--driver dwf` once saved into
+the shared scope.ini made the next plain start open the Analog Discovery
+(lab PC 2026-10-10).
 
 Siglent:
 

@@ -218,6 +218,7 @@ class Generator:
                              self._ramp_done(ch, knob, reason)),
                     channel=f"{ch}_{knob}", name=f"sweep-{ch}-{knob}")
         self._ramp_active = None             # (ch, knob) of the running / last sweep
+        self._force_phase: dict = {}         # ch -> send the phase even if unchanged
         self._ramp_id = 0
         self._ramp_quiet_until = 0.0         # no "changed at the instrument" before this
         self._stream_id = 0
@@ -515,6 +516,13 @@ class Generator:
     def set_phase(self, ch, deg: float) -> None:
         self._refuse_if_following(ch, "phase")
         self._take_over(ch, "phase")
+        # a phase SET is always sent, even when the value is unchanged: on an
+        # instrument where it re-syncs the outputs (the Analog Discovery), a
+        # repeated "phase 0" is how the outputs are put in phase again (lab
+        # 2026-10-10: W2 phase 0 asked again after a W1 frequency change, phase_21
+        # stayed at +86 deg)
+        with self._lock:
+            self._force_phase[parse_channel(ch)] = True
         self._change(ch, f"phase {float(deg):g} deg", phase_deg=float(deg))
 
     def set_duty(self, ch, pct: float) -> None:
@@ -1084,7 +1092,7 @@ class Generator:
             force_off = self._force_off[ch]
             self._force_off[ch] = False
         have = self._applied[ch] or {}
-        if have == want and not force_off:
+        if have == want and not force_off and not self._force_phase.get(ch):
             self._applied_gen[ch] = gen
             return False
         sent = False
@@ -1134,7 +1142,8 @@ class Generator:
                 b.set_amplitude(i, a_new)
             if o_changes:
                 b.set_offset(i, o_new)
-        if has_freq and want["phase_deg"] != have.get("phase_deg"):
+        force_phase = self._force_phase.pop(ch, False)
+        if has_freq and (want["phase_deg"] != have.get("phase_deg") or force_phase):
             b.set_phase(i, self.phase_to_send(want["phase_deg"]))
             if self._follows():
                 self._align_pending = True

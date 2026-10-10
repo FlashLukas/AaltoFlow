@@ -331,6 +331,7 @@ class DwfScope:
         self._slope = "rising"
         self._record = None
         self._io = None                    # AnalogIO channel map (supplies)
+        self._sup_set: dict = {}           # supply -> the voltage this module SET
         self.open_warnings: list[str] = []
 
     # ---- lifecycle ------------------------------------------------------------------
@@ -595,9 +596,15 @@ class DwfScope:
 
         out = {"monitors": {}}
         for key, sp in io["supplies"].items():
+            # the voltage: the value this module SET, once it has set one
+            # (lab AD2 2026-10-10: V- set to -2 V, the node read back -2.2014
+            # right after, and -2.0 later -- reading it back is not reliable);
+            # until then the device's own (at start: adopt)
+            v_set = self._sup_set.get(key)
             out[key] = {
                 "on": bool(node("FDwfAnalogIOChannelNodeGet", sp["ch"], sp["enable"])),
-                "V": node("FDwfAnalogIOChannelNodeGet", sp["ch"], sp["voltage"]),
+                "V": (v_set if v_set is not None else
+                      node("FDwfAnalogIOChannelNodeGet", sp["ch"], sp["voltage"])),
                 "V_meas": (None if sp["v_read"] is None else
                            node("FDwfAnalogIOChannelNodeStatus", sp["ch"], sp["v_read"])),
                 "A_meas": (None if sp["a_read"] is None else
@@ -621,6 +628,7 @@ class DwfScope:
         if volts is not None:
             d.call("FDwfAnalogIOChannelNodeSet", ctypes.c_int(sp["ch"]),
                    ctypes.c_int(sp["voltage"]), ctypes.c_double(float(volts)))
+            self._sup_set[which] = float(volts)
         if on is not None:
             d.call("FDwfAnalogIOChannelNodeSet", ctypes.c_int(sp["ch"]),
                    ctypes.c_int(sp["enable"]), ctypes.c_double(1.0 if on else 0.0))
@@ -798,6 +806,15 @@ class DwfWaveGen:
             self._apply(ch)
 
     def set_frequency(self, ch: int, hz: float) -> None:
+        self._set("FDwfAnalogOutNodeFrequencySet", ch, float(hz))
+        # the phase between the outputs is lost when one changes frequency
+        # (lab AD2 2026-10-10: W1 2 kHz -> 1 kHz, then phase_21 = +86 deg with
+        # both at 0 deg): restart both together, as after a phase set
+        self._sync_start()
+
+    def ramp_set_frequency(self, ch: int, hz: float) -> None:
+        """A step of a frequency SWEEP: no restart per step (a follower's
+        phase is re-aligned once, at the end of the sweep)."""
         self._set("FDwfAnalogOutNodeFrequencySet", ch, float(hz))
 
     def set_amplitude(self, ch: int, vpp: float) -> None:

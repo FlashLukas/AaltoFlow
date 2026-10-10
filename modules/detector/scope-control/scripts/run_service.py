@@ -52,31 +52,43 @@ def main() -> int:
     ap.add_argument("--real", action="store_true",
                     help="drive the real scope (pyvisa + a VISA library) instead of simulating")
     ap.add_argument("--visa", default=None, help="VISA resource of the real scope")
-    ap.add_argument("--driver", choices=["siglent", "dwf"], default=None,
-                    help="which real instrument (default: hardware.driver in scope.ini)")
+    ap.add_argument("--driver", choices=["siglent", "dwf"], default="siglent",
+                    help="which instrument: siglent (default) or dwf (an Analog Discovery). "
+                         "Chooses the settings file too: scope.ini / scope-dwf.ini")
     ap.add_argument("--dwf-device", default=None,
                     help="dwf: the Analog Discovery's serial (or #n); default the first free")
     ap.add_argument("--config", default=None, help="path to a .ini config to load")
     args = ap.parse_args()
 
-    # No --config: use scope.ini in the project folder if this PC has saved one.
+    # ONE SETTINGS FILE PER INSTRUMENT. The Siglent and the Analog Discovery
+    # are two services of this module, each with its own settings: scope.ini
+    # (siglent) and scope-dwf.ini (dwf), next to the project; --config names
+    # another. The DRIVER comes from the command line only -- lab PC
+    # 2026-10-10: `--driver dwf` was saved into the one shared scope.ini, and
+    # the next plain (Siglent) start opened the Analog Discovery.
     config = args.config
-    default_ini = Path(__file__).resolve().parents[1] / "scope.ini"
+    project = Path(__file__).resolve().parents[1]
+    default_ini = project / ("scope.ini" if args.driver == "siglent" else
+                             f"scope-{args.driver}.ini")
     if config is None and default_ini.is_file():
         config = str(default_ini)
         print(f"scope service: settings from {default_ini.name}")
     cfg = Config.load(config) if config else Config()
+    cfg.hardware.driver = args.driver
     if args.visa:
         cfg.hardware.visa = args.visa
-    if args.driver:
-        cfg.hardware.driver = args.driver
     if args.dwf_device is not None:
         cfg.hardware.dwf_device = args.dwf_device
     # The GENERATOR's settings (an instrument with one: the Analog Discovery's
-    # W1/W2 -- coupling, limits) live in their own file next to scope.ini.
+    # W1/W2 -- coupling, limits) live in their own file next to the settings:
+    # scope-dwf-generator.ini (one saved as scope-generator.ini before
+    # 2026-10-10 is read once, if the new one does not exist yet).
     from scope.generator.config import GenConfig
-    gen_ini = Path(config or default_ini).with_name("scope-generator.ini")
-    gen_cfg = GenConfig.load(str(gen_ini)) if gen_ini.is_file() else GenConfig()
+    gen_ini = Path(config or default_ini)
+    gen_ini = gen_ini.with_name(gen_ini.stem + "-generator.ini")
+    old_gen = project / "scope-generator.ini"
+    src = gen_ini if gen_ini.is_file() else (old_gen if old_gen.is_file() else None)
+    gen_cfg = GenConfig.load(str(src)) if src else GenConfig()
 
     spec = build_scope(cfg, args.real, gen_cfg)
     if spec.gen is not None:
