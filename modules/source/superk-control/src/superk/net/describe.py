@@ -36,7 +36,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, wait=None, danger=False, help="", bits=None):
+       settle=None, args=None, wait=None, danger=False, help="", bits=None,
+       ramp=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract.
 
     `type` (and an indicator's min/max/bits) also tells scan-core how to STORE
@@ -52,7 +53,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("wait", wait), ("help", help), ("bits", bits)):
+                 ("wait", wait), ("help", help), ("bits", bits), ("ramp", ramp)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -96,11 +97,17 @@ def read_path(status: dict, path):
     return cur
 
 
+#: The sweep pace a client is offered first (nm/s): 5 nm/s crosses a 50 nm
+#: feature in 10 s -- slow enough for a lock-in at a few ms time constant.
+SWEEP_RATE_DEFAULT_NM_PER_S = 5.0
+
+
 def _line_params(laser, n: int) -> list[dict]:
     """Wavelength + amplitude controls of line n (1-based), expanded FLAT so a
     panel can place one and scan-core can sweep one (guide section 6b)."""
     lo, hi = laser.wavelength_range()
     lim = laser.cfg.limits
+    r_lo, r_hi = laser.ramp_rate_limits()
     i = n - 1
     group = "Line 1 (scan)" if n == 1 else f"Line {n}"
     return [
@@ -116,6 +123,22 @@ def _line_params(laser, n: int) -> list[dict]:
                 "extra": {"line": n}},
            settle={"policy": "echoes", "key": "wavelength_nm", "index": i,
                    "tol": 0.002},
+           # A CONTINUOUS SWEEP for fly scans (2026-10-10; guide 6b,
+           # "Ramps"): the SERVICE walks this line's wavelength register
+           # (softramp.py) and records every value it sent; the fly scan bins
+           # by that COMMANDED wavelength (the AOTF follows its RF frequency
+           # in microseconds). One sweep at a time over all lines; the record
+           # holds all 8 lines in one group, the unswept ones forward-filled.
+           ramp={"kind": "software",
+                 "start": {"verb": "ramp_wavelength",
+                           "args": {"to": "wavelength_nm", "rate": "rate_nm_per_s"},
+                           "extra": {"line": n}},
+                 "stop": {"verb": "ramp_stop"},
+                 "rate": {"unit": "nm/s", "min": r_lo, "max": r_hi,
+                          "default": max(r_lo, min(r_hi, SWEEP_RATE_DEFAULT_NM_PER_S))},
+                 "readback": {"stream": {"group": "ramp", "channel": f"wavelength_{n}"},
+                              "measured": False},
+                 "done": {"key": "ramping", "id_key": "ramp_id"}},
            help=f"Limited to the active crystal ({laser.active_filter()}, "
                 f"{lo:g}..{hi:g} nm)."),
         _p(f"amplitude_{n}", f"Line {n} amplitude", "control", "float",
@@ -207,6 +230,15 @@ def build_manifest(laser) -> dict:
            help="NKT's number of the crystal the RF driver reaches, READ from "
                 "the driver (1, 2 = the SELECT with the lower bus address, "
                 "3, 4 = the other; 0 = none)."),
+        # the sweep's stop is a SAFETY verb (a viewer may send it), and every
+        # safety verb is also an action, so the suite's Control tab offers it
+        _p("ramp_stop", "Stop sweep", "action", "action", group="Filter", order=7,
+           wait={"ready": {"policy": "immediate"}},
+           help="End a wavelength sweep (ramp_wavelength) where it is. The "
+                "verb returns once no further step will be written."),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Filter", order=6,
+           read_path=["ramping"],
+           help="True while a wavelength sweep (ramp_wavelength) walks a line."),
         _p("crystal_temp", "Crystal temperature", "indicator", "float",
            unit="C", group="Filter", order=5, decimals=1, plottable=True,
            read_path=["crystal_temp_C"]),

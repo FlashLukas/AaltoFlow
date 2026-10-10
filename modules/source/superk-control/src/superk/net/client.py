@@ -68,6 +68,12 @@ class RemoteStatus:
         self.crystal = d.get("crystal", 0)
         self.emission_guarded = d.get("emission_guarded", False)
         self.hw_error = d.get("hw_error", "")
+        # the wavelength SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = int(d.get("ramp_id") or 0)
+        self.ramp_line = int(d.get("ramp_line") or 0)
+        self.ramp_target_nm = float(d.get("ramp_target_nm") or 0.0)
+        self.ramp_rate_nm_per_s = float(d.get("ramp_rate_nm_per_s") or 0.0)
         self.describe_rev = d.get("describe_rev")
 
 
@@ -179,6 +185,22 @@ class SuperkClient(ControlClient):
 
     def set_wavelength(self, line: int, nm: float):
         self._must({"cmd": "set_wavelength", "line": int(line), "wavelength_nm": float(nm)})
+
+    def ramp_wavelength(self, line: int, nm: float, rate_nm_per_s: float):
+        """Sweep one line's wavelength (fly scans; the GUI's Sweep button)."""
+        return self._must({"cmd": "ramp_wavelength", "line": int(line),
+                           "wavelength_nm": float(nm),
+                           "rate_nm_per_s": float(rate_nm_per_s)}).get("ramp_id")
+
+    def ramp_stop(self):
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._must({"cmd": "ramp_stop"}).get("stopped")
+
+    def ramp_rate_limits(self) -> tuple[float, float]:
+        """(min, max) sweep pace in nm/s, from the config last fetched."""
+        lim = self.cfg.limits
+        lo = max(1e-6, float(lim.ramp_rate_min_nm_per_s))
+        return lo, max(lo, float(lim.ramp_rate_max_nm_per_s))
 
     def set_amplitude(self, line: int, pct: float):
         self._must({"cmd": "set_amplitude", "line": int(line), "amplitude_pct": float(pct)})

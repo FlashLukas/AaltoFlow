@@ -64,11 +64,22 @@ class Limits:
                      saturation point more RF does not give more light (the
                      diffraction efficiency goes over the top of its sin^2),
                      it only heats the crystal.
+    ramp_rate_min_nm_per_s, ramp_rate_max_nm_per_s -- the pace a wavelength
+                     SWEEP of one line (ramp_wavelength, fly scans,
+                     2026-10-10) may be asked for. The AOTF itself retunes in
+                     microseconds (only the RF frequency changes); what limits
+                     a sweep is the Interbus: one register write per step,
+                     every hardware.ramp_dt_s. At 100 nm/s and 50 ms the steps
+                     are 5 nm -- the fly scan bins by the value each step SENT,
+                     so coarse steps only coarsen the pixels. # VERIFY on the
+                     rig how fast a line can be written (it bounds both).
     """
 
     power_min_pct: float = 0.0
     power_max_pct: float = 50.0
     amplitude_max_pct: float = 100.0
+    ramp_rate_min_nm_per_s: float = 0.01
+    ramp_rate_max_nm_per_s: float = 100.0
 
 
 @dataclass
@@ -126,6 +137,12 @@ class Hardware:
     # interlock, kept deliberately -- see CLAUDE.local.md).
     watchdog_s: int = 10
     poll_hz: float = 5.0               # how often the worker re-reads the hardware
+    # A wavelength SWEEP (ramp_wavelength) writes the line's wavelength
+    # register once every ramp_dt_s (softramp.py). 50 ms = 20 writes a second;
+    # a register write is a few bytes on the Interbus (# VERIFY how long one
+    # takes, with the poll's ~20 reads competing for the same port). A late
+    # step does not slow the sweep: each value is computed from the time.
+    ramp_dt_s: float = 0.05
     # Lost-client guard: a REMOTE GUI that switches emission on becomes its
     # "owner" and pings the service every second. If the owner is silent for
     # this long (GUI crashed, network gone), the service switches emission OFF.

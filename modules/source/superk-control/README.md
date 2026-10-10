@@ -85,6 +85,9 @@ Universal: `status`, `info`, `get_config`, `set_config`, `describe`,
 | `set_wavelength` | `line` (1..8), `wavelength_nm` | clamped to the crystal |
 | `set_amplitude` | `line`, `amplitude_pct` | 0 % = line off |
 | `set_line` | `line`, `wavelength_nm`, `amplitude_pct` | both at once |
+| `ramp_wavelength` | `line`, `wavelength_nm`, `rate_nm_per_s` | sweep one line (see Sweep); reply `ramp_id` |
+| `ramp_stop` | -- | end a sweep where it is (a safety verb: a viewer may send it) |
+| `stream_start` / `stream_read` / `stream_stop` | -- | the sweep's record (group `ramp`) |
 
 A reply means **accepted**; the status stream shows the hardware's readback
 (`wavelength_nm[i]`, `power_pct`, `emission_on`, ...), which is what a scan waits
@@ -97,6 +100,37 @@ active crystal); `amplitude_n`, `power` and the other lines are controls too.
 `emission_on` / `emission_off` can run in a scan routine: their `wait` block
 waits until the laser *reports* emission (or its absence).
 
+## Sweep (fly scans over a wavelength)
+
+A fly axis in scan-core can fly any line's wavelength (`superk.wavelength_n`):
+the service sweeps it over each row at a set pace, the detectors stream, and
+every sample is binned by the wavelength the service **commanded** at that
+moment (`describe`: a `ramp` block per line, `kind: software`, readback
+`measured: false`).
+
+- **Why a software ramp, binned by command.** The SELECT has no sweep a fly
+  scan could follow, so the service walks the line's wavelength register
+  (`softramp.py`, the suite's shared copy): one write every
+  `hardware.ramp_dt_s` (50 ms), each value computed from the elapsed time so
+  a late write does not slow the pace. The AOTF follows its RF frequency
+  within microseconds, so the commanded wavelength IS the wavelength, far
+  better than a pixel.
+- **One sweep at a time, one `ramp_id` counter.** A new sweep (of any line)
+  replaces a running one from wherever it got to. Status: `ramping`,
+  `ramp_id`, `ramp_line` (1-based), `ramp_target_nm`, `ramp_rate_nm_per_s`.
+- **The record** is one stream group `ramp` with all 8 lines per row
+  (`wavelength_1` .. `wavelength_8`; the lines not being swept are
+  forward-filled), so a fly over any line finds its channel in the same group.
+- **Emission is never switched by a sweep** -- nor RF, power or amplitude.
+  Switch the light in a scan routine.
+- **A set takes over:** `set_wavelength` of the SWEPT line stops the sweep
+  first (a set of another line leaves it running); a crystal change, a
+  settings change and the shutdown stop it too.
+- **Limits:** target clamped to the active crystal, rate to
+  `limits.ramp_rate_min_nm_per_s` .. `ramp_rate_max_nm_per_s` (0.01 .. 100
+  nm/s), both warned. `# VERIFY` on the rig how fast a wavelength register can
+  be written next to the poll's reads (it bounds `ramp_dt_s` and the top rate).
+
 ## Layout
 
 ```
@@ -107,7 +141,9 @@ src/superk/
     base.py          SupercontinuumBackend Protocol
     sim.py           SimulatedSuperK -- registers, interlock, warm-up, quantisation
     nktp.py          NktpSuperK -- NKTPDLL.dll via ctypes (the ONLY vendor file)
-  laser.py           SuperK brain: safety, clamps, crystal selection, poll thread
+  laser.py           SuperK brain: safety, clamps, crystal selection, poll thread, sweep
+  softramp.py        the wavelength sweep (byte-identical copy of suite-common's)
+  stream.py          StreamRecorder -- the sweep's record for a fly scan
   net/               protocol, service, client, describe
   apps/              gui (SpectrumIndicator), settings_dialog, theme
 scripts/             run_service, run_gui, superk_console (raw pyzmq), smoke_test

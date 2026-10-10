@@ -87,9 +87,12 @@ class SuperkService:
         #   safety either.)
         #   READ: `ping` only says "this client is alive" (the lost-client
         #   guard); it changes nothing.
+        #   Since 2026-10-10: `ramp_stop` ends a wavelength SWEEP where it is
+        #   (it only stops), so a viewer may send it; `stream_read` only reads
+        #   the sweep's record.
         self.control = ControlLease(
-            safety={"emission_off"},
-            read={"ping"},
+            safety={"emission_off", "ramp_stop"},
+            read={"ping", "stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -269,6 +272,20 @@ class SuperkService:
                 L.set_filter(msg["filter"])
             elif cmd == "set_wavelength":
                 L.set_wavelength(int(msg.get("line", 1)), float(msg["wavelength_nm"]))
+            elif cmd == "ramp_wavelength":
+                # the wavelength SWEEP of one line (fly scans); the reply's
+                # ramp_id is what status `ramp_id` shows while and after it runs
+                return {"ok": True, "ramp_id": L.ramp_wavelength(
+                    int(msg.get("line", 1)), float(msg["wavelength_nm"]),
+                    float(msg["rate_nm_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": L.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": L.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": L.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": L.stream_stop()}
             elif cmd == "set_amplitude":
                 L.set_amplitude(int(msg.get("line", 1)), float(msg["amplitude_pct"]))
             elif cmd == "set_line":

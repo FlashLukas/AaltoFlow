@@ -25,6 +25,16 @@ here. What there IS, because this is a CLASS 4 LASER, is safety logic:
     forgets the "emission on" request (so closing the door does not bring the
     beam back by itself) and says so in a warn event.
 
+WAVELENGTH SWEEP (fly scans, 2026-10-10; INSTRUMENT_MODULE_GUIDE.md 6b
+"Ramps"). Any ONE line's wavelength can be swept at a set pace
+(ramp_wavelength): the SERVICE walks the wavelength register (softramp.py, a
+SOFTWARE ramp -- the SELECT has no sweep of its own a fly scan could follow)
+and records every value it sent. A fly scan bins by that COMMANDED wavelength
+(the AOTF follows its RF frequency within microseconds, so the command is the
+wavelength far better than a pixel). One sweep at a time, one ramp_id
+counter: a new sweep (of any line) replaces a running one. A sweep never
+touches emission, RF, power or amplitudes -- only the wavelength of its line.
+
 THREADS (docs/DEVELOPER_NOTES.md gotcha #1). One worker thread polls the
 hardware and REBUILDS the Status snapshot; setters change brain attributes
 (the desired values) and write to the hardware, and never touch the snapshot.
@@ -37,11 +47,13 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import config as C
 from .backends.base import SupercontinuumBackend
 from .config import Config, N_LINES
+from .softramp import SoftRamp
+from .stream import StreamRecorder
 
 INTERLOCK_TEXT = {0: "open", 1: "needs reset", 2: "OK"}
 
@@ -94,6 +106,16 @@ class Status:
     crystal: int = 0                   # NKT crystal number the RF driver reports (0 = none)
     emission_guarded: bool = False     # lost-client guard armed (a remote GUI owns emission)
     hw_error: str = ""
+    # The wavelength SWEEP (ramp_wavelength, fly scans). Live values of the
+    # software ramp, laid over the snapshot by status() (in memory: no
+    # hardware is read for them). ramp_id = the newest sweep started; "ramp_id
+    # >= mine and not ramping" = my sweep is over. ramp_line is 1-based (0 =
+    # none yet). 0.0, not NaN, for "none": this status goes out as plain JSON.
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_line: int = 0
+    ramp_target_nm: float = 0.0
+    ramp_rate_nm_per_s: float = 0.0
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -134,6 +156,20 @@ class SuperK:
         # ---- lost-client guard (see set_emission / touch) ------------------
         self._owner: str | None = None          # client id that owns emission
         self._owner_seen = 0.0                  # monotonic time of its last word
+        # ---- the wavelength SWEEP (see the module doc) ---------------------
+        # ONE SoftRamp for all 8 lines: one sweep at a time and one ramp_id
+        # counter. _ramp_line (0-based) says which line its steps write; it is
+        # changed only between stop() and start(), never under a running walk.
+        self._ramp_line = 0
+        self._ramp = SoftRamp(self._ramp_step, lambda: self._wl[self._ramp_line],
+                              limits=lambda: self._range,
+                              dt_s=float(self.cfg.hardware.ramp_dt_s),
+                              on_done=self._ramp_done, channel="wavelength",
+                              name="superk-sweep")
+        # THE STREAM: every wavelength the sweep sent, as ONE row of all 8
+        # lines (the lines not being swept keep their last value: forward-
+        # filled), so a fly scan over any line finds its channel in one group.
+        self.recorder = StreamRecorder([f"wavelength_{n}" for n in range(1, N_LINES + 1)])
         # ---- snapshot, rebuilt only by the worker -------------------------
         self._status = Status()
         self._stop = threading.Event()
@@ -265,6 +301,9 @@ class SuperK:
     def shutdown(self, keep_outputs: bool = False) -> None:
         """RF off, emission off, disconnect. Safe to call more than once / on a crash.
 
+        A running wavelength sweep is stopped first (no step may follow the RF
+        off below).
+
         keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
         disconnect and release the port the same, but leave emission and RF
         as they are -- the next start adopts them. The laser's own watchdog
@@ -272,6 +311,8 @@ class SuperK:
         talking to the laser within that time, the laser cuts emission
         itself, as after a killed service."""
         self._stop.set()
+        # stopped BEFORE self._lock, which a sweep step may be waiting for
+        self._ramp.stop()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
@@ -387,12 +428,22 @@ class SuperK:
         if not (by_name or by_index):
             raise ValueError(f"unknown filter {name!r} (have {', '.join(names)})")
         idx = self._filter_index(name)
+        # a crystal change moves every line's range and blips the RF: no
+        # sweep may walk through it (stopped BEFORE the lock, see SoftRamp)
+        if self._ramp.stop():
+            self._emit("info", "wavelength sweep stopped by a crystal change")
         with self._lock:
             self._apply_filter_locked(idx, announce=True, switch=True)
 
     def set_wavelength(self, line: int, nm: float) -> None:
-        """Line is 1-based (1..8), like the channels on the RF driver."""
+        """Line is 1-based (1..8), like the channels on the RF driver.
+
+        A set of the line that is being SWEPT takes it over: the sweep is
+        stopped first (BEFORE the lock its step may be waiting for). A set of
+        another line leaves the sweep running -- it does not touch that line."""
         i = self._line_index(line)
+        if self._ramp.running and i == self._ramp_line and self._ramp.stop():
+            self._emit("info", f"wavelength sweep of line {i + 1} stopped by a set")
         lo, hi = self._range
         value, clamped = _clamp(float(nm), lo, hi)
         self._wl[i] = value
@@ -418,11 +469,108 @@ class SuperK:
         self.set_wavelength(line, nm)
         self.set_amplitude(line, pct)
 
+    # ======================================================= wavelength SWEEP
+
+    def ramp_rate_limits(self) -> tuple[float, float]:
+        """(min, max) sweep pace in nm/s, from cfg.limits."""
+        lim = self.cfg.limits
+        lo = max(1e-6, float(lim.ramp_rate_min_nm_per_s))
+        return lo, max(lo, float(lim.ramp_rate_max_nm_per_s))
+
+    def ramp_wavelength(self, line: int, nm: float, rate_nm_per_s: float) -> int:
+        """Sweep line `line` (1-based) from its present wavelength to `nm` at
+        `rate_nm_per_s`; returns the sweep's number. Target clamped to the
+        active crystal, rate to the limits (both warned). Emission, RF, power
+        and amplitude are NOT touched: a sweep of a dark line is a sweep of a
+        dark line (the caller switches the light, e.g. in a scan routine)."""
+        i = self._line_index(line)
+        rate = abs(float(rate_nm_per_s))
+        if not rate > 0 or rate != rate:
+            raise ValueError("rate must be > 0")
+        target = float(nm)
+        if target != target or target in (float("inf"), float("-inf")):
+            raise ValueError(f"wavelength must be a finite number, got {nm!r}")
+        lo, hi = self._range
+        value, clamped = _clamp(target, lo, hi)
+        r, rclamped = _clamp(rate, *self.ramp_rate_limits())
+        # the line is switched only with no walk running: stop, THEN point the
+        # ramp at the new line, THEN start (start() would stop it again, but by
+        # then the old walk must not write into the new line)
+        self._ramp.stop()
+        self._ramp_line = i
+        rid = self._ramp.start(value, r)
+        if clamped or rclamped:
+            self._emit("warn", f"line {i + 1}: sweep clamped to {value:g} nm at "
+                               f"{r:g} nm/s ({self.active_filter()} {lo:g}..{hi:g} nm)")
+        self._emit("info", f"line {i + 1}: wavelength sweep -> {value:g} nm at {r:g} nm/s")
+        return rid
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is. True if one was running. (A SAFETY verb
+        over the wire: it only stops.)"""
+        was = self._ramp.stop()
+        if was:
+            i = self._ramp_line
+            self._emit("info", f"line {i + 1}: wavelength sweep stopped at "
+                               f"{self._wl[i]:g} nm")
+        return was
+
+    def _ramp_step(self, nm: float) -> None:
+        """One step of the sweep, on the sweep's thread: write the line's
+        wavelength register and record ALL lines' commanded wavelengths with
+        the moment the write returned. Quiet: no event per step."""
+        i = self._ramp_line
+        with self._lock:
+            if self._connected:
+                self.backend.set_wavelength(i, float(nm))
+            self._wl[i] = float(nm)
+            row = list(self._wl)
+        self.recorder.append(time.time(), row)
+
+    def _ramp_done(self, rid: int, reason: str) -> None:
+        i = self._ramp_line
+        if reason == "done":
+            self._emit("info", f"line {i + 1}: wavelength sweep done at {self._wl[i]:g} nm")
+        elif reason.startswith("error"):
+            self._emit("error", f"line {i + 1}: wavelength sweep ended: {reason}")
+
+    # the stream verbs: every wavelength the sweep sent (group "ramp")
+    def stream_start(self) -> int:
+        sid = self.recorder.start()
+        # the PRESENT wavelengths as the first row: a fly row's lead-in, at
+        # rest, needs a value to look up before the walk sends its first step
+        self.recorder.append(time.time(), list(self._wl))
+        return sid
+
+    def stream_read(self) -> dict:
+        if not self._ramp.running:
+            # at rest nothing changes, but the record must go on covering time
+            # (a lagging detector's tail is looked up later)
+            self.recorder.append(time.time(), list(self._wl))
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        if not self._ramp.running:
+            self.recorder.append(time.time(), list(self._wl))
+        return self.recorder.stop()
+
     # ================================================================ status
 
     def status(self) -> Status:
-        """The last snapshot the worker built. Never touches hardware."""
-        return self._status
+        """The last snapshot the worker built. Never touches hardware.
+
+        The sweep's fields are laid over it LIVE (in memory, no hardware): the
+        snapshot is only rebuilt at poll_hz, and a fly scan waiting for the
+        end of a sweep should not wait a poll period for nothing."""
+        r = self._ramp.status()
+        st = self._status
+        live = {"ramping": r["ramping"], "ramp_id": r["ramp_id"],
+                "ramp_line": self._ramp_line + 1 if r["ramp_id"] else 0,
+                "ramp_target_nm": r["ramp_target"] or 0.0,
+                "ramp_rate_nm_per_s": r["ramp_rate"] or 0.0}
+        if all(getattr(st, k) == v for k, v in live.items()):
+            return st                        # nothing to lay over: the snapshot itself
+        return replace(st, **live)           # a COPY: the snapshot is never edited
 
     # ============================================================== settings
 
@@ -441,6 +589,9 @@ class SuperK:
         An unchanged Settings > Apply therefore writes nothing at all."""
         self._sanitise_limits()
         self._filter = min(self._filter, max(len(self.filter_names()) - 1, 0))
+        # a settings change may move the crystal's range under a running sweep
+        if self._ramp.stop():
+            self._emit("info", "wavelength sweep stopped by a settings change")
         with self._lock:
             p = self._clamped_power(self._power, announce=True)
             if p != self._power:

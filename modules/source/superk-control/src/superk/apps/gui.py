@@ -388,6 +388,33 @@ class MainWindow(QtWidgets.QMainWindow):
         set_l1 = QtWidgets.QPushButton("Set line 1"); set_l1.setObjectName("primary")
         set_l1.clicked.connect(lambda: self._set_line(1))
         llay.addWidget(set_l1)
+        # SWEEP (2026-10-10): walk one line's wavelength CONTINUOUSLY to the
+        # value in its wavelength box at a set pace -- what a fly scan does
+        # row by row, by hand. Only the wavelength moves: emission, RF and
+        # amplitude stay as they are.
+        srow = QtWidgets.QHBoxLayout()
+        self.sweep_line = QtWidgets.QSpinBox()
+        self.sweep_line.setRange(1, N_LINES); self.sweep_line.setPrefix("line ")
+        self.sweep_line.setToolTip("Which line to sweep (the target is that line's "
+                                   "wavelength box)")
+        self.sweep_rate = _dspin(lim.ramp_rate_min_nm_per_s, lim.ramp_rate_max_nm_per_s,
+                                 2, 1.0, 5.0, "nm/s")
+        self.sweep_rate.setToolTip("Sweep pace: the service writes the wavelength "
+                                   f"every {self.cfg.hardware.ramp_dt_s * 1e3:g} ms")
+        sweep_btn = QtWidgets.QPushButton("Sweep to")
+        sweep_btn.setToolTip("Sweep the line's wavelength continuously to its box's value")
+        sweep_btn.clicked.connect(self._sweep_line)
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where it is")
+        sweep_stop.clicked.connect(lambda: self._safe(self.ctrl.ramp_stop))
+        mark_always(sweep_stop)      # a SAFETY verb (net/service.py): viewers too
+        # two rows: the sidebar is too narrow for four widgets in one
+        srow.addWidget(QtWidgets.QLabel("Sweep"))
+        srow.addWidget(self.sweep_line); srow.addWidget(self.sweep_rate, 1)
+        llay.addLayout(srow)
+        brow = QtWidgets.QHBoxLayout()
+        brow.addWidget(sweep_btn, 1); brow.addWidget(sweep_stop)
+        llay.addLayout(brow)
         col.addWidget(lcard)
 
         col.addStretch(1)
@@ -495,6 +522,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             wl, am = self.line_wl[n].value(), self.line_amp[n].value()
         self._safe(self.ctrl.set_line, n, wl, am)
+
+    def _sweep_line(self):
+        n = self.sweep_line.value()
+        wl = self.wl1_spin.value() if n == 1 else self.line_wl[n].value()
+        self._safe(self.ctrl.ramp_wavelength, n, wl, self.sweep_rate.value())
 
     def _open_settings(self):
         self._safe(self.ctrl.get_config)   # fetch over the socket if remote
