@@ -316,8 +316,8 @@ frame (`last_deep()`).
   averaging"). Still open: a real TIME axis / a per-point timestamp recorded
   with every point (today only the interval pacing exists, the time each
   point was measured is not stored). (`average` with a fly axis: DONE
-  2026-10-09, pixels pooled over the repeats. Not built: collapsing the flown
-  axis into one mean per row.)
+  2026-10-09, pixels pooled over the repeats. Collapsing the flown axis into
+  one mean per row: DONE 2026-10-10, `collapse: mean` on the fly axis.)
 
 - **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
   `warn` for every module (`"*"`) since 2026-10-04 -- the week of `warn` is

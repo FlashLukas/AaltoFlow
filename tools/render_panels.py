@@ -571,6 +571,9 @@ def _axis_advanced(win):
     row = b.rows[1]
     row.timeout_auto.setChecked(False)
     row.timeout_spin.setValue(300.0)
+    # one mean per row (2026-10-10): shown ticked, the pixels kept, so the
+    # picture shows both boxes and the "row mean" tag
+    row.collapse_box.setChecked(True)
     b.open_advanced(row)
     b._rebuild_summary()
 

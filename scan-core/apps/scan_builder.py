@@ -356,7 +356,7 @@ class AxisRow(_StackRow):
     #: axis carries is kept in `extra` and written back unchanged
     MODELLED = {"type", "param", "start", "stop", "num", "step", "speed",
                 "row_time_s", "speed_param", "move", "readback", "lag_correction", "timeout_s",
-                "name"}
+                "collapse", "collapse_keep_pixels", "name"}
 
     def __init__(self, param, level_getter, speed_param=None, move_choices=(),
                  speed_lookup=None, registry=None):
@@ -601,6 +601,24 @@ class AxisRow(_StackRow):
             "instrument MEASURED at that moment.\n"
             "binned by command: by the value the module SENT at that moment --\n"
             "right when the instrument follows its commands quickly.")
+        # ONE MEAN PER ROW (flyscan.collapse_rows): the row as a way of
+        # collecting samples -- fly the field across a window and keep one
+        # number per outer point. The pixels stay in the file unless "keep
+        # pixel data" is unticked (only meaningful with the row mean on).
+        self.collapse_box = QtWidgets.QCheckBox("collapse to one mean per row")
+        self.collapse_box.setToolTip(
+            "Also store, for every row, the mean over ALL the pixels of the row\n"
+            "(<detector>_rowmean, with _rowmean_n samples and _rowmean_std).\n"
+            "Weighted by the samples: the mean of every sample the row recorded,\n"
+            "not the mean of the pixel means. Its spread includes the variation\n"
+            "ALONG the row. A trace keeps its own axis (one mean trace per row).\n"
+            "With a repeat set to average, the repeats are pooled first.")
+        self.keep_box = QtWidgets.QCheckBox("keep pixel data")
+        self.keep_box.setChecked(True)
+        self.keep_box.setToolTip(
+            "On (default): the file holds the pixels AND the row means.\n"
+            "Off: only the row means are saved -- for a long scan where only\n"
+            "the mean matters. The live plot shows the pixels either way.")
         self.fly_hint = _muted("", small=True)
         self.fly_hint.setWordWrap(True)
         self.knob_lbl = _muted("speed knob")
@@ -613,8 +631,13 @@ class AxisRow(_StackRow):
         g.addWidget(_muted("row timeout"), 2, 2); g.addLayout(to_box, 2, 3)
         g.addWidget(self.lag_box, 3, 0, 1, 2)
         g.addWidget(self.readback_lbl, 3, 2); g.addWidget(self.readback_box, 3, 3)
-        g.addWidget(self.binned_lbl, 4, 0, 1, 4)
-        g.addWidget(self.fly_hint, 5, 0, 1, 4)
+        # the long label spans three columns, so the FLY group gets no wider
+        # (a wider group would stack the Advanced groups one under the other
+        # on the suite's Scan tab)
+        g.addWidget(self.collapse_box, 4, 0, 1, 3)
+        g.addWidget(self.keep_box, 4, 3)
+        g.addWidget(self.binned_lbl, 5, 0, 1, 4)
+        g.addWidget(self.fly_hint, 6, 0, 1, 4)
         if not self.move_choices:
             # a stage flies itself: nothing to choose
             self.move_lbl.setText("")
@@ -654,6 +677,9 @@ class AxisRow(_StackRow):
         self.timeout_auto.toggled.connect(lambda *_: self._fly_toggled(self.is_fly()))
         self.timeout_spin.valueChanged.connect(lambda *_: self.changed.emit())
         self.lag_box.toggled.connect(lambda *_: self.changed.emit())
+        # the keep box greys out with the row mean off: re-run the enabling
+        self.collapse_box.toggled.connect(lambda *_: self._fly_toggled(self.is_fly()))
+        self.keep_box.toggled.connect(lambda *_: self.changed.emit())
         self.readback_box.currentIndexChanged.connect(lambda *_: self._readback_changed())
 
     def _readback_changed(self) -> None:
@@ -876,9 +902,11 @@ class AxisRow(_StackRow):
     def _fly_toggled(self, on):
         on = bool(on)
         for w in (self.move_box, self.knob_box, self.dir_box,
-                  self.timeout_auto, self.lag_box, self.readback_box):
+                  self.timeout_auto, self.lag_box, self.readback_box,
+                  self.collapse_box):
             w.setEnabled(on and self.streams)
         self.timeout_spin.setEnabled(on and self.streams and not self.timeout_auto.isChecked())
+        self.keep_box.setEnabled(on and self.streams and self.collapse_box.isChecked())
         self._update_pace_widgets()               # speed / row time / default
         self.num_lbl.setText("pixels" if on else "pts")
         self.changed.emit()
@@ -1122,6 +1150,10 @@ class AxisRow(_StackRow):
                         skipped.append(f"speed ({src.speed.value():g} {su} does not "
                                        f"fit an axis in {tu})")
                     self.lag_box.setChecked(src.lag_box.isChecked())
+                    self.collapse_box.setChecked(src.collapse_box.isChecked())
+                    self.keep_box.setChecked(src.keep_box.isChecked())
+                    if src.collapse_box.isChecked():
+                        copied.append("one mean per row")
                     self.timeout_auto.setChecked(src.timeout_auto.isChecked())
                     self.timeout_spin.setValue(src.timeout_spin.value())
                     mv = src.move_param()
@@ -1162,7 +1194,7 @@ class AxisRow(_StackRow):
     def reset_advanced(self) -> None:
         """Back to plain stepping."""
         widgets = (self.fly, self.speed, self.row_time, self.pace_box,
-                   self.lag_box, self.timeout_auto,
+                   self.lag_box, self.timeout_auto, self.collapse_box, self.keep_box,
                    self.timeout_spin, self.readback_box, self.scout,
                    self.scout_step, self.margin_auto, self.margin_spin,
                    self.name_edit)
@@ -1174,6 +1206,8 @@ class AxisRow(_StackRow):
             self.row_time.setValue(60.0)
             self.pace_box.setCurrentIndex(0)          # speed
             self.lag_box.setChecked(True)
+            self.collapse_box.setChecked(False)
+            self.keep_box.setChecked(True)
             self.timeout_auto.setChecked(True)
             self.timeout_spin.setValue(120.0)
             self.readback_box.setCurrentIndex(0)
@@ -1217,6 +1251,9 @@ class AxisRow(_StackRow):
                 out.append("zig-zag")
             if not self.lag_box.isChecked():
                 out.append("no lag correction")
+            if self.collapse_box.isChecked():
+                out.append("row mean" if self.keep_box.isChecked()
+                           else "row mean only")
             if not self.timeout_auto.isChecked():
                 out.append(f"row max {self.timeout_spin.value():g} s")
             if self.readback_box.currentData():
@@ -1369,6 +1406,11 @@ class AxisRow(_StackRow):
                 ax["readback"] = self.readback_box.currentData()
             if not self.lag_box.isChecked():
                 ax["lag_correction"] = False
+            # only what differs from the default is written, as for the rest
+            if self.collapse_box.isChecked():
+                ax["collapse"] = "mean"
+                if not self.keep_box.isChecked():
+                    ax["collapse_keep_pixels"] = False
             if not self.timeout_auto.isChecked():
                 ax["timeout_s"] = float(self.timeout_spin.value())
         else:
@@ -1430,6 +1472,8 @@ class AxisRow(_StackRow):
                     missing.append(rb)
             self.readback_box.setCurrentIndex(self.readback_box.findData(rb))
         self.lag_box.setChecked(ax.get("lag_correction", True) is not False)
+        self.collapse_box.setChecked(ax.get("collapse") == "mean")
+        self.keep_box.setChecked(ax.get("collapse_keep_pixels") is not False)
         if ax.get("timeout_s"):
             self.timeout_auto.setChecked(False)
             self.timeout_spin.setValue(float(ax["timeout_s"]))

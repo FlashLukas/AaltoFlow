@@ -629,7 +629,14 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
   (`repeat._pool_fly`): N = sum n_i, M = sum n_i m_i / N, std = sqrt(sum n_i
   (s_i^2 + |m_i - M|^2) / N) -- the exact population stats of all samples of
   all repeats in the pixel; `_n` stays per pixel (also for a trace); a NaN
-  count (row not flown yet) is 0, which gives the running mean.
+  count (row not flown yet) is 0, which gives the running mean. The formula
+  is `flyscan.pool_bins`, shared with the fly axis's `collapse: mean`
+  (2026-10-10): `engine._to_dataset` pools the pixels of each row AFTER the
+  repeat collapse (`flyscan.collapse_rows`) into `<det>_rowmean` / `_n` /
+  `_std` whose dims are the scan dims minus the fly dim (`row_vars`);
+  `collapse_keep_pixels: false` drops the pixel trio from every dataset
+  except the live snapshot (`_to_dataset(live=True)`, passed only by the fly
+  row's snapshot), so the live plot keeps its pixel map.
 - **Compression:** zlib level 4 with shuffle on every data variable, including
   the window's mask and record variables; coordinates stay uncompressed;
   strings are not filtered. A 100x100 scan of bool + 12-bit + enum + one float

@@ -136,6 +136,10 @@
             "move": {"type": "string", "description": "the stage that flies the row when param is a coordinate measured by something else (camera.laser_x); the grid, placement and binning stay in param's coordinates"},
             "lag_correction": {"type": "boolean", "description": "move each sample back by its channel's declared delay (default true)"},
             "timeout_s": {"type": "number", "description": "longest one row may take (default 3x the expected time + 30 s)"},
+            "collapse": {"enum": ["none", "mean"],
+                         "description": "mean: ALSO store one mean per row, <det>_rowmean / _rowmean_n / _rowmean_std without the fly dimension (a trace keeps its own), pooled over the pixels weighted by their samples (= the mean and spread of every sample of the row; with a repeat average, the repeats are pooled first). Default none"},
+            "collapse_keep_pixels": {"type": "boolean",
+                                     "description": "with collapse: mean, keep the pixel variables (<det>, <det>_n, <det>_std) in the file too (default true); false keeps only the row means. The live plot shows the pixels either way"},
             "name": {"type": "string"}
           },
           "required": ["type", "param", "start", "stop", "num"]
@@ -147,7 +151,7 @@
             "type": {"const": "repeat"},
             "num": {"type": "integer", "minimum": 1, "description": "how many times"},
             "mode": {"enum": ["keep", "average"],
-                     "description": "keep (default): a dimension 'repeat' with coordinate 0..num-1, every repeat in the file; average: the dimension is collapsed to <det> (mean, NaN ignored), <det>_std (sample std; of |z| for complex) and <det>_n (finite repeats). At most one average repeat per scan; not with a fly axis or the resonance window; numeric detectors only"},
+                     "description": "keep (default): a dimension 'repeat' with coordinate 0..num-1, every repeat in the file; average: the dimension is collapsed to <det> (mean, NaN ignored), <det>_std (sample std; of |z| for complex) and <det>_n (finite repeats). At most one average repeat per scan; not inside a fly axis (above one, the pixels are pooled over the repeats, weighted by their samples) and not with the resonance window; numeric detectors only"},
             "interval_s": {"type": "number", "minimum": 0,
                            "description": "repeat k of a pass starts no earlier than t0 + k*interval_s (t0 = start of repeat 0)"},
             "name": {"type": "string", "description": "dimension name (default 'repeat', or repeat_1, repeat_2, ... when there are several)"}

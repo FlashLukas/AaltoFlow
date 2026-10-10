@@ -1209,12 +1209,14 @@ def _storage_for(name, g, arr, extra: dict):
 
 def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                 det_axes=None, det_coords=None, var_attrs=None,
-                ds_attrs=None, extra=None) -> xr.Dataset:
+                ds_attrs=None, extra=None, live=False) -> xr.Dataset:
     """Build the Dataset. `var_attrs` = {name: {attr: value}} merged into a
     variable's or coordinate's attributes (a fly scan's per-pixel count and
     spread are not registry parameters, so their units come from here).
     `ds_attrs` = extra FILE attributes: the run info (sample, operator...),
-    the software provenance and the instrument snapshot (snapshot.py)."""
+    the software provenance and the instrument snapshot (snapshot.py).
+    `live` = a snapshot for the live plot, not the file: a fly axis that
+    keeps only its row means in the file still shows its pixels then."""
     dims = compiled.dims
     det_axes = det_axes or {}
     det_coords = det_coords or {}
@@ -1232,6 +1234,23 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         var_attrs.update(stat_attrs)
         dims = dims[:avg] + dims[avg + 1:]
     dim_names = [d.name for d in dims]
+
+    # ONE MEAN PER ROW of a fly axis with `collapse: mean` (flyscan.py): the
+    # pixels of each row pooled -- after the repeats, so a repeat average
+    # and a row mean combine into the mean of every sample of every repeat.
+    # The row means have the scan dims WITHOUT the fly dim.
+    row_vars: set = set()
+    fly_ax = None
+    if dims and dims[-1].kind == "fly":
+        from .flyscan import collapse_of, collapse_rows, fly_axis, keeps_pixels
+        fly_ax = fly_axis(recipe)
+        if fly_ax is not None and collapse_of(fly_ax) == "mean":
+            data, det_axes, row_attrs, row_vars = collapse_rows(
+                data, len(dims) - 1, list(compiled.detectors), det_axes, registry,
+                keep_pixels=live or keeps_pixels(fly_ax))
+            var_attrs.update(row_attrs)
+        else:
+            fly_ax = None
 
     # index coordinates (one per dim), carrying the driving parameter's units.
     # A repeat dim has no parameter: its coordinate is the repeat number.
@@ -1272,9 +1291,14 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
     data_vars = {}
     for det, arr in data.items():
         g = registry.get(det)
-        names = dim_names + [a.name for a in det_axes.get(det, ())]
+        own = dim_names[:-1] if det in row_vars else dim_names
+        names = own + [a.name for a in det_axes.get(det, ())]
         attrs = {"units": _units(registry, det),
                  "label": getattr(g, "label", det)}
+        if det in row_vars:
+            # not a registry parameter: its label and units come with it (and
+            # must reach the _real/_imag halves of a complex row mean too)
+            attrs.update(var_attrs.get(det) or {})
         st, extra_attrs = _storage_for(det, g, arr, var_attrs.get(det) or {})
         attrs.update(extra_attrs)
         # `encoding` is what to_netcdf applies when the file is written --
@@ -1359,6 +1383,11 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         # is a mean (and over how many), not one measurement
         ds.attrs["repeat_averaged"] = averaged.name
         ds.attrs["repeat_num"] = int(averaged.size)
+    if fly_ax is not None:
+        # in the header as well: this file holds one mean per row of the fly
+        # axis named here (and whether the pixels are in it too)
+        ds.attrs["fly_row_mean"] = dims[-1].name
+        ds.attrs["fly_pixels_kept"] = int(live or keeps_pixels(fly_ax))
     if ds_attrs:
         # after the fixed ones on purpose: `comment` from the run info is the
         # same field as the recipe's comment (the builder puts it there), so

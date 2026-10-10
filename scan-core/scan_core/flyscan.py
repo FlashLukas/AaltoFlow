@@ -89,6 +89,32 @@ How it plugs in (everything stepped stays exactly as it was):
     axis flies every row N times; the pixels are pooled over the repeats when
     the dataset is built (repeat._pool_fly), weighted by their samples.
 
+  * ONE MEAN PER ROW (2026-10-10, Lukas approved): `collapse: mean` on the
+    fly axis ALSO stores, for every row, the mean over all the pixels of the
+    row -- for a measurement where the row is only a way of collecting
+    samples (fly the field across a window and keep one number per
+    frequency, average a signal over a strip of the sample):
+
+        {type: fly, param: kim.position_x, start: 0, stop: 50, num: 101,
+         speed: 5, speed_param: kim.velocity_x,
+         collapse: mean,                    # default: none
+         collapse_keep_pixels: true}        # default: true
+
+    The file gets <det>_rowmean, <det>_rowmean_n and <det>_rowmean_std,
+    without the fly dimension (a trace keeps its own: one mean trace per
+    row). The pixels are pooled with the formula that pools repeats
+    (pool_bins): weighted by their SAMPLES, so the row mean is the mean of
+    every sample the row recorded -- not the mean of the pixel means, which
+    would give a pixel with 2 samples the same say as one with 20. Its std
+    is the spread of all those samples around the row mean, so it INCLUDES
+    the variation along the row (the image contrast, a resonance the field
+    crossed): it is the spread of the row, not the noise of one pixel.
+    With a repeat in mode 'average' the repeats are pooled first, pixel by
+    pixel, then the row. By default the pixel variables stay next to the row
+    means (nothing is thrown away unless asked); `collapse_keep_pixels:
+    false` drops them from the FILE, for a long scan where only the mean
+    matters. The live plot always shows the pixels while the scan runs.
+
 THE LAG. A lock-in's output is its input averaged over the last few time
 constants, so the value recorded at time t belongs to where the stage was a
 little EARLIER. Moving at speed v, that shifts the image by v * delay, in
@@ -267,6 +293,116 @@ def bin_samples(t_pos, pos, t_det, values, edges, delay_s: float = 0.0,
     return m, cnt.astype(int), np.sqrt(var)
 
 
+def pool_bins(x, n_i, s_i, axis: int):
+    """Pool binned statistics along `axis` EXACTLY as if every sample had
+    fallen into one bin. Returns (mean, count, std) with `axis` removed.
+
+    x    : the bin means m_i (complex: coherent; a trace: element-wise, its
+           own dims AFTER those of n_i)
+    n_i  : samples per bin (NaN = not measured yet, counts as empty)
+    s_i  : the spread within each bin, sqrt(mean |z - m_i|^2) (ddof = 0,
+           what bin_samples gives)
+
+        N   = sum_i n_i
+        M   = sum_i n_i m_i / N                      (weighted by the samples)
+        std = sqrt( sum_i n_i (s_i^2 + |m_i - M|^2) / N )
+
+    The second term in the std is the spread BETWEEN the bins: the pooled
+    std is the spread of every sample around the final mean. Used over the
+    repeats of a pixel (repeat._pool_fly) and over the pixels of a row
+    (collapse_rows). An empty bin (n_i = 0, or a NaN mean) does not count.
+    `count` is per bin position, like `n_i` (not per trace point).
+    """
+    x = np.asarray(x)
+    n_i = np.nan_to_num(np.asarray(n_i, dtype=float), nan=0.0)
+    s_i = np.asarray(s_i, dtype=float)
+    k = x.ndim - n_i.ndim                     # a trace's own dims (freq)
+    n_b = n_i.reshape(n_i.shape + (1,) * k)
+    cplx = np.iscomplexobj(x)
+    ok = np.isfinite(x) & (n_b > 0)
+    w = np.where(ok, n_b, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        big_n = w.sum(axis=axis)
+        mean = (np.where(ok, x, 0) * w).sum(axis=axis) / big_n
+        dev2 = np.abs(np.where(ok, x, 0) - np.expand_dims(mean, axis)) ** 2
+        within = np.where(ok, np.nan_to_num(s_i, nan=0.0) ** 2, 0.0)
+        var = (w * (within + dev2)).sum(axis=axis) / big_n
+    empty = big_n <= 0
+    nan = complex(np.nan, np.nan) if cplx else np.nan
+    mean = np.where(empty, nan, mean).astype(np.complex128 if cplx else np.float64)
+    std = np.where(empty, np.nan, np.sqrt(np.maximum(var, 0.0)))
+    return mean, n_i.sum(axis=axis).astype(np.float64), std
+
+
+#: what `collapse` on a fly axis may say; the first is the default
+COLLAPSE_MODES = ("none", "mean")
+
+#: the suffix of a row-mean variable: <det>_rowmean, <det>_rowmean_n, _std
+ROWMEAN = "_rowmean"
+
+
+def collapse_of(ax) -> str:
+    """'mean' when the fly axis collapses each row into one mean, else 'none'."""
+    v = ax.get("collapse") if isinstance(ax, dict) else None
+    return "none" if v in (None, "", False) else str(v)
+
+
+def keeps_pixels(ax) -> bool:
+    """Does the FILE keep the pixel variables next to the row means? Yes by
+    default (Lukas did not ask to throw data away; a long scan can opt out)."""
+    return not (isinstance(ax, dict) and ax.get("collapse_keep_pixels") is False)
+
+
+def collapse_rows(data: dict, axis: int, dets, det_axes: dict, registry,
+                  keep_pixels: bool = True):
+    """Add one MEAN PER ROW of every fly detector (`collapse: mean`).
+
+    `axis` is the fly dim's position in the buffers (the last scan dim; a
+    trace's own dims follow it). For every detector `d` with its fly
+    statistics (d, d_n, d_std) in `data`, adds d_rowmean / d_rowmean_n /
+    d_rowmean_std, pooled over the pixels by pool_bins -- weighted by the
+    samples, so the result is the mean of every sample the row recorded.
+    With keep_pixels False the pixel variables are dropped.
+
+    Returns (data', det_axes', var_attrs', row_vars) -- row_vars = the names
+    whose dims are the scan dims WITHOUT the fly dim (the engine needs that
+    to name their dimensions).
+    """
+    out = dict(data)
+    axes_out = dict(det_axes)
+    attrs: dict = {}
+    row_vars: set = set()
+    for det in dets:
+        if not (det in data and f"{det}_n" in data and f"{det}_std" in data):
+            continue
+        mean, count, std = pool_bins(data[det], data[f"{det}_n"],
+                                     data[f"{det}_std"], axis)
+        m, n, s = det + ROWMEAN, det + ROWMEAN + "_n", det + ROWMEAN + "_std"
+        out[m], out[n], out[s] = mean, count, std
+        inner = det_axes.get(det, [])
+        axes_out[m], axes_out[s], axes_out[n] = inner, inner, []
+        row_vars.update((m, n, s))
+        p = registry.get(det) if registry is not None else None
+        label = getattr(p, "label", det)
+        unit = getattr(p, "unit", "") or ""
+        trace = bool(getattr(p, "axes", None))
+        cplx = np.iscomplexobj(mean)
+        attrs[m] = {"units": unit, "label": f"{label}: mean of the row",
+                    "fly_stat": "mean", "fly_collapse": "mean"}
+        attrs[n] = {"units": "",
+                    "label": f"{label}: {'traces' if trace else 'samples'} in the row",
+                    "fly_stat": "count", "fly_collapse": "mean"}
+        attrs[s] = {"units": unit,
+                    "label": f"{label}: spread of every sample in the row"
+                             + (" (rms |z - mean|)" if cplx else ""),
+                    "fly_stat": "std", "fly_collapse": "mean"}
+        if not keep_pixels:
+            for name in (det, f"{det}_n", f"{det}_std"):
+                out.pop(name, None)
+                axes_out.pop(name, None)
+    return out, axes_out, attrs, row_vars
+
+
 def _sum_by_pixel(idx, arr, npix):
     """Row sums of `arr` (samples x elements) grouped by pixel index `idx`:
     (npix x elements). Sorting once and summing each run with add.reduceat is
@@ -403,6 +539,17 @@ def validate_fly(recipe, registry) -> list[str]:
         num = 0
     if num < 2:
         errs.append(f"fly axis '{pid}' needs at least 2 pixels (num)")
+    if collapse_of(ax) not in COLLAPSE_MODES:
+        errs.append(f"fly axis collapse must be 'none' or 'mean', not "
+                    f"{ax.get('collapse')!r}")
+    kp = ax.get("collapse_keep_pixels")
+    if kp is not None and not isinstance(kp, bool):
+        errs.append(f"fly axis collapse_keep_pixels must be true or false, "
+                    f"not {kp!r}")
+    elif kp is False and collapse_of(ax) != "mean":
+        # dropping the pixels without a row mean would leave nothing at all
+        errs.append("fly axis collapse_keep_pixels: false needs collapse: mean "
+                    "(otherwise the file would hold no data)")
     ramp = ramp_of(ax, registry)
     speed = fly_rate(ax, registry)
     if not (math.isfinite(speed) and speed > 0):
@@ -640,7 +787,11 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                            {k: v.copy() for k, v in data.items()},
                            created_iso, time.monotonic() - t0,
                            det_axes, det_coords, var_attrs=ctx.get("var_attrs"),
-                           ds_attrs=ctx.get("ds_attrs"))
+                           ds_attrs=ctx.get("ds_attrs"),
+                           # the LIVE plot shows the pixel map while the scan
+                           # runs, even when the file will keep only the row
+                           # means (collapse_keep_pixels: false)
+                           live=True)
 
     def fly_row(row, redo):
         """Fly ONE row (approach, outer dims, the move, binning).

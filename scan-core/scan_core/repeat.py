@@ -65,7 +65,9 @@ the spread of every one of those samples around the pooled mean (between-
 repeat spread included). The exact formulas are in _pool_fly. It works for
 single values and for whole traces (a VNA sweep), with zig-zag and the lag
 correction, which act on each row before anything is pooled. This is NOT
-"one mean per row" (collapsing the flown axis itself): the pixels stay.
+"one mean per row" (collapsing the flown axis itself): the pixels stay. That
+is the fly axis's own option `collapse: mean` (flyscan.collapse_rows, 2026-10-10),
+which works on top of this one: the repeats are pooled first, then the row.
 """
 
 from __future__ import annotations
@@ -329,26 +331,17 @@ def _pool_fly(name, data, axis, det_axes, registry, out, axes_out, attrs) -> Non
     flown yet (n_i NaN in memory) counts as empty, which is what makes the
     live plot and an aborted scan show the RUNNING mean.
     """
+    # The formula itself lives in flyscan.pool_bins: the SAME pooling also
+    # collapses a flown row into one mean (`collapse: mean` on the fly axis),
+    # over the pixels instead of over the repeats.
+    from .flyscan import pool_bins
     x = np.asarray(data[name])
-    n_i = np.nan_to_num(np.asarray(data[f"{name}_n"], dtype=float), nan=0.0)
-    s_i = np.asarray(data[f"{name}_std"], dtype=float)
-    k = x.ndim - n_i.ndim                     # a trace's own dims (freq)
-    n_b = n_i.reshape(n_i.shape + (1,) * k)
     cplx = np.iscomplexobj(x)
-    ok = np.isfinite(x) & (n_b > 0)
-    w = np.where(ok, n_b, 0.0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        big_n = w.sum(axis=axis)
-        mean = (np.where(ok, x, 0) * w).sum(axis=axis) / big_n
-        dev2 = np.abs(np.where(ok, x, 0) - np.expand_dims(mean, axis)) ** 2
-        within = np.where(ok, np.nan_to_num(s_i, nan=0.0) ** 2, 0.0)
-        var = (w * (within + dev2)).sum(axis=axis) / big_n
-    empty = big_n <= 0
-    nan = complex(np.nan, np.nan) if cplx else np.nan
-    out[name] = np.where(empty, nan, mean).astype(np.complex128 if cplx else np.float64)
-    out[f"{name}_std"] = np.where(empty, np.nan, np.sqrt(np.maximum(var, 0.0)))
+    mean, count, std = pool_bins(x, data[f"{name}_n"], data[f"{name}_std"], axis)
+    out[name] = mean
+    out[f"{name}_std"] = std
     # the count is per PIXEL, like a single fly row's (not per trace point)
-    out[f"{name}_n"] = n_i.sum(axis=axis).astype(np.float64)
+    out[f"{name}_n"] = count
     axes_out[f"{name}_std"] = det_axes.get(name, [])
     axes_out[f"{name}_n"] = []
     p = registry.get(name)

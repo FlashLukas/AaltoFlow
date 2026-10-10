@@ -621,6 +621,13 @@ def axis_attrs(recipe, units=None, registry=None) -> dict:
         # zig-zag is scan-wide in the recipe; on a fly row it decides whether
         # every other row was flown backwards, so it belongs here too
         a["fly_zigzag"] = int(bool(getattr(recipe, "zigzag", False)))
+        # ONE MEAN PER ROW (flyscan.collapse_rows): said on the coordinate,
+        # with whether the pixels were kept (only when it is on, so a file of
+        # an ordinary fly scan looks exactly as before)
+        from .flyscan import collapse_of, keeps_pixels
+        if collapse_of(ax) == "mean":
+            a["fly_collapse"] = "mean"
+            a["fly_collapse_keep_pixels"] = int(keeps_pixels(ax))
         out.setdefault(ax.get("name") or ax.get("param"), {}).update(a)
     block = getattr(recipe, "scout", None)
     if isinstance(block, dict) and block:

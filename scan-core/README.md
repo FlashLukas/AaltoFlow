@@ -642,9 +642,43 @@ and the lag correction (both act on each row before anything is pooled); the
 live plot and an aborted scan show the running mean. Use `keep` instead to see
 the repeats one by one.
 
-Not the same thing: "collapse the flown axis into one mean per row" (a
-1-D result per outer step). That is not built; today, average over the fly
-axis in the viewer.
+Not the same thing: one mean per ROW (below), which collapses the flown axis
+itself.
+
+### One mean per row: `collapse: mean` (2026-10-10)
+
+Sometimes the row is only a way of collecting samples: fly the field across
+a window and keep one number per frequency, or average a signal over a strip
+of the sample. Tick **collapse to one mean per row** in the axis's FLY group
+(Advanced), or write
+
+    - {type: fly, param: kim.position_x, start: 0, stop: 50, num: 101,
+       speed: 5, speed_param: kim.velocity_x,
+       collapse: mean,                  # default: none
+       collapse_keep_pixels: true}      # default: true
+
+and the file ALSO holds, for every row, `<det>_rowmean`, `<det>_rowmean_n`
+and `<det>_rowmean_std`, without the fly dimension (a VNA trace keeps its
+frequency axis: one mean trace per row). The pixels are pooled with the
+formula above, now over the pixels of the row: weighted by their samples, so
+the row mean is the mean of EVERY SAMPLE the row recorded -- not the mean of
+the pixel means, which would give a pixel with 2 samples the same weight as
+one with 20. The `_rowmean_std` is the spread of all those samples around the
+row mean, so it includes the variation ALONG the row (an edge, a resonance
+the field crossed): it is the spread of the row, not the noise of one pixel.
+With a repeat in mode average above the fly axis, the repeats are pooled
+first, pixel by pixel, then the row. Zig-zag and the lag correction act on
+each row before that, as always.
+
+By default the pixel variables stay in the file next to the row means.
+Untick **keep pixel data** (`collapse_keep_pixels: false`) for a long scan
+where only the mean matters: the file then keeps only the row means (the fly
+coordinate stays, with its settings). The live plot shows the pixel map while
+the scan runs either way. The fly coordinate says `fly_collapse = mean` and
+`fly_collapse_keep_pixels` (1/0); the file header `fly_row_mean` (the fly
+dimension) and `fly_pixels_kept`. The row's tag reads "row mean" (or "row
+mean only"); the time estimate does not change -- the rows are flown exactly
+as before.
 
 ## Scripts: set, wait, scan in a loop
 
@@ -800,7 +834,8 @@ which opens a panel under the row (one row at a time):
 
 - **FLY**: fly this axis, its speed and speed knob, the stage that moves it
   (for a measured coordinate), the direction, the row timeout, the lag
-  correction and the readback;
+  correction, the readback, and one mean per row (with or without the pixel
+  data);
 - **SCOUT**: scout this axis, its coarse step and its margin in grid points;
 - **POINT**: the axis's name in the data file, and the routines bound to it
   (edited under ROUTINES > THROUGHOUT).
@@ -815,7 +850,7 @@ panel hides nothing.
 The data file carries these settings on each axis's coordinate as well as in
 `recipe_json`: `fly`, `fly_speed`, `fly_speed_units`, `fly_speed_param`,
 `fly_move`, `fly_readback`, `fly_lag_correction`, `fly_timeout_s`,
-`fly_zigzag`, `scout_every`, `scout_margin` (`auto`) and
+`fly_zigzag`, `fly_collapse`, `fly_collapse_keep_pixels`, `scout_every`, `scout_margin` (`auto`) and
 `scout_margin_points`. Only what is set is written.
 
 ![an axis row's Advanced panel](../front-panels/suite-axis-advanced.png)
