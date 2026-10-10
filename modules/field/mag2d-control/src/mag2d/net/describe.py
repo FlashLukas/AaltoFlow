@@ -33,7 +33,7 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, set=None, settle=None,
-       timeout_s=None, args=None, danger=False, help=""):
+       timeout_s=None, args=None, danger=False, help="", ramp=None, stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -45,7 +45,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("set", set),
                  ("settle", settle), ("timeout_s", timeout_s), ("args", args),
-                 ("help", help)):
+                 ("help", help), ("ramp", ramp), ("stream", stream)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -56,6 +56,32 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
 def _stable_after(setpoint_key: str) -> dict:
     return {"policy": "adopt_then_flag", "setpoint_key": setpoint_key,
             "flag_key": "field_stable"}
+
+
+#: The sweep paces a client is offered first: 2 mT/s (a 100 mT FMR row in
+#: under a minute, slow enough for a lock-in at a few ms time constant) and
+#: 2 deg/s (a full turn in 3 minutes).
+SWEEP_FIELD_DEFAULT_MT_PER_S = 2.0
+SWEEP_ANGLE_DEFAULT_DEG_PER_S = 2.0
+
+
+def _ramp(verb: str, to_arg: str, rate_arg: str, unit: str, lo: float, hi: float,
+          default: float, channel: str) -> dict:
+    """A `ramp` block (INSTRUMENT_MODULE_GUIDE.md 6b, "Ramps"): the SERVICE
+    walks the setpoint (its control loop computes it from the elapsed time)
+    and the PI makes the field follow; a fly scan bins by the MEASURED field
+    (the Hall-probe stream), not by the setpoint."""
+    lo, hi = min(lo, hi), max(lo, hi)
+    return {
+        "kind": "software",
+        "start": {"verb": verb, "args": {"to": to_arg, "rate": rate_arg}},
+        "stop": {"verb": "ramp_stop"},
+        "rate": {"unit": unit, "min": lo, "max": hi,
+                 "default": max(lo, min(hi, default))},
+        "readback": {"stream": {"group": "field", "channel": channel},
+                     "measured": True},
+        "done": {"key": "ramping", "id_key": "ramp_id"},
+    }
 
 
 def build_manifest(ctrl) -> dict:
@@ -75,6 +101,10 @@ def build_manifest(ctrl) -> dict:
            plottable=True, read_path=["measured_field_mT"],
            set={"verb": "set_field", "arg": "field_mT"},
            settle=_stable_after("setpoint_field_mT"), timeout_s=settle_t,
+           # a CONTINUOUS SWEEP of the magnitude for fly scans (2026-10-10)
+           ramp=_ramp("ramp_field", "field_mT", "rate_mT_per_s", "mT/s",
+                      lim.field_rate_min_mT_per_s, lim.field_rate_max_mT_per_s,
+                      SWEEP_FIELD_DEFAULT_MT_PER_S, "field"),
            help="Signed magnitude along the setpoint angle (the angle is kept). "
                 "The read-back is the measured component along that direction."),
         _p("angle", "Field angle", "control", "float", unit="deg",
@@ -82,7 +112,15 @@ def build_manifest(ctrl) -> dict:
            step=1.0, decimals=2, plottable=True, read_path=["measured_angle_deg"],
            set={"verb": "set_angle", "arg": "angle_deg"},
            settle=_stable_after("setpoint_angle_deg"), timeout_s=settle_t,
-           help="Rotates the field, keeping its magnitude. 0 deg = +X, 90 deg = +Y."),
+           # a CONTINUOUS ROTATION for fly scans: the angular FMR scan as a
+           # fly axis (2026-10-10); binned by the measured direction
+           ramp=_ramp("ramp_angle", "angle_deg", "rate_deg_per_s", "deg/s",
+                      lim.angle_rate_min_deg_per_s, lim.angle_rate_max_deg_per_s,
+                      SWEEP_ANGLE_DEFAULT_DEG_PER_S, "angle"),
+           help="Rotates the field, keeping its magnitude. 0 deg = +X, 90 deg = +Y. "
+                "The read-back is the measured direction, unwrapped to the "
+                "setpoint's turn (and the setpoint itself below "
+                "limits.angle_min_field_mT, where the direction is noise)."),
         _p("bx", "Field X", "control", "float", unit="mT",
            group="Vector", order=30, min=-fmax, max=fmax, step=1.0, decimals=3,
            plottable=True, read_path=["measured_bx_mT"],
@@ -129,7 +167,18 @@ def build_manifest(ctrl) -> dict:
            read_path=["measured_magnitude_mT"]),
         _p("measured_angle", "Measured angle", "indicator", "float", unit="deg",
            group="Measured", order=130, decimals=2, plottable=True,
-           read_path=["measured_angle_deg"]),
+           read_path=["measured_angle_deg"],
+           # every loop reading, for fly scans (group "field": one recorder)
+           stream={"group": "field", "channel": "angle"}),
+        _p("measured_field", "Measured field (along)", "indicator", "float", unit="mT",
+           group="Measured", order=125, decimals=3, plottable=True,
+           read_path=["measured_field_mT"],
+           stream={"group": "field", "channel": "field"},
+           help="The measured field's component along the setpoint direction "
+                "(signed), every loop reading streamed for fly scans."),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Status", order=4,
+           read_path=["ramping"],
+           help="True while a sweep (ramp_field / ramp_angle) moves the setpoint."),
         _p("error", "Vector error", "indicator", "float", unit="mT",
            group="Measured", order=140, decimals=3, plottable=True,
            read_path=["error_mT"],

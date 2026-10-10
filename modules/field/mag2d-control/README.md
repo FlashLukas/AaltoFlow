@@ -83,13 +83,50 @@ instant, and True again once every axis has been within `control.tolerance_mT`
 for `control.stable_time_s`. Wait for both "my setpoint is in the status" and
 `field_stable` (the client's `set_field_blocking` does).
 
+## Sweep (fly scans)
+
+The field magnitude and the field **angle** can be swept continuously at a set
+pace, so scan-core's fly axis can fly them: the magnet sweeps over each row,
+the detectors stream, and every sample is binned by the **measured** field.
+An angle sweep is the angular FMR scan as one continuous rotation.
+
+| verb | args | |
+|---|---|---|
+| `ramp_field` | `field_mT`, `rate_mT_per_s` | sweep the signed magnitude, angle kept; reply `{"ramp_id": n}` |
+| `ramp_angle` | `angle_deg`, `rate_deg_per_s` | rotate, magnitude kept; the angle is never wrapped |
+| `ramp_stop` | | end it where it is (safety verb: a viewer may send it) |
+| `stream_start` / `stream_read` / `stream_stop` | | every Hall reading with its time: `field` (along the setpoint direction), `angle` (measured direction), `bx`, `by`, the setpoint |
+
+How it works: the control loop moves the **setpoint** along a straight line in
+time (computed from the elapsed time, so a late tick does not slow the sweep)
+and the continuous PI makes the field follow; at the target the ordinary
+`field_stable` takes over. The status shows `ramping`, `ramp_id` (the newest
+sweep started), `ramp_knob` (`field` / `angle`), `ramp_target`, `ramp_rate`;
+a sweep is over when `ramp_id` is yours and `ramping` is false. Any ordinary
+set (`set_field`, `set_angle`, `set_vector`, `zero`, output off) stops a
+running sweep first; a new sweep replaces a running one from where it got to.
+Targets and rates are clamped to `limits` with a warning
+(`field_rate_*_mT_per_s`, `angle_rate_*_deg_per_s`; the maxima are what the
+sim's PI follows -- VERIFY on the magnet). A FAULT (water lost, temperature,
+a failed read) ends the sweep and zeroes the setpoint as always; during a
+FAULT a sweep is refused.
+
+The measured angle is reported in the setpoint's own convention: a negative
+field reads the direction of -B, the angle is unwrapped to the setpoint's turn
+(350 deg reads 350, not -10), and below `limits.angle_min_field_mT` (1 mT) --
+where the direction is only probe noise -- it shows the setpoint angle.
+
+The GUI's **Sweep** card sweeps to the magnitude / angle typed above at the
+rate beside each button; **Stop** ends it.
+
 ## Files
 
 ```
 src/mag2d/
   config.py            every tunable number (+ .ini save/load)
   pid.py               one axis: feed-forward + PI, clamp, slew, anti-windup
-  controller.py        the brain: setpoints, states, interlocks, the loop thread
+  controller.py        the brain: setpoints, states, interlocks, sweeps, the loop thread
+  stream.py            the record of every Hall reading, for fly scans
   sim_system.py        a controller on the simulated magnet
   backends/base.py     the hardware Protocol (volts in, volts out)
   backends/sim.py      the simulated magnet (+ FakeClock for tests)

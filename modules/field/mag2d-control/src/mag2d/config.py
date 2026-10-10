@@ -147,6 +147,24 @@ class Limits:
     angle_min_deg: float = -360.0
     angle_max_deg: float = 360.0
     ao_limit_V: float = 10.0          # the PI output is clamped to +-this
+    # SWEEPS (ramp_field / ramp_angle, for fly scans, 2026-10-10): the pace a
+    # sweep may be asked for. A sweep moves the SETPOINT along a straight line
+    # in time and the PI follows it, so the upper ends are what the loop can
+    # follow: the drive slews at most control.slew_V_per_s (2 V/s = 40 mT/s at
+    # the sim's 20 mT/V), and a rotation at w rad/s asks each axis for up to
+    # |B| * w mT/s (10 deg/s at 150 mT = 26 mT/s). Faster than that the field
+    # just lags further behind the setpoint -- the fly scan still bins by the
+    # MEASURED field, but the lag smears a pixel. VERIFY on the magnet: sweep
+    # at increasing rates and watch error_mT in status.
+    field_rate_min_mT_per_s: float = 0.01
+    field_rate_max_mT_per_s: float = 20.0
+    angle_rate_min_deg_per_s: float = 0.01
+    angle_rate_max_deg_per_s: float = 10.0
+    # Below this |B| the measured ANGLE is noise (the direction of a vector
+    # smaller than the Hall probes' noise is undefined): the status and the
+    # sweep stream then report the SETPOINT angle instead of a random number.
+    # 1 mT = 20x the sim's noise; VERIFY against the real probes' noise.
+    angle_min_field_mT: float = 1.0
 
 
 @dataclass

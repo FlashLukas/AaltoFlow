@@ -291,6 +291,43 @@ class MainWindow(QtWidgets.QMainWindow):
         flay.addWidget(go)
         col.addWidget(fcard)
 
+        # --- SWEEP (2026-10-10): move the magnitude or the angle CONTINUOUSLY
+        # to the value above at a set pace -- what a fly scan does row by row,
+        # by hand. The setpoint walks, the PI follows; "Stop" ends it where it is.
+        scard, slay = _card("Sweep  (to the value above)")
+        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(6); grid.setVerticalSpacing(6)
+        self.sweep_field_rate = self._dspin(
+            lim.field_rate_min_mT_per_s, lim.field_rate_max_mT_per_s, 2, 0.5, "mT/s",
+            max(lim.field_rate_min_mT_per_s, min(lim.field_rate_max_mT_per_s, 2.0)))
+        self.sweep_angle_rate = self._dspin(
+            lim.angle_rate_min_deg_per_s, lim.angle_rate_max_deg_per_s, 2, 0.5, "deg/s",
+            max(lim.angle_rate_min_deg_per_s, min(lim.angle_rate_max_deg_per_s, 2.0)))
+        sweep_f = QtWidgets.QPushButton("Sweep |B|")
+        sweep_f.setToolTip("Sweep the magnitude to the value above at this pace "
+                           "(the angle stays)")
+        sweep_f.clicked.connect(lambda: self._call(self.ctrl.ramp_field,
+                                                   self.field_spin.value(),
+                                                   self.sweep_field_rate.value()))
+        sweep_a = QtWidgets.QPushButton("Sweep angle")
+        sweep_a.setToolTip("Rotate to the angle above at this pace (the magnitude stays)")
+        sweep_a.clicked.connect(lambda: self._call(self.ctrl.ramp_angle,
+                                                   self.angle_spin.value(),
+                                                   self.sweep_angle_rate.value()))
+        grid.addWidget(self.sweep_field_rate, 0, 0); grid.addWidget(sweep_f, 0, 1)
+        grid.addWidget(self.sweep_angle_rate, 1, 0); grid.addWidget(sweep_a, 1, 1)
+        grid.setColumnStretch(0, 1)
+        slay.addLayout(grid)
+        srow = QtWidgets.QHBoxLayout()
+        self.sweep_label = QtWidgets.QLabel("no sweep")
+        self.sweep_label.setObjectName("hint")
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where it is; the loop holds the field there")
+        sweep_stop.clicked.connect(lambda: self._call(self.ctrl.ramp_stop))
+        mark_always(sweep_stop)      # ramp_stop is a safety verb: a viewer may stop
+        srow.addWidget(self.sweep_label, 1); srow.addWidget(sweep_stop)
+        slay.addLayout(srow)
+        col.addWidget(scard)
+
         # --- cartesian setpoint
         vcard, vlay = _card("Vector  (Bx, By)")
         form = QtWidgets.QFormLayout(); form.setSpacing(6)
@@ -488,6 +525,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.field_spin, self.bx_spin, self.by_spin):
             w.setRange(-fmax, fmax)
         self.angle_spin.setRange(lim.angle_min_deg, lim.angle_max_deg)
+        self.sweep_field_rate.setRange(lim.field_rate_min_mT_per_s, lim.field_rate_max_mT_per_s)
+        self.sweep_angle_rate.setRange(lim.angle_rate_min_deg_per_s, lim.angle_rate_max_deg_per_s)
 
     # ---- refresh & events ------------------------------------------------
 
@@ -534,6 +573,12 @@ class MainWindow(QtWidgets.QMainWindow):
         spl.setText(f"tol {cfg.control.tolerance_mT:g}")
         self.setpoint_label.setText(
             f"setpoint {_fmt(s.setpoint_field_mT)} mT @ {_fmt(s.setpoint_angle_deg, '.1f')}°")
+        if getattr(s, "ramping", False):
+            unit = "mT" if s.ramp_knob == "field" else "deg"
+            self.sweep_label.setText(f"sweeping {s.ramp_knob} -> {_fmt(s.ramp_target, 'g')} "
+                                     f"{unit} at {_fmt(s.ramp_rate, 'g')} {unit}/s")
+        else:
+            self.sweep_label.setText("no sweep")
 
         color = COLORS[STATE_COLOR_KEY.get(s.state, "text")]
         self.state_badge.setText(s.state)

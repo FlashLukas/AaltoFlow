@@ -36,6 +36,26 @@ STATES
 A new setpoint resets the stability timer in the same critical section that
 stores it, so no status frame can show the new setpoint together with the old
 point's field_stable=True.
+
+SWEEPS (ramp_field / ramp_angle, for fly scans, 2026-10-10). A fly scan
+records the detectors while a knob moves CONTINUOUSLY and sorts every sample
+into the pixel of the value the knob had at that moment. Here the knob is the
+field magnitude (at a fixed angle) or the field ANGLE (at a fixed magnitude:
+the angular FMR scan as a fly axis). A sweep moves the SETPOINT along a
+straight line in time -- each tick computes it from the elapsed time, so a
+late tick just puts the setpoint further along and the pace stays exact --
+and the PI, which runs continuously anyway, makes the field follow. No new
+state: the magnet is REGULATING while the setpoint moves (never STABLE: the
+setpoint changes every tick), and `ramping` says a sweep is on. At the target
+the setpoint stops and the ordinary settling (field_stable) takes over.
+  * every sweep is NUMBERED (ramp_id, gotcha #17): ramp_field returns the
+    number, and "status ramp_id >= mine and not ramping" = my sweep is over;
+  * any ordinary set (set_field, set_angle, set_vector, zero, output off)
+    takes the knob over: the sweep stops first; ramp_stop ends it where it is;
+  * a FAULT ends it too (the fault zeroes the setpoint anyway);
+  * the fly scan bins by the MEASURED field: every Hall reading the loop takes
+    is recorded with its time (the stream verbs), as the component along the
+    setpoint direction ("field") and as the measured direction ("angle").
 """
 
 from __future__ import annotations
@@ -48,6 +68,7 @@ from dataclasses import dataclass, field
 from .backends.base import VectorMagnetBackend
 from .config import Config
 from .pid import AxisPI, ramp_toward_zero
+from .stream import StreamRecorder
 
 _NAN = float("nan")
 
@@ -89,6 +110,27 @@ class Status:
     temp_monitor: bool = False
     fault: str = ""
     hw_error: str = ""                      # extra: last failed hardware call
+    # The SWEEP (ramp_field / ramp_angle, fly scans). ramp_id = the number of
+    # the newest sweep started; "ramp_id >= mine and not ramping" = it is over.
+    # ramp_knob says WHICH knob sweeps ("field" or "angle"), and ramp_target /
+    # ramp_rate are in that knob's units (mT and mT/s, or deg and deg/s).
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_knob: str = ""
+    ramp_target: float = _NAN
+    ramp_rate: float = _NAN
+
+
+@dataclass
+class _Sweep:
+    """One running sweep: the setpoint goes from `frm` to `to` at `rate`
+    (units per second), starting at clock time `t0`."""
+
+    knob: str            # "field" (signed mT, angle kept) or "angle" (deg, magnitude kept)
+    frm: float
+    to: float
+    rate: float
+    t0: float
 
 
 def _finite(value, what: str) -> float:
@@ -135,6 +177,20 @@ class Controller:
         # and a drive adopted at start is not re-written by a rounding of itself.
         self._ao_last: tuple[float, float] | None = None
         self._ao_known = True        # False while the drive is unknown (no read-back)
+
+        # ---- the SWEEP (see the module doc); under _lock ----
+        self._sweep: _Sweep | None = None
+        self._ramp_id = 0
+        self._ramp_knob = ""
+        self._ramp_target = _NAN
+        self._ramp_rate = _NAN
+        # THE STREAM (fly scans): every Hall reading the loop takes, with its
+        # time, as the field along the setpoint direction and as the measured
+        # angle (plus Bx, By and the setpoint at that moment). The control
+        # thread appends (cheap: one lock, one deque append); the service's
+        # stream verbs hand it out. Recording only while a stream is started.
+        self.recorder = StreamRecorder(["field", "angle", "bx", "by",
+                                        "setpoint_field", "setpoint_angle"])
 
         self._opened = False
         self._thread: threading.Thread | None = None
@@ -291,6 +347,8 @@ class Controller:
         """
         if not self._opened:
             return
+        with self._lock:
+            self._sweep = None           # no sweep step may follow the ramp down
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=5.0)
@@ -350,10 +408,12 @@ class Controller:
         a_in = None if angle_deg is None else _finite(angle_deg, "angle_deg")
         with self._lock:
             self._refuse_in_fault("set_field")
+            took = self._cancel_sweep_locked()
             a = self._sp_angle if a_in is None else a_in
             b, warn_b = self._clamp_field(b)
             a, warn_a = self._clamp_angle(a)
             self._apply_polar_locked(b, a)
+        self._took_over(took)
         self._report(warn_b, warn_a, f"field -> {b:g} mT at {a:g} deg")
 
     def set_angle(self, angle_deg: float) -> None:
@@ -361,9 +421,11 @@ class Controller:
         a = _finite(angle_deg, "angle_deg")
         with self._lock:
             self._refuse_in_fault("set_angle")
+            took = self._cancel_sweep_locked()
             a, warn_a = self._clamp_angle(a)
             b = self._sp_field
             self._apply_polar_locked(b, a)
+        self._took_over(took)
         self._report(None, warn_a, f"angle -> {a:g} deg (field {b:g} mT)")
 
     def set_vector(self, bx_mT: float, by_mT: float) -> None:
@@ -371,7 +433,9 @@ class Controller:
         by = _finite(by_mT, "by_mT")
         with self._lock:
             self._refuse_in_fault("set_vector")
+            took = self._cancel_sweep_locked()
             bx, by, warn = self._apply_vector_locked(bx, by)
+        self._took_over(took)
         self._report(warn, None, f"vector -> Bx {bx:g} mT, By {by:g} mT")
 
     def set_bx(self, bx_mT: float) -> None:
@@ -379,7 +443,9 @@ class Controller:
         bx = _finite(bx_mT, "bx_mT")
         with self._lock:
             self._refuse_in_fault("set_bx")
+            took = self._cancel_sweep_locked()
             bx, by, warn = self._apply_vector_locked(bx, self._sp_by)
+        self._took_over(took)
         self._report(warn, None, f"Bx -> {bx:g} mT (By {by:g} mT)")
 
     def set_by(self, by_mT: float) -> None:
@@ -387,13 +453,17 @@ class Controller:
         by = _finite(by_mT, "by_mT")
         with self._lock:
             self._refuse_in_fault("set_by")
+            took = self._cancel_sweep_locked()
             bx, by, warn = self._apply_vector_locked(self._sp_bx, by)
+        self._took_over(took)
         self._report(warn, None, f"By -> {by:g} mT (Bx {bx:g} mT)")
 
     def zero(self) -> None:
         """Field setpoint 0 mT, angle kept. Allowed during a FAULT (it only lowers)."""
         with self._lock:
+            took = self._cancel_sweep_locked()
             self._apply_polar_locked(0.0, self._sp_angle)
+        self._took_over(took)
         self._emit("info", "field -> 0 mT")
 
     # ==================================================================== output
@@ -414,6 +484,10 @@ class Controller:
                 self._stable = False
                 self._stable_since = None
                 msg = "output OFF -- ramping to 0 V"
+            if not on and self._cancel_sweep_locked():
+                # switching off takes the knob over like any set: the sweep
+                # ends where it is (the setpoint stays there, the coils go to 0 V)
+                msg = (msg + "; " if msg else "") + "sweep stopped"
         if msg:
             self._emit("info", msg)
 
@@ -447,6 +521,164 @@ class Controller:
             self._state = RAMP_DOWN if self._enable_hw else OFF
         self._emit("info", f"fault cleared ({old}); output stays off until switched on")
 
+    # ==================================================================== sweeps
+
+    def ramp_field(self, field_mT: float, rate_mT_per_s: float) -> int:
+        """SWEEP the (signed) field magnitude to `field_mT` at `rate_mT_per_s`,
+        the angle kept. Returns the sweep's number (status `ramp_id`).
+
+        Starts from the present SETPOINT (where the loop is driving the field);
+        a sweep already running is replaced from wherever it got to. The
+        target is clamped to the field envelope and the rate to the configured
+        limits, each with a warning, like every setter here. Refused during a
+        FAULT. With the output OFF the setpoint walks as asked (it is stored,
+        as a set_field would be) but nothing reaches the coils."""
+        b = _finite(field_mT, "field_mT")
+        rate = self._sweep_rate(rate_mT_per_s, "rate_mT_per_s",
+                                self.cfg.limits.field_rate_min_mT_per_s,
+                                self.cfg.limits.field_rate_max_mT_per_s, "mT/s")
+        with self._lock:
+            self._refuse_in_fault("ramp_field")
+            b, warn_b = self._clamp_field(b)
+            rid, frm = self._begin_sweep_locked("field", b, rate)
+            angle = self._sp_angle
+        if warn_b:
+            self._emit("warn", "sweep target " + warn_b)
+        self._emit("info", f"field sweep #{rid}: {frm:g} -> {b:g} mT at {rate:g} mT/s "
+                           f"(angle {angle:g} deg)")
+        self._report_off()
+        return rid
+
+    def ramp_angle(self, angle_deg: float, rate_deg_per_s: float) -> int:
+        """SWEEP the field ANGLE to `angle_deg` at `rate_deg_per_s`, the
+        (signed) magnitude kept -- an angular FMR scan as one continuous
+        rotation. Returns the sweep's number. Same rules as ramp_field: the
+        target is clamped to the angle limits, the rate to its limits (warned).
+        The angle is NOT wrapped: 0 -> 400 deg turns more than once around, as
+        asked (the setpoint model never normalises an angle)."""
+        a = _finite(angle_deg, "angle_deg")
+        rate = self._sweep_rate(rate_deg_per_s, "rate_deg_per_s",
+                                self.cfg.limits.angle_rate_min_deg_per_s,
+                                self.cfg.limits.angle_rate_max_deg_per_s, "deg/s")
+        with self._lock:
+            self._refuse_in_fault("ramp_angle")
+            a, warn_a = self._clamp_angle(a)
+            rid, frm = self._begin_sweep_locked("angle", a, rate)
+            field = self._sp_field
+        if warn_a:
+            self._emit("warn", "sweep target " + warn_a)
+        self._emit("info", f"angle sweep #{rid}: {frm:g} -> {a:g} deg at {rate:g} deg/s "
+                           f"(field {field:g} mT)")
+        self._report_off()
+        return rid
+
+    def ramp_stop(self) -> bool:
+        """End a sweep WHERE IT IS: the setpoint stays at the value it has
+        reached now and the loop holds it (a scan's Abort; a safety verb).
+        True if a sweep was running."""
+        with self._lock:
+            if self._sweep is None:
+                return False
+            knob = self._sweep.knob
+            self._advance_sweep_locked(self._clock(), [])
+            self._sweep = None
+            here = self._sp_field if knob == "field" else self._sp_angle
+        unit = "mT" if knob == "field" else "deg"
+        self._emit("info", f"{knob} sweep stopped at {here:g} {unit}")
+        return True
+
+    # the stream verbs (fly scans): see self.recorder
+    def stream_start(self) -> int:
+        return self.recorder.start()
+
+    def stream_read(self) -> dict:
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        return self.recorder.stop()
+
+    def _sweep_rate(self, rate, what: str, lo: float, hi: float, unit: str) -> float:
+        r = abs(_finite(rate, what))
+        if not r > 0:
+            raise ValueError(f"{what} must be > 0")
+        lo, hi = min(lo, hi), max(lo, hi)
+        c = max(lo, min(hi, r))
+        if c != r:
+            self._emit("warn", f"sweep rate {r:g} {unit} clamped to {c:g} {unit} "
+                               f"(limits {lo:g}..{hi:g})")
+        return c
+
+    def _begin_sweep_locked(self, knob: str, to: float, rate: float):
+        """Start a sweep of `knob` (under _lock). Returns (ramp_id, start value)."""
+        now = self._clock()
+        if self._sweep is not None:
+            # replaced: first bring the setpoint to where the old sweep is NOW
+            self._advance_sweep_locked(now, [])
+            self._sweep = None
+        frm = self._sp_field if knob == "field" else self._sp_angle
+        self._ramp_id += 1
+        self._sweep = _Sweep(knob, frm, to, rate, now)
+        self._ramp_knob, self._ramp_target, self._ramp_rate = knob, to, rate
+        self._new_setpoint_locked()          # field_stable False from this frame on
+        return self._ramp_id, frm
+
+    def _advance_sweep_locked(self, now: float, events) -> None:
+        """Put the setpoint where the sweep is at `now` (under _lock). The value
+        comes from the ELAPSED time, not from adding a step per tick, so a late
+        tick does not slow the sweep down. Clamped to the LIVE limits."""
+        sw = self._sweep
+        if sw is None:
+            return
+        span = abs(sw.to - sw.frm)
+        travelled = sw.rate * max(0.0, now - sw.t0)
+        arrived = travelled >= span
+        v = sw.to if arrived else sw.frm + (1.0 if sw.to >= sw.frm else -1.0) * travelled
+        if sw.knob == "field":
+            b, _ = self._clamp_field(v)
+            self._apply_polar_locked(b, self._sp_angle)
+        else:
+            a, _ = self._clamp_angle(v)
+            self._apply_polar_locked(self._sp_field, a)
+        if arrived:
+            self._sweep = None
+            unit = "mT" if sw.knob == "field" else "deg"
+            events.append(("info", f"{sw.knob} sweep #{self._ramp_id} reached "
+                                   f"{sw.to:g} {unit}; settling"))
+
+    def _cancel_sweep_locked(self) -> bool:
+        """An ordinary set takes the knob over: end a running sweep (under
+        _lock) where the last tick left the setpoint. True if one ran."""
+        was = self._sweep is not None
+        self._sweep = None
+        return was
+
+    def _took_over(self, took: bool) -> None:
+        if took:
+            self._emit("info", "sweep stopped: a set takes over")
+
+    def _report_off(self) -> None:
+        if self._state == OFF:
+            self._emit("info", "output is OFF: the setpoint sweeps, but nothing reaches "
+                               "the coils until the output is switched on")
+
+    def _measured_angle_locked(self, bx: float, by: float) -> float:
+        """The measured DIRECTION, in the setpoint's own convention (under _lock).
+
+        * A NEGATIVE signed setpoint points the field the other way, so the
+          direction is read off -B: (-50 mT at 30 deg) measures as 30, not 210.
+        * Unwrapped to within +-180 deg of the setpoint angle: atan2 knows only
+          -180..180, but a setpoint may be 350 or 400 deg -- and a fly scan
+          over the angle bins by this number, so it must live on the same axis.
+        * Below limits.angle_min_field_mT the direction is noise; the setpoint
+          angle is reported instead of a random number (see config)."""
+        if not (math.isfinite(bx) and math.isfinite(by)):
+            return _NAN
+        if math.hypot(bx, by) < abs(self.cfg.limits.angle_min_field_mT):
+            return self._sp_angle
+        s = -1.0 if self._sp_field < 0 else 1.0
+        raw = math.degrees(math.atan2(s * by, s * bx))
+        return self._sp_angle + ((raw - self._sp_angle + 180.0) % 360.0 - 180.0)
+
     # ================================================================== reporting
 
     def status(self) -> Status:
@@ -457,7 +689,7 @@ class Controller:
             if math.isfinite(bx) and math.isfinite(by):
                 along = bx * math.cos(a) + by * math.sin(a)
                 mag = math.hypot(bx, by)
-                ang = math.degrees(math.atan2(by, bx))
+                ang = self._measured_angle_locked(bx, by)
                 err = math.hypot(self._sp_bx - bx, self._sp_by - by)
             else:
                 along = mag = ang = err = _NAN
@@ -478,6 +710,9 @@ class Controller:
                 water_ok=self._water, water_bypass=bool(ilk.water_bypass),
                 temp_monitor=bool(ilk.temp_monitor),
                 fault=self._fault, hw_error=self._hw_error,
+                ramping=self._sweep is not None, ramp_id=self._ramp_id,
+                ramp_knob=self._ramp_knob, ramp_target=self._ramp_target,
+                ramp_rate=self._ramp_rate,
             )
 
     def get_config(self) -> Config:
@@ -510,7 +745,16 @@ class Controller:
             except Exception as exc:                  # the loop must never die
                 self._trip(f"control loop error: {type(exc).__name__}: {exc}")
             period = 1.0 / max(1.0, self.cfg.control.loop_hz)
-            self._stop.wait(max(0.001, period - (self._clock() - t0)))
+            # deadline + short time.sleep slices, not Event.wait(timeout): on
+            # Windows a timed wait sleeps at least one 15.6 ms tick (gotcha
+            # #34), and the "50 Hz" loop ran at ~32 Hz -- which is also the rate
+            # a fly scan's field stream gets its samples at
+            end = time.monotonic() + max(0.001, period - (self._clock() - t0))
+            while not self._stop.is_set():
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                time.sleep(min(left, 0.005))
 
     def tick(self) -> None:
         """One loop cycle: read, check interlocks, regulate or ramp, write.
@@ -528,8 +772,10 @@ class Controller:
 
         # ---- 1. read (hardware, outside the lock) ------------------------
         read_error = ""
+        tw0 = tw1 = time.time()
         try:
             vx, vy = self.backend.read_hall()
+            tw1 = time.time()        # the Hall reading is the mean over this window
             v1, v2 = self.backend.read_temps()
             water = bool(self.backend.read_water())
         except Exception as exc:
@@ -550,10 +796,14 @@ class Controller:
                     events.append(("info", "hardware reads recovered"))
                 self._hw_error = ""
                 self._store_reads_locked(vx, vy, v1, v2)
+                self._record_locked(0.5 * (tw0 + tw1))
                 self._water = water
                 reason = self._interlock_reason_locked()
                 if reason and self._state != FAULT:
                     self._enter_fault_locked(reason, events)
+            # a running sweep moves the setpoint to where it is NOW, before
+            # the PI below acts on it (a fault above has already ended it)
+            self._advance_sweep_locked(now, events)
 
             state = self._state
             out = [p.output for p in self._pi]
@@ -658,6 +908,20 @@ class Controller:
         self._stable_since = None
         self._enable_want = True
 
+    def _record_locked(self, t_wall: float) -> None:
+        """One Hall reading into the stream (under _lock; a no-op unless a
+        stream is started). Stamped with the wall clock at the MIDDLE of the
+        read (time.time(): a coordinator on another PC lines it up), with the
+        setpoint the loop was driving at that moment."""
+        if not self.recorder.running:
+            return
+        bx, by = self._bx, self._by
+        a = math.radians(self._sp_angle)
+        along = (bx * math.cos(a) + by * math.sin(a)
+                 if math.isfinite(bx) and math.isfinite(by) else _NAN)
+        self.recorder.append(t_wall, (along, self._measured_angle_locked(bx, by), bx, by,
+                                      self._sp_field, self._sp_angle))
+
     def _store_reads_locked(self, vx, vy, v1, v2) -> None:
         """Raw volts -> mT and C, into the brain attributes (used by start and tick)."""
         self._hall = [vx, vy]
@@ -675,7 +939,11 @@ class Controller:
         self._stable_since = None
         self._sp_field = 0.0
         self._sp_bx = self._sp_by = 0.0
-        events.append(("error", f"FAULT: {reason} -- ramping the output to 0 V"))
+        # a running sweep ends here: it would otherwise walk the zeroed
+        # setpoint up again (the sweep's number shows it over at once)
+        swept = self._cancel_sweep_locked()
+        events.append(("error", f"FAULT: {reason} -- ramping the output to 0 V"
+                                + ("; sweep stopped" if swept else "")))
 
     def _trip(self, reason: str) -> None:
         events = []
