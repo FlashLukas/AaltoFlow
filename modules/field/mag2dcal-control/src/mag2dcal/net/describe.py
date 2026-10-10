@@ -261,6 +261,12 @@ def build_manifest(ctrl) -> dict:
            help="Sweeps each axis over its full range (the other axis at 0 V) "
                 "and measures both hysteresis legs. The magnet goes to full "
                 "field while this runs. Abort with `zero`."),
+        # ramp_stop is a SAFETY verb too (net/service.py): as an action the
+        # suite's Control tab offers it to a viewer, like zero and output_off
+        _p("ramp_stop", "Stop the sweep", "action", "action", group="Field",
+           order=6,
+           help="End a sweep (ramp_field / ramp_angle) where it is; the loop "
+                "holds the field there. Allowed for anyone, also a viewer."),
         _p("clear_fault", "Clear fault", "action", "action", group="Interlock",
            order=220,
            help="Refused while the cause is still present. The output stays off."),

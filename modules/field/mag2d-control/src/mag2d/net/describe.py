@@ -214,6 +214,12 @@ def build_manifest(ctrl) -> dict:
            order=55,
            help="Ramp the drive to 0 V, then switch the output off. Allowed for "
                 "anyone, also a viewer: it only makes things safer."),
+        # ramp_stop is a SAFETY verb too (net/service.py): as an action the
+        # suite's Control tab offers it to a viewer, like zero and output_off
+        _p("ramp_stop", "Stop the sweep", "action", "action", group="Field",
+           order=6,
+           help="End a sweep (ramp_field / ramp_angle) where it is; the loop "
+                "holds the field there. Allowed for anyone, also a viewer."),
         _p("clear_fault", "Clear fault", "action", "action", group="Interlock",
            order=220,
            help="Refused while the cause is still present. The output stays off."),

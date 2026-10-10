@@ -249,6 +249,8 @@ def test_describe_offers_both_ramps():
     assert p["measured_field"]["stream"] == {"group": "field", "channel": "field"}
     assert p["measured_angle"]["stream"] == {"group": "field", "channel": "angle"}
     assert p["ramping"]["read_path"] == ["ramping"]
+    # a safety verb is an action, so the Control tab offers it to a viewer
+    assert p["ramp_stop"]["kind"] == "action" and "wait" not in p["ramp_stop"]
 
 
 def test_sweeps_over_the_wire():
