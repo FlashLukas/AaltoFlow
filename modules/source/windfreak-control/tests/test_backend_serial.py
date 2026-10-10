@@ -194,6 +194,23 @@ def test_phase_is_sent_as_steps_from_where_we_are(fake_serial):
     assert port.writes == ["C0~90.000", "C0~300.000", "C1~45.000"]
 
 
+def test_many_small_phase_steps_do_not_drift(fake_serial):
+    """A phase SWEEP sends hundreds of small relative steps, each rounded to
+    0.001 deg on the wire. The backend must count what it SENT, or the
+    rounding errors add up and its idea of the phase drifts away from what
+    the instrument has accumulated."""
+    b = SerialSynthHD("COM7", phase_command="relative")
+    b.open()
+    port = fake_serial[0]
+    port.writes.clear()
+    for k in range(1, 401):
+        b.set_phase(0, k * 0.1234567)
+    sent = sum(float(w.split("~")[1]) for w in port.writes)
+    assert b._phase_sent[0] == pytest.approx(sent % 360.0, abs=1e-9)
+    # and the instrument ends up where it was asked, to the wire's resolution
+    assert abs(sent - 400 * 0.1234567) <= 0.0005
+
+
 def test_absolute_phase_variant(fake_serial):
     b = SerialSynthHD("COM7", phase_command="absolute")
     b.open()

@@ -4,7 +4,9 @@ Control for a **Windfreak Technologies SynthHD PRO v2**, a two-channel RF
 synthesizer (10 MHz - 24 GHz, up to +20 dBm): switch each output (RFoutA,
 RFoutB) on and off, set its **frequency**, **power** and **phase**, and pick the
 **reference** both PLLs lock to -- over the instrument's USB virtual COM port,
-or fully simulated with no hardware.
+or fully simulated with no hardware. Frequency, power and phase of either
+channel can also be **swept** continuously at a set pace, for fly scans
+(section "Sweeps").
 
 ![windfreak front panel](../../../front-panels/windfreak.png)
 
@@ -35,7 +37,8 @@ windfreak-control/
   module.toml            how the suite finds this module
   src/windfreak/
     config.py            Channel (x2) / Reference / Limits / Hardware / UI + .ini save/load
-    synthesizer.py       the brain: desired state, clamps, ONE worker thread, status snapshot
+    synthesizer.py       the brain: desired state, clamps, ONE worker thread, status snapshot, sweeps
+    softramp.py          the suite's software ramp (byte-identical copy from suite-common)
     sim_system.py        build_sim_system(): brain + simulated SynthHD
     backends/base.py     the DualSynth interface (a typing.Protocol)
     backends/sim.py      a simulated SynthHD PRO v2 (grid, lock, leveling, temperature)
@@ -113,14 +116,74 @@ simulation closes, both outputs are switched **off**. Verb
 update) the service closes but leaves both outputs as they are, and the next
 start adopts them.
 
+## Sweeps (fly scans over frequency, power or phase)
+
+A fly scan (scan-core, `type: fly` axis) records the detectors while a knob
+moves CONTINUOUSLY and bins every sample by the value the knob had at that
+moment. The SynthHD jumps to the value it is told, so the **service walks the
+knob** in small steps (`softramp.py`, the suite's software ramp, copied byte
+for byte from suite-common): one `f` / `W` / `~` write every
+`hardware.ramp_dt_s` (20 ms), each value computed from the elapsed time, so a
+late step does not slow the sweep down.
+
+Each channel's knob has its own sweep, named like its describe control:
+`a_frequency`, `a_power`, `a_phase`, `b_frequency`, `b_power`, `b_phase`. The
+channel is an argument of the ramp verbs, exactly as of `set_frequency`.
+
+| verb | arguments | pace limits (config `[limits]`) |
+|---|---|---|
+| `ramp_frequency` | `channel`, `frequency_Hz`, `rate_Hz_per_s` | `ramp_rate_min/max_Hz_per_s` (1 kHz/s .. 10 GHz/s) |
+| `ramp_power` | `channel`, `power_dBm`, `rate_dB_per_s` | `ramp_rate_min/max_dB_per_s` (0.01 .. 100 dB/s) |
+| `ramp_phase` | `channel`, `phase_deg`, `rate_deg_per_s` | `ramp_rate_min/max_deg_per_s` (0.01 .. 3600 deg/s) |
+| `ramp_stop` | `knob` (optional, e.g. `a_frequency`; none = every sweep) | a stop: a viewer may send it |
+
+- The reply carries the sweep's number (`ramp_id`); status shows
+  `<sweep>_ramping`, `<sweep>_ramp_id`, the target and the pace
+  (`a_frequency_ramp_target_Hz`, `b_power_ramp_rate_dB_per_s`, ...) and
+  `ramping` (any knob of either channel). The sweep is over when
+  `<sweep>_ramp_id` is yours and `<sweep>_ramping` is false. While a knob
+  sweeps, its status value (`a_frequency_Hz` ...) is the live one.
+- A target or pace outside the limits is clamped, with a warning; a zero,
+  negative or non-finite pace is refused.
+- An ordinary `set_frequency` / `set_power` / `set_phase` takes that channel's
+  knob over (stops its sweep); a set of another knob or of the other channel
+  does not. Settings sent back (OK in the Settings dialog) while a knob sweeps
+  do not jump it back: its stale value is ignored. Shutdown stops every sweep
+  before it switches the outputs off.
+- **The RF output is never switched by a sweep.**
+- The record: the stream verbs (`stream_start` / `stream_read` /
+  `stream_stop`, group `ramp`) hand out every value each sweep SENT, one
+  channel per sweep, each with its own time stamps in `t_ch`. describe
+  declares a `ramp` block on each of the six controls with
+  `readback.measured: false` -- **binned by command**. Why not read back: the
+  SynthHD has no measurement of its output to read -- `f?` / `W?` return the
+  setting (the frequency snapped to the channel grid, the requested power),
+  and there is no phase readback at all -- so a query would only echo the
+  number just sent, and waiting for its reply line on the serial port roughly
+  halves the step rate. The PLL settles in ~100 us (datasheet), far inside
+  one step; `a_locked` / `b_locked` still show if it ever does not keep up.
+- A sweep step writes to the serial port from its own thread; every backend
+  call (the worker's polls and the steps) goes through one hardware lock, so
+  bytes never interleave on the line.
+- **VERIFY on the unit:** how fast the SynthHD takes back-to-back writes (it
+  re-levels the power after every frequency / power write) -- that bounds
+  `ramp_dt_s`; how long one query takes; whether a large power sweep glitches
+  the output at internal switch points; the instrument's phase resolution
+  (a long phase sweep is many small relative `~` steps).
+
+The GUI's **Sweep** card does the same by hand: pick the channel and the knob,
+set the pace, "Sweep to" walks it to the value in that channel's box, "Stop"
+ends every sweep.
+
 ## What a scan sees (`describe`)
 
 Per channel, flat ids: `a_rf_on`, `a_frequency` (MHz), `a_power` (dBm),
 `a_phase` (deg) as controls; `a_locked`, `a_leveled`, `a_frequency_actual` as
 indicators -- and the same with `b_`. Plus `reference` (enum),
 `ext_ref` (a control only while the external reference is selected),
-`ref_settled`, `rf_all_off`, `temperature`, and the action `all_rf_off` (usable in a scan
-routine).
+`ref_settled`, `rf_all_off`, `ramping`, `temperature`, and the action `all_rf_off`
+(usable in a scan routine). Frequency, power and phase of each channel carry
+a `ramp` block (section "Sweeps"), so a fly scan can fly them.
 
 **Settle rule:** every channel control is `adopt_then_flag`: wait until the
 service echoes the value it pushed (`a_frequency_Hz`), then until
@@ -135,7 +198,7 @@ i.e. until both outputs really are off in the instrument.
 ## Tests
 
 ```powershell
-.\dev.ps1 run pytest -q            # 69 tests, offline, ports 17020-17039
+.\dev.ps1 run pytest -q            # 116 tests, offline, ports 17020-17039
 .\dev.ps1 run python scripts/smoke_test.py
 python ..\..\..\tools\check_modules.py windfreak --live
 ```

@@ -166,6 +166,9 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(hw.channel_spacing_Hz, 0.0, 1000.0, 1, 1.0, "Hz"))
         self._add(form, "hardware", "temp_warn_C", "Temperature warning",
                   _dspin(hw.temp_warn_C, 20.0, 90.0, 1, 1.0, "C"))
+        # the time between two steps of a SWEEP (read at every sweep start)
+        self._add(form, "hardware", "ramp_dt_s", "Sweep step",
+                  _dspin(hw.ramp_dt_s, 0.005, 1.0, 3, 0.005, "s"))
         form.addRow(_hint("Port, timeout, poll rate, RF off mode and phase command take "
                           "effect when the service starts (restart it after a change). "
                           "Channel spacing is never written at start: a new value (> 0) "

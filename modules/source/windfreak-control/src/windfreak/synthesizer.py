@@ -41,15 +41,24 @@ status, the GUI and describe say so. The config's channel / reference values
 are no longer pushed at start; they are overwritten with what was read (so
 get_config and a saved .ini tell the truth), and a value is sent to the
 instrument only when someone sets it (a setter, or set_config changing it).
+
+SWEEPS (fly scans, 2026-10-10). Frequency, power and phase of EACH channel
+can also be walked continuously at a set pace (ramp_frequency / ramp_power /
+ramp_phase, see "the SWEEPS" below). A sweep step is the one exception to
+"only the worker talks to the serial port": it writes from its own thread,
+so every backend call -- the worker's and the sweep's -- now goes through ONE
+hardware lock, `_io`.
 """
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
 from .backends.base import DualSynth
 from .config import Config, REFERENCE_SOURCES
+from .softramp import SoftRamp
 
 #: channel names on the wire and in the GUI, and the instrument's numbering
 CHANNELS = ("a", "b")
@@ -57,6 +66,21 @@ _INDEX = {"a": 0, "b": 1}
 
 _KNOBS = ("frequency_Hz", "power_dBm", "phase_deg")
 _NAN = float("nan")
+
+#: The knobs a sweep can walk, PER CHANNEL: knob -> (key in `_want` and in the
+#: status, wire unit, rate unit on the wire, limit field prefix in
+#: config.Limits). The pace limits are config.Limits
+#: ramp_rate_min_<rate unit> / ramp_rate_max_<rate unit>.
+SWEEP_KNOBS = {
+    "frequency": ("frequency_Hz", "Hz", "Hz_per_s", "freq"),
+    "power": ("power_dBm", "dBm", "dB_per_s", "power"),
+    "phase": ("phase_deg", "deg", "deg_per_s", "phase"),
+}
+
+#: Every sweep by its name on the wire: "<channel>_<knob>", e.g. "a_frequency"
+#: -- the same id as the describe control it sweeps (windfreak.a_frequency),
+#: so a ramp block, its status keys and its stream channel all share it.
+SWEEPS = tuple(f"{ch}_{knob}" for ch in CHANNELS for knob in SWEEP_KNOBS)
 
 
 def parse_channel(ch) -> str:
@@ -129,6 +153,28 @@ class Synthesizer:
         # while the hardware still does the old thing. The hardware group
         # therefore takes effect at the next service start.
         self._pll_off_when_off = bool(self.cfg.hardware.pll_off_when_rf_off)
+        # ONE lock around every backend call (the serial port). Until the
+        # sweeps there was one thread on the port (the worker); a sweep step
+        # now writes from its own thread, and two threads must never
+        # interleave bytes on one serial line (a write in the middle of the
+        # worker's query would garble the reply). RLock: harmless if a holder
+        # re-enters. Lock order, to stay deadlock-free: `_io` first, then
+        # `_lock` -- never the other way round.
+        self._io = threading.RLock()
+        # THE SWEEPS (fly scans, 2026-10-10): one software ramp per channel
+        # and knob (softramp.py, copied byte for byte from suite-common).
+        self._sweeps = {}
+        for ch in CHANNELS:
+            for knob, spec in SWEEP_KNOBS.items():
+                name = f"{ch}_{knob}"
+                self._sweeps[name] = SoftRamp(
+                    self._sweep_setter(ch, knob),
+                    (lambda c=ch, k=spec[0]: self._want[c][k]),
+                    limits=(lambda k=knob: self._knob_limits(k)),
+                    dt_s=float(self.cfg.hardware.ramp_dt_s),
+                    on_done=(lambda rid, why, n=name: self._sweep_done(n, why)),
+                    channel=name, name=f"windfreak-{name}-sweep")
+        self._stream_id = 0
         self._snapshot = self._build_snapshot({}, "", float("nan"))
         # replaced by the service to forward events; default = no-op
         self._on_event = lambda level, msg: None
@@ -222,6 +268,10 @@ class Synthesizer:
         keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
         disconnect and release the port the same, but leave both RF outputs
         as they are -- the next start adopts them."""
+        # no sweep step may follow the RF off below (and none may race the
+        # backend's close): stop every sweep FIRST
+        for ramp in self._sweeps.values():
+            ramp.stop()
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
@@ -268,19 +318,31 @@ class Synthesizer:
             self.set_rf(ch, False)
 
     def set_frequency(self, ch, hz: float) -> None:
+        self._take_over(ch, "frequency")
         lim = self.cfg.limits
         self._set(ch, "frequency_Hz", float(hz), lim.freq_min_Hz, lim.freq_max_Hz,
                   "frequency", "Hz")
 
     def set_power(self, ch, dBm: float) -> None:
+        self._take_over(ch, "power")
         lim = self.cfg.limits
         self._set(ch, "power_dBm", float(dBm), lim.power_min_dBm, lim.power_max_dBm,
                   "power", "dBm")
 
     def set_phase(self, ch, deg: float) -> None:
+        self._take_over(ch, "phase")
         lim = self.cfg.limits
         self._set(ch, "phase_deg", float(deg), lim.phase_min_deg, lim.phase_max_deg,
                   "phase", "deg")
+
+    def _take_over(self, ch, knob: str) -> None:
+        """A set is a new instruction: it takes the knob over from a sweep of
+        THAT channel's knob (a set of another knob, or of the other channel,
+        leaves a sweep running). Called BEFORE any lock is taken: stop() waits
+        for the step in progress, which may itself be waiting for a lock."""
+        ch = parse_channel(ch)
+        if self._sweeps[f"{ch}_{knob}"].stop():
+            self._emit("info", f"{ch.upper()}: {knob} sweep stopped by a {knob} set")
 
     def set_reference(self, source: str, ext_MHz: float | None = None) -> None:
         """Select the PLL reference for BOTH channels."""
@@ -333,9 +395,222 @@ class Synthesizer:
     # ---- status ----------------------------------------------------------
 
     def status(self) -> dict:
-        """The latest snapshot (a copy). Never touches hardware."""
+        """The latest snapshot (a copy). Never touches hardware.
+
+        The sweeps' fields are laid over that COPY, live and from memory (the
+        snapshot itself is never edited -- gotcha #1): the worker rebuilds it
+        only at poll_hz, and a fly scan waiting for the end of a sweep should
+        not wait a poll period for nothing. While a knob sweeps, its value
+        (`a_frequency_Hz` ...) is also the live one, the last value the sweep
+        SENT; when it is not sweeping the snapshot's value stands, because
+        only the snapshot pairs a value with its own `<ch>_settled` (a fresher
+        value next to an older settled flag could let a scan go on before the
+        PLL has locked on it)."""
+        sweep = self.sweep_status()          # in memory: no hardware read
         with self._lock:
-            return dict(self._snapshot)
+            snap = dict(self._snapshot)
+            applied = {ch: self._applied[ch] for ch in CHANNELS}
+        if self._connected:
+            for name in SWEEPS:
+                ch, knob = name.split("_", 1)
+                if sweep[f"{name}_ramping"] and applied[ch] is not None:
+                    key = SWEEP_KNOBS[knob][0]
+                    snap[f"{ch}_{key}"] = applied[ch][key]
+        snap.update(sweep)
+        return snap
+
+    # ---- the SWEEPS (fly scans) ------------------------------------------
+    #
+    # Why: a fly scan (scan-core, `type: fly` axis) records the detectors
+    # while a knob moves CONTINUOUSLY and sorts every sample into the pixel of
+    # the value the knob had at that moment. A synthesizer jumps to the value
+    # it is told, so the service walks it: ramp_frequency / ramp_power /
+    # ramp_phase start a walk of ONE channel's knob at a set pace, ramp_stop
+    # ends it where it is, and an ordinary set of the same channel's knob
+    # takes it over. The two channels are independent synthesizers sharing a
+    # serial line, so each channel's knob has its own sweep (six in all,
+    # named like the describe controls: "a_frequency", "b_phase", ...). The
+    # channel is an argument of the ramp verbs, exactly as of set_frequency.
+    #
+    # What a fly scan bins by is the COMMANDED value (describe: readback
+    # measured false). Decided 2026-10-10: the SynthHD has no measurement of
+    # its output to read back -- "f?" / "W?" return the SETTING (the
+    # frequency snapped to the channel grid, the requested power) and there
+    # is no phase readback at all. A read-back would only echo the number
+    # just sent, and as a query it waits for a reply line: on the serial line
+    # that is a round trip per step, which roughly halves the step rate
+    # (VERIFY on the unit how long one query takes). The PLL is at a new
+    # frequency within ~100 us (datasheet lock time), far inside one 20 ms
+    # step, so the command IS the value. `<ch>_locked` still tells whether
+    # the PLL keeps up; a fly scan on an unlocked channel is visible there.
+    #
+    # The RF output is NEVER switched by a sweep: a step sends only the knob.
+    #
+    # Threads: a step runs on the sweep's own thread and writes to the serial
+    # port directly, under `_io` (the worker takes `_io` for each of its own
+    # backend calls). It also updates `_want` AND `_applied` to the value
+    # sent, so the worker finds nothing to re-send. Going through the worker
+    # instead (set `_want`, wake it) was rejected: after every push the
+    # worker reads lock, leveled, frequency and temperature (seven queries),
+    # which would cap the step rate and blur the time each value was sent.
+
+    def _knob_limits(self, knob: str) -> tuple[float, float]:
+        """The knob's safety envelope from config.Limits, read LIVE (an edited
+        limit applies to the next step of a running sweep, too)."""
+        _key, unit, _runit, pre = SWEEP_KNOBS[knob]
+        lim = self.cfg.limits
+        return (float(getattr(lim, f"{pre}_min_{unit}")),
+                float(getattr(lim, f"{pre}_max_{unit}")))
+
+    def _rate_limits(self, knob: str) -> tuple[float, float]:
+        runit = SWEEP_KNOBS[knob][2]
+        lim = self.cfg.limits
+        return (float(getattr(lim, f"ramp_rate_min_{runit}")),
+                float(getattr(lim, f"ramp_rate_max_{runit}")))
+
+    def _sweep_setter(self, ch: str, knob: str):
+        key = SWEEP_KNOBS[knob][0]
+        set_fn = f"set_{knob}"
+        i = _INDEX[ch]
+
+        def step(value: float) -> None:
+            """One step, on the sweep's own thread. Quiet (no event per step:
+            a sweep is tens of steps a second) and only this one knob."""
+            value = float(value)
+            with self._io:
+                if self._connected and self._applied[ch] is not None:
+                    # VERIFY on the unit, for SWEEPS: how fast the SynthHD
+                    # takes back-to-back writes (it re-levels the power after
+                    # every frequency / power write) -- that bounds
+                    # hardware.ramp_dt_s.
+                    getattr(self.backend, set_fn)(i, value)
+                with self._lock:
+                    self._want[ch][key] = value
+                    if self._applied[ch] is not None:
+                        # a NEW dict (the snapshot builder may hold the old one)
+                        self._applied[ch] = {**self._applied[ch], key: value}
+                    # get_config / a saved .ini tell the truth, and
+                    # apply_config does not mistake the sweep for a user edit
+                    setattr(self.cfg.channel(ch), key, value)
+                    self._seen[ch][key] = value
+        return step
+
+    def ramp(self, ch, knob: str, to: float, rate: float) -> int:
+        """Sweep one channel's `knob` to `to` at `rate` (wire units: Hz, dBm,
+        deg and per second); returns the sweep's number. The target is
+        clamped to the knob's limits and the pace to the configured sweep
+        paces, both with a warning -- like every setter here. A sweep of the
+        same knob already running is taken over from wherever it got to."""
+        ch = parse_channel(ch)
+        if knob not in SWEEP_KNOBS:
+            raise ValueError(f"cannot sweep {knob!r}; one of {sorted(SWEEP_KNOBS)}")
+        _key, unit, runit, _pre = SWEEP_KNOBS[knob]
+        shown_runit = runit.replace("_per_s", "/s")
+        r = abs(float(rate))
+        if not r > 0:                                    # also catches NaN
+            raise ValueError("rate must be > 0")
+        target = float(to)
+        if not math.isfinite(target):
+            raise ValueError(f"target must be a finite number, got {to!r}")
+        lo, hi = self._knob_limits(knob)
+        rlo, rhi = self._rate_limits(knob)
+        r, rclamped = _clamp(r, rlo, rhi)
+        value, clamped = _clamp(target, lo, hi)
+        sw = self._sweeps[f"{ch}_{knob}"]
+        sw.dt_s = max(0.001, float(self.cfg.hardware.ramp_dt_s))   # live config
+        rid = sw.start(value, r)
+        C = ch.upper()
+        if clamped or rclamped:
+            self._emit("warn", f"{C}: {knob} sweep clamped to {value:g} {unit} at "
+                               f"{r:g} {shown_runit} (limits {lo:g}..{hi:g} {unit}, "
+                               f"{rlo:g}..{rhi:g} {shown_runit})")
+        self._emit("info", f"{C}: {knob} sweep -> {value:g} {unit} at {r:g} {shown_runit}")
+        return rid
+
+    def ramp_frequency(self, ch, hz: float, rate_Hz_per_s: float) -> int:
+        return self.ramp(ch, "frequency", hz, rate_Hz_per_s)
+
+    def ramp_power(self, ch, dBm: float, rate_dB_per_s: float) -> int:
+        return self.ramp(ch, "power", dBm, rate_dB_per_s)
+
+    def ramp_phase(self, ch, deg: float, rate_deg_per_s: float) -> int:
+        return self.ramp(ch, "phase", deg, rate_deg_per_s)
+
+    def ramp_stop(self, knob: str | None = None) -> bool:
+        """End a sweep where it is -- of one channel's knob ("a_frequency"),
+        or of every knob of both channels (None). True if one was running.
+        A stop: allowed for a viewer too."""
+        if knob is not None and knob not in self._sweeps:
+            raise ValueError(f"no sweep {knob!r}; one of {list(SWEEPS)}")
+        was = False
+        for name in ([knob] if knob else list(SWEEPS)):
+            if self._sweeps[name].stop():
+                was = True
+                ch, k = name.split("_", 1)
+                key, unit = SWEEP_KNOBS[k][0], SWEEP_KNOBS[k][1]
+                with self._lock:
+                    here = self._want[ch][key]
+                self._emit("info", f"{ch.upper()}: {k} sweep stopped at {here:g} {unit}")
+        return was
+
+    def _sweep_done(self, name: str, reason: str) -> None:
+        # a fresh snapshot now, so the published value does not sit on the
+        # last poll's mid-sweep number for up to a poll period
+        self._wake.set()
+        ch, knob = name.split("_", 1)
+        key, unit = SWEEP_KNOBS[knob][0], SWEEP_KNOBS[knob][1]
+        if reason == "done":
+            with self._lock:
+                here = self._want[ch][key]
+            self._emit("info", f"{ch.upper()}: {knob} sweep done at {here:g} {unit}")
+        elif reason.startswith("error"):
+            self._emit("error", f"{ch.upper()}: {knob} sweep ended: {reason}")
+
+    def sweep_status(self) -> dict:
+        """The sweeps' live values as flat wire keys (in memory, no hardware).
+        `<sweep>_ramp_id` is the newest sweep of that knob started; a caller
+        whose sweep has number n waits for `<sweep>_ramp_id >= n` and
+        `<sweep>_ramping` false -- numbered so a "not ramping" from before the
+        start can never pass for the end (docs/DEVELOPER_NOTES.md gotcha #17).
+        `ramping` = any knob of either channel sweeping."""
+        out = {"ramping": False}
+        for name in SWEEPS:
+            _key, unit, runit, _pre = SWEEP_KNOBS[name.split("_", 1)[1]]
+            r = self._sweeps[name].status()
+            out[f"{name}_ramping"] = r["ramping"]
+            out[f"{name}_ramp_id"] = r["ramp_id"]
+            out[f"{name}_ramp_target_{unit}"] = r["ramp_target"]
+            out[f"{name}_ramp_rate_{runit}"] = r["ramp_rate"]
+            out["ramping"] = out["ramping"] or r["ramping"]
+        return out
+
+    # The stream verbs: ONE stream (group "ramp") with one channel per sweep
+    # ("a_frequency", ..., "b_phase") -- every value each sweep sent, with the
+    # time the backend had it. Each channel keeps its own time stamps (`t_ch`,
+    # guide 6b "Streams"): the knobs are walked by separate threads. A knob
+    # at rest still contributes its value (softramp records the rest value),
+    # so a fly row's lead-in has a value to look up.
+
+    def stream_start(self) -> int:
+        for ramp in self._sweeps.values():
+            ramp.stream_start()
+        self._stream_id += 1
+        return self._stream_id
+
+    def stream_read(self) -> dict:
+        return self._merge({k: r.stream_read() for k, r in self._sweeps.items()})
+
+    def stream_stop(self) -> dict:
+        return self._merge({k: r.stream_stop() for k, r in self._sweeps.items()})
+
+    def _merge(self, chunks: dict) -> dict:
+        first = next(iter(chunks.values()))
+        return {"id": self._stream_id, "t": first["t"],
+                "t_ch": {k: c["t"] for k, c in chunks.items()},
+                "values": {k: c["values"][k] for k, c in chunks.items()},
+                "delay_s": {k: 0.0 for k in chunks},
+                "overflow": any(c["overflow"] for c in chunks.values()),
+                "now": time.time()}
 
     # ---- settings (Settings dialog / wire use these) ---------------------
 
@@ -355,9 +630,20 @@ class Synthesizer:
         cur = self._channel_cfg()
         setters = {"frequency_Hz": self.set_frequency, "power_dBm": self.set_power,
                    "phase_deg": self.set_phase}
+        knob_of = {spec[0]: knob for knob, spec in SWEEP_KNOBS.items()}
         for ch in CHANNELS:
             for key in _KNOBS:
                 if cur[ch][key] != self._seen[ch][key]:
+                    if self._sweeps[f"{ch}_{knob_of[key]}"].running:
+                        # A knob that is SWEEPING has moved since the Settings
+                        # dialog (or any set_config sender) read it, so the
+                        # value sent back is stale, not an edit: applying it
+                        # would stop the sweep and jump back. Keep the live
+                        # value in the config instead (ramp_stop first, to
+                        # set this knob from Settings).
+                        with self._lock:
+                            setattr(self.cfg.channel(ch), key, self._want[ch][key])
+                        continue
                     setters[key](ch, cur[ch][key])
         with self._lock:
             self._seen = self._channel_cfg()
@@ -419,15 +705,23 @@ class Synthesizer:
         readings = {}
         temp = float("nan")
         try:
-            self._push_changes()
+            # Every backend call under `_io` (a sweep step may write from its
+            # own thread). Taken per call, not around the whole poll, so a
+            # sweep step waits at most one query, not seven, and stays on time.
+            with self._io:
+                self._push_changes()
             for ch in CHANNELS:
                 i = _INDEX[ch]
-                readings[ch] = {
-                    "locked": bool(self.backend.read_locked(i)),
-                    "leveled": bool(self.backend.read_leveled(i)),
-                    "frequency_actual_Hz": float(self.backend.read_frequency(i)),
-                }
-            temp = float(self.backend.read_temperature())
+                with self._io:
+                    locked = bool(self.backend.read_locked(i))
+                with self._io:
+                    leveled = bool(self.backend.read_leveled(i))
+                with self._io:
+                    actual = float(self.backend.read_frequency(i))
+                readings[ch] = {"locked": locked, "leveled": leveled,
+                                "frequency_actual_Hz": actual}
+            with self._io:
+                temp = float(self.backend.read_temperature())
         except Exception as exc:                  # never let the worker die
             error = f"{type(exc).__name__}: {exc}"
         if error != self._last_error:

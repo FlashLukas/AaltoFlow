@@ -243,12 +243,21 @@ class SerialSynthHD:
         deg = float(deg) % 360.0
         if self._phase_relative:
             # send the STEP from where we are; 359 deg acts as -1 deg [API]
-            step = (deg - self._phase_sent[ch]) % 360.0
-            if step == 0.0:
+            # The step goes out rounded to 0.001 deg, so remember what was
+            # really SENT, not the exact request: a phase SWEEP sends
+            # thousands of small steps, and adding up each step's rounding
+            # error (up to 0.0005 deg) would let the bookkeeping drift by
+            # degrees from what the instrument has accumulated.
+            step = round((deg - self._phase_sent[ch]) % 360.0, 3)
+            if step in (0.0, 360.0):
                 return
             self._write(f"C{ch}~{step:.3f}")             # VERIFY: still relative on v2 firmware
-        else:
-            self._write(f"C{ch}~{deg:.3f}")              # VERIFY: absolute variant, if v2 has it
+            # VERIFY: the instrument's own phase resolution (datasheet
+            # 0.01 deg) -- if it rounds each step to 0.01 deg, a long phase
+            # sweep of tiny steps drifts there instead; then step in 0.01.
+            self._phase_sent[ch] = (self._phase_sent[ch] + step) % 360.0
+            return
+        self._write(f"C{ch}~{deg:.3f}")                  # VERIFY: absolute variant, if v2 has it
         self._phase_sent[ch] = deg
 
     def read_locked(self, ch: int) -> bool:

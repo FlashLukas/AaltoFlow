@@ -2,7 +2,8 @@
 
 A GUI, a script, or the coordinator can hold a WindfreakClient exactly where it
 would hold a Synthesizer: same method names (set_rf, set_frequency, set_power,
-set_phase, set_reference, all_rf_off), same status() dict, same
+set_phase, set_reference, all_rf_off, ramp_frequency / ramp_power /
+ramp_phase / ramp_stop), same status() dict, same
 get_config()/apply_config(), same `_on_event` hook. So the caller does not care
 whether the synthesizer is in-process or across the lab -- only the address
 changes.
@@ -124,6 +125,35 @@ class WindfreakClient(ControlClient):
 
     def all_rf_off(self):
         return self._cmd({"cmd": "all_rf_off"})
+
+    # ---- the SWEEPS (fly scans, the GUI's Sweep card) --------------------
+
+    def _ramp(self, d: dict):
+        r = self._cmd(d)
+        if not r.get("ok"):
+            raise RuntimeError(r.get("error", "sweep refused"))
+        return r.get("ramp_id")
+
+    def ramp_frequency(self, channel, hz: float, rate_Hz_per_s: float):
+        return self._ramp({"cmd": "ramp_frequency", "channel": channel,
+                           "frequency_Hz": float(hz),
+                           "rate_Hz_per_s": float(rate_Hz_per_s)})
+
+    def ramp_power(self, channel, dBm: float, rate_dB_per_s: float):
+        return self._ramp({"cmd": "ramp_power", "channel": channel,
+                           "power_dBm": float(dBm), "rate_dB_per_s": float(rate_dB_per_s)})
+
+    def ramp_phase(self, channel, deg: float, rate_deg_per_s: float):
+        return self._ramp({"cmd": "ramp_phase", "channel": channel,
+                           "phase_deg": float(deg), "rate_deg_per_s": float(rate_deg_per_s)})
+
+    def ramp_stop(self, knob: str | None = None):
+        """End a sweep where it is (`knob` e.g. "a_frequency"; without it
+        every sweep). A safety verb: allowed also while viewing."""
+        d = {"cmd": "ramp_stop"}
+        if knob:
+            d["knob"] = knob
+        return self._cmd(d).get("stopped")
 
     def shutdown(self):
         """Close the client. Does NOT stop the remote service."""

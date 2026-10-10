@@ -22,6 +22,12 @@ Commands (a reply means ACCEPTED, not done -- poll status for the effect):
     set_reference {source: "internal_10MHz"|"internal_27MHz"|"external", ext_MHz?}
     set_ext_ref   {ext_MHz}
     all_rf_off    {}
+  The SWEEPS (fly scans; the reply carries `ramp_id`):
+    ramp_frequency {channel, frequency_Hz, rate_Hz_per_s}
+    ramp_power     {channel, power_dBm, rate_dB_per_s}
+    ramp_phase     {channel, phase_deg, rate_deg_per_s}
+    ramp_stop      {knob?}   e.g. "a_frequency"; none = every sweep
+    stream_start / stream_read / stream_stop   the record of every value sent
   + the universal verbs status, info, get_config, set_config, describe, shutdown.
 """
 
@@ -79,11 +85,12 @@ class WindfreakService:
         #   viewer who sees an output hit something it should not must be able
         #   to take it away. `set_rf` is NOT in the list even though on=false
         #   is the same thing for one channel -- the same verb also switches
-        #   an output ON. No sweep runs in this module, so nothing else to stop.
-        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        #   an output ON. `ramp_stop` ends a sweep (frequency, power or phase
+        #   of either channel) where it is: a stop, so a viewer may send it too.
+        #   READ: `stream_read` only reads the sweeps' record.
         self.control = ControlLease(
-            safety={"all_rf_off"},
-            read=set(),
+            safety={"all_rf_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -264,6 +271,27 @@ class WindfreakService:
                 s.set_ext_ref(float(msg["ext_MHz"]))
             elif cmd == "all_rf_off":
                 s.all_rf_off()
+            # The SWEEPS (fly scans): the reply's ramp_id is what status
+            # `<channel>_<knob>_ramp_id` shows while and after this sweep runs.
+            elif cmd == "ramp_frequency":
+                return {"ok": True, "ramp_id": s.ramp_frequency(
+                    msg["channel"], float(msg["frequency_Hz"]), float(msg["rate_Hz_per_s"]))}
+            elif cmd == "ramp_power":
+                return {"ok": True, "ramp_id": s.ramp_power(
+                    msg["channel"], float(msg["power_dBm"]), float(msg["rate_dB_per_s"]))}
+            elif cmd == "ramp_phase":
+                return {"ok": True, "ramp_id": s.ramp_phase(
+                    msg["channel"], float(msg["phase_deg"]), float(msg["rate_deg_per_s"]))}
+            elif cmd == "ramp_stop":
+                # no `knob`: every sweep of both channels stops (the safest
+                # reading of "stop")
+                return {"ok": True, "stopped": s.ramp_stop(msg.get("knob") or None)}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": s.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": s.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": s.stream_stop()}
             elif cmd == "status":
                 return {"ok": True, "status": self.status_payload()}
             elif cmd == "describe":

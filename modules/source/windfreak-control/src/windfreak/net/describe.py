@@ -32,12 +32,45 @@ from ..config import REFERENCE_SOURCES
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
+#: The sweep pace a client is offered first, per knob, in WIRE units per
+#: second (clamped to the configured paces): 10 MHz/s -- a 100 MHz FMR line
+#: in 10 s, slow enough for a lock-in at a few ms time constant; 1 dB/s;
+#: 10 deg/s.
+SWEEP_RATE_DEFAULTS = {"frequency": 10.0e6, "power": 1.0, "phase": 10.0}
+
+
+def sweep_block(synth, ch: str, knob: str, *, wire_arg: str, rate_arg: str,
+                rate_unit: str, scale: float = 1.0) -> dict:
+    """The `ramp` block of one channel's knob (guide 6b, "Ramps"): a
+    CONTINUOUS SWEEP a fly scan can fly. The SERVICE walks the knob
+    (softramp.py) and records every value it sent; the fly scan bins by that
+    COMMANDED value (measured: false -- why, see synthesizer.py "the
+    SWEEPS"). The channel travels as a fixed extra argument, exactly as in
+    the control's `set`. The sweep's name -- in ramp_stop, the status keys
+    and the stream channel -- is the control's id, "<ch>_<knob>". `to` and
+    the rate are scaled like the set (MHz in the scan, Hz on the wire); the
+    limits are the live config paces, never literals."""
+    name = f"{ch}_{knob}"
+    lo, hi = synth._rate_limits(knob)
+    default = max(lo, min(hi, SWEEP_RATE_DEFAULTS[knob]))
+    return {"kind": "software",
+            "start": {"verb": f"ramp_{knob}",
+                      "args": {"to": wire_arg, "rate": rate_arg},
+                      "extra": {"channel": ch}},
+            # stops THIS channel's knob only (no `knob`: every sweep)
+            "stop": {"verb": "ramp_stop", "extra": {"knob": name}},
+            "rate": {"unit": rate_unit, "min": lo / scale, "max": hi / scale,
+                     "default": default / scale},
+            "readback": {"stream": {"group": "ramp", "channel": name},
+                         "measured": False},
+            "done": {"key": f"{name}_ramping", "id_key": f"{name}_ramp_id"}}
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
        settle=None, args=None, danger=False, help="", timeout_s=None,
-       wait=None):
+       wait=None, ramp=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -49,7 +82,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("timeout_s", timeout_s), ("wait", wait), ("help", help)):
+                 ("timeout_s", timeout_s), ("wait", wait), ("ramp", ramp),
+                 ("help", help)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -95,7 +129,7 @@ def read_path(status: dict, path):
     return cur
 
 
-def _channel_params(ch: str, lim, base_order: int) -> list:
+def _channel_params(ch: str, synth, base_order: int) -> list:
     """The descriptors of ONE output channel, ids prefixed "a_" / "b_".
 
     Flat ids (not one descriptor with a channel argument) so a panel can place
@@ -112,6 +146,7 @@ def _channel_params(ch: str, lim, base_order: int) -> list:
     C = ch.upper()
     grp = f"Channel {C}"
     extra = {"channel": ch}
+    lim = synth.cfg.limits
 
     def settle(key):
         return {"policy": "adopt_then_flag", "setpoint_key": key,
@@ -134,6 +169,8 @@ def _channel_params(ch: str, lim, base_order: int) -> list:
            read_path=[f"{ch}_frequency_Hz"],
            set={"verb": "set_frequency", "arg": "frequency_Hz", "extra": extra},
            settle=settle(f"{ch}_frequency_Hz"), timeout_s=10.0,
+           ramp=sweep_block(synth, ch, "frequency", wire_arg="frequency_Hz",
+                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6),
            help="Resolution = the channel spacing (100 Hz by default). Above "
                 "20 GHz the output is not power-calibrated."),
 
@@ -143,6 +180,8 @@ def _channel_params(ch: str, lim, base_order: int) -> list:
            read_path=[f"{ch}_power_dBm"],
            set={"verb": "set_power", "arg": "power_dBm", "extra": extra},
            settle=settle(f"{ch}_power_dBm"), timeout_s=10.0,
+           ramp=sweep_block(synth, ch, "power", wire_arg="power_dBm",
+                            rate_arg="rate_dB_per_s", rate_unit="dB/s"),
            help="The instrument levels to this value when it can (about -40 dBm "
                 "to +20 dBm at low frequency, falling to ~+6 dBm at 24 GHz); "
                 "watch the leveled indicator."),
@@ -153,6 +192,8 @@ def _channel_params(ch: str, lim, base_order: int) -> list:
            read_path=[f"{ch}_phase_deg"],
            set={"verb": "set_phase", "arg": "phase_deg", "extra": extra},
            settle=settle(f"{ch}_phase_deg"), timeout_s=10.0,
+           ramp=sweep_block(synth, ch, "phase", wire_arg="phase_deg",
+                            rate_arg="rate_deg_per_s", rate_unit="deg/s"),
            help="Relative to the phase at service start (the instrument has "
                 "no absolute phase readback). Meaningful between A and B only "
                 "when both run at the same frequency."),
@@ -176,8 +217,8 @@ def build_manifest(synth) -> dict:
     lim = cfg.limits
     external = cfg.reference.source == "external"
     params = []
-    params += _channel_params("a", lim, 10)
-    params += _channel_params("b", lim, 20)
+    params += _channel_params("a", synth, 10)
+    params += _channel_params("b", synth, 20)
     params.append(
         _p("reference", "Reference", "control", "enum", group="Reference",
            order=1, options=list(REFERENCE_SOURCES), read_path=["reference"],
@@ -216,6 +257,10 @@ def build_manifest(synth) -> dict:
            help="Switch both outputs off. Usable as a scan routine step."),
         _p("rf_all_off", "Both outputs off", "indicator", "bool",
            group="Output", order=2, read_path=["rf_all_off"]),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Output", order=3,
+           read_path=["ramping"],
+           help="True while a sweep (ramp_frequency / ramp_power / ramp_phase) "
+                "walks a knob of either channel."),
         _p("temperature", "Temperature", "indicator", "float", unit="degC",
            group="Status", order=1, decimals=1, plottable=True,
            read_path=["temperature_C"]),

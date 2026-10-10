@@ -9,9 +9,10 @@ Channels are numbered the way the instrument numbers them: 0 = RFoutA,
 1 = RFoutB. (The wire and the GUI say "a"/"b"; the brain translates.)
 
 Clamping to the safety limits is the brain's job, not the backend's. The
-backend also does no threading of its own: exactly ONE thread (the brain's
-worker) ever calls it, which is what makes a single serial port safe to share
-between two channels.
+backend also does no threading of its own: the brain calls it under ONE
+hardware lock (`Synthesizer._io`) -- from its worker, and while a sweep runs
+also from that sweep's thread -- which is what makes a single serial port safe
+to share between two channels.
 """
 
 from __future__ import annotations

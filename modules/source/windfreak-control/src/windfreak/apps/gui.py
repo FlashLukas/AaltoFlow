@@ -259,6 +259,13 @@ class DualToneIndicator(QtWidgets.QWidget):
 
 _FREQ_UNITS = {"MHz": 1e6, "GHz": 1e9}
 
+#: The Sweep card: shown name -> (knob, pace unit shown, wire units per shown
+#: unit, decimals, first pace offered in the shown unit, rate unit on the
+#: wire = the config.Limits suffix, wire unit of the value).
+_SWEEP_UI = {"Frequency": ("frequency", "MHz/s", 1e6, 3, 10.0, "Hz_per_s", "Hz"),
+             "Power": ("power", "dB/s", 1.0, 3, 1.0, "dB_per_s", "dBm"),
+             "Phase": ("phase", "deg/s", 1.0, 2, 10.0, "deg_per_s", "deg")}
+
 
 class ChannelCard(QtWidgets.QFrame):
     """The controls and readouts of ONE output channel."""
@@ -476,7 +483,11 @@ class MainWindow(QtWidgets.QMainWindow):
         icard, ilay = _card("Outputs")
         self.tone = DualToneIndicator()
         ilay.addWidget(self.tone, 1)
-        mid.addWidget(icard, 1)
+        # right-hand column: the indicator, and the Sweep card under it
+        right = QtWidgets.QVBoxLayout(); right.setSpacing(14)
+        right.addWidget(icard, 1)
+        right.addWidget(self._build_sweep(), 0)
+        mid.addLayout(right, 1)
         outer.addLayout(mid, 0)
 
         lcard, llay = _card("Status log")
@@ -575,6 +586,89 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(off_btn)
         return row
 
+    def _build_sweep(self) -> QtWidgets.QWidget:
+        """SWEEP (2026-10-10): walk one knob of one channel CONTINUOUSLY to
+        the value in that channel's box on the left, at a set pace -- what a
+        fly scan does row by row, by hand. The RF output is not touched; Stop
+        ends every sweep where it is."""
+        card, lay = _card("Sweep")
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(8)
+        self.sweep_ch = QtWidgets.QComboBox()
+        self.sweep_ch.addItems(["A", "B"])
+        self.sweep_ch.setToolTip("Which channel to sweep")
+        self.sweep_knob = QtWidgets.QComboBox()
+        self.sweep_knob.addItems(list(_SWEEP_UI))
+        self.sweep_knob.setToolTip("Which knob to sweep; the target is the value "
+                                   "in that channel's box on the left")
+        self.sweep_rate = _spin()
+        self.sweep_rate.setToolTip("Sweep pace: the service steps the knob every "
+                                   f"{self.cfg.hardware.ramp_dt_s * 1e3:g} ms")
+        # each knob remembers its own pace while you switch between them
+        self._sweep_rates = {name: spec[4] for name, spec in _SWEEP_UI.items()}
+        self._sweep_shown = None
+        self.sweep_knob.currentTextChanged.connect(self._sweep_knob_changed)
+        go = QtWidgets.QPushButton("Sweep to"); go.setObjectName("primary")
+        go.setToolTip("Sweep the chosen knob continuously to the value in its box")
+        go.clicked.connect(self._sweep)
+        stop = QtWidgets.QPushButton("Stop")
+        stop.setToolTip("End every sweep where it is (allowed also while viewing)")
+        stop.clicked.connect(lambda: self._safe(self.ctrl.ramp_stop))
+        mark_always(stop)            # ramp_stop is a safety verb (net/service.py)
+        row.addWidget(self.sweep_ch); row.addWidget(self.sweep_knob)
+        row.addWidget(self.sweep_rate, 1)
+        row.addWidget(go); row.addWidget(stop)
+        lay.addLayout(row)
+        self.sweep_state = QtWidgets.QLabel("idle")
+        self.sweep_state.setStyleSheet(f"color:{COLORS['muted']};")
+        lay.addWidget(self.sweep_state)
+        self._sweep_knob_changed(self.sweep_knob.currentText())
+        return card
+
+    def _sweep_knob_changed(self, name: str):
+        if self._sweep_shown is not None:
+            self._sweep_rates[self._sweep_shown] = self.sweep_rate.value()
+        _knob, unit, scale, decimals, _default, runit, _u = _SWEEP_UI[name]
+        lim = self.cfg.limits
+        self.sweep_rate.setDecimals(decimals)
+        self.sweep_rate.setRange(getattr(lim, f"ramp_rate_min_{runit}") / scale,
+                                 getattr(lim, f"ramp_rate_max_{runit}") / scale)
+        self.sweep_rate.setSuffix(f"  {unit}")
+        self.sweep_rate.setValue(self._sweep_rates[name])
+        self._sweep_shown = name
+
+    def _sweep(self):
+        ch = self.sweep_ch.currentText().lower()
+        knob, _unit, scale, _d, _default, _r, _u = _SWEEP_UI[self.sweep_knob.currentText()]
+        card = self.cards[ch]
+        target = {"frequency": card.current_freq_hz,
+                  "power": card.power_spin.value,
+                  "phase": card.phase_spin.value}[knob]()
+        fn = getattr(self.ctrl, f"ramp_{knob}")
+        try:
+            self._safe(fn, ch, target, self.sweep_rate.value() * scale)
+        except Exception as exc:      # a refused sweep goes to the log, not a crash
+            self._on_event("error", f"sweep refused: {exc}")
+
+    def _refresh_sweep(self, s: dict):
+        """The sweep line: which knob walks where (an older service: no keys)."""
+        parts = []
+        for ch in "ab":
+            for knob, _u, _sc, _d, _df, _r, unit in _SWEEP_UI.values():
+                name = f"{ch}_{knob}"
+                if not s.get(f"{name}_ramping"):
+                    continue
+                tgt = _num(s.get(f"{name}_ramp_target_{unit}"))
+                if tgt is None:
+                    continue
+                shown = (f"{tgt / 1e6:.3f} MHz" if knob == "frequency"
+                         else f"{tgt:.2f} {unit}")
+                parts.append(f"{ch.upper()} {knob} -> {shown}")
+        text = ("sweeping " + ", ".join(parts)) if parts else "idle"
+        if text != self.sweep_state.text():
+            self.sweep_state.setText(text)
+            self.sweep_state.setStyleSheet(
+                f"color:{COLORS['accent'] if parts else COLORS['muted']};")
+
     # ---- actions ---------------------------------------------------------
 
     def _set_reference(self, index: int):
@@ -599,6 +693,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_settings_applied(self):
         for card in self.cards.values():
             card.apply_limits()
+        self._sweep_knob_changed(self.sweep_knob.currentText())   # new pace limits
         self.ext_spin.setRange(self.cfg.limits.ext_ref_min_MHz, self.cfg.limits.ext_ref_max_MHz)
 
     # ---- refresh & events ------------------------------------------------
@@ -617,6 +712,7 @@ class MainWindow(QtWidgets.QMainWindow):
         s = self.ctrl.status()
         for card in self.cards.values():
             card.refresh(s)
+        self._refresh_sweep(s)
 
         if s.get("connected"):
             err = s.get("hw_error")

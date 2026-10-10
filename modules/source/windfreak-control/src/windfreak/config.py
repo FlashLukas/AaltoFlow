@@ -93,6 +93,26 @@ class Limits:
     phase_max_deg: float = 360.0
     ext_ref_min_MHz: float = 10.0
     ext_ref_max_MHz: float = 100.0
+    # SWEEPS (ramp_frequency / ramp_power / ramp_phase, for fly scans,
+    # 2026-10-10): the pace a sweep may be asked for, in the knob's unit per
+    # second, shared by both channels. A pace outside these is clamped and
+    # warned, like a setpoint.
+    #   frequency: 1 kHz/s (slower than any scan wants) .. 10 GHz/s (most of
+    #     the band in a few seconds -- the steps then get large; a fly scan
+    #     does not mind, it bins by the value each step SENT, but a lock-in
+    #     behind it can only follow at its own time constant);
+    #   power: 0.01 .. 100 dB/s. The SynthHD re-levels at every power (and
+    #     frequency) write from its calibration table; whether a large power
+    #     sweep makes the output glitch at internal gain/attenuator switch
+    #     points is not known (VERIFY on the unit, with a power meter or a
+    #     spectrum analyser, before sweeping across tens of dB);
+    #   phase: 0.01 .. 3600 deg/s.
+    ramp_rate_min_Hz_per_s: float = 1.0e3
+    ramp_rate_max_Hz_per_s: float = 1.0e10
+    ramp_rate_min_dB_per_s: float = 0.01
+    ramp_rate_max_dB_per_s: float = 100.0
+    ramp_rate_min_deg_per_s: float = 0.01
+    ramp_rate_max_deg_per_s: float = 3600.0
 
 
 @dataclass
@@ -123,6 +143,17 @@ class Hardware:
                           AND slower phase tuning.
     temp_warn_C        -- warn when the internal sensor goes above this (the
                           datasheet says keep it below 75 C).
+    ramp_dt_s          -- a SWEEP sends one value every ramp_dt_s (softramp.py).
+                          20 ms = 50 steps a second. One step is one short
+                          serial write with no reply ("C0f2450.00000000",
+                          about 17 bytes over USB full speed: well under a ms
+                          on the wire), and the PLL relocks in ~100 us
+                          (datasheet), but how fast the SynthHD's firmware
+                          takes in back-to-back commands -- it re-levels the
+                          power at every frequency write -- is not documented
+                          (VERIFY on the unit: it bounds how small this may
+                          be). A step that comes late does not slow the
+                          sweep: each value is computed from the elapsed time.
     """
 
     port: str = "COM4"
@@ -132,6 +163,7 @@ class Hardware:
     phase_command: str = "relative"
     channel_spacing_Hz: float = 0.0
     temp_warn_C: float = 70.0
+    ramp_dt_s: float = 0.02
 
 
 @dataclass
