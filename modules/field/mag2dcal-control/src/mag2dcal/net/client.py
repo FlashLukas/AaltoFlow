@@ -68,6 +68,12 @@ class RemoteStatus:
         self.stabilizer = bool(d.get("stabilizer", False))
         self.calibrated = bool(d.get("calibrated", False))
         self.calibration_progress = float(d.get("calibration_progress") or 0.0)
+        # the SWEEPS (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = d.get("ramp_id", 0) or 0
+        self.ramp_knob = d.get("ramp_knob", "") or ""
+        self.ramp_target = _num(d.get("ramp_target"))
+        self.ramp_rate = _num(d.get("ramp_rate"))
         self.describe_rev = d.get("describe_rev")
 
 
@@ -149,6 +155,21 @@ class Mag2dcalClient(ControlClient):
 
     def zero(self):
         self._do({"cmd": "zero"})
+
+    def ramp_field(self, field_mT: float, rate_mT_per_s: float) -> int:
+        """Sweep the field magnitude (fly scans, the GUI's Sweep button).
+        Returns the sweep's number; a refusal raises Refused."""
+        return self._do({"cmd": "ramp_field", "field_mT": field_mT,
+                         "rate_mT_per_s": rate_mT_per_s}).get("ramp_id")
+
+    def ramp_angle(self, angle_deg: float, rate_deg_per_s: float) -> int:
+        """Sweep (rotate) the field angle at a set pace."""
+        return self._do({"cmd": "ramp_angle", "angle_deg": angle_deg,
+                         "rate_deg_per_s": rate_deg_per_s}).get("ramp_id")
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._do({"cmd": "ramp_stop"}).get("stopped")
 
     def set_output(self, enabled: bool):
         self._do({"cmd": "set_output", "enabled": bool(enabled)})

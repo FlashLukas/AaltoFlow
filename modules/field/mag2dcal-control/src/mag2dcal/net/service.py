@@ -73,8 +73,12 @@ class Mag2dcalService:
         #   and `set_stabilizer` (they change how the field is reached).
         #   READ = none: every read-only verb here is already status/info/
         #   describe/get_config.
+        #   `ramp_stop` (end a sweep where it is; the loop holds the field
+        #   there) is a stop, so a viewer may send it too; `stream_read` only
+        #   reads the record of the field readings.
         self.control = ControlLease(
-            safety={"zero", "output_off"},
+            safety={"zero", "output_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -252,6 +256,22 @@ class Mag2dcalService:
                 c.set_by(float(msg["by_mT"]))
             elif cmd == "zero":
                 c.zero()
+            elif cmd == "ramp_field":
+                # the SWEEPS (fly scans): the reply's ramp_id is what status
+                # `ramp_id` shows while, and after, this sweep runs
+                return {"ok": True, "ramp_id": c.ramp_field(
+                    float(msg["field_mT"]), float(msg["rate_mT_per_s"]))}
+            elif cmd == "ramp_angle":
+                return {"ok": True, "ramp_id": c.ramp_angle(
+                    float(msg["angle_deg"]), float(msg["rate_deg_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": c.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": c.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": c.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": c.stream_stop()}
             elif cmd == "set_output":
                 c.set_output(_as_bool(msg["enabled"]))
             elif cmd == "output_off":

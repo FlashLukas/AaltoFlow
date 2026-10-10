@@ -66,6 +66,42 @@ boolean apart:
 
 Details, and why it is not a gain problem, in that file's docstring.
 
+## Sweep (fly scans)
+
+The same verbs and status keys as mag2d-control: `ramp_field{field_mT,
+rate_mT_per_s}` sweeps the signed magnitude (angle kept), `ramp_angle{angle_deg,
+rate_deg_per_s}` rotates the field (magnitude kept) -- the angular FMR scan as
+a fly axis -- and `ramp_stop` ends a sweep where it is (a safety verb). The
+reply carries `ramp_id`; the status shows `ramping`, `ramp_id`, `ramp_knob`,
+`ramp_target`, `ramp_rate`, and the state **SWEEP** while the setpoint moves.
+Every Hall reading is streamed (`stream_start` / `_read` / `_stop`: `field`
+along the setpoint direction, measured `angle`, `bx`, `by`, the setpoint) and
+a fly scan bins by that MEASURED field.
+
+What the calibrated philosophy needs during a sweep:
+
+* the drive follows the moving setpoint with the calibrated feed-forward (the
+  leg each axis is moving along, offset to where the drive was at the start)
+  plus a two-sided PI on the measured field;
+* **the drive never steps back** against the direction an axis's setpoint is
+  moving (a reversal flips the iron onto the other branch, gotcha #11); if the
+  field runs ahead, the drive waits and the integral does not wind up;
+* **the freeze and the stabilizer stand aside** while the setpoint moves (a
+  frozen output cannot follow it; a stabilizer nudge against the sweep would
+  flip the branch);
+* at the end (or on `ramp_stop`) each axis settles as a set_field ends,
+  without going back: freeze within tolerance/2, a one-way trim from where the
+  drive is if behind, an ordinary seek only if it ran past by more. The drive
+  stays monotonic through the endgame (`tests/test_sweep.py`).
+
+Any ordinary set, output off, a calibration, shutdown or a FAULT stops a
+sweep; during a calibration or a FAULT a sweep is refused. Targets and rates
+are clamped with a warning (`limits.field_rate_*_mT_per_s`,
+`angle_rate_*_deg_per_s`, VERIFY on the magnet). The measured angle uses the
+setpoint's convention (as mag2d: -B for a negative field, unwrapped to the
+setpoint's turn, the setpoint angle below `limits.angle_min_field_mT`). The
+GUI's **Sweep** card: a rate per knob, Sweep |B|, Sweep angle, Stop.
+
 ## Stopping
 
 `shutdown` ramps the coils to 0 V and drops the enable line, as mag2d does.

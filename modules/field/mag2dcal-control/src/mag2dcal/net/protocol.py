@@ -38,11 +38,15 @@ CONTRACT_STATUS_KEYS = [
 #: What this module publishes IN ADDITION. Extra keys are safe (a client that
 #: only knows mag2d ignores them); missing ones are not.
 EXTRA_STATUS_KEYS = ["hw_error", "frozen", "stabilizer", "calibrated",
-                     "calibration_progress"]
+                     "calibration_progress",
+                     # the sweeps (2026-10-10): the SAME keys as mag2d's
+                     "ramping", "ramp_id", "ramp_knob", "ramp_target", "ramp_rate"]
 
 #: `state` values. mag2d's REGULATING is split into SEEK (moving) and HOLD
-#: (output frozen, dwelling), and CALIBRATE is new.
-STATE_VALUES = ["OFF", "SEEK", "HOLD", "STABLE", "RAMP_DOWN", "CALIBRATE", "FAULT"]
+#: (output frozen, dwelling), and CALIBRATE is new; SWEEP (2026-10-10) = the
+#: setpoint moves at a set pace (ramp_field / ramp_angle) and the drive follows.
+STATE_VALUES = ["OFF", "SEEK", "HOLD", "STABLE", "SWEEP", "RAMP_DOWN", "CALIBRATE",
+                "FAULT"]
 
 
 def json_safe(v):
