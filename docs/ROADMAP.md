@@ -256,9 +256,18 @@ frame (`last_deep()`).
     angular FMR scan as a fly axis); mag2dcal's freeze must stand aside while
     the setpoint moves, as clMag's does.
   * **kepco**: current (software ramp at A/s; readback = the measured current).
-  * **smb / windfreak / hp8648 / shsg**: frequency, power, phase (software
-    ramps via softramp.py; measured false unless a read-back is cheap -- the
-    smb over GPIB may be fast enough to read `FREQ?` per step; check).
+  * **smb / windfreak / hp8648 / shsg / dssg**: DONE 2026-10-10 (simulation
+    only) -- software ramps via softramp.py on frequency, power and phase
+    where the instrument has them (smb, windfreak per channel, dssg: all
+    three; hp8648, shsg: frequency + level, no phase control). Every knob is
+    binned by COMMAND (measured false): FREQ? / POW? and the shsg owner's
+    echo return the stored setting, not a measurement, and a query per step
+    would halve the step rate. dssg sweeps power only with fine power (each
+    step re-splits attenuator + vernier, calibrated). Verbs ramp_<knob>,
+    ramp_stop{knob?}; status <knob>_ramping / <knob>_ramp_id; one stream
+    group "ramp", a channel per knob (own stamps in t_ch); a Sweep card in
+    each GUI. Open: the per-step timings on the instruments (# VERIFY in
+    each module), and the signalhound owner logs one event per TG step.
   * **afg** and the **AD2** waveform generator: DONE 2026-10-10 (frequency /
     amplitude / offset / phase per channel, software ramps, measured false;
     the follower follows each step). Simulation; the lab tries them on the
