@@ -251,11 +251,15 @@ frame (`last_deep()`).
   Lukas: "when it makes sense". Candidates, module by module, each with its
   ramp block, verbs, readback stream, status `ramping`, a Sweep control in
   the GUI and a sim test:
-  * **mag2d / mag2dcal**: field magnitude (closed loop, measured by the Hall
-    probes) and the ROTATING ANGLE (a sweep of `angle_deg` at deg/s -- the
-    angular FMR scan as a fly axis); mag2dcal's freeze must stand aside while
-    the setpoint moves, as clMag's does.
-  * **kepco**: current (software ramp at A/s; readback = the measured current).
+  * **mag2d / mag2dcal**: DONE 2026-10-10 (simulation only) -- field
+    magnitude (`ramp_field`) and the ROTATING ANGLE (`ramp_angle`, the
+    angular FMR scan as a fly axis), the control loop walking the setpoint,
+    binned by the MEASURED field / angle (Hall stream); mag2dcal has a SWEEP
+    state in which the freeze and the stabilizer stand aside and the drive
+    never steps back (clMag's model, gotcha #11).
+  * **kepco**: DONE 2026-10-10 (simulation only) -- current (`ramp_current`,
+    softramp.py at A/s), binned by the MEASURED current; the voltage limit,
+    output off and the watchdog stop it; it never switches the output on.
   * **smb / windfreak / hp8648 / shsg / dssg**: DONE 2026-10-10 (simulation
     only) -- software ramps via softramp.py on frequency, power and phase
     where the instrument has them (smb, windfreak per channel, dssg: all
@@ -282,14 +286,18 @@ frame (`last_deep()`).
     those that stream a position fly on the STAGE path already (speed_param);
     the rest need either a stream + a speed knob, or a ramp block where the
     controller can move at a set velocity (ddr25, elliptec).
-  * **k2450**: source voltage / current sweeps (the SMU's own sweep is a
-    hardware ramp; readback = the measured value).
-  * **chopper**: frequency (software ramp; measured = the chopper's own
-    frequency reading).
+  * **k2450**: DONE 2026-10-10 (simulation only) -- `ramp_voltage` /
+    `ramp_current` as SOFTWARE ramps (the 2450's own :SOUR:SWE is a
+    trigger-model list the poll cannot read during), binned by the measured
+    readback; compliance stops a sweep; it never switches the output on.
+  * **chopper**: DONE 2026-10-10 (simulation only) -- `ramp_frequency`
+    (softramp.py), binned by the MEASURED wheel frequency (REF OUT on a
+    sensor), honestly by the commanded one while REF OUT is on 'target'.
   The Scan Builder side is DONE (2026-10-09, 7ab8757: the FLY group of the
-  per-axis Advanced panel offers fly on a ramp knob). The three pilots and the
-  VNA streaming (traces + single points, 2026-10-09) are simulation-only until
-  their instruments are connected again.
+  per-axis Advanced panel offers fly on a ramp knob). The three pilots, the
+  five modules above (2026-10-10; every rate limit and bus budget is a
+  `# VERIFY`) and the VNA streaming (traces + single points, 2026-10-09) are
+  simulation-only until their instruments are connected again.
 
 - **Scan server, phase 2** (phase 1 DONE 2026-10-05, branch `scan-server`:
   the scan engine as a service, `scan_core/scan_server.py`; start a scan on
