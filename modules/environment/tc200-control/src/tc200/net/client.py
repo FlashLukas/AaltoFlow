@@ -60,6 +60,11 @@ class RemoteStatus:
         self.tmax_C = _f(d, "tmax_C")
         self.readings = int(d.get("readings") or 0)
         self.poll_ms = _f(d, "poll_ms")
+        # the temperature SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = int(d.get("ramp_id") or 0)
+        self.ramp_target_C = _f(d, "ramp_target_C")
+        self.ramp_rate_C_per_s = _f(d, "ramp_rate_C_per_s")
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -138,6 +143,23 @@ class Tc200Client(ControlClient):
 
     def set_temperature(self, temperature_C: float):
         return self._checked({"cmd": "set_temperature", "temperature_C": float(temperature_C)})
+
+    def ramp_temperature(self, temperature_C: float, rate_C_per_s: float):
+        """Sweep the setpoint (fly scans; the GUI's Sweep button). Rate in C/s."""
+        return self._checked({"cmd": "ramp_temperature",
+                              "temperature_C": float(temperature_C),
+                              "rate_C_per_s": float(rate_C_per_s)}).get("ramp_id")
+
+    def ramp_stop(self):
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._checked({"cmd": "ramp_stop"}).get("stopped")
+
+    def ramp_rate_limits(self) -> tuple[float, float]:
+        """(min, max) sweep pace in C/s, from the service's config (as last
+        fetched by start() / get_config(): no round trip here)."""
+        lim = self.cfg.limits
+        lo = max(1e-6, float(lim.ramp_rate_min_C_per_s))
+        return lo, max(lo, float(lim.ramp_rate_max_C_per_s))
 
     def set_enabled(self, enabled: bool):
         return self._checked({"cmd": "set_enabled", "enabled": bool(enabled)})

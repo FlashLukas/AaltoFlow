@@ -86,6 +86,42 @@ ceiling (`[limits] temperature_max_C = 150`).
   the indicator's glow is an estimate from how far below the setpoint the
   block is.
 
+## Sweep (fly scans over the temperature)
+
+A fly axis in scan-core can fly `tc200.temperature`: the module sweeps the
+setpoint over each row at a set pace, the detectors stream, and every sample
+is binned by the **measured** temperature (`describe`: a `ramp` block,
+`kind: software`, readback `measured: true`).
+
+- **Why a software ramp.** The TC200 has ramps of its own only inside its
+  front-panel CYCLE program (a stored temperature profile); no serial command
+  to start, pace or stop one is documented. So the service walks the setpoint
+  (`softramp.py`, the suite's shared copy) and sends a new `tset` every time
+  the walk has moved by the box's **0.1 degC** resolution -- at 1 K/min that is
+  one command every 6 s.
+- **Verbs:** `ramp_temperature{temperature_C, rate_C_per_s}` -> `{ramp_id}`;
+  `ramp_stop` ends it where the setpoint is (a **safety** verb: a viewer may
+  send it); `stream_start` / `stream_read` / `stream_stop` hand out the
+  temperature readings (group `temperature`). Status: `ramping`, `ramp_id`,
+  `ramp_target_C`, `ramp_rate_C_per_s`.
+- **Units.** The rate travels as **degC per second** (scan-core reads every
+  ramp rate as unit/s); the GUI's Sweep box shows and takes **K/min** and
+  converts. Limits `limits.ramp_rate_min_C_per_s` / `ramp_rate_max_C_per_s`
+  (0.1 .. 20 K/min; `# VERIFY` how fast the real block follows, both ways).
+  A target or rate outside the limits is clamped and warned.
+- **The readback.** While a sweep runs or a stream records, the poll thread
+  reads the temperature alone every `hardware.ramp_poll_s` (0.1 s) and the
+  status byte and setpoint at `poll_s`. The block lags the setpoint by its
+  thermal time constant (minutes): the reason the samples are binned by
+  measurement, and the reason a heater sweeps DOWN no faster than the room
+  cools it.
+- **A set takes over:** `set_temperature` (and the shutdown) stops a running
+  sweep first. A sweep in CYCLE mode is refused; with the output off it runs
+  but warns (nothing heats).
+- `# VERIFY` on the unit: the time one `tact?` takes (it bounds
+  `ramp_poll_s`), and that a `tset` every few seconds does not upset the box's
+  own PID (an integral that winds on every step).
+
 ## Layout
 
 ```
@@ -96,6 +132,8 @@ src/tc200/
     sim.py             SimulatedTC200 -- first-order thermal plant + PID, TMAX trips, alarms
     serial_tc200.py    SerialTC200 -- the USB virtual COM port (lazy pyserial import)
   heater.py            Heater -- clamps, pushes, polls, decides "reached", keeps it safe
+  softramp.py          the setpoint sweep (byte-identical copy of suite-common's)
+  stream.py            StreamRecorder -- the temperature readings for a fly scan
   net/                 service, client, protocol, describe
   apps/                gui (HotPlateIndicator + history chart), settings dialog, theme
 scripts/               run_service.py, run_gui.py, tc200_console.py, smoke_test.py

@@ -321,6 +321,34 @@ class MainWindow(QtWidgets.QMainWindow):
         set_t = QtWidgets.QPushButton("Set temperature"); set_t.setObjectName("primary")
         set_t.clicked.connect(self._set_temperature)
         tlay.addWidget(set_t)
+        # SWEEP (2026-10-10): walk the setpoint CONTINUOUSLY to the value above
+        # at a set pace -- what a fly scan does row by row, by hand. The pace
+        # is shown in K/min (how people think about heating); the wire and
+        # describe carry C/s (scan-core reads every ramp rate as unit/s), so
+        # this box converts: C/s = (K/min) / 60.
+        srow = QtWidgets.QHBoxLayout()
+        self.sweep_rate = QtWidgets.QDoubleSpinBox()
+        lim = self.cfg.limits
+        self.sweep_rate.setDecimals(2)
+        self.sweep_rate.setRange(lim.ramp_rate_min_C_per_s * 60.0,
+                                 lim.ramp_rate_max_C_per_s * 60.0)
+        self.sweep_rate.setValue(1.0)
+        self.sweep_rate.setSuffix("  K/min")
+        self.sweep_rate.setToolTip("Sweep pace. The service moves the setpoint in the "
+                                   "TC200's 0.1 °C steps; the block follows with its "
+                                   "own lag.")
+        sweep_btn = QtWidgets.QPushButton("Sweep to")
+        sweep_btn.setToolTip("Sweep the setpoint continuously to the value above")
+        sweep_btn.clicked.connect(
+            lambda: self._call(self.ctrl.ramp_temperature, self.temp_spin.value(),
+                               self.sweep_rate.value() / 60.0))
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where the setpoint is")
+        sweep_stop.clicked.connect(lambda: self._call(self.ctrl.ramp_stop))
+        # the SAFETY set (net/service.py): a stop works for a viewer too
+        mark_always(sweep_stop)
+        srow.addWidget(self.sweep_rate, 1); srow.addWidget(sweep_btn); srow.addWidget(sweep_stop)
+        tlay.addLayout(srow)
         row = QtWidgets.QHBoxLayout()
         self.on_btn = QtWidgets.QPushButton("Heater ON"); self.on_btn.setObjectName("primary")
         self.on_btn.clicked.connect(lambda: self._call(self.ctrl.set_enabled, True))
@@ -496,8 +524,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.temp_spin.setMaximum(s.temperature_max_C)   # TMAX moved the ceiling
 
         self.temp_value.setText(_fmt(s.temperature_C, ".2f"))
+        sweep = ""
+        if getattr(s, "ramping", False):
+            sweep = (f"  ·  sweeping to {_fmt(s.ramp_target_C, '.1f')} °C at "
+                     f"{_fmt(s.ramp_rate_C_per_s * 60.0, '.2g')} K/min")
         self.temp_sub.setText(f"set {_fmt(s.setpoint_C, '.1f')} °C  ·  heater "
-                              f"{'ON' if s.enabled else 'off'}  ·  {s.mode or '—'} mode")
+                              f"{'ON' if s.enabled else 'off'}  ·  {s.mode or '—'} mode"
+                              + sweep)
         if s.temperature_stable:
             self.lamp.setText("●  reached")
             self.lamp.setStyleSheet(f"color:{COLORS['ok']}; font-weight:700;")

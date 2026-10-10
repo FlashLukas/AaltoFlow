@@ -65,9 +65,12 @@ class Tc200Service:
         #   list even though it can also switch off -- it can switch ON too.
         #   READ = nothing extra: every read-only verb here is already
         #   status / info / describe / get_config.
+        #   Since 2026-10-10: `ramp_stop` ends a temperature SWEEP (fly scans)
+        #   where the setpoint is -- it only stops, so a viewer may send it;
+        #   `stream_read` only reads the poll thread's record.
         self.control = ControlLease(
-            safety={"heater_off"},
-            read=set(),
+            safety={"heater_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -226,6 +229,19 @@ class Tc200Service:
         try:
             if cmd == "set_temperature":
                 self.heater.set_temperature(float(msg["temperature_C"]))
+            elif cmd == "ramp_temperature":
+                # the temperature SWEEP (fly scans); the reply's ramp_id is
+                # what status `ramp_id` shows while and after this sweep runs
+                return {"ok": True, "ramp_id": self.heater.ramp_temperature(
+                    float(msg["temperature_C"]), float(msg["rate_C_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": self.heater.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.heater.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.heater.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.heater.stream_stop()}
             elif cmd == "set_enabled":
                 self.heater.set_enabled(_bool(msg["enabled"]))
             elif cmd == "heater_off":
@@ -286,6 +302,8 @@ class Tc200Service:
             "temperature_min_C": lim.temperature_min_C,
             "temperature_max_C": self.heater.temperature_max(),
             "pmax_max_W": lim.pmax_max_W,
+            "ramp_rate_min_C_per_s": self.heater.ramp_rate_limits()[0],
+            "ramp_rate_max_C_per_s": self.heater.ramp_rate_limits()[1],
             "sensor": st.sensor,
             "expected_sensor": self.heater.cfg.hardware.expected_sensor,
         }

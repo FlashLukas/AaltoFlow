@@ -29,11 +29,16 @@ from ..config import (D_GAIN_RANGE, I_GAIN_RANGE, P_GAIN_RANGE, PMAX_MIN_W, SENS
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
+#: The sweep pace a client is offered first, degC/s: 1 K/min -- slow enough
+#: for a heated block (tau ~ a minute or two) to stay close behind it.
+SWEEP_RATE_DEFAULT_C_PER_S = 1.0 / 60.0
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, timeout_s=None, args=None, wait=None, danger=False, help=""):
+       settle=None, timeout_s=None, args=None, wait=None, danger=False, help="",
+       ramp=None, stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -45,7 +50,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("timeout_s", timeout_s),
-                 ("args", args), ("wait", wait),
+                 ("args", args), ("wait", wait), ("ramp", ramp), ("stream", stream),
                  ("help", help)):
         if v is not None and v != "":
             d[k] = v
@@ -116,6 +121,7 @@ def build_manifest(heater) -> dict:
     t_lo = float(lim.temperature_min_C)
     t_hi = heater.temperature_max()          # LIVE: follows the box's TMAX
     pmax_hi = max(PMAX_MIN_W, float(lim.pmax_max_W))
+    r_lo, r_hi = heater.ramp_rate_limits()
     params = [
         # ---- temperature -----------------------------------------------------
         _p("temperature", "Temperature setpoint", "control", "float", unit="C",
@@ -125,6 +131,22 @@ def build_manifest(heater) -> dict:
            settle={"policy": "adopt_then_flag", "setpoint_key": "setpoint_C",
                    "flag_key": "temperature_stable"},
            timeout_s=settle_timeout(cfg, t_hi),
+           # A CONTINUOUS SWEEP for fly scans (2026-10-10; guide 6b, "Ramps").
+           # A SOFTWARE ramp: the TC200's own ramps live only in its front-
+           # panel CYCLE program (no confirmed serial commands), so the
+           # service walks the setpoint in the box's 0.1 C steps. Binned by
+           # the MEASURED temperature, read fast by the poll thread while the
+           # sweep runs. The rate is C/s here (scan-core reads every ramp
+           # rate as unit/s); the GUI shows it as K/min.
+           ramp={"kind": "software",
+                 "start": {"verb": "ramp_temperature",
+                           "args": {"to": "temperature_C", "rate": "rate_C_per_s"}},
+                 "stop": {"verb": "ramp_stop"},
+                 "rate": {"unit": "C/s", "min": r_lo, "max": r_hi,
+                          "default": max(r_lo, min(r_hi, SWEEP_RATE_DEFAULT_C_PER_S))},
+                 "readback": {"stream": {"group": "temperature", "channel": "temperature"},
+                              "measured": True},
+                 "done": {"key": "ramping", "id_key": "ramp_id"}},
            help=f"Reached = heater on and within {t.tolerance_C:g} C for "
                 f"{t.stable_time_s:g} s. Enable the heater first: the setpoint "
                 "alone heats nothing. A heater cannot cool -- going down is slow."),
@@ -136,7 +158,11 @@ def build_manifest(heater) -> dict:
                 "wired to it, on a sensor alarm, or in CYCLE mode."),
         _p("measured_temperature", "Temperature", "indicator", "float", unit="C",
            group="Temperature", order=30, decimals=2, plottable=True,
-           read_path=["temperature_C"]),
+           read_path=["temperature_C"],
+           stream={"group": "temperature", "channel": "temperature"}),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Temperature", order=55,
+           read_path=["ramping"],
+           help="True while a temperature sweep (ramp_temperature) walks the setpoint."),
         _p("temperature_error", "Temperature error", "indicator", "float", unit="C",
            group="Temperature", order=40, decimals=2, plottable=True,
            read_path=["temperature_error_C"]),

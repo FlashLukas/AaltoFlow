@@ -104,12 +104,24 @@ class Limits:
                          TMAX changes (describe's revision changes with it).
     pmax_max_W        -- ceiling for set_pmax; set it to the heater's rating
                          so nobody pushes 18 W into a 5 W element.
+    ramp_rate_min_C_per_s, ramp_rate_max_C_per_s -- the pace a temperature
+                         SWEEP (ramp_temperature, fly scans, 2026-10-10) may
+                         be asked for, in degC per SECOND (scan-core reads
+                         every ramp rate as unit/s; the GUI shows K/min).
+                         0.1 K/min is slower than any scan would want; 20 K/min
+                         is about what 18 W lifts a small block -- the heater
+                         cannot follow a faster setpoint, and it cannot COOL
+                         faster than the room takes the heat away at all.
+                         # VERIFY on the rig: how fast the real block follows
+                         (both directions) at the PMAX in use.
     """
 
     temperature_min_C: float = TSET_MIN_C
     temperature_max_C: float = 100.0
     tmax_margin_C: float = 5.0
     pmax_max_W: float = PMAX_MAX_W
+    ramp_rate_min_C_per_s: float = 0.1 / 60.0
+    ramp_rate_max_C_per_s: float = 20.0 / 60.0
 
 
 @dataclass
@@ -149,6 +161,16 @@ class Hardware:
     stat_base: int = 16
     expected_sensor: str = "ptc100"
     disable_on_shutdown: bool = True
+    # The temperature SWEEP (ramp_temperature, 2026-10-10). The service walks
+    # the setpoint (softramp.py) and sends a new `tset` every time the walk
+    # has moved by the box's 0.1 degC resolution, checking every ramp_dt_s.
+    # While a sweep runs -- or while a fly scan records the temperature --
+    # the TEMPERATURE alone is read every ramp_poll_s (the status byte and the
+    # setpoint stay at poll_s): a fly scan bins by those readings, and two a
+    # second would leave short pixels empty. # VERIFY on the unit: what one
+    # `tact?` costs on the serial line (100 ms assumes a few ms).
+    ramp_dt_s: float = 0.1
+    ramp_poll_s: float = 0.1
 
 
 @dataclass

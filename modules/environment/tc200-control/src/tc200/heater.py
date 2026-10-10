@@ -18,7 +18,9 @@ unattended heater safe. Its jobs:
   * refuse to enable while the box's sensor setting does not match the sensor
     that is really wired (a PT100 read as a PT1000 reads ~10x too cold, and
     the controller would heat without limit -- the manual warns it cannot
-    detect this itself).
+    detect this itself);
+  * SWEEP the setpoint at a set pace (ramp_temperature, 2026-10-10), so a fly
+    scan can fly the temperature: see "The temperature sweep" below.
 
 What it deliberately does NOT do at start: change anything. It ADOPTS the
 box's setpoint, output state, sensor, gains, PMAX and TMAX, and only QUERIES
@@ -27,6 +29,17 @@ startup, not to change anything"). A wrong sensor setting is a WARNING, never
 a write -- the enable interlock below keeps it safe. At shutdown it
 switches the output OFF when `hardware.disable_on_shutdown` (the default,
 because an unattended heater is the one thing in the lab that can start a fire).
+
+The temperature sweep (fly scans, INSTRUMENT_MODULE_GUIDE.md 6b "Ramps").
+The TC200 has ramps of its own, but only inside its front-panel CYCLE program
+(a stored temperature profile), and no serial command to start, pace or stop
+one is documented -- so the SERVICE walks the setpoint (softramp.py, a
+SOFTWARE ramp): a new `tset` every time the walk has moved by the box's
+0.1 degC resolution. A fly scan bins by the MEASURED temperature, which the
+poll thread reads every hardware.ramp_poll_s while a sweep runs or a stream
+records (status byte and setpoint stay at poll_s). The measured temperature
+LAGS the setpoint (the block's thermal time constant, ~90 s in the sim) --
+which is exactly why the samples are binned by measurement, not by command.
 
 Threads and locks (the rules the other modules learned the hard way):
 
@@ -53,6 +66,8 @@ from dataclasses import dataclass, asdict, fields
 from .backends.base import HeaterBackend
 from .config import (D_GAIN_RANGE, I_GAIN_RANGE, P_GAIN_RANGE, PMAX_MIN_W, SENSORS,
                      TMAX_MAX_C, TMAX_MIN_C, TSET_MAX_C, Config, Device)
+from .softramp import SoftRamp
+from .stream import StreamRecorder
 
 _NAN = float("nan")
 
@@ -93,6 +108,13 @@ class Status:
     # housekeeping
     readings: int = 0
     poll_ms: float = _NAN
+    # the temperature SWEEP (ramp_temperature, fly scans): ramp_id = the
+    # newest sweep started; "ramp_id >= mine and not ramping" = my sweep is
+    # over (the SETPOINT has arrived; the block follows with its own lag)
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_target_C: float = _NAN
+    ramp_rate_C_per_s: float = _NAN
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -161,6 +183,21 @@ class Heater:
         self._poll_ms = _NAN
         self._last_settings_read = -1e9
         self._band = _Band()
+        # THE SWEEP: the service walks the setpoint (see the module doc).
+        # Limits are read live at every step: TMAX can move the ceiling.
+        self._ramp = SoftRamp(self._ramp_step, lambda: self._sp,
+                              limits=lambda: (float(self.cfg.limits.temperature_min_C),
+                                              self.temperature_max()),
+                              dt_s=float(self.cfg.hardware.ramp_dt_s),
+                              on_done=self._ramp_done, channel="setpoint",
+                              name="tc200-sweep")
+        # THE STREAM (fly scans): every temperature reading the poll thread
+        # takes, with its time. Recording only while a stream is started.
+        self.recorder = StreamRecorder(["temperature"])
+        self._last_full = -1e9               # clock of the last full poll
+        # set by a sweep / a stream start: the poll loop ends its wait and
+        # goes over to fast polling at once
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         # replaced by the service to forward events; default = no-op
@@ -219,6 +256,9 @@ class Heater:
         disconnect and release the port the same, but leave the heater as it
         is whatever disable_on_shutdown says -- the next start adopts it."""
         self._stop.set()
+        # no sweep step may follow the switch-off below (stopped BEFORE _hw,
+        # which a step may be waiting for)
+        self._ramp.stop()
         t = self._thread
         if t is not None and t is not threading.current_thread():
             t.join(timeout=5.0)
@@ -259,6 +299,10 @@ class Heater:
     def set_temperature(self, temperature_C: float) -> None:
         """New setpoint. Fire-and-forget: the box heats on its own; watch
         `temperature_stable`. Does NOT switch the output on."""
+        # a set is a new instruction: it takes the setpoint over from a sweep
+        # (stopped BEFORE the lock below, which a sweep step may be waiting for)
+        if self._ramp.stop():
+            self._emit("info", "temperature sweep stopped by a setpoint")
         lim = self.cfg.limits
         value, clamped = _clamp(_finite(temperature_C, "temperature_C"),
                                 float(lim.temperature_min_C), self.temperature_max())
@@ -369,6 +413,104 @@ class Heater:
         self._emit("info", f"sensor = {s}")
         self._check_sensor(announce=True)
 
+    # ---- the temperature SWEEP (fly scans) -----------------------------------------
+
+    def ramp_rate_limits(self) -> tuple[float, float]:
+        """(min, max) sweep pace in degC/s, from cfg.limits."""
+        lim = self.cfg.limits
+        lo = max(1e-6, float(lim.ramp_rate_min_C_per_s))
+        return lo, max(lo, float(lim.ramp_rate_max_C_per_s))
+
+    def ramp_temperature(self, temperature_C: float, rate_C_per_s: float) -> int:
+        """SWEEP the setpoint from where it is to `temperature_C` at
+        `rate_C_per_s` (degC per second); returns the sweep's number.
+
+        Target and rate are clamped like every setter (warned). Refused (in
+        the caller's thread, so the reply says why) when not connected or in
+        CYCLE mode -- the box would ignore our setpoints. Like a set, it does
+        not switch the output on: a sweep with the heater off is warned."""
+        lim = self.cfg.limits
+        value, clamped = _clamp(_finite(temperature_C, "temperature_C"),
+                                float(lim.temperature_min_C), self.temperature_max())
+        rate = abs(_finite(rate_C_per_s, "rate_C_per_s"))
+        if not rate > 0:
+            raise ValueError("rate must be > 0")
+        r, rclamped = _clamp(rate, *self.ramp_rate_limits())
+        self._require_connected()
+        with self._lock:
+            cycle, enabled = self._cycle, self._enabled
+        if cycle:
+            raise RuntimeError("the TC200 is in CYCLE mode (its own temperature "
+                               "program); switch it to NORMAL on the front panel")
+        rid = self._ramp.start(value, r)
+        self._wake.set()                     # fast polling from now on
+        if clamped or rclamped:
+            self._emit("warn", f"temperature sweep clamped to {value:g} C at "
+                               f"{r * 60.0:g} K/min")
+        self._emit("info", f"temperature sweep -> {value:g} C at {r * 60.0:g} K/min "
+                           f"({r:g} C/s)")
+        if not enabled:
+            self._emit("warn", "the heater output is OFF: the setpoint sweeps, but "
+                               "nothing heats until it is enabled")
+        return rid
+
+    def ramp_stop(self) -> bool:
+        """End a sweep WHERE IT IS: the setpoint stays at the last value sent.
+        True if one was running. (A SAFETY verb over the wire: it only stops.)"""
+        was = self._ramp.stop()
+        if was:
+            with self._lock:
+                sp = self._sp
+            self._emit("info", f"temperature sweep stopped at {sp:g} C")
+        return was
+
+    def _ramp_step(self, value_C: float) -> None:
+        """One step of the sweep, on the sweep's thread. The box keeps ONE
+        decimal, so the walk's value is rounded to 0.1 degC and sent only when
+        that rounded value changed: at 1 K/min that is one `tset` every 6 s,
+        not ten a second of the same number. Quiet: no event per step."""
+        v = round(float(value_C), 1)
+        lo, hi = float(self.cfg.limits.temperature_min_C), self.temperature_max()
+        # rounding may step just outside a limit that is not on the 0.1 grid
+        if v > hi + 1e-9:
+            v = math.floor(hi * 10.0 + 1e-6) / 10.0
+        if v < lo - 1e-9:
+            v = math.ceil(lo * 10.0 - 1e-6) / 10.0
+        with self._lock:
+            if abs(v - self._sp) < 1e-9:
+                return
+        with self._hw:
+            self._require_connected()
+            with self._lock:
+                cycle = self._cycle
+            if cycle:
+                raise RuntimeError("the TC200 went into CYCLE mode")
+            self.backend.set_setpoint(v)
+            with self._lock:                # setpoint + flag reset: ONE section
+                self._sp = v
+                self._gen += 1
+                self._band.reset()
+
+    def _ramp_done(self, rid: int, reason: str) -> None:
+        if reason == "done":
+            with self._lock:
+                sp = self._sp
+            self._emit("info", f"temperature sweep done: setpoint {sp:g} C")
+        elif reason.startswith("error"):
+            self._emit("error", f"temperature sweep ended: {reason}")
+
+    # the stream verbs: the poll thread's temperature readings
+    def stream_start(self) -> int:
+        sid = self.recorder.start()
+        self._wake.set()
+        return sid
+
+    def stream_read(self) -> dict:
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        return self.recorder.stop()
+
     # ---- status -------------------------------------------------------------------
 
     def status(self) -> Status:
@@ -376,6 +518,9 @@ class Heater:
         lim = self.cfg.limits
         tmax_eff = self.temperature_max()
         expected = self.cfg.hardware.expected_sensor
+        # the sweep's live values, read BEFORE _lock: its own lock is never
+        # taken inside ours (the sweep thread takes ours inside its step)
+        r = self._ramp.status()
         with self._lock:
             d = self._dev
             return Status(
@@ -399,6 +544,10 @@ class Heater:
                 pmax_W=float(d.pmax_W), tmax_C=float(d.tmax_C),
                 readings=self._readings,
                 poll_ms=self._poll_ms,
+                ramping=r["ramping"],
+                ramp_id=r["ramp_id"],
+                ramp_target_C=_NAN if r["ramp_target"] is None else r["ramp_target"],
+                ramp_rate_C_per_s=_NAN if r["ramp_rate"] is None else r["ramp_rate"],
             )
 
     # ---- settings (Settings dialog / wire use these) ----------------------------------
@@ -451,30 +600,53 @@ class Heater:
 
     def _poll_loop(self) -> None:
         # Deadline scheduling (gotcha #34: a timed Event.wait sleeps in 15.6 ms
-        # ticks on Windows; harmless at 2 Hz, but the rule is cheap to follow).
-        period = max(0.05, float(self.cfg.hardware.poll_s))
+        # ticks on Windows; at the fast sweep rate that would matter).
         next_t = time.monotonic()
         while not self._stop.is_set():
-            self.poll_once()
-            period = max(0.05, float(self.cfg.hardware.poll_s))
+            hw = self.cfg.hardware
+            # during a sweep -- or while a fly scan records the temperature --
+            # the temperature fast, the status byte and setpoint at poll_s
+            fast = self._ramp.running or self.recorder.running
+            full = not fast or self._clock() - self._last_full >= float(hw.poll_s)
+            self.poll_once(full=full)
+            period = (max(0.02, float(hw.ramp_poll_s)) if fast
+                      else max(0.05, float(hw.poll_s)))
             next_t += period
             now = time.monotonic()
             if next_t < now:                  # fell behind (slow link): do not burst
                 next_t = now
-            while not self._stop.is_set() and time.monotonic() < next_t:
-                time.sleep(min(0.05, max(0.0, next_t - time.monotonic())))
+            self._wake.clear()
+            while (not self._stop.is_set() and not self._wake.is_set()
+                   and time.monotonic() < next_t):
+                time.sleep(min(0.01, max(0.0, next_t - time.monotonic())))
+            if self._wake.is_set():           # a sweep / stream began: poll now
+                next_t = time.monotonic()
 
-    def poll_once(self) -> None:
+    def poll_once(self, full: bool = True) -> None:
         """Read temperature, status byte and setpoint (and, every
-        settings_poll_s, the stored settings) and update the flags."""
+        settings_poll_s, the stored settings) and update the flags. A
+        temperature-only poll (`full=False`: the fast polls during a sweep or
+        a stream) keeps the last status byte and setpoint and leaves the
+        "reached" flag to the next full poll."""
         with self._lock:
             gen = self._gen
         t0 = self._clock()
         try:
             with self._hw:
+                tw0 = time.time()
                 temp = self.backend.read_temperature()
+                # the reading's time: the middle of the call (wall clock, so a
+                # coordinator on another PC can line it up)
+                self.recorder.append(0.5 * (tw0 + time.time()), (temp,))
+                if not full:
+                    with self._lock:
+                        self._temp = float(temp)
+                        self._readings += 1
+                        self._poll_ms = (self._clock() - t0) * 1000.0
+                    return
                 st = self.backend.read_status()
                 sp = self.backend.read_setpoint()
+                self._last_full = t0
                 if t0 - self._last_settings_read >= float(self.cfg.hardware.settings_poll_s):
                     self._read_settings(adopt_into_cfg=False)
         except Exception as exc:
