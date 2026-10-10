@@ -52,11 +52,10 @@ class RemoteStatus:
         self.power_min_dBm = d.get("power_min_dBm", 0.0)
         self.power_max_dBm = d.get("power_max_dBm", 0.0)
         self.polls = d.get("polls", 0)
-        # the frequency SWEEP (an older service has none: never sweeping)
+        # the SWEEPS (an older service has none: never sweeping); the flat
+        # per-knob keys are kept as a dict, e.g. sweep["power_ramp_id"]
         self.ramping = bool(d.get("ramping", False))
-        self.ramp_id = d.get("ramp_id", 0)
-        self.ramp_target_Hz = d.get("ramp_target_Hz", 0.0)
-        self.ramp_rate_Hz_per_s = d.get("ramp_rate_Hz_per_s", 0.0)
+        self.sweep = {k: v for k, v in d.items() if "ramp" in k}
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -144,14 +143,27 @@ class DssgClient(ControlClient):
     def set_frequency(self, hz: float):
         self._checked({"cmd": "set_frequency", "frequency_Hz": float(hz)})
 
+    # ---- the SWEEPS (fly scans, the GUI's Sweep card) --------------------
+
     def ramp_frequency(self, hz: float, rate_Hz_per_s: float):
-        """Sweep the frequency (fly scans, the GUI's Sweep button)."""
         return self._checked({"cmd": "ramp_frequency", "frequency_Hz": float(hz),
                               "rate_Hz_per_s": float(rate_Hz_per_s)}).get("ramp_id")
 
-    def ramp_stop(self):
-        """End a sweep where it is (a safety verb: allowed also while viewing)."""
-        return self._checked({"cmd": "ramp_stop"}).get("stopped")
+    def ramp_power(self, dBm: float, rate_dB_per_s: float):
+        return self._checked({"cmd": "ramp_power", "power_dBm": float(dBm),
+                              "rate_dB_per_s": float(rate_dB_per_s)}).get("ramp_id")
+
+    def ramp_phase(self, deg: float, rate_deg_per_s: float):
+        return self._checked({"cmd": "ramp_phase", "phase_deg": float(deg),
+                              "rate_deg_per_s": float(rate_deg_per_s)}).get("ramp_id")
+
+    def ramp_stop(self, knob: str | None = None):
+        """End a sweep where it is (all of them without `knob`). A safety
+        verb: allowed also while viewing."""
+        d = {"cmd": "ramp_stop"}
+        if knob:
+            d["knob"] = knob
+        return self._checked(d).get("stopped")
 
     def set_phase(self, deg: float):
         self._checked({"cmd": "set_phase", "phase_deg": float(deg)})

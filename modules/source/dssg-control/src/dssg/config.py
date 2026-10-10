@@ -81,6 +81,14 @@ class Limits:
     # behind it can only follow at its own time constant.
     ramp_rate_min_Hz_per_s: float = 1.0e3
     ramp_rate_max_Hz_per_s: float = 1.0e10
+    # The POWER and PHASE sweeps (ramp_power / ramp_phase, 2026-10-10), in dB
+    # and degrees per second. A power sweep needs fine power (every step
+    # re-splits attenuator + vernier); 100 dB/s crosses the whole range in
+    # about a second, 0.01 dB/s is slower than any scan would want.
+    ramp_rate_min_dB_per_s: float = 0.01
+    ramp_rate_max_dB_per_s: float = 100.0
+    ramp_rate_min_deg_per_s: float = 0.01
+    ramp_rate_max_deg_per_s: float = 3600.0
 
 
 @dataclass
@@ -101,7 +109,8 @@ class Hardware:
     tcp_port: int = 10001
     timeout_s: float = 1.0                    # per query
     poll_hz: float = 5.0                      # how often the worker reads the box back
-    # A frequency SWEEP sends one FREQ:CW every ramp_dt_s (softramp.py). 50 ms
+    # A SWEEP sends one FREQ:CW (or PHASE, or the fine-power attenuator /
+    # vernier pair) every ramp_dt_s (softramp.py). 50 ms
     # = 20 steps a second: a FREQ:CW is ~25 bytes, ~2 ms at 115200 baud, plus
     # the unit's own handling (VERIFY on the unit). A step that comes late
     # does not slow the sweep down: each value is computed from the time.

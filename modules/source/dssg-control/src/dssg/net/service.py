@@ -63,11 +63,9 @@ class DssgService:
         #   "RF Off" button): a viewer who sees the output hit something it
         #   should not must be able to take it away. `set_rf` is NOT in the
         #   list even though on=false is the same thing -- the same verb also
-        #   switches the RF ON. This module drives no sweep, so there is
-        #   nothing else to stop.
-        #   READ: none beyond get_/read_/list_ and the universal verbs.
-        # `ramp_stop` ends a frequency sweep where it is: a stop, so a viewer
-        # may send it. `stream_read` only reads the sweep's record.
+        #   switches the RF ON. `ramp_stop` ends a sweep (frequency, power or
+        #   phase) where it is: a stop, so a viewer may send it too.
+        #   READ: `stream_read` only reads the sweeps' record.
         self.control = ControlLease(
             safety={"rf_off", "ramp_stop"},
             read={"stream_read"},
@@ -239,13 +237,20 @@ class DssgService:
                 self.synth.set_power(float(msg["power_dBm"]))
             elif cmd == "set_frequency":
                 self.synth.set_frequency(float(msg["frequency_Hz"]))
+            # The SWEEPS (fly scans): the reply's ramp_id is what status
+            # `<knob>_ramp_id` shows while and after this sweep runs.
             elif cmd == "ramp_frequency":
-                # the frequency SWEEP (fly scans); the reply's ramp_id is what
-                # status `ramp_id` shows while and after this sweep runs
                 return {"ok": True, "ramp_id": self.synth.ramp_frequency(
                     float(msg["frequency_Hz"]), float(msg["rate_Hz_per_s"]))}
+            elif cmd == "ramp_power":
+                return {"ok": True, "ramp_id": self.synth.ramp_power(
+                    float(msg["power_dBm"]), float(msg["rate_dB_per_s"]))}
+            elif cmd == "ramp_phase":
+                return {"ok": True, "ramp_id": self.synth.ramp_phase(
+                    float(msg["phase_deg"]), float(msg["rate_deg_per_s"]))}
             elif cmd == "ramp_stop":
-                return {"ok": True, "stopped": self.synth.ramp_stop()}
+                # no `knob`: every sweep stops (the safest reading of "stop")
+                return {"ok": True, "stopped": self.synth.ramp_stop(msg.get("knob") or None)}
             elif cmd == "stream_start":
                 return {"ok": True, "stream_id": self.synth.stream_start()}
             elif cmd == "stream_read":

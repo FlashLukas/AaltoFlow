@@ -22,8 +22,12 @@ TOPIC_EVENT = b"event"
 
 
 def status_to_dict(status) -> dict:
-    """Synthesizer Status dataclass -> plain dict for the wire (every field)."""
-    return {f.name: getattr(status, f.name) for f in fields(status)}
+    """Synthesizer Status dataclass -> plain dict for the wire (every field).
+    The sweeps' keys (ramping, frequency_ramp_id, ...) go to the TOP level:
+    a ramp block's `done` names them as plain status keys."""
+    d = {f.name: getattr(status, f.name) for f in fields(status) if f.name != "sweep"}
+    d.update(getattr(status, "sweep", None) or {})
+    return d
 
 
 # ---- config (Settings) over the wire ---------------------------------------

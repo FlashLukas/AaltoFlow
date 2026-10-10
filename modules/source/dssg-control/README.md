@@ -14,7 +14,8 @@ of the noise floor at its frequency and power, with the harmonic and
 sub-harmonic lines measured on this model at that frequency and power (see
 [Spurious lines](#spurious-lines-measured)), and the dial in the corner shows the phase.*
 
-A **set-and-forget** instrument: no control loop, no ramp, no state machine. The
+A **set-and-forget** instrument: no control loop, no state machine (only the
+**sweeps** below walk a knob over time, for fly scans). The
 `Synthesizer` brain holds the desired signal, clamps it, pushes it to the unit,
 and a poll thread reads the unit BACK, so what the status reports (and what a
 scan waits for) is the instrument's own answer, not our memory of the request.
@@ -99,7 +100,9 @@ tests/                   pytest: config, brain, real backend vs a fake link, net
 ## Verbs
 
 `set_rf{on}`, `set_frequency{frequency_Hz}`, `set_power{power_dBm}`,
-`set_phase{phase_deg}`, `set_vernier{vernier}`, `set_reference{mode: internal|external|auto}`, plus the
+`set_phase{phase_deg}`, `set_vernier{vernier}`, `set_reference{mode: internal|external|auto}`,
+the sweeps `ramp_frequency`, `ramp_power`, `ramp_phase`, `ramp_stop{knob?}` with
+`stream_start` / `stream_read` / `stream_stop` (section "Sweeps"), plus the
 universal `status`, `info`, `get_config`, `set_config`, `describe`,
 `shutdown{keep_outputs?}` (plain: RF off; `keep_outputs: true` = a restart for a
 code update, RF left as it is and adopted by the next start).
@@ -107,7 +110,59 @@ A reply means *accepted*; the read-back in `status` means *done*.
 
 Status keys: `rf_on, frequency_Hz, power_dBm, phase_deg, vernier, reference,
 ext_ref_detected, usb_volts, connected, has_phase, has_vernier, idn, hw_error,
-freq_min_Hz, freq_max_Hz, power_min_dBm, power_max_dBm, polls, describe_rev`.
+freq_min_Hz, freq_max_Hz, power_min_dBm, power_max_dBm, polls, describe_rev`,
+and the sweeps' keys (next section).
+
+## Sweeps (fly scans over frequency, power or phase)
+
+A fly scan (scan-core, `type: fly` axis) records the detectors while a knob
+moves CONTINUOUSLY and bins every sample by the value the knob had at that
+moment. The SG12000L jumps to the value it is told, so the **service walks the
+knob** in small steps (`softramp.py`, the suite's software ramp, copied byte
+for byte from suite-common): one command every `hardware.ramp_dt_s` (50 ms),
+each value computed from the elapsed time, so a late step does not slow the
+sweep down.
+
+| verb | arguments | pace limits (config `[limits]`) |
+|---|---|---|
+| `ramp_frequency` | `frequency_Hz`, `rate_Hz_per_s` | `ramp_rate_min/max_Hz_per_s` (1 kHz/s .. 10 GHz/s) |
+| `ramp_power` | `power_dBm`, `rate_dB_per_s` | `ramp_rate_min/max_dB_per_s` (0.01 .. 100 dB/s) |
+| `ramp_phase` | `phase_deg`, `rate_deg_per_s` | `ramp_rate_min/max_deg_per_s` (0.01 .. 3600 deg/s) |
+| `ramp_stop` | `knob` (optional; none = every sweep) | a stop: a viewer may send it |
+
+- The reply carries the sweep's number (`ramp_id`); status shows
+  `<knob>_ramping`, `<knob>_ramp_id`, the target and the pace
+  (`frequency_ramp_target_Hz`, `power_ramp_rate_dB_per_s`, ...) and `ramping`
+  (any knob). The sweep is over when `<knob>_ramp_id` is yours and
+  `<knob>_ramping` is false. (The frequency-only pilot of 2026-10-09 called
+  these `ramp_id` / `ramp_target_Hz`; they are per knob now.)
+- A target or pace outside the limits (the EFFECTIVE envelope: config AND the
+  unit) is clamped, with a warning.
+- An ordinary set of a knob takes that knob over (stops its sweep); a set of
+  another knob does not. **The RF output is never switched by a sweep.**
+- **Frequency**: one `FREQ:CW` per step; with fine power the attenuator /
+  vernier split is redone too, so the LEVEL stays what was asked while the
+  frequency moves (the vernier's dB per count changes with frequency).
+- **Power** needs **fine power**: every step re-splits the asked level into
+  the nearest attenuator step plus vernier counts, with the power calibration
+  applied, so the DELIVERED level follows the ramp (to the ~0.05 dB of the
+  model). Only what changed is sent: mostly the vernier, the attenuator when
+  the level crosses into its next 0.5 dB step. Without fine power the level
+  could only take 0.5 dB steps, so a power sweep is refused and describe
+  offers none.
+- **Phase**: one `PHASE` per step; refused on a unit without phase control.
+- The record: the stream verbs hand out every value each sweep SENT, one
+  channel per knob (`frequency`, `power`, `phase`, each with its own time
+  stamps in `t_ch`). describe declares a `ramp` block on each knob with
+  `readback.measured: false` -- **binned by command**: reading the unit back
+  on every step would halve the step rate on the serial link and only echo
+  the setting.
+- **VERIFY on the unit:** how long one command takes on the serial link
+  (bounds `ramp_dt_s`); whether the output relocks / dips on every frequency
+  step or attenuator switch; whether a phase change is smooth.
+
+The GUI's **Sweep** card does the same by hand: pick the knob, set the pace,
+"Sweep to" walks it to the value in that knob's box, "Stop" ends it.
 
 ## SCPI used (real backend)
 

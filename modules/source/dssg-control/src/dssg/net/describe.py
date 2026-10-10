@@ -31,9 +31,33 @@ from ..config import REFERENCES
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
-#: The sweep pace a client is offered first (Hz/s): 10 MHz/s -- a 100 MHz FMR
-#: line in 10 s, slow enough for a lock-in at a few ms time constant.
-SWEEP_RATE_DEFAULT_HZ_PER_S = 10.0e6
+#: The sweep pace a client is offered first, per knob, in WIRE units per
+#: second (clamped to the configured paces): 10 MHz/s -- a 100 MHz FMR line
+#: in 10 s, slow enough for a lock-in at a few ms time constant; 1 dB/s;
+#: 10 deg/s.
+SWEEP_RATE_DEFAULTS = {"frequency": 10.0e6, "power": 1.0, "phase": 10.0}
+
+
+def sweep_block(synth, knob: str, *, wire_arg: str, rate_arg: str, rate_unit: str,
+                scale: float = 1.0) -> dict:
+    """The `ramp` block of one knob (guide 6b, "Ramps"): a CONTINUOUS SWEEP a
+    fly scan can fly. The SERVICE walks the knob (softramp.py) and records
+    every value it sent; the fly scan bins by that COMMANDED value
+    (measured: false -- why, see synthesizer.py "the SWEEPS"). `to` and the
+    rate are scaled like the set (MHz in the scan, Hz on the wire); the
+    limits are the live config paces, never literals."""
+    lo, hi = synth._rate_limits(knob)
+    default = max(lo, min(hi, SWEEP_RATE_DEFAULTS[knob]))
+    return {"kind": "software",
+            "start": {"verb": f"ramp_{knob}",
+                      "args": {"to": wire_arg, "rate": rate_arg}},
+            # stops THIS knob's sweep only (no `knob`: every sweep)
+            "stop": {"verb": "ramp_stop", "extra": {"knob": knob}},
+            "rate": {"unit": rate_unit, "min": lo / scale, "max": hi / scale,
+                     "default": default / scale},
+            "readback": {"stream": {"group": "ramp", "channel": knob},
+                         "measured": False},
+            "done": {"key": f"{knob}_ramping", "id_key": f"{knob}_ramp_id"}}
 
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
@@ -137,25 +161,10 @@ def build_manifest(synth) -> dict:
            set={"verb": "set_frequency", "arg": "frequency_Hz"},
            settle={"policy": "echoes", "key": "frequency_Hz",
                    "tol": float(hw.freq_echo_tol_Hz)},
-           # A CONTINUOUS SWEEP for fly scans (2026-10-09; guide 6b, "Ramps").
-           # The SERVICE walks the frequency (softramp.py) and records every
-           # value it sent: the fly scan bins by that COMMANDED frequency
-           # (measured: false -- reading FREQ:CW? back on every step would
-           # halve the step rate on the serial link; see ramp_frequency).
-           # `to` and the rate are scaled like the set: MHz here, Hz on the wire.
-           ramp={"kind": "software",
-                 "start": {"verb": "ramp_frequency",
-                           "args": {"to": "frequency_Hz", "rate": "rate_Hz_per_s"}},
-                 "stop": {"verb": "ramp_stop"},
-                 "rate": {"unit": "MHz/s",
-                          "min": float(synth.cfg.limits.ramp_rate_min_Hz_per_s) / 1e6,
-                          "max": float(synth.cfg.limits.ramp_rate_max_Hz_per_s) / 1e6,
-                          "default": max(float(synth.cfg.limits.ramp_rate_min_Hz_per_s),
-                                         min(float(synth.cfg.limits.ramp_rate_max_Hz_per_s),
-                                             SWEEP_RATE_DEFAULT_HZ_PER_S)) / 1e6},
-                 "readback": {"stream": {"group": "ramp", "channel": "frequency"},
-                              "measured": False},
-                 "done": {"key": "ramping", "id_key": "ramp_id"}},
+           # A CONTINUOUS SWEEP for fly scans (2026-10-09; guide 6b, "Ramps"):
+           # MHz and MHz/s here, Hz and Hz/s on the wire, like the set.
+           ramp=sweep_block(synth, "frequency", wire_arg="frequency_Hz",
+                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6),
            help="CW frequency. Range = your limits AND the unit's own range."),
 
         _p("power", "Power", "control", "float", unit="dBm", group="Signal",
@@ -169,6 +178,12 @@ def build_manifest(synth) -> dict:
            read_path=["power_dBm"],
            set={"verb": "set_power", "arg": "power_dBm"},
            settle={"policy": "echoes", "key": "power_dBm", "tol": power_tol},
+           # a power SWEEP only with fine power: each step re-splits attenuator
+           # + vernier (calibrated), so the delivered level follows the ramp;
+           # without it the level moves in attenuator steps and none is offered
+           ramp=(sweep_block(synth, "power", wire_arg="power_dBm",
+                             rate_arg="rate_dB_per_s", rate_unit="dB/s")
+                 if fine else None),
            help=("Output level. The step attenuator moves in "
                  f"{hw.power_step_dB:g} dB steps; the vernier fills in between "
                  "(dB per count measured on the lab unit), so the level asked "
@@ -213,7 +228,9 @@ def build_manifest(synth) -> dict:
                read_path=["phase_deg"],
                set={"verb": "set_phase", "arg": "phase_deg"},
                settle={"policy": "echoes", "key": "phase_deg",
-                       "tol": float(hw.phase_echo_tol_deg)}))
+                       "tol": float(hw.phase_echo_tol_deg)},
+               ramp=sweep_block(synth, "phase", wire_arg="phase_deg",
+                                rate_arg="rate_deg_per_s", rate_unit="deg/s")))
     params += [
         _p("reference", "10 MHz reference", "control", "enum", group="Reference",
            order=50, options=list(REFERENCES), read_path=["reference"],
@@ -231,7 +248,8 @@ def build_manifest(synth) -> dict:
 
         _p("ramping", "Sweeping", "indicator", "bool", group="Signal", order=21,
            read_path=["ramping"],
-           help="True while a frequency sweep (ramp_frequency) walks the frequency."),
+           help="True while a sweep (ramp_frequency / ramp_power / ramp_phase) "
+                "walks a knob."),
         _p("usb_volts", "USB supply", "indicator", "float", unit="V",
            group="Status", order=3, decimals=2, plottable=True,
            read_path=["usb_volts"],
