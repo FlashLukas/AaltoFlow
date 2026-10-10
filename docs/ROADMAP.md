@@ -49,37 +49,6 @@ show the real numbers.
 Effort: ~1-1.5 days (extraction + table + dssg indicators + GUI + tests with
 a simulated measurement), plus the measurement itself.
 
-### Camera: autofocus at a fixed AF position, then back (2026-10-02)
-
-Sometimes focus must be found somewhere else than where you measure (a
-feature with contrast, a clean area): measure, go to the AF position, find
-focus, come back, carry on. As one camera ACTION a scan can run (Before /
-After / Throughout, e.g. "start of each sweep of Scan point X").
-
-- New action `autofocus_at_position` ("Find focus at AF position"), next to
-  `autofocus` in describe, with the same `wait` block (target_key af_id,
-  af_running false, af_error OK) so a scan waits for the whole round trip.
-- The AF position is camera config (saved with the pattern / ini), either
-  - an array INDEX (ix, iy) -- moves with the pattern, or
-  - a position in um relative to the main template (as `set_laser_target`),
-  plus a button "Set AF position here" in the camera GUI and a marker on the
-  image (a distinct colour, labelled AF).
-- The brain: remember the current target (selected index or laser target),
-  go to the AF position and wait until stable (the stabiliser / laser
-  target loop, as a scan axis does), run the configured autofocus, go BACK to
-  the remembered target and wait until stable again, then report done. Z
-  stays where the autofocus put it (the point of the exercise: same focus
-  plane, assuming the sample is flat between the two places; a tilt
-  correction could come later).
-- Failure: if the move or the autofocus fails, still return to the measuring
-  point, then report the error (af_error) so the scan's wait fails clearly;
-  Kill AF (safety verb) aborts the whole trip and leaves the stage where it
-  is.
-- Needs tracking and a calibrated spot, like the stabiliser; says so if not.
-
-Effort: ~1 day with tests on the camera simulator (round trip ends on the
-original point; Z changed; a failing autofocus still returns; Kill AF).
-
 ### Oscilloscope module (first: Digilent Analog Discovery 3) for MOKE hysteresis loops (2026-10-03, spec agreed)
 
 **2026-10-07, Lukas: the scope module is a plain SCOPE** -- the loop

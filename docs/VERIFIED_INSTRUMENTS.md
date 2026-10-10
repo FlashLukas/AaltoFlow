@@ -121,6 +121,14 @@ scan-core `test_image_*.py`.
 [`test_adopt_on_start.py`](../modules/imaging/camera-control/tests/test_adopt_on_start.py),
 [`test_hwlock.py`](../modules/imaging/camera-control/tests/test_hwlock.py).
 
+**Simulation only (not yet on the rig):** autofocus at a fixed AF position,
+then back (`autofocus_at_position`, 2026-10-10) -- the round trip, index and um
+positions, a failing autofocus that still returns, Kill AF, per-run settings,
+backup patterns on the way; tests in
+[`test_af_at_position.py`](../modules/imaging/camera-control/tests/test_af_at_position.py).
+On the rig it needs what the stabiliser and the laser placement need (kim's
+px/step table at the objective in use).
+
 **Caveats found on the hardware:**
 - Close IDS peak Cockpit before starting the service (it holds the camera).
 - The camera's power-on default (15 ms exposure) saturates every pixel on this

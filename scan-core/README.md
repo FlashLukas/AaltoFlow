@@ -369,6 +369,34 @@ every row, a reference every 100 points.
   (`before_point` / `after_point`), which is where `abort_if` and `skip_if`
   usually sit.
 
+### Action arguments: a step's Advanced options
+
+An action that declares arguments in its `describe` (`args`: name, label,
+type float / int / bool / enum / string, unit, min / max, options, default,
+help) gets a **gear button** on its routine step. It opens the step's
+**Advanced** options in place, built from that list alone -- so any module's
+action with arguments gets them, not only the camera's. Each line has a tick
+box: **ticked = sent** with the action, unticked = not sent, and the module
+uses its own setting. The values set are shown as small tags on the step, so
+a closed step still says what it does differently. In the recipe they are the
+step's `args`:
+
+```yaml
+  - {when: each_sweep, axis: pos_x, edge: start, every: 1, on_error: continue,
+     action: call, args: {action: camera.autofocus_at_position,
+                          args: {ix: 0, iy: 0, routine: one_way}}}
+  - {when: before_scan, action: call, args: {steps: [
+       {action: camera.autofocus_at_position, args: {x_um: -12.5, exposure_us: 65}},
+       {action: camera.save_picture}]}}
+```
+
+They travel with the definition (.yaml, and every .nc), are checked by
+`validate()` against what the module declares (an unknown name, a value
+outside min / max or not one of the options is refused before anything
+moves), and are passed to the verb -- plus the declared default of anything
+left out, as before. The simulator offers `sim_focus_at` to try it without a
+rig.
+
 ### Five generic steps: wait, check, pause, comment, compute
 
 Besides "set" and "run an action", a routine's steps can be one of five

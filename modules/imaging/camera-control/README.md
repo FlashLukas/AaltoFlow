@@ -193,6 +193,53 @@ Simulator: `sim_bit_depth = 12` (Camera settings -> Simulator) gives real
 12-bit frames (every value 0..4095 occurs), so the storage of a real-depth
 image is exercised. Tests: `tests/test_image_recording.py`.
 
+## Autofocus at a fixed AF position, then back
+
+Sometimes focus must be found somewhere else than where you measure -- a
+feature with contrast, a clean area. **Find focus at AF position**
+(`autofocus_at_position`) remembers where the laser is held (the array point
+the stabiliser holds, the laser target being placed, or else the point under
+the laser now), takes the laser to the **AF position**, waits until it is
+there (the stabiliser for an array point, the laser placement for a point in
+um -- the same settle rule a scan axis waits on), runs the autofocus, brings
+the laser back and waits again, and only then reports done. Z stays where the
+autofocus put it: the same focal plane, assuming the sample is flat between
+the two places.
+
+- **The AF position** is camera config in the scanning group, saved with the
+  pattern and with camera.ini: `af_position` = `index` (`af_index_x/y`, an
+  array point: it moves with the array) or `um` (`af_x_um/af_y_um`, from the
+  main template, like `set_laser_target`), plus `af_position_set`. Camera tab,
+  Focus card: **Set AF position here** (the array point the stabiliser holds,
+  else the point under the laser) and **Focus at AF position**; the values
+  can be edited in Scan pattern > Scanning. On the image: a violet square
+  labelled **AF**. Verbs `set_af_position{position?, ix?, iy?, x_um?, y_um?}`,
+  `set_af_position_here{position?}`, `clear_af_position`, `get_af_position`.
+- **Arguments** (all optional; a missing one = the camera's own setting):
+  `position`, `ix`, `iy`, `x_um`, `y_um`, `go_back` (default true), and for
+  THIS run only `routine`, `mechanism`, `exposure_us`, `drive_amplitude_v`,
+  `steps`, `averages_per_level`, `approach_from`, `coarse_step_v`,
+  `fine_step_v`, `max_travel_v`, `offset_from_found_v` -- put back after the
+  run. A wrong name or value is refused before anything moves. In scan-core
+  these are the step's **Advanced** options (gear button on the routine step).
+- **One numbered run**: the reply is `af_id`, finished when status shows that
+  id and `af_running` false -- the same `wait` block as `autofocus`, so a scan
+  waits for the whole round trip. `af_trip` says where it is (`to_af`,
+  `focus`, `back`); while it MOVES, the stabiliser / placement run (they are
+  what moves the laser) and the AF zoom stays off.
+- **Failure**: if the move or the autofocus fails, the laser is still taken
+  back to the measuring point first, then `af_error` says what went wrong, so
+  the scan's wait fails clearly. **Kill AF** stops the trip where it is: the
+  stabiliser and the placement are switched off (nothing pulls the stage), and
+  the selected index is the measuring point again (switching the stabiliser on
+  goes back there).
+- Needs tracking (a matched pattern) and a calibrated spot, like the
+  stabiliser; refused with the reason otherwise. With backup patterns the
+  main template may leave the image on the way: the array and the um position
+  hang off its (possibly off-screen) position, so the trip still works.
+- `autofocus.af_trip_settle_s` (120 s): the longest wait to arrive at the AF
+  position, and again back. Simulation only so far.
+
 ## Hardware pass (at the lab PC — later session)
 
 The simulator needs no hardware. To go live:
