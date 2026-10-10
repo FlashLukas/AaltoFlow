@@ -190,6 +190,21 @@ still assumes piezo/zpiezo.
   as the element-wise coherent mean; `<det>_n` counts traces per pixel.
   Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
   checks the verbs wherever a stream is declared.
+- **Binary reply parts (optional, 2026-10-10) -- large arrays.** A request
+  may say `"binary": true`; a verb that serves a large array (the camera's
+  `get_image`) then answers with a MULTIPART reply: part 0 the usual JSON dict
+  with `"binary": [{"key", "dtype", "shape"}]` (numpy dtype strings with byte
+  order, e.g. `"<u2"`), parts 1.. the raw bytes, C order, one per entry, in
+  order. Without the flag the same verb answers in one JSON part, the array
+  as `{"dtype", "shape", "b64"}`, so a `recv_json()` client never meets a
+  multipart reply. Additive: nothing that exists changes; errors stay one
+  part; CurveZMQ encrypts every part. scan-core's `Instrument.command`
+  receives with `recv_multipart` and `instrument.decode_reply` puts each
+  array at `reply[key]` (refusing a header that does not match the parts);
+  a descriptor's `read: {..., "binary": true}` makes the scan ask for it.
+  Spec: `INSTRUMENT_MODULE_GUIDE.md` 6b, "Binary replies"; checked by
+  `check_modules.py --live`. First user: the camera image detector
+  (camera README, "Images for scans").
 - **Ramps (optional, 2026-10-09) -- fly scans over ANY knob.** A control the
   module can sweep at a set pace carries a `ramp` block: `kind`
   (software|hardware), `start` {verb, args {to, rate}} (scan units x `scale`
@@ -643,6 +658,38 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
   `collapse_keep_pixels: false` drops the pixel trio from every dataset
   except the live snapshot (`_to_dataset(live=True)`, passed only by the fly
   row's snapshot), so the live plot keeps its pixel map.
+- **Images (2026-10-10, `scan_core/framestore.py`):** an array detector with
+  two inner dims (a camera frame per point) is held in memory as float32
+  with NaN (exact for every count up to 2^24) instead of float64, gets a
+  per-point mask `<det>_measured` (uint8 0/1, attr `measured_mask_of`; an
+  averaged repeat ORs it), the attribute `aaltoflow_image = 1`, and is
+  written ONE FRAME PER CHUNK (`chunksizes (1, ..., h, w)`), compressed like
+  everything else. An unmeasured frame is all fill value (65535 for 12 bit)
+  = NaN to a reader. A live snapshot does not copy an image buffer (frames
+  are only ever added); `ds.encoding["aaltoflow_latest"]` carries the newest
+  frame for the live view (in memory only). The vectorised
+  `Storage._numeric_array` checks a frame in one pass (the per-element loop
+  took seconds per frame) and raises the same error words. `bits` + `max`
+  together: unsigned, max tightens the top (a 4x4 bin of 12-bit counts:
+  uint16, not uint32).
+  **Write as you go:** an image variable estimated (points x pixels x bytes
+  stored) above `framestore.INCREMENTAL_ABOVE_BYTES` (1 GB) is not held in
+  memory: a `FrameBuffer` stands in for the buffer; the first frame creates
+  the data file (xarray writes every small variable, then h5netcdf adds the
+  image variable, pre-allocated, chunked, compressed; unwritten chunks are
+  not stored), each frame is written into its slot (file opened and closed
+  per frame). The dataset the engine hands out then lacks the image variable
+  (its mask and coordinates are there; attr `images_written_as_they_came`),
+  `ds.encoding["aaltoflow_frames"]` names the buffer, and
+  `autosave.write_dataset` writes such a dataset IN PLACE (xarray mode "a":
+  the small variables and attributes; a different path = copy the file,
+  then update). Refused, with the estimate in the message, before anything
+  moves: no data file (`data_path`), or an `average` repeat. Every save path
+  goes through `write_dataset` (the suite's checkpoint and Save data too).
+  A crash keeps every frame written; an HDF5 file written in place can be
+  damaged by a crash DURING a write (rare; the old atomic temp+rename is
+  impossible without copying the frames). The scan server's live mirror
+  leaves an image variable above 32 MB out (`mirror_left_out`).
 - **Compression:** zlib level 4 with shuffle on every data variable, including
   the window's mask and record variables; coordinates stay uncompressed;
   strings are not filtered. A 100x100 scan of bool + 12-bit + enum + one float

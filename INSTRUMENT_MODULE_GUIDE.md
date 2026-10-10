@@ -514,7 +514,11 @@ an `enum` or a `string`, not a float -- and both are recordable since then.
   the scan log -- the value is lost, so list every value the instrument can
   report. `None` is stored as "not measured" too.
 - **`bits`** (new, optional): an int detector that is an N-bit count (a 12-bit
-  camera, a 16-bit digitiser) -> stored unsigned, 0..2^N-1 allowed.
+  camera, a 16-bit digitiser) -> stored unsigned, 0..2^N-1 allowed. With
+  `bits`, a `max` may TIGHTEN the top (2026-10-10): a 4 x 4 bin of 12-bit
+  counts declares `bits: 16, max: 65520` and is stored as uint16 with 65535
+  spare for "not measured" (`bits: 16` alone needs uint32). `min` is ignored
+  with `bits` (bits means unsigned).
 - **`store: "float32"`** (new, optional): a float/complex detector whose
   precision is ~7 significant digits or worse (most ADCs) may be stored in
   half the space. Default float64.
@@ -596,6 +600,71 @@ mid-scan (a span or point-count change will do it) the array stops being
 rectangular. The engine stops and names the detector, both shapes and the grid
 index, because padding with NaN would hand back a file that looks fine and is
 wrong.
+
+Optional dim fields (2026-10-10, the camera image): `"attrs": {...}` is
+copied onto the coordinate in the file (`{"um_per_px": 0.413}`), and
+`"aux": [{"name": "image_x_um", "key": "x_um", "unit": "um"}]` names MORE
+coordinates of the same axis that `coord_verb`'s reply carries (`reply["x_um"]`)
+-- written as non-index coordinates, so a reader can plot against pixels or
+micrometres.
+
+### Images -- a frame per point (2026-10-10)
+
+An array detector with **two** dims is an IMAGE to scan-core (`camera.image`
+is the worked example, `modules/imaging/camera-control/src/camera/recording.py`).
+Nothing new to declare beyond the array fields, but four things follow:
+
+- declare the pixels honestly: `type: "int"`, `bits` (unsigned) and `max` =
+  the largest value a stored pixel can take at the CURRENT depth and binning;
+  the revision changes when they do. scan-core then stores uint16 for a
+  12-bit camera, one frame per compression chunk, with a per-point mask
+  `<id>_measured`;
+- give each dim its `length` (the frame shape now): the Scan tab estimates
+  the file size from it before the run, without a network call;
+- an `acquire` block with numbered acquisitions, the frame taken AFTER the
+  trigger (gotchas #17, #28) -- a camera that keeps its last frame would
+  otherwise hand every point the previous point's picture;
+- serve it as a **binary reply part** (next section), `"read": {..., "binary":
+  true}`.
+
+Above ~1 GB (uncompressed) scan-core writes the frames into the data file as
+they arrive instead of holding them in memory (scan-core README, "Images").
+
+### Binary replies (2026-10-10; additive to the wire contract)
+
+JSON is the right format for everything in the suite but a large array: a
+1936 x 1096 frame of 12-bit counts is 4 MB as raw bytes and ~6 MB as base64,
+plus the time to encode and parse it. So a reply MAY carry binary parts --
+**only when the request asked for them** with `"binary": true`:
+
+```text
+request   {"cmd": "get_image", "which": "sample", "binary": true, "client": {...}}
+
+reply     part 0   {"ok": true, "image_meta": {...},
+                    "binary": [{"key": "image", "dtype": "<u2",
+                                "shape": [1096, 1936]}]}
+          part 1   1096 * 1936 * 2 raw bytes, C order
+```
+
+- Part 0 is an ordinary reply dict; its `binary` list names the extra parts
+  IN ORDER: `key` (where the array belongs in the reply), `dtype` (numpy's
+  explicit string with byte order: `"<u2"`, `"|u1"`, `"<f4"` ...) and
+  `shape`. Part *i* + 1 holds the bytes of `binary[i]`. A client puts each
+  array at `reply[key]` (scan-core: `instrument.decode_reply`) and REFUSES a
+  reply whose parts do not match the header (count or byte size).
+- Without `"binary": true` the same verb answers in ONE JSON part, the array
+  as `{"dtype": "<u2", "shape": [h, w], "b64": "<base64 of the raw bytes>"}`
+  -- so a console or a client that does `recv_json()` keeps working. A
+  module that predates this ignores the flag and answers in JSON, which
+  scan-core decodes too. That is what makes the change additive.
+- An error is always a plain one-part `{"ok": false, "error": ...}`.
+- Encryption: CurveZMQ encrypts every part of a message; nothing changes.
+- Service side (camera `net/service.py`): `_dispatch` returns
+  `{"ok": true, ..., "_binary": [(key, ndarray)]}`, and the commander turns
+  that into `[json header, raw bytes...]` with `send_multipart`.
+- `check_modules.py --live` checks every descriptor with `read.binary`:
+  acquire (if declared), binary read (header vs parts vs describe's dims and
+  max), and the same read without binary (one part, the same values).
 
 ### Acquisition — does the caller wait for the detector?
 

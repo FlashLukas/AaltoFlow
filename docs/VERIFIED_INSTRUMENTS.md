@@ -104,6 +104,15 @@ calibration at 63x, template tracking, the "stage not answering" handling with
 kim switched off, and `save_picture` / `save_scan_pattern` from a real scan's
 before/after routines.
 
+**Simulation only (2026-10-10): images as a scan detector** (`camera.image`,
+recording region / binning, binary reply parts, auto exposure / gain held off
+during a scan) -- never run on the IDS camera. To check on the rig: the number
+of queued frames after a request (`record_discard_frames`), whether the
+camera has ExposureAuto / GainAuto features, the frame rate of a scan with
+full frames, and a full-frame map above 1 GB written as it goes.
+Tests: [`test_image_recording.py`](../modules/imaging/camera-control/tests/test_image_recording.py),
+scan-core `test_image_*.py`.
+
 **Tests:** [`tests/test_gui_smoke.py`](../modules/imaging/camera-control/tests/test_gui_smoke.py)
 (replays the real camera's feature list,
 [`tests/data/`](../modules/imaging/camera-control/tests/data)),

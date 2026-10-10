@@ -229,19 +229,26 @@ module ~2 days, plus a short hardware session per maker.
 
 ### Camera images as a scan detector (2026-10-01)
 
-The microscope camera (mono, 1936 x 1096) as a detector: one frame per
-point, or a single snapshot. The engine and the file already handle 2D
-detectors; the camera backends already keep a full-depth 16-bit copy of each
-frame (`last_deep()`).
+PHASE 1 DONE 2026-10-10 (simulation only), and the cheap half of phase 2:
+`camera.image` (full / spot crop / rect, binning, numbered fresh frames,
+auto exposure / gain held off during a scan), binary reply parts, uint16
+storage one frame per chunk with `<det>_measured`, write-as-you-go above
+1 GB, the size in the Scan tab, the newest frame next to the map. See the
+camera README "Images for scans", the scan-core README "Images", developer
+notes 4 + 4b, guide 6b "Images" / "Binary replies".
 
-- Phase 1 (~2-3 days): 16-bit storage with a measured mask (above); a
-  camera command and describe entry for the deep frame, with an acquire step
-  so each point gets a new frame; the frame as a binary part of the reply,
-  not base64 JSON; compression; a live image view; a 12-bit simulator mode.
-  Auto exposure / gain off during a scan.
-- Phase 2 (~2 days): write each frame to the file as it arrives, for
-  full-frame maps on large sensors (a 12 MP 16-bit 30 x 30 map is 22 GB).
-  Cropping a region around the laser spot is the cheaper alternative.
+Still open:
+- **On the rig**: how many frames the IDS camera has queued after a request
+  (`record_discard_frames`, default 1, # VERIFY); whether its ExposureAuto /
+  GainAuto exist as GenICam features at all; real frame rates of a scan.
+- **Phase 2, the rest**: the scan server's watchers do not get the frames of
+  a big map (left out of the mirror above 32 MB; the file is on the server's
+  PC); a FILE written in place (big maps) is not atomic -- a crash during a
+  checkpoint write could damage it; maps above RAM in AaltoView (it loads a
+  variable whole: a 20 GB file needs lazy/dask loading there).
+- A single snapshot as a detector of a 0-D scan works already (a scan with
+  one point); a "take one picture into the run's file" routine step does not
+  exist yet (save_picture writes a PNG next to it).
 
 ## Open work
 
