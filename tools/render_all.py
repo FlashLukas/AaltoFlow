@@ -47,6 +47,7 @@ PROJECTS.update({
     # the Measurement tab WATCHING a scan server (a scan running in another
     # process -- here an in-process server on the simulator)
     "suite-watch": ("scan-core", True),
+    "suite-watch-remote": ("scan-core", True),
     "suite-data": ("scan-core", True),
     "suite-settings": ("scan-core", True),
     "suite-catalogue": ("scan-core", True),

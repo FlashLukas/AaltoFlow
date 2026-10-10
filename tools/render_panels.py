@@ -104,6 +104,7 @@ SIZES = {
     "suite-navigator": (1500, 950),
     "suite-queue": (1500, 950),
     "suite-watch": (1500, 990),
+    "suite-watch-remote": (1500, 1040),
     "suite-queue-dialog": (760, 430),
     "suite-fly-scan": (1500, 950),
     "suite-repeat-scan": (1500, 950),
@@ -700,12 +701,17 @@ def _queue_running(win):
                  fmr("FMR map 14 dBm", 41, 61, 14.0)])
 
 
-def _watch_server(win):
+def _watch_server(win, remote: bool = False):
     """The Measurement tab WATCHING a scan server: a server in this process
     (on the simulator, scratch ports) runs a 2-scan queue submitted by "the
     lab PC", and the suite shows it -- header, progress, queue line, live map,
     the server's log. The PC and user names are neutral ("lab-pc", "operator"):
-    a screenshot is a tracked file (CLAUDE.md, private names)."""
+    a screenshot is a tracked file (CLAUDE.md, private names).
+
+    `remote` (phase 2): the suite watches as if from ANOTHER PC
+    ("office-pc"), holds control of the server and has added a third scan to
+    the running queue -- the queue card's Add / Remove / Up / Down and Copy to
+    this PC, and the RUN INFO card that comes back while it may submit."""
     import random
     import socket as _socket
     import tempfile
@@ -745,7 +751,22 @@ def _watch_server(win):
     c.submit_queue([("FMR map 0 dBm", fmr("FMR map 0 dBm", 0.0)),
                     ("FMR map 8 dBm", fmr("FMR map 8 dBm", 8.0))],
                    attrs={"sample": "YIG islands", "operator": "operator"})
-    win.watch_server(f"127.0.0.1:{cmd}:{cmd + 1}")
+    if remote:
+        # "another PC": the watch must not take 127.0.0.1 for this PC
+        import apps.scan_server_view as SV
+        SV.ServerWatch.is_local = lambda self: False
+    w = win.watch_server(f"127.0.0.1:{cmd}:{cmd + 1}")
+    if remote:
+        # neutral names on the picture (the queue card says who added a scan)
+        for cl in (w.client, w._poll):
+            cl.identity["host"] = "operator@office-pc"
+        import time as _t
+        t0 = _t.monotonic()
+        while not w.answering and _t.monotonic() - t0 < 10:
+            _t.sleep(0.05)
+        w.take_control()
+        w.client.queue_add(("FMR map 14 dBm", fmr("FMR map 14 dBm", 14.0)),
+                           attrs={"sample": "YIG islands", "operator": "office"})
 
     def cleanup():
         if win.watch is not None:
@@ -1457,6 +1478,8 @@ TARGETS = {
     "suite-navigator": _suite("Navigator", _navigator_demo, settle=2.0),
     "suite-queue": _suite("Measurement", _queue_running, settle=2.5),
     "suite-watch": _suite("Measurement", _watch_server, settle=4.0),
+    "suite-watch-remote": _suite("Measurement", lambda w: _watch_server(w, remote=True),
+                                 settle=4.0),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),
     "suite-fly-scan": _suite("Scan", _fly(run=False), settle=2.0),
     "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),

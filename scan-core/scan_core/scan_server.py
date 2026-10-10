@@ -11,13 +11,17 @@ process -- a service with exactly the wire contract every instrument module
 has (docs/DEVELOPER_NOTES.md section 4) -- and every measurement suite, on the
 lab PC or in the office, becomes a CLIENT of it.
 
-PHASE 1 (this file): WATCH. A suite on the server's own PC submits a scan
-(or a queue); any suite can watch it live -- progress, ETA, where it is, the
-live map, the log, the PAUSED fault banner, the operator's pause question --
-and Abort / Continue / Abort all / Stop queue. The scan does not depend on any
-window: a suite that closes (or crashes, or loses its network) changes nothing.
-PHASE 2 (not yet): defining and submitting scans from another PC, and editing
-a running queue (docs/DEVELOPER_NOTES.md, "The scan server").
+PHASE 1: WATCH. Any suite can watch a scan live -- progress, ETA, where it
+is, the live map, the log, the PAUSED fault banner, the operator's pause
+question -- and Abort / Continue / Abort all / Stop queue. The scan does not
+depend on any window: a suite that closes (or crashes, or loses its network)
+changes nothing.
+PHASE 2 (2026-10-10): a suite on ANOTHER PC may define and submit scans too
+(the "same PC only" rule became CONTROL: whoever holds control of the server,
+or anyone while nobody does), and a running queue can be EDITED -- scans
+added, removed and reordered as long as they have not started
+(queue_add / queue_remove / queue_move). The files stay on this PC; a watcher
+fetches a copy with get_file (docs/DEVELOPER_NOTES.md, "The scan server").
 
 What it is made of -- nothing new where something tested exists:
   * the ENGINE: scan_core.engine.run, called exactly as the suite's ScanWorker
@@ -43,16 +47,16 @@ Control (who may do what):
     on any PC (like a stage's `stop`): whoever sees a scan going wrong must be
     able to stop it, and above all the PC that started it must never be locked
     out of its own Abort by somebody else holding control;
-  * `submit`, `submit_queue`, `resume`, `answer_pause`, `clear_fault`,
-    `set_config` need control when somebody holds it (nobody holds it -> allowed, as for
-    every module). A person's suite takes control with the "Take control"
-    button of the watch header;
-  * PHASE 1: `submit` / `submit_queue` only from a client on THIS PC. "This
-    PC" = the PC part of the request's client identity ("user@PC",
-    suite_common.control.pc_of) equals this PC's name. With encryption on, the
-    service's Guard has already checked that name against the CurveZMQ key
-    that sent the request (secure.Guard.check); with it off it is self-declared
-    -- like everything control does, a guard against mistakes, not security.
+  * `submit`, `submit_queue`, `queue_add`, `queue_remove`, `queue_move`,
+    `resume`, `answer_pause`, `clear_fault`, `set_config` need control when
+    somebody holds it (nobody holds it -> allowed, as for every module), from
+    ANY PC since phase 2. A person's suite takes control with the "Take
+    control" button of the watch header. Who sent a request is its client
+    identity ("user@PC"); with encryption on, the service's Guard has already
+    checked that name against the CurveZMQ key that sent it
+    (secure.Guard.check); with it off it is self-declared -- like everything
+    control does, a guard against mistakes, not security. Every submit and
+    queue edit is logged with that name ("QUEUE: ... added by anna@office").
   * `shutdown` (the launcher's Stop) while a scan runs ABORTS the scan and the
     queue, waits for the after-scan routine and the final save, then exits.
     A refusal would not help: Mission Control kills a service that refuses,
@@ -65,6 +69,7 @@ No Qt in here: it runs headless, and is tested without a screen.
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import os
 import queue
@@ -288,6 +293,20 @@ def build_manifest() -> dict:
                                "default": "continue"}]),
         _p("clear_fault", "Clear a module's fault", "action", "action", order=93,
            group="Run", args=[{"name": "module", "type": "string", "default": ""}]),
+        # phase 2: editing the running queue (control, not safety: changing
+        # what runs next is a decision for whoever runs the measurement)
+        _p("queue_remove", "Remove a waiting scan from the queue", "action", "action",
+           order=94, group="Queue",
+           args=[{"name": "id", "type": "int", "default": 0}],
+           help="A scan that has not started (get_scan ids). The running one is "
+                "ended with Abort."),
+        _p("queue_move", "Move a waiting scan in the queue", "action", "action",
+           order=95, group="Queue",
+           args=[{"name": "id", "type": "int", "default": 0},
+                 {"name": "to", "type": "int", "default": 0}],
+           help="To position `to` (0-based), among the scans that have not started."),
+        _p("queue_rev", "Queue revision", "indicator", "int", ["queue_rev"], order=16,
+           min=0),
     ]
     manifest = {"schema": 1, "module": SERVER_KEY, "label": "Scan server",
                 "parameters": params}
@@ -306,10 +325,19 @@ FILE_CHUNK = 4 * 2**20
 
 # ──────────────────────────────────── a scan ──────────────────────────────────
 
+#: a number for every scan ever submitted to this server: a queue edit names
+#: the scan it means by this id, not by its position -- two people editing the
+#: same queue (or the runner moving on) must not make "remove #3" hit the
+#: wrong scan
+_ENTRY_IDS = itertools.count(1)
+
+
 class _Entry:
     """One scan of what was submitted (a single scan is a queue of one)."""
 
-    def __init__(self, name: str, recipe: Recipe, attrs: dict):
+    def __init__(self, name: str, recipe: Recipe, attrs: dict, added_by: str = ""):
+        self.id = next(_ENTRY_IDS)
+        self.added_by = added_by             # who queue_add-ed it ("" = submitted)
         self.name = name
         self.recipe = recipe
         self.attrs = attrs
@@ -411,6 +439,15 @@ class ScanServer:
         # and run info with get_scan when scan_rev moves, and the plot choice of
         # the suite on this PC with get_view when view_rev moves
         self._scan_rev = 0
+        # queue_rev moves whenever the LIST changes -- a submission, a scan
+        # added / removed / moved, a scan that finished (its file path is now
+        # known) -- so every watcher re-reads get_scan and redraws its queue.
+        # scan_rev moves only on a new submission (a watcher closes the
+        # definitions it had open then; an edit keeps them open).
+        self._queue_rev = 0
+        #: False once the runner has taken its last scan: an add after that
+        #: would never run, so it is refused (the queue has ended)
+        self._queue_open = False
         self._view: dict = {}
         self._view_rev = 0
         self._view_by = ""
@@ -751,8 +788,9 @@ class ScanServer:
                 "data_dir": str(self._data_dir()),
                 "modules": list(self.connected),
                 "follow": self.follow,
-                "phase": 1,
+                "phase": 2,
                 "scan_rev": self._scan_rev,
+                "queue_rev": self._queue_rev,
                 "view_rev": self._view_rev,
                 "instruments": dict(self.instruments),
                 "design_rev": self._design_rev,
@@ -850,7 +888,7 @@ class ScanServer:
                 "idn": f"AaltoFlow scan server (scan-core {ver})".replace(" ()", ""),
                 "pc": self.pc, "setup_name": setup_name(self.root),
                 "data_dir": str(self._data_dir()), "modules": list(self.connected),
-                "phase": 1, "follow": self.follow}}
+                "phase": 2, "follow": self.follow}}
         if cmd == "get_config":
             return {"ok": True, "config": self._config()}
         if cmd == "set_config":
@@ -869,6 +907,12 @@ class ScanServer:
         if cmd == "submit_queue":
             return self._submit(req, req.get("entries"), req.get("attrs"),
                                 bool(req.get("allow_unsaved", False)))
+        if cmd == "queue_add":
+            return self._queue_add(req)
+        if cmd == "queue_remove":
+            return self._queue_remove(req)
+        if cmd == "queue_move":
+            return self._queue_move(req)
         if cmd == "abort":
             return self._abort_verb(req)
         if cmd == "stop_queue":
@@ -918,14 +962,20 @@ class ScanServer:
         """The submitted queue as it is: every entry's definition, run info and
         result, which one runs, who started it. A watcher shows this read-only
         (and can copy a definition into its own Scan tab)."""
+        ddir = self._data_dir()
         with self._lock:
-            entries = [{"name": e.name,
+            entries = [{"id": e.id, "name": e.name,
                         "recipe": json.loads(e.recipe.to_json()),
                         "attrs": dict(e.attrs),
                         "n_points": int(e.n_points),
-                        "result": e.result, "path": e.path, "error": e.error}
+                        "result": e.result, "path": e.path, "error": e.error,
+                        # the file RELATIVE to the data folder, the name get_file
+                        # takes: a watcher copies a finished scan to its own PC
+                        "rel_path": _relative(e.path, ddir) if e.result else "",
+                        "added_by": e.added_by}
                        for e in self._entries]
-            return {"ok": True, "scan_rev": self._scan_rev, "entries": entries,
+            return {"ok": True, "scan_rev": self._scan_rev, "queue_rev": self._queue_rev,
+                    "entries": entries,
                     "current": self._qi if self._busy else -1, "busy": self._busy,
                     "started_by": self._started_by}
 
@@ -1104,33 +1154,28 @@ class ScanServer:
         return {"ok": True, "live_rev": rev, "encoding": LIVE_ENCODING, "data": text}
 
     # ---- submit --------------------------------------------------------
-    def _same_pc(self, req) -> str:
-        """'' when the request comes from THIS PC, else why not (phase 1)."""
-        ident = ControlLease._identity(req)
-        if ident is None:
-            return ("submit needs a client identity (\"client\": {\"id\", \"kind\", "
-                    "\"name\", \"host\"}) -- a scan is accepted only from this PC")
-        pc = pc_of(ident)
-        if pc != self.pc:
-            return (f"a scan can only be started from the scan server's own PC "
-                    f"('{self.pc}') in phase 1; this request comes from "
-                    f"{describe_holder(ident)}. Watching, Abort and Stop queue work "
-                    f"from every PC; starting scans from another PC is phase 2")
-        return ""
+    #
+    # Phase 1 accepted scans from THIS PC only. Phase 2 (Lukas, 2026-10-10:
+    # define and submit from the office) replaced that with CONTROL: the
+    # ControlLease gate in _dispatch has already refused the request if
+    # another PC holds control, so whoever gets here may start a scan. What is
+    # still required is an identity, so the log and the watchers can say WHO
+    # started it ("submitted by anna@office-pc").
 
-    def _submit(self, req, raw_entries, common_attrs, allow_unsaved) -> dict:
-        why = self._same_pc(req)
-        if why:
-            return {"ok": False, "refused": "phase2", "error": why}
+    def _needs_identity(self, req, what: str) -> dict | None:
+        if ControlLease._identity(req) is None:
+            return {"ok": False, "refused": "identity",
+                    "error": f"{what} needs a client identity (\"client\": {{\"id\", "
+                             f"\"kind\", \"name\", \"host\"}}): the scan server logs who "
+                             f"starts and edits scans"}
+        return None
+
+    @staticmethod
+    def _parse_entries(raw_entries, common_attrs, added_by: str = ""):
+        """[_Entry] from the wire, or an error reply. The run info (sample,
+        operator, ...) is what the SUBMITTING PC sent: its Run info card."""
         if not isinstance(raw_entries, list) or not raw_entries:
             return {"ok": False, "error": "nothing to run (no recipe / an empty queue)"}
-        with self._lock:
-            if self._busy:
-                name = self._entries[self._qi].name if 0 <= self._qi < len(self._entries) else ""
-                return {"ok": False, "refused": "busy",
-                        "error": f"a scan is already running on this server ('{name}'); "
-                                 f"wait for it to end or abort it (adding to a running "
-                                 f"queue is phase 2)"}
         entries = []
         for k, item in enumerate(raw_entries):
             if not isinstance(item, dict) or not isinstance(item.get("recipe"), dict):
@@ -1142,7 +1187,23 @@ class ScanServer:
                 return {"ok": False, "error": f"entry {k + 1}: not a scan definition ({exc})"}
             name = str(item.get("name") or recipe.name or "scan").strip() or "scan"
             attrs = {**_clean_attrs(common_attrs), **_clean_attrs(item.get("attrs"))}
-            entries.append(_Entry(name, recipe, attrs))
+            entries.append(_Entry(name, recipe, attrs, added_by))
+        return entries
+
+    def _submit(self, req, raw_entries, common_attrs, allow_unsaved) -> dict:
+        refused = self._needs_identity(req, "submit")
+        if refused:
+            return refused
+        with self._lock:
+            if self._busy:
+                name = self._entries[self._qi].name if 0 <= self._qi < len(self._entries) else ""
+                return {"ok": False, "refused": "busy",
+                        "error": f"a scan is already running on this server ('{name}'); "
+                                 f"wait for it to end, abort it, or add yours to the "
+                                 f"running queue (queue_add)"}
+        entries = self._parse_entries(raw_entries, common_attrs)
+        if isinstance(entries, dict):
+            return entries
 
         # every entry checked BEFORE anything runs: the third scan must not turn
         # out to be invalid at two in the morning (scan_queue.validate_queue)
@@ -1166,8 +1227,10 @@ class ScanServer:
             if self._busy:
                 return {"ok": False, "refused": "busy", "error": "a scan started meanwhile"}
             self._busy = True
+            self._queue_open = True
             self._entries = entries
             self._scan_rev += 1
+            self._queue_rev += 1
             self._qi = -1
             self._stop_reason = ""
             self._abort = False
@@ -1187,6 +1250,9 @@ class ScanServer:
                 "data_dir": str(ddir) if ok else "", "save_ok": ok, "save_note": msg}
 
     def _validate(self, entries) -> list[str]:
+        """Every entry against THIS server's registry -- the instruments it
+        will drive, with their LIVE limits. Whatever a remote suite checked
+        on its own side, this is the check that counts."""
         out = []
         with self._lock:
             reg = self.registry
@@ -1205,6 +1271,151 @@ class ScanServer:
             if errs:
                 out.append(f"{e.name}: {'; '.join(errs)}")
         return out
+
+    # ---- editing a running queue (phase 2) ---------------------------------
+    #
+    # Lukas, 2026-10-10: a queue runs over night; in the morning the third scan
+    # should be a different one, or another scan should go after the last.
+    # Only scans that have NOT started can be removed or moved -- the running
+    # one is ended with Abort, and a finished one is history. Each edit is
+    # checked and applied under the lock the runner takes when it picks its
+    # next scan, so an edit never races the runner into running a scan twice
+    # or skipping one. All three need control (ControlLease gate) and log who.
+
+    def _editable(self) -> str:
+        """'' when the queue can still be edited, else why not."""
+        if not self._busy or not self._queue_open:
+            return ("no queue is running on the scan server -- start one with "
+                    "submit / Run (queue edits change a RUNNING queue)")
+        if self._stop_reason:
+            return f"the queue is stopping ({self._stop_reason}); nothing more will run"
+        return ""
+
+    def _find(self, req) -> tuple[int, str]:
+        """(index, '') of the scan a queue edit means -- by `id` (preferred:
+        robust against a queue that changed meanwhile) or by `index`; else
+        (-1, why not). Caller holds the lock."""
+        if req.get("id") is not None:
+            try:
+                want = int(req["id"])
+            except (TypeError, ValueError):
+                return -1, "'id' must be a number (an entry id from get_scan)"
+            for k, e in enumerate(self._entries):
+                if e.id == want:
+                    return k, ""
+            return -1, f"no scan with id {want} in the queue (it changed meanwhile?)"
+        try:
+            k = int(req.get("index"))
+        except (TypeError, ValueError):
+            return -1, "say which scan: 'id' (from get_scan) or 'index'"
+        if not 0 <= k < len(self._entries):
+            return -1, f"index {k} is outside the queue (0 .. {len(self._entries) - 1})"
+        return k, ""
+
+    def _not_started(self, k: int) -> str:
+        # caller holds the lock
+        e = self._entries[k]
+        if k == self._qi:
+            return (f"'{e.name}' is running -- it cannot be removed or moved; Abort "
+                    f"ends it (the queue then goes on with the next scan)")
+        if k < self._qi or e.result is not None:
+            return f"'{e.name}' has already run"
+        return ""
+
+    def _edited(self, msg: str, req) -> None:
+        """Bump the revision (every watcher re-reads the queue), push a status
+        frame at once, and log the edit with who made it."""
+        self._queue_rev += 1            # caller holds the lock
+        self._status_kick = True
+        self.log(f"QUEUE: {msg} by {self._who(req)}")
+
+    def _queue_add(self, req) -> dict:
+        """Add one or more scans to the running queue: at the end, or at
+        `index` (anywhere after the running scan). Validated against this
+        server's registry first, exactly as submit validates."""
+        refused = self._needs_identity(req, "queue_add")
+        if refused:
+            return refused
+        raw_entries = req.get("entries")
+        if raw_entries is None and isinstance(req.get("recipe"), dict):
+            raw_entries = [{"name": req.get("name"), "recipe": req["recipe"]}]
+        entries = self._parse_entries(raw_entries, req.get("attrs"),
+                                      added_by=self._who(req))
+        if isinstance(entries, dict):
+            return entries
+        with self._lock:
+            why = self._editable()
+        if why:
+            return {"ok": False, "refused": "idle", "error": why}
+        problems = self._validate(entries)
+        if problems:
+            return {"ok": False, "refused": "invalid",
+                    "error": "not added -- " + " | ".join(problems)}
+        with self._lock:
+            why = self._editable()           # the queue may have ended meanwhile
+            if why:
+                return {"ok": False, "refused": "idle", "error": why}
+            n = len(self._entries)
+            index = req.get("index")
+            try:
+                pos = n if index is None else int(index)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "'index' must be a position (0-based)"}
+            if not self._qi < pos <= n:
+                return {"ok": False, "refused": "started",
+                        "error": f"a scan can only be added after the running one "
+                                 f"(positions {self._qi + 2} .. {n + 1}, counting from 1)"}
+            self._entries[pos:pos] = entries
+            what = (f"'{entries[0].name}'" if len(entries) == 1
+                    else f"{len(entries)} scans")
+            self._edited(f"{what} added as scan {pos + 1} of {len(self._entries)}", req)
+            return {"ok": True, "added": [e.id for e in entries], "index": pos,
+                    "n": len(self._entries), "queue_rev": self._queue_rev}
+
+    def _queue_remove(self, req) -> dict:
+        """Take a scan that has not started out of the running queue."""
+        with self._lock:
+            why = self._editable()
+            if why:
+                return {"ok": False, "refused": "idle", "error": why}
+            k, why = self._find(req)
+            if why:
+                return {"ok": False, "refused": "unknown", "error": why}
+            why = self._not_started(k)
+            if why:
+                return {"ok": False, "refused": "started", "error": why}
+            e = self._entries.pop(k)
+            self._edited(f"'{e.name}' (scan {k + 1}) removed", req)
+            return {"ok": True, "removed": e.id, "n": len(self._entries),
+                    "queue_rev": self._queue_rev}
+
+    def _queue_move(self, req) -> dict:
+        """Move a scan that has not started to position `to` (0-based, also
+        among the scans that have not started)."""
+        with self._lock:
+            why = self._editable()
+            if why:
+                return {"ok": False, "refused": "idle", "error": why}
+            k, why = self._find(req)
+            if why:
+                return {"ok": False, "refused": "unknown", "error": why}
+            why = self._not_started(k)
+            if why:
+                return {"ok": False, "refused": "started", "error": why}
+            try:
+                to = int(req.get("to"))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "'to' must be the new position (0-based)"}
+            n = len(self._entries)
+            if not self._qi < to < n:
+                return {"ok": False, "refused": "started",
+                        "error": f"a scan can only move among those not started yet "
+                                 f"(positions {self._qi + 2} .. {n}, counting from 1)"}
+            if to != k:
+                e = self._entries.pop(k)
+                self._entries.insert(to, e)
+                self._edited(f"'{e.name}' moved from scan {k + 1} to scan {to + 1}", req)
+            return {"ok": True, "index": to, "queue_rev": self._queue_rev}
 
     # ---- abort / stop / answer / clear -----------------------------------
     def _who(self, req) -> str:
@@ -1309,41 +1520,59 @@ class ScanServer:
     # the runner: one queue, one scan after another
     # ------------------------------------------------------------------ #
     def _run_queue(self, data_dir) -> None:
-        entries = self._entries
+        # The list is read under the lock at every step, NOT captured once:
+        # queue_add / queue_remove / queue_move change it while it runs (only
+        # behind the running scan, so position i stays the scan just run).
         try:
-            if len(entries) > 1:
-                self.log(f"queue: {len(entries)} scans")
-            for i, e in enumerate(entries):
+            with self._lock:
+                n0 = len(self._entries)
+            if n0 > 1:
+                self.log(f"queue: {n0} scans")
+            i = 0
+            while True:
                 with self._lock:
-                    if self._stop_reason:
+                    if self._stop_reason or i >= len(self._entries):
+                        # the last scan is taken: from here on an add would
+                        # never run, so queue_add says so instead
+                        self._queue_open = False
                         break
+                    e = self._entries[i]
+                    n = len(self._entries)
                     self._qi = i
                     self._abort = False
                     self._reset_scan_state()
-                if len(entries) > 1:
-                    self.log(f"queue: scan {i + 1} of {len(entries)} '{e.name}' started")
+                if n > 1:
+                    self.log(f"queue: scan {i + 1} of {n} '{e.name}' started")
                 self._run_one(e, data_dir)
+                with self._lock:
+                    n = len(self._entries)
+                    # the result (and so the file a watcher may copy) is new
+                    self._queue_rev += 1
                 if e.result == "error":
                     # a module that died fails the next scan the same way
                     with self._lock:
                         self._stop_reason = self._stop_reason or f"'{e.name}' failed: {e.error}"
-                    if len(entries) > 1:
+                    if n > 1:
                         self.log(f"queue: scan {i + 1} '{e.name}' FAILED ({e.error}); "
                                  f"queue stopped", "error")
                     break
                 if e.stop_all:
                     with self._lock:
                         self._stop_reason = self._stop_reason or f"abort all: {e.stop_reason}"
-                    if len(entries) > 1:
+                    if n > 1:
                         self.log(f"queue: scan {i + 1} '{e.name}' {e.result} -- ABORT ALL, "
                                  f"queue stopped", "warn")
                     break
-                if len(entries) > 1:
+                if n > 1:
                     self.log(f"queue: scan {i + 1} '{e.name}' {e.result}")
+                i += 1
         except Exception as exc:              # never leave the server "busy"
             self._last_error = f"{type(exc).__name__}: {exc}"
             self.log(f"the scan runner failed: {self._last_error}", "error")
         finally:
+            with self._lock:
+                self._queue_open = False
+                entries = list(self._entries)
             counts: dict = {}
             for e in entries:
                 if e.result:
@@ -1496,6 +1725,17 @@ class ScanServer:
 
 def _json(obj) -> bytes:
     return json.dumps(obj).encode("utf-8")
+
+
+def _relative(path, ddir) -> str:
+    """`path` relative to the data folder `ddir` (posix), or '' when it is not
+    inside it -- get_file only hands out files of the data folder."""
+    if not path:
+        return ""
+    try:
+        return Path(path).resolve().relative_to(Path(ddir).resolve()).as_posix()
+    except (ValueError, OSError):
+        return ""
 
 
 def main(argv=None) -> int:

@@ -44,6 +44,56 @@ class _Bridge(QtCore.QObject):
     fetched = QtCore.Signal(object, str)       # local Path or None, error text
 
 
+class FileFetcher(QtCore.QObject):
+    """Copy ONE file of the watched server's data folder to this PC, in a
+    thread (phase 2: "Copy to this PC" on a finished scan of the queue).
+
+    The same chunked get_file transfer as the dialog below (ScanServerClient.
+    download: .part first, then replaced), on a connection of its own so a
+    200 MB map never delays an Abort on the suite's command connection.
+    `done(path or None, error text)` arrives on the GUI thread."""
+
+    progress = QtCore.Signal(int, int)
+    done = QtCore.Signal(object, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.busy = False
+        self._stop = threading.Event()
+
+    def fetch(self, watch, rel: str) -> Path | None:
+        """Start copying `rel` (relative to the server's data folder); the
+        local destination, or None when a copy is already running."""
+        if self.busy or not rel:
+            return None
+        pc = str((watch.last or {}).get("pc") or watch.host)
+        dest = cache_path(pc, rel)
+        self.busy = True
+        host, cmd, pub = watch.host, watch.cmd_port, watch.pub_port
+
+        def work():
+            from scan_core.scan_server_client import ScanServerClient
+            c = ScanServerClient(host, cmd, pub, timeout_ms=15000, kind="gui",
+                                 name="measurement suite (copy)")
+            try:
+                path = c.download(rel, dest,
+                                  progress=lambda d, t: self.progress.emit(d, t),
+                                  cancel=self._stop.is_set)
+                err = ""
+            except Exception as exc:
+                path, err = None, str(exc)
+            finally:
+                c.close()
+            self.busy = False
+            if not self._stop.is_set():
+                self.done.emit(path, err)
+        threading.Thread(target=work, daemon=True, name="lab-file-copy").start()
+        return dest
+
+    def cancel(self):
+        self._stop.set()
+
+
 class LabFilesDialog(QtWidgets.QDialog):
     """The server PC's measurements; double-click one to open a copy."""
 

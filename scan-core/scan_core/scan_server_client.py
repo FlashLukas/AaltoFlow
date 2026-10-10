@@ -34,7 +34,8 @@ from .scan_server import (DEFAULT_CMD_PORT, SERVER_KEY, TOPIC_EVENT, TOPIC_LIVE,
 
 class ScanServerError(RuntimeError):
     """The server answered ok:false. `refused` says why when it is a rule
-    ("control", "phase2", "busy", "invalid", "unsaved", "security")."""
+    ("control", "identity", "busy", "invalid", "unsaved", "idle", "started",
+    "unknown", "security")."""
 
     def __init__(self, message: str, refused: str = ""):
         super().__init__(message)
@@ -208,7 +209,8 @@ class ScanServerClient(ControlClient):
     # ---- the verbs -------------------------------------------------------
     def submit(self, recipe, name: str | None = None, attrs: dict | None = None,
                allow_unsaved: bool = False) -> dict:
-        """Start ONE scan on the server (phase 1: only from the server's PC).
+        """Start ONE scan on the server (from any PC that holds control, or
+        from any PC while nobody holds it).
         `recipe` = a scan_core Recipe or its dict."""
         return self.command("submit", recipe=_recipe_dict(recipe), name=name,
                             attrs=dict(attrs or {}), allow_unsaved=allow_unsaved,
@@ -218,18 +220,33 @@ class ScanServerClient(ControlClient):
                      allow_unsaved: bool = False) -> dict:
         """Start a queue: entries = [(name, recipe)] or [{"name", "recipe"}]
         or scan_queue.QueueEntry objects."""
-        out = []
-        for e in entries:
-            if isinstance(e, dict):
-                out.append({"name": e.get("name"), "recipe": _recipe_dict(e["recipe"]),
-                            "attrs": e.get("attrs")})
-            elif isinstance(e, (tuple, list)):
-                out.append({"name": e[0], "recipe": _recipe_dict(e[1])})
-            else:                                   # a QueueEntry
-                out.append({"name": e.name, "recipe": _recipe_dict(e.recipe)})
-        return self.command("submit_queue", entries=out, attrs=dict(attrs or {}),
-                            allow_unsaved=allow_unsaved,
+        return self.command("submit_queue", entries=_entries_list(entries),
+                            attrs=dict(attrs or {}), allow_unsaved=allow_unsaved,
                             _timeout_ms=max(self.timeout_ms, 20000))
+
+    # ---- editing the RUNNING queue (phase 2; all need control) -----------
+    def queue_add(self, entries, index: int | None = None,
+                  attrs: dict | None = None) -> dict:
+        """Add scans to the running queue -- at the end, or at `index`
+        (0-based, after the running scan). Same entry forms as submit_queue;
+        a single Recipe is accepted too. Validated against the SERVER's
+        registry. Reply: {added: [ids], index, n, queue_rev}."""
+        if not isinstance(entries, (list, tuple)) or (
+                len(entries) == 2 and isinstance(entries[0], str)):
+            entries = [entries if isinstance(entries, (tuple, dict))
+                       else (getattr(entries, "name", None), entries)]
+        return self.command("queue_add", entries=_entries_list(entries),
+                            index=index, attrs=dict(attrs or {}),
+                            _timeout_ms=max(self.timeout_ms, 20000))
+
+    def queue_remove(self, id: int | None = None, index: int | None = None) -> dict:
+        """Remove a scan that has not started (by its get_scan `id`, or index)."""
+        return self.command("queue_remove", id=id, index=index)
+
+    def queue_move(self, to: int, id: int | None = None,
+                   index: int | None = None) -> dict:
+        """Move a scan that has not started to position `to` (0-based)."""
+        return self.command("queue_move", id=id, index=index, to=int(to))
 
     def abort(self) -> dict:
         return self.command("abort")
@@ -339,6 +356,21 @@ class ScanServerClient(ControlClient):
         ds = dataset_from_text(r["data"])
         self.live_rev = rev
         return ds
+
+
+def _entries_list(entries) -> list[dict]:
+    """[(name, recipe)] / [{"name", "recipe", "attrs"}] / [QueueEntry] ->
+    the wire form [{"name", "recipe" (dict), "attrs"}]."""
+    out = []
+    for e in entries:
+        if isinstance(e, dict):
+            out.append({"name": e.get("name"), "recipe": _recipe_dict(e["recipe"]),
+                        "attrs": e.get("attrs")})
+        elif isinstance(e, (tuple, list)):
+            out.append({"name": e[0], "recipe": _recipe_dict(e[1])})
+        else:                                   # a QueueEntry
+            out.append({"name": e.name, "recipe": _recipe_dict(e.recipe)})
+    return out
 
 
 def _recipe_dict(recipe) -> dict:

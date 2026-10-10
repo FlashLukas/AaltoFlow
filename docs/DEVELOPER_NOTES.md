@@ -837,9 +837,9 @@ measurement suite's window: close it and the scan stops, sit elsewhere and you
 see nothing. `scan_core/scan_server.py` puts the engine into a SERVICE with
 the wire contract of section 4; every measurement suite is a client.
 
-**Phase 1 (built): WATCH.** A suite on the server's PC submits a scan or a
-queue; any suite watches it live and can Abort / Continue / Abort all / Stop
-queue / clear a fault. The scan does not depend on any window.
+**Phase 1 (built): WATCH.** Any suite watches a scan live and can Abort /
+Continue / Abort all / Stop queue / clear a fault. The scan does not depend
+on any window.
 **Mirror (built 2026-10-06; Lukas: "a 1:1 copy of what i see on the lab
 pc"):** a watching suite also shows the submitted queue with every scan's
 run info and definition (`get_scan`, fetched when `scan_rev` moves), can copy
@@ -848,9 +848,25 @@ on the server's PC while "show what the lab shows" is ticked (`set_view` /
 `get_view`, `view_rev`; DataView `view_state()` / `apply_view_state()`). The
 lab's suite must run its scans ON the server (setting `run_on_scan_server`),
 or there is nothing to mirror. Not mirrored on purpose: which tab is open,
-plot zoom. **Phase 2 (open):** define and submit scans from another PC (the recipe validated
-against the SERVER's registry, the run info from the submitting PC), and edit
-a running queue (add / remove / reorder the scans not yet started). ROADMAP.
+plot zoom.
+**Phase 2 (built 2026-10-10; Lukas: "define and submit from the office"):**
+(a) a suite on ANOTHER PC defines and submits scans. Its Scan tab builds
+against the lab's instruments -- the mirror already connects the server's
+`instruments` under the server's slugs, so parameters, units and live limits
+are the lab's -- and the SERVER validates every submitted scan against its own
+registry; that verdict is the one that counts (the watcher sends even when its
+local check complains, and shows the server's refusal word for word). The
+"same PC only" submit rule is replaced by CONTROL: the ControlLease gate lets a
+submit through when its PC holds control of the server or nobody does, from
+any PC; a request without a client identity is refused (`refused: identity`),
+so the log can always say who started a scan. The run info is the submitting
+PC's Run info card; the file is saved on the server's PC as before.
+(b) the running queue is EDITABLE: `queue_add` / `queue_remove` / `queue_move`
+(control-gated, logged with who) change the scans not yet started; the
+running one is ended with Abort. (c) "Copy to this PC" fetches a finished
+scan's file with the same chunked `get_file` as "Lab files..." and opens it in
+the Data tab. (d) the scan name, RUN INFO card and per-point box are shown
+only while the suite may submit (they belong to a scan started HERE).
 
 **What it reuses.** `engine.run` with the same callbacks the suite's
 `ScanWorker` passes (abort flag + `Lab.set_abort`, `on_fault` = pause,
@@ -874,14 +890,17 @@ large map never rides the PUB socket.
 | `status`, `info`, `describe`, `get_config` | | no | universal |
 | `get_log` | `since` | no | `{lines, first, next}` (5000 kept) |
 | `get_live` | `have_rev` | no | `{live_rev, data}` = netCDF bytes, zlib, base64 (`dataset_to_text`); `unchanged` when not newer |
-| `submit` | `recipe` (dict), `name`, `attrs`, `allow_unsaved` | yes* | phase 1: from THIS PC only; refused while busy, when invalid, when the data folder cannot be written (unless allow_unsaved) |
+| `submit` | `recipe` (dict), `name`, `attrs`, `allow_unsaved` | yes* | from ANY PC (phase 2), with a client identity; refused while busy, when invalid for the SERVER's registry, when the data folder cannot be written (unless allow_unsaved) |
 | `submit_queue` | `entries` [{name, recipe, attrs}], `attrs` | yes* | all validated before anything runs |
+| `queue_add` | `entries` [{name, recipe, attrs}] (or `recipe` + `name`), `attrs`, `index` | yes* | into the RUNNING queue: at the end, or at `index` (0-based, after the running scan); validated like submit. `{added: [ids], index, n, queue_rev}`. Refused `idle` (nothing runs, or the queue has taken its last scan / is stopping), `started` (a place before the running scan), `invalid` |
+| `queue_remove` | `id` (from get_scan) or `index` | yes* | a scan not yet started; refused `started` for the running / a finished one, `unknown` for a wrong id |
+| `queue_move` | `id` or `index`, `to` | yes* | to position `to` (0-based) among the scans not yet started |
 | `abort` | | **never** (safety) | the current scan; a queue goes on (the suite's Abort) |
 | `stop_queue` | | **never** (safety) | this scan AND the rest |
 | `answer_pause` | `answer` true / false / "all" | yes* | the `pause` step's Continue / Abort scan / Abort all |
 | `clear_fault` | `module` | yes* | forwarded to that module (`Lab.clear_fault`) |
 | `set_config` | `{server: {live_every_s}}` | yes* | `data_dir` is shown, never set over the wire |
-| `get_scan` | | no | `{scan_rev, entries [{name, recipe, attrs, n_points, result, path, error}], current, busy, started_by}` |
+| `get_scan` | | no | `{scan_rev, queue_rev, entries [{id, name, recipe, attrs, n_points, result, path, rel_path, error, added_by}], current, busy, started_by}`; `rel_path` = a finished scan's file relative to the data folder, the name `get_file` takes |
 | `get_view` | | no | `{view, view_rev, by}`: the plot choice of the suite on the server's PC |
 | `set_view` | `view` (JSON object, <= 20 kB) | no, but THIS PC only | refused `not_this_pc` from anywhere else: a watcher never steers the lab's screen |
 | `shutdown` | | never | while a scan runs: ABORT it and the queue, wait for the after-scan routine and the save, then exit |
@@ -896,8 +915,12 @@ stop_reason, summary}, `done`, `total`, `progress`, `eta_s`, `queue_eta_s`,
 `elapsed_s`, `scan_elapsed_s`, `where` (the suite's status line) +
 `where_axes`, `now`, `faults` [{module, message, can_clear}], `pause_message`,
 `save_path`, `last_saved`, `save_error`, `live_rev`, `log_tail`, `log_n`,
-`error`, `pc`, `setup_name`, `data_dir`, `modules`, `phase`, `control`,
-`describe_rev`, `scan_rev`, `view_rev`. Deliberately NO `fault` / `hw_error` key: those mean "do not
+`error`, `pc`, `setup_name`, `data_dir`, `modules`, `phase` (2), `control`,
+`describe_rev`, `scan_rev`, `queue_rev`, `view_rev`. `scan_rev` moves on a
+new submission, `queue_rev` on ANY change of the list (a submission, a queue
+edit, a scan that finished and so has a file): a watcher re-reads `get_scan`
+when either moves, and closes the definitions it had open only on a new
+`scan_rev`. Deliberately NO `fault` / `hw_error` key: those mean "do not
 trust my readings" to a scan engine, and the server is not an instrument.
 
 **Decisions and why.**
@@ -906,12 +929,31 @@ trust my readings" to a scan engine, and the server is not an instrument.
   of its Abort because somebody else took control. `stop_queue` likewise (the
   "Abort all" of a queue). Answers and clear_fault change what the scan does
   next, so they follow control.
-- *"Same PC" for submit* = the PC part of the request's client identity
-  (`control.pc_of`, "user@PC") equals the server's hostname. With encryption
-  on, `secure.Guard.check` has already checked that name against the key that
-  sent the request; with it off it is self-declared -- like all of control, a
-  guard against mistakes, not security. A request without an identity is
-  refused.
+- *Submit follows CONTROL (phase 2), not "same PC" (phase 1).* Phase 1
+  accepted scans only from a client whose identity's PC part
+  (`control.pc_of`, "user@PC") was the server's hostname. Lukas wanted to
+  start scans from the office, and control already answers "who may change
+  what" for every module: the holder's PC, or anyone while nobody holds it.
+  With encryption on, `secure.Guard.check` has checked the identity's name
+  against the key that sent the request; with it off it is self-declared --
+  like all of control, a guard against mistakes, not security. `set_view` /
+  `set_design` stay "this PC only": a watcher never steers the lab's screen.
+- *Queue edits name a scan by its `id`, not its position.* Two watchers
+  editing at once, or the runner moving on to the next scan, would make
+  "remove scan 3" hit the wrong one. Every edit and the runner's "take the
+  next scan" happen under one lock, so a scan is never run twice or skipped;
+  once the runner has taken its last scan (`_queue_open` false) an add is
+  refused instead of being accepted and never run.
+- *Queue edits are control-gated, not safety verbs.* Removing a scan someone
+  else planned is a decision, unlike stopping a scan that goes wrong (Abort,
+  Pause, Stop queue stay safety verbs). Each edit is logged
+  ("QUEUE: 'x' added as scan 4 of 4 by office suite (anna@office-pc)") and
+  the queue card shows "added by" on the scan.
+- *The server's registry decides.* A watcher's Scan tab uses the lab's
+  instruments through its own connections; it can lag a module that just
+  restarted on the lab PC, and a server with a FIXED registry (`--sim`)
+  reports no instruments at all. So a remote submit is sent even when the
+  local check complains, and the server's refusal is shown.
 - *Shutdown aborts instead of refusing.* Mission Control kills a service
   whose shutdown is refused; a kill would lose the after-scan routine and the
   final save. Mission Control asks before stopping a busy scan server and
@@ -944,8 +986,16 @@ Take control / Release and Stop watching. Settings > SCAN SERVER: "Run scans
 on this PC's scan server" (setting `run_on_scan_server`, default OFF = the
 old in-process behaviour, untouched) and "Watch scan server" (discovered
 servers, local and Add remote... ones, or host:port). The data files stay on
-the server's PC: the pane shows their path there (no file transfer in phase
-1). Closing the suite closes its connections only.
+the server's PC: the pane shows their path there, and "Copy to this PC" on
+the queue card (a finished scan, or the last one saved) fetches a copy into
+the same cache folder "Lab files..." uses (`lab_files.FileFetcher`). Phase 2
+on the suite side: `Suite._may_submit` = on the server's PC the setting, on
+another PC `ServerWatch.may_submit()` (control is ours or free), recomputed at
+every status frame; `ScanBuilder.server_submit` is a property whose setter
+re-shows the name / RUN INFO / per-point widgets and the queue card's edit
+buttons; while this PC HOLDS control the lab's Scan-tab definition is no
+longer followed (this PC is the one defining scans). Closing the suite closes
+its connections only.
 
 ---
 

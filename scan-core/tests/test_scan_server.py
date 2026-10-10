@@ -6,8 +6,9 @@ simulator with real sockets on scratch ports:
 
 * a scan submitted from THIS PC runs, reports progress, and is saved exactly
   like the suite saves it (dated file, run info attributes);
-* a client on ANOTHER PC may watch (status, live data, log) but not submit
-  -- the refusal says "phase 2";
+* a client on ANOTHER PC may watch (status, live data, log); a submit without
+  an identity is refused (phase 2 -- submitting from another PC under the
+  control rule, queue edits, fetching files -- is test_scan_server_phase2.py);
 * get_live hands over the engine's partial snapshot (unmeasured points NaN);
 * Abort / Stop queue / the operator pause (Continue, Abort, Abort all) work,
   in a single scan and in a queue;
@@ -167,15 +168,13 @@ def test_submit_from_this_pc_runs_reports_progress_and_saves(server, client, tmp
     assert any("saved to" in ln for ln in lines)
 
 
-def test_another_pc_may_watch_but_not_submit(server, client):
+def test_another_pc_may_watch_and_a_submit_needs_an_identity(server, client):
+    # phase 2: another PC MAY submit (see test_scan_server_phase2.py for the
+    # control rule); what is still refused is a request that does not say who
+    # sent it -- the log must name whoever starts a scan
     srv = server()
-    r = raw(srv, {"cmd": "submit", "recipe": json.loads(recipe().to_json()),
-                  "client": OTHER_PC})
-    assert not r["ok"] and r["refused"] == "phase2"
-    assert "phase 2" in r["error"] and "office-pc" in r["error"]
-    # no identity at all: refused too (a scan is accepted only from this PC)
     r = raw(srv, {"cmd": "submit", "recipe": json.loads(recipe().to_json())})
-    assert not r["ok"] and r["refused"] == "phase2"
+    assert not r["ok"] and r["refused"] == "identity"
     # ... watching works from anywhere
     c = client(srv)
     c.submit(recipe(num=30))
@@ -355,7 +354,7 @@ def test_shutdown_while_running_aborts_saves_and_stops(server, client):
 def test_status_works_with_no_client_and_describe_is_honest(server):
     srv = server()
     st = srv.status_payload()
-    assert st["state"] == "idle" and st["phase"] == 1 and "control" in st
+    assert st["state"] == "idle" and st["phase"] == 2 and "control" in st
     d = raw(srv, {"cmd": "describe"})["describe"]
     assert d["module"] == "scanserver"
     ids = {p["id"] for p in d["parameters"]}

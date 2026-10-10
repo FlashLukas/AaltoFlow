@@ -299,23 +299,30 @@ frame (`last_deep()`).
   `# VERIFY`) and the VNA streaming (traces + single points, 2026-10-09) are
   simulation-only until their instruments are connected again.
 
-- **Scan server, phase 2** (phase 1 DONE 2026-10-05, branch `scan-server`:
-  the scan engine as a service, `scan_core/scan_server.py`; start a scan on
-  the lab PC, watch / abort / answer it from any PC -- scan-core README "The
-  scan server", developer notes 4f). MIRROR DONE 2026-10-06: a watcher sees
-  the queue, every scan's run info and definition (copy to its Scan tab) and
-  follows the lab's plot choice. Phase 2: (a) DEFINE and SUBMIT scans
-  from the office: the Scan tab must then build against the SERVER's
-  registry (its parameters and live limits, not this PC's), the submit
-  rule "same PC only" is replaced by control, and the run info comes from
-  the submitting PC; (b) EDIT a running queue: add, remove and reorder the
-  scans not yet started (verbs like `queue_add` / `queue_remove` /
-  `queue_move` against the server's queue); (c) maybe: fetch a finished
-  file from the server (today only its path on the server's PC is shown);
-  (d) the run info card and per-point box are still shown while watching,
-  though they only matter when submitting -- hide them in watch-only mode.
-  On hardware since 2026-10-06: scans with the AFG + scope on the lab PC's
-  server, watched from the office over 5551; Pause / Resume (2026-10-07).
+- **Scan server** -- phase 1 DONE 2026-10-05 (the scan engine as a service,
+  `scan_core/scan_server.py`; watch / abort / answer from any PC), MIRROR
+  DONE 2026-10-06, **phase 2 DONE 2026-10-10** (scan-core README "The scan
+  server", developer notes 4f): define and submit from another PC under the
+  CONTROL rule (the "same PC only" rule is gone), the run info of the
+  submitting PC, the server's registry and live limits decide; editing a
+  running queue (`queue_add` / `queue_remove` / `queue_move`, `queue_rev`);
+  "Copy to this PC" for a finished file; the run info card and per-point box
+  only while the suite may submit. On hardware since 2026-10-06 (AFG + scope
+  on the lab PC's server, watched from the office over 5551); phase 2 is
+  simulation-tested only -- first real try: submit from the office with
+  control, add a scan to a running queue, copy the file. Still open:
+  * the watching suite's Scan tab builds against the lab's instruments only
+    when the server reports them (`instruments` in its status, i.e. a
+    server that follows the launcher); a server started with a FIXED
+    registry (`--sim`) exposes no parameter list, so the watcher's Scan tab
+    shows its own simulator and only the server's verdict at submit is the
+    lab's. A `get_registry` verb (the server's parameter manifest) would
+    close that gap;
+  * inserting at a chosen place from the GUI: "+ Add to queue" (and a
+    queue loaded with Load scan... while the server is busy) appends; Up /
+    Down then place it. The verb takes an `index` already;
+  * the lab PC's own suite (run on its server) still has no queue card --
+    queue edits there go through a watcher view or a script.
 
 - **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
   suite's Catalogue tab, `scan_core/catalogue.py`, `python -m

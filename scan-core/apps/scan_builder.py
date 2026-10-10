@@ -4501,11 +4501,18 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: ServerWatch), or None: scans run in this window, exactly as before.
         #: While one is attached, the pane shows the SERVER's scan -- progress,
         #: live map, banners -- and Abort / Stop queue / the banners' buttons go
-        #: to the server. Run submits there only when `server_submit` is True
-        #: (the scan server of THIS PC, and the suite's "Run scans on the scan
-        #: server" setting on): starting scans from another PC is phase 2.
+        #: to the server. Run submits there only when `server_submit` is True:
+        #: on the server's own PC with the suite's "Run scans on this PC's scan
+        #: server" setting on; on ANOTHER PC (phase 2, 2026-10-10) while this
+        #: suite holds control of the server, or nobody does.
         self.server = None
-        self.server_submit = False
+        self._may_submit_flag = False
+        #: True when the attached server runs on THIS PC (this suite is the
+        #: lab's own: it publishes its view, and has no queue card to mirror)
+        self._server_local = False
+        #: the host's way of copying a server file to this PC and opening it
+        #: (suite: lab_files.FileFetcher -> Data tab); None = not offered
+        self.on_fetch_file = None
         self._server_faults = None
         self._server_answered: tuple[str, float] = ("", 0.0)
         #: the host's part of a published view (suite: the Control tab's panel)
@@ -5042,6 +5049,41 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.copy_def_btn.setEnabled(False)
         head.addWidget(self.copy_def_btn)
         v.addLayout(head)
+        # PHASE 2 (2026-10-10): edit the RUNNING queue from here -- add this
+        # Scan tab's definition, remove / move a scan that has not started --
+        # and copy a finished scan's file to this PC. The edits need control
+        # of the server (the server checks; the buttons only follow it).
+        qrow = QtWidgets.QHBoxLayout()
+        self.queue_add_btn = QtWidgets.QPushButton("+ Add to queue")
+        self.queue_add_btn.setToolTip(
+            "Add the definition on THIS PC's Scan tab to the end of the running\n"
+            "queue, with this PC's run info (sample, operator, ...). Checked\n"
+            "against the scan server's instruments and limits first.\n"
+            "Needs control of the scan server (or nobody holding it).")
+        self.queue_add_btn.clicked.connect(self._queue_add_clicked)
+        self.queue_remove_btn = QtWidgets.QPushButton("Remove")
+        self.queue_remove_btn.setToolTip(
+            "Take the selected scan out of the queue. Only a scan that has not\n"
+            "started: the running one is ended with Abort.")
+        self.queue_remove_btn.clicked.connect(self._queue_remove_clicked)
+        self.queue_up_btn = QtWidgets.QPushButton("Up")
+        self.queue_up_btn.setToolTip("Run the selected waiting scan one place earlier.")
+        self.queue_up_btn.clicked.connect(lambda: self._queue_move_clicked(-1))
+        self.queue_down_btn = QtWidgets.QPushButton("Down")
+        self.queue_down_btn.setToolTip("Run the selected waiting scan one place later.")
+        self.queue_down_btn.clicked.connect(lambda: self._queue_move_clicked(+1))
+        self.fetch_btn = QtWidgets.QPushButton("Copy to this PC")
+        self.fetch_btn.setToolTip(
+            "Copy the selected finished scan's file (or, with none selected, the\n"
+            "last one saved) from the scan server's PC to this PC, and open it in\n"
+            "the Data tab. The original stays where it was saved.")
+        self.fetch_btn.clicked.connect(self._fetch_clicked)
+        for b in (self.queue_add_btn, self.queue_remove_btn, self.queue_up_btn,
+                  self.queue_down_btn):
+            qrow.addWidget(b)
+        qrow.addStretch(1)
+        qrow.addWidget(self.fetch_btn)
+        v.addLayout(qrow)
         self.server_tree = QtWidgets.QTreeWidget()
         self.server_tree.setHeaderHidden(True)
         self.server_tree.setRootIsDecorated(True)
@@ -5049,8 +5091,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.server_tree.itemCollapsed.connect(lambda *_: self._size_server_tree())
         self.server_tree.setToolTip("Every scan the server was given, in order. Open one\n"
                                     "(the arrow) to read its run info and definition.")
-        self.server_tree.currentItemChanged.connect(
-            lambda *_: self.copy_def_btn.setEnabled(self._selected_server_entry() is not None))
+        self.server_tree.currentItemChanged.connect(lambda *_: self._sync_queue_buttons())
         v.addWidget(self.server_tree)
         box.hide()
         self.server_box = box
@@ -5101,7 +5142,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         v.addWidget(self.run_info)
 
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("per-point (s)"))
+        self.per_pt_lbl = QtWidgets.QLabel("per-point (s)")
+        row.addWidget(self.per_pt_lbl)
         self.per_pt = QtWidgets.QDoubleSpinBox(); self.per_pt.setRange(0.0, 100); self.per_pt.setDecimals(3)
         self.per_pt.setValue(0.05); self.per_pt.valueChanged.connect(lambda *_: self._rebuild_summary())
         row.addWidget(self.per_pt)
@@ -6004,7 +6046,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.refresh_axis_limits()
         recipe = self.build_recipe()
         errs = recipe.validate(self.registry)
-        if errs or not self.rows:
+        if not self.rows or (errs and not self._server_judges()):
             self._rebuild_summary(); return
         if self.server is not None and not block:
             # the run pane shows a SCAN SERVER: the scan runs THERE
@@ -6090,6 +6132,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.refresh_axis_limits()
         problems = scan_queue.validate_queue(entries, self.registry)
         bad = [f"{e.name}: {'; '.join(errs)}" for e, errs in zip(entries, problems) if errs]
+        if bad and self._server_judges():
+            bad = []                 # the scan server checks it against ITS registry
         if not entries or bad:
             self.detail.setText("queue NOT started -- " + (" | ".join(bad) or "it is empty"))
             return False
@@ -6204,21 +6248,37 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.queue_lbl.setText(text)
 
     # ---- a SCAN SERVER (scan_core/scan_server.py) ------------------------------
-    def attach_server(self, watch, can_submit: bool = False) -> None:
+    @property
+    def server_submit(self) -> bool:
+        """Run (and a loaded queue, and the queue edits) go to the attached
+        scan server. Setting it re-shows what only matters when submitting."""
+        return self._may_submit_flag
+
+    @server_submit.setter
+    def server_submit(self, on: bool) -> None:
+        on = bool(on)
+        if on != self._may_submit_flag:
+            self._may_submit_flag = on
+            if self.server is not None:
+                self._sync_server_mode()
+
+    def attach_server(self, watch, can_submit: bool = False, local: bool | None = None) -> None:
         """Show the scan of a scan server (apps/scan_server_view.ServerWatch)
-        in this run pane. `can_submit`: Run (and a loaded queue) go to it."""
+        in this run pane. `can_submit`: Run (and a loaded queue) go to it.
+        `local`: the server runs on this PC (default: ask the watch)."""
         from apps.scan_server_view import ServerFaults
+        if self.server is watch:
+            # the same server again (a setting changed): only the mode moves --
+            # connecting the signals twice would draw everything twice
+            self._server_local = bool(watch.is_local() if local is None else local)
+            self.server_submit = can_submit
+            self._sync_server_mode()
+            return
         self.server = watch
-        self.server_submit = bool(can_submit)
+        self._may_submit_flag = bool(can_submit)
+        self._server_local = bool(watch.is_local() if local is None else local)
         self._server_faults = ServerFaults(watch)
         self._server_answered = ("", 0.0)
-        self.run_btn.setEnabled(self.server_submit)
-        self.run_btn.setToolTip(
-            "Run this scan ON THE SCAN SERVER of this PC: it keeps running when\n"
-            "this window closes, and any PC can watch it." if self.server_submit else
-            "This pane is watching a scan server. Starting scans from here is\n"
-            "phase 2: stop watching (Settings tab) to run scans in this window,\n"
-            "or tick 'Run scans on this PC's scan server' on the scan server's PC.")
         self.abort_btn.setEnabled(False)
         self._show_pause_state(False, enabled=False)
         self.save_lbl.setText(f"watching the scan server on {watch.label}")
@@ -6227,34 +6287,78 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._server_tree_key = None
         watch.scan_info.connect(self._on_server_scan)
         watch.view.connect(self._on_server_view)
-        self.server_box.setVisible(not self.server_submit)
-        # this PC's own name and run info belong to scans run HERE; next to a
-        # scan of the lab they would read as its name and sample. The lab's own
-        # are in the ON THE SCAN SERVER card.
-        for w in (self.name_lbl, self.name_edit, self.run_info):
-            w.setVisible(self.server_submit)
+        self._sync_server_mode()
+        if not self._server_local and self.follow_view_box.isChecked() \
+                and getattr(watch, "last_view", None):
+            self._on_server_view(watch.last_view)
+
+    def _sync_server_mode(self) -> None:
+        """What the pane shows for the attached server, from two facts: is it
+        THIS PC's server, and may this suite submit to it (server_submit).
+
+        (d) of phase 2: this PC's scan name, RUN INFO and per-point time only
+        matter for a scan started HERE -- next to a scan of the lab they
+        would read as its name and sample (the lab's own are in the ON THE
+        SCAN SERVER card). So they are shown exactly while this suite may
+        submit: on the lab PC with "Run scans on this PC's scan server", on
+        another PC while it holds control of the server (or nobody does)."""
+        if self.server is None:
+            return
+        submit, local = self.server_submit, self._server_local
+        busy = bool((self.server.last or {}).get("busy"))
+        self.run_btn.setEnabled(submit and not busy)
+        if submit and local:
+            tip = ("Run this scan ON THE SCAN SERVER of this PC: it keeps running when\n"
+                   "this window closes, and any PC can watch it.")
+        elif submit:
+            tip = ("Run this scan ON THE SCAN SERVER you are watching: it runs on that\n"
+                   "PC with its instruments, is saved there (Copy to this PC fetches\n"
+                   "the file), and carries this PC's run info. The server checks it\n"
+                   "against its own instruments and limits.")
+        elif local:
+            tip = ("This pane is watching this PC's scan server. Tick 'Run scans on\n"
+                   "this PC's scan server' (Settings tab) to start scans there.")
+        else:
+            tip = ("This pane is watching a scan server on another PC, and another PC\n"
+                   "holds control of it. 'Take control' (above) to start scans here.")
+        self.run_btn.setToolTip(tip)
+        # the queue card mirrors what the server runs: not needed on the lab
+        # PC's own suite while it is the one submitting (it IS the lab)
+        self.server_box.setVisible(not (local and submit))
+        for w in (self.name_lbl, self.name_edit, self.run_info, self.per_pt_lbl, self.per_pt):
+            w.setVisible(submit)
         self._fill_server_tree()
-        if self.server_submit:
+        self._sync_queue_buttons()
+        if local and submit:
             # the suite ON the server's PC tells watchers what it shows
             if not self._view_published:
                 self.view.view_changed.connect(self._publish_view)
                 self._view_published = True
             self._publish_view()
-        elif self.follow_view_box.isChecked() and getattr(watch, "last_view", None):
-            self._on_server_view(watch.last_view)
+        elif self._view_published:
+            self.view.view_changed.disconnect(self._publish_view)
+            self._view_published = False
 
     def detach_server(self) -> None:
         """Back to running scans in this window."""
         if self._view_published:
             self.view.view_changed.disconnect(self._publish_view)
             self._view_published = False
+        if self.server is not None:
+            for sig, slot in ((self.server.scan_info, self._on_server_scan),
+                              (self.server.view, self._on_server_view)):
+                try:
+                    sig.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
         self.server_box.hide()
-        for w in (self.name_lbl, self.name_edit, self.run_info):
+        for w in (self.name_lbl, self.name_edit, self.run_info, self.per_pt_lbl, self.per_pt):
             w.show()
         self._server_scan = {}
         self.server_tree.clear()
         self.server = None
-        self.server_submit = False
+        self._may_submit_flag = False
+        self._server_local = False
         self._server_faults = None
         self._on_paused([])
         self._on_ask("", None)
@@ -6283,17 +6387,29 @@ class ScanBuilder(QtWidgets.QMainWindow):
         return ok
 
     def _server_submit(self, recipe=None, entries=None) -> bool:
-        """Run on the server (phase 1: the scan server of this PC only)."""
+        """Run on the server: this PC's (with the setting on), or -- phase 2 --
+        a watched server on another PC while this suite may submit (control).
+        The run info is THIS PC's Run info card; the server validates the
+        scan against ITS instruments and saves the file on ITS PC."""
         if not self.server_submit:
             self.detail.setText(
-                "this pane is watching a scan server on another PC -- starting scans "
-                "there is phase 2. Stop watching (Settings tab) to run in this window.")
-            return False
-        if (self.server.last or {}).get("busy"):
-            self.detail.setText("the scan server is already running a scan -- wait for it, "
-                                "or Abort it first")
+                "Run is not available here: on the scan server's PC tick 'Run scans "
+                "on this PC's scan server' (Settings tab); on another PC take control "
+                "of the server first (another PC holds it). Stop watching to run "
+                "in this window.")
             return False
         attrs = self.run_info.attrs()
+        st = self.server.last or {}
+        if st.get("busy"):
+            # a queue (Load scan... with several files) while the server runs:
+            # it goes to the END of the running queue (phase 2) instead of
+            # being refused -- unless that queue is already stopping
+            if entries is not None and not (st.get("queue") or {}).get("stop_reason"):
+                return self._server_cmd(f"add {len(entries)} scans to the running queue",
+                                        self.server.queue_add, entries, None, attrs)
+            self.detail.setText("the scan server is already running a scan -- wait for it, "
+                                "Abort it, or add yours with '+ Add to queue'")
+            return False
         if entries is not None:
             ok = self._server_cmd(f"queue of {len(entries)} scans",
                                   self.server.submit_queue, entries, attrs)
@@ -6305,6 +6421,102 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.abort_btn.setEnabled(True)
             self._show_pause_state(False, enabled=True)
         return ok
+
+    def _server_judges(self) -> bool:
+        """True when a scan goes to a scan server on ANOTHER PC. Its own
+        registry -- the instruments it drives, with their live limits -- is
+        the one that counts: this window's copy (the mirrored instruments) is
+        the same services under the same names, but may lag a module that
+        just (re)started there, so the server's verdict decides, and its
+        refusal is shown here word for word."""
+        return self.server is not None and self.server_submit and not self._server_local
+
+    # ---- editing the server's RUNNING queue (phase 2) -----------------------
+    def _queue_entry(self, i):
+        entries = (self._server_scan or {}).get("entries") or []
+        return entries[i] if i is not None and 0 <= i < len(entries) else None
+
+    def _waiting(self, i) -> bool:
+        """The i-th scan of the server's queue has not started (editable)."""
+        st = (self.server.last or {}) if self.server is not None else {}
+        e = self._queue_entry(i)
+        if e is None or not st.get("busy") or e.get("result"):
+            return False
+        pos = int((st.get("queue") or {}).get("pos") or 0) - 1
+        return i > pos
+
+    def _sync_queue_buttons(self) -> None:
+        if not hasattr(self, "queue_add_btn"):
+            return
+        st = (self.server.last or {}) if self.server is not None else {}
+        busy = bool(st.get("busy"))
+        stopping = bool((st.get("queue") or {}).get("stop_reason"))
+        may = self.server is not None and self.server_submit
+        i = self._selected_server_entry(strict=True)
+        n = len((self._server_scan or {}).get("entries") or [])
+        waiting = may and self._waiting(i)
+        self.queue_add_btn.setEnabled(may and busy and not stopping)
+        self.queue_remove_btn.setEnabled(waiting)
+        self.queue_up_btn.setEnabled(waiting and self._waiting(i - 1))
+        self.queue_down_btn.setEnabled(waiting and i is not None and i + 1 < n)
+        self.fetch_btn.setEnabled(self.on_fetch_file is not None
+                                  and bool(self._fetch_target()))
+        self.copy_def_btn.setEnabled(self._selected_server_entry() is not None)
+        for b in (self.queue_add_btn, self.queue_remove_btn, self.queue_up_btn,
+                  self.queue_down_btn):
+            b.setVisible(may)
+
+    def _queue_add_clicked(self) -> bool:
+        """This Scan tab's definition, at the end of the server's running queue."""
+        if self.server is None or not self.server_submit:
+            return False
+        self.refresh_axis_limits()
+        recipe = self.build_recipe()
+        if not self.rows:
+            self.detail.setText("nothing to add: the axis stack on the Scan tab is empty")
+            return False
+        return self._server_cmd(f"add '{recipe.name}' to the queue", self.server.queue_add,
+                                recipe, None, self.run_info.attrs())
+
+    def _queue_remove_clicked(self) -> bool:
+        i = self._selected_server_entry(strict=True)
+        e = self._queue_entry(i)
+        if e is None or self.server is None:
+            return False
+        return self._server_cmd(f"remove '{e.get('name')}' from the queue",
+                                self.server.queue_remove, e.get("id"))
+
+    def _queue_move_clicked(self, step: int) -> bool:
+        i = self._selected_server_entry(strict=True)
+        e = self._queue_entry(i)
+        if e is None or self.server is None:
+            return False
+        self._keep_selected_id = e.get("id")      # the moved scan stays selected
+        return self._server_cmd(f"move '{e.get('name')}' {'up' if step < 0 else 'down'}",
+                                self.server.queue_move, e.get("id"), i + step)
+
+    def _fetch_target(self):
+        """(relative path on the server, name) of the file Copy to this PC
+        takes: the selected finished scan, else the last one saved."""
+        entries = (self._server_scan or {}).get("entries") or []
+        i = self._selected_server_entry(strict=True)
+        if i is not None and 0 <= i < len(entries):
+            e = entries[i]
+            return (e.get("rel_path"), e.get("name")) if e.get("rel_path") else None
+        for e in reversed(entries):
+            if e.get("rel_path"):
+                return e["rel_path"], e.get("name")
+        return None
+
+    def _fetch_clicked(self):
+        target = self._fetch_target()
+        if not target or self.on_fetch_file is None:
+            return None
+        rel, name = target
+        msg = f"copying '{name}' from the scan server's PC ..."
+        self.detail.setText(msg)
+        self.run_log.append(msg)
+        return self.on_fetch_file(rel)
 
     def _server_answer(self, value) -> None:
         """The operator banner's buttons, for a question the SERVER asks."""
@@ -6368,6 +6580,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # buttons: Abort while anything runs; Run only when we may submit
         self.abort_btn.setEnabled(busy)
         self.run_btn.setEnabled(self.server_submit and not busy)
+        self._sync_queue_buttons()
         # Pause follows the SERVER's flag (whoever pressed it). Pause is a
         # safety verb like Abort (enabled while busy, for every PC); Resume
         # needs control, so it is only offered when the server would take it
@@ -6408,7 +6621,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """What this PC shows -- the plot, plus whatever the host adds
         (`view_extra`: the suite adds its Control tab's panel) -- to the
         scan server, for the PCs watching it."""
-        if self.server is None or not self.server_submit:
+        if self.server is None or not (self.server_submit and self._server_local):
             return
         view = {"plot": self.view.view_state() if self.view.ds is not None else None}
         if self.view_extra is not None:
@@ -6416,7 +6629,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.server.set_view(view)
 
     def _on_server_view(self, reply):
-        if self.server is None or self.server_submit or not self.follow_view_box.isChecked():
+        # the lab's own suite publishes, never follows (it IS the lab); a
+        # watcher on another PC follows even while it may submit (phase 2)
+        if self.server is None or (self.server_submit and self._server_local) \
+                or not self.follow_view_box.isChecked():
             return
         view = (reply or {}).get("view") if isinstance(reply, dict) else None
         if not view:
@@ -6449,13 +6665,21 @@ class ScanBuilder(QtWidgets.QMainWindow):
         results = {i: r for i, r in enumerate(q.get("results") or [])}
         busy = bool(st.get("busy"))
         pos = int(q.get("pos") or 0) - 1 if busy else -1
-        key = (self._server_scan.get("scan_rev"), pos, busy,
-               tuple(tuple(r) for r in (q.get("results") or [])))
+        key = (self._server_scan.get("scan_rev"), self._server_scan.get("queue_rev"),
+               pos, busy, tuple(tuple(r) for r in (q.get("results") or [])))
         if key == self._server_tree_key:
             return
         self._server_tree_key = key
-        keep = self._selected_server_entry()
-        expanded = {self.server_tree.topLevelItem(k).data(0, QtCore.Qt.UserRole)
+        # what was selected and opened is remembered by the scan's ID: a queue
+        # edit moves scans, and the scan that was open must stay open
+        ID = QtCore.Qt.UserRole + 1
+        keep = getattr(self, "_keep_selected_id", None)
+        self._keep_selected_id = None
+        cur = self.server_tree.currentItem()
+        if keep is None and cur is not None:
+            top_cur = cur.parent() or cur
+            keep = top_cur.data(0, ID)
+        expanded = {self.server_tree.topLevelItem(k).data(0, ID)
                     for k in range(self.server_tree.topLevelItemCount())
                     if self.server_tree.topLevelItem(k).isExpanded()}
         if self._server_scan.get("scan_rev") != getattr(self, "_server_tree_rev", None):
@@ -6471,11 +6695,15 @@ class ScanBuilder(QtWidgets.QMainWindow):
         for i, e in enumerate(entries):
             res = results.get(i)
             mark = ("running" if i == pos else
-                    (res[1] if res else ("waiting" if busy and i > pos else "")))
+                    (e.get("result") or (res[1] if res else
+                                         ("waiting" if busy and i > pos else ""))))
             n = f"{e.get('n_points')} pts" if e.get("n_points") else ""
-            label = "  ·  ".join(x for x in (f"{i + 1}. {e.get('name', 'scan')}", mark, n) if x)
+            added = f"added by {e['added_by']}" if e.get("added_by") else ""
+            label = "  ·  ".join(x for x in (f"{i + 1}. {e.get('name', 'scan')}", mark, n,
+                                             added) if x)
             top = QtWidgets.QTreeWidgetItem(self.server_tree, [label])
             top.setData(0, QtCore.Qt.UserRole, i)
+            top.setData(0, ID, e.get("id", i))
             if i == pos:
                 top.setForeground(0, QtGui.QBrush(QtGui.QColor(C["accent"])))
             section = None
@@ -6490,11 +6718,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
             if by and i == 0:
                 it = QtWidgets.QTreeWidgetItem(top, [f"started by {by}"])
                 it.setData(0, QtCore.Qt.UserRole, i)
-            if i in expanded:
+            if e.get("rel_path"):
+                it = QtWidgets.QTreeWidgetItem(top, [f"    file on the server: {e['rel_path']}"])
+                it.setData(0, QtCore.Qt.UserRole, i)
+            if e.get("id", i) in expanded:
                 top.setExpanded(True)       # what the operator opened stays open
-            if keep is not None and keep == i:
+            if keep is not None and keep == e.get("id", i):
                 self.server_tree.setCurrentItem(top)
-        self.copy_def_btn.setEnabled(self._selected_server_entry() is not None)
+        self._sync_queue_buttons()
         self._size_server_tree()
 
     def _size_server_tree(self):
@@ -6509,9 +6740,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
         h = tree.sizeHintForRow(0) if tree.topLevelItemCount() else 18
         tree.setFixedHeight(min(SERVER_TREE_MAX, max(1, rows) * max(h, 16) + 6))
 
-    def _selected_server_entry(self) -> int | None:
+    def _selected_server_entry(self, strict: bool = False) -> int | None:
+        """The index of the selected scan of the server's queue. Not
+        `strict`: with nothing selected, a queue of one counts as selected
+        (Copy to Scan tab); the queue edits want an explicit choice."""
         it = self.server_tree.currentItem()
         if it is None:
+            if strict:
+                return None
             entries = (self._server_scan or {}).get("entries") or []
             return 0 if len(entries) == 1 else None
         i = it.data(0, QtCore.Qt.UserRole)

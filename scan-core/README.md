@@ -942,7 +942,7 @@ starts; **Stop queue** ends all of it; an error stops the queue.
 
 ![a queue running](../front-panels/suite-queue.png)
 
-## The scan server: start on the lab PC, watch from the office
+## The scan server: start on the lab PC, watch -- and run -- from the office
 
 Normally a scan runs inside the measurement suite's window: close the window
 and it stops, sit at another PC and you see nothing. The **scan server** runs
@@ -983,22 +983,40 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
    plot follows the lab's choice of detector, X / Y, held slices and colour
    range; untick it to look at something else -- the lab's screen never
    changes either way.
+4. **Start scans from the office**: while your suite holds control of the
+   server (the header's **Take control**) -- or nobody holds it -- **Run**
+   on the Scan tab starts the scan ON THE LAB PC: the Scan tab shows the
+   lab's instruments, their units and live limits; the server checks the
+   scan against its own instruments before it starts (a refusal is shown in
+   full); the file gets the run info typed HERE (the RUN INFO card shows up
+   exactly when you may start scans) and is saved on the lab PC.
+5. **Edit the running queue** on the ON THE SCAN SERVER card: **+ Add to
+   queue** puts this Scan tab's definition at the end, **Remove** / **Up** /
+   **Down** change the scans that have not started (the running one is
+   ended with Abort). Every watcher sees the change at once; the server's
+   log says who made it. A queue loaded with Load scan... while the server
+   is busy goes to the end of the running queue too.
+6. **Copy to this PC** on a finished scan (or, with none selected, the last
+   one saved) brings a copy of its file here and opens it in the Data tab.
 
 ![the Measurement tab watching a scan server](../front-panels/suite-watch.png)
 
+![watching from another PC with control: queue editing, run info](../front-panels/suite-watch-remote.png)
+
 **Who may do what.** Watching is free for everyone. **Abort** and **Stop
 queue** are always allowed, from every PC (safety -- like a stage's STOP).
-Answering a pause, clearing a fault and starting scans follow control: when
-another PC holds control of the server they are refused; the header's
-**Take control** takes it (asking first if someone else has it). Starting a
-scan is possible from the server's own PC only -- that is phase 2 (see
-docs/ROADMAP.md), as is editing a running queue. Stopping the Scan server card
+Starting scans, editing the queue, Resume, answering a pause and clearing a
+fault follow control -- from any PC: when another PC holds control of the
+server they are refused; the header's **Take control** takes it (asking first
+if someone else has it). On the lab PC itself, Run goes to the server only
+with *Run scans on this PC's scan server* ticked. Stopping the Scan server card
 while it runs a scan asks first, then aborts the scan (the points so far are
 saved, the after-scan routine runs) and exits.
 
 From a script or a console the same works with
 `scan_core.scan_server_client.ScanServerClient` (`submit`, `status`,
-`get_live`, `abort`, ...). Details: docs/DEVELOPER_NOTES.md, section 4f.
+`get_live`, `abort`, `queue_add`, `queue_remove`, `queue_move`, `download`,
+...). Details: docs/DEVELOPER_NOTES.md, section 4f.
 
 ## Run info, instrument snapshots, and recalling settings
 

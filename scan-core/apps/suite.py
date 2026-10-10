@@ -143,6 +143,11 @@ class Suite(QtWidgets.QMainWindow):
                                            "scan": self.builder.definition_state(),
                                            "nav": self.navigator.nav_state()}
         self.builder.on_server_view = self._on_server_view_extra
+        # phase 2: "Copy to this PC" on a finished scan of a watched server
+        from apps.lab_files import FileFetcher
+        self._fetcher = FileFetcher(self)
+        self._fetcher.done.connect(self._fetched_lab_file)
+        self.builder.on_fetch_file = self.fetch_lab_file
         self.control.panel_changed.connect(self.builder._publish_view)
         self.builder.definition_changed.connect(self.builder._publish_view)
         self.navigator = NavigatorWidget(on_log=self.log, is_busy=self.scan_running)
@@ -283,9 +288,10 @@ class Suite(QtWidgets.QMainWindow):
         sh.addWidget(self.server_ctrl_lbl, 1)
         self.server_ctrl_btn = QtWidgets.QPushButton("Take control")
         self.server_ctrl_btn.setToolTip(
-            "Control of the scan server: who may answer its pause questions, clear\n"
-            "faults and start scans. Abort and Stop queue are always allowed, for\n"
-            "every PC. Nobody holding control = everyone may act.")
+            "Control of the scan server: who may start scans, edit the running\n"
+            "queue, resume, answer its pause questions and clear faults -- from\n"
+            "any PC. Abort, Pause and Stop queue are always allowed, for every PC.\n"
+            "Nobody holding control = everyone may act.")
         self.server_ctrl_btn.clicked.connect(self._server_control_clicked)
         sh.addWidget(self.server_ctrl_btn)
         unwatch = QtWidgets.QPushButton("Stop watching")
@@ -466,7 +472,9 @@ class Suite(QtWidgets.QMainWindow):
     # A scan server runs scans in its own process on the lab PC; this window
     # can WATCH one (phase 1): its Measurement tab then shows the server's
     # scan with the same widgets as a scan of its own. On the server's own PC,
-    # with "Run scans on this PC's scan server" ticked, Run submits there.
+    # with "Run scans on this PC's scan server" ticked, Run submits there; on
+    # another PC (phase 2) Run submits while this suite holds control of the
+    # server (or nobody does), and the queue card edits the running queue.
 
     def watch_server(self, target: str) -> ServerWatch | None:
         """Show the scan of the server at 'host[:cmd[:pub]]' on the Measurement tab."""
@@ -507,7 +515,40 @@ class Suite(QtWidgets.QMainWindow):
                      f"(its scan, if any, goes on)")
 
     def _may_submit(self, w) -> bool:
-        return bool(self.run_on_server_box.isChecked() and w is not None and w.is_local())
+        """May Run (and a queue, and queue edits) go to the watched server?
+
+        On the server's own PC: when "Run scans on this PC's scan server" is
+        ticked (off = scans run in this window, the old behaviour). On ANOTHER
+        PC (phase 2, Lukas 2026-10-10: define and submit from the office):
+        while this suite holds control of the server, or nobody does -- the
+        same rule the server enforces (ControlLease), so the Run button never
+        offers what the server would refuse."""
+        if w is None:
+            return False
+        if w.is_local():
+            return bool(self.run_on_server_box.isChecked())
+        return w.may_submit()
+
+    def fetch_lab_file(self, rel: str):
+        """Copy a file of the watched server's data folder to this PC (a
+        cache folder) and open it in the Data tab when it has arrived."""
+        if self.watch is None:
+            return None
+        dest = self._fetcher.fetch(self.watch, rel)
+        if dest is None:
+            self.log("a copy from the scan server is already running -- wait for it")
+            return None
+        self.log(f"copying {rel} from the scan server's PC ...")
+        return dest
+
+    def _fetched_lab_file(self, path, err: str) -> None:
+        if path is None:
+            self.log(f"copy from the scan server failed: {err}")
+            self.builder.detail.setText(f"could not copy the file: {err}")
+            return
+        self.log(f"copied to {path}")
+        self.builder.detail.setText(f"copied to this PC: {path}")
+        self.open_in_viewer(path)
 
     def _local_server_target(self) -> str | None:
         found = self.found or discover(self.root)
@@ -535,9 +576,10 @@ class Suite(QtWidgets.QMainWindow):
                      "Mission Control if it is not running)")
             self._watch_local_server()
         elif self.watch is not None:
-            self.builder.attach_server(self.watch, can_submit=False)
-            self.log("Run no longer goes to the scan server (still watching it; "
-                     "'Stop watching' to run scans in this window)")
+            self.builder.server_submit = self._may_submit(self.watch)
+            if self.watch.is_local():
+                self.log("Run no longer goes to the scan server (still watching it; "
+                         "'Stop watching' to run scans in this window)")
 
     def _watch_clicked(self) -> None:
         text = self.watch_edit.text().strip()
@@ -646,7 +688,11 @@ class Suite(QtWidgets.QMainWindow):
             return
         if isinstance(view.get("panel"), dict):
             self.control.apply_panel_state(view["panel"])
-        if isinstance(view.get("scan"), dict) and not self.scan_running():
+        # the lab's Scan-tab definition is followed -- but not while THIS PC
+        # holds control of the server: then this PC is the one defining scans
+        # (phase 2), and the lab's edits must not overwrite them
+        mine = self.watch is not None and self.watch.control_text()[0] == "you"
+        if isinstance(view.get("scan"), dict) and not self.scan_running() and not mine:
             missing = self.builder.apply_definition(view["scan"])
             if missing:
                 self._note("the lab's scan names parameters not connected here: "
@@ -711,8 +757,12 @@ class Suite(QtWidgets.QMainWindow):
             text += "  --  NOT ANSWERING"
         self.server_lbl.setText(text)
         state, ctrl = w.control_text()
-        mode = ("Run starts scans on it" if self.builder.server_submit else
-                "watch only: starting scans from here is phase 2")
+        if self.builder.server_submit:
+            mode = "Run starts scans on it"
+        elif w.is_local():
+            mode = "watch only: tick 'Run scans on this PC's scan server' to start scans"
+        else:
+            mode = "watch only: take control to start scans from here"
         self.server_ctrl_lbl.setText(f"{ctrl}   ·   {mode}")
         self.server_ctrl_btn.setText("Release control" if state == "you" else "Take control")
 
@@ -845,7 +895,9 @@ class Suite(QtWidgets.QMainWindow):
             "A scan server runs scans in its own process (Mission Control: the 'Scan "
             "server' card). A scan there keeps running when this window closes, and any "
             "PC can watch it: progress, the live map, the log, the pause banners, Abort. "
-            "Starting scans works from the server's own PC (watching works from anywhere). "
+            "From another PC you can also start scans and edit the running queue while "
+            "you hold control of the server (or nobody does); the files stay on the "
+            "server's PC and 'Copy to this PC' fetches one. "
             "To watch the lab PC from the office: Mission Control > Add remote... with the "
             "lab PC's name and port 5551, then pick it below.")
         note3.setWordWrap(True); note3.setStyleSheet(f"color:{C['muted']};")

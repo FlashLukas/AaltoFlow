@@ -92,7 +92,7 @@ def test_watch_mode_shows_progress_live_map_log_and_header(qapp, rig):
     assert win.tabs.tabText(win.tabs.currentIndex()) == "Measurement"
     assert win.server_strip.isVisible() or not win.isVisible()   # offscreen: not shown
     assert "watching scan server on this PC" in win.server_lbl.text()
-    assert not b.run_btn.isEnabled()          # watch only: submitting is phase 2 here
+    assert not b.run_btn.isEnabled()          # this PC, setting off: watch only
     c.submit(recipe(num=80, dets=("slow",)), attrs={"sample": "S7"})
     pump(qapp, lambda: 0 < b.progress.value() < 80 and b.progress.maximum() == 80)
     assert b.abort_btn.isEnabled()

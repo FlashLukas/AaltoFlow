@@ -63,6 +63,7 @@ class ServerWatch(QtCore.QObject):
         self.why = "connecting ..."
         self._log_next = None                # None = only the tail on the first poll
         self._scan_rev = -1                  # what get_scan / get_view were last
+        self._queue_rev = -1                 # (queue_rev: any change of the list)
         self._view_rev = -1                  # fetched at (-1: fetch on first contact)
         self._design_rev = 0                 # 0 = none shared yet
         self.design_meta: dict | None = None  # the last design fetched (+ "path" here)
@@ -89,7 +90,9 @@ class ServerWatch(QtCore.QObject):
         return f"{self.host}:{self.cmd_port}"
 
     def is_local(self) -> bool:
-        """True when the server runs on THIS PC (so this suite may submit)."""
+        """True when the server runs on THIS PC: this suite is then the lab's
+        own (it publishes its view and Navigator design; it submits only with
+        "Run scans on this PC's scan server" ticked)."""
         if self.host.lower() in _LOCAL:
             return True
         pc = str(self.last.get("pc") or "")
@@ -143,9 +146,13 @@ class ServerWatch(QtCore.QObject):
         """Definitions and view are fetched only when their revision moved:
         a definition is a few kB, not something to send twice a second."""
         rev = st.get("scan_rev")
-        if rev is not None and int(rev) != self._scan_rev:
+        qrev = st.get("queue_rev")
+        if (rev is not None and int(rev) != self._scan_rev) or                 (qrev is not None and int(qrev) != self._queue_rev):
+            # a new submission, or an edit of the running queue (phase 2:
+            # added / removed / moved scans, a scan that finished)
             r = self._poll.get_scan()
-            self._scan_rev = int(r.get("scan_rev", rev))
+            self._scan_rev = int(r.get("scan_rev", rev if rev is not None else -1))
+            self._queue_rev = int(r.get("queue_rev", qrev if qrev is not None else -1))
             self.scan = r
             self.scan_info.emit(r)
         rev = st.get("design_rev")
@@ -230,6 +237,22 @@ class ServerWatch(QtCore.QObject):
 
     def submit_queue(self, entries, attrs=None):
         return self._do(self.client.submit_queue, entries, attrs=attrs)
+
+    # editing the RUNNING queue (phase 2): control, like submit
+    def queue_add(self, entries, index=None, attrs=None):
+        return self._do(self.client.queue_add, entries, index=index, attrs=attrs)
+
+    def queue_remove(self, entry_id: int):
+        return self._do(self.client.queue_remove, id=entry_id)
+
+    def queue_move(self, entry_id: int, to: int):
+        return self._do(self.client.queue_move, to, id=entry_id)
+
+    def may_submit(self) -> bool:
+        """Would the server take a scan (or a queue edit) from this suite?
+        Phase 2: whoever holds control of the server, or anyone while nobody
+        holds it -- from any PC (the ControlLease rule of every module)."""
+        return self.answering and self.control_text()[0] in ("you", "free")
 
     def set_view(self, view: dict) -> None:
         """Publish this suite's plot choice (sent at the next poll; only the
