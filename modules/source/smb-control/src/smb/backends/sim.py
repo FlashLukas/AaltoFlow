@@ -47,21 +47,21 @@ class SimulatedSMB100A:
         return self._output
 
     # ---- level -----------------------------------------------------------
-    def set_power(self, dBm: float) -> None:
+    def set_power(self, dBm: float, settle: bool = True) -> None:
         self._power = float(dBm)
 
     def read_power(self) -> float:
         return self._power
 
     # ---- frequency -------------------------------------------------------
-    def set_frequency(self, hz: float) -> None:
+    def set_frequency(self, hz: float, settle: bool = True) -> None:
         self._freq = float(hz)
 
     def read_frequency(self) -> float:
         return self._freq
 
     # ---- phase -----------------------------------------------------------
-    def set_phase(self, deg: float) -> None:
+    def set_phase(self, deg: float, settle: bool = True) -> None:
         self._phase = float(deg)
 
     def read_phase(self) -> float:

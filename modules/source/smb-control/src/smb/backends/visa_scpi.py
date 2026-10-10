@@ -109,9 +109,9 @@ class VisaSMB100A:
 
     # ---- small SCPI helpers ---------------------------------------------
 
-    def _write(self, cmd: str) -> None:
+    def _write(self, cmd: str, settle: bool = True) -> None:
         self._inst.write(cmd)
-        if self._settle_s:
+        if settle and self._settle_s:
             import time
             time.sleep(self._settle_s)
 
@@ -138,22 +138,25 @@ class VisaSMB100A:
         return self._query("OUTP:STAT?").strip() in ("1", "ON")
 
     # ---- level -----------------------------------------------------------
-    def set_power(self, dBm: float) -> None:
-        self._write(f"POW {dBm:.3f}")
+    def set_power(self, dBm: float, settle: bool = True) -> None:
+        self._write(f"POW {dBm:.3f}", settle)
 
     def read_power(self) -> float:
         return float(self._query("POW?"))
 
     # ---- frequency -------------------------------------------------------
-    def set_frequency(self, hz: float) -> None:
-        self._write(f"FREQ {hz:.3f}")
+    def set_frequency(self, hz: float, settle: bool = True) -> None:
+        # VERIFY on the unit, for SWEEPS: how long one FREQ write takes over
+        # GPIB and how long the SMB100A needs to settle (datasheet: a few ms);
+        # together they bound hardware.ramp_dt_s.
+        self._write(f"FREQ {hz:.3f}", settle)
 
     def read_frequency(self) -> float:
         return float(self._query("FREQ?"))
 
     # ---- phase -----------------------------------------------------------
-    def set_phase(self, deg: float) -> None:
-        self._write(f"PHAS {deg:.3f} DEG")
+    def set_phase(self, deg: float, settle: bool = True) -> None:
+        self._write(f"PHAS {deg:.3f} DEG", settle)
 
     def read_phase(self) -> float:
         value = float(self._query("PHAS?"))

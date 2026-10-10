@@ -14,9 +14,11 @@ dataclass `Config` with plain-text save/load, and a ZeroMQ service + client so a
 GUI, a console, or a coordinator can drive it over localhost or the lab network.
 
 The one big difference: the SMB100A is a **set-and-forget** instrument. There is
-no control loop, so there is no ramp, no PID, no calibration, and no state
-machine here — the `Generator` just holds the desired signal, clamps it to the
-safety limits, and pushes it to the box.
+no control loop, so there is no PID, no calibration, and no state machine
+here — the `Generator` just holds the desired signal, clamps it to the safety
+limits, and pushes it to the box. The one thing it does over time is a
+**sweep** (below): walking frequency, power or phase at a set pace, for fly
+scans.
 
 ## Ports (why they differ from the magnet)
 
@@ -68,7 +70,9 @@ Verbs: `set_rf`, `rf_off`, `set_power`, `set_frequency`, `set_phase`, plus the
 universal `status`, `info`, `get_config`, `set_config`, `describe`,
 `shutdown{keep_outputs?}` — a plain shutdown switches the RF off; with
 `keep_outputs: true` (a restart for a code update) the RF is left as it is and
-the next start adopts it.
+the next start adopts it. The sweeps add `ramp_frequency`, `ramp_power`,
+`ramp_phase`, `ramp_stop{knob?}` and `stream_start` / `stream_read` /
+`stream_stop` (section "Sweeps" below).
 
 ## Setup
 
@@ -124,6 +128,48 @@ uv run scripts/run_service.py --real --visa GPIB0::28::INSTR
 
 Point a client (the console or the GUI) at another machine with `--connect <host>`.
 
+## Sweeps (fly scans over frequency, power or phase)
+
+A fly scan (scan-core, `type: fly` axis) records the detectors while a knob
+moves CONTINUOUSLY and bins every sample by the value the knob had at that
+moment. The SMB100A jumps to the value it is told, so the **service walks the
+knob** in small steps (`softramp.py`, the suite's software ramp, copied byte
+for byte from suite-common): one `FREQ` / `POW` / `PHAS` every
+`hardware.ramp_dt_s` (50 ms), each value computed from the elapsed time, so a
+late step does not slow the sweep down.
+
+| verb | arguments | pace limits (config `[limits]`) |
+|---|---|---|
+| `ramp_frequency` | `frequency_Hz`, `rate_Hz_per_s` | `ramp_rate_min/max_Hz_per_s` (1 kHz/s .. 10 GHz/s) |
+| `ramp_power` | `power_dBm`, `rate_dB_per_s` | `ramp_rate_min/max_dB_per_s` (0.01 .. 100 dB/s) |
+| `ramp_phase` | `phase_deg`, `rate_deg_per_s` | `ramp_rate_min/max_deg_per_s` (0.01 .. 3600 deg/s) |
+| `ramp_stop` | `knob` (optional; none = every sweep) | a stop: a viewer may send it |
+
+- The reply carries the sweep's number (`ramp_id`); status shows
+  `<knob>_ramping`, `<knob>_ramp_id`, the target and the pace
+  (`frequency_ramp_target_Hz`, `power_ramp_rate_dB_per_s`, ...) and `ramping`
+  (any knob). The sweep is over when `<knob>_ramp_id` is yours and
+  `<knob>_ramping` is false.
+- A target or pace outside the limits is clamped, with a warning.
+- An ordinary `set_frequency` / `set_power` / `set_phase` takes that knob over
+  (stops its sweep); a set of another knob does not.
+- **The RF output is never switched by a sweep.**
+- The record: the stream verbs hand out every value each sweep SENT, one
+  channel per knob (`frequency`, `power`, `phase`, each with its own time
+  stamps in `t_ch`). describe declares a `ramp` block on each knob with
+  `readback.measured: false` -- **binned by command**. Why not read back:
+  `FREQ?` / `POW?` / `PHAS?` return the setting the box holds, not a
+  measurement, so they would only echo the number just sent and cost a GPIB
+  round trip per step. Sweep steps skip the backend's 50 ms settle pause
+  (`hardware.settle_s`), which exists for a read-back right after a set.
+- **VERIFY on the unit:** how long one write takes over GPIB and the SMB100A's
+  setting time (together they bound `ramp_dt_s`); which step attenuator the
+  unit has -- a mechanical one clicks at every switch point of a large power
+  sweep.
+
+The GUI's **Sweep** card does the same by hand: pick the knob, set the pace,
+"Sweep to" walks it to the value in that knob's box, "Stop" ends it.
+
 ## GUI
 
 A dark, amber-on-dark window in the same style as the magnet GUI, with a
@@ -148,7 +194,9 @@ uv run pytest            # or: uv run pytest -v
 ```
 
 Covers the config round-trip (including the `rf_on` bool), the generator’s
-set/read and safety clamping, and a full service⇄client round-trip over ZeroMQ.
+set/read and safety clamping, a full service⇄client round-trip over ZeroMQ, and
+the sweeps (`tests/test_sweep.py`: each knob to its end at the pace, stop, a
+set taking over, RF untouched, the record, the verbs on ports 18102/18103).
 
 ## Using it from Python (e.g. a coordinator)
 

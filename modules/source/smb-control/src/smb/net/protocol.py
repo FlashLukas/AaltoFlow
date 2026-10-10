@@ -23,7 +23,7 @@ TOPIC_EVENT = b"event"
 
 def status_to_dict(status) -> dict:
     """Generator Status dataclass -> plain dict for the wire."""
-    return {
+    d = {
         "rf_on": status.rf_on,
         "power_dBm": status.power_dBm,
         "frequency_Hz": status.frequency_Hz,
@@ -31,6 +31,10 @@ def status_to_dict(status) -> dict:
         "connected": status.connected,
         "idn": status.idn,
     }
+    # the sweeps' flat keys (ramping, frequency_ramp_id, ...): top level,
+    # because a ramp block's `done` names them as plain status keys
+    d.update(getattr(status, "sweep", None) or {})
+    return d
 
 
 # ---- config (Settings) over the wire ---------------------------------------

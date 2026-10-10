@@ -52,6 +52,24 @@ class Limits:
     power_max_dBm: float = 18.0              # base-model max level; raise for high-power option
     phase_min_deg: float = -360.0
     phase_max_deg: float = 360.0
+    # SWEEPS (ramp_frequency / ramp_power / ramp_phase, for fly scans,
+    # 2026-10-10): the pace a sweep may be asked for, in the knob's unit per
+    # second. A pace outside these is clamped and warned, like a setpoint.
+    #   frequency: 1 kHz/s (slower than any scan wants) .. 10 GHz/s (the whole
+    #     band in about a second -- the steps then get large; a fly scan does
+    #     not mind, it bins by the value each step SENT, but a lock-in behind
+    #     it can only follow at its own time constant);
+    #   power: 0.01 .. 100 dB/s. Careful with large power sweeps: the SMB100A
+    #     switches its step attenuator at fixed levels, and a mechanical
+    #     attenuator clicks at every switch point (VERIFY which one your unit
+    #     has, and the attenuator mode, before sweeping across tens of dB);
+    #   phase: 0.01 .. 3600 deg/s.
+    ramp_rate_min_Hz_per_s: float = 1.0e3
+    ramp_rate_max_Hz_per_s: float = 1.0e10
+    ramp_rate_min_dB_per_s: float = 0.01
+    ramp_rate_max_dB_per_s: float = 100.0
+    ramp_rate_min_deg_per_s: float = 0.01
+    ramp_rate_max_deg_per_s: float = 3600.0
 
 
 @dataclass
@@ -63,6 +81,14 @@ class Hardware:
     smb_visa: str = "GPIB0::28::INSTR"
     visa_timeout_ms: int = 5000
     settle_s: float = 0.05                    # small pause after a SCPI write before reading back
+    # A SWEEP sends one FREQ / POW / PHAS every ramp_dt_s (softramp.py), WITHOUT
+    # the settle pause above (that pause is for a read-back right after a
+    # set; a sweep reads nothing back). 50 ms = 20 steps a second: one short
+    # SCPI write over GPIB takes a few ms, and the SMB100A's setting time is a
+    # few ms too (VERIFY both on the unit: they bound how small this may be).
+    # A step that comes late does not slow the sweep: each value is computed
+    # from the elapsed time.
+    ramp_dt_s: float = 0.05
 
 
 @dataclass

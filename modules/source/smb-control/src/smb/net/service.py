@@ -63,12 +63,12 @@ class SmbService:
         #   "RF Off" button): a viewer who sees the output hit something it
         #   should not must be able to take it away. `set_rf` is NOT in the
         #   list even though on=false is the same thing -- the same verb also
-        #   switches the RF ON. The SMB100A has no sweep of its own here, so
-        #   there is nothing else to stop.
-        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        #   switches the RF ON. `ramp_stop` ends a sweep (frequency, power or
+        #   phase) where it is: a stop, so a viewer may send it too.
+        #   READ: `stream_read` only reads the sweeps' record.
         self.control = ControlLease(
-            safety={"rf_off"},
-            read=set(),
+            safety={"rf_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -241,6 +241,26 @@ class SmbService:
                 self.gen.set_frequency(float(msg["frequency_Hz"]))
             elif cmd == "set_phase":
                 self.gen.set_phase(float(msg["phase_deg"]))
+            # The SWEEPS (fly scans): the reply's ramp_id is what status
+            # `<knob>_ramp_id` shows while and after this sweep runs.
+            elif cmd == "ramp_frequency":
+                return {"ok": True, "ramp_id": self.gen.ramp_frequency(
+                    float(msg["frequency_Hz"]), float(msg["rate_Hz_per_s"]))}
+            elif cmd == "ramp_power":
+                return {"ok": True, "ramp_id": self.gen.ramp_power(
+                    float(msg["power_dBm"]), float(msg["rate_dB_per_s"]))}
+            elif cmd == "ramp_phase":
+                return {"ok": True, "ramp_id": self.gen.ramp_phase(
+                    float(msg["phase_deg"]), float(msg["rate_deg_per_s"]))}
+            elif cmd == "ramp_stop":
+                # no `knob`: every sweep stops (the safest reading of "stop")
+                return {"ok": True, "stopped": self.gen.ramp_stop(msg.get("knob") or None)}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.gen.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.gen.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.gen.stream_stop()}
             elif cmd == "status":
                 return {"ok": True, "status": self.status_payload()}
             elif cmd == "describe":

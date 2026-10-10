@@ -33,6 +33,10 @@ class RemoteStatus:
         self.phase_deg = d.get("phase_deg", 0.0)
         self.connected = d.get("connected", False)
         self.idn = d.get("idn", "")
+        # the SWEEPS (an older service has none: never sweeping); the flat
+        # per-knob keys are kept as a dict, e.g. sweep["power_ramp_id"]
+        self.ramping = bool(d.get("ramping", False))
+        self.sweep = {k: v for k, v in d.items() if "ramp" in k}
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -122,6 +126,34 @@ class SmbClient(ControlClient):
 
     def set_phase(self, deg: float):
         self._cmd({"cmd": "set_phase", "phase_deg": float(deg)})
+
+    # ---- the SWEEPS (fly scans, the GUI's Sweep card) --------------------
+
+    def _ramp(self, d: dict):
+        r = self._cmd(d)
+        if not r.get("ok"):
+            raise RuntimeError(r.get("error", "sweep refused"))
+        return r.get("ramp_id")
+
+    def ramp_frequency(self, hz: float, rate_Hz_per_s: float):
+        return self._ramp({"cmd": "ramp_frequency", "frequency_Hz": float(hz),
+                           "rate_Hz_per_s": float(rate_Hz_per_s)})
+
+    def ramp_power(self, dBm: float, rate_dB_per_s: float):
+        return self._ramp({"cmd": "ramp_power", "power_dBm": float(dBm),
+                           "rate_dB_per_s": float(rate_dB_per_s)})
+
+    def ramp_phase(self, deg: float, rate_deg_per_s: float):
+        return self._ramp({"cmd": "ramp_phase", "phase_deg": float(deg),
+                           "rate_deg_per_s": float(rate_deg_per_s)})
+
+    def ramp_stop(self, knob: str | None = None):
+        """End a sweep where it is (all of them without `knob`). A safety
+        verb: allowed also while viewing."""
+        d = {"cmd": "ramp_stop"}
+        if knob:
+            d["knob"] = knob
+        return self._cmd(d).get("stopped")
 
     def shutdown(self):
         """Close the client. Does NOT stop the remote service."""

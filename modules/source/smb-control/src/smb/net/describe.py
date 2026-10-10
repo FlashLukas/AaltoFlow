@@ -28,11 +28,39 @@ import zlib
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
+#: The sweep pace a client is offered first, per knob, in WIRE units per
+#: second (clamped to the configured paces): 10 MHz/s -- a 100 MHz FMR line
+#: in 10 s, slow enough for a lock-in at a few ms time constant; 1 dB/s;
+#: 10 deg/s.
+SWEEP_RATE_DEFAULTS = {"frequency": 10.0e6, "power": 1.0, "phase": 10.0}
+
+
+def sweep_block(gen, knob: str, *, wire_arg: str, rate_arg: str, rate_unit: str,
+                scale: float = 1.0) -> dict:
+    """The `ramp` block of one knob (guide 6b, "Ramps"): a CONTINUOUS SWEEP a
+    fly scan can fly. The SERVICE walks the knob (softramp.py) and records
+    every value it sent; the fly scan bins by that COMMANDED value
+    (measured: false -- why, see generator.py "the SWEEPS"). `to` and the
+    rate are scaled like the set (MHz in the scan, Hz on the wire); the
+    limits are the live config paces, never literals."""
+    lo, hi = gen._rate_limits(knob)
+    default = max(lo, min(hi, SWEEP_RATE_DEFAULTS[knob]))
+    return {"kind": "software",
+            "start": {"verb": f"ramp_{knob}",
+                      "args": {"to": wire_arg, "rate": rate_arg}},
+            # stops THIS knob's sweep only (no `knob`: every sweep)
+            "stop": {"verb": "ramp_stop", "extra": {"knob": knob}},
+            "rate": {"unit": rate_unit, "min": lo / scale, "max": hi / scale,
+                     "default": default / scale},
+            "readback": {"stream": {"group": "ramp", "channel": knob},
+                         "measured": False},
+            "done": {"key": f"{knob}_ramping", "id_key": f"{knob}_ramp_id"}}
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help=""):
+       settle=None, args=None, danger=False, help="", ramp=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -43,7 +71,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     }
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
-                 ("set", set), ("settle", settle), ("args", args),
+                 ("set", set), ("settle", settle), ("args", args), ("ramp", ramp),
                  ("help", help)):
         if v is not None and v != "":
             d[k] = v
@@ -115,7 +143,9 @@ def build_manifest(gen) -> dict:
            min=lim.freq_min_Hz / 1e6, max=lim.freq_max_Hz / 1e6,
            scale=1e6, read_path=["frequency_Hz"],
            set={"verb": "set_frequency", "arg": "frequency_Hz"},
-           settle={"policy": "echoes", "key": "frequency_Hz", "tol": 1.0}),
+           settle={"policy": "echoes", "key": "frequency_Hz", "tol": 1.0},
+           ramp=sweep_block(gen, "frequency", wire_arg="frequency_Hz",
+                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6)),
 
         _p("power", "Power", "control", "float", unit="dBm", group="Signal",
            order=30, decimals=2, plottable=True,
@@ -123,6 +153,8 @@ def build_manifest(gen) -> dict:
            read_path=["power_dBm"],
            set={"verb": "set_power", "arg": "power_dBm"},
            settle={"policy": "echoes", "key": "power_dBm", "tol": 1e-3},
+           ramp=sweep_block(gen, "power", wire_arg="power_dBm",
+                            rate_arg="rate_dB_per_s", rate_unit="dB/s"),
            help="Ranges are option-dependent; widen the limits in the .ini if "
                 "your unit has the high-power option."),
 
@@ -131,7 +163,14 @@ def build_manifest(gen) -> dict:
            min=lim.phase_min_deg, max=lim.phase_max_deg,
            read_path=["phase_deg"],
            set={"verb": "set_phase", "arg": "phase_deg"},
-           settle={"policy": "echoes", "key": "phase_deg", "tol": 1e-3}),
+           settle={"policy": "echoes", "key": "phase_deg", "tol": 1e-3},
+           ramp=sweep_block(gen, "phase", wire_arg="phase_deg",
+                            rate_arg="rate_deg_per_s", rate_unit="deg/s")),
+
+        _p("ramping", "Sweeping", "indicator", "bool", group="Signal", order=45,
+           read_path=["ramping"],
+           help="True while a sweep (ramp_frequency / ramp_power / ramp_phase) "
+                "walks a knob."),
 
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
