@@ -248,9 +248,8 @@ frame (`last_deep()`).
 - **Fly scans over any knob -- the remaining modules** (the contract and three
   pilots DONE 2026-10-09: a `ramp` block in describe, guide 6b "Ramps";
   `suite_common/softramp.py`; clMag field, dssg frequency, ppms field).
-  Lukas: "when it makes sense". Candidates, module by module, each with its
-  ramp block, verbs, readback stream, status `ramping`, a Sweep control in
-  the GUI and a sim test:
+  Lukas: "when it makes sense". DONE 2026-10-10 (simulation only; each
+  README has a "Sweep" section and its `# VERIFY` list):
   * **mag2d / mag2dcal**: DONE 2026-10-10 (simulation only) -- field
     magnitude (`ramp_field`) and the ROTATING ANGLE (`ramp_angle`, the
     angular FMR scan as a fly axis), the control loop walking the setpoint,
@@ -272,20 +271,6 @@ frame (`last_deep()`).
     group "ramp", a channel per knob (own stamps in t_ch); a Sweep card in
     each GUI. Open: the per-step timings on the instruments (# VERIFY in
     each module), and the signalhound owner logs one event per TG step.
-  * **afg** and the **AD2** waveform generator: DONE 2026-10-10 (frequency /
-    amplitude / offset / phase per channel, software ramps, measured false;
-    the follower follows each step). Simulation; the lab tries them on the
-    bench.
-  * **superk** (Fianium + SELECT): wavelength (software ramp over the RF
-    driver's frequency; measured false) -- and the **cs260** monochromator
-    (a hardware scan if its firmware has one; else stepped stays).
-  * **tc200 / ls455 / ppms temperature**: temperature ramps (hardware: the
-    controllers ramp their setpoint themselves; readback = the measured
-    temperature, slow -- a fly axis of minutes per row).
-  * **stages / rotators**: smaract, agilis, ddr25, elliptec, piezo, zpiezo --
-    those that stream a position fly on the STAGE path already (speed_param);
-    the rest need either a stream + a speed knob, or a ramp block where the
-    controller can move at a set velocity (ddr25, elliptec).
   * **k2450**: DONE 2026-10-10 (simulation only) -- `ramp_voltage` /
     `ramp_current` as SOFTWARE ramps (the 2450's own :SOUR:SWE is a
     trigger-model list the poll cannot read during), binned by the measured
@@ -293,6 +278,38 @@ frame (`last_deep()`).
   * **chopper**: DONE 2026-10-10 (simulation only) -- `ramp_frequency`
     (softramp.py), binned by the MEASURED wheel frequency (REF OUT on a
     sensor), honestly by the commanded one while REF OUT is on 'target'.
+  * **tc200** temperature: a SOFTWARE ramp of the setpoint in the box's
+    0.1 degC steps (its own ramps live only in the front-panel CYCLE program,
+    no confirmed serial commands); binned by the MEASURED temperature, polled
+    fast while sweeping; C/s on the wire, K/min in the GUI.
+  * **ppms temperature**: a HARDWARE ramp (MultiVu, fast_settle; K/s on the
+    wire, K/min to MultiVu); arrival = within tolerance_K and Near/Stable; its
+    own done keys (`temp_ramping` / `temp_ramp_id`) and stop verb
+    `ramp_temperature_stop`. The stream group is now `cryostat` (field AND
+    temperature in one recorder, so a fly starts/drains it once per row).
+  * **superk** wavelength: a SOFTWARE ramp per AOTF line, one sweep at a
+    time, binned by command; one stream group `ramp` with all 8 lines
+    (forward-filled); a sweep never switches emission.
+  * **elliptec** angle: a HARDWARE ramp ("move to at velocity", deg/s -> the
+    ELL14's velocity percent, the user's velocity restored afterwards),
+    binned by the polled encoder angle. Fly rows are fast: the slowest speed
+    is ~30 % of ~430 deg/s.
+  * **afg** and the **AD2** waveform generator: DONE 2026-10-10 (frequency /
+    amplitude / offset / phase per channel, software ramps, measured false;
+    the follower follows each step). Simulation; the lab tries them on the
+    bench.
+  Looked at and SKIPPED (2026-10-10), with the reason:
+  * **ls455**: a gaussmeter -- its field is a measurement, not a setting.
+  * **cs260** monochromator: no scan / speed command, GOWAVE blocks the bus
+    until the grating has arrived, the mechanical arrival time is unknown,
+    and a filter change blanks the light -- stepped scans stay.
+  * **agilis**: open loop with no speed control; it already streams its
+    counted position.
+  * **ddr25, smaract**: need nothing -- they fly on the STAGE path already
+    (position stream + a velocity in unit/s; `check_modules ddr25 smaract
+    --live` passed 38/0).
+  Still open: **piezo, zpiezo** -- those that stream a position fly on the
+  STAGE path already (speed_param); the rest need a stream + a speed knob.
   The Scan Builder side is DONE (2026-10-09, 7ab8757: the FLY group of the
   per-axis Advanced panel offers fly on a ramp knob). The three pilots, the
   five modules above (2026-10-10; every rate limit and bus budget is a

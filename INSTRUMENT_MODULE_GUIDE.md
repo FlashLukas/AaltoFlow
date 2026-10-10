@@ -792,7 +792,10 @@ to the frequency it is told. A control that the module CAN sweep at a set pace
 (field, frequency, power, phase, wavelength, temperature) declares a `ramp`
 block, and scan-core's fly axis then flies it like a stage: the module sweeps
 the knob over each row, the detectors stream, and every sample is binned by
-the ramp's readback. Pilots: clMag `field`, dssg `frequency`, ppms `field`.
+the ramp's readback. Pilots: clMag `field`, dssg `frequency`, ppms `field`;
+since 2026-10-10 also tc200 `temperature` (software, measured), ppms
+`temperature` (hardware), superk `wavelength_n` (software, one sweep at a
+time over 8 lines, command) and elliptec `angle_<addr>` (hardware, measured).
 
 ```python
 "ramp": {

@@ -204,9 +204,15 @@ still assumes piezo/zpiezo.
   over (stops the sweep). Software ramps use `suite_common/softramp.py`,
   copied byte for byte into the module (check_modules compares it). Pilots:
   clMag field (closed loop, measured), dssg frequency (software, command),
-  ppms field (MultiVu sweeps, measured). Spec: `INSTRUMENT_MODULE_GUIDE.md`,
-  "Ramps"; `check_modules.py --live` runs a short sweep for every declared
-  ramp. Candidates for later: `docs/ROADMAP.md`.
+  ppms field (MultiVu sweeps, measured); since 2026-10-10 tc200 temperature,
+  ppms temperature, superk wavelength and elliptec angle. Two ramps in ONE
+  module (ppms field + temperature) each get their own `done` keys
+  (`ramping`/`ramp_id`, `temp_ramping`/`temp_ramp_id`) and stop verb, so one
+  sweep's end never passes for the other's -- and their readbacks share ONE
+  stream group (`cryostat`), so a fly that records both starts and drains the
+  stream verbs once per row. Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Ramps";
+  `check_modules.py --live` runs a short sweep for every declared ramp.
+  Candidates for later: `docs/ROADMAP.md`.
 - **Can the readings be trusted? `hw_error` and `fault` (2026-09-28).** Two
   optional status keys, both strings, both `""` when all is well (a missing key
   also means "fine", so older modules need no change):
