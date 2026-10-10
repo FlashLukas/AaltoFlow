@@ -273,7 +273,18 @@ def _camera(theme, tab: str | None = None):
     def warm_up(win):
         # Tracking on so the overlays (spot crosshair, template box, scan grid)
         # are drawn -- they are the point of this panel.
-        fn = getattr(getattr(win, "ctrl", None), "set_tracking", None)
+        c = getattr(win, "ctrl", None)
+        # 2026-10-10: a calibrated spot, a template and an AF position, so the
+        # violet "AF" mark and the AF-position buttons are shown working
+        try:
+            c.calibrate_spot(10)
+            cam = built[1]
+            tcx, tcy = cam.template_center_px()
+            c.capture_reference((tcx, tcy, 60, 60))
+            c.set_af_position("um", x_um=-30.0, y_um=-40.0)
+        except Exception:
+            pass
+        fn = getattr(c, "set_tracking", None)
         if fn:
             fn(True)
         if tab:
