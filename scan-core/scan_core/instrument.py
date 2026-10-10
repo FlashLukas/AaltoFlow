@@ -287,7 +287,10 @@ class Instrument:
                 for attempt in (1, 2):
                     try:
                         self._req.send_json(msg)
-                        reply = self._req.recv_json()
+                        # recv_multipart, not recv_json: a reply may carry
+                        # BINARY parts after its JSON header (a camera frame,
+                        # 2026-10-10; decode_reply). A plain reply is one part.
+                        reply = decode_reply(self._req.recv_multipart())
                         break
                     except zmq.Again:
                         # A timed-out REQ socket is stuck in the wrong half of its
@@ -507,6 +510,52 @@ class Instrument:
             self.on_event(level, msg)
         except Exception:
             pass
+
+
+def decode_reply(parts) -> dict:
+    """A REP reply (one or more ZeroMQ message parts) -> the reply dict.
+
+    The suite's replies are ONE JSON part. Since 2026-10-10 a reply may also
+    carry BINARY parts -- a camera frame of 2 million 12-bit pixels is 4 MB as
+    raw bytes, but ~6 MB as base64 inside JSON plus the time to encode and
+    parse it. The JSON header then lists them, in order:
+
+        part 0   {"ok": true, ..., "binary": [{"key": "image",
+                                               "dtype": "<u2",
+                                               "shape": [1096, 1936]}]}
+        part 1   the raw bytes of "image" (C order, the dtype's byte order)
+
+    and each one is put into the dict under its `key` as a numpy array, so a
+    caller sees `reply["image"]` exactly as if it had come inside the JSON.
+    A service sends this form only to a client that asked for it (the request
+    says "binary": true), so a console speaking plain JSON never meets it.
+    CurveZMQ encrypts every part of a message, so this works encrypted too.
+    """
+    if not parts:
+        raise InstrumentError("empty reply")
+    reply = json.loads(parts[0])
+    if not isinstance(reply, dict):
+        raise InstrumentError(f"reply is a {type(reply).__name__}, not an object")
+    specs = reply.pop("binary", None) or []
+    if len(parts) - 1 != len(specs):
+        raise InstrumentError(
+            f"reply header lists {len(specs)} binary part(s) but "
+            f"{len(parts) - 1} arrived")
+    if specs:
+        import numpy as np
+        for spec, raw in zip(specs, parts[1:]):
+            dt = np.dtype(str(spec.get("dtype", "<f8")))
+            shape = tuple(int(n) for n in spec.get("shape") or ())
+            buf = memoryview(raw)
+            if buf.nbytes != dt.itemsize * int(np.prod(shape, dtype=np.int64)):
+                raise InstrumentError(
+                    f"binary part {spec.get('key')!r}: {buf.nbytes} bytes, but "
+                    f"{dt} x {list(shape)} needs "
+                    f"{dt.itemsize * int(np.prod(shape, dtype=np.int64))}")
+            # copy: the array must not depend on the ZeroMQ message buffer
+            reply[str(spec.get("key", "value"))] = (
+                np.frombuffer(buf, dtype=dt).reshape(shape).copy())
+    return reply
 
 
 def _brief(st: dict, keys: int = 6) -> str:

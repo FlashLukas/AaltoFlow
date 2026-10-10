@@ -129,6 +129,10 @@ class PortInUse(RuntimeError):
 
 # ───────────────────────── the live dataset on the wire ──────────────────────
 
+#: an image variable larger than this (in memory) is not sent to watchers
+MIRROR_IMAGE_MAX_BYTES = 32_000_000
+
+
 def dataset_to_text(ds) -> str:
     """A dataset as JSON-safe text: netCDF bytes, zlib-compressed, base64.
 
@@ -137,6 +141,15 @@ def dataset_to_text(ds) -> str:
     split) and opens it with the same code. Written through a temporary file:
     the h5netcdf engine is the one the suite writes with, and it wants a path.
     """
+    # CAMERA IMAGES (framestore.py) are left out of the mirror above a size
+    # a network can carry a few times a second: a map of frames can be a
+    # gigabyte. The watcher still gets every other variable and the image's
+    # per-point mask; the frames are in the file on the server's PC.
+    big = [n for n, da in ds.data_vars.items()
+           if da.attrs.get("aaltoflow_image") and da.nbytes > MIRROR_IMAGE_MAX_BYTES]
+    if big:
+        ds = ds.drop_vars(big)
+        ds.attrs["mirror_left_out"] = ",".join(str(n) for n in big)
     fd, tmp = tempfile.mkstemp(suffix=".nc", prefix="scanserver-live-")
     os.close(fd)
     try:

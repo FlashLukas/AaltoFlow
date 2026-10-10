@@ -281,6 +281,42 @@ and `scan_core.data.as_complex` puts it back together.
 rectangular, and padding it with NaN would hand you a file that looks fine and
 is wrong.
 
+### Images: a camera frame per point (2026-10-10)
+
+A detector with TWO inner axes is an image -- the camera's `camera.image`
+(camera README, "Images for scans"): one frame per scan point, dims
+`(scan dims..., camera.image_y, camera.image_x)`, the pixel axes in px with
+`um_per_px` on them and `camera.image_x_um` / `_y_um` coordinates beside.
+
+```python
+ds["camera.image"].isel(pos_x=3, pos_y=5).plot()          # the frame at one point
+ds["camera.image"].sel(**{"camera.image_x": 820}, method="nearest")   # one pixel vs the scan
+ds["camera.image_measured"]                                  # 1 = a frame was taken here
+```
+
+- **Stored** as the narrowest unsigned integer the camera declares (uint16
+  for 12 bit), zlib-compressed, ONE FRAME PER CHUNK (reading one point's
+  frame does not decompress the map). A point never measured is all fill
+  value -- NaN when read -- and `<det>_measured` says it per point without
+  reading a single frame. A pixel above the declared range stops the scan.
+- **How big**: the Scan tab's summary shows it before the run
+  ("images ~2.1 GB", uncompressed; camera noise usually compresses to 30-70 %).
+  `scan_core.framestore.estimate(recipe, registry)` gives the same number.
+- **Live**: the Measurement tab shows the newest frame next to the map.
+- **Above 1 GB** (`framestore.INCREMENTAL_ABOVE_BYTES`) the frames are not
+  held in memory: each is written into the data file as it arrives, and the
+  checkpoints and the end update the rest of that file in place. Such a scan
+  NEEDS a data file and cannot `average` repeats -- both are refused before
+  anything moves, with the size in the message. The dataset `run()` returns
+  then has no image variable (only its mask and axes); open the file to get
+  the frames. Below 1 GB everything is as for any other detector.
+- Cheaper than a full frame: the camera's `spot` region (a crop around the
+  laser) and binning. The scan server's live view leaves image variables
+  above 32 MB out (they stay in the file on its PC).
+- AaltoView opens the file unchanged: the two pixel axes are just two more
+  rows of the cube (pick image_x / image_y as the picture to see one frame,
+  or a pixel against the scan axes).
+
 ## Routines: before, during and after a scan
 
 Hooks fire at a moment of the scan: `before_scan`, `after_scan`, `before_point`,

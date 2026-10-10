@@ -29,6 +29,7 @@ from .repeat import average_index, collapse, pace
 from .snapshot import (ATTR_END, MISSING, diff_config, path_text, provenance,
                        snapshot_attrs)
 from .storage import COMPRESSION, COUNT, FLOAT, storage_of
+from . import framestore as FS
 
 
 # ─────────────────────────── faults and the PAUSE ────────────────────────────
@@ -456,6 +457,12 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     ctx["guard"] = _Guard(check, _used_ids(recipe, compiled, registry), on_fault,
                           should_abort, ctx["log_fn"], pause_poll_s)
 
+    # IMAGE detectors (framestore.py): refuse a map too big to hold in memory
+    # that cannot be written as it goes -- HERE, before the conditions move
+    # anything. Uses the frame shapes the modules declared (no network); the
+    # allocation below checks again with the coordinates it fetches.
+    _check_image_plan(recipe, compiled, registry, data_path, fetch=False)
+
     def after_scan(aborted: bool):
         ctx["aborted"] = aborted
         run_hooks(compiled.hooks, "after_scan", ctx)
@@ -529,7 +536,25 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
         # binning and the window all do arithmetic with NaN. Only text is an
         # object array ("" = not measured). The declared type is applied when
         # the file is written (storage.py, _to_dataset).
-        data[d] = storage_of(g).allocate(tuple(shape) + tuple(inner))
+        if FS.is_image(g):
+            # an IMAGE (a camera frame per point, framestore.py): float32 in
+            # memory when exact, or -- above the size limit -- not in memory
+            # at all but written into the data file frame by frame
+            data[d] = _image_buffer(d, g, tuple(shape), tuple(inner), compiled,
+                                    data_path, ctx, recipe, registry, data,
+                                    created_iso, t_start, det_axes, det_coords)
+            # one flag per point: was a frame taken here? Readable without
+            # opening a single frame (a 20 GB map need not be scanned to find
+            # out where the abort was)
+            mname = FS.mask_name(d)
+            data[mname] = np.zeros(tuple(shape), dtype=bool)
+            det_axes[mname] = []
+            ctx.setdefault("images", {})[d] = mname
+            ctx["var_attrs"] = {**(ctx.get("var_attrs") or {}), mname: {
+                "long_name": f"1 = a frame of {d} was taken at this point",
+                "measured_mask_of": d}}
+        else:
+            data[d] = storage_of(g).allocate(tuple(shape) + tuple(inner))
 
     # One AcquireSpec per distinct group among the selected detectors.
     acquire_groups = []
@@ -730,12 +755,20 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         that redraws later, or a partial file someone saves. The copy costs
         one array per emission, and the caller controls how often that is by
         only calling the factory when it actually wants a picture."""
+        # An IMAGE buffer is NOT copied (framestore.py): it can be a gigabyte,
+        # copied a few times a second. Frames are only ever ADDED to it, so a
+        # snapshot that shares it sees at worst a newer frame than its other
+        # variables -- harmless for a picture, and a checkpoint is written in
+        # this very thread, before the next frame arrives.
+        images = ctx.get("images") or {}
         if on_point:
             on_point(done, total,
                      lambda: _to_dataset(recipe, compiled, registry,
-                                         {k: v.copy() for k, v in data.items()},
+                                         {k: (v if k in images else v.copy())
+                                          for k, v in data.items()},
                                          created_iso, time.monotonic() - t0,
                                          det_axes, det_coords,
+                                         var_attrs=ctx.get("var_attrs"),
                                          ds_attrs=dict(ctx.get("ds_attrs") or {}),
                                          extra=ctx.get("ds_extra")))
 
@@ -820,6 +853,11 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 old = data[det][idx]
                 before[det] = old.copy() if isinstance(old, np.ndarray) else old
                 data[det][idx] = value
+            for det in ctx.get("images") or ():
+                if det in values:
+                    # the newest frame, for the live image view (framestore)
+                    ctx.setdefault("ds_extra", {}).setdefault("latest", {})[det] = (
+                        tuple(int(i) for i in idx), values[det])
         pending = ctx.pop("window_pending", None)
         # after_point routines run for a skipped point too: the scan still
         # VISITED it, and an end-of-sweep routine on the last point of a row
@@ -1071,6 +1109,10 @@ def _checked_read(registry, dets, det_axes, data, shape, idx, guard) -> dict:
         st = storage_of(g)
         out[det] = st.to_memory(
             value, what=f"detector '{det}' at grid index {tuple(int(i) for i in idx)}")
+        mname = FS.mask_name(det)
+        if det_axes[det] and mname in data and FS.is_image(g):
+            # an image's per-point mask: a frame with at least one value
+            out[mname] = bool(np.isfinite(np.asarray(out[det], dtype=float)).any())
         # an enum value outside its options is stored as "not measured";
         # say so once per detector and value, not at every point
         while st.unknown_seen:
@@ -1175,6 +1217,70 @@ def _window_point(runner, plan, wspec, out, registry, det_axes, data, shape,
     return out
 
 
+# ───────────────────── image detectors (framestore.py) ──────────────────────
+
+def _check_image_plan(recipe, compiled, registry, data_path, fetch: bool) -> dict:
+    """{det: bytes} of every IMAGE detector, refusing what cannot be done.
+
+    An image variable above framestore.INCREMENTAL_ABOVE_BYTES is written into
+    the data file frame by frame instead of being held in memory. That needs
+    a data file, and it cannot be combined with an AVERAGED repeat (the mean
+    of N frames is computed from all N in memory). Both are refused with the
+    size in the message -- before anything moves, so nothing needs undoing.
+    `fetch` = ask the module for a frame shape it did not declare.
+    """
+    out = {}
+    n = int(compiled.n_points)        # in memory every repeat is kept
+    for d in compiled.detectors:
+        g = registry.get(d)
+        if not FS.is_image(g):
+            continue
+        nbytes = FS.image_bytes(g, n, fetch=fetch)
+        out[d] = nbytes
+        if nbytes is None or nbytes <= FS.INCREMENTAL_ABOVE_BYTES:
+            continue
+        size, limit = FS.format_bytes(nbytes), FS.format_bytes(FS.INCREMENTAL_ABOVE_BYTES)
+        if average_index(compiled.dims) is not None:
+            raise ValueError(
+                f"image detector '{d}' needs {size} over {n:,} points, more than "
+                f"can be held in memory ({limit}), and an AVERAGED repeat needs "
+                f"every frame in memory to average them. Crop or bin the image "
+                f"(the camera's recording ROI), keep the repeats (mode keep), or "
+                f"measure fewer points.")
+        if not data_path:
+            raise ValueError(
+                f"image detector '{d}' needs {size} over {n:,} points, more than "
+                f"is held in memory ({limit}). A scan this large writes each "
+                f"frame into its data file as it arrives -- and this run has no "
+                f"data file. Give it one (a data folder / save path), crop or "
+                f"bin the image (the camera's recording ROI), or measure fewer "
+                f"points.")
+    return out
+
+
+def _image_buffer(det, g, shape, inner, compiled, data_path, ctx, recipe,
+                  registry, data, created_iso, t_start, det_axes, det_coords):
+    """The buffer of one IMAGE detector: float32 in memory, or a FrameBuffer
+    writing into the data file when the map is above the size limit."""
+    plan = _check_image_plan(recipe, compiled, registry, data_path, fetch=True)
+    nbytes = plan.get(det)
+    st = storage_of(g)
+    if nbytes is None or nbytes <= FS.INCREMENTAL_ABOVE_BYTES:
+        return st.allocate(shape + inner, compact=True)
+    log = ctx.get("log_fn") or (lambda m: None)
+    log(f"{det}: {FS.format_bytes(nbytes)} of frames -- written into "
+        f"{data_path} as they arrive (not held in memory)")
+
+    def skeleton():
+        # the dataset as it stands, WITHOUT this image (it is the buffer):
+        # the file is created from it at the first frame
+        return _to_dataset(recipe, compiled, registry, data, created_iso,
+                           time.monotonic() - t_start, det_axes, det_coords,
+                           var_attrs=ctx.get("var_attrs"),
+                           ds_attrs=ctx.get("ds_attrs"), extra=ctx.get("ds_extra"))
+    return FS.FrameBuffer(data_path, det, shape, inner, st, skeleton)
+
+
 def _units(registry, pid: str) -> str:
     p = registry.get(pid)
     return getattr(p, "unit", "") if p else ""
@@ -1229,6 +1335,12 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
     averaged = None
     if avg is not None:
         averaged = dims[avg]
+        # an image's per-point mask is a flag, not a detector: "a frame was
+        # taken at this point" over the repeats is ANY of them (collapse
+        # passes non-detectors through, and the repeat dim must go)
+        data = {k: (np.asarray(v).any(axis=avg)
+                    if (var_attrs.get(k) or {}).get("measured_mask_of") else v)
+                for k, v in data.items()}
         data, det_axes, stat_attrs = collapse(data, avg, set(compiled.detectors),
                                               det_axes, registry)
         var_attrs.update(stat_attrs)
@@ -1286,9 +1398,18 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                      if a.name == name), None)
         coords[name] = (name, vals,
                         {"units": getattr(axis, "unit", ""),
-                         "label": getattr(axis, "label", name)})
+                         "label": getattr(axis, "label", name),
+                         # e.g. a camera axis in px says its um per px
+                         **dict(getattr(axis, "attrs", None) or {})})
+        # AUXILIARY coordinates along it (the same camera axis in um):
+        # non-index coordinates, so a reader can plot against either
+        for aname, (avals, aunit) in (getattr(axis, "aux", None) or {}).items():
+            avals = np.asarray(avals, dtype=float)
+            if avals.shape == (len(vals),) and aname not in coords:
+                coords[aname] = (name, avals, {"units": aunit})
 
     data_vars = {}
+    frames = {}                    # big images written into the file (framestore)
     for det, arr in data.items():
         g = registry.get(det)
         own = dim_names[:-1] if det in row_vars else dim_names
@@ -1301,11 +1422,33 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             attrs.update(var_attrs.get(det) or {})
         st, extra_attrs = _storage_for(det, g, arr, var_attrs.get(det) or {})
         attrs.update(extra_attrs)
+        if isinstance(arr, FS.FrameBuffer):
+            image = True
+        else:
+            image = FS.is_image(g) and len(names) == np.ndim(arr)
+        if image:
+            # said in the file: a reader (AaltoView, the live view) can tell a
+            # frame per point from any other 2-D detector
+            attrs[FS.IMAGE_ATTR] = 1
+        if isinstance(arr, FS.FrameBuffer):
+            # NOT in the dataset: its frames are in the data file already.
+            # The buffer learns its dims and attributes from here, so the
+            # variable it creates in the file is named and labelled exactly
+            # as an in-memory one would be.
+            arr.dims = list(names)
+            arr.attrs = {**attrs, **{k: v for k, v in (var_attrs.get(det) or {}).items()}}
+            frames[det] = arr
+            continue
         # `encoding` is what to_netcdf applies when the file is written --
         # dtype, fill value, compression -- whoever writes it (the autosave,
         # Save data, a script's ds.to_netcdf(path)). The values in memory are
         # untouched (storage.py).
         enc = st.encoding() if st is not None else dict(COMPRESSION)
+        if image:
+            # one FRAME per chunk: reading one point's picture back
+            # decompresses that frame, not the whole map
+            enc["chunksizes"] = FS.chunks_for(np.shape(arr)[:len(dim_names)],
+                                              np.shape(arr)[len(dim_names):])
         if np.iscomplexobj(arr):
             # Split complex into two real variables so the file stays
             # CONFORMING netCDF-4. h5netcdf will happily write complex as an
@@ -1343,11 +1486,14 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
         except (TypeError, ValueError):
             continue
 
-    for name, extra in var_attrs.items():
+    # (the loop variable is NOT called `extra`: it used to be, and shadowed the
+    # `extra` argument -- the scout's coords/vars below were then looked up
+    # in the last variable's attribute dict whenever var_attrs was not empty)
+    for name, more in var_attrs.items():
         target = (data_vars.get(name) or data_vars.get(f"{name}_measured")
                   or coords.get(name))
         if target is not None and len(target) >= 3:
-            target[2].update(extra)
+            target[2].update(more)
 
     # Variables on axes of their OWN (the scout pass's readings and the mask
     # itself, scout.py): {"coords": {name: (dim, values, attrs)},
@@ -1360,6 +1506,15 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             data_vars[name] = (list(vdims), np.array(vals, copy=True), dict(a),
                                dict(COMPRESSION))
     ds = xr.Dataset(data_vars=data_vars, coords=coords)
+    # in memory only (xarray writes no unknown Dataset.encoding key): where
+    # the big frames are, and the newest frame per image detector for the
+    # live view (framestore.frames_of / latest_frames)
+    if frames:
+        ds.encoding[FS.ENCODING_KEY] = frames
+        ds.attrs["images_written_as_they_came"] = ",".join(frames)
+    latest = (extra or {}).get("latest") if extra else None
+    if latest:
+        ds.encoding[FS.LATEST_KEY] = dict(latest)
     w = getattr(recipe, "window", None)
     if w:
         # the window's settings in plain sight (they are in recipe_json too):

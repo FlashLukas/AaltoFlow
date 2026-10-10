@@ -98,6 +98,13 @@ def write_dataset(ds, path) -> Path:
     checkpoint, or the end).
     """
     path = Path(path)
+    from .framestore import frames_of, write_with_frames
+    if frames_of(ds):
+        # A big camera map whose frames were written into the file as they
+        # arrived (framestore.py): the small variables go into that SAME file
+        # in place -- rewriting gigabytes of frames at every checkpoint is
+        # exactly what writing them as they come avoids.
+        return write_with_frames(ds, path)
     tmp = path.with_suffix(".writing.nc")
     path.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(tmp)

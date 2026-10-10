@@ -119,12 +119,19 @@ class AxisSpec:
     """
 
     def __init__(self, name: str, label: str = "", unit: str = "",
-                 values_fn=None, length: int | None = None):
+                 values_fn=None, length: int | None = None, attrs=None):
         self.name = name
         self.label = label or name
         self.unit = unit
         self.length = length
         self._values = values_fn
+        #: extra attributes for the axis's coordinate in the file, e.g. a
+        #: camera image axis in pixels says {"um_per_px": 0.413}
+        self.attrs = dict(attrs or {})
+        #: AUXILIARY coordinates along this axis {name: (values, unit)}, filled
+        #: by values_fn when the module sends more than one coordinate (a
+        #: camera axis in px AND in um). Written as non-index coordinates.
+        self.aux: dict = {}
 
     def values(self):
         """The coordinate array for this axis (numpy)."""

@@ -74,6 +74,7 @@ SIZES = {
     "stage": (1280, 800),
     "piezo": (1240, 760),
     "camera": (1400, 940),
+    "camera-settings": (1400, 940),
     "kim": (1240, 1240),
     "hf2": (1400, 900),
     "hf2-ch2": (1400, 900),
@@ -107,8 +108,10 @@ SIZES = {
     "suite-watch-remote": (1500, 1040),
     "suite-queue-dialog": (760, 430),
     "suite-fly-scan": (1500, 950),
+    "suite-image-scan": (1500, 950),
     "suite-repeat-scan": (1500, 950),
     "suite-fly": (1500, 950),
+    "suite-image": (1500, 950),
     "suite-scout-scan": (1500, 950),
     "suite-scout": (1500, 950),
     "suite-axis-advanced": (1500, 950),
@@ -251,7 +254,7 @@ def _kim(theme):
     return lambda: gui.run_app(ctrl, cfg), warm_up, 4.5
 
 
-def _camera(theme):
+def _camera(theme, tab: str | None = None):
     from camera.config import Config
     from camera.sim_system import build_sim_system
     from camera.apps import gui
@@ -272,6 +275,16 @@ def _camera(theme):
         fn = getattr(getattr(win, "ctrl", None), "set_tracking", None)
         if fn:
             fn(True)
+        if tab:
+            # one tab by NAME (a settings tab: "Camera settings" holds the
+            # Images for scans box, 2026-10-10)
+            from PySide6 import QtWidgets
+            for tw in win.findChildren(QtWidgets.QTabWidget):
+                names = [tw.tabText(i) for i in range(tw.count())]
+                if tab in names:
+                    tw.setCurrentIndex(names.index(tab))
+                    return
+            raise SystemExit(f"camera: no tab named {tab!r}")
 
     return lambda: gui.run_app(ctrl, cfg), warm_up, 5.0
 
@@ -808,6 +821,56 @@ def _fly(run: bool):
         b.per_pt.setValue(0.05)
         if run:
             b.run_scan(block=True)
+    return warm_up
+
+
+def _image_scan(run: bool):
+    """A camera IMAGE per point (2026-10-10): a toy 12-bit camera added to the
+    simulator -- a laser spot on a striped sample that slides under it as X
+    moves -- recorded with the lock-in over a 9 x 13 map. `run=False` poses the
+    Scan tab (its summary shows the size of the images); `run=True` runs it
+    and shows the Measurement tab with the newest frame next to the map."""
+    def warm_up(win):
+        import numpy as np
+        from PySide6 import QtCore
+        from scan_core.registry import AxisSpec, Gettable
+        from scan_core.storage import Storage
+        win.use_simulator()
+        b = win.builder
+        reg = b.registry
+        h, w = 96, 128
+        yy, xx = np.mgrid[0:h, 0:w]
+
+        def frame():
+            x = reg.get("pos_x").get()
+            y = reg.get("pos_y").get()
+            stripes = 900 + 500 * (np.sin((xx + 3.0 * x) / 6.0) > 0)
+            spot = 2600 * np.exp(-((xx - 64) ** 2 + (yy - 48) ** 2) / (2 * 6.0 ** 2))
+            noise = np.random.default_rng(int(1000 + 10 * x + y)).normal(0, 40, (h, w))
+            return np.clip(stripes + spot + noise, 0, 4095).astype(np.uint16)
+        axes = [AxisSpec("camera.image_y", "image y", "px", length=h,
+                         values_fn=lambda: np.arange(h, dtype=float)),
+                AxisSpec("camera.image_x", "image x", "px", length=w,
+                         values_fn=lambda: np.arange(w, dtype=float))]
+        reg.add(Gettable("camera.image", "Camera image", "counts", frame, axes=axes,
+                         dtype="int", storage=Storage("int", bits=12)))
+        b.set_registry(reg)
+        b.name_edit.setText("spot images")
+        b.name_edit.setCursorPosition(0)
+        b.add_fixed("field", 40.0)
+        b.add_axis("pos_y")
+        b.rows[0].start.setValue(-20.0); b.rows[0].stop.setValue(20.0)
+        b.rows[0].num.setValue(9)
+        b.add_axis("pos_x")
+        b.rows[1].start.setValue(-30.0); b.rows[1].stop.setValue(30.0)
+        b.rows[1].num.setValue(13)
+        for it in b._det_items():
+            it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole)
+                             in ("lockin_r", "camera.image") else QtCore.Qt.Unchecked)
+        b.per_pt.setValue(0.0)
+        if run:
+            b.run_scan(block=True)
+            b.view.apply_view_state({"detector": "lockin_r"})
     return warm_up
 
 
@@ -1489,6 +1552,9 @@ TARGETS = {
     "suite-axis-advanced": _suite("Scan", _axis_advanced, settle=2.0),
     "suite-axis-advanced-scout": _suite("Scan", _axis_advanced_scout, settle=2.0),
     "suite-axis-advanced-ramp": _suite("Scan", _axis_advanced_ramp, settle=2.0),
+    "suite-image-scan": _suite("Scan", _image_scan(run=False), settle=2.0),
+    "suite-image": _suite("Measurement", _image_scan(run=True), settle=3.0),
+    "camera-settings": lambda theme: _camera(theme, tab="Camera settings"),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),
     "clMag": _clMag,

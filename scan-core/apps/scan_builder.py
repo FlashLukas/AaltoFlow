@@ -41,6 +41,7 @@ from scan_core import autosave, scan_queue
 from suite_common import title as suite_title
 from suite_common.fileio import replace_retry
 from apps.data_view import DataView
+from apps.image_live import LiveImage
 from apps.run_info_card import RunInfoCard
 from apps.theme import DEFAULT_THEME, C, apply, set_theme
 
@@ -3089,11 +3090,11 @@ class ScanWorker(QtCore.QThread):
         """
         if self.save_path is None:
             return
-        tmp = self.save_path.with_suffix(".writing.nc")
         try:
-            self.save_path.parent.mkdir(parents=True, exist_ok=True)
-            ds.to_netcdf(tmp)
-            replace_retry(tmp, self.save_path)   # Windows may refuse it for a moment
+            # autosave.write_dataset: temp file + rename -- or, for a big
+            # camera map whose frames are already IN the file
+            # (scan_core/framestore.py), the small variables in place
+            autosave.write_dataset(ds, self.save_path)
             self.saved.emit(str(self.save_path), done, total)
         except Exception as exc:            # a full disk must not kill the scan
             self.save_failed.emit(f"could not save to {self.save_path}: {exc}")
@@ -5293,7 +5294,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # widget serves the Data tab, so what you watch during a run behaves
         # exactly like what you open a saved file with.
         self.view = DataView()
-        v.addWidget(self.view, 1)
+        # the newest CAMERA frame next to the map, shown only while a scan
+        # records an image detector (apps/image_live.py, 2026-10-10)
+        self.live_image = LiveImage()
+        res_row = QtWidgets.QHBoxLayout()
+        res_row.setSpacing(8)
+        res_row.addWidget(self.view, 1)
+        res_row.addWidget(self.live_image)
+        v.addLayout(res_row, 1)
         self.det_combo = self.view.det_combo       # kept: callers/tests use it
         self.plot, self.img, self.curve = self.view.plot, self.view.img, self.view.curve
 
@@ -5928,6 +5936,19 @@ class ScanBuilder(QtWidgets.QMainWindow):
             kept = n // max(1, comp.dims[avg].size)
             self.summary.setText(self.summary.text()
                                  + f"  (average of {comp.dims[avg].size} -> {kept:,} stored)")
+        # CAMERA IMAGES (scan_core/framestore.py): a frame per point adds up
+        # fast -- say how big the file will be BEFORE the run, uncompressed
+        # (compression usually takes it to 30-70 %), and whether the frames
+        # will be written to the file as they come instead of held in memory
+        from scan_core import framestore as FS
+        sizes = FS.estimate(recipe, self.registry)
+        if sizes:
+            known = [b for b in sizes.values() if b is not None]
+            total_b = sum(known) if known else None
+            text = f"  ·  images {FS.format_bytes(total_b)}"
+            if any(b is not None and b > FS.INCREMENTAL_ABOVE_BYTES for b in known):
+                text += " (written to the file as they come)"
+            self.summary.setText(self.summary.text() + text)
         # The pre-run ETA counts only what this window can know -- the dwell
         # per point (or per fly row) -- not settling, not routines such as an
         # autofocus, which on the rig can be most of the time. So it says
@@ -7230,6 +7251,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _fill_det_combo(self, ds):
         """Hand the dataset to the viewer (it keeps the operator's choices)."""
         self.view.set_dataset(ds)
+        self.live_image.set_dataset(ds)
 
     def _on_done(self, ds):
         self.dataset = ds
@@ -7341,7 +7363,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
             return
         fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save data", "scan.nc", "netCDF (*.nc)")
         if fn:
-            self.dataset.to_netcdf(fn)
+            # through write_dataset: a big camera map's frames live in the
+            # scan's file, not in the dataset, and are copied along
+            autosave.write_dataset(self.dataset, fn)
 
 
 def main() -> int:

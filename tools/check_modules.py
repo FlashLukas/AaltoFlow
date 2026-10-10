@@ -210,6 +210,79 @@ except Exception as exc:
 print(json.dumps(out))
 """
 
+# A detector read as a BINARY reply part (`read.binary`, guide 6b "Binary
+# replies"; the camera's image): run its acquire step if it has one (trigger,
+# then poll status until the ready rule's id is taken up and the busy flag is
+# down), ask for the value WITH binary (header + parts must agree: dtype x
+# shape = bytes, each part named in `binary`) and WITHOUT (one JSON part --
+# a plain client must still work), and compare both with the declared dims
+# lengths and max. argv: port, JSON descriptor. Prints one JSON line.
+_BINARY = r"""
+import base64, json, sys, time, zmq
+port, d = sys.argv[1], json.loads(sys.argv[2])
+s = zmq.Context.instance().socket(zmq.REQ)
+s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 8000)
+s.connect(f"tcp://127.0.0.1:{port}")
+def ask(**m):
+    s.send_json(m); return s.recv_multipart()
+out = {"ok": False, "why": ""}
+try:
+    import numpy as np
+    acq = d.get("acquire") or {}
+    if acq.get("trigger_verb"):
+        head = json.loads(ask(cmd=acq["trigger_verb"])[0])
+        if not head.get("ok"):
+            raise RuntimeError(f"trigger refused: {head.get('error')}")
+        rd = acq.get("ready") or {}
+        n = head.get(acq.get("target_key")) if acq.get("target_key") else None
+        t0 = time.monotonic()
+        while True:
+            st = json.loads(ask(cmd="status")[0])["status"]
+            adopted = n is None or st.get(rd.get("setpoint_key")) == n
+            busy = bool(st.get(rd.get("flag_key")))
+            if adopted and (busy if not rd.get("invert") else not busy):
+                break
+            if time.monotonic() - t0 > float(acq.get("timeout_s", 10)):
+                raise RuntimeError("the acquisition did not finish")
+            time.sleep(0.05)
+    r = d["read"]; key = r.get("key", "value")
+    parts = ask(cmd=r["verb"], **(r.get("args") or {}), binary=True)
+    head = json.loads(parts[0])
+    if not head.get("ok"):
+        raise RuntimeError(f"binary read refused: {head.get('error')}")
+    specs = head.get("binary") or []
+    if len(specs) != len(parts) - 1:
+        raise RuntimeError(f"header lists {len(specs)} part(s), {len(parts) - 1} arrived")
+    spec = next((x for x in specs if x.get("key") == key), None)
+    if spec is None:
+        raise RuntimeError(f"no binary part named {key!r}")
+    raw = parts[1 + specs.index(spec)]
+    dt = np.dtype(spec["dtype"]); shape = tuple(spec["shape"])
+    if len(raw) != dt.itemsize * int(np.prod(shape)):
+        raise RuntimeError(f"{len(raw)} bytes for {dt} x {list(shape)}")
+    a = np.frombuffer(raw, dt).reshape(shape)
+    want = tuple(x.get("length") for x in d.get("dims") or [])
+    if all(want) and want != shape:
+        raise RuntimeError(f"shape {list(shape)}, describe's dims say {list(want)}")
+    if d.get("max") is not None and a.size and a.max() > d["max"]:
+        raise RuntimeError(f"a value {a.max()} above the declared max {d['max']}")
+    plain = ask(cmd=r["verb"], **(r.get("args") or {}))
+    if len(plain) != 1:
+        raise RuntimeError("a request WITHOUT binary got a multipart reply")
+    pj = json.loads(plain[0])
+    v = pj.get(key)
+    if isinstance(v, dict) and "b64" in v:
+        b = np.frombuffer(base64.b64decode(v["b64"]), np.dtype(v["dtype"])).reshape(v["shape"])
+        if not np.array_equal(a, b):
+            raise RuntimeError("the JSON reply holds another value than the binary one")
+    out = {"ok": True, "why": f"{dt} x {list(shape)}, {len(raw)} bytes"}
+except zmq.Again:
+    out["why"] = "no reply"
+except Exception as exc:
+    out["why"] = f"{type(exc).__name__}: {exc}"
+print(json.dumps(out))
+"""
+
 # Three `status` replies ~0.4 s apart (a value may only appear once the
 # brain's worker has run): prints a JSON list of status dicts, or null.
 _STATUS = r"""
@@ -544,6 +617,24 @@ def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
                  f"{sum(len((c or {}).get('t') or []) for c in chunks)} samples in 0.6 s")
 
 
+def binary_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
+    """A detector declared with `read.binary` (a camera image) must really
+    come back as a binary reply part that matches its header and describe --
+    and still as one JSON part for a client that did not ask for binary."""
+    for d in manifest.get("parameters", []):
+        r = d.get("read")
+        if not isinstance(r, dict) or not r.get("binary"):
+            continue
+        name = f"live: binary read of '{d.get('id')}' works"
+        p = subprocess.run([str(py), "-c", _BINARY, str(cmd), json.dumps(d)],
+                           capture_output=True, text=True, timeout=60)
+        try:
+            res = json.loads(p.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            res = {"ok": False, "why": (p.stderr or p.stdout).strip()[-150:]}
+        rep.add(m.key, name, "PASS" if res.get("ok") else "FAIL", res.get("why", ""))
+
+
 def ramp_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
     """A declared `ramp` must work: scan-core flies the knob through it.
     Each one: the block names its verbs and rate, a short sweep starts, its
@@ -870,6 +961,7 @@ def live_check(rep: Report, m, py: Path):
         rep.add(m.key, "live: describe has parameters", "PASS" if n else "FAIL", f"{n}")
         stream_check(rep, m, py, cmd, manifest)
         ramp_check(rep, m, py, cmd, manifest)
+        binary_check(rep, m, py, cmd, manifest)
         types_check(rep, m, py, cmd, manifest)
         if not malformed_check(rep, m, py, cmd):
             rep.add(m.key, "live: stops cleanly on `shutdown`", "SKIP",

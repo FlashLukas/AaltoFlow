@@ -409,6 +409,12 @@ def _command_reader(d: dict, inst: Instrument):
     spec = d["read"]
     verb, key = spec["verb"], spec.get("key", "value")
     args = dict(spec.get("args") or {})
+    # "binary": true (2026-10-10, the camera's frames): ask for the value as
+    # a RAW binary part of the reply instead of JSON (instrument.decode_reply
+    # turns it into a numpy array). Additive: a module that does not know the
+    # flag ignores it and answers in JSON, which decodes as before.
+    if spec.get("binary"):
+        args["binary"] = True
     complex_ = d.get("dtype") == "complex"
     # The descriptor's `scale` (wire = display x scale) applies here exactly as
     # it does to the status reader: one descriptor must give ONE number however
@@ -440,6 +446,17 @@ def decode_wire_value(value, complex_: bool = False):
 
     def arr(xs):
         return np.array([np.nan if v is None else v for v in xs], dtype=float)
+
+    if isinstance(value, np.ndarray):
+        # a BINARY reply part, already an array (instrument.decode_reply)
+        return value.astype(complex) if complex_ and value.dtype.kind != "c" else value
+    if isinstance(value, dict) and "b64" in value and "dtype" in value:
+        # the same array inside JSON, for a client that did not ask for
+        # binary parts: {"dtype": "<u2", "shape": [h, w], "b64": "..."}
+        import base64
+        raw = base64.b64decode(value["b64"])
+        shape = tuple(int(n) for n in value.get("shape") or ())
+        return np.frombuffer(raw, dtype=np.dtype(str(value["dtype"]))).reshape(shape).copy()
 
     if isinstance(value, dict) and "re" in value and "im" in value:
         re, im = value["re"], value["im"]
@@ -477,11 +494,27 @@ def _axes_from(d: dict, inst: Instrument, prefix: bool, module: str, on_warn):
 
         verb = dim.get("coord_verb")
         inline = dim.get("values")
+        # optional AUXILIARY coordinates from the same coord_verb reply
+        # (2026-10-10, the camera): [{"name", "key", "unit"}] -- an image axis
+        # in pixels that also comes in micrometres. Names are namespaced like
+        # the axis itself.
+        aux_specs = [a for a in (dim.get("aux") or [])
+                     if isinstance(a, dict) and a.get("name") and a.get("key")]
+        holder: dict = {}
         if verb:
             key = dim.get("coord_key", "values")
 
-            def values_fn(_v=verb, _k=key, _inst=inst):
-                return _inst.command(_v).get(_k, [])
+            def values_fn(_v=verb, _k=key, _inst=inst, _aux=aux_specs, _h=holder):
+                reply = _inst.command(_v)
+                spec = _h.get("spec")
+                if spec is not None:
+                    spec.aux = {}
+                    for a in _aux:
+                        vals = reply.get(a["key"])
+                        if isinstance(vals, (list, tuple)):
+                            aname = f"{module}.{a['name']}" if prefix else a["name"]
+                            spec.aux[aname] = (vals, a.get("unit", ""))
+                return reply.get(_k, [])
         elif inline is not None:
             def values_fn(_vals=list(inline)):
                 return _vals
@@ -491,9 +524,12 @@ def _axes_from(d: dict, inst: Instrument, prefix: bool, module: str, on_warn):
                 on_warn(f"{d.get('id')}: dim '{name}' declares neither "
                         f"coord_verb, values nor length; using indices")
 
-        out.append(AxisSpec(axis_name, dim.get("label", name),
-                            dim.get("unit", ""), values_fn=values_fn,
-                            length=dim.get("length")))
+        attrs = dim.get("attrs") if isinstance(dim.get("attrs"), dict) else None
+        spec = AxisSpec(axis_name, dim.get("label", name),
+                        dim.get("unit", ""), values_fn=values_fn,
+                        length=dim.get("length"), attrs=attrs)
+        holder["spec"] = spec
+        out.append(spec)
     return out
 
 

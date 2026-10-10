@@ -58,6 +58,11 @@ PROJECTS.update({
     "suite-scout-scan": ("scan-core", True),
     "suite-scout": ("scan-core", True),
     "suite-fly": ("scan-core", True),
+    # a camera IMAGE per point: the Scan tab (its size) and the live frame
+    "suite-image-scan": ("scan-core", True),
+    "suite-image": ("scan-core", True),
+    # the camera's Camera settings tab (Images for scans)
+    "camera-settings": ("modules/imaging/camera-control", True),
     # an axis row's Advanced panel opened in place (fly, and scout)
     "suite-axis-advanced": ("scan-core", True),
     "suite-axis-advanced-scout": ("scan-core", True),

@@ -113,7 +113,16 @@ class Storage:
         self.unknown_seen: list = []
         self.store = store if store in ("float32", "float64") else None
         if kind == "int" and self.bits is not None:
-            lo, hi = 0, 2 ** self.bits - 1
+            # `bits` = unsigned, 0 .. 2^bits - 1. A `max` given WITH it can
+            # only tighten the top (2026-10-10, the camera: a 4 x 4 bin of
+            # 12-bit counts declares 16 bits and max 65520 -- still uint16,
+            # with 65535 spare for "not measured")
+            top = 2 ** self.bits - 1
+            try:
+                given = float(hi) if hi is not None else math.inf
+            except (TypeError, ValueError):
+                given = math.inf
+            lo, hi = 0, (min(top, int(math.floor(given))) if math.isfinite(given) else top)
         # an infinite bound is the same as none (a module's "unbounded")
         lo = None if lo is None or not math.isfinite(float(lo)) else lo
         hi = None if hi is None or not math.isfinite(float(hi)) else hi
@@ -144,6 +153,8 @@ class Storage:
         if t == "int" or dt == "int":
             lo = d.get("min") if use_bounds else None
             hi = d.get("max") if use_bounds else None
+            # with `bits`, min is ignored (bits means unsigned) and max may
+            # only tighten 2^bits - 1 (see __init__)
             return cls("int", lo=lo, hi=hi, bits=d.get("bits"))
         return cls("float", store=store)
 
@@ -189,13 +200,32 @@ class Storage:
         return lo, hi
 
     # ---- the in-memory array -----------------------------------------------
-    def allocate(self, shape) -> np.ndarray:
-        """The engine's buffer, every point "not measured"."""
+    def allocate(self, shape, compact: bool = False) -> np.ndarray:
+        """The engine's buffer, every point "not measured".
+
+        `compact` (an IMAGE detector, 2026-10-10): hold a bool/int quantity
+        whose range fits 24 bits as float32 instead of float64. A camera map
+        is millions of numbers per point; float32 halves the memory and still
+        holds every whole number up to 16 777 216 EXACTLY (a 12-bit count, a
+        16-bit count, a 4x4-binned sum of 16-bit counts), with NaN still
+        meaning "not measured" for every consumer of the buffer.
+        """
         if self.kind == "complex":
             return np.full(shape, np.nan + 1j * np.nan, dtype=np.complex128)
         if self.kind == "string":
             return np.full(shape, "", dtype=object)
+        if compact and self.fits_float32():
+            return np.full(shape, np.nan, dtype=np.float32)
         return np.full(shape, np.nan, dtype=float)
+
+    def fits_float32(self) -> bool:
+        """True when every value this quantity may take is exact in float32."""
+        if self.kind == "bool":
+            return True
+        if self.kind != "int":
+            return False
+        lo, hi = self.int_range
+        return -2**24 <= lo and hi <= 2**24
 
     # ---- one measured value -> the buffer, CHECKED ------------------------
     def to_memory(self, value, what: str = ""):
@@ -217,11 +247,43 @@ class Storage:
                 return np.array([_text(v) for v in np.ravel(np.asarray(value, dtype=object))],
                                 dtype=object).reshape(np.shape(value))
             return _text(value)
+        if isinstance(value, np.ndarray) and value.dtype.kind in "biuf" \
+                and k in ("bool", "int"):
+            return self._numeric_array(value, what)
         if isinstance(value, (list, tuple, np.ndarray)):
             arr = np.asarray(value, dtype=object)
             flat = [self._scalar(v, what) for v in arr.ravel()]
             return np.array(flat, dtype=float).reshape(arr.shape)
         return self._scalar(value, what)
+
+    def _numeric_array(self, value: np.ndarray, what):
+        """to_memory for a NUMERIC numpy array, vectorised (2026-10-10).
+
+        A camera frame is ~2 million pixels; checking them one Python call at
+        a time costs seconds per point. The rules are exactly _scalar's: NaN
+        is "no value", a bool must be 0/1, an int a whole number inside its
+        range. The first offending element (in C order, as the loop would
+        meet it) is handed to _scalar, so the error is word for word the same.
+        """
+        if value.dtype.kind in "biu":
+            x = value.astype(np.float64)
+            bad = np.zeros(x.shape, dtype=bool)
+        else:
+            x = np.asarray(value, dtype=np.float64)
+            nan = np.isnan(x)
+            finite = np.isfinite(x)
+            # +-inf is not a whole number; a fraction is not one either
+            bad = ~nan & (~finite | (np.floor(np.where(finite, x, 0.0)) != np.where(finite, x, 0.0)))
+        with np.errstate(invalid="ignore"):
+            if self.kind == "bool":
+                bad |= ~np.isnan(x) & (x != 0.0) & (x != 1.0)
+            else:
+                lo, hi = self.int_range
+                bad |= ~np.isnan(x) & ((x < lo) | (x > hi))
+        if bad.any():
+            first = value.reshape(-1)[int(np.flatnonzero(bad.reshape(-1))[0])]
+            self._scalar(first.item(), what)          # raises with the usual words
+        return x
 
     def _scalar(self, v, what):
         if v is None or (isinstance(v, (float, np.floating)) and math.isnan(v)):
