@@ -1904,6 +1904,121 @@ class SetStepRow(FixedRow):
         return f"{self.param.label} = {self.value():g}{unit}"
 
 
+class ActionArgsPanel(QtWidgets.QFrame):
+    """The ADVANCED options of a routine step that runs an action: one line
+    per argument the module declares (describe `args`), built from that list
+    alone -- type, unit, min / max, options, default, help -- so ANY module's
+    action with arguments gets it, not only the camera's.
+
+    Each line has a tick box: TICKED = this value is sent with the action,
+    unticked = not sent, and the module uses its OWN setting (the camera's
+    configured AF position, its autofocus settings, ...). That is the point of
+    the options: a routine overrides only what it means to, and a module
+    setting changed later still counts for everything the routine left alone.
+    """
+
+    changed = QtCore.Signal()
+
+    def __init__(self, specs: list, values: dict | None = None):
+        super().__init__()
+        self.setObjectName("actionArgs")
+        self.setStyleSheet(
+            f"QFrame#actionArgs {{ border-top: 1px dashed {C['border']}; }}")
+        values = dict(values or {})
+        grid = QtWidgets.QGridLayout(self)
+        grid.setContentsMargins(24, 4, 6, 4)
+        grid.setHorizontalSpacing(6); grid.setVerticalSpacing(2)
+        grid.setColumnStretch(1, 1)
+        #: name -> (tick box, editor, spec)
+        self.lines: dict = {}
+        for r, spec in enumerate(specs):
+            name = spec["name"]
+            tick = QtWidgets.QCheckBox(spec.get("label") or name)
+            tip = (spec.get("help") or "").strip()
+            tick.setToolTip((tip + "\n" if tip else "") + f"argument '{name}'. Ticked = sent "
+                            f"with the action; unticked = the module's own setting.")
+            tick.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            tick.setMinimumWidth(90)
+            editor = self._editor(spec, values.get(name))
+            editor.setToolTip(tick.toolTip())
+            tick.setChecked(name in values)
+            editor.setEnabled(name in values)
+            tick.toggled.connect(lambda on, e=editor: (e.setEnabled(on), self.changed.emit()))
+            grid.addWidget(tick, r, 0)
+            grid.addWidget(editor, r, 1)
+            self.lines[name] = (tick, editor, spec)
+        # values the module no longer declares are KEPT (and shown as tags),
+        # so a definition loaded next to an older module comes back unchanged;
+        # recipe.validate() names them before a run
+        self.extra = {k: v for k, v in values.items() if k not in self.lines}
+
+    def _editor(self, spec: dict, value):
+        t = spec.get("type", "float")
+        lo, hi = spec.get("min"), spec.get("max")
+        default = spec.get("default")
+        if t == "bool":
+            w = QtWidgets.QCheckBox("on")
+            w.setChecked(bool(value if value is not None else default))
+            w.toggled.connect(lambda on, w=w: (w.setText("on" if on else "off"),
+                                               self.changed.emit()))
+            w.setText("on" if w.isChecked() else "off")
+            return w
+        if t == "enum":
+            w = QtWidgets.QComboBox()
+            for o in spec.get("options") or []:
+                w.addItem(str(o))
+            pick = value if value is not None else default
+            if pick is not None and w.findText(str(pick)) >= 0:
+                w.setCurrentText(str(pick))
+            w.currentTextChanged.connect(lambda *_: self.changed.emit())
+            return w
+        if t == "string":
+            w = QtWidgets.QLineEdit("" if value is None and default is None
+                                    else str(value if value is not None else default))
+            w.textChanged.connect(lambda *_: self.changed.emit())
+            return w
+        if t == "int":
+            w = QtWidgets.QSpinBox()
+            w.setRange(int(lo) if lo is not None else -2**31,
+                       int(hi) if hi is not None else 2**31 - 1)
+        else:
+            w = QtWidgets.QDoubleSpinBox()
+            w.setDecimals(4)
+            w.setRange(float(lo) if lo is not None else -1e12,
+                       float(hi) if hi is not None else 1e12)
+        if spec.get("unit"):
+            w.setSuffix(f" {spec['unit']}")
+        start = value if value is not None else default
+        if start is None:
+            # nothing given: 0 when allowed, else the nearest limit -- visibly
+            # a starting point to type over (the routine's set steps do the same)
+            start = 0 if (lo is None or lo <= 0) and (hi is None or hi >= 0) else \
+                (lo if lo is not None else hi)
+        w.setValue(int(round(float(start))) if t == "int" else float(start))
+        w.valueChanged.connect(lambda *_: self.changed.emit())
+        return w
+
+    def values(self) -> dict:
+        """{name: value} of the TICKED lines (+ kept unknown ones), in declared order."""
+        out = {}
+        for name, (tick, w, spec) in self.lines.items():
+            if not tick.isChecked():
+                continue
+            t = spec.get("type", "float")
+            if t == "bool":
+                out[name] = bool(w.isChecked())
+            elif t == "enum":
+                out[name] = w.currentText()
+            elif t == "string":
+                out[name] = w.text()
+            elif t == "int":
+                out[name] = int(w.value())
+            else:
+                out[name] = float(w.value())
+        out.update(self.extra)
+        return out
+
+
 class ActionStepRow(QtWidgets.QFrame):
     """A routine step "run <action>" -- one registry action, waited for.
 
@@ -1911,15 +2026,33 @@ class ActionStepRow(QtWidgets.QFrame):
     (an autofocus has parked, a reference sweep is in), which is what makes
     "find focus, then save the pattern, then save a picture" safe to write
     down as three steps.
+
+    An action that declares ARGUMENTS (2026-10-10, Lukas: the AF position and
+    the autofocus's settings "are advanced settings in the procedure called in
+    before/after/throughout scan") gets a gear button: it opens the step's
+    Advanced options IN PLACE under the step (ActionArgsPanel). Whatever is
+    set there is saved in the recipe as the step's `args`, sent with the
+    action, and shown as small tags on the step, so a closed step still says
+    what it will do differently.
     """
 
     remove = QtCore.Signal(object)
     move = QtCore.Signal(object, int)
+    changed = QtCore.Signal()
 
-    def __init__(self, action):
+    def __init__(self, action, args: dict | None = None):
         super().__init__()
         self.aid = action.id
-        lay = _step_frame(self)
+        self.setObjectName("axis")
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        top = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(top)
+        lay.setContentsMargins(8, 3, 6, 3); lay.setSpacing(4)     # as _step_frame
+        self.marker = QtWidgets.QLabel("")
+        self.marker.setStyleSheet(f"color:{C['accent']}; font-weight:800;")
+        self.marker.setFixedWidth(16)
+        lay.addWidget(self.marker)
         run = QtWidgets.QLabel("run")
         run.setStyleSheet(f"color:{C['muted']};")
         lay.addWidget(run)
@@ -1933,17 +2066,81 @@ class ActionStepRow(QtWidgets.QFrame):
             w.setMinimumWidth(60)
             w.setToolTip(f"{action.id}\n{action.help}" if action.help else action.id)
             namebox.addWidget(w)
+        # the tags: one per argument the step SETS (clipped, never widening
+        # the column; the full list is in the tooltip)
+        self.tags = QtWidgets.QWidget()
+        self.tags.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                QtWidgets.QSizePolicy.Preferred)
+        self.tags_box = QtWidgets.QHBoxLayout(self.tags)
+        self.tags_box.setContentsMargins(0, 1, 0, 0); self.tags_box.setSpacing(3)
+        self.tags_box.addStretch(1)
+        namebox.addWidget(self.tags)
         lay.addLayout(namebox, 1)
+        specs = list(getattr(action, "arg_specs", None) or [])
+        self.args_panel = None
+        self.adv_btn = None
+        if specs or args:
+            self.adv_btn = QtWidgets.QPushButton()
+            self.adv_btn.setIcon(_gear_icon())
+            self.adv_btn.setCheckable(True)
+            self.adv_btn.setFixedWidth(26)
+            self.adv_btn.setStyleSheet("padding: 0px;")
+            self.adv_btn.setToolTip("Advanced: this action's own options for THIS step\n"
+                                    "(ticked = sent; unticked = the module's setting).")
+            self.adv_btn.toggled.connect(self.set_advanced_open)
+            lay.addWidget(self.adv_btn)
         _step_buttons(self, lay)
+        outer.addWidget(top)
+        if self.adv_btn is not None:
+            self.args_panel = ActionArgsPanel(specs, args)
+            self.args_panel.setVisible(False)
+            self.args_panel.changed.connect(self._args_changed)
+            outer.addWidget(self.args_panel)
+        self._sync_tags()
+
+    def set_advanced_open(self, on: bool) -> None:
+        if self.args_panel is None:
+            return
+        self.adv_btn.blockSignals(True)
+        self.adv_btn.setChecked(on)
+        self.adv_btn.blockSignals(False)
+        self.args_panel.setVisible(on)
+
+    def advanced_open(self) -> bool:
+        return self.args_panel is not None and self.args_panel.isVisibleTo(self)
+
+    def args(self) -> dict:
+        """The arguments this step sends ({} = none: the module's defaults)."""
+        return self.args_panel.values() if self.args_panel is not None else {}
+
+    def _args_changed(self) -> None:
+        self._sync_tags()
+        self.changed.emit()
+
+    def _sync_tags(self) -> None:
+        from scan_core.hooks import args_text
+        while self.tags_box.count() > 1:
+            item = self.tags_box.takeAt(0)
+            if item.widget() is not None:
+                item.widget().setParent(None)
+        vals = self.args()
+        for k, v in vals.items():
+            self.tags_box.insertWidget(self.tags_box.count() - 1,
+                                       _axis_tag(args_text({k: v}), args_text(vals)))
+        self.tags.setVisible(bool(vals))
+        self.tags.setToolTip(args_text(vals))
 
     def set_number(self, k: int) -> None:
         self.marker.setText(str(k))
 
     def to_step(self) -> dict:
-        return {"action": self.aid}
+        a = self.args()
+        return {"action": self.aid, "args": a} if a else {"action": self.aid}
 
     def text(self) -> str:
-        return self.aid
+        from scan_core.hooks import args_text
+        a = self.args()
+        return f"{self.aid} ({args_text(a)})" if a else self.aid
 
     def refresh_limits(self) -> None:          # an action has none
         pass
@@ -2364,7 +2561,7 @@ class RoutineSection(QtWidgets.QFrame):
     def _insert(self, row, at: int | None = None):
         row.remove.connect(self.remove_step)
         row.move.connect(self.move_step)
-        if isinstance(row, (SetStepRow, GenericStepRow)):
+        if isinstance(row, (SetStepRow, GenericStepRow, ActionStepRow)):
             row.changed.connect(self._changed)
         at = len(self.steps) if at is None else at
         self.steps.insert(at, row)
@@ -2393,12 +2590,13 @@ class RoutineSection(QtWidgets.QFrame):
                     return row
         return self._insert(SetStepRow(param, value))
 
-    def add_action(self, aid: str) -> "ActionStepRow | None":
-        """Append "run aid". None if no connected module offers that action."""
+    def add_action(self, aid: str, args: dict | None = None) -> "ActionStepRow | None":
+        """Append "run aid" (with its Advanced `args`, if any). None if no
+        connected module offers that action."""
         a = self._actions.get(aid)
         if a is None:
             return None
-        return self._insert(ActionStepRow(a))
+        return self._insert(ActionStepRow(a, args))
 
     def set_registry(self, registry) -> None:
         """The registry a generic step checks its conditions against (and
@@ -2544,6 +2742,9 @@ class RoutineSection(QtWidgets.QFrame):
                 args["set"] = {s.param.id: s.value() for s in self.rows}
             if n_act:
                 args["action"] = self.steps[-1].aid
+                if self.steps[-1].args():
+                    # {set, action, args}: the action's Advanced options
+                    args["args"] = self.steps[-1].args()
             return args
         return {"steps": [s.to_step() for s in self.steps]}
 
@@ -2579,7 +2780,7 @@ class RoutineSection(QtWidgets.QFrame):
                     self.add_generic(kind, ident)
                 continue
             if kind == "action":
-                if self.add_action(ident) is None:
+                if self.add_action(ident, value[0] if value else None) is None:
                     missing.append(ident)
                 continue
             p = registry.get(ident)

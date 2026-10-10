@@ -804,7 +804,8 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
                                       f"{got!r} (expected {_check.get('equals')!r})")
         return reply
 
-    return Action(aid, label, run_fn, help=d.get("help", "") or d.get("description", ""))
+    return Action(aid, label, run_fn, help=d.get("help", "") or d.get("description", ""),
+                  arg_specs=d.get("args") or [])
 
 
 def describe_or_none(inst: Instrument):

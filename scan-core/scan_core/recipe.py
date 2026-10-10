@@ -458,8 +458,13 @@ class Recipe:
                     continue
                 if kind == "action":
                     get_action = getattr(registry, "get_action", None)
-                    if get_action is None or get_action(pid) is None:
+                    act = get_action(pid) if get_action is not None else None
+                    if act is None:
                         errs.append(f"{where} references unknown action '{pid}'")
+                    elif rest:
+                        # the step's arguments, against what the module declared
+                        from .hooks import action_arg_problems
+                        errs += [f"{where}: {m}" for m in action_arg_problems(act, rest[0])]
                     continue
                 value = rest[0]
                 p = registry.get(pid)

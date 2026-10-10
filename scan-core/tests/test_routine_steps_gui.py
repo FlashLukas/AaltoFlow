@@ -97,7 +97,7 @@ def test_the_step_combo_offers_the_five_kinds(builder):
     # the action list is untouched: still exactly the registry's actions
     combo = builder.routines["before_scan"].add_combo
     assert [combo.itemData(i) for i in range(combo.count())] == [
-        None, "vna_reference", "sim_autofocus"]
+        None, "vna_reference", "sim_autofocus", "sim_focus_at"]
 
 
 def test_each_step_loads_and_writes_back_identically(builder):

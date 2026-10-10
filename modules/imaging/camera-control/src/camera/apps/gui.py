@@ -2338,7 +2338,11 @@ class MainWindow(QMainWindow):
         end it comes back. autofocus.zoom_on_af off = nothing happens.
         """
         self._status_seen = s
-        running = bool(getattr(s, "af_running", False) or getattr(s, "zcal_running", False))
+        # An AF-position trip that is MOVING (to the AF position / back) is
+        # not focusing: the whole view shows the pattern travel instead.
+        af_on = bool(getattr(s, "af_running", False)) and \
+            getattr(s, "af_trip", "") not in ("to_af", "back")
+        running = bool(af_on or getattr(s, "zcal_running", False))
         key = (getattr(s, "af_id", 0), getattr(s, "zcal_id", 0))
         started = running and (not self._zoom_run_was or key != self._zoom_run_key)
         ended = self._zoom_run_was and not running

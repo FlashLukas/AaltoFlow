@@ -378,6 +378,56 @@ def test_laser_on_sample_card_places_the_laser_and_follows_the_brain():
         brain.shutdown()
 
 
+def test_af_position_buttons_set_it_mark_it_and_run_the_round_trip():
+    """Set AF position here stores where the laser is; the view puts the violet
+    AF mark there; Focus at AF position runs the trip and the line says so."""
+    from PySide6.QtWidgets import QApplication
+    from camera.apps.gui import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    cfg.autofocus.drive_amplitude_v = 12.0
+    brain, cam, xy, z = build_sim_system(cfg)
+    brain.start()
+    try:
+        deadline = time.monotonic() + 5
+        while brain.status().frame_number < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        brain.calibrate_spot(10)
+        tcx, tcy = cam.template_center_px()
+        brain.capture_reference((tcx, tcy, 60, 60))
+        brain.set_tracking(True)
+        win = MainWindow(brain, cfg, remote=False)
+
+        def pump(cond, timeout=30.0):
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < timeout:
+                win._refresh(); app.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.03)
+            return False
+
+        assert pump(lambda: win.b_af_here.isEnabled())
+        assert not win.b_af_at.isEnabled()             # no AF position yet
+        win._set_af_here()
+        assert brain.af_position()["set"] and brain.af_position()["position"] == "um"
+        assert pump(lambda: "um from the template" in win.lab_afpos.text())
+        at = win.view.af_position_image()
+        s = brain.status()
+        assert at is not None and abs(at[0] - s.spot_x) < 3 and abs(at[1] - s.spot_y) < 3
+        assert pump(lambda: win.b_af_at.isEnabled())
+        win._af_at_position()
+        assert pump(lambda: brain.status().af_running and brain.status().af_trip)
+        assert pump(lambda: not brain.status().af_running, timeout=60.0)
+        assert brain.status().af_error == "OK"
+        win.grab()                                     # paints the AF mark
+        win.close()
+    finally:
+        brain.shutdown()
+
+
 def test_laser_card_is_greyed_without_a_pattern_and_sits_by_the_stage_controls():
     """Lukas, 2026-09-28: on the Camera tab the card pushed the bottom tabs down;
     it now sits in "Control XY stage", and without a matched pattern there are

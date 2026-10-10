@@ -224,8 +224,11 @@ def _fmt(p, value) -> str:
 def routine_steps(args) -> list[tuple]:
     """The steps of a `call` routine, flattened, in the order they run.
 
-    Returns a list of ("set", param_id, value), ("action", action_id) and,
-    for the five generic steps, (kind, spec) -- e.g. ("wait_until",
+    Returns a list of ("set", param_id, value), ("action", action_id) --
+    ("action", action_id, {name: value}) when the step gives the action
+    ARGUMENTS (2026-10-10, {action: X, args: {...}}: a routine step's
+    "Advanced" options; anything not given is the module's own default) --
+    and, for the five generic steps, (kind, spec) -- e.g. ("wait_until",
     {"condition": ..., "timeout_s": ...}); see step_problems().
     A routine can be written two ways, and both come out the same here:
 
@@ -269,16 +272,81 @@ def routine_steps(args) -> list[tuple]:
                                  f"{{{kind}: {{{sorted(STEP_KEYS[kind][1])[0]}: ...}}}}")
             out.append((kind, st[kind]))
             continue
-        if not isinstance(st, dict) or not set(st) <= {"set", "action"}:
+        if not isinstance(st, dict) or not set(st) <= {"set", "action", "args"}:
             raise ValueError(f"step {k} must be {{set: {{id: value}}}}, {{action: id}} "
                              f"or one of {', '.join(STEP_KINDS)}")
         sets = st.get("set") or {}
         if not isinstance(sets, dict):
             raise ValueError(f"step {k}: 'set' must map parameter ids to values")
         out += [("set", pid, value) for pid, value in sets.items()]
+        act_args = st.get("args")
+        if act_args is not None:
+            if not st.get("action"):
+                raise ValueError(f"step {k}: 'args' belong to an action ({{action: id, "
+                                 f"args: {{...}}}})")
+            if not isinstance(act_args, dict):
+                raise ValueError(f"step {k}: 'args' must map argument names to values")
         if st.get("action"):
-            out.append(("action", st["action"]))
+            out.append(("action", st["action"], dict(act_args))
+                       if act_args else ("action", st["action"]))
     return out
+
+
+def action_arg_problems(act, values: dict) -> list[str]:
+    """Everything wrong with the ARGUMENTS a routine gives an action ([] = fine).
+
+    Checked against what the module declared (describe `args`): a name it
+    does not have, a value of the wrong type, outside min / max, or not one
+    of the options. The same check for recipe.validate() (before the run)
+    and _call() (a caller that did not validate) -- a wrong value must be
+    found before anything moves, not by the module mid-scan.
+    """
+    specs = {a["name"]: a for a in (getattr(act, "arg_specs", None) or [])}
+    errs: list[str] = []
+    if values and not getattr(act, "takes_args", True):
+        return [f"{act.id} takes no arguments"]
+    for name, v in (values or {}).items():
+        spec = specs.get(name)
+        if spec is None:
+            errs.append(f"{act.id}: no argument called {name!r} "
+                        f"(it takes: {', '.join(specs) or 'none'})")
+            continue
+        t = spec.get("type", "float")
+        label = spec.get("label") or name
+        if t == "bool":
+            if not isinstance(v, bool):
+                errs.append(f"{act.id} {label}: must be true or false")
+            continue
+        if t in ("enum", "string"):
+            opts = spec.get("options")
+            if not isinstance(v, str):
+                errs.append(f"{act.id} {label}: must be text")
+            elif t == "enum" and opts and v not in opts:
+                errs.append(f"{act.id} {label}: {v!r} is not one of {', '.join(map(str, opts))}")
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            errs.append(f"{act.id} {label}: must be a number")
+            continue
+        if t == "int" and float(v) != round(float(v)):
+            errs.append(f"{act.id} {label}: must be a whole number")
+            continue
+        lo, hi = spec.get("min"), spec.get("max")
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            lo_t = "-inf" if lo is None else f"{lo:g}"
+            hi_t = "inf" if hi is None else f"{hi:g}"
+            errs.append(f"{act.id} {label}: {v:g} is outside [{lo_t}, {hi_t}]")
+    return errs
+
+
+def args_text(values: dict) -> str:
+    """'ix=2, routine=one_way' -- an action step's arguments, for logs and tags."""
+    def one(v):
+        if isinstance(v, bool):
+            return "on" if v else "off"
+        if isinstance(v, float):
+            return f"{v:g}"
+        return str(v)
+    return ", ".join(f"{k}={one(v)}" for k, v in (values or {}).items())
 
 
 def _number(spec, key, default=None):
@@ -577,7 +645,7 @@ def _call(ctx, **args):
     # this is for a caller that did not validate.)
     params, acts = {}, {}
     get_action = getattr(registry, "get_action", None)
-    for kind, ident, *_ in steps:
+    for kind, ident, *rest in steps:
         if kind == "set":
             p = registry.get(ident)
             if p is None or getattr(p, "kind", "") != "settable":
@@ -590,6 +658,9 @@ def _call(ctx, **args):
                 raise KeyError(f"{label} routine: no action '{ident}' here "
                                f"(is its module connected?)")
             acts[ident] = act
+            probs = action_arg_problems(act, rest[0] if rest else {})
+            if probs:
+                raise KeyError(f"{label} routine: {probs[0]}")
         else:
             # a generic step: `ident` is its spec
             probs = step_problems(kind, ident, registry, moment)
@@ -666,7 +737,12 @@ def _call(ctx, **args):
                 applied[ident] = v
             elif kind == "action":
                 act = acts[ident]
-                step(f"run {act.id}", lambda act=act: act.run(context=action_context(ctx)))
+                # the step's "Advanced" options (value[0]) go to the module;
+                # whatever they leave out is the module's own default
+                a_args = value[0] if value else None
+                what = f"run {act.id}" + (f" ({args_text(a_args)})" if a_args else "")
+                step(what, lambda act=act, a=a_args: act.run(context=action_context(ctx),
+                                                             args=a or None))
             elif kind == "compute_set":
                 for pid, text in ident["set"].items():
                     p, box = params[pid], {}

@@ -391,7 +391,8 @@ def _routine_text(hook: dict) -> str:
         if s[0] == "set":
             parts.append(f"{s[1]} = {_num(s[2])}")
         elif s[0] == "action":
-            parts.append(f"run {s[1]}")
+            from scan_core.hooks import args_text
+            parts.append(f"run {s[1]}" + (f" ({args_text(s[2])})" if len(s) > 2 else ""))
         else:
             parts.append(str(s[0]).replace("_", " "))
     return f"{when}: " + ("; ".join(parts) if parts else "(routine)")

@@ -404,11 +404,19 @@ class Action:
 
     kind = "action"
 
-    def __init__(self, id: str, label: str, run_fn, help: str = ""):
+    def __init__(self, id: str, label: str, run_fn, help: str = "",
+                 arg_specs: list | None = None):
         self.id = id
         self.label = label
         self.help = help
         self._run = run_fn
+        #: The ARGUMENTS this action declares (2026-10-10): describe's `args`
+        #: list, one dict per argument -- name, label, type (float / int /
+        #: bool / enum / string), unit, default, min, max, options, help. The
+        #: Scan Builder builds a routine step's "Advanced" options from it and
+        #: recipe.validate() checks a routine's values against it. [] = none.
+        self.arg_specs = [dict(a) for a in (arg_specs or [])
+                          if isinstance(a, dict) and a.get("name")]
         import inspect
         try:
             params = inspect.signature(run_fn).parameters
@@ -424,7 +432,8 @@ class Action:
         """Run it. `context` = where the scan is ({data_dir, data_stem,
         moment}); passed on only to actions that ask for it (a module's
         action whose text arguments contain placeholders). `args` = values
-        that replace the declared defaults (a routine never passes any)."""
+        that replace the declared defaults (a routine step's "Advanced"
+        options, or a script)."""
         kw = {}
         if self._takes_context:
             kw["context"] = context
@@ -933,6 +942,28 @@ def build_sim_registry() -> Registry:
     reg.add_action(Action("sim_autofocus", "Autofocus (simulated)", s.autofocus,
                           help="Stands in for camera.autofocus: waits 50 ms. For "
                                "trying a THROUGHOUT routine without the rig."))
+
+    # An action WITH ARGUMENTS (2026-10-10), standing in for the camera's
+    # "Find focus at AF position": a routine step's Advanced options can be
+    # tried without the rig, and the values it ran with are kept in
+    # s.last_focus_at for tests.
+    def focus_at(args=None):
+        time.sleep(0.02)
+        s.last_focus_at = dict(args or {})
+    reg.add_action(Action(
+        "sim_focus_at", "Focus at AF position (simulated)", focus_at,
+        help="Stands in for camera.autofocus_at_position: waits 20 ms and "
+             "remembers its arguments.",
+        arg_specs=[
+            {"name": "ix", "label": "AF point index X", "type": "int", "min": 0, "max": 4},
+            {"name": "iy", "label": "AF point index Y", "type": "int", "min": 0, "max": 4},
+            {"name": "x_um", "label": "AF position X", "type": "float", "unit": "um",
+             "min": -100.0, "max": 100.0},
+            {"name": "go_back", "label": "Return to where it was", "type": "bool",
+             "default": True},
+            {"name": "routine", "label": "AF routine", "type": "enum",
+             "options": ["sweep", "one_way"]},
+        ]))
 
     _attach_sim_streams(reg, s)
     _attach_sim_ramps(reg, s)

@@ -517,7 +517,7 @@ def test_the_card_offers_the_registry_actions(builder):
     combo = builder.routines["before_scan"].add_combo
     assert combo.itemText(0).startswith("＋ run an action")
     assert [combo.itemData(i) for i in range(combo.count())] == [
-        None, "vna_reference", "sim_autofocus"]
+        None, "vna_reference", "sim_autofocus", "sim_focus_at"]
     assert combo.isEnabled()
 
 
