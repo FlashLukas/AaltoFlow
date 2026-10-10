@@ -90,6 +90,12 @@ class _Axis:
         self.pending_velocity = None
         self.last_gp = 0.0
         self.info = {}
+        # sweep TRACKING (set_tracking): read the encoder during the move
+        self.tracking = False
+        self.track_target = None  # pulses the move should end at
+        self.track_last = None    # the previous position reply (pulses)
+        self.track_same = 0       # how many replies in a row did not move
+        self.track_failed = False  # the mount did not answer gp while moving
 
 
 class EllSerialBus:
@@ -225,10 +231,27 @@ class EllSerialBus:
             return a, code, data          # a device we do not drive: ignore
         if code in ("PO", "HO", "BO"):     # position (a move ends with PO)
             try:
-                ax.pos_deg = decode_s32(data[:8]) / ax.pulses_per_rev * ax.travel
+                pulses = decode_s32(data[:8])
+                ax.pos_deg = pulses / ax.pulses_per_rev * ax.travel
             except ValueError:
-                pass
-            ax.moving = False
+                pulses = None
+            if ax.tracking and ax.moving and pulses is not None:
+                # A SWEEP asks for the position while it moves (gp), and the
+                # answer looks exactly like the PO that ends the move.  So a
+                # tracked move ends when the position reaches its target --
+                # or stops changing for three replies in a row (blocked, or
+                # arrived a few pulses off).                         # VERIFY
+                if ax.track_target is not None and abs(pulses - ax.track_target) <= 20:
+                    ax.moving = False
+                elif ax.track_last is not None and pulses == ax.track_last:
+                    ax.track_same += 1
+                    if ax.track_same >= 3:
+                        ax.moving = False
+                else:
+                    ax.track_same = 0
+                ax.track_last = pulses
+            else:
+                ax.moving = False
         elif code == "GS":
             try:
                 status = int(data[:2], 16)
@@ -293,7 +316,15 @@ class EllSerialBus:
 
     def start_move_rel(self, address: str, delta_deg: float) -> None:
         ax = self._axis(address)
-        self._start(address, "mr", encode_s32(self._deg_to_pulses(ax, delta_deg)))   # VERIFY
+        steps = self._deg_to_pulses(ax, delta_deg)
+        if ax.tracking:
+            # where the tracked move should end (see _handle); unknown if the
+            # angle is not known, and then only "stopped moving" ends it
+            here = ax.pos_deg
+            ax.track_target = (None if here != here else
+                               int(round(here / ax.travel * ax.pulses_per_rev)) + steps)
+            ax.track_last, ax.track_same, ax.track_failed = None, 0, False
+        self._start(address, "mr", encode_s32(steps))                                # VERIFY
 
     def start_home(self, address: str, ccw: bool = False) -> None:
         # Rotary mounts take a direction: ho0 = clockwise, ho1 = counter-clockwise.
@@ -314,6 +345,19 @@ class EllSerialBus:
             # timeout, and ask where the mount actually is.
             ax.moving = False
             ax.error = 2
+        if ax.moving and ax.tracking and not ax.track_failed:
+            # A SWEEP: read the encoder now, and wait for the answer, so the
+            # brain stamps the reading at the middle of this poll call (an
+            # answer collected one poll later would be ~50 ms late: 6 deg at
+            # 129 deg/s).  # VERIFY that the ELL14 answers gp while it moves;
+            # if it does not, stop asking for this move (the readback then
+            # only shows where the move ended).
+            try:
+                self._transact(address, "gp", "", ("PO",),
+                               timeout=2.0 * float(self.cfg.hardware.read_timeout_s))
+                ax.last_gp = time.monotonic()
+            except (TimeoutError, RuntimeError):
+                ax.track_failed = True
         if not ax.moving:
             if ax.pending_velocity is not None:
                 v, ax.pending_velocity = ax.pending_velocity, None
@@ -351,6 +395,15 @@ class EllSerialBus:
             ax.velocity = int(percent)
             return
         self._set_velocity_now(address, percent)
+
+    def set_tracking(self, address: str, on: bool) -> None:
+        """SWEEP tracking on/off (the brain's ramp_angle): while on, a move
+        is followed by reading the encoder on every poll, so a fly scan can
+        bin by the MEASURED angle.  Off again after the sweep."""
+        ax = self._axis(address)
+        ax.tracking = bool(on)
+        ax.track_target, ax.track_last, ax.track_same = None, None, 0
+        ax.track_failed = False
 
     def read_velocity(self, address: str) -> "int | None":
         # None when "gv" failed at open: the status then shows "not measured",

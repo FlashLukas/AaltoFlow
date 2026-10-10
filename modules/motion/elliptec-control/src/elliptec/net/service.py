@@ -72,9 +72,12 @@ class ElliptecService:
         #   must be able to stop it. `home` is not safety: it turns the mount.
         #   READ = nothing extra: every read-only verb here is already
         #   status / info / describe / get_config.
+        #   Since 2026-10-10: `ramp_stop` ends an angle SWEEP (fly scans)
+        #   where the mount is -- it only stops -- so a viewer may send it;
+        #   `stream_read` only reads the polled angles.
         self.control = ControlLease(
-            safety={"stop"},
-            read=set(),
+            safety={"stop", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # ------------------------------------------------------------------ #
@@ -321,6 +324,19 @@ class ElliptecService:
                 runs = b.home_all(req.get("direction"))
                 return {"ok": True, "move_ids": [r["move_id"] for r in runs]}
             return {"ok": True, **b.home(axis(), req.get("direction"))}
+        if cmd == "ramp_angle":
+            # the angle SWEEP (fly scans): the mount turns at this rate; the
+            # reply's ramp_id is what status `ramp_id` shows while it runs
+            return {"ok": True, **b.ramp_angle(axis(), req["angle_deg"],
+                                               req["rate_deg_per_s"])}
+        if cmd == "ramp_stop":
+            return {"ok": True, "stopped": b.ramp_stop()}
+        if cmd == "stream_start":
+            return {"ok": True, "stream_id": b.stream_start()}
+        if cmd == "stream_read":
+            return {"ok": True, "stream": b.stream_read()}
+        if cmd == "stream_stop":
+            return {"ok": True, "stream": b.stream_stop()}
         if cmd == "stop":
             if req.get("axis") is None:
                 b.stop_all()

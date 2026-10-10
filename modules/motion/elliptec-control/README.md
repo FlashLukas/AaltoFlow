@@ -110,6 +110,8 @@ status (published at ~8 Hz). An axis is its index 0..n-1, or `"@<address>"`.
 | home                   | `{"cmd":"home","axis":0,"direction":"ccw"}` (no axis = all) |
 | stop                   | `{"cmd":"stop","axis":0}` (no axis = all) |
 | speed                  | `{"cmd":"set_velocity","axis":0,"value":60}` (percent) |
+| sweep (fly scans)      | `{"cmd":"ramp_angle","axis":0,"angle_deg":300,"rate_deg_per_s":129}` -> `ramp_id`, `target`, `rate` · `{"cmd":"ramp_stop"}` |
+| the polled angles      | `stream_start` / `stream_read` / `stream_stop` (group `angle`, channel `angle_<addr>`) |
 | user zero              | `set_zero` / `clear_zero` `{axis}` · `set_offset` `{axis, value}` |
 | identity, pulses/rev   | `{"cmd":"info"}` |
 | describe actions       | `home_<addr>`, `set_zero_<addr>`, `stop` (bare verbs) |
@@ -117,6 +119,43 @@ status (published at ~8 Hz). An axis is its index 0..n-1, or `"@<address>"`.
 
 Arrived = `target_deg[i]` equals what you sent **and** `moving[i]` is false;
 that is exactly the settle policy `describe` declares for scan-core.
+
+## Sweep (fly scans over an angle)
+
+A fly axis in scan-core can fly `elliptec.angle_<addr>`: the mount turns over
+each row at a set speed by itself (a **hardware** ramp, "move to at
+velocity"), the detectors stream, and every sample is binned by the
+**measured** encoder angle (`describe`: a `ramp` block, readback
+`measured: true`).
+
+- **The rate is deg/s** on the wire (scan-core's unit) and becomes the ELL14's
+  own unit, a velocity percent of `hardware.max_speed_deg_s` (430 deg/s),
+  rounded to a whole percent. The user's velocity is put back when the sweep
+  ends -- done, stopped, taken over, or at shutdown.
+- **Fly rows over an angle are FAST.** The ELL14 is a resonant piezo motor
+  that stalls below ~30 % (`limits.min_velocity_pct`), so the slowest sweep
+  is ~30 % of ~430 deg/s = **~129 deg/s** (a full turn in under 3 s) and the
+  fastest 430 deg/s. A rate outside 129..430 deg/s is clamped and warned. Use
+  a detector that streams fast enough, or step the angle instead.
+- **The readback** is the encoder angle the worker polls (`hardware.poll_hz`,
+  20 Hz: one reading per ~6 deg at 129 deg/s), stamped at the middle of each
+  read and UNWRAPPED (a sweep to 360 ends at 360, not 0). The sweep turns
+  along the user frame, so 300 -> 360 goes up through 330, never the short
+  way back.
+- **One sweep at a time** (one `ramp_id`): a new sweep, on any mount, ends
+  the running one. Status: `ramping`, `ramp_id`, `ramp_axis`,
+  `ramp_target_deg`, `ramp_rate_deg_per_s`.
+- **A command takes over:** `move_abs` / `move_rel` / `home` / `stop` of the
+  swept mount end the sweep first. A `set_velocity` during a sweep is kept
+  and applied when it ends. `ramp_stop` is a **safety** verb (a viewer may
+  send it).
+- `# VERIFY` on the ELL14: the deg/s per percent (linear? 430 at 100 %?), the
+  stall floor, and that the mount answers `gp` WHILE it moves. On the real
+  bus a tracked move is followed by a `gp` on every poll, and ends when the
+  position reaches its target (or stops changing for three replies), because
+  a `gp` answer looks exactly like the `PO` that ends a move. If the mount
+  does not answer while moving, the readback only shows where the sweep
+  ended -- then the stream is not usable for a fly row.
 
 ## Things to know
 

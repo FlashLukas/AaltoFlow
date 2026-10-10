@@ -91,6 +91,10 @@ class Limits:
     max_relative_deg: float = 360.0
     # Velocity window in percent.  The ELL14 is a resonant piezo motor and
     # stalls if driven too slowly, hence a floor.            # VERIFY the floor
+    # The same window bounds an angle SWEEP (ramp_angle, fly scans): its rate
+    # limits are min/max_velocity_pct x hardware.max_speed_deg_s, i.e. about
+    # 129 .. 430 deg/s -- a fly row over an angle is FAST (a full turn in
+    # under 3 s even at the slowest speed).
     min_velocity_pct: int = 30
     max_velocity_pct: int = 100
     # Master switch for clamping (the angle wrap to [0, 360) always applies).
@@ -129,7 +133,14 @@ class Hardware:
     # turn at the lowest speed should fit comfortably.
     move_timeout_s: float = 8.0
     # How often the worker thread polls the bus (and rebuilds the status), Hz.
+    # During an angle SWEEP (fly scans) every poll also reads the swept
+    # mount's encoder, and those readings are what a fly row is binned by.
     poll_hz: float = 20.0
+    # The mount's top speed at 100 %, deg/s: what turns a sweep rate (deg/s,
+    # scan-core's unit) into the ELL14's own unit, percent of the maximum.
+    # Thorlabs quotes ~430 deg/s for the ELL14.  # VERIFY on our mounts (time
+    # a full turn at 100 % and at 30 %; the mapping may not be linear).
+    max_speed_deg_s: float = 430.0
 
 
 @dataclass

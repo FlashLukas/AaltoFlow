@@ -308,6 +308,28 @@ class AxisCard(QFrame):
         setv = QPushButton("Set")
         setv.clicked.connect(lambda: win._do(lambda: win.ctrl.set_velocity(axis, self.vel.value())))
         g.addWidget(setv, 2, 2, 1, 2)
+
+        # SWEEP (2026-10-10): turn to the "go to" angle at a set RATE, as a fly
+        # scan does row by row -- the mount's own "move to at velocity". The
+        # rate (deg/s) becomes its velocity percent of the top speed, so the
+        # box only offers what the velocity window allows (~129..430 deg/s);
+        # the speed above comes back when the sweep ends. "Stop" below ends a
+        # sweep too.
+        g.addWidget(QLabel("sweep"), 3, 0)
+        lim, top = cfg.limits, float(cfg.hardware.max_speed_deg_s)
+        lo_pct = int(lim.min_velocity_pct) if lim.enforce else 1
+        hi_pct = min(100, int(lim.max_velocity_pct)) if lim.enforce else 100
+        self.sweep_rate = _dspin(lo_pct / 100.0 * top, lo_pct / 100.0 * top,
+                                 hi_pct / 100.0 * top, 10.0, 0)
+        self.sweep_rate.setSuffix("  deg/s")
+        self.sweep_rate.setToolTip("Sweep rate: the mount's speed while it sweeps")
+        g.addWidget(self.sweep_rate, 3, 1)
+        sweep = QPushButton("Sweep to")
+        sweep.setToolTip("Turn to the 'go to' angle at this rate (the readback is the "
+                         "encoder angle)")
+        sweep.clicked.connect(lambda: win._do(lambda: win.ctrl.ramp_angle(
+            axis, self.target.value(), self.sweep_rate.value())))
+        g.addWidget(sweep, 3, 2, 1, 2)
         right.addLayout(g)
 
         brow = QHBoxLayout()
@@ -354,6 +376,9 @@ class AxisCard(QFrame):
         self.sub.setText(f"device {_fmt(dev)} · offset {_fmt(off)} · target {_fmt(tgt)}")
         parts = ["MOVING" if moving else "idle", "homed" if homed else "not homed",
                  f"{'--' if at(st.velocity_pct) is None else at(st.velocity_pct)} %"]
+        if getattr(st, "ramping", False) and getattr(st, "ramp_axis", -1) == i:
+            parts[0] = (f"SWEEPING to {_fmt(st.ramp_target_deg)} at "
+                        f"{_fmt(st.ramp_rate_deg_per_s, 0)} deg/s")
         if err:
             parts.append(f"ERROR: {err}")
         self.state.setText("  ·  ".join(parts))

@@ -45,6 +45,12 @@ class RemoteStatus:
     move_id: list = field(default_factory=list)
     connected: bool = False
     n_axes: int = 0
+    # the angle SWEEP (an older service has none: never sweeping)
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_axis: int = -1
+    ramp_target_deg: float | None = None
+    ramp_rate_deg_per_s: float | None = None
     #: Manifest revision from the service; None if it predates `describe`.
     describe_rev: int | None = None
 
@@ -239,6 +245,16 @@ class ElliptecClient(ControlClient):
 
     def stop(self, axis) -> None:
         self._rpc(cmd="stop", axis=axis)
+
+    def ramp_angle(self, axis, angle_deg, rate_deg_per_s) -> dict:
+        """Sweep one mount to an angle at a rate (fly scans; the GUI's Sweep)."""
+        r = self._rpc(cmd="ramp_angle", axis=axis, angle_deg=angle_deg,
+                      rate_deg_per_s=rate_deg_per_s)
+        return {"ramp_id": r["ramp_id"], "target": r["target"], "rate": r["rate"]}
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return bool(self._rpc(cmd="ramp_stop").get("stopped"))
 
     def stop_all(self) -> None:
         self._rpc(cmd="stop", axis=None)

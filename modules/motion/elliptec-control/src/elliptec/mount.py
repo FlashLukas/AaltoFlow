@@ -25,6 +25,16 @@ new target, "not moving", and believe it had arrived.  So every motion command
 gets a number (``move_id``); an axis counts as moving until the worker has
 EXECUTED the latest numbered command AND the backend reports the motion over.
 
+The angle SWEEP (fly scans, 2026-10-10; INSTRUMENT_MODULE_GUIDE.md 6b
+"Ramps").  ``ramp_angle`` turns one mount to an angle AT A RATE: a HARDWARE
+ramp -- the mount itself moves at a set speed ("move to at velocity").  The
+rate (deg/s, scan-core's unit) becomes the ELL14's velocity percent
+(hardware.max_speed_deg_s = 100 %); the user's own velocity is put back when
+the sweep ends, however it ends.  The readback is the encoder angle the
+worker polls, streamed (a fly scan bins by the MEASURED angle).  One sweep at
+a time (one ramp_id): a new one, on any mount, ends the running one.  The
+slowest speed is ~30 % of ~430 deg/s, so a fly row over an angle is fast.
+
 Threads (gotcha #1): the snapshot is built only by the worker, from brain
 attributes read under one lock; setters change those attributes, never the
 snapshot.  ``status()`` hands out the last snapshot and never touches hardware.
@@ -40,6 +50,7 @@ from dataclasses import asdict, dataclass, field
 
 from .backends.base import ElliptecBackend, status_text
 from .config import Config, axis_names, get_offsets, parse_addresses, set_offsets
+from .stream import StreamRecorder
 
 
 def wrap360(deg: float) -> float:
@@ -69,6 +80,16 @@ class MountStatus:
     move_id: list = field(default_factory=list)       # number of the last motion command
     connected: bool = False
     n_axes: int = 0
+    # The angle SWEEP (ramp_angle, fly scans).  ONE sweep at a time, so plain
+    # values, not per-axis lists: ramp_id = the newest sweep started; "ramp_id
+    # >= mine and not ramping" = my sweep is over.  ramp_axis = its axis
+    # index (-1 = none yet); the rate is what the mount really runs at (the
+    # asked rate rounded to a whole velocity percent).
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_axis: int = -1
+    ramp_target_deg: float | None = None
+    ramp_rate_deg_per_s: float | None = None
 
 
 class RotationMount:
@@ -103,6 +124,16 @@ class RotationMount:
         self._homed = [False] * n
         self._err = [0] * n
         self._err_text = [""] * n
+        # -- the angle SWEEP (under _lock) -------------------------------- #
+        self._ramp_id = 0
+        self._ramping = False
+        self._ramp_axis = -1
+        self._ramp_seq = 0                   # move_id of the sweep's move
+        self._ramp_target = None
+        self._ramp_rate = None
+        # -- THE STREAM (fly scans): every polled angle, all axes per row --- #
+        self.recorder = StreamRecorder([f"angle_{a.lower()}" for a in self.addresses])
+        self._rec_prev = [None] * n          # last recorded value (unwrapping)
         self._snapshot = MountStatus()
 
         # The service replaces this hook to forward events onto the wire; the
@@ -198,6 +229,18 @@ class RotationMount:
                     self.backend.stop(a)
                 except Exception:
                     pass
+            # A sweep runs the mount at ITS speed: put the user's back (the
+            # worker is gone, so the backend is ours to call here).
+            with self._lock:
+                i, was = self._ramp_axis, self._ramping
+                self._ramping = False
+            if was and 0 <= i < self.n:
+                try:
+                    self._set_tracking(self.addresses[i], False)
+                    if self._velocity[i] is not None:
+                        self.backend.set_velocity(self.addresses[i], int(self._velocity[i]))
+                except Exception:
+                    pass
         finally:
             try:
                 self.backend.close()
@@ -271,9 +314,14 @@ class RotationMount:
                 self._queue.extendleft(reversed(keep))
 
     def _poll_all(self) -> None:
+        stamps = [None] * self.n
         for i, a in enumerate(self.addresses):
             try:
+                tw0 = time.time()
                 r = self.backend.poll(a)
+                # the reading's time: the middle of the call (wall clock, so a
+                # coordinator on another PC can line it up)
+                stamps[i] = 0.5 * (tw0 + time.time())
             except Exception as exc:
                 with self._lock:
                     if not self._err_text[i].startswith("poll"):
@@ -297,6 +345,55 @@ class RotationMount:
                     self._home_seq[i] = 0
                     if self._homed[i]:
                         self._emit("info", f"{self._label(i)} homed")
+                # The SWEEP has ended when its move was executed and the
+                # mount has stopped turning: put the user's speed back.
+                if (self._ramping and i == self._ramp_axis
+                        and self._exec_seq[i] >= self._ramp_seq and not self._hw_moving[i]):
+                    self._end_sweep_locked(halt=False)
+                    self._emit("info", f"{self._label(i)}: sweep done at "
+                                       f"{self._user(i, self._device[i]):.4g} deg"
+                               if self._device[i] is not None else
+                               f"{self._label(i)}: sweep done")
+        self._record(stamps)
+
+    def _record(self, stamps) -> None:
+        """One row of the stream: every axis' USER angle, stamped at the
+        middle of the swept axis' poll during a sweep (the angle the fly row
+        is binned by), else at the middle of the whole pass.  The angle is
+        UNWRAPPED (370, not 10, after 359) relative to the previous row, and
+        the first row relative to the commanded target, so a sweep that ends
+        at 360 deg does not jump back to 0 in its last pixel."""
+        if not self.recorder.running:
+            return
+        with self._lock:
+            i = self._ramp_axis if self._ramping else -1
+            if 0 <= i < self.n and stamps[i] is not None:
+                t = stamps[i]
+            else:
+                got = [s for s in stamps if s is not None]
+                if not got:
+                    return
+                t = 0.5 * (min(got) + max(got))
+            row = []
+            for k in range(self.n):
+                dev = self._device[k]
+                if dev is None:
+                    row.append(float("nan"))
+                    continue
+                a = self._user(k, dev)
+                ref = self._rec_prev[k]
+                if ref is None:
+                    # first row: plain [0, 360) -- unless the mount sits AT its
+                    # target (within 1 deg round the circle), e.g. parked at a
+                    # fly row's start of 360 while the encoder says 0.001
+                    tgt = self._target[k]
+                    near = (tgt is not None
+                            and abs(((a - tgt + 180.0) % 360.0) - 180.0) < 1.0)
+                    ref = tgt if near else a
+                a = min((a - 360.0, a, a + 360.0), key=lambda v: abs(v - ref))
+                self._rec_prev[k] = a
+                row.append(a)
+        self.recorder.append(t, row)
 
     def _moving(self, i: int) -> bool:
         return self._hw_moving[i] or self._exec_seq[i] != self._seq[i]
@@ -320,6 +417,11 @@ class RotationMount:
             move_id=list(self._seq),
             connected=self._connected,
             n_axes=n,
+            ramping=self._ramping,
+            ramp_id=self._ramp_id,
+            ramp_axis=self._ramp_axis,
+            ramp_target_deg=self._ramp_target,
+            ramp_rate_deg_per_s=self._ramp_rate,
         )
 
     def status(self) -> MountStatus:
@@ -400,6 +502,7 @@ class RotationMount:
         target and the move_id."""
         i = self._check_axis(axis)
         target = self._clamp_angle(i, float(angle_deg))
+        self._take_over(i)
         device = wrap360(target + self._offsets[i])
         addr = self.addresses[i]
         if self._full_circle():
@@ -456,6 +559,7 @@ class RotationMount:
         d = float(delta_deg)
         if not math.isfinite(d):
             raise ValueError(f"step {delta_deg!r} is not a number")
+        self._take_over(i)
         lim = self.cfg.limits
         if lim.enforce and abs(d) > lim.max_relative_deg:
             c = math.copysign(lim.max_relative_deg, d)
@@ -498,6 +602,7 @@ class RotationMount:
             raise ValueError(f"home direction {direction!r} (use cw or ccw)")
         ccw = direction == "ccw"
         addr = self.addresses[i]
+        self._take_over(i)
         with self._lock:
             self._homed[i] = False
             self._target[i] = self._user(i, 0.0)
@@ -525,6 +630,9 @@ class RotationMount:
             self._exec_seq[i] = self._seq[i]
             self._home_seq[i] = 0
             self._queue.appendleft((i, 0, "stop", lambda: self.backend.stop(addr)))
+            # a stop ends a sweep of this axis too (and puts the speed back)
+            if self._ramping and self._ramp_axis == i:
+                self._end_sweep_locked(halt=False)
         self._emit("warn", f"STOP {self._label(i)}")
 
     def stop_all(self) -> None:
@@ -540,10 +648,165 @@ class RotationMount:
         addr = self.addresses[i]
         with self._lock:
             self._velocity[i] = v
-            self._enqueue(i, "set velocity", lambda: self.backend.set_velocity(addr, v),
-                          motion=False)
-        self._emit("info", f"{self._label(i)} velocity = {v} %")
+            if self._ramping and self._ramp_axis == i:
+                # the mount runs at the SWEEP's speed now; this one is the
+                # user's, and it is what the end of the sweep puts back
+                self._rebuild_snapshot()
+                sweeping = True
+            else:
+                self._enqueue(i, "set velocity", lambda: self.backend.set_velocity(addr, v),
+                              motion=False)
+                sweeping = False
+        self._emit("info", f"{self._label(i)} velocity = {v} %"
+                   + (" (applies when the sweep ends)" if sweeping else ""))
         return v
+
+    # ------------------------------------------------------------------ #
+    # the angle SWEEP (fly scans)
+    # ------------------------------------------------------------------ #
+    def ramp_rate_limits(self) -> tuple[float, float]:
+        """(min, max) sweep rate in deg/s: the velocity window times the
+        mount's top speed (hardware.max_speed_deg_s)."""
+        lim = self.cfg.limits
+        top = max(1e-6, float(self.cfg.hardware.max_speed_deg_s))
+        if lim.enforce:
+            lo, hi = int(lim.min_velocity_pct), min(100, int(lim.max_velocity_pct))
+        else:
+            lo, hi = 1, 100
+        lo = max(1, min(lo, hi))
+        return lo / 100.0 * top, hi / 100.0 * top
+
+    def ramp_angle(self, axis, angle_deg, rate_deg_per_s) -> dict:
+        """Turn one mount from where it is to a USER angle at a RATE (deg/s):
+        the mount's own "move to at velocity" (a HARDWARE ramp).
+
+        The rate becomes the ELL14's velocity percent (rounded to a whole
+        percent and clamped to the velocity window -- warned when the asked
+        rate was outside it); the user's velocity is restored when the sweep
+        ends.  The sweep turns along the USER frame (a relative step worked
+        out when the worker sends it), so it never takes the short way round
+        the wrong direction: 300 -> 360 turns up through 330, not down.
+        Returns {"ramp_id", "target", "rate"}."""
+        i = self._check_axis(axis)
+        rate = float(rate_deg_per_s)
+        if not math.isfinite(rate) or abs(rate) <= 0:
+            raise ValueError(f"rate {rate_deg_per_s!r} must be a number > 0")
+        rate = abs(rate)
+        target = self._clamp_angle(i, float(angle_deg))
+        top = max(1e-6, float(self.cfg.hardware.max_speed_deg_s))
+        r_lo, r_hi = self.ramp_rate_limits()
+        if not r_lo - 1e-9 <= rate <= r_hi + 1e-9:
+            self._emit("warn", f"{self._label(i)}: sweep rate {rate:.4g} deg/s clamped to "
+                               f"{min(max(rate, r_lo), r_hi):.4g} deg/s (the ELL14 "
+                               f"runs at {r_lo:.4g} .. {r_hi:.4g} deg/s)")
+        pct = self._clamp_velocity(rate / top * 100.0, quiet=True)
+        real = pct / 100.0 * top
+        addr = self.addresses[i]
+        # a running sweep (of any mount) ends first: one at a time
+        with self._lock:
+            if self._ramping:
+                self._end_sweep_locked(halt=True)
+
+        def prepare():
+            # on the worker thread, BEFORE the move: follow the encoder
+            # during the move, and run at the sweep's speed
+            self._set_tracking(addr, True)
+            self.backend.set_velocity(addr, pct)
+
+        with self._lock:
+            self._enqueue(i, "sweep speed", prepare, motion=False)
+            self._target[i] = target
+            seq = self._enqueue(i, "sweep",
+                                lambda: self._start_sweep_move(i, addr, target))
+            self._ramp_id += 1
+            rid = self._ramp_id
+            self._ramping = True
+            self._ramp_axis = i
+            self._ramp_seq = seq
+            self._ramp_target = target
+            self._ramp_rate = real
+            self._rebuild_snapshot()
+        self._emit("info", f"{self._label(i)}: sweep -> {target:.4g} deg at {real:.4g} deg/s "
+                           f"({pct} %)")
+        return {"ramp_id": rid, "target": target, "rate": real}
+
+    def ramp_stop(self) -> bool:
+        """End a sweep WHERE IT IS (the mount stops, the user's speed comes
+        back).  True if one was running.  A SAFETY verb over the wire."""
+        with self._lock:
+            if not self._ramping:
+                return False
+            i = self._ramp_axis
+            self._end_sweep_locked(halt=True)
+        self._emit("info", f"{self._label(i)}: sweep stopped")
+        return True
+
+    def _take_over(self, i: int) -> None:
+        """An ordinary command for axis i ends a sweep of axis i first: the
+        mount is halted (a move queued behind a running sweep would otherwise
+        wait for it to finish) and the user's speed is put back."""
+        with self._lock:
+            if not (self._ramping and self._ramp_axis == i):
+                return
+            self._end_sweep_locked(halt=True)
+        self._emit("info", f"{self._label(i)}: sweep stopped by a new command")
+
+    def _end_sweep_locked(self, halt: bool) -> None:
+        """Caller holds _lock.  End the sweep: optionally halt its mount (drop
+        its queued motion, stop it first thing), then queue the user's speed
+        and the end of encoder tracking."""
+        i = self._ramp_axis
+        self._ramping = False
+        if not 0 <= i < self.n:
+            return
+        addr = self.addresses[i]
+        if halt:
+            self._queue = collections.deque(q for q in self._queue
+                                            if not (q[0] == i and q[1]))
+            self._exec_seq[i] = self._seq[i]
+            self._queue.appendleft((i, 0, "stop", lambda: self.backend.stop(addr)))
+        v = self._velocity[i]
+
+        def restore():
+            self._set_tracking(addr, False)
+            if v is not None:
+                self.backend.set_velocity(addr, int(v))
+        self._queue.append((i, 0, "restore speed", restore))
+        self._rebuild_snapshot()
+
+    def _start_sweep_move(self, i: int, addr: str, target: float) -> None:
+        """Worker thread: the sweep's move, as a RELATIVE step along the user
+        frame from where the mount is NOW to `target` (see ramp_angle)."""
+        with self._lock:
+            dev = self._device[i]
+            here = None if dev is None else self._user(i, dev)
+        if here is None:
+            self.backend.start_move_abs(addr, wrap360(target + self._offsets[i]))
+            return
+        # a mount parked at 0 can read 359.999: take the nearer of here and
+        # here - 360 (the target is in [0, 360])
+        if abs((here - 360.0) - target) < abs(here - target):
+            here -= 360.0
+        delta = target - here
+        if abs(delta) > 1e-9:
+            self.backend.start_move_rel(addr, delta)
+
+    def _set_tracking(self, addr: str, on: bool) -> None:
+        fn = getattr(self.backend, "set_tracking", None)
+        if fn is not None:
+            fn(addr, on)
+
+    # the stream verbs: every polled angle (group "angle")
+    def stream_start(self) -> int:
+        with self._lock:
+            self._rec_prev = [None] * self.n
+        return self.recorder.start()
+
+    def stream_read(self) -> dict:
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        return self.recorder.stop()
 
     def set_offset(self, axis, offset_deg) -> float:
         """Set the user zero: user angle = device angle - offset."""

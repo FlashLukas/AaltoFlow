@@ -30,7 +30,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, wait=None, danger=False, help=""):
+       settle=None, args=None, wait=None, danger=False, help="", ramp=None,
+       stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -42,7 +43,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args), ("wait", wait),
-                 ("help", help)):
+                 ("ramp", ramp), ("stream", stream), ("help", help)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -106,6 +107,7 @@ def build_manifest(brain) -> dict:
     # The wrap to [0, 360) always applies, so no window can be wider than that.
     a_lo, a_hi = max(0.0, a_lo), min(360.0, a_hi)
     step = float(cfg.motion.jog_step_deg)
+    r_lo, r_hi = brain.ramp_rate_limits()
 
     # An ACTION is invoked by its id (scan-core and the control screen send the
     # id as the verb, with no axis argument), so per-axis actions are named by
@@ -125,6 +127,23 @@ def build_manifest(brain) -> dict:
                # target_deg is published exactly as commanded, never rounded.
                settle={"policy": "adopt_then_flag", "setpoint_key": "target_deg",
                        "flag_key": "moving", "invert": True, "index": i},
+               # A CONTINUOUS SWEEP for fly scans (2026-10-10; guide 6b,
+               # "Ramps"): a HARDWARE ramp -- the mount turns to the angle at
+               # a set speed by itself (the rate in deg/s becomes its velocity
+               # percent; the user's velocity comes back afterwards). Binned
+               # by the MEASURED encoder angle the worker polls. The slowest
+               # speed is ~30 % of ~430 deg/s: fly rows over an angle are fast.
+               ramp={"kind": "hardware",
+                     "start": {"verb": "ramp_angle",
+                               "args": {"to": "angle_deg", "rate": "rate_deg_per_s"},
+                               "extra": {"axis": i}},
+                     "stop": {"verb": "ramp_stop"},
+                     "rate": {"unit": "deg/s", "min": r_lo, "max": r_hi,
+                              "default": r_lo},
+                     "readback": {"stream": {"group": "angle", "channel": f"angle_{s}"},
+                                  "measured": True},
+                     "done": {"key": "ramping", "id_key": "ramp_id"}},
+               stream={"group": "angle", "channel": f"angle_{s}"},
                help="User angle (device angle minus the offset), degrees. "
                     "360 is the same orientation as 0."),
 
@@ -170,6 +189,9 @@ def build_manifest(brain) -> dict:
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status",
            order=1, read_path=["connected"]),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Status", order=2,
+           read_path=["ramping"],
+           help="True while an angle sweep (ramp_angle) turns a mount."),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
            danger=True,
            wait={"ready": {"policy": "immediate"}},

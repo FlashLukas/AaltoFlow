@@ -154,6 +154,11 @@ class SimEllBus:
     def read_velocity(self, address: str) -> int:
         return self._mount(address).velocity_pct
 
+    def set_tracking(self, address: str, on: bool) -> None:
+        """Sweep tracking (see EllSerialBus.set_tracking).  The simulator
+        reports the angle continuously anyway, so there is nothing to do."""
+        self._mount(address).tracking = bool(on)
+
     # -- test hooks -------------------------------------------------------- #
     def inject_error(self, address: str, code: int) -> None:
         """Make a mount report an Elliptec error code and stop (tests)."""
