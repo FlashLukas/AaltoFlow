@@ -211,6 +211,10 @@ class Visa8648:
 
     def set_power(self, dBm: float) -> None:
         # 0.1 dB is the instrument's resolution; more digits buy nothing.
+        # VERIFY on the unit, for level SWEEPS: with POW:ATT:AUTO ON the step
+        # attenuator switches at fixed levels as the level moves -- whether it
+        # is mechanical (relays click and wear at each switch point) and how
+        # big the level glitch there is.
         if self._pow_ref_on:
             # reference mode left on by the operator: talk RELATIVE to it
             self._inst.write(f"POW:AMPL {dBm - self._pow_ref_dBm:.1f} DB")  # VERIFY
@@ -225,6 +229,11 @@ class Visa8648:
     def set_frequency(self, hz: float) -> None:
         # "up to 9 digits with a maximum of 10 Hz resolution" -> send MHz with
         # five decimals (10 Hz), which is 9 digits at 4000 MHz.
+        # VERIFY on the unit, for SWEEPS (one call per step, every
+        # hardware.ramp_dt_s = 0.1 s): how long this write takes over GPIB,
+        # the real switching time after it (spec < 75 ms below 1001 MHz,
+        # < 100 ms above), and whether the output blanks or glitches while the
+        # synthesiser relocks -- together they bound ramp_dt_s.
         if self._freq_ref_on:
             hz = hz - self._freq_ref_Hz                          # VERIFY relative entry
         self._inst.write(f"FREQ:CW {hz / 1e6:.5f} MHZ")          # VERIFY digits accepted

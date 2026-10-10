@@ -282,6 +282,13 @@ class SpectrumIndicator(QtWidgets.QWidget):
 
 _FREQ_UNITS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 
+#: The Sweep card: shown name -> (knob, pace unit shown, wire units per shown
+#: unit, decimals, first pace offered in the shown unit). No phase: the 8648D
+#: has no phase control.
+_SWEEP_UI = {"Frequency": ("frequency", "MHz/s", 1e6, 3, 10.0),
+             "Level": ("power", "dB/s", 1.0, 2, 1.0)}
+_SWEEP_RUNIT = {"frequency": "Hz_per_s", "power": "dB_per_s"}
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, ctrl, cfg: Config, remote: bool = False):
@@ -462,6 +469,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spectrum = SpectrumIndicator()
         olay.addWidget(self.spectrum, 1)
         colw.addWidget(ocard, 3)
+        colw.addWidget(self._build_sweep())
 
         lcard, llay = _card("Status log")
         self.log = QtWidgets.QPlainTextEdit(); self.log.setObjectName("log")
@@ -470,6 +478,64 @@ class MainWindow(QtWidgets.QMainWindow):
         llay.addWidget(self.log)
         colw.addWidget(lcard, 1)
         return panel
+
+    def _build_sweep(self) -> QtWidgets.QWidget:
+        """SWEEP (2026-10-10): walk one knob CONTINUOUSLY to the value in its
+        box on the left, at a set pace -- what a fly scan does row by row, by
+        hand. The RF output is not touched; Stop ends the sweep where it is."""
+        card, lay = _card("Sweep")
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(8)
+        self.sweep_knob = QtWidgets.QComboBox()
+        self.sweep_knob.addItems(list(_SWEEP_UI))
+        self.sweep_knob.setToolTip("Which knob to sweep; the target is the value "
+                                   "in that knob's box on the left")
+        self.sweep_rate = _c_locale(QtWidgets.QDoubleSpinBox())
+        self.sweep_rate.setMinimumWidth(150)
+        self.sweep_rate.setToolTip("Sweep pace: the service steps the knob every "
+                                   f"{self.cfg.hardware.ramp_dt_s * 1e3:g} ms")
+        # each knob remembers its own pace while you switch between them
+        self._sweep_rates = {name: spec_[4] for name, spec_ in _SWEEP_UI.items()}
+        self._sweep_shown = None
+        self.sweep_knob.currentTextChanged.connect(self._sweep_knob_changed)
+        go = QtWidgets.QPushButton("Sweep to"); go.setObjectName("primary")
+        go.setToolTip("Sweep the chosen knob continuously to the value in its box")
+        go.clicked.connect(self._sweep)
+        stop = QtWidgets.QPushButton("Stop")
+        stop.setToolTip("End the sweep where it is (allowed also while viewing)")
+        stop.clicked.connect(lambda: self._safe(self.ctrl.ramp_stop))
+        mark_always(stop)            # ramp_stop is a safety verb (net/service.py)
+        self.sweep_state = QtWidgets.QLabel("idle")
+        self.sweep_state.setStyleSheet(f"color:{COLORS['muted']};")
+        row.addWidget(self.sweep_knob); row.addWidget(self.sweep_rate, 1)
+        row.addWidget(go); row.addWidget(stop)
+        lay.addLayout(row)
+        lay.addWidget(self.sweep_state)
+        self._sweep_knob_changed(self.sweep_knob.currentText())
+        return card
+
+    def _sweep_knob_changed(self, name: str):
+        if self._sweep_shown is not None:
+            self._sweep_rates[self._sweep_shown] = self.sweep_rate.value()
+        knob, unit, scale, decimals, _default = _SWEEP_UI[name]
+        runit = _SWEEP_RUNIT[knob]
+        lim = self.cfg.limits
+        self.sweep_rate.setDecimals(decimals)
+        self.sweep_rate.setRange(getattr(lim, f"ramp_rate_min_{runit}") / scale,
+                                 getattr(lim, f"ramp_rate_max_{runit}") / scale)
+        self.sweep_rate.setSuffix(f"  {unit}")
+        self.sweep_rate.setValue(self._sweep_rates[name])
+        self._sweep_shown = name
+
+    def _sweep(self):
+        name = self.sweep_knob.currentText()
+        knob, _unit, scale, _d, _default = _SWEEP_UI[name]
+        target = {"frequency": self._current_freq_hz,
+                  "power": self.power_spin.value}[knob]()
+        fn = getattr(self.ctrl, f"ramp_{knob}")
+        try:
+            self._safe(fn, target, self.sweep_rate.value() * scale)
+        except Exception as exc:      # a refused sweep goes to the log, not a crash
+            self._on_event("error", f"sweep refused: {exc}")
 
     def _readout(self, row, label, unit, minw=120):
         box = QtWidgets.QVBoxLayout(); box.setSpacing(2)
@@ -594,15 +660,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rf_btn.style().unpolish(self.rf_btn)
             self.rf_btn.style().polish(self.rf_btn)
 
+        # the sweep line: which knob walks where (an older service: no keys)
+        sw = getattr(s, "sweep", None) or {}
+        moving = [k for k in ("frequency", "power") if sw.get(f"{k}_ramping")]
+        if moving:
+            parts = []
+            for k in moving:
+                if k == "frequency":
+                    tgt = sw.get("frequency_ramp_target_Hz")
+                    if tgt is not None:
+                        parts.append(f"frequency -> {tgt / 1e6:,.3f} MHz")
+                else:
+                    tgt = sw.get("power_ramp_target_dBm")
+                    if tgt is not None:
+                        parts.append(f"level -> {tgt:+.1f} dBm")
+            text = "sweeping " + ", ".join(parts)
+        else:
+            text = "idle"
+        if text != self.sweep_state.text():
+            self.sweep_state.setText(text)
+            self.sweep_state.setStyleSheet(
+                f"color:{COLORS['accent'] if moving else COLORS['muted']};")
+
         # The input boxes follow the SETPOINT when it changes from elsewhere (a
-        # scan, a console, another GUI) -- but never while you are typing in one.
-        if s.frequency_set_Hz != self._set_from["f"]:
+        # scan, a console, another GUI) -- but never while you are typing in one,
+        # and not while that knob SWEEPS: the box holds the sweep's target
+        # ("Sweep to"), and the moving setpoint would overwrite it every frame.
+        # When the sweep ends the box catches up with where it stopped.
+        if s.frequency_set_Hz != self._set_from["f"] and "frequency" not in moving:
             self._set_from["f"] = s.frequency_set_Hz
             if not self.freq_spin.hasFocus():
                 self.freq_spin.blockSignals(True)
                 self.freq_spin.setValue(s.frequency_set_Hz / _FREQ_UNITS[self._freq_unit])
                 self.freq_spin.blockSignals(False)
-        if s.power_set_dBm != self._set_from["p"]:
+        if s.power_set_dBm != self._set_from["p"] and "power" not in moving:
             self._set_from["p"] = s.power_set_dBm
             if not self.power_spin.hasFocus():
                 self.power_spin.setValue(s.power_set_dBm)

@@ -28,11 +28,39 @@ from .. import spec
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
+#: The sweep pace a client is offered first, per knob, in WIRE units per
+#: second (clamped to the configured paces): 10 MHz/s -- a 100 MHz FMR line
+#: in 10 s, 1 MHz per 0.1 s step, slow enough for a lock-in at a few ms time
+#: constant; 1 dB/s (0.1 dB per step: the level resolution).
+SWEEP_RATE_DEFAULTS = {"frequency": 10.0e6, "power": 1.0}
+
+
+def sweep_block(src, knob: str, *, wire_arg: str, rate_arg: str, rate_unit: str,
+                scale: float = 1.0) -> dict:
+    """The `ramp` block of one knob (guide 6b, "Ramps"): a CONTINUOUS SWEEP a
+    fly scan can fly. The SERVICE walks the knob (softramp.py) and records
+    every value it sent; the fly scan bins by that COMMANDED value
+    (measured: false -- why, see source.py "the SWEEPS"). `to` and the rate
+    are scaled like the set (MHz in the scan, Hz on the wire); the limits are
+    the live config paces, never literals."""
+    lo, hi = src._rate_limits(knob)
+    default = max(lo, min(hi, SWEEP_RATE_DEFAULTS[knob]))
+    return {"kind": "software",
+            "start": {"verb": f"ramp_{knob}",
+                      "args": {"to": wire_arg, "rate": rate_arg}},
+            # stops THIS knob's sweep only (no `knob`: every sweep)
+            "stop": {"verb": "ramp_stop", "extra": {"knob": knob}},
+            "rate": {"unit": rate_unit, "min": lo / scale, "max": hi / scale,
+                     "default": default / scale},
+            "readback": {"stream": {"group": "ramp", "channel": knob},
+                         "measured": False},
+            "done": {"key": f"{knob}_ramping", "id_key": f"{knob}_ramp_id"}}
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help=""):
+       settle=None, args=None, danger=False, help="", ramp=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -43,7 +71,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     }
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
-                 ("set", set), ("settle", settle), ("args", args),
+                 ("set", set), ("settle", settle), ("args", args), ("ramp", ramp),
                  ("help", help)):
         if v is not None and v != "":
             d[k] = v
@@ -120,6 +148,8 @@ def build_manifest(src) -> dict:
            set={"verb": "set_frequency", "arg": "frequency_Hz"},
            settle={"policy": "echoes", "key": "frequency_Hz",
                    "tol": spec.FREQ_RESOLUTION_HZ},
+           ramp=sweep_block(src, "frequency", wire_arg="frequency_Hz",
+                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6),
            help="CW frequency, 10 Hz resolution. Crossing 2500 MHz changes "
                 "the power ceiling (and this manifest's revision)."),
 
@@ -130,9 +160,16 @@ def build_manifest(src) -> dict:
            set={"verb": "set_power", "arg": "power_dBm"},
            settle={"policy": "echoes", "key": "power_dBm",
                    "tol": spec.POWER_RESOLUTION_DB / 2 + 1e-6},
+           ramp=sweep_block(src, "power", wire_arg="power_dBm",
+                            rate_arg="rate_dB_per_s", rate_unit="dB/s"),
            help="Output level, 0.1 dB resolution. The maximum is LIVE: the "
                 "tighter of your envelope and the instrument's specified "
                 "maximum at the current frequency."),
+
+        _p("ramping", "Sweeping", "indicator", "bool", group="Signal", order=45,
+           read_path=["ramping"],
+           help="True while a sweep (ramp_frequency / ramp_power) walks a "
+                "knob. There is no phase sweep: the 8648D has no phase control."),
 
         _p("power_ceiling", "Power ceiling", "indicator", "float", unit="dBm",
            group="Signal", order=35, decimals=1,

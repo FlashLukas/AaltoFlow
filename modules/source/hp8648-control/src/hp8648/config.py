@@ -58,6 +58,26 @@ class Limits:
     power_min_dBm: float = -136.0            # the attenuator's bottom
     power_max_dBm: float = 13.0              # 8648D standard maximum; lower it to protect the sample
     enforce_spec_ceiling: bool = True
+    # SWEEPS (ramp_frequency / ramp_power, for fly scans, 2026-10-10): the
+    # pace a sweep may be asked for, in the knob's unit per second. A pace
+    # outside these is clamped and warned, like a setpoint.
+    #   frequency: 1 kHz/s (slower than any scan wants) .. 4 GHz/s (the whole
+    #     8648D band in a second -- the steps are then large: at the default
+    #     step time of 0.1 s that is 400 MHz a step. A fly scan does not mind,
+    #     it bins by the value each step SENT, but every step is a synthesiser
+    #     switch of up to 75-100 ms, see hardware.ramp_dt_s);
+    #   power: 0.01 .. 100 dB/s. Careful with large power sweeps: the 8648
+    #     switches its step attenuator at fixed levels as the level moves
+    #     (POWer:ATTenuation:AUTO ON, the normal mode). If that attenuator is
+    #     mechanical, it clicks -- and wears -- at every switch point, and the
+    #     level may jump briefly there. VERIFY on the unit which attenuator it
+    #     has and how big the glitch at a switch point is before sweeping
+    #     across tens of dB. (Attenuator HOLD, set at the front panel, avoids
+    #     the switching but limits the range: status `level_unspecified`.)
+    ramp_rate_min_Hz_per_s: float = 1.0e3
+    ramp_rate_max_Hz_per_s: float = 4.0e9
+    ramp_rate_min_dB_per_s: float = 0.01
+    ramp_rate_max_dB_per_s: float = 100.0
 
 
 @dataclass
@@ -77,6 +97,19 @@ class Hardware:
                         long before reading back, so the echo a scan waits for
                         arrives only once the synthesiser has switched (spec:
                         < 75 ms below 1001 MHz, < 100 ms above).
+    ramp_dt_s        -- a SWEEP sends one FREQ:CW / POW:AMPL every ramp_dt_s
+                        (softramp.py), WITHOUT the switch_settle_s wait (that
+                        wait is for a read-back right after a set; a sweep
+                        reads nothing back). 0.1 s = 10 steps a second, chosen
+                        as ONE SWITCHING TIME (spec.switching_time_s: < 75 ms
+                        below 1001 MHz, < 100 ms above): a shorter step would
+                        send the next frequency before the synthesiser has
+                        arrived at the last one. VERIFY on the unit how long
+                        one write takes over GPIB, and whether the output
+                        blanks (or glitches) while it relocks -- both bound
+                        how small this may be. A step that comes late does
+                        not slow the sweep: each value is computed from the
+                        elapsed time.
     """
 
     visa_resource: str = "GPIB0::19::INSTR"
@@ -84,6 +117,7 @@ class Hardware:
     option_1ea: bool = False
     poll_s: float = 0.2
     switch_settle_s: float = 0.1
+    ramp_dt_s: float = 0.1
 
 
 @dataclass

@@ -6,8 +6,10 @@ simulator. The brain (`source.SignalSource`) depends ONLY on this interface, so
 swapping real hardware for the simulator changes nothing above this line.
 
 Every setter commands the value directly. Clamping to the safety limits is the
-brain's job, not the backend's. Only the brain's worker thread calls these, so a
-backend needs no locking of its own.
+brain's job, not the backend's. The brain's worker thread calls these, and
+while a sweep runs (fly scans) the sweep's own thread calls set_frequency /
+set_power -- both always under the brain's one `_hw_lock`, so a backend still
+needs no locking of its own.
 """
 
 from __future__ import annotations

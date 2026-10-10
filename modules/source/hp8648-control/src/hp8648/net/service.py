@@ -1,7 +1,8 @@
 """The service: wrap a SignalSource and expose it over ZeroMQ.
 
 One process owns the instrument (or the simulator) and the brain. Besides the
-brain's own worker thread (which owns the GPIB bus) it runs two threads:
+brain's own threads (the worker, and while a sweep runs the sweep's thread;
+they share the GPIB bus under one lock) it runs two threads:
   * publisher  -- owns the PUB socket; sends a status frame at `status_hz` and
                   forwards brain events as they happen (one socket, because a
                   ZeroMQ socket must be used from a single thread).
@@ -64,11 +65,12 @@ class Hp8648Service:
         #   should not must be able to take it away. `set_rf` is NOT in the
         #   list even though on=false is the same thing -- the same verb also
         #   switches the RF ON (and re-arms the reverse-power protection).
-        #   The 8648 runs no sweep here, so there is nothing else to stop.
-        #   READ: none beyond get_/read_/list_ and the universal verbs.
+        #   `ramp_stop` ends a sweep (frequency or level) where it is: a
+        #   stop, so a viewer may send it too.
+        #   READ: `stream_read` only reads the sweeps' record.
         self.control = ControlLease(
-            safety={"rf_off"},
-            read=set(),
+            safety={"rf_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -241,6 +243,24 @@ class Hp8648Service:
                 self.src.set_power(float(msg["power_dBm"]))
             elif cmd == "set_frequency":
                 self.src.set_frequency(float(msg["frequency_Hz"]))
+            # The SWEEPS (fly scans): the reply's ramp_id is what status
+            # `<knob>_ramp_id` shows while and after this sweep runs. No
+            # ramp_phase: the 8648D has no phase control.
+            elif cmd == "ramp_frequency":
+                return {"ok": True, "ramp_id": self.src.ramp_frequency(
+                    float(msg["frequency_Hz"]), float(msg["rate_Hz_per_s"]))}
+            elif cmd == "ramp_power":
+                return {"ok": True, "ramp_id": self.src.ramp_power(
+                    float(msg["power_dBm"]), float(msg["rate_dB_per_s"]))}
+            elif cmd == "ramp_stop":
+                # no `knob`: every sweep stops (the safest reading of "stop")
+                return {"ok": True, "stopped": self.src.ramp_stop(msg.get("knob") or None)}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.src.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.src.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.src.stream_stop()}
             elif cmd == "status":
                 return {"ok": True, "status": self.status_payload()}
             elif cmd == "describe":

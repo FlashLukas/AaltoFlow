@@ -11,11 +11,12 @@ ports **5619 / 5620**.
 the red staircase is the power ceiling, which drops from +13 to +10 dBm above
 2500 MHz, so +12 dBm is allowed at 2 GHz but not at 3 GHz.*
 
-It is a **set-and-forget** instrument: no control loop, no ramp, no state
-machine. The brain (`SignalSource`) holds the desired signal, clamps it to the
-safety limits, and lets one worker thread write it to the box, wait for the
-synthesiser to switch, and read everything back. Three things make it more than
-a setter:
+It is a **set-and-forget** instrument: no control loop, no state machine. The
+brain (`SignalSource`) holds the desired signal, clamps it to the safety
+limits, and lets one worker thread write it to the box, wait for the
+synthesiser to switch, and read everything back. The one thing it does over
+time is a **sweep** (section "Sweeps" below): walking frequency or level at a
+set pace, for fly scans. A few things make it more than a setter:
 
 - **The power ceiling depends on frequency.** The 8648D is specified to
   +13 dBm up to 2500 MHz and +10 dBm above (option 1EA raises it). The brain
@@ -38,7 +39,7 @@ a setter:
   config are defaults, sent only when you change them in Settings.
 - **Pure CW is assumed, not forced.** Status reports `modulation_off` and the
   AM/FM/PM state; the module never switches a modulation. There is no phase
-  control on the 8648.
+  control on the 8648 (and so no phase sweep).
 
 The RF output is switched **only by an explicit command** (there is no config
 switch for it) and is switched **off at shutdown** (Ctrl-C, the `shutdown`
@@ -54,7 +55,8 @@ src/hp8648/
     base.py              SigGenBackend Protocol -- the interface everything depends on
     sim.py               SimulatedHP8648 -- resolution, RPP, unspecified-level flag, power-on state
     visa_8648.py         Visa8648 -- the real box over GPIB (SCPI, lazy pyvisa import)
-  source.py              SignalSource -- clamps, worker thread, safe write order, RPP
+  source.py              SignalSource -- clamps, worker thread, safe write order, RPP, sweeps
+  softramp.py            the suite's software ramp (byte-identical copy of suite-common's)
   sim_system.py          build_sim_system(cfg)
   net/
     protocol.py          wire shapes + default ports (5619/5620)
@@ -67,7 +69,7 @@ scripts/
   run_gui.py             the GUI (local simulator, or --connect HOST)
   hp8648_console.py      standalone raw-protocol console (only needs pyzmq)
   smoke_test.py          quick offline check
-tests/                   pytest: config, brain, describe, network, GUI (all offline)
+tests/                   pytest: config, brain, describe, network, GUI, sweeps (all offline)
 ```
 
 ## Verbs
@@ -79,6 +81,7 @@ tests/                   pytest: config, brain, describe, network, GUI (all offl
 | `set_power` | `power_dBm` | level, clamped to the live ceiling |
 | `status` `info` `get_config` `set_config` `describe` `shutdown` | | the universal verbs |
 | `shutdown` | `keep_outputs?` (bool) | plain: RF off; `true` = a restart for a code update, RF left as it is (the next start adopts it) |
+| `ramp_frequency` `ramp_power` `ramp_stop` `stream_start` `stream_read` `stream_stop` | | the sweeps (section "Sweeps" below) |
 
 A reply means **accepted**, not done. Status carries the read-back values
 (`rf_on`, `frequency_Hz`, `power_dBm`), the setpoints (`*_set`),
@@ -86,6 +89,67 @@ A reply means **accepted**, not done. Status carries the read-back values
 `hw_error` and `describe_rev`. A scan waits with the `echoes` policy; the
 tolerances are the instrument's resolution (10 Hz, 0.1 dB), so a request for
 -12.34 dBm counts as settled at -12.3.
+
+## Sweeps (fly scans over frequency or level)
+
+A fly scan (scan-core, `type: fly` axis) records the detectors while a knob
+moves CONTINUOUSLY and bins every sample by the value the knob had at that
+moment. The 8648D jumps to the value it is told, so the **service walks the
+knob** in small steps (`softramp.py`, the suite's software ramp, copied byte
+for byte from suite-common): one `FREQ:CW` / `POW:AMPL` every
+`hardware.ramp_dt_s` (0.1 s), each value computed from the elapsed time, so a
+late step does not slow the sweep down. There is no phase sweep: the 8648D
+has no phase control.
+
+| verb | arguments | pace limits (config `[limits]`) |
+|---|---|---|
+| `ramp_frequency` | `frequency_Hz`, `rate_Hz_per_s` | `ramp_rate_min/max_Hz_per_s` (1 kHz/s .. 4 GHz/s) |
+| `ramp_power` | `power_dBm`, `rate_dB_per_s` | `ramp_rate_min/max_dB_per_s` (0.01 .. 100 dB/s) |
+| `ramp_stop` | `knob` (optional; none = every sweep) | a stop: a viewer may send it |
+
+- The reply carries the sweep's number (`ramp_id`); status shows
+  `<knob>_ramping`, `<knob>_ramp_id`, the target and the pace
+  (`frequency_ramp_target_Hz`, `power_ramp_rate_dB_per_s`, ...) and `ramping`
+  (any knob). The sweep is over when `<knob>_ramp_id` is yours and
+  `<knob>_ramping` is false.
+- A target or pace outside the limits is clamped, with a warning. The limits
+  are the same EFFECTIVE ones the setters use: the frequency never wider than
+  the 8648D, the level never above the ceiling at the current frequency.
+- **The level ceiling over a frequency sweep:** if the level does not fit the
+  ceiling ANYWHERE on the way (e.g. +12 dBm on a sweep from 2 to 3 GHz), it is
+  lowered once, to the lowest ceiling on the path, BEFORE the sweep starts --
+  so the whole sweep runs at one level -- with a warning.
+- An ordinary `set_frequency` / `set_power` takes that knob over (stops its
+  sweep); a set of the other knob does not. A reverse-power trip stops every
+  sweep.
+- **The RF output is never switched by a sweep.**
+- The record: the stream verbs hand out every value each sweep SENT, one
+  channel per knob (`frequency`, `power`, each with its own time stamps in
+  `t_ch`). describe declares a `ramp` block on each knob with
+  `readback.measured: false` -- **binned by command**. Why not read back:
+  `FREQ:CW?` / `POW:AMPL?` return the setting the box holds (the "programmed"
+  value), not a measurement, so they would only echo the number just sent and
+  cost a GPIB round trip per step. Sweep steps skip the worker's
+  `switch_settle_s` wait, which exists for a read-back right after a set.
+- **What the command does not capture (an old synthesiser):** every frequency
+  step is a synthesiser SWITCH, specified < 75 ms below 1001 MHz and < 100 ms
+  above. The output reaches each value up to one switching time after its time
+  stamp, and may blank or glitch while it relocks. At a pace R that is an
+  offset of about R x t_switch in the binned frequency (10 MHz/s x 0.1 s =
+  1 MHz); a slower pace, or zig-zag rows (the two directions shift
+  oppositely), keeps it small. That is also why `ramp_dt_s` is 0.1 s and not
+  smaller. On a level sweep the step attenuator switches at fixed levels; if
+  it is mechanical it clicks at every switch point and the level may jump
+  briefly there. The level resolution is 0.1 dB.
+- **VERIFY on the unit:** how long one write takes over GPIB; the real
+  switching time per step and whether the output blanks while it relocks
+  (both bound `ramp_dt_s`); which step attenuator the unit has, and the size
+  of the level glitch at a switch point, before sweeping across tens of dB.
+
+The GUI's **Sweep** card does the same by hand: pick the knob, set the pace,
+"Sweep to" walks it to the value in that knob's box on the left, "Stop" ends
+it. While a knob sweeps, its box keeps the target instead of following the
+moving setpoint.
 
 ## SCPI commands used (real backend)
 

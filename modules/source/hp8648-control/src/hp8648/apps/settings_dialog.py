@@ -154,11 +154,17 @@ class SettingsDialog(QtWidgets.QDialog):
                   _dspin(hw.poll_s, 0.02, 5.0, 2, 0.05, "s"))
         self._add(form, "hardware", "switch_settle_s", "Switching wait",
                   _dspin(hw.switch_settle_s, 0.0, 2.0, 3, 0.01, "s"))
+        # one sweep step (config.Hardware.ramp_dt_s): keep it >= the switching
+        # time, or the next value is sent before the synthesiser has arrived
+        self._add(form, "hardware", "ramp_dt_s", "Sweep step",
+                  _dspin(hw.ramp_dt_s, 0.02, 2.0, 3, 0.01, "s"))
         form.addRow(_hint("The VISA fields are used by the real GPIB backend only (the "
                           "8648's factory HP-IB address is 19). 'Switching wait' is how "
                           "long the brain waits after a frequency or level change "
                           "before reading back: the spec switching time is < 75 ms "
-                          "below 1001 MHz and < 100 ms above."))
+                          "below 1001 MHz and < 100 ms above. 'Sweep step' is the time "
+                          "between two values of a sweep (fly scans); keep it at "
+                          "least one switching time."))
         return page
 
     def _appearance_tab(self):
