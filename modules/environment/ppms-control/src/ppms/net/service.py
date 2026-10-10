@@ -74,7 +74,7 @@ class PpmsService:
         #   ends a field SWEEP (fly scans) where the field is, so a viewer
         #   may send it; `stream_read` only reads the poll thread's record.
         self.control = ControlLease(
-            safety={"ramp_stop"},
+            safety={"ramp_stop", "ramp_temperature_stop"},
             read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
@@ -240,6 +240,13 @@ class PpmsService:
                     float(msg["field_mT"]), float(msg["rate_mT_per_s"]))}
             elif cmd == "ramp_stop":
                 return {"ok": True, "stopped": self.cryo.ramp_stop()}
+            elif cmd == "ramp_temperature":
+                # the temperature SWEEP (fly scans): MultiVu sweeps at this
+                # rate (K/s on the wire, converted to K/min by the brain)
+                return {"ok": True, "ramp_id": self.cryo.ramp_temperature(
+                    float(msg["temperature_K"]), float(msg["rate_K_per_s"]))}
+            elif cmd == "ramp_temperature_stop":
+                return {"ok": True, "stopped": self.cryo.ramp_temperature_stop()}
             elif cmd == "stream_start":
                 return {"ok": True, "stream_id": self.cryo.stream_start()}
             elif cmd == "stream_read":

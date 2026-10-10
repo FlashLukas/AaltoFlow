@@ -34,6 +34,14 @@ SCHEMA_VERSION = 1
 #: two minutes, a quarter of the magnet's top rate.
 SWEEP_RATE_DEFAULT_MT_PER_S = 5.0
 
+#: The temperature sweep pace offered first (K/s): 2 K/min, slow enough for a
+#: sample on the puck to stay close behind the thermometer.
+SWEEP_RATE_DEFAULT_K_PER_S = 2.0 / 60.0
+
+#: The ONE stream group: field and temperature come from the same poll and the
+#: same recorder, so scan-core starts / drains them together (once per row).
+STREAM_GROUP = "cryostat"
+
 
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
@@ -132,6 +140,7 @@ def build_manifest(cryo) -> dict:
     cfg = cryo.cfg
     lim, f, t = cfg.limits, cfg.field, cfg.temperature
     field_t, temp_t = settle_timeouts(cfg)
+    tr_lo, tr_hi = cryo.temperature_ramp_limits()
     params = [
         # ---- field ---------------------------------------------------------
         _p("field", "Magnetic field", "control", "float", unit="mT", group="Field",
@@ -155,7 +164,7 @@ def build_manifest(cryo) -> dict:
                           "default": max(lim.field_rate_min_mT_per_s,
                                          min(lim.field_rate_max_mT_per_s,
                                              SWEEP_RATE_DEFAULT_MT_PER_S))},
-                 "readback": {"stream": {"group": "field", "channel": "field"},
+                 "readback": {"stream": {"group": STREAM_GROUP, "channel": "field"},
                               "measured": True},
                  "done": {"key": "ramping", "id_key": "ramp_id"}},
            help=f"Setpoint. Reached = within {f.tolerance_mT:g} mT and MultiVu holding, "
@@ -175,7 +184,7 @@ def build_manifest(cryo) -> dict:
         _p("measured_field", "Measured field", "indicator", "float", unit="mT",
            group="Field", order=40, decimals=2, plottable=True,
            read_path=["measured_field_mT"],
-           stream={"group": "field", "channel": "field"}),
+           stream={"group": STREAM_GROUP, "channel": "field"}),
         _p("ramping", "Sweeping", "indicator", "bool", group="Field", order=75,
            read_path=["ramping"],
            help="True while a field sweep (ramp_field) is on its way."),
@@ -196,6 +205,22 @@ def build_manifest(cryo) -> dict:
            settle={"policy": "adopt_then_flag", "setpoint_key": "setpoint_temperature_K",
                    "flag_key": "temperature_stable"},
            timeout_s=temp_t,
+           # A CONTINUOUS SWEEP for fly scans (2026-10-10): a HARDWARE ramp --
+           # MultiVu's temperature controller sweeps at the asked rate itself
+           # (fast_settle). The rate is K/s here (scan-core reads every ramp
+           # rate as unit/s); the brain converts it to MultiVu's K/min. Its
+           # own done keys (temp_ramping / temp_ramp_id), so a field sweep's
+           # end can never pass for a temperature sweep's. Binned by the
+           # MEASURED temperature, read every ramp_poll_s during the sweep.
+           ramp={"kind": "hardware",
+                 "start": {"verb": "ramp_temperature",
+                           "args": {"to": "temperature_K", "rate": "rate_K_per_s"}},
+                 "stop": {"verb": "ramp_temperature_stop"},
+                 "rate": {"unit": "K/s", "min": tr_lo, "max": tr_hi,
+                          "default": max(tr_lo, min(tr_hi, SWEEP_RATE_DEFAULT_K_PER_S))},
+                 "readback": {"stream": {"group": STREAM_GROUP, "channel": "temperature"},
+                              "measured": True},
+                 "done": {"key": "temp_ramping", "id_key": "temp_ramp_id"}},
            help=f"Setpoint. Reached = within {t.tolerance_K:g} K and MultiVu Stable, "
                 f"for {t.stable_time_s:g} s."),
         _p("temperature_rate", "Temperature rate", "control", "float", unit="K/min",
@@ -213,7 +238,11 @@ def build_manifest(cryo) -> dict:
            help="Applies from the next temperature setpoint."),
         _p("measured_temperature", "Measured temperature", "indicator", "float",
            unit="K", group="Temperature", order=40, decimals=3, plottable=True,
-           read_path=["temperature_K"]),
+           read_path=["temperature_K"],
+           stream={"group": STREAM_GROUP, "channel": "temperature"}),
+        _p("temp_ramping", "Temperature sweeping", "indicator", "bool",
+           group="Temperature", order=75, read_path=["temp_ramping"],
+           help="True while a temperature sweep (ramp_temperature) is on its way."),
         _p("temperature_error", "Temperature error", "indicator", "float", unit="K",
            group="Temperature", order=50, decimals=3, plottable=True,
            read_path=["temperature_error_K"]),

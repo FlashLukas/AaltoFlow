@@ -81,6 +81,42 @@ loaded by the service when present: put the magnet's real limit there
 - The status key `measured_field_mT` is the one clMag uses, so `vna-control`
   reads the DynaCool's field with the same code (field source `ppms`).
 
+## Sweep (fly scans over field or temperature)
+
+A fly axis in scan-core can fly `ppms.field` or `ppms.temperature`: MultiVu
+sweeps the knob over each row at the asked rate (a **hardware** ramp, `ramp`
+block in `describe`), the detectors stream, and every sample is binned by the
+**measured** value (`readback.measured: true`).
+
+| | field | temperature |
+|---|---|---|
+| start | `ramp_field{field_mT, rate_mT_per_s}` | `ramp_temperature{temperature_K, rate_K_per_s}` |
+| stop (safety verb) | `ramp_stop` | `ramp_temperature_stop` |
+| approach | linear | fast_settle |
+| rate limits | `field_rate_min/max_mT_per_s` | the K/min limits / 60: 1.67e-4 .. 0.333 K/s (default 2 K/min) |
+| arrived | within `tolerance_mT` and MultiVu holding | within `tolerance_K` and MultiVu `Near` or `Stable` |
+| status | `ramping`, `ramp_id`, `ramp_target_mT`, `ramp_rate_mT_per_s` | `temp_ramping`, `temp_ramp_id`, `temp_ramp_target_K`, `temp_ramp_rate_K_per_s` |
+
+- **Arrived has no hold time**: the fly row ends there. `field_stable` /
+  `temperature_stable`, with their hold times, are for a scan that wants to
+  measure AT a value. Readings taken before the sweep's command never count.
+- **The temperature rate travels in K/s** (scan-core reads every ramp rate as
+  unit/s); the brain converts to MultiVu's K/min. The GUI's temperature card
+  keeps showing K/min. The rate and approach SETTINGS for ordinary setpoints
+  are left untouched by a sweep.
+- **fast_settle, not no_overshoot**: no_overshoot slows down near the target
+  and would bend the end of every row. `# VERIFY` on the DynaCool that
+  fast_settle holds the rate to the end, and how far it overshoots there.
+- **One stream group, `cryostat`**: every poll reads field AND temperature,
+  and both go into one recorder (channels `field`, `temperature`), so a field
+  fly that also records the temperature starts and drains the stream verbs
+  once per row. While a sweep runs or a stream records, the poll runs every
+  `hardware.ramp_poll_s` (50 ms; the chamber stays at `poll_s`).
+- **A set takes over**: `set_field` / `set_temperature` end a running sweep
+  of the same knob. A stop sends a setpoint at the present value, at the
+  sweep's rate (`# VERIFY` on the DynaCool that this ends the sweep without a
+  step or an overshoot). Target and rate are clamped and warned.
+
 ## Layout
 
 ```
@@ -94,5 +130,5 @@ src/ppms/
   net/                 service, client, protocol, describe
   apps/                gui (CryostatIndicator + history charts), settings dialog, theme
 scripts/               run_service.py, run_gui.py, ppms_console.py, smoke_test.py
-tests/                 43 tests, offline (the real backend against a fake MultiPyVu)
+tests/                 80 tests, offline (the real backend against a fake MultiPyVu)
 ```

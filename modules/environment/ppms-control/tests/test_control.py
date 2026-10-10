@@ -116,12 +116,14 @@ def test_the_first_takes_control_the_second_is_a_viewer(svc, clients):
     assert b.status().connected
 
 
-def test_only_ramp_stop_is_a_safety_verb(svc, clients):
-    """Nothing but shutdown and ramp_stop is always allowed: every other verb
-    can send the magnet anywhere; ramp_stop (2026-10-09) only ends a field
-    sweep where it is (see net/service.py)."""
+def test_only_ramp_stops_are_safety_verbs(svc, clients):
+    """Nothing but shutdown and the two sweep stops is always allowed: every
+    other verb can send the magnet or the temperature anywhere; ramp_stop
+    (2026-10-09) and ramp_temperature_stop (2026-10-10) only end a sweep where
+    it is (see net/service.py)."""
     clients()
-    assert set(svc.status_payload()["control"]["always"]) <= {"shutdown", "ramp_stop"}
+    assert set(svc.status_payload()["control"]["always"]) <= {
+        "shutdown", "ramp_stop", "ramp_temperature_stop"}
 
 
 def test_machines_bypass_and_a_script_must_take_control(svc, clients):

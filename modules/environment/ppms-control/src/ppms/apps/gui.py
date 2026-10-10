@@ -309,6 +309,7 @@ class MainWindow(QtWidgets.QMainWindow):
         stop_f = QtWidgets.QPushButton("Stop")
         stop_f.setToolTip("End the sweep where the field is")
         stop_f.clicked.connect(lambda: self._call(self.ctrl.ramp_stop))
+        mark_always(stop_f)          # a SAFETY verb (net/service.py): viewers too
         srow.addWidget(sweep_f, 1); srow.addWidget(stop_f)
         flay.addLayout(srow)
         col.addWidget(fcard)
@@ -329,6 +330,23 @@ class MainWindow(QtWidgets.QMainWindow):
         set_t = QtWidgets.QPushButton("Set temperature"); set_t.setObjectName("primary")
         set_t.clicked.connect(self._set_temperature)
         tlay.addWidget(set_t)
+        # SWEEP (2026-10-10): a temperature sweep to the setpoint at the rate
+        # above, as a fly scan runs it -- MultiVu sweeps, "Stop" ends it where
+        # the temperature is. The box shows K/min (MultiVu's unit); the wire
+        # takes K/s (scan-core's ramp unit), hence the / 60.
+        trow = QtWidgets.QHBoxLayout()
+        sweep_t = QtWidgets.QPushButton("Sweep to setpoint")
+        sweep_t.setToolTip("Sweep at the rate above (fast_settle); the temperature is "
+                           "read fast while it runs")
+        sweep_t.clicked.connect(lambda: self._call(self.ctrl.ramp_temperature,
+                                                   self.temp_spin.value(),
+                                                   self.trate_spin.value() / 60.0))
+        stop_t = QtWidgets.QPushButton("Stop")
+        stop_t.setToolTip("End the sweep where the temperature is")
+        stop_t.clicked.connect(lambda: self._call(self.ctrl.ramp_temperature_stop))
+        mark_always(stop_t)          # a SAFETY verb (net/service.py): viewers too
+        trow.addWidget(sweep_t, 1); trow.addWidget(stop_t)
+        tlay.addLayout(trow)
         col.addWidget(tcard)
 
         self._apply_limits_to_widgets()

@@ -63,6 +63,11 @@ class RemoteStatus:
         self.ramp_id = int(d.get("ramp_id") or 0)
         self.ramp_target_mT = _f(d, "ramp_target_mT")
         self.ramp_rate_mT_per_s = _f(d, "ramp_rate_mT_per_s")
+        # the temperature SWEEP (an older service has none: never sweeping)
+        self.temp_ramping = bool(d.get("temp_ramping", False))
+        self.temp_ramp_id = int(d.get("temp_ramp_id") or 0)
+        self.temp_ramp_target_K = _f(d, "temp_ramp_target_K")
+        self.temp_ramp_rate_K_per_s = _f(d, "temp_ramp_rate_K_per_s")
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -146,6 +151,16 @@ class PpmsClient(ControlClient):
     def ramp_stop(self):
         """End a sweep where it is (a safety verb: allowed also while viewing)."""
         return self._checked({"cmd": "ramp_stop"}).get("stopped")
+
+    def ramp_temperature(self, temperature_K: float, rate_K_per_s: float):
+        """Sweep the temperature (fly scans; the GUI's Sweep button). K/s."""
+        return self._checked({"cmd": "ramp_temperature",
+                              "temperature_K": float(temperature_K),
+                              "rate_K_per_s": float(rate_K_per_s)}).get("ramp_id")
+
+    def ramp_temperature_stop(self):
+        """End a temperature sweep where it is (a safety verb)."""
+        return self._checked({"cmd": "ramp_temperature_stop"}).get("stopped")
 
     def set_field_rate(self, rate_mT_per_s: float):
         return self._checked({"cmd": "set_field_rate", "rate_mT_per_s": float(rate_mT_per_s)})

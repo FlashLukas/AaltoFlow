@@ -58,6 +58,17 @@ _NAN = float("nan")
 FIELD_HOLDING = frozenset({"Holding (driven)", "Stable"})
 #: MultiVu temperature statuses that mean "at the setpoint".
 TEMPERATURE_STABLE = frozenset({"Stable"})
+#: ... and the ones that END a temperature SWEEP (ramp_temperature): "Near"
+#: comes as soon as MultiVu is close to the setpoint, before it has settled
+#: to "Stable". A fly row needs the sweep to be OVER, not settled -- settling
+#: is what temperature_stable (with its hold time) is for.
+TEMPERATURE_ARRIVED = frozenset({"Near", "Stable"})
+
+#: The approach a temperature SWEEP uses. fast_settle goes at the asked rate
+#: to the end; no_overshoot slows down near the target, which would bend the
+#: end of every fly row. VERIFY on the DynaCool that fast_settle holds the
+#: rate to the end (and how far it overshoots there).
+TEMPERATURE_SWEEP_APPROACH = "fast_settle"
 
 
 @dataclass
@@ -95,6 +106,13 @@ class Status:
     ramp_id: int = 0
     ramp_target_mT: float = _NAN
     ramp_rate_mT_per_s: float = _NAN
+    # the temperature SWEEP (ramp_temperature, fly scans, 2026-10-10): its own
+    # number and flag, so a field sweep and a temperature sweep never take
+    # each other's "done" (and either may run while the other does)
+    temp_ramping: bool = False
+    temp_ramp_id: int = 0
+    temp_ramp_target_K: float = _NAN
+    temp_ramp_rate_K_per_s: float = _NAN
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -168,9 +186,19 @@ class Cryostat:
         self._ramping = False
         self._ramp_target = _NAN
         self._ramp_rate = _NAN
-        # THE STREAM (fly scans): every field reading the poll thread takes,
-        # with the time it was taken. Recording only while a stream is started.
-        self.recorder = StreamRecorder(["field"])
+        # the temperature SWEEP (under _lock): the same, for MultiVu's
+        # temperature controller. Rate kept in K/s (the wire's unit).
+        self._temp_ramp_id = 0
+        self._temp_ramping = False
+        self._temp_ramp_target = _NAN
+        self._temp_ramp_rate = _NAN
+        # THE STREAM (fly scans): every field AND temperature reading the poll
+        # thread takes, with the time it was taken. Recording only while a
+        # stream is started. ONE recorder, one stream group ("cryostat"), for
+        # both: scan-core starts and drains a group once per row, so a field
+        # fly that also records the temperature (or the other way round)
+        # must not start and drain the same verbs twice.
+        self.recorder = StreamRecorder(["field", "temperature"])
         self._last_full = -1e9               # clock of the last full poll
         # set by a sweep / a stream start: the poll loop stops its (slow)
         # wait and goes over to fast polling at once
@@ -287,6 +315,7 @@ class Cryostat:
                 self._temp_sp = value
                 self._temp_gen += 1
                 self._temp_band.reset()
+                self._temp_ramping = False  # a set takes over from a sweep
         if clamped:
             self._emit("warn", f"temperature clamped to {value:g} K "
                                f"(limit {lim.temperature_min_K:g}..{lim.temperature_max_K:g})")
@@ -350,7 +379,77 @@ class Cryostat:
         self._emit("info", f"field sweep stopped at {here:.2f} mT")
         return True
 
-    # the stream verbs: the poll thread's field readings
+    # ---- the temperature SWEEP (fly scans) ---------------------------------------
+
+    def temperature_ramp_limits(self) -> tuple[float, float]:
+        """(min, max) temperature sweep rate in K/s, DERIVED from the K/min
+        limits of the config (one envelope, two units: nothing retyped)."""
+        lim = self.cfg.limits
+        lo = max(1e-9, float(lim.temperature_rate_min_K_per_min) / 60.0)
+        return lo, max(lo, float(lim.temperature_rate_max_K_per_min) / 60.0)
+
+    def ramp_temperature(self, temperature_K: float, rate_K_per_s: float) -> int:
+        """SWEEP the temperature to `temperature_K` at `rate_K_per_s`; returns
+        its number.
+
+        A HARDWARE ramp, like the field's: MultiVu's temperature controller
+        sweeps at that rate by itself. MultiVu takes the rate in K/min, so it
+        is converted here (x 60). The approach is fast_settle (constant rate
+        to the end; no_overshoot would slow down near the target and bend the
+        end of the row). The rate is this sweep's own: the temperature-rate
+        SETTING for ordinary setpoints is left as it is. A fly scan bins by
+        the MEASURED temperature, read by the poll thread every ramp_poll_s
+        while the sweep runs. The sweep has arrived when the temperature is
+        within tolerance_K AND MultiVu says Near or Stable (no hold time).
+        Clamped like every setter (warned)."""
+        lim = self.cfg.limits
+        value, clamped = _clamp(_finite(temperature_K, "temperature_K"),
+                                lim.temperature_min_K, lim.temperature_max_K)
+        rate = abs(_finite(rate_K_per_s, "rate_K_per_s"))
+        if not rate > 0:
+            raise ValueError("rate must be > 0")
+        r, rclamped = _clamp(rate, *self.temperature_ramp_limits())
+        with self._hw:
+            self._require_connected()
+            self.backend.set_temperature(value, r * 60.0, TEMPERATURE_SWEEP_APPROACH)
+            with self._lock:                # setpoint, flag, sweep: ONE section
+                self._temp_sp = value
+                self._temp_gen += 1
+                self._temp_band.reset()
+                self._temp_ramp_id += 1
+                rid = self._temp_ramp_id
+                self._temp_ramping = True
+                self._temp_ramp_target, self._temp_ramp_rate = value, r
+        if clamped or rclamped:
+            self._emit("warn", f"temperature sweep clamped to {value:g} K at "
+                               f"{r * 60.0:g} K/min")
+        self._wake.set()
+        self._emit("info", f"temperature sweep -> {value:g} K at {r * 60.0:g} K/min "
+                           f"({TEMPERATURE_SWEEP_APPROACH})")
+        return rid
+
+    def ramp_temperature_stop(self) -> bool:
+        """Stop a temperature sweep WHERE IT IS: a new setpoint at the present
+        temperature, at the sweep's rate. True if one was running.
+        VERIFY on the DynaCool that a setpoint at the present temperature ends
+        a sweep without the controller overshooting back and forth."""
+        with self._lock:
+            was, rate = self._temp_ramping, self._temp_ramp_rate
+        if not was:
+            return False
+        with self._hw:
+            here, _ = self.backend.read_temperature()
+            self.backend.set_temperature(float(here), float(rate) * 60.0,
+                                         TEMPERATURE_SWEEP_APPROACH)
+            with self._lock:
+                self._temp_sp = float(here)
+                self._temp_gen += 1
+                self._temp_band.reset()
+                self._temp_ramping = False
+        self._emit("info", f"temperature sweep stopped at {here:.3f} K")
+        return True
+
+    # the stream verbs: the poll thread's field and temperature readings
     def stream_start(self) -> int:
         sid = self.recorder.start()
         self._wake.set()
@@ -428,6 +527,10 @@ class Cryostat:
                 ramp_id=self._ramp_id,
                 ramp_target_mT=self._ramp_target,
                 ramp_rate_mT_per_s=self._ramp_rate,
+                temp_ramping=self._temp_ramping,
+                temp_ramp_id=self._temp_ramp_id,
+                temp_ramp_target_K=self._temp_ramp_target,
+                temp_ramp_rate_K_per_s=self._temp_ramp_rate,
             )
 
     # ---- settings (Settings dialog / wire use these) -------------------------------
@@ -466,9 +569,9 @@ class Cryostat:
         while not self._stop.is_set():
             t0 = self._clock()
             hw = self.cfg.hardware
-            # during a sweep -- or while a fly scan records the field -- the
-            # field fast, the temperature and chamber at their usual pace
-            fast = self._ramping or self.recorder.running
+            # during a sweep -- or while a fly scan records the stream -- field
+            # and temperature fast, the chamber at its usual pace
+            fast = self._ramping or self._temp_ramping or self.recorder.running
             full = (not fast or t0 - self._last_full >= float(hw.poll_s))
             self.poll_once(full=full)
             period = float(hw.ramp_poll_s) if fast else float(hw.poll_s)
@@ -482,21 +585,22 @@ class Cryostat:
                 time.sleep(min(0.01, max(0.0, end - time.monotonic())))
 
     def poll_once(self, full: bool = True) -> None:
-        """Read field (and, when `full`, temperature and chamber) once and
-        update the flags. A field-only poll keeps the last temperature."""
+        """Read field and temperature (and, when `full`, the chamber) once and
+        update the flags. A fast poll keeps the last chamber state."""
         with self._lock:
             fgen, tgen = self._field_gen, self._temp_gen
-            temp, tstat, chamber = self._temp, self._temp_status, self._chamber
+            chamber = self._chamber
         t0 = self._clock()
         try:
             with self._hw:
                 tw0 = time.time()
                 field, fstat = self.backend.read_field()
-                # the reading's time: the middle of the call (wall clock, so a
-                # coordinator on another PC can line it up)
-                self.recorder.append(0.5 * (tw0 + time.time()), (field,))
+                temp, tstat = self.backend.read_temperature()
+                # the readings' time: the middle of the two calls (wall clock,
+                # so a coordinator on another PC can line it up). Both readings
+                # share it: two local calls of a few ms, far inside a pixel.
+                self.recorder.append(0.5 * (tw0 + time.time()), (field, temp))
                 if full:
-                    temp, tstat = self.backend.read_temperature()
                     chamber = self.backend.read_chamber()
                     self._last_full = t0
         except Exception as exc:
@@ -532,9 +636,16 @@ class Cryostat:
                 if self._ramping and ok:
                     self._ramping = False
             if tgen == self._temp_gen:
-                ok = (abs(self._temp - self._temp_sp) <= float(t.tolerance_K)
-                      and self._temp_status in TEMPERATURE_STABLE)
+                near = abs(self._temp - self._temp_sp) <= float(t.tolerance_K)
+                ok = near and self._temp_status in TEMPERATURE_STABLE
                 self._temp_band.update(ok, now, float(t.stable_time_s))
+                # a temperature sweep has ARRIVED when it is within tolerance
+                # and MultiVu says Near or Stable -- no hold time (see
+                # TEMPERATURE_ARRIVED); the tgen guard above keeps a reading
+                # from before the sweep's command from ending it
+                if (self._temp_ramping and near
+                        and self._temp_status in TEMPERATURE_ARRIVED):
+                    self._temp_ramping = False
         if recovered:
             self._emit("info", "MultiVu readings recovered")
 

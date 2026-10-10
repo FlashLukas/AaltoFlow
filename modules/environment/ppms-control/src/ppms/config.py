@@ -79,6 +79,11 @@ class Limits:
                     # VERIFY the system's own maximum sweep rate in MultiVu.
     temperature_min_K / max_K -- DynaCool's standard range is 1.8 - 400 K.
     temperature_rate_max_K_per_min -- the old program's 20 K/min.
+                    The temperature SWEEP of a fly scan (ramp_temperature,
+                    2026-10-10) takes its rate in K/s -- scan-core reads every
+                    ramp rate as unit/s -- and derives its limits from these
+                    two: 0.01 .. 20 K/min = 1.67e-4 .. 0.333 K/s.
+                    # VERIFY the system's own temperature sweep range in MultiVu.
     """
 
     field_max_mT: float = 9000.0
@@ -116,11 +121,13 @@ class Hardware:
     mpv_port: int = 5000
     scaffolding: bool = False
     poll_s: float = 0.5
-    # While a field SWEEP runs (ramp_field, fly scans, 2026-10-09) the field
-    # is read this often -- a fly scan bins by these readings, and 2 a second
-    # would give a pixel of a fast sweep no reading at all. Temperature and
-    # chamber stay at poll_s. VERIFY on the DynaCool: what one get_field
-    # costs through MultiPyVu (local socket + COM); 50 ms assumes a few ms.
+    # While a field or temperature SWEEP runs (ramp_field / ramp_temperature,
+    # fly scans, 2026-10-09/10) -- or a fly scan records the stream -- field
+    # AND temperature are read this often: a fly scan bins by these readings,
+    # and 2 a second would give a pixel of a fast sweep no reading at all.
+    # The chamber stays at poll_s. VERIFY on the DynaCool: what one
+    # get_field + get_temperature cost through MultiPyVu (local socket + COM);
+    # 50 ms assumes a few ms each.
     ramp_poll_s: float = 0.05
 
 
