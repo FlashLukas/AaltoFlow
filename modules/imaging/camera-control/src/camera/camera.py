@@ -44,7 +44,8 @@ import numpy as np
 from . import objectives as OBJ
 from . import vision as V
 from . import zcal as ZC
-from .config import CALIB_MODES, LOCATE_MODES, Config
+from .config import (AF_POSITIONS, AF_ROUTINES, AF_SIDES, CALIB_MODES, FOCUS_MECHANISMS,
+                     LOCATE_MODES, Config)
 from .recording import ImageRecorder
 from .stream import StreamRecorder
 from .template_io import BackupPattern, Reference, load_template, save_template
@@ -91,6 +92,21 @@ SPOT_CHECK_PAUSED = "threshold check paused (autofocus exposure)"
 
 #: af_error / zcal_state carry at most this many characters of a failure.
 FAILURE_TEXT_MAX = 200
+
+#: The autofocus settings ONE autofocus_at_position run may change (a scan
+#: routine step's "Advanced" options): name -> type. Put back after the run,
+#: so the camera's own settings stay what a plain Find focus uses.
+AF_TRIP_SETTINGS = {"routine": str, "mechanism": str, "exposure_us": float,
+                    "drive_amplitude_v": float, "steps": int,
+                    "averages_per_level": int, "approach_from": str,
+                    "coarse_step_v": float, "fine_step_v": float,
+                    "max_travel_v": float, "offset_from_found_v": float}
+
+
+def failure_text_short(text: str, limit: int = FAILURE_TEXT_MAX) -> str:
+    """A plain message on one line, at most ``limit`` chars (af_error)."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
 def failure_text(exc: BaseException, limit: int = FAILURE_TEXT_MAX) -> str:
@@ -298,6 +314,10 @@ class CameraStatus:
     # "not af_running" can be read off a frame from before the request
     # (gotchas #2 and #17).
     af_id: int = 0
+    # Where an autofocus AT THE AF POSITION is ("" = none running): to_af |
+    # focus | back. During to_af / back af_running is True but the stabiliser
+    # and the laser placement RUN -- they are what moves the laser.
+    af_trip: str = ""
     # A warning about the chosen focus metric, "" when there is none. Today:
     # spot_area on a spot that is NOT saturated (its thresholded area is then
     # LARGEST at focus, but spot_area is minimised -- rig 2026-09-28).
@@ -514,6 +534,17 @@ class Camera:
         self._engine: threading.Thread | None = None
         self._af_request: dict | None = None
         self._af_kill = threading.Event()
+        # Autofocus AT THE AF POSITION (autofocus_at_position): the trip's
+        # phase -- None | "to_af" | "focus" | "back" -- its Kill, and the
+        # hand-over of the autofocus in the middle (the engine sets
+        # _trip_af_done when that run is completely over). While the trip
+        # MOVES (to_af / back) the image loops must run although af_busy is
+        # True: they are what moves the laser (see _af_holds_loops).
+        self._trip_phase: str | None = None
+        self._trip_kill = threading.Event()
+        self._trip_af_done = threading.Event()
+        self._trip_af_state = ""
+        self._trip_thread: threading.Thread | None = None
         self._frame_times: deque = deque(maxlen=10)
 
         # Event hook (the service replaces this).
@@ -835,7 +866,7 @@ class Camera:
         # a scan go on before focus has even begun. Both also stand down while
         # a fly scan records the camera: the stage is being flown on purpose.
         # (a Z step calibration moves Z just the same: both loops stand down)
-        af_pending = self._af_busy or self._zcal_busy
+        af_pending = self._af_holds_loops()
         # The AF exposure is on (or just came off: frames in flight): the image
         # is not the working one, so the loops stand down exactly as during an
         # autofocus -- and a pattern not matched on a dark frame is not "lost".
@@ -847,7 +878,7 @@ class Camera:
         # maybe start the autofocus recovery). Done BEFORE the loops below, so
         # the frame that declares the loss already holds the stage.
         self._update_loss(st, gray.shape[:2], af_pending)
-        af_pending = (self._af_busy or self._zcal_busy     # the recovery may just have queued one
+        af_pending = (self._af_holds_loops()     # the recovery may just have queued one
                       or self._af_expo_active or af_pending)
         with self._lock:
             faulted = bool(self._fault)
@@ -940,6 +971,7 @@ class Camera:
             st.af_error = self._af_state
             st.af_running = self._af_busy
             st.af_id = self._af_id
+            st.af_trip = self._trip_phase or ""
             # spot_area's hint only while spot_area is the metric in use
             st.af_hint = self._af_hint if self.cfg.autofocus.mechanism == "spot_area" else ""
             st.spot_bit_note = self._deep_note
@@ -950,7 +982,7 @@ class Camera:
             for k, v in self._zcal_result.items():
                 setattr(st, k, v)
             self.recorder.fill_status(st)
-            if self._af_busy or self._zcal_busy:   # a request that arrived mid-frame
+            if self._af_holds_loops():   # a request that arrived mid-frame
                 st.point_settled = False
                 st.stable = False
             # the fault as it is NOW (clear_fault may have run mid-frame); a
@@ -1191,7 +1223,10 @@ class Camera:
             if self._fault or self._lost_count < n_lost:
                 return
         kind, why = self._loss_cause(frame_hw)
-        if (pat.autofocus_on_loss and kind == "focus" and self.cfg.hardware.use_z):
+        # (not during an AF-position trip: its own autofocus is the one that
+        # runs; the trip sees the fault and stops with it)
+        if (pat.autofocus_on_loss and kind == "focus" and self.cfg.hardware.use_z
+                and self._trip_phase is None):
             # Rate limit (Lukas 2026-09-28): a pattern that keeps flickering
             # out must not start an autofocus every few seconds -- a second
             # loss soon after a recovery is itself a sign something is wrong.
@@ -1780,6 +1815,9 @@ class Camera:
         ``af_running`` False; ``af_error`` then says how it went ("OK").
         """
         with self._lock:
+            if self._trip_phase is not None:
+                raise RuntimeError("an autofocus at the AF position is running "
+                                   "(Kill AF stops it)")
             self._af_id += 1
             self._af_request = {"kind": "sweep", "id": self._af_id}
             self._af_busy = True
@@ -1795,11 +1833,19 @@ class Camera:
             # event in one critical section, so this can land neither between
             # the two nor be wiped out afterwards
             self._af_kill.set()      # a sweep in progress stops at its next check
+            self._trip_kill.set()    # an AF-position trip stops where it is
             if self._af_request is not None:     # queued, never started: cancel it
+                trip = bool(self._af_request.get("trip"))
                 self._af_request = None
-                self._af_busy = False
-                self._af_state = "killed"
-                self._publish_af_locked()
+                if trip:
+                    # the trip ends itself (it says "killed" once it has
+                    # stopped the loops); only its hand-over is released
+                    self._trip_af_state = "killed"
+                    self._trip_af_done.set()
+                else:
+                    self._af_busy = False
+                    self._af_state = "killed"
+                    self._publish_af_locked()
             if self._zcal_request is not None:   # the same for a Z step calibration
                 self._zcal_request = None
                 self._zcal_busy = False
@@ -1814,6 +1860,7 @@ class Camera:
         self._status.af_running = self._af_busy
         self._status.af_error = self._af_state
         self._status.best_focus_v = self._af_best
+        self._status.af_trip = self._trip_phase or ""
 
     def _af_finish(self, state: str, best: float | None = None,
                    z: float | None = None) -> None:
@@ -1825,6 +1872,16 @@ class Camera:
                 self._af_best = float(best)
             if z is not None:
                 self._status.z_voltage = float(z)
+            if self._trip_phase == "focus":
+                # the autofocus IN THE MIDDLE of an AF-position trip: the
+                # run is not over (the way back is still to come), so stay
+                # busy; the trip reads this state when the engine signals
+                # _trip_af_done (end of _do_autofocus)
+                self._trip_af_state = state
+                self._af_state = "focus done"
+                self._publish_af_locked()
+                self._z_target = None
+                return
             self._af_busy = self._af_request is not None
             self._af_state = "queued" if self._af_busy else state
             self._publish_af_locked()
@@ -1852,8 +1909,11 @@ class Camera:
         try:
             # the AF exposure (if set) is switched on here and ALWAYS back off
             # before the loops resume below -- normal end, failure, kill, crash
-            with self._exposure_for("autofocus"):
-                self._run_autofocus(req)
+            # per-run settings (autofocus_at_position) outside the exposure
+            # switch: exposure_us may be one of them
+            with self._af_overrides(req.get("overrides")):
+                with self._exposure_for("autofocus"):
+                    self._run_autofocus(req)
         except Exception as exc:
             # crashed (not a handled failure): never "busy" forever, and say
             # WHAT crashed -- the message too, not only the type (rig 2026-09-29)
@@ -1866,6 +1926,10 @@ class Camera:
                 self._af_finish("stopped")
             self._pause_image_loops()            # nothing measured during AF counts after it
             self._stab_move_t = time.monotonic()
+            if req.get("trip"):
+                # only NOW (exposure and settings back, frames dropped) may
+                # the trip go on and move the stage back
+                self._trip_af_done.set()
 
     @contextmanager
     def _exposure_for(self, what: str, engine: bool = True):
@@ -2054,6 +2118,14 @@ class Camera:
         vals = gray[mask] if mask.any() else gray.ravel()
         return float(np.percentile(vals, pct))
 
+    def _af_holds_loops(self) -> bool:
+        """True while an autofocus (queued or running) or a Z step calibration
+        owns the image loops: the stabiliser, the laser placement and
+        continuous focus stand down. Not while an AF-position trip is MOVING
+        (to the AF position or back): the loops are what moves it."""
+        return ((self._af_busy and self._trip_phase not in ("to_af", "back"))
+                or self._zcal_busy)
+
     def _pause_image_loops(self) -> None:
         self._avg_buf.clear()
         self._temporal.clear()
@@ -2225,6 +2297,435 @@ class Camera:
             what = str(exc) if isinstance(exc, AutofocusFailed) else failure_text(exc, 2000)
             self._emit("error", f"autofocus failed: {what}{back}")
             self._check_area_saturation()
+
+    # ------------------------------------------------------------------ #
+    # autofocus AT THE AF POSITION, then back  (2026-10-10)
+    # ------------------------------------------------------------------ #
+    # Sometimes focus must be found somewhere else than where we measure: a
+    # feature with contrast, a clean area. The trip: remember where the laser
+    # is held now, take it to the AF position and wait until it is there, find
+    # focus, take it back and wait again, then report done. Z stays where the
+    # autofocus put it -- that is the point: the same focal plane, assuming the
+    # sample is flat between the two places.
+    #
+    # It runs on its OWN thread (not the engine thread): the moves are done by
+    # the image loops (the stabiliser for an array point, the laser placement
+    # for a point in um), and those run inside the engine's frames -- the trip
+    # only sets their target and watches status, exactly as a scan axis does.
+    # Only the autofocus in the middle is handed to the engine, as an ordinary
+    # request. The whole trip is ONE numbered run: af_id / af_running /
+    # af_error, so a scan waits on it with the autofocus's own wait block.
+
+    def autofocus_at_position(self, position: str | None = None,
+                              ix: int | None = None, iy: int | None = None,
+                              x_um: float | None = None, y_um: float | None = None,
+                              go_back: bool = True, **settings) -> int:
+        """Go to the AF position, find focus, come back. Returns the run NUMBER.
+
+        Every argument is optional; a missing one = the camera's own setting:
+        the AF position from config (scanning.af_*), the autofocus settings
+        from the autofocus group. ``position`` = "index" (``ix``, ``iy``: an
+        array point) or "um" (``x_um``, ``y_um``: um from the main template);
+        left out, it follows from which of those were given. ``settings`` =
+        autofocus fields for THIS run only (see AF_TRIP_SETTINGS), put back
+        after it. ``go_back`` False = stay at the AF position afterwards.
+        Finished like autofocus(): status af_id == the number, af_running
+        False; af_error "OK" or why not. Raises at once (nothing moves) when
+        the trip cannot start: no tracked pattern, no calibrated spot, ...
+        """
+        where = self._af_position_target(position, ix, iy, x_um, y_um)
+        overrides = self._check_af_settings(settings)
+        self._trip_ready()
+        home = self._remember_target()
+        with self._lock:
+            if self._af_busy or self._zcal_busy or self._trip_phase is not None:
+                raise RuntimeError("an autofocus or a Z step calibration is already "
+                                   "running (Kill AF stops it)")
+            self._af_id += 1
+            n = self._af_id
+            self._af_busy = True
+            self._af_state = "to AF position"
+            self._trip_phase = "to_af"
+            self._trip_kill.clear()
+            self._trip_af_done.clear()
+            self._trip_af_state = ""
+            self._publish_af_locked()
+        self._trip_thread = threading.Thread(
+            target=self._run_trip, args=(n, where, home, overrides, bool(go_back)),
+            name="camera-af-trip", daemon=True)
+        self._trip_thread.start()
+        self._emit("info", f"autofocus at the AF position ({self._where_text(where)}), "
+                           f"then {'back to ' + self._where_text(home) if go_back else 'stay'}")
+        return n
+
+    def _af_position_target(self, position, ix, iy, x_um, y_um) -> tuple:
+        """("index", (ix, iy)) or ("um", (x, y)) -- from the arguments, else config."""
+        sc = self.cfg.scanning
+        given_idx = ix is not None or iy is not None
+        given_um = x_um is not None or y_um is not None
+        if position in (None, ""):
+            if given_idx and given_um:
+                raise ValueError("give the AF position as ix/iy OR as x_um/y_um, not both")
+            position = "index" if given_idx else "um" if given_um else None
+        if position is None:
+            if not sc.af_position_set:
+                raise RuntimeError("no AF position: set one (Set AF position here) or "
+                                   "give ix/iy or x_um/y_um")
+            position = sc.af_position
+        if position == "index":
+            def pick(v, cfg_v, n, name):
+                if v is None:
+                    v = cfg_v
+                if isinstance(v, bool):
+                    raise ValueError(f"{name} must be an array index")
+                f = float(v)
+                if not math.isfinite(f) or f != round(f):
+                    raise ValueError(f"{name} must be a whole number (got {v!r})")
+                k = int(round(f))
+                if not 0 <= k < max(1, n):
+                    raise ValueError(f"AF position {name} = {k} is outside the array "
+                                     f"(0..{max(1, n) - 1})")
+                return k
+            return ("index", (pick(ix, sc.af_index_x, sc.points_x, "ix"),
+                              pick(iy, sc.af_index_y, sc.points_y, "iy")))
+        if position == "um":
+            def num(v, cfg_v, name):
+                v = cfg_v if v is None else v
+                if isinstance(v, bool):
+                    raise ValueError(f"{name} must be a number")
+                f = float(v)
+                if not math.isfinite(f):
+                    raise ValueError(f"{name} must be a finite number")
+                return f
+            return ("um", (num(x_um, sc.af_x_um, "x_um"), num(y_um, sc.af_y_um, "y_um")))
+        raise ValueError(f"position must be one of {', '.join(AF_POSITIONS)} "
+                         f"(got {position!r})")
+
+    def _check_af_settings(self, settings: dict) -> dict:
+        """Validate the per-run autofocus overrides; return them typed.
+
+        Checked HERE, before anything moves: a typo in a scan routine's step
+        must be refused at the start, not discovered after the stage went to
+        the AF position.
+        """
+        out = {}
+        for name, value in (settings or {}).items():
+            if value is None:
+                continue                         # "not given" = the camera's own
+            kind = AF_TRIP_SETTINGS.get(name)
+            if kind is None:
+                raise ValueError(f"autofocus_at_position: no setting called {name!r} "
+                                 f"(it takes: {', '.join(AF_TRIP_SETTINGS)})")
+            if kind is str:
+                v = str(value)
+                allowed = {"routine": AF_ROUTINES, "mechanism": FOCUS_MECHANISMS,
+                           "approach_from": AF_SIDES}[name]
+                if v not in allowed:
+                    raise ValueError(f"{name} must be one of {', '.join(allowed)} (got {v!r})")
+            else:
+                if isinstance(value, bool):
+                    raise ValueError(f"{name} must be a number")
+                f = float(value)
+                if not math.isfinite(f):
+                    raise ValueError(f"{name} must be a finite number")
+                if kind is int:
+                    if f != round(f) or f < 1:
+                        raise ValueError(f"{name} must be a whole number >= 1")
+                    v = int(round(f))
+                else:
+                    # every float here is a distance that must be positive,
+                    # except the deliberate defocus (any sign) and the
+                    # exposure, where 0 means "the working exposure"
+                    if name == "exposure_us" and f < 0:
+                        raise ValueError("exposure_us must be >= 0 (0 = working exposure)")
+                    if name not in ("offset_from_found_v", "exposure_us") and f <= 0:
+                        raise ValueError(f"{name} must be > 0")
+                    v = f
+            out[name] = v
+        return out
+
+    def _trip_ready(self) -> None:
+        """Raise (nothing moves) when the trip cannot work -- and say why."""
+        if not self.cfg.hardware.use_z:
+            raise RuntimeError("no Z: the autofocus is switched off (hardware.use_z)")
+        if self.reference is None or not self._tracking_on:
+            raise RuntimeError("no template tracked: load or capture a pattern and switch "
+                               "tracking on first (the AF position hangs off the pattern)")
+        if not self.cfg.spot.ref_set:
+            raise RuntimeError("no spot position: calibrate the spot first (Spot tab)")
+        with self._lock:
+            fault = self._fault
+            matched = bool(self._status.match_found)
+        if fault:
+            raise RuntimeError(f"pattern fault: {fault} -- correct it and Clear fault first")
+        if not matched:
+            raise RuntimeError("the pattern is not matched now: the AF position (and the "
+                               "way back) are not known")
+        if self.stream.running:
+            raise RuntimeError("a fly scan is recording the camera")
+
+    def _remember_target(self) -> dict:
+        """Where the laser is held now, to come back to.
+
+        The stabiliser on -> its array point. A laser placement running (or
+        just finished there) -> its target. Neither -> the point of the sample
+        under the laser now (um from the main template), so even an idle
+        camera comes back to exactly where it was.
+        """
+        sc = self.cfg.scanning
+        index = (sc.selected_index_x, sc.selected_index_y)
+        with self._laser_lock:
+            laser = (self._laser_target, self._laser_done)
+        st = self._status
+        home = {"index": index, "stabilize": bool(self._stabilize_on), "laser": laser}
+        if self._stabilize_on:
+            return {**home, "kind": "index", "value": index}
+        tgt = laser[0]
+        if tgt is not None and (self._laser_goto or st.laser_settled):
+            return {**home, "kind": "um", "value": tuple(tgt)}
+        here = (st.spot_from_template_x_um, st.spot_from_template_y_um)
+        if not (math.isfinite(here[0]) and math.isfinite(here[1])):
+            raise RuntimeError("where the laser is on the sample is not known "
+                               "(pattern not matched? spot not calibrated?)")
+        return {**home, "kind": "um", "value": (float(here[0]), float(here[1]))}
+
+    @staticmethod
+    def _where_text(where) -> str:
+        kind, value = (where["kind"], where["value"]) if isinstance(where, dict) else where
+        if kind == "index":
+            return f"array point ({value[0]}, {value[1]})"
+        return f"({value[0]:.2f}, {value[1]:.2f}) um from the template"
+
+    def _trip_go(self, kind: str, value: tuple, what: str) -> None:
+        """Aim the image loops at a point and BLOCK until the laser is there.
+
+        An array point: the stabiliser (switched on if it was off) with that
+        index selected, done when point_settled says so FOR THAT INDEX. A point
+        in um: the laser placement loop, done when laser_settled says so for
+        THAT target. Both flags need a whole averaged window within
+        stable_radius_um, the same rule a scan axis waits on. Frames from
+        before the request are not trusted (the frame counter must move on by
+        two: one may already be in flight with the old target, gotcha #2).
+        """
+        timeout = max(1.0, float(self.cfg.autofocus.af_trip_settle_s))
+        n0 = self._status.frame_number
+        if kind == "index":
+            value = tuple(self.set_selected_index(*value))
+            if not self._stabilize_on:
+                self.set_stabilize(True)          # (also stops a laser placement)
+
+            def there(st):
+                return ((st.selected_index_x, st.selected_index_y) == value
+                        and st.point_settled)
+        else:
+            target = tuple(self.set_laser_target(*value))   # switches the stabiliser off
+
+            def there(st):
+                return (st.laser_settled
+                        and math.isclose(st.laser_target_x_um, target[0], abs_tol=1e-9)
+                        and math.isclose(st.laser_target_y_um, target[1], abs_tol=1e-9))
+        t_end = time.monotonic() + timeout
+        while True:
+            if self._trip_kill.is_set() or self._stop.is_set():
+                raise _AutofocusKilled()
+            with self._lock:
+                st, fault = self._status, self._fault
+            if fault:
+                # the loops hold the stage while faulted: waiting is pointless
+                raise AutofocusFailed("pattern fault", fault)
+            if st.frame_number >= n0 + 2 and there(st):
+                return
+            if time.monotonic() > t_end:
+                raise AutofocusFailed(f"not at the {what}",
+                                      f"the laser did not settle there within {timeout:g} s "
+                                      f"(autofocus.af_trip_settle_s)")
+            time.sleep(0.02)
+
+    def _run_trip(self, n: int, where: tuple, home: dict, overrides: dict,
+                  go_back: bool) -> None:
+        """The trip itself (its own thread). One finish at the very end."""
+        problem = ""
+        try:
+            try:
+                self._trip_go(where[0], where[1], "AF position")
+                # hand the autofocus to the engine, as an ordinary request; it
+                # applies `overrides` for this run and puts them back after
+                with self._lock:
+                    self._trip_phase = "focus"
+                    self._af_state = "queued"
+                    self._af_request = {"kind": "sweep", "id": n, "trip": True,
+                                        "overrides": dict(overrides)}
+                    self._publish_af_locked()
+                while not self._trip_af_done.wait(0.05):
+                    if self._trip_kill.is_set() or self._stop.is_set():
+                        raise _AutofocusKilled()
+                state = self._trip_af_state or "stopped"
+                if state in ("killed", "stopped"):
+                    raise _AutofocusKilled()
+                if state != "OK":
+                    problem = f"autofocus at the AF position failed: {state}"
+            except _AutofocusKilled:
+                raise
+            except Exception as exc:
+                problem = str(exc) if isinstance(exc, AutofocusFailed) else failure_text(exc)
+                if not isinstance(exc, AutofocusFailed):
+                    _log_traceback("autofocus at the AF position", exc)
+            if go_back:
+                # BACK, also after a failure: the scan must carry on (or stop)
+                # with the laser on its measuring point, not at the AF position
+                with self._lock:
+                    self._trip_phase = "back"
+                    self._af_state = "back to the measuring point"
+                    self._publish_af_locked()
+                try:
+                    self._trip_go(home["kind"], home["value"], "measuring point")
+                    self._trip_restore(home)
+                except _AutofocusKilled:
+                    raise
+                except Exception as exc:
+                    why = str(exc) if isinstance(exc, AutofocusFailed) else failure_text(exc)
+                    problem = (f"{problem}; " if problem else "") + f"could not return: {why}"
+            self._trip_finish(failure_text_short(problem) if problem else "OK")
+            if problem:
+                self._emit("error", f"autofocus at the AF position: {problem}")
+            else:
+                self._emit("info", f"autofocus at the AF position done (best "
+                                   f"{self._af_best:.3f} {self.z_unit()})"
+                                   + ("; back at the measuring point" if go_back else ""))
+        except _AutofocusKilled:
+            # Kill AF: stop the whole trip where it is. The autofocus in the
+            # middle (if it runs) is stopped by the same Kill; wait for it to
+            # let go of Z before saying "killed".
+            if self._trip_phase == "focus":
+                self._trip_af_done.wait(10.0)
+            self._trip_stop_where_it_is(home)
+            # A frame already in flight read "stabiliser on" when it started
+            # and would publish that AFTER the stop; say "killed" only once a
+            # whole frame has seen the loops off (bounded: a stopped camera
+            # must not keep the run busy).
+            n0, t_end = self._status.frame_number, time.monotonic() + 1.0
+            while self._status.frame_number < n0 + 2 and time.monotonic() < t_end \
+                    and not self._stop.is_set():
+                time.sleep(0.01)
+            self._trip_finish("killed")
+            self._emit("warn", "autofocus at the AF position killed: the stage stays where "
+                               "it is (stabiliser / laser placement stopped)")
+        except Exception as exc:                  # a bug: never "busy" forever
+            _log_traceback("autofocus at the AF position", exc)
+            self._trip_finish(f"crashed: {failure_text(exc)}")
+
+    def _trip_restore(self, home: dict) -> None:
+        """Back at the measuring point: put the loops' settings as they were.
+
+        Coming back to an array point leaves the stabiliser holding it (as
+        before the trip); the laser target the trip may have overwritten is
+        put back. Coming back to a point in um leaves the stabiliser off (as
+        before) and puts the array's selected index back.
+        """
+        if home["kind"] == "index":
+            with self._laser_lock:
+                self._laser_target = home["laser"][0]
+                self._laser_done = False
+        else:
+            self.cfg.scanning.selected_index_x, self.cfg.scanning.selected_index_y = \
+                home["index"]
+
+    def _trip_stop_where_it_is(self, home: dict) -> None:
+        """Kill AF during a trip: no loop may move the stage any more."""
+        self._laser_goto = False
+        if self._stabilize_on:
+            self._stabilize_on = False
+            self._avg_buf.clear()
+            self._settled_for = None
+        # the selected point is the measuring point again (nothing moves: the
+        # stabiliser is off) -- switching it on brings the laser back there
+        self.cfg.scanning.selected_index_x, self.cfg.scanning.selected_index_y = home["index"]
+        with self._lock:
+            # this snapshot too: "killed" must not go out next to a frame that
+            # still says the stabiliser holds a point (the next frame copies
+            # the attributes again anyway)
+            self._status.stabilize_on = False
+            self._status.laser_goto = False
+            self._status.point_settled = False
+            self._status.stable = False
+            self._status.selected_index_x, self._status.selected_index_y = home["index"]
+
+    def _trip_finish(self, state: str) -> None:
+        """End the trip: state and "not busy" in ONE critical section (gotcha #28)."""
+        with self._lock:
+            self._trip_phase = None
+            self._af_busy = self._af_request is not None
+            self._af_state = "queued" if self._af_busy else state
+            self._publish_af_locked()
+
+    @contextmanager
+    def _af_overrides(self, overrides: dict | None):
+        """Run the block with some autofocus fields changed, then put them back.
+
+        For autofocus_at_position's per-run settings (a scan routine step's
+        "Advanced" options): the camera's own AF settings are what the next
+        plain Find focus uses, whatever a routine asked for once.
+        """
+        af = self.cfg.autofocus
+        saved = {k: getattr(af, k) for k in (overrides or {}) if hasattr(af, k)}
+        try:
+            for k in saved:
+                setattr(af, k, overrides[k])
+            yield
+        finally:
+            for k, v in saved.items():
+                setattr(af, k, v)
+
+    def set_af_position(self, position: str | None = None, ix: int | None = None,
+                        iy: int | None = None, x_um: float | None = None,
+                        y_um: float | None = None) -> dict:
+        """Store the AF position in config (scanning.af_*); returns it.
+
+        Same rules as autofocus_at_position's arguments (a missing value keeps
+        the stored one). Saved with the pattern and with camera.ini.
+        """
+        if position in (None, ""):
+            position = ("index" if (ix is not None or iy is not None) else
+                        "um" if (x_um is not None or y_um is not None) else
+                        self.cfg.scanning.af_position)
+        kind, value = self._af_position_target(position, ix, iy, x_um, y_um)
+        sc = self.cfg.scanning
+        sc.af_position = kind
+        if kind == "index":
+            sc.af_index_x, sc.af_index_y = value
+        else:
+            sc.af_x_um, sc.af_y_um = value
+        sc.af_position_set = True
+        self._emit("info", f"AF position set: {self._where_text((kind, value))}")
+        return self.af_position()
+
+    def set_af_position_here(self, position: str | None = None) -> dict:
+        """The AF position = where the laser is now ("Set AF position here").
+
+        "um" (default when the stabiliser is off): the point of the sample
+        under the laser, in um from the main template. "index" (default while
+        the stabiliser holds an array point): that array point.
+        """
+        position = position or ("index" if self._stabilize_on else "um")
+        if position == "index":
+            sc = self.cfg.scanning
+            return self.set_af_position("index", sc.selected_index_x, sc.selected_index_y)
+        st = self._status
+        here = (st.spot_from_template_x_um, st.spot_from_template_y_um)
+        if not (math.isfinite(here[0]) and math.isfinite(here[1])):
+            raise RuntimeError("where the laser is on the sample is not known: track the "
+                               "pattern and calibrate the spot first")
+        return self.set_af_position("um", x_um=here[0], y_um=here[1])
+
+    def clear_af_position(self) -> None:
+        self.cfg.scanning.af_position_set = False
+        self._emit("info", "AF position cleared")
+
+    def af_position(self) -> dict:
+        sc = self.cfg.scanning
+        return {"set": bool(sc.af_position_set), "position": sc.af_position,
+                "ix": sc.af_index_x, "iy": sc.af_index_y,
+                "x_um": sc.af_x_um, "y_um": sc.af_y_um}
 
     # ------------------------------------------------------------------ #
     # autofocus routine "one_way"  (for a hysteretic, open-loop Z)
@@ -2621,6 +3122,9 @@ class Camera:
         step counter (kim). Kill AF stops it (Z stays where it is).
         """
         with self._lock:
+            if self._trip_phase is not None:
+                raise RuntimeError("an autofocus at the AF position is running "
+                                   "(Kill AF stops it)")
             self._zcal_id += 1
             self._zcal_request = {"kind": "zcal", "id": self._zcal_id}
             self._zcal_busy = True
@@ -3417,6 +3921,11 @@ class Camera:
                     setattr(sc, k, type(cur)(v) if not isinstance(cur, bool) else bool(v))
                 except (TypeError, ValueError):
                     pass
+            if "af_position_set" not in saved:
+                # a pattern saved before the AF position existed: the one set
+                # now belongs to ANOTHER pattern (its um hang off that one's
+                # template), so it is not carried over
+                sc.af_position_set = False
             self._avg_buf.clear()
             if "pixel_size_x_um" in m:
                 im.pixel_size_x_um = float(m["pixel_size_x_um"])

@@ -50,6 +50,8 @@ SPOT_TINT_BGRA = (106, 255, 43, 105)   # thresholded pixels, same green, translu
 OUTLINE = QColor(0, 0, 0, 200)         # under every green line: readable on white too
 AIM_COLOUR = "#ff4fd8"                 # the stabiliser's target (selected scan point)
 LASER_TARGET_COLOUR = "#35d4ff"        # where the laser is being PLACED (set_laser_target)
+AF_POSITION_COLOUR = "#b48cff"         # the AF position (autofocus_at_position): violet,
+                                       # unlike every other mark on the image
 
 # Free zoom. One wheel notch multiplies the magnification by WHEEL_STEP, so
 # four notches double it (1.19**4 = 2.0): fine enough to stop where you want,
@@ -892,6 +894,13 @@ class CameraView(QWidget):
                 if getattr(s, "laser_goto", False) and getattr(s, "spot_calibrated", False):
                     p.drawLine(self._img_to_widget(s.spot_x, s.spot_y), tp)
 
+        # -- the AF POSITION (where autofocus_at_position finds focus) -------- #
+        # A violet square labelled "AF", drawn while one is set and the
+        # pattern is matched (an array point or um from the main template:
+        # both hang off the pattern, so the mark moves with the sample). It
+        # may be off-screen -- then simply not seen.
+        self._paint_af_position(p, s, cfg)
+
         # -- optional text labels on the image (Imaging card checkboxes) ------- #
         # Micrometres once an objective calibration gives the pixel size (Lukáš,
         # 2026-09-14); pixels only when there is none. Positions are the image
@@ -956,6 +965,40 @@ class CameraView(QWidget):
         siy = int(np.clip(sc.selected_index_y, 0, sc.points_y - 1))
         return (offs, s.selected_point_x - offs[siy, six, 0],
                 s.selected_point_y - offs[siy, six, 1])
+
+    def af_position_image(self):
+        """Image position (x, y) of the configured AF position, or None (none
+        set, no matched pattern, an index outside the array)."""
+        s, cfg = self._status, self._cfg
+        if s is None or cfg is None or not getattr(s, "match_found", False):
+            return None
+        sc = cfg.scanning
+        if not getattr(sc, "af_position_set", False):
+            return None
+        if getattr(sc, "af_position", "index") == "index":
+            return self.array_point_image(int(sc.af_index_x), int(sc.af_index_y))
+        pxx, pxy = getattr(s, "pixel_size_x", 0.0), getattr(s, "pixel_size_y", 0.0)
+        if pxx <= 0 or pxy <= 0:
+            return None
+        return (s.anchor_x + float(sc.af_x_um) / pxx, s.anchor_y + float(sc.af_y_um) / pxy)
+
+    def _paint_af_position(self, p: QPainter, s, cfg) -> None:
+        at = self.af_position_image()
+        if at is None:
+            return
+        c = self._img_to_widget(*at)
+        d = 7
+        p.save()                                        # the bold font stays in here
+        p.setBrush(Qt.NoBrush)
+        for _ in outlined_pen(p, AF_POSITION_COLOUR, 2.0):
+            p.drawRect(QRectF(c.x() - d, c.y() - d, 2 * d, 2 * d))
+        f = p.font(); f.setBold(True); p.setFont(f)
+        at_txt = QPointF(c.x() + d + 3, c.y() - d)
+        p.setPen(QPen(OUTLINE))                         # a dark shadow: readable on white
+        p.drawText(at_txt + QPointF(1, 1), "AF")
+        p.setPen(QPen(QColor(AF_POSITION_COLOUR)))
+        p.drawText(at_txt, "AF")
+        p.restore()
 
     def array_point_image(self, ix: int, iy: int):
         """Image position (x, y) of array point (ix, iy), or None (no match,

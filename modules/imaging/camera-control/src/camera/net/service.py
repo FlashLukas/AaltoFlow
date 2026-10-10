@@ -306,6 +306,25 @@ class CameraService:
         # -- focus / autofocus ------------------------------------------- #
         if cmd == "autofocus":
             return {"ok": True, "result": "queued", "af_id": b.autofocus()}
+        if cmd == "autofocus_at_position":
+            # go to the AF position, find focus, come back -- ONE numbered run
+            # (af_id), finished like autofocus. Every argument optional; a
+            # missing one = the camera's own setting. Unknown names are refused
+            # by the brain (a typo must not be silently dropped).
+            # (minus the envelope: the verb and who sent it, control.py)
+            args = {k: v for k, v in req.items() if k not in ("cmd", "client")}
+            return {"ok": True, "result": "queued", "af_id": b.autofocus_at_position(**args)}
+        if cmd == "set_af_position":
+            return {"ok": True, "af_position": b.set_af_position(
+                req.get("position"), req.get("ix"), req.get("iy"),
+                req.get("x_um"), req.get("y_um"))}
+        if cmd == "set_af_position_here":
+            return {"ok": True, "af_position": b.set_af_position_here(req.get("position"))}
+        if cmd == "clear_af_position":
+            b.clear_af_position()
+            return {"ok": True}
+        if cmd == "get_af_position":
+            return {"ok": True, "af_position": b.af_position()}
         if cmd == "kill_af":
             b.kill_af()
             return {"ok": True}

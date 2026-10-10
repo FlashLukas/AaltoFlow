@@ -59,6 +59,59 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     return d
 
 
+def _af_trip_args(brain, lx: float, ly: float, z_unit: str) -> list:
+    """The arguments of autofocus_at_position, for a scan routine step's
+    "Advanced" options (scan-core builds the form from exactly this list).
+
+    No `default` keys (except go_back): an argument the step does not set is
+    not sent, and the camera then uses its OWN setting. The limits are live
+    (the array's size, the image's size in um), like every other limit here.
+    """
+    from ..config import AF_POSITIONS, AF_ROUTINES, AF_SIDES, FOCUS_MECHANISMS
+    sc = brain.cfg.scanning
+    zu = z_unit or "V"
+    return [
+        {"name": "position", "label": "AF position as", "type": "enum",
+         "options": list(AF_POSITIONS),
+         "help": "index = an array point (ix, iy); um = a point in um from the main "
+                 "template (x_um, y_um). Left out: follows from what is set below, "
+                 "else the camera's stored AF position."},
+        {"name": "ix", "label": "AF point index X", "type": "int",
+         "min": 0, "max": max(0, int(sc.points_x) - 1)},
+        {"name": "iy", "label": "AF point index Y", "type": "int",
+         "min": 0, "max": max(0, int(sc.points_y) - 1)},
+        {"name": "x_um", "label": "AF position X", "type": "float", "unit": "um",
+         "min": -lx, "max": lx, "help": "um from the main template, image +x right"},
+        {"name": "y_um", "label": "AF position Y", "type": "float", "unit": "um",
+         "min": -ly, "max": ly, "help": "um from the main template, image +y DOWN"},
+        {"name": "go_back", "label": "Return to where it was", "type": "bool",
+         "default": True,
+         "help": "Off = stay at the AF position after the autofocus."},
+        {"name": "routine", "label": "AF routine", "type": "enum",
+         "options": list(AF_ROUTINES)},
+        {"name": "mechanism", "label": "AF metric", "type": "enum",
+         "options": list(FOCUS_MECHANISMS)},
+        {"name": "exposure_us", "label": "AF exposure", "type": "float", "unit": "us",
+         "min": 0.0, "help": "0 = the working exposure"},
+        {"name": "drive_amplitude_v", "label": "Sweep range (p-p)", "type": "float",
+         "unit": zu, "min": 0.001, "help": "routine sweep"},
+        {"name": "steps", "label": "Sweep levels", "type": "int", "min": 3, "max": 501,
+         "help": "routine sweep"},
+        {"name": "averages_per_level", "label": "Frames per level", "type": "int",
+         "min": 1, "max": 100},
+        {"name": "approach_from", "label": "Approach from", "type": "enum",
+         "options": list(AF_SIDES), "help": "routine one_way"},
+        {"name": "coarse_step_v", "label": "Coarse step", "type": "float", "unit": zu,
+         "min": 0.001, "help": "routine one_way"},
+        {"name": "fine_step_v", "label": "Fine step", "type": "float", "unit": zu,
+         "min": 0.001, "help": "routine one_way"},
+        {"name": "max_travel_v", "label": "Max travel", "type": "float", "unit": zu,
+         "min": 0.001, "help": "routine one_way"},
+        {"name": "offset_from_found_v", "label": "Park offset from focus", "type": "float",
+         "unit": zu, "help": "a deliberate defocus"},
+    ]
+
+
 def manifest_revision(manifest: dict) -> int:
     """A checksum over the parts of the manifest a client must react to.
 
@@ -450,6 +503,31 @@ def build_manifest(brain) -> dict:
                  "timeout_s": float(brain.cfg.autofocus.scan_timeout_s)},
            help="Finds focus (routine: sweep or one_way, AutoFocus tab) and parks "
                 "there. Tracking and the stabiliser pause while it runs."),
+        # AUTOFOCUS AT THE AF POSITION, then back (2026-10-10). The SAME wait
+        # block as autofocus: the whole round trip is one numbered run, so a
+        # scan waits until the laser is back on its measuring point, and a
+        # failure (af_error) raises -- also when the laser did come back.
+        # Every arg is OPTIONAL and has NO default on purpose: a routine sends
+        # only what its step's "Advanced" options set, and everything left out
+        # is the camera's own setting (the AF position in the scanning group,
+        # the autofocus group) -- see Camera.autofocus_at_position.
+        _p("autofocus_at_position", "Find focus at AF position", "action", "action",
+           group="Focus", order=103,
+           args=_af_trip_args(brain, lx, ly, z_unit),
+           wait={"target_key": "af_id",
+                 "ready": {"policy": "adopt_then_flag", "setpoint_key": "af_id",
+                           "flag_key": "af_running", "invert": True},
+                 "check": {"key": "af_error", "equals": "OK"},
+                 "timeout_s": float(brain.cfg.autofocus.scan_timeout_s)
+                 + 2.0 * float(brain.cfg.autofocus.af_trip_settle_s)},
+           help="Takes the laser to the AF position (an array point, or um from the "
+                "main template), finds focus there, and brings it back to where it "
+                "was; Z stays at the new focus. Needs tracking and a calibrated spot. "
+                "Kill AF stops it where it is."),
+        _p("af_trip", "AF position trip", "indicator", "string", group="Focus",
+           order=28, read_path=["af_trip"],
+           help="Where an autofocus at the AF position is: to_af, focus, back; "
+                "empty when none runs."),
         # a run counter: starts at 0 and only counts up (min 0 is a promise
         # the brain keeps; no max -- it is unbounded, int32 holds 2e9 runs)
         _p("af_id", "Autofocus #", "indicator", "int", group="Focus", order=23,

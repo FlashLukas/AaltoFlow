@@ -189,6 +189,27 @@ class CameraClient(ControlClient):
         """Queue an autofocus; returns its number (status ``af_id``), like the brain."""
         return self._rpc(cmd="autofocus")["af_id"]
 
+    def autofocus_at_position(self, **args) -> int:
+        """Go to the AF position, find focus, come back; returns the run number.
+        Arguments as the brain's (all optional: None / missing = the camera's own)."""
+        msg = {k: v for k, v in args.items() if v is not None}
+        return self._rpc(cmd="autofocus_at_position", **msg)["af_id"]
+
+    def set_af_position(self, position=None, ix=None, iy=None, x_um=None, y_um=None) -> dict:
+        msg = {k: v for k, v in (("position", position), ("ix", ix), ("iy", iy),
+                                 ("x_um", x_um), ("y_um", y_um)) if v is not None}
+        return self._rpc(cmd="set_af_position", **msg)["af_position"]
+
+    def set_af_position_here(self, position=None) -> dict:
+        msg = {"position": position} if position else {}
+        return self._rpc(cmd="set_af_position_here", **msg)["af_position"]
+
+    def clear_af_position(self) -> None:
+        self._rpc(cmd="clear_af_position")
+
+    def af_position(self) -> dict:
+        return self._rpc(cmd="get_af_position")["af_position"]
+
     def kill_af(self) -> None:
         self._rpc(cmd="kill_af")
 

@@ -45,6 +45,9 @@ AF_ROUTINES = ("sweep", "one_way")
 # Which side the one-way routine approaches focus from (Autofocus.approach_from):
 # "below" walks Z upwards, "above" walks it downwards.
 AF_SIDES = ("below", "above")
+# How the AF position is given (Scanning.af_position): an array point, or um
+# from the main template.
+AF_POSITIONS = ("index", "um")
 # How the image is mirrored after rotation (Image.symmetry).
 SYMMETRIES = ("none", "horizontal", "vertical")
 # GUI theme choices (UI.theme).
@@ -429,6 +432,11 @@ class Autofocus:
     # How long a SCAN waits for one autofocus before calling it failed (s).
     # Generous: an open-loop Z walks slowly and a far-off start takes many levels.
     scan_timeout_s: float = 600.0
+    # Autofocus AT THE AF POSITION (autofocus_at_position): the longest wait
+    # for the laser to arrive at the AF position, and again back at the
+    # measuring point (the stabiliser / laser placement loop moves it; an
+    # open-loop stage on a long way may need a while). Then the trip fails.
+    af_trip_settle_s: float = 120.0
     # --- Z STEP CALIBRATION by the camera (2026-09-28, Camera.calibrate_z_steps)
     # A slip-stick Z steps UP and DOWN by different amounts, so its counter is
     # a poor ruler. The routine walks Z up through focus, then down through it,
@@ -496,6 +504,20 @@ class Scanning:
     selected_index_y: int = 0
     overlay_size: int = 5              # marker radius, px (GUI overlay)
     overlay_style: str = "fill"        # fill | open
+    # THE AF POSITION (2026-10-10, Camera.autofocus_at_position): a place on the
+    # sample where focus is FOUND before measuring somewhere else -- a feature
+    # with contrast, a clean area. Kept here, in the scanning group, because it
+    # belongs to the pattern: it is saved with it (pattern meta) and with
+    # camera.ini. Either an array point (af_position = "index": moves with the
+    # array) or a point in um from the MAIN template, like set_laser_target
+    # (af_position = "um"). af_position_set False = none chosen yet: the action
+    # then refuses unless the caller names a position itself.
+    af_position: str = "index"         # index | um
+    af_index_x: int = 0
+    af_index_y: int = 0
+    af_x_um: float = 0.0
+    af_y_um: float = 0.0
+    af_position_set: bool = False
 
 
 @dataclass

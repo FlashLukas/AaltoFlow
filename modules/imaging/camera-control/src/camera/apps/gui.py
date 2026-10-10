@@ -42,7 +42,7 @@ from .control_bar import ControlBar, mark_always
 from .plots import MiniPlot
 from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
 from .. import vision as V
-from ..config import (AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
+from ..config import (AF_POSITIONS, AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
                       FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, RECORD_ROIS, SIM_SPOTS,
                       SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
 
@@ -53,6 +53,7 @@ _ENUMS = {
     "mechanism": FOCUS_MECHANISMS,
     "routine": AF_ROUTINES,
     "approach_from": AF_SIDES,
+    "af_position": AF_POSITIONS,
     "symmetry": SYMMETRIES,
     "overlay_style": ("fill", "open"),
     "theme": THEMES,
@@ -67,6 +68,16 @@ _ENUMS = {
     "motion": MOTIONS,
     "record_roi": RECORD_ROIS,
 }
+
+def _af_pos_text(pos: dict) -> str:
+    """'array point (2, 3)' / '(4.50, -3.00) um' / 'none' -- for the GUI line."""
+    if not pos or not pos.get("set"):
+        return "none"
+    if pos.get("position") == "index":
+        return f"array point ({pos.get('ix')}, {pos.get('iy')})"
+    return (f"({float(pos.get('x_um', 0)):.2f}, {float(pos.get('y_um', 0)):.2f}) um "
+            f"from the template")
+
 
 # What the focus plot's y axis shows, per autofocus mechanism.
 AF_METRIC_LABELS = {"spot_area": "spot area (px²)",
@@ -123,7 +134,8 @@ AF_LAYOUT = [
                (_A, "park_tolerance_relative"), (_A, "park_noise_k"), (_A, "park_centre"),
                (_A, "offset_from_found_v")]),
      ("Autofocus exposure", [(_A, "exposure_us"), (_A, "exposure_discard_frames")])],
-    [("Scan & continuous", [(_A, "scan_timeout_s"), (_A, "continuous_enabled"),
+    [("Scan & continuous", [(_A, "scan_timeout_s"), (_A, "af_trip_settle_s"),
+                            (_A, "continuous_enabled"),
                             (_A, "continuous_gain"), (_A, "continuous_target")]),
      ("Z step calibration", [(_A, "zcal_step_v"), (_A, "zcal_start_offset_v"),
                              (_A, "zcal_max_travel_v"), (_A, "zcal_averages"),
@@ -580,6 +592,25 @@ class MainWindow(QMainWindow):
         b_kill.clicked.connect(lambda: self.ctrl.kill_af())
         mark_always(b_kill)          # a viewer can always stop an autofocus
         row2.addWidget(self.b_af); row2.addWidget(b_kill); l.addLayout(row2)
+        # AUTOFOCUS AT THE AF POSITION (2026-10-10): find focus somewhere else
+        # (a feature with contrast), then come back to the measuring point.
+        # The position itself is edited in Scan pattern > Scanning (af_*);
+        # "Set AF here" takes where the laser is now. Violet "AF" on the image.
+        row_afp = QHBoxLayout()
+        self.b_af_here = QPushButton("Set AF position here")
+        self.b_af_here.setToolTip("the AF position = where the laser is now: the array "
+                                  "point the stabiliser holds, else the point of the "
+                                  "sample under the laser (um from the template)")
+        self.b_af_here.clicked.connect(self._set_af_here)
+        self.b_af_at = QPushButton("Focus at AF position")
+        self.b_af_at.setToolTip("go to the AF position, find focus there (the AutoFocus "
+                                "tab's settings), come back; Z stays at the new focus. "
+                                "Kill AF stops it where it is.")
+        self.b_af_at.clicked.connect(self._af_at_position)
+        row_afp.addWidget(self.b_af_here); row_afp.addWidget(self.b_af_at)
+        l.addLayout(row_afp)
+        self.lab_afpos = QLabel("AF position: none"); self.lab_afpos.setObjectName("muted")
+        l.addWidget(self.lab_afpos)
         r3 = QHBoxLayout(); r3.addWidget(QLabel("AF")); self.led_af = _led(T.OK)
         r3.addWidget(self.led_af); self.lab_af = QLabel("OK"); r3.addWidget(self.lab_af)
         r3.addStretch(1); r3.addWidget(QLabel("Best")); self.lab_best = QLabel("0.00 V")
@@ -795,6 +826,41 @@ class MainWindow(QMainWindow):
             self.ctrl.cancel_laser_target()
         except Exception as exc:
             self._log_event("warn", f"cancel failed: {exc}")
+
+    # -- the AF position (autofocus_at_position) ---------------------------- #
+    def _set_af_here(self) -> None:
+        try:
+            pos = self.ctrl.set_af_position_here()
+        except Exception as exc:
+            self._log_event("error", f"set AF position: {exc}")
+            return
+        self.ctrl_get_config_into_cfg()      # the marker reads cfg.scanning.af_*
+        self._sync_form("scanning")
+        self._log_event("info", f"AF position set ({_af_pos_text(pos)})")
+
+    def _af_at_position(self) -> None:
+        try:
+            self.ctrl.autofocus_at_position()
+        except Exception as exc:
+            self._log_event("error", f"focus at AF position: {exc}")
+
+    def _refresh_af_position(self, s) -> None:
+        """The AF position line + whether the buttons can work (from status)."""
+        sc = self.cfg.scanning
+        pos = {"set": sc.af_position_set, "position": sc.af_position,
+               "ix": sc.af_index_x, "iy": sc.af_index_y,
+               "x_um": sc.af_x_um, "y_um": sc.af_y_um}
+        trip = getattr(s, "af_trip", "")
+        text = f"AF position: {_af_pos_text(pos)}"
+        if trip:
+            text += {"to_af": " -- going there", "focus": " -- focusing there",
+                     "back": " -- coming back"}.get(trip, "")
+        self.lab_afpos.setText(text)
+        ready = (bool(getattr(s, "tracking_on", False)) and bool(getattr(s, "match_found", False))
+                 and bool(getattr(s, "spot_calibrated", False)))
+        self.b_af_here.setEnabled(ready)
+        self.b_af_at.setEnabled(ready and bool(sc.af_position_set)
+                                and not getattr(s, "af_running", False))
 
     def _refresh_laser(self, s) -> None:
         x, y = s.spot_from_template_x_um, s.spot_from_template_y_um
@@ -2105,6 +2171,7 @@ class MainWindow(QMainWindow):
         self._follow_switch(self.chk_track, s.tracking_on)
         self._follow_switch(self.chk_stab, s.stabilize_on)
         self._follow_switch(self.chk_cont, getattr(s, "continuous_focus_on", False))
+        self._refresh_af_position(s)
         self._refresh_laser(s)
         _set_led(self.led_af, not s.af_running and s.af_error == "OK", T.OK)
         zcal_on = bool(getattr(s, "zcal_running", False))
