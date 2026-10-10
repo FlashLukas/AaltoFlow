@@ -397,6 +397,7 @@ class SimCamera:
         self.coherent = CoherentSpot(coherent_w0_px, coherent_zr, coherent_mix,
                                      coherent_phase, coherent_peak)
         self._rng = np.random.default_rng(seed)
+        self._deep_rng = np.random.default_rng(seed + 1)   # the deep frame's low bits
         self.bit_depth = int(bit_depth) if int(bit_depth) in (10, 12, 16) else 8
         self._deep = None                 # (uint16 frame, bits) of the last grab
         # Stage position at which the template sits at its home pixel.
@@ -561,9 +562,16 @@ class SimCamera:
             lut = (np.clip((np.arange(256) / 255.0) ** (1.0 / gamma), 0, 1) * 255).astype(np.uint8)
             frame = lut[frame]
         if self.bit_depth > 8:
-            # the toy Gaussian spot has no depth to give: its deep frame is the
-            # 8-bit one scaled up (enough for the pipeline to run in N bit)
-            self._deep = (frame.astype(np.uint16) << (self.bit_depth - 8), self.bit_depth)
+            # The toy Gaussian scene is rendered in 8 bit. Its deep frame is
+            # that frame scaled up PLUS the low bits an 8-bit camera throws
+            # away, drawn at random (2026-10-10): every value 0 .. 2^N - 1 then
+            # occurs, as on a real 12-bit sensor, so storing a real-depth image
+            # is really tested (a frame of multiples of 16 would compress and
+            # round-trip suspiciously well). A separate random stream: the
+            # 8-bit frames -- and every test that relies on them -- unchanged.
+            low = self.bit_depth - 8
+            dither = self._deep_rng.integers(0, 1 << low, frame.shape, dtype=np.uint16)
+            self._deep = ((frame.astype(np.uint16) << low) | dither, self.bit_depth)
         return frame
 
     def _quantise_both(self, f: np.ndarray) -> np.ndarray:

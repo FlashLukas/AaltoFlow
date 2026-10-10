@@ -52,7 +52,9 @@ def test_manifest_shape_and_required_fields():
             if p["kind"] == "control":
                 assert "set" in p and "verb" in p["set"] and "arg" in p["set"], p["id"]
             if p["kind"] == "indicator":
-                assert p["read_path"], p["id"]
+                # read from status, or (an array: the camera image) fetched
+                # by the command its `read` names (guide 6b)
+                assert p["read_path"] or (p.get("read") or {}).get("verb"), p["id"]
             if p["kind"] == "action" and p.get("args"):
                 for a in p["args"]:
                     assert "name" in a and "type" in a, p["id"]

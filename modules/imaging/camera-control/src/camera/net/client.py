@@ -301,6 +301,23 @@ class CameraClient(ControlClient):
     def snapshot(self, path: str | None = None) -> str:
         return self._rpc(cmd="snapshot", path=path)["path"]
 
+    def acquire_image(self) -> int:
+        """Ask for a fresh frame for recording; returns its number (the frame
+        is taken by the service's frame loop: wait for status image_id == n
+        and not image_acquiring, then get_image())."""
+        return int(self._rpc(cmd="acquire_image")["image_id"])
+
+    def get_image(self, which: str = "sample") -> tuple:
+        """(meta, frame) of the last acquired image ("sample") or of the
+        current frame ("live"), at full depth, cropped/binned as configured.
+        JSON + base64 here (this client's REQ speaks one-part replies);
+        scan-core asks for the same frame as a binary part."""
+        r = self._rpc(cmd="get_image", which=which)
+        img = r["image"]
+        frame = np.frombuffer(base64.b64decode(img["b64"]),
+                              dtype=np.dtype(img["dtype"])).reshape(img["shape"])
+        return r.get("image_meta", {}), frame.copy()
+
     def get_frame(self) -> "np.ndarray | None":
         import cv2
         png_b64 = self._rpc(cmd="get_frame")["png_b64"]

@@ -74,6 +74,10 @@ SIM_SPOTS = ("gaussian", "coherent")
 SIM_BIT_DEPTHS = (8, 10, 12, 16)
 # XY position / jog unit on a stage that counts steps (Hardware.xy_unit).
 XY_UNITS = ("steps", "um")
+# The region a scan's image detector records, and its binning
+# (Image.record_roi / record_binning; recording.py has the same two lists).
+RECORD_ROIS = ("full", "spot", "rect")
+RECORD_BINNINGS = (1, 2, 4)
 
 
 # --------------------------------------------------------------------------- #
@@ -132,6 +136,26 @@ class Image:
     clip_top: int = 0
     clip_right: int = 0                # 0 = full width (see brain preprocess)
     clip_bottom: int = 0               # 0 = full height
+    # IMAGES FOR SCANS (recording.py, 2026-10-10): which pixels a scan's
+    # `camera.image` detector stores per point. "full" = the whole processed
+    # frame; "spot" = record_w x record_h px centred on the CALIBRATED laser
+    # spot (the most useful: the spot and its surroundings, small files);
+    # "rect" = record_w x record_h px at (record_x, record_y). Binning 1/2/4
+    # SUMS b x b pixels. A full 1936 x 1096 frame is 4 MB per point.
+    record_roi: str = "full"
+    record_w: int = 256
+    record_h: int = 256
+    record_x: int = 0
+    record_y: int = 0
+    record_binning: int = 1
+    # frames thrown away after the request before one is taken: a real camera
+    # may hand out frames already waiting in its buffer queue (exposed BEFORE
+    # the request). # VERIFY on the IDS camera how many are queued.
+    record_discard_frames: int = 1
+    record_timeout_s: float = 10.0     # how long a scan waits for one frame
+    # auto exposure / gain switched Off by an image request from a client
+    # that holds no scan claim: restored after this long without another one
+    record_auto_restore_s: float = 30.0
 
 
 @dataclass
@@ -679,4 +703,8 @@ def load_config(path: str) -> Config:
         cfg.camera.sim_bit_depth = 8
     if cfg.hardware.xy_unit not in XY_UNITS:
         cfg.hardware.xy_unit = "steps"
+    if cfg.image.record_roi not in RECORD_ROIS:
+        cfg.image.record_roi = "full"
+    if cfg.image.record_binning not in RECORD_BINNINGS:
+        cfg.image.record_binning = 1
     return cfg

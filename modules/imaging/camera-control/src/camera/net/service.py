@@ -196,6 +196,11 @@ class CameraService:
                     try:
                         payload = self.status_payload()
                         sock.send_multipart([P.TOPIC_STATUS, _json(payload)])
+                        # auto exposure / gain switched off for recording
+                        # images come back once the scan that asked has
+                        # released (or lost) its claim (recording.py)
+                        self.brain.recorder.housekeeping(
+                            bool((payload.get("control") or {}).get("scan")))
                     except Exception:
                         pass
                 time.sleep(0.005)
@@ -236,11 +241,17 @@ class CameraService:
                     # Serialise BEFORE sending, for the same reason: a reply json
                     # cannot encode (a numpy int, say) must still be answered.
                     try:
-                        data = _json(reply)
+                        data, parts = _encode_reply(reply)
                     except Exception as exc:
                         data = _json({"ok": False, "error": f"reply not JSON-encodable: {exc}"})
+                        parts = []
                     try:
-                        sock.send(data)
+                        if parts:
+                            # [JSON header, raw part, ...] -- CurveZMQ, when on,
+                            # encrypts every part of the message
+                            sock.send_multipart([data] + parts)
+                        else:
+                            sock.send(data)
                     except Exception:
                         pass
         finally:
@@ -395,6 +406,25 @@ class CameraService:
             png = b.get_frame_png()
             return {"ok": True, "png_b64": base64.b64encode(png).decode("ascii")}
 
+        # -- images as a scan detector (recording.py) --------------------- #
+        if cmd == "acquire_image":
+            # numbered; replies at once, the frame is taken by the engine
+            # thread. in_scan: a scan holds the camera's claim, so auto
+            # exposure / gain switched off now come back when it ends.
+            in_scan = bool((self.control.status() or {}).get("scan"))
+            return {"ok": True, "image_id": b.recorder.acquire(in_scan=in_scan)}
+        if cmd == "get_image":
+            meta, frame = b.recorder.get(str(req.get("which") or "sample"))
+            if req.get("binary"):
+                # the frame as a RAW binary part after the JSON header (the
+                # commander sends it; guide 6b "Binary replies")
+                return {"ok": True, "image_meta": meta, "_binary": [("image", frame)]}
+            return {"ok": True, "image_meta": meta, "image": {
+                "dtype": frame.dtype.str, "shape": list(frame.shape),
+                "b64": base64.b64encode(frame.tobytes()).decode("ascii")}}
+        if cmd == "image_coords":
+            return {"ok": True, **b.recorder.coords()}
+
         # -- calibration ------------------------------------------------- #
         if cmd == "set_objective":
             return {"ok": True, "objective": b.set_objective(req["name"])}
@@ -450,3 +480,29 @@ class CameraService:
 
 def _json(obj) -> bytes:
     return _json_mod.dumps(obj).encode("utf-8")
+
+
+def _encode_reply(reply) -> tuple:
+    """(JSON header bytes, [raw parts]) for one reply.
+
+    A reply may carry numpy arrays to be sent as BINARY parts instead of
+    inside the JSON (the image detector): `reply["_binary"]` = [(key, array)].
+    They are listed, in order, in the header's `binary` list with dtype
+    (numpy's explicit byte-order string, e.g. "<u2") and shape, so a client
+    rebuilds them without guessing:
+
+        part 0  {"ok": true, ..., "binary": [{"key": "image", "dtype": "<u2",
+                                              "shape": [1096, 1936]}]}
+        part 1  the raw bytes, C order
+    """
+    if not isinstance(reply, dict) or not reply.get("_binary"):
+        return _json(reply), []
+    head = {k: v for k, v in reply.items() if k != "_binary"}
+    specs, parts = [], []
+    for key, arr in reply["_binary"]:
+        import numpy as np
+        a = np.ascontiguousarray(arr)
+        specs.append({"key": str(key), "dtype": a.dtype.str, "shape": list(a.shape)})
+        parts.append(a.tobytes())
+    head["binary"] = specs
+    return _json(head), parts

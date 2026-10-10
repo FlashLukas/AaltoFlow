@@ -43,8 +43,8 @@ from .plots import MiniPlot
 from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
 from .. import vision as V
 from ..config import (AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
-                      FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, SIM_SPOTS, SIZE_METHODS,
-                      SYMMETRIES, THEMES, XY_UNITS)
+                      FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, RECORD_ROIS, SIM_SPOTS,
+                      SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
 
 # What a QSpinBox (a C++ int) can hold.
 _INT32_MIN, _INT32_MAX = -2**31, 2**31 - 1
@@ -65,6 +65,7 @@ _ENUMS = {
     "locate": LOCATE_MODES,
     "calib_mode": CALIB_MODES,
     "motion": MOTIONS,
+    "record_roi": RECORD_ROIS,
 }
 
 # What the focus plot's y axis shows, per autofocus mechanism.
@@ -140,7 +141,16 @@ ONE_WAY_ONLY = {"approach_from", "coarse_step_v", "fine_step_v", "max_travel_v",
                 "park_tolerance_relative", "park_noise_k", "park_centre"}
 CAMERA_LAYOUT = [
     [("Objective & pixels", [("image", "objective_name"), ("image", "pixel_size_x_um"),
-                             ("image", "pixel_size_y_um"), ("image", "objectives_file")])],
+                             ("image", "pixel_size_y_um"), ("image", "objectives_file")]),
+     # what a scan's camera.image detector stores per point (recording.py);
+     # in the first column: its long field names would widen the second one
+     # past the lab screen (the settings tab must not scroll sideways)
+     ("Images for scans", [("image", "record_roi"), ("image", "record_w"),
+                           ("image", "record_h"), ("image", "record_x"),
+                           ("image", "record_y"), ("image", "record_binning"),
+                           ("image", "record_discard_frames"),
+                           ("image", "record_timeout_s"),
+                           ("image", "record_auto_restore_s")])],
     [("Image geometry", [("image", "rotation_deg"), ("image", "symmetry"),
                          ("image", "clip_enabled"), ("image", "clip_left"),
                          ("image", "clip_top"), ("image", "clip_right"),

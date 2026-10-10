@@ -45,6 +45,7 @@ from . import objectives as OBJ
 from . import vision as V
 from . import zcal as ZC
 from .config import CALIB_MODES, LOCATE_MODES, Config
+from .recording import ImageRecorder
 from .stream import StreamRecorder
 from .template_io import BackupPattern, Reference, load_template, save_template
 
@@ -355,6 +356,22 @@ class CameraStatus:
     pixel_size_y: float = 0.413
     objective_name: str = ""
 
+    # IMAGES FOR SCANS (recording.py, 2026-10-10): numbered acquisitions of a
+    # fresh full-depth frame. image_id = the last one ASKED for, and
+    # image_acquiring stays True until that one is taken -- a scan waits for
+    # both (gotcha #17). image_sample_id = the one the sample holds now.
+    image_id: int = 0
+    image_acquiring: bool = False
+    image_sample_id: int = 0
+    image_error: str = ""             # why the last acquisition failed ("" = fine)
+    image_bits: int = 8               # depth of the frames (8, or 10/12/16)
+    image_shape: list = field(default_factory=lambda: [0, 0])   # stored (h, w)
+    image_exposure_us: float = float("nan")   # what the last image was taken with
+    image_gain: float = float("nan")
+    # auto features switched Off while images are recorded ("" = none), e.g.
+    # "GainAuto (was Continuous)"; restored when the scan ends
+    image_auto_frozen: str = ""
+
     #: Manifest revision, filled in by the service (see net/describe.py) so a
     #: client can tell its cached manifest went stale. None from the brain
     #: itself, which knows nothing about the wire.
@@ -399,6 +416,9 @@ class Camera:
         self._laser_lock = threading.Lock()
         # The fly-scan record of the laser position on the sample (stream.py).
         self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
+        # Frames as a scan detector (recording.py): numbered acquisitions,
+        # the recording region, auto exposure/gain off while recording.
+        self.recorder = ImageRecorder(self)
 
         # Objective table -> pixel size (and the objective's autofocus
         # distances, see _apply_objective_af).
@@ -572,6 +592,13 @@ class Camera:
                 self._emit("error", f"could not restore the exposure at shutdown: {exc}")
             self._af_expo_saved = None
             self._af_expo_active = False
+        # auto exposure / gain switched Off for recording images: back as they
+        # were (the same reasoning as the exposure above -- it restores the
+        # user's setting, also on a restart)
+        try:
+            self.recorder.restore_auto("shutdown")
+        except Exception:
+            pass
         for dev, name in ((self.backend, "camera"), (self.xy, "xy"), (self.z, "z")):
             try:
                 dev.close()
@@ -694,6 +721,9 @@ class Camera:
         return gray, 255.0, 8
 
     def _process(self) -> None:
+        # when this grab was ASKED for: an image acquisition takes only a
+        # frame whose grab started after its request (recording.py)
+        t_grab = time.monotonic()
         try:
             gray = self._grab_gray()
         except Exception as exc:
@@ -716,6 +746,13 @@ class Camera:
         # stream up with other instruments'). The grab returns once the frame
         # is exposed and read out; the exposure is ~1 ms here, so "now" is it.
         t_frame = time.time()
+
+        # An IMAGE for a scan takes THIS raw frame (full depth when there is
+        # one), before the temporal average below -- one exposure, not a mean.
+        try:
+            self.recorder.on_frame(t_grab, gray, self._deep)
+        except Exception as exc:          # never the frame loop's end
+            self._warn_limited("image", f"image recording: {type(exc).__name__}: {exc}")
 
         # Temporal (running) average across frames. The full-depth copy is
         # averaged alongside (as float: the average IS finer than a count), and
@@ -912,6 +949,7 @@ class Camera:
             st.zcal_state = self._zcal_state
             for k, v in self._zcal_result.items():
                 setattr(st, k, v)
+            self.recorder.fill_status(st)
             if self._af_busy or self._zcal_busy:   # a request that arrived mid-frame
                 st.point_settled = False
                 st.stable = False

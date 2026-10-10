@@ -97,6 +97,81 @@ def read_path(status: dict, path):
     return cur
 
 
+def _image_params(brain) -> list:
+    """The camera IMAGE as a scan detector (recording.py, 2026-10-10).
+
+    `image` is an ARRAY detector with two inner axes (image_y, image_x): one
+    frame per scan point. Everything about it is LIVE, so describe tells the
+    truth: the frame's shape follows the recording region and binning, the
+    largest value the bit depth the camera delivers now (12 bit -> 4095, x b^2
+    when binned) -- scan-core stores it in the narrowest integer that holds
+    that (uint16 for 12 bit) and STOPS a scan if a pixel ever exceeds it. Any
+    of these changing changes the revision, so a client re-fetches.
+
+    It is fetched by command (`read`) because a frame does not belong in the
+    status stream, as a BINARY reply part (`"binary": true`) because 4 MB of
+    pixels as base64 JSON is 6 MB and slow to parse; and it is ACQUIRED
+    (numbered, a fresh frame taken after the request) so every point gets its
+    own frame. Guide section 6b, "Binary replies".
+    """
+    rec = brain.recorder
+    h, w = rec.out_shape()
+    bits = int(rec._bits)
+    c = rec.coords()
+    px_x, px_y = c["um_per_px"]
+    image = _p("image", "Camera image", "indicator", "int", group="Imaging",
+               order=104, unit="counts", min=0, max=rec.max_value(bits),
+               help="One frame per scan point, at the camera's full depth "
+                    f"({bits} bit now), cropped and binned as set in Camera "
+                    "settings (Images for scans: region full / spot / rect, "
+                    "binning). Auto exposure and auto gain are switched Off while "
+                    "a scan records images and restored when it ends.")
+    top = rec.max_value(bits)
+    image.update({
+        "dtype": "int",
+        # `bits` says UNSIGNED (a count is never negative), so scan-core
+        # stores it as uint16 rather than int16; `max` tightens the top
+        # (a 2x2 bin of 12-bit counts: 14 bits, max 16380)
+        "bits": int(top).bit_length(),
+        "bits_per_pixel": bits,
+        "dims": [
+            {"name": "image_y", "label": "image y", "unit": "px", "length": int(h),
+             "coord_verb": "image_coords", "coord_key": "y",
+             "attrs": {"um_per_px": round(float(px_y), 6),
+                       "binning": int(c["binning"])},
+             "aux": [{"name": "image_y_um", "key": "y_um", "unit": "um"}]},
+            {"name": "image_x", "label": "image x", "unit": "px", "length": int(w),
+             "coord_verb": "image_coords", "coord_key": "x",
+             "attrs": {"um_per_px": round(float(px_x), 6),
+                       "binning": int(c["binning"])},
+             "aux": [{"name": "image_x_um", "key": "x_um", "unit": "um"}]},
+        ],
+        "read": {"verb": "get_image", "key": "image", "args": {"which": "sample"},
+                 "binary": True},
+        "acquire": {"group": "image", "trigger_verb": "acquire_image",
+                    "target_key": "image_id",
+                    "ready": {"policy": "adopt_then_flag", "setpoint_key": "image_id",
+                              "flag_key": "image_acquiring", "invert": True},
+                    "timeout_s": float(brain.cfg.image.record_timeout_s)},
+    })
+    return [
+        image,
+        _p("image_id", "Image #", "indicator", "int", group="Imaging", order=105,
+           min=0, read_path=["image_id"]),
+        _p("image_acquiring", "Taking an image", "indicator", "bool", group="Imaging",
+           order=106, read_path=["image_acquiring"]),
+        _p("image_exposure_us", "Image exposure", "indicator", "float", group="Imaging",
+           order=107, unit="us", decimals=1, read_path=["image_exposure_us"],
+           help="The ExposureTime the last image was taken with."),
+        _p("image_gain", "Image gain", "indicator", "float", group="Imaging",
+           order=107, decimals=3, read_path=["image_gain"]),
+        _p("image_auto_frozen", "Auto features held off", "indicator", "string",
+           group="Imaging", order=107, read_path=["image_auto_frozen"],
+           help="Empty when none. Auto exposure / gain the camera had on, switched "
+                "Off while images are recorded; restored when the scan ends."),
+    ]
+
+
 def build_manifest(brain) -> dict:
     """The vision brain's own surface: focus, the two loops, and what it sees."""
     try:
@@ -494,6 +569,8 @@ def build_manifest(brain) -> dict:
                 "control here. To sweep XY, drive the stage's own module "
                 "(kim-control or piezo-control) instead."),
     ]
+
+    params += _image_params(brain)
 
     manifest = {"schema": SCHEMA_VERSION, "module": "camera",
                 "label": "Vision brain", "parameters": params}

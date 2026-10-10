@@ -108,7 +108,9 @@ Both zoom and these marks are display only, so they work in a viewer window.
 Every action is a ZeroMQ command (see `scripts/camera_console.py` for the verbs):
 `snapshot`, `autofocus`, `set_tracking`, `set_stabilize`, `set_selected_index`,
 `move_xy` / `read_xy`, `set_z` / `read_z`, `read_position_px` / `set_position_px`,
-`load_pattern` / `save_pattern`, `set_objective`, `get_frame`, plus the universal
+`load_pattern` / `save_pattern`, `set_objective`, `get_frame`,
+`acquire_image` / `get_image{which, binary}` / `image_coords` (images for
+scans, below), plus the universal
 `status` / `info` / `get_config` / `set_config` / `describe` / `shutdown{keep_outputs?}`
 (shutdown never moves XY or Z; `keep_outputs: true` marks a restart for a code update).
 
@@ -144,6 +146,52 @@ enter at all. While a fly scan records, the stabiliser and the placement loop
 stand down (they would fight the moving stage). Needs what the stabiliser
 needs: a tracked template, a calibrated spot, and kim's camera calibration at
 the objective in use.
+
+## Images for scans: a frame per point (2026-10-10, simulation only)
+
+`camera.image` is a scan-core detector: one camera frame per scan point, at
+the camera's FULL depth (12-bit counts in Mono12; 8-bit on a camera that only
+delivers Mono8), stored in the scan's `.nc` file as uint16, one frame per
+compression chunk. Tick it on the Scan tab like any detector; the summary
+says how big the images will be, and the Measurement tab shows the newest
+frame next to the map.
+
+Camera settings -> **Images for scans** (`cfg.image.record_*`):
+
+| setting | meaning |
+|---|---|
+| `record_roi` | `full` (the whole processed frame), `spot` (record_w x record_h centred on the CALIBRATED laser spot -- the most useful one: the spot and its surroundings, small files; refused while the spot is not calibrated), `rect` (record_w x record_h at record_x, record_y) |
+| `record_binning` | 1, 2 or 4: SUMS b x b pixels (a 4x4 bin of 12-bit counts still fits 16 bits) |
+| `record_discard_frames` | frames thrown away after a request before one is taken (a real camera may hand out a frame exposed before the request; # VERIFY on the IDS camera) |
+| `record_timeout_s` | how long a scan waits for one frame |
+| `record_auto_restore_s` | see auto exposure below |
+
+A full 1936 x 1096 frame is 4 MB per point; a 64 x 64 spot crop 8 kB.
+
+How a frame is taken (`src/camera/recording.py`): `acquire_image` replies at
+once with a NUMBER; the frame loop takes the first frame whose grab started
+AFTER the request (plus the discards) and latches it together with "not
+busy"; the scan waits for `image_id == n and not image_acquiring`, then
+fetches it with `get_image{which: "sample", binary: true}` -- the pixels as a
+raw binary part of the reply (guide 6b, "Binary replies"; base64 JSON for a
+client that does not ask for binary). `image_coords` gives the two axes in
+px (bin centres, in the processed frame) and in um (the objective's pixel
+size); the file gets both.
+
+**Auto exposure / auto gain** (decision 2026-10-10): a map whose brightness
+the camera keeps re-adjusting is not a measurement. When a frame is asked for
+while ExposureAuto or GainAuto is not Off, it is switched Off (the camera
+keeps the value it had reached) and RESTORED when the scan's claim on the
+camera ends -- or, for a client that holds no claim, after
+`record_auto_restore_s` without another request -- and at shutdown. Status
+`image_auto_frozen` says what is held off; every switch is in the log. The
+exposure and gain each frame was taken with are in status
+(`image_exposure_us`, `image_gain`; tick them as detectors to keep them per
+point) and in the scan's instrument snapshot.
+
+Simulator: `sim_bit_depth = 12` (Camera settings -> Simulator) gives real
+12-bit frames (every value 0..4095 occurs), so the storage of a real-depth
+image is exercised. Tests: `tests/test_image_recording.py`.
 
 ## Hardware pass (at the lab PC — later session)
 
