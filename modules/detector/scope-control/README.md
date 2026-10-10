@@ -217,6 +217,11 @@ chosen on the command line only, never saved: a `--driver dwf` once saved into
 the shared scope.ini made the next plain start open the Analog Discovery
 (lab PC 2026-10-10).
 
+**V- read-back caveat (AD2, measured 2026-10-10):** once V- is enabled the
+runtime reports it about 0.20 V more negative than set (also beyond -5 V);
+V+ reads back exactly. The status shows the value SET; what is really
+driven is still to be measured with a DMM.
+
 Siglent:
 
 1. NI-VISA. The scope is USB-TMC (`USB0::0xF4EC::0xEE3A::<serial>::INSTR`,

@@ -27,8 +27,9 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
 | [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
 | [`dssg`](../modules/source/dssg-control) | DS Instruments SG12000L (fw V7.84) | **verified** (vernier measured, fine power, per-unit power calibration) | 2026-10-07 |
-| [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart) | 2026-10-07 |
+| [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart, sweeps) | 2026-10-10 |
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
+| [`scope`](../modules/detector/scope-control) `--driver dwf` | Digilent Analog Discovery 2 (WaveForms 3.24.4) | **verified** (scope, W1/W2 generator incl. phase, sweeps, V+/V- supplies) | 2026-10-10 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass | 2026-10-09 |
 | all others | -- | simulation only | -- |
 
@@ -392,6 +393,41 @@ Checked on the scope (AFG CH1/CH2 -> scope CH1/CH2, high-Z).
   has < 4 points per period).
 - Only some time/div values exist on this model (20 ms -> 10 ms); the module
   warns when the scope changed a value.
+
+## scope `--driver dwf` -- Digilent Analog Discovery 2 (2026-10-08 .. 10)
+
+Loopback on the device itself: W1 -> its scope input 1, W2 -> input 2.
+Commits 4566d00 .. 27facf8.
+
+- `scripts/ad_selftest.py` passes: W1 0.4995 / 1.0007 / 2.0417 Vpp at
+  100 Hz / 1 kHz / 10 kHz; W2 at +90 deg reads +90.003 deg.
+- **Generator**: the device's default auto-configure STOPS a running output
+  on every parameter change, and Configure(ch, 3) "succeeds" without
+  restarting it -- the module opens it in DYNAMIC auto-configure and checks
+  the status after each change. Phases between W1 and W2 need a common start
+  (W2 slaved to W1): done after a phase set, a frequency set, or an output
+  switched on while the other runs; the follow path gives 89.99 deg.
+- **Scope**: trigger hysteresis needed (input noise ~5 mV rms fired on the
+  wrong edge); the time axis is centred on the trigger, a positive delay
+  moves the window later; T1 waits in NORMAL; the W1 trigger source works.
+- **Supplies**: the settable range is the node's SET range (V+ 0.5 .. 5 V,
+  V- -5 .. -0.5 V; the dead band below 0.5 V is refused); no voltage or
+  current readback on the AD2 (status shows the value set). Once ENABLED the
+  runtime reports V- about 0.20 V more negative than set (-2 -> -2.2014,
+  -1 -> -1.2035, -5 -> -5.1951; V+ reads back exactly) -- whether that is
+  what is really driven is still to be measured with a DMM.
+- **Sweeps** (fly scans): W1 frequency 1 -> 2 kHz keeps the output on and
+  measured follows commanded; a W2 phase sweep moves phase_21 1:1.
+- Opening the device resets it: a `keep_outputs` restart cannot keep the
+  outputs or supplies (the service warns).
+- One settings file per driver: `scope.ini` (Siglent) / `scope-dwf.ini`
+  (AD2); the AD2 runs on its own ports (5635/5636) next to the Siglent.
+
+## afg sweeps (2026-10-10)
+
+CH1 frequency 30 -> 40 Hz at 2 Hz/s with CH2 following: equal at every
+sample, tracked by the Siglent; amplitude 0.5 -> 2 Vpp ended at 2.027 Vpp on
+the scope; ramp_stop mid-sweep leaves both outputs on at the same frequency.
 
 ## scan-core -- scans with real instruments
 

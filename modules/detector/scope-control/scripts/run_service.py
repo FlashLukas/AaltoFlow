@@ -72,7 +72,9 @@ def main() -> int:
                              f"scope-{args.driver}.ini")
     if config is None and default_ini.is_file():
         config = str(default_ini)
-        print(f"scope service: settings from {default_ini.name}")
+    # say which file, also before it exists (it is written at the first change)
+    print(f"scope service: settings from {Path(config or default_ini).name}"
+          + ("" if Path(config or default_ini).is_file() else " (new: written at the first change)"))
     cfg = Config.load(config) if config else Config()
     cfg.hardware.driver = args.driver
     if args.visa:
