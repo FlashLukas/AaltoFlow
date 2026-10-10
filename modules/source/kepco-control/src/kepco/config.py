@@ -76,6 +76,11 @@ class Limits:
     current_max_A: float = 10.0
     rate_max_A_per_s: float = 10.0
     rate_max_V_per_s: float = 40.0
+    # The current SWEEP (ramp_current, for fly scans, 2026-10-10) may be asked
+    # for between this and rate_max_A_per_s. With a coil on the output the
+    # supply needs V = I R + L dI/dt: a fast sweep runs into the voltage limit
+    # sooner (the sweep then stops, see supply.py). VERIFY on the real load.
+    sweep_rate_min_A_per_s: float = 1.0e-4
 
 
 @dataclass
@@ -125,6 +130,13 @@ class Hardware:
     visa: str = "GPIB0::6::INSTR"
     visa_timeout_ms: int = 5000
     poll_hz: float = 5.0             # how often V and I are measured
+    # ...and how often while a current SWEEP runs or a fly scan records the
+    # stream (the readback a fly row is binned by). Each measurement is two
+    # GPIB queries (MEAS:VOLT?, MEAS:CURR?) next to the sweep's own CURR
+    # writes. VERIFY on the BIT 4886 that 10 Hz fits the bus alongside a
+    # 20 Hz sweep (the 4886 reports a 16-reading average, so readings closer
+    # than ~20 ms apart are not independent anyway).
+    stream_poll_hz: float = 10.0
     full_range: bool = True          # pin range 1 on a mode change -- no transient at 1/4 scale
 
 

@@ -158,6 +158,15 @@ class KepcoClient(ControlClient):
     def set_voltage(self, volts: float):
         self._checked({"cmd": "set_voltage", "voltage_V": float(volts)})
 
+    def ramp_current(self, amps: float, rate_A_per_s: float) -> int:
+        """Sweep the current at a set pace (fly scans, the GUI's Sweep button)."""
+        return self._checked({"cmd": "ramp_current", "current_A": float(amps),
+                              "rate_A_per_s": float(rate_A_per_s)}).get("ramp_id")
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._checked({"cmd": "ramp_stop"}).get("stopped")
+
     def set_current_limit(self, amps: float):
         self._checked({"cmd": "set_current_limit", "current_A": float(amps)})
 

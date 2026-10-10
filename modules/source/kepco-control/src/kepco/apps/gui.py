@@ -370,6 +370,29 @@ class MainWindow(QtWidgets.QMainWindow):
         tcard, tlay, self.set_title = _card("Setpoint")
         self.set_spin = self._spin()
         self._row(tlay, self.set_spin, self._apply_setpoint)
+        # SWEEP (2026-10-10, current mode only): walk the current CONTINUOUSLY
+        # to the value above at a set pace -- what a fly scan does row by row,
+        # by hand. "Stop" ends it where it is. It never switches the output on.
+        srow = QtWidgets.QHBoxLayout()
+        lim = self.cfg.limits
+        self.sweep_rate = self._spin(dec=4, step=0.05)
+        self.sweep_rate.setRange(lim.sweep_rate_min_A_per_s, lim.rate_max_A_per_s)
+        self.sweep_rate.setValue(max(lim.sweep_rate_min_A_per_s,
+                                     min(lim.rate_max_A_per_s, 0.1)))
+        self.sweep_rate.setSuffix("  A/s")
+        self.sweep_btn = QtWidgets.QPushButton("Sweep to")
+        self.sweep_btn.setToolTip("Sweep the current continuously to the value above "
+                                  "at this pace (current mode)")
+        self.sweep_btn.clicked.connect(
+            lambda: self._safe(self.ctrl.ramp_current, self.set_spin.value(),
+                               self.sweep_rate.value()))
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where it is")
+        sweep_stop.clicked.connect(lambda: self._safe(self.ctrl.ramp_stop))
+        mark_always(sweep_stop)      # ramp_stop is a safety verb: a viewer may stop
+        srow.addWidget(self.sweep_rate, 1); srow.addWidget(self.sweep_btn)
+        srow.addWidget(sweep_stop)
+        tlay.addLayout(srow)
         col.addWidget(tcard)
 
         # limit channel
@@ -480,6 +503,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rate_spin.setValue(s.ramp_rate_A_per_s if cur else s.ramp_rate_V_per_s)
 
         self.prog_unit.setText(unit)
+        # the sweep is a CURRENT sweep: offered in current mode only
+        self.sweep_rate.setEnabled(cur); self.sweep_btn.setEnabled(cur)
         _restyle(self.btn_cur, "primary" if cur else "")
         _restyle(self.btn_volt, "" if cur else "primary")
         self._mode_shown = s.mode
@@ -559,6 +584,8 @@ class MainWindow(QtWidgets.QMainWindow):
             badge = ("OUTPUT OFF", COLORS["muted"])
         elif s.at_limit:
             badge = ("AT LIMIT", COLORS["danger"])
+        elif getattr(s, "sweeping", False):
+            badge = ("SWEEPING", COLORS["accent"])
         elif s.ramping:
             badge = ("RAMPING", COLORS["accent"])
         else:

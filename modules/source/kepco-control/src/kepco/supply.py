@@ -21,6 +21,14 @@ What it does, in the order a physicist would worry about it:
     waits `acquisition.settle_s` (the BIT 4886 averages its last 16 readings,
     valid ~320 ms after a change) and averages `acquisition.readings` fresh
     measurements into `sample`.
+  * SWEEPS the current for a fly scan (ramp_current, 2026-10-10): softramp.py
+    walks the setpoint at the asked pace (A/s) and programs every step; the
+    worker measures V and I faster while it runs and records every reading
+    with its time (the stream verbs). A fly scan bins by that MEASURED
+    current -- with a coil it lags the programmed value by L/R. Numbered
+    (ramp_id, gotcha #17); any set of the current, output off, a mode change,
+    the watchdog and reaching the voltage limit stop it; it never switches
+    the output on (with the output off only the stored setpoint walks).
 
 THREADS (docs gotcha #1). One worker thread owns every hardware call. Setters
 only change brain attributes (under `_lock`); the worker reads them, acts, and
@@ -42,6 +50,8 @@ from dataclasses import dataclass, field
 
 from .backends.base import BipolarSupplyBackend
 from .config import Config, MODES
+from .softramp import SoftRamp
+from .stream import StreamRecorder
 
 _NAN = float("nan")
 
@@ -73,6 +83,15 @@ class Status:
     connected: bool = False
     idn: str = ""
     hw_error: str = ""
+    # The current SWEEP (ramp_current, fly scans). Laid over the snapshot LIVE
+    # by status() (in memory, no hardware). ramp_id = the newest sweep started;
+    # the sweep is over when ramp_id is yours and `ramping` (above, which a
+    # running sweep keeps True) is False. sweep_target_A / sweep_rate_A_per_s
+    # are the sweep's own -- the ordinary ramp rate above is not changed.
+    sweeping: bool = False
+    ramp_id: int = 0
+    sweep_target_A: float = _NAN
+    sweep_rate_A_per_s: float = _NAN
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -139,6 +158,22 @@ class BipolarSupply:
         self._stop = threading.Event()
         # replaced by the service / GUI to forward events; default = no-op
         self._on_event = lambda level, msg: None
+
+        # THE CURRENT SWEEP (suite_common/softramp.py, copied as softramp.py).
+        # The walk runs on its own thread and calls _sweep_step every
+        # 1/ramp.step_hz s; each value is computed from the elapsed time, so a
+        # slow GPIB write does not slow the sweep down. _sweep_last = the value
+        # the sweep last PROGRAMMED (NaN: it has not programmed, see _sweep_step).
+        self._sweep_last = _NAN
+        self._sweep = SoftRamp(self._sweep_step, lambda: self._i_set,
+                               limits=self.current_range,
+                               dt_s=1.0 / max(1.0, float(self.cfg.ramp.step_hz)),
+                               on_done=self._sweep_done, channel="commanded",
+                               name="kepco-sweep")
+        # THE STREAM (fly scans): every V/I measurement the worker takes, with
+        # its time and the value programmed at that moment. Recording only
+        # while a stream is started.
+        self.recorder = StreamRecorder(["current", "voltage", "programmed"])
 
         # initial setpoints from the config, clamped (quietly: nobody asked yet)
         self._i_set = self._clamp_i(o.current_A)[0]
@@ -274,6 +309,8 @@ class BipolarSupply:
         no ramp, no OUTP OFF -- the worker stops (so a ramp in progress stops
         where it is) and the BOP is disconnected and its address released; the
         next start adopts the output as it is."""
+        # no sweep step may follow (stopped BEFORE any lock it may wait for)
+        self._sweep.stop()
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
@@ -332,6 +369,8 @@ class BipolarSupply:
             mode = "voltage"
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+        if mode != self._mode:
+            self._stop_sweep("a mode change")
         with self._lock:
             if mode == self._mode:
                 return
@@ -344,6 +383,10 @@ class BipolarSupply:
 
     def set_output(self, on: bool) -> None:
         on = bool(on)
+        if not on:
+            # switching off takes the knob over: the sweep must not keep
+            # programming while the worker ramps the output down
+            self._stop_sweep("output off")
         with self._lock:
             self._out_req = on
             if on:
@@ -365,6 +408,7 @@ class BipolarSupply:
         0 A in one step -- with a coil attached the supply then has to absorb
         the coil's energy. Use the normal `set_output(False)` unless the ramp
         itself is the problem."""
+        self._stop_sweep("output off NOW")
         with self._lock:
             self._kill = True
             self._out_req = False
@@ -377,6 +421,10 @@ class BipolarSupply:
         if self._mode != "current":
             raise ValueError("set_current needs current mode; in voltage mode "
                              "the current is the limit: use set_current_limit")
+        # a set takes the knob over from a sweep (stopped BEFORE the locks
+        # below, which a sweep step may be waiting for); the ordinary ramp then
+        # walks from where the sweep got to
+        self._stop_sweep("a current set")
         value, clamped = self._clamp_i(amps)
         with self._lock:
             self._i_set = value
@@ -444,6 +492,108 @@ class BipolarSupply:
         the lost-client watchdog."""
         self._last_touch = self._clock()
 
+    # ---- the current SWEEP (fly scans) ------------------------------------------
+
+    def ramp_current(self, amps: float, rate_A_per_s: float) -> int:
+        """SWEEP the current to `amps` at `rate_A_per_s`; returns the sweep's
+        number. Current mode only. The target is clamped to the envelope and
+        the rate to limits.sweep_rate_min_A_per_s .. rate_max_A_per_s, each with
+        a warning, like every setter here.
+
+        It never switches the output on. With the output ON the sweep starts
+        from what is programmed NOW (a running ordinary ramp is taken over
+        where it is) and programs every step; with the output OFF only the
+        stored setpoint walks (switching on later ramps to it as usual)."""
+        amps = _finite(amps, "current")
+        rate = abs(_finite(rate_A_per_s, "rate"))
+        if not rate > 0:
+            raise ValueError("rate must be > 0")
+        if self._mode != "current":
+            raise ValueError("ramp_current needs current mode")
+        lim = self.cfg.limits
+        lo_r, hi_r = sorted((float(lim.sweep_rate_min_A_per_s), float(lim.rate_max_A_per_s)))
+        r, rclamped = _clamp(rate, lo_r, hi_r)
+        value, clamped = self._clamp_i(amps)
+        # a running sweep is replaced from wherever it got to: stop it first
+        self._sweep.stop()
+        with self._hw:
+            with self._lock:
+                live = self._out_req and self._out_hw and self._mode_hw == "current"
+                start = self._prog if live else self._i_set
+                # the sweep may program only while the output is live and
+                # nobody else has moved it (see _sweep_step)
+                self._sweep_last = start if live else _NAN
+                self._wd_armed = True          # a client now drives the output
+        rid = self._sweep.start(value, r, start=start)
+        if clamped or rclamped:
+            self._emit("warn", f"sweep clamped to {value:g} A at {r:g} A/s "
+                               f"(limits {self.current_range()[0]:g}..{self.current_range()[1]:g} A, "
+                               f"{lo_r:g}..{hi_r:g} A/s)")
+        self._emit("info", f"current sweep #{rid}: {start:g} -> {value:g} A at {r:g} A/s"
+                   + ("" if live else " (output OFF: only the setpoint walks)"))
+        return rid
+
+    def ramp_stop(self) -> bool:
+        """End a sweep WHERE IT IS: the setpoint stays at the value reached
+        (a scan's Abort; a safety verb). True if one was running."""
+        was = self._sweep.stop()
+        if was:
+            self._emit("info", f"current sweep stopped at {self._i_set:g} A")
+        return was
+
+    # the stream verbs: the worker's V/I measurements
+    def stream_start(self) -> int:
+        return self.recorder.start()
+
+    def stream_read(self) -> dict:
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        return self.recorder.stop()
+
+    def _stop_sweep(self, why: str) -> None:
+        """Stop a running sweep because `why` takes the knob over. Called
+        WITHOUT any lock held: stop() waits for the step in progress, and that
+        step may be waiting for the hardware lock."""
+        if self._sweep.stop():
+            self._emit("info", f"current sweep stopped by {why} at {self._i_set:g} A")
+
+    def _sweep_step(self, amps: float) -> None:
+        """One step of the sweep, on the sweep's thread. The setpoint always
+        follows; the instrument is PROGRAMMED only while the output is live
+        AND the main channel still holds the value this sweep programmed last.
+        That second condition is what keeps a coil safe: if the worker moved
+        the output meanwhile (switching it on, ramping it down) a direct write
+        would be a STEP from the worker's value to the sweep's -- instead the
+        sweep then only moves the setpoint and the worker's ordinary ramp
+        follows it at its own rate. Quiet: no event per step."""
+        with self._hw:
+            with self._lock:
+                if self._mode != "current":
+                    raise RuntimeError("the mode is no longer current")
+                self._i_set = float(amps)
+                live = self._out_req and self._out_hw and self._mode_hw == "current"
+            if live and self._prog == self._sweep_last:
+                self._program_main(float(amps))
+                self._sweep_last = float(amps)
+            else:
+                self._sweep_last = _NAN        # not ours any more: never step
+            # Rebuild the snapshot NOW, from the brain's attributes, as the
+            # worker does (a full rebuild under the same lock, not an edit, so
+            # gotcha #1's lost update cannot happen). Without it the frame
+            # after the LAST step would still show the value before it, and
+            # status() -- "sweep over, not ramping" -- would report a finished
+            # sweep with a stale setpoint for up to one worker period.
+            with self._lock:
+                self._snapshot = self._build_snapshot()
+
+    def _sweep_done(self, rid: int, reason: str) -> None:
+        self.cfg.output.current_A = self._i_set   # get_config shows the truth
+        if reason == "done":
+            self._emit("info", f"current sweep #{rid} done at {self._i_set:g} A")
+        elif reason.startswith("error"):
+            self._emit("error", f"current sweep #{rid} ended: {reason}")
+
     # ---- acquisition -----------------------------------------------------------
 
     def acquire(self) -> int:
@@ -473,10 +623,21 @@ class BipolarSupply:
     # ---- status ------------------------------------------------------------------
 
     def status(self) -> Status:
-        """The latest snapshot built by the worker. Never touches hardware."""
+        """The latest snapshot built by the worker. Never touches hardware.
+
+        The sweep's fields are laid over it LIVE (in memory): the snapshot is
+        rebuilt only at step_hz, and a fly scan waiting for the end of a sweep
+        should not see a frame from before it started."""
+        r = self._sweep.status()
         with self._lock:
             s = self._snapshot
-            return Status(**{**s.__dict__, "sample": dict(s.sample)})
+            st = Status(**{**s.__dict__, "sample": dict(s.sample)})
+        st.sweeping = bool(r["ramping"])
+        st.ramping = bool(st.ramping or r["ramping"])
+        st.ramp_id = int(r["ramp_id"])
+        st.sweep_target_A = _NAN if r["ramp_target"] is None else float(r["ramp_target"])
+        st.sweep_rate_A_per_s = _NAN if r["ramp_rate"] is None else float(r["ramp_rate"])
+        return st
 
     def get_config(self) -> Config:
         return self.cfg
@@ -540,6 +701,11 @@ class BipolarSupply:
 
         try:
             with self._hw:
+                # the target AGAIN, inside the hardware lock: a sweep step
+                # (which holds this lock) may have moved it since the read
+                # above, and walking towards the stale one would step BACK
+                with self._lock:
+                    target = self._i_set if mode == "current" else self._v_set
                 if kill and self._out_hw:
                     self.backend.set_output(False)
                     self._out_hw = False
@@ -580,12 +746,20 @@ class BipolarSupply:
                         self._zero_hold = 0.0
                 v = i = None
                 t_meas = now
-                if measure and self._connected and (
-                        now - self._t_meas >= 1.0 / max(0.1, self.cfg.hardware.poll_hz)):
+                hwc = self.cfg.hardware
+                # faster while a sweep runs or a fly scan records the stream
+                fast = self._sweep.running or self.recorder.running
+                poll = max(0.1, float(hwc.stream_poll_hz if fast else hwc.poll_hz))
+                if measure and self._connected and now - self._t_meas >= 1.0 / poll:
                     t_meas = self._clock()
+                    tw0 = time.time()
                     v = self.backend.measure_voltage()
                     i = self.backend.measure_current()
                     self._t_meas = t_meas
+                    # stamped at the middle of the two queries (wall clock:
+                    # the coordinator may sit on another PC)
+                    self.recorder.append(0.5 * (tw0 + time.time()),
+                                         (float(i), float(v), self._prog))
         except Exception as exc:
             self._report_hw_error(exc)
             with self._lock:
@@ -602,8 +776,18 @@ class BipolarSupply:
             # the busy flag, the id and the sample are published in ONE
             # critical section (gotcha #28)
             self._snapshot = self._build_snapshot()
+            at_limit = self._snapshot.at_limit
         if recovered:
             self._emit("info", "hardware reads recovered")
+        if at_limit and self._sweep.running:
+            # The voltage limit (compliance) has taken over: the current no
+            # longer follows what is programmed, so going on sweeping would
+            # only pile up a setpoint the coil never reaches. Stop where it is
+            # (no lock is held here; the step in progress may need one).
+            if self._sweep.stop():
+                self._emit("warn", f"current sweep stopped: the supply is at its "
+                                   f"voltage limit ({self._v_lim:g} V) and the "
+                                   f"current no longer follows")
 
     # ---- internals ---------------------------------------------------------------
 
@@ -660,6 +844,9 @@ class BipolarSupply:
             live = self._out_req and self._wd_armed
         # not armed = an adopted output nobody here has touched: leave it
         if live and now - self._last_touch > wd:
+            # the sweep first (no lock held here): it must not keep programming
+            # while the worker ramps the output down
+            self._sweep.stop()
             with self._lock:
                 self._out_req = False
             self._emit("warn", f"no client for {wd:g} s: ramping to zero, output off")

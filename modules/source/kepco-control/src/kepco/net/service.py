@@ -73,9 +73,11 @@ class KepcoService:
         #   the same thing -- the same verb also switches the output ON.
         #   READ: `ping` only says "a client is alive" (the lost-client
         #   watchdog); every client sends it, a viewer too.
+        #   `ramp_stop` ends a current sweep where it is: a stop, so a viewer
+        #   may send it. `stream_read` only reads the record of measurements.
         self.control = ControlLease(
-            safety={"output_off", "output_off_now"},
-            read={"ping"},
+            safety={"output_off", "output_off_now", "ramp_stop"},
+            read={"ping", "stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -244,6 +246,19 @@ class KepcoService:
                 s.output_off_now()
             elif cmd == "set_current":
                 s.set_current(float(msg["current_A"]))
+            elif cmd == "ramp_current":
+                # the current SWEEP (fly scans): the reply's ramp_id is what
+                # status `ramp_id` shows while, and after, this sweep runs
+                return {"ok": True, "ramp_id": s.ramp_current(
+                    float(msg["current_A"]), float(msg["rate_A_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": s.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": s.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": s.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": s.stream_stop()}
             elif cmd == "set_voltage":
                 s.set_voltage(float(msg["voltage_V"]))
             elif cmd == "set_current_limit":

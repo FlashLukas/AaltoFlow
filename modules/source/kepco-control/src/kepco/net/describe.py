@@ -35,7 +35,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, acquire=None, wait=None, help=""):
+       settle=None, args=None, danger=False, acquire=None, wait=None, help="",
+       ramp=None, stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -47,7 +48,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("acquire", acquire), ("wait", wait), ("help", help)):
+                 ("acquire", acquire), ("wait", wait), ("help", help),
+                 ("ramp", ramp), ("stream", stream)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -100,6 +102,29 @@ def _ramped(key: str) -> dict:
             "flag_key": "ramping", "invert": True}
 
 
+#: The sweep pace a client is offered first: 0.1 A/s -- gentle on a coil, a
+#: 1 A row in 10 s.
+SWEEP_RATE_DEFAULT_A_PER_S = 0.1
+
+
+def _current_ramp(lim) -> dict:
+    """The `ramp` block of the current (guide 6b, "Ramps"): the SERVICE
+    walks the setpoint (softramp.py); a fly scan bins by the MEASURED current
+    the worker streams (a coil lags the programmed value by L/R)."""
+    lo, hi = sorted((float(lim.sweep_rate_min_A_per_s), float(lim.rate_max_A_per_s)))
+    return {
+        "kind": "software",
+        "start": {"verb": "ramp_current", "args": {"to": "current_A",
+                                                   "rate": "rate_A_per_s"}},
+        "stop": {"verb": "ramp_stop"},
+        "rate": {"unit": "A/s", "min": lo, "max": hi,
+                 "default": max(lo, min(hi, SWEEP_RATE_DEFAULT_A_PER_S))},
+        "readback": {"stream": {"group": "measure", "channel": "current"},
+                     "measured": True},
+        "done": {"key": "ramping", "id_key": "ramp_id"},
+    }
+
+
 def build_manifest(supply) -> dict:
     """The bipolar supply: ramped setpoints (adopt_then_flag on `ramping`),
     limits applied at once (echoes), and ACQUIRED measurements for a scan."""
@@ -139,6 +164,8 @@ def build_manifest(supply) -> dict:
                min=ilo, max=ihi, read_path=["current_set_A"],
                set={"verb": "set_current", "arg": "current_A"},
                settle=_ramped("current_set_A"),
+               # a CONTINUOUS SWEEP for fly scans (2026-10-10), current mode only
+               ramp=_current_ramp(lim),
                help="Ramped at the current ramp rate. Settled = ramp finished; "
                     "a coil may still be catching up if the supply sat at its "
                     "voltage limit (see `at_limit`)."),
@@ -224,10 +251,16 @@ def build_manifest(supply) -> dict:
            order=3, min=0, read_path=["acq_id"]),
         _p("live_voltage", "Voltage (live)", "indicator", "float", unit="V",
            group="Live", order=10, decimals=4, plottable=True,
-           read_path=["voltage_V"]),
+           read_path=["voltage_V"],
+           # every measurement, for fly scans (one group: one start/read/stop)
+           stream={"group": "measure", "channel": "voltage"}),
         _p("live_current", "Current (live)", "indicator", "float", unit="A",
            group="Live", order=11, decimals=5, plottable=True,
-           read_path=["current_A"]),
+           read_path=["current_A"],
+           stream={"group": "measure", "channel": "current"}),
+        _p("sweeping", "Sweeping", "indicator", "bool", group="Ramp", order=55,
+           read_path=["sweeping"],
+           help="True while a current sweep (ramp_current) walks the setpoint."),
         _p("power", "Power", "indicator", "float", unit="W", group="Live",
            order=12, decimals=3, plottable=True, read_path=["power_W"],
            help="V*I. Negative = the supply is SINKING power (quadrants II/IV)."),
@@ -246,6 +279,10 @@ def build_manifest(supply) -> dict:
            group="Safety", order=1, danger=True,
            help="Emergency only: switches off without ramping. With a coil "
                 "attached the supply must absorb its stored energy."),
+        _p("ramp_stop", "Stop the sweep", "action", "action", group="Safety",
+           order=3,
+           help="End a current sweep (ramp_current) where it is. Allowed for "
+                "anyone, also a viewer: it only stops something moving."),
         _p("output_state", "Output switch", "indicator", "bool", group="Safety",
            order=2, read_path=["output"]),
 

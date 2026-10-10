@@ -74,7 +74,9 @@ src/kepco/
     base.py              BipolarSupplyBackend Protocol -- the interface everything depends on
     sim.py               SimulatedBOP -- a BOP driving an R-L coil, runs offline
     bop_gpib.py          VisaBOP -- the real unit over GPIB (SCPI, lazy pyvisa import)
-  supply.py              BipolarSupply -- clamps, ramps, safety, measures, acquires (one worker thread)
+  supply.py              BipolarSupply -- clamps, ramps, safety, measures, acquires (one worker thread), sweeps
+  softramp.py            the current sweep's walk (a byte-identical copy of suite-common's)
+  stream.py              the record of every measurement, for fly scans
   sim_system.py          build_sim_system(cfg) -- wire the simulator into a BipolarSupply
   net/
     protocol.py          wire shapes + default ports (5581/5582)
@@ -143,6 +145,42 @@ it settles when the service has adopted the new target AND the ramp is over.
 `kepco.measured_current` / `kepco.measured_voltage` are the detectors (one
 acquisition serves both). A setpoint changed while the output is OFF settles
 at once -- nothing moves -- so switch the output on in a routine before the scan.
+
+## Sweep (fly scans)
+
+The current can be swept continuously at a set pace (current mode), so a
+scan-core fly axis can fly it: the supply sweeps over each row, the detectors
+stream, and every sample is binned by the **measured** current -- with a coil
+on the output it lags the programmed value by L/R, and the measurement says
+where it really was.
+
+| verb | args | |
+|---|---|---|
+| `ramp_current` | `current_A`, `rate_A_per_s` | sweep to the target at this pace; reply `{"ramp_id": n}` |
+| `ramp_stop` | | end it where it is (safety verb: a viewer may send it) |
+| `stream_start` / `stream_read` / `stream_stop` | | every V/I measurement with its time: `current`, `voltage`, `programmed` |
+
+* The service walks the setpoint (`softramp.py`, a copy of
+  `suite-common/src/suite_common/softramp.py`) at `ramp.step_hz` and programs
+  every step; each value comes from the elapsed time, so a slow bus write does
+  not slow the sweep. The ordinary ramp rate (`ramp.rate_A_per_s`) is not
+  touched: the sweep has its own pace, clamped (with a warning) to
+  `limits.sweep_rate_min_A_per_s .. rate_max_A_per_s`, the target to the
+  current envelope.
+* While it runs (or a stream records) V and I are measured at
+  `hardware.stream_poll_hz` (10 Hz; VERIFY the GPIB budget on the BIT 4886).
+* Status: `sweeping`, `ramp_id` (the newest sweep), `sweep_target_A`,
+  `sweep_rate_A_per_s`; `ramping` stays True while a sweep runs, so a sweep
+  is over when `ramp_id` is yours and `ramping` is false.
+* **It never switches the output on.** With the output off only the stored
+  setpoint walks; switching on later ramps to it as usual.
+* A current set, output off (also NOW), a mode change, the lost-client
+  watchdog and the **voltage limit** (the supply at its compliance: the current
+  no longer follows) stop a sweep. A new sweep replaces a running one from where
+  it got to. If the worker has moved the output meanwhile, the sweep stops
+  programming and only moves the setpoint, so a coil never sees a step.
+
+The GUI's setpoint card has the rate, **Sweep to** (the value above) and **Stop**.
 
 ## Using it from Python
 
