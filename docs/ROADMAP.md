@@ -87,9 +87,11 @@ analysis (Hc, Ms, ...) below was removed from it and belongs in the AaltoView
 processing module; the scope records the traces (and keeps the XY view).
 
 **BUILT 2026-10-06** as `scope-control` (simulation + the Siglent SDS1000CML+
-backend, untested on the instrument). Still open from this spec: the AD3
-backend with its Generator / Supplies (copy afg-control's generator brain),
-the drift number, trigger holdoff, the live map of traces against a scan axis.
+backend, untested on the instrument). The Siglent backend and the Digilent
+(dwf) backend -- scope + W1/W2 generator + V+/V- supplies + T1/T2 trigger --
+are on the real instruments since 2026-10-07/09 (Analog Discovery 2; the AD2's
+self-test passes; supplies still to be tried). Still open from this spec: the
+drift number, trigger holdoff, the live map of traces against a scan axis.
 The spec's open points were decided as written in the module's README.
 
 **Purpose.** Classical laser MOKE hysteresis loops: the magnet is driven
@@ -272,8 +274,10 @@ frame (`last_deep()`).
     hardware ramp; readback = the measured value).
   * **chopper**: frequency (software ramp; measured = the chopper's own
     frequency reading).
-  The Scan Builder side: the FLY group of the per-axis Advanced panel must
-  offer fly on a ramp knob (see the report of 2026-10-09).
+  The Scan Builder side is DONE (2026-10-09, 7ab8757: the FLY group of the
+  per-axis Advanced panel offers fly on a ramp knob). The three pilots and the
+  VNA streaming (traces + single points, 2026-10-09) are simulation-only until
+  their instruments are connected again.
 
 - **Scan server, phase 2** (phase 1 DONE 2026-10-05, branch `scan-server`:
   the scan engine as a service, `scan_core/scan_server.py`; start a scan on
@@ -290,9 +294,8 @@ frame (`last_deep()`).
   file from the server (today only its path on the server's PC is shown);
   (d) the run info card and per-point box are still shown while watching,
   though they only matter when submitting -- hide them in watch-only mode.
-  Also not on hardware yet: the first lab test = start the card on the lab
-  PC, tick "Run scans on this PC's scan server", run a short kim + hf2 scan,
-  watch it from the office (Add remote... lab PC, port 5551).
+  On hardware since 2026-10-06: scans with the AFG + scope on the lab PC's
+  server, watched from the office over 5551; Pause / Resume (2026-10-07).
 
 - **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
   suite's Catalogue tab, `scan_core/catalogue.py`, `python -m
@@ -314,8 +317,8 @@ frame (`last_deep()`).
   axis into one mean per row.)
 
 - **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
-  `warn` for kim + camera. Next: widen the lab policy to `"*"` (restart the
-  services), a week of `warn`, then `enforce` -- before that, make the keyring
+  `warn` for every module (`"*"`) since 2026-10-04 -- the week of `warn` is
+  over. Next: `enforce` (Lukas's decision) -- before that, make the keyring
   folder writable only by the lab's admin. The installer does not ship
   `tools/` yet, so an installed PC has no `tools/keys.py`.
   `camera-control/scripts/kim_xy_calibration.py` still talks plain.
