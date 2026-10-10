@@ -601,6 +601,107 @@ class ChannelCard(QtWidgets.QFrame):
 
 
 
+# ------------------------------------------------------------- sweep box
+
+#: what a sweep of each knob reads in: (status key, unit, rate unit, cfg name)
+_SWEEP_KNOBS = {"frequency": ("frequency_Hz", "Hz", "Hz/s", "freq"),
+                "amplitude": ("amplitude_Vpp", "Vpp", "Vpp/s", "amp"),
+                "offset": ("offset_V", "V", "V/s", "offset"),
+                "phase": ("phase_deg", "deg", "deg/s", "phase")}
+
+
+class SweepBox(QtWidgets.QFrame):
+    """SWEEP a knob at a set pace (ramp_start; fly scans fly the same
+    sweeps): channel, knob, target, rate, Sweep, Stop. The output is never
+    switched by a sweep; a set of the knob, or Stop, ends it where it is."""
+
+    def __init__(self, ctrl, safe=None):
+        super().__init__()
+        self.ctrl = ctrl
+        self._safe = safe or (lambda fn, *args: fn(*args))
+        self.setObjectName("card")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14); lay.setSpacing(8)
+        title = QtWidgets.QLabel("SWEEP"); title.setObjectName("cardTitle")
+        lay.addWidget(title)
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(8)
+        self.ch_combo = QtWidgets.QComboBox()
+        for ch in ctrl.channels:
+            self.ch_combo.addItem(ch.upper(), ch)
+        self.knob_combo = QtWidgets.QComboBox()
+        for k in _SWEEP_KNOBS:
+            self.knob_combo.addItem(k, k)
+        self.to_spin = _spin(6, 1.0)
+        self.to_spin.setRange(-1e12, 1e12)
+        self.rate_spin = _spin(6, 1.0)
+        self.rate_spin.setRange(0.0, 1e12)
+        for w in (self.ch_combo, self.knob_combo):
+            row.addWidget(w)
+        row.addWidget(QtWidgets.QLabel("to")); row.addWidget(self.to_spin, 1)
+        row.addWidget(QtWidgets.QLabel("at")); row.addWidget(self.rate_spin, 1)
+        self.go_btn = QtWidgets.QPushButton("Sweep"); self.go_btn.setObjectName("primary")
+        self.go_btn.clicked.connect(self._go)
+        self.stop_btn = QtWidgets.QPushButton("Stop"); self.stop_btn.setObjectName("danger")
+        self.stop_btn.clicked.connect(lambda: self._safe(self.ctrl.ramp_stop))
+        mark_always(self.stop_btn)          # a stop: a viewer may use it too
+        row.addWidget(self.go_btn); row.addWidget(self.stop_btn)
+        lay.addLayout(row)
+        self.state = QtWidgets.QLabel("idle")
+        self.state.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
+        lay.addWidget(self.state)
+        self.ch_combo.currentIndexChanged.connect(lambda _i: self._seed())
+        self.knob_combo.currentIndexChanged.connect(lambda _i: self._seed())
+        self._seed_rate()
+        self._seeded = False
+
+    def _knob(self):
+        return self.ch_combo.currentData(), self.knob_combo.currentData()
+
+    def _seed_rate(self):
+        _ch, knob = self._knob()
+        key, unit, runit, name = _SWEEP_KNOBS[knob]
+        hw = getattr(getattr(self.ctrl, "cfg", None), "hardware", None)
+        rate = float(getattr(hw, f"ramp_{name}_rate_default", 1.0)) if hw else 1.0
+        self.rate_spin.setSuffix("  " + runit)
+        self.to_spin.setSuffix("  " + unit)
+        self.rate_spin.blockSignals(True); self.rate_spin.setValue(rate)
+        self.rate_spin.blockSignals(False)
+
+    def _seed(self, s: dict | None = None):
+        """The target box starts at where the knob is now."""
+        self._seed_rate()
+        ch, knob = self._knob()
+        s = s if s is not None else self.ctrl.status()
+        v = _num(s.get(f"{ch}_{_SWEEP_KNOBS[knob][0]}"))
+        if v is not None:
+            self.to_spin.blockSignals(True); self.to_spin.setValue(v)
+            self.to_spin.blockSignals(False)
+
+    def _go(self):
+        ch, knob = self._knob()
+        self._safe(self.ctrl.ramp_start, ch, knob, self.to_spin.value(),
+                   self.rate_spin.value())
+
+    def refresh(self, s: dict):
+        if not self._seeded and s.get("connected"):
+            self._seed(s)
+            self._seeded = True
+        if s.get("ramping"):
+            knob = str(s.get("ramp_knob") or "")
+            ch, _, k = knob.partition("_")
+            unit = _SWEEP_KNOBS.get(k, ("", "", "", ""))[1]
+            self.state.setText(
+                f"sweeping {ch.upper()} {k}: {_num(s.get('ramp_value')) or 0:.6g} {unit}"
+                f" -> {_num(s.get('ramp_target')) or 0:.6g} {unit} "
+                f"(#{s.get('ramp_id')})")
+            self.state.setStyleSheet(f"color:{COLORS['accent']}; font-size:11px;")
+        else:
+            err = s.get("ramp_error") or ""
+            self.state.setText(f"idle{'  -- last sweep failed: ' + err if err else ''}")
+            self.state.setStyleSheet(
+                f"color:{COLORS['danger'] if err else COLORS['muted']}; font-size:11px;")
+
+
 # ------------------------------------------------------------- this module's own
 
 class GeneratorPanel(QtWidgets.QWidget):
@@ -622,6 +723,8 @@ class GeneratorPanel(QtWidgets.QWidget):
         self.view = OutputsView()
         right.addWidget(self.view, 1)
         right.addWidget(self._build_coupling())
+        self.sweep = SweepBox(gen, safe=self._call)
+        right.addWidget(self.sweep)
         top.addLayout(right, 2)
         outer.addLayout(top, 1)
         self.supplies_card = self._build_supplies()
@@ -703,6 +806,7 @@ class GeneratorPanel(QtWidgets.QWidget):
         for card in self.cards.values():
             card.refresh(s)
         self.view.set_status(s)
+        self.sweep.refresh(s)
         follow = bool(s.get("follow"))
         phase_follow = bool(s.get("phase_follow"))
         for box, val in ((self.follow_box, follow),

@@ -574,7 +574,9 @@ def test_a_panel_change_of_ch2_switches_follow_off(system, tmp_path):
     wait(gen, lambda s: s["ch2_settled"] and s["ch2_frequency_Hz"] == s["ch1_frequency_Hz"])
     sim.ch[1]["frequency_Hz"] = 777.0                 # the knob on CH2
     gen._wake.set()
-    s = wait(gen, lambda s: s["follow"] is False, 4.0)
-    assert s["ch2_frequency_Hz"] == 777.0 and sim.ch[1]["frequency_Hz"] == 777.0
+    # (the adopted value shows with the worker's next snapshot, a moment
+    # after the follow flag: wait for both)
+    s = wait(gen, lambda s: s["follow"] is False and s["ch2_frequency_Hz"] == 777.0, 4.0)
+    assert sim.ch[1]["frequency_Hz"] == 777.0
     assert any(lvl == "warn" and "follow" in m and "OFF" in m for lvl, m in events)
     assert "ch2_follows_ch1 = False" in (tmp_path / "afg.ini").read_text(encoding="utf-8")

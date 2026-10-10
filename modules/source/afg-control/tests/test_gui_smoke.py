@@ -146,3 +146,30 @@ def test_boxes_follow_changes_made_elsewhere(app):
         assert backend.writes.count(("set_phase", 0, 47.0)) <= 1  # the refresh sent nothing
     finally:
         win.close()
+
+
+def test_the_sweep_box_sweeps_and_stops(app):
+    """The Sweep card: channel, knob, target (seeded with the knob's value),
+    rate (the configured default), Sweep, Stop."""
+    from afg.apps.gui import MainWindow
+    cfg = Config()
+    gen, backend = build_sim_system(cfg)
+    win = MainWindow(gen, cfg)
+    try:
+        win._refresh()
+        sw = win.sweep
+        assert sw.to_spin.value() == pytest.approx(30.0)          # CH1 frequency now
+        assert sw.rate_spin.value() == pytest.approx(cfg.hardware.ramp_freq_rate_default)
+        sw.to_spin.setValue(31.0); sw.rate_spin.setValue(10.0)
+        sw.go_btn.click()
+        _settle(app, gen, win, lambda s: s["ramp_id"] >= 1 and not s["ramping"]
+                and s["ch1_frequency_Hz"] == 31.0, timeout=4.0)
+        assert sw.state.text().startswith("idle")
+        sw.to_spin.setValue(100.0); sw.go_btn.click()
+        _settle(app, gen, win, lambda s: s["ramping"])
+        win._refresh()
+        assert sw.state.text().startswith("sweeping CH1 frequency")
+        sw.stop_btn.click()
+        _settle(app, gen, win, lambda s: not s["ramping"])
+    finally:
+        win.close()

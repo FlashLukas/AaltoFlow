@@ -155,6 +155,23 @@ runs, restarts both together (W2 slaved to W1). The CH1/CH2 trigger has a
 hysteresis (`hardware.dwf_trigger_hysteresis_div`, 0.05 division): without
 it the input noise fired the trigger on the wrong edge.
 
+**Sweeps** of W1/W2 (fly scans over any knob, 2026-10-10): frequency,
+amplitude, offset and phase, exactly as afg-control's (its README, "Sweeps"),
+with the generator's names on the wire: `gen_ramp_start {channel, knob, to,
+rate}`, `gen_ramp_stop` (safety), the record `gen_stream_start|read|stop`,
+status `gen_ramping` / `gen_ramp_id`. On the AD2 every step is one dwf call
+(dynamic auto-configure: the output keeps running); a PHASE step does not
+restart both outputs together as a phase set does (`# VERIFY` that a running
+output's phase moves by the step).
+
+**Supplies, measured 2026-10-10** (raw dwf on the lab AD2): the supplies are
+found by node TYPE (enable / voltage); the settable range is the node's SET
+range -- V+ 0.5 .. 5 V, V- -5 .. -0.5 V. A request in the dead band between 0
+and 0.5 V is REFUSED (switch the supply off for 0 V). The AD2 has NO readback
+of a supply's voltage or current: `supply_*_meas_V/A` are empty, not an echo.
+Its "Current" node (0..1 in one step) is not a current limit and is not
+offered. The USB monitor (voltage, current, temperature) is shown.
+
 Generator tab of the window: the AFG's output cards, the drawing of both
 outputs, the coupling row and the supplies. `--driver dwf` and the simulator
 `sim.model = ad` (W1 looped back to CH1, W2 to CH2, like the lab bench)

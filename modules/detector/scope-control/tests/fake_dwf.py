@@ -46,10 +46,28 @@ class FakeDwf:
         self.aout = [dict(base), dict(base)]
         self.master = None
         # AnalogIO: (name, label, nodes, units), node values (set / measured)
-        self.io = [("V+", "V+", ["Enable", "Voltage", "Current"], ["", "V", "A"]),
-                   ("V-", "V-", ["Enable", "Voltage", "Current"], ["", "V", "A"]),
-                   ("USB Monitor", "USB", ["Voltage", "Current"], ["V", "A"])]
-        self.io_set = {(0, 0): 0.0, (0, 1): 0.0, (1, 0): 0.0, (1, 1): 0.0}
+        # AnalogIO as the lab's AD2 describes itself (raw dwf, 2026-10-10):
+        # (name, label, [(node, unit, type, set (min, max, steps),
+        #                 status (min, max, steps), status value)])
+        self.io = [
+            ("Positive Supply", "V+", [
+                ("Enable", "", 1, (0, 1, 2), (0, 1, 2), 0.0),
+                ("Voltage", "V", 2, (0.5, 5.0, 4000), (0, 5, 0), 0.0),
+                ("Current", "A", 3, (0, 1, 1), (0, 0, 0), 0.0)]),
+            ("Negative Supply", "V-", [
+                ("Enable", "", 1, (0, 1, 2), (0, 1, 2), 0.0),
+                ("Voltage", "V", 2, (-5.0, -0.5, 4000), (0, 5, 0), -0.2057),
+                ("Current", "A", 3, (0, 1, 1), (0, 0, 0), 0.0)]),
+            ("USB Monitor", "USB", [
+                ("Voltage", "V", 2, (0, 0, 0), (0, 6, 1000), 4.756),
+                ("Current", "A", 3, (0, 0, 0), (0, 1, 1000), 0.2985),
+                ("Temperature", "C", 4, (0, 0, 0), (0, 100, 1000), 39.0)]),
+            ("Auxiliary Monitor", "AUX", [
+                ("Voltage", "V", 2, (0, 0, 0), (0, 6, 1000), 0.0),
+                ("Current", "A", 3, (0, 0, 0), (0, 1, 1000), 0.0)]),
+            ("Power Supply", "V+-", [("Limit", "", 1, (0, 3, 4), (0, 1, 2), 0.0)])]
+        self.io_set = {(0, 0): 0.0, (0, 1): 0.5, (0, 2): 0.0,
+                       (1, 0): 0.0, (1, 1): -0.5, (1, 2): 0.0, (4, 0): 0.0}
         self.io_master = 0
 
     def __getattr__(self, name):
@@ -235,27 +253,33 @@ class FakeDwf:
 
     def _FDwfAnalogIOChannelInfo(self, h, ch, n): _put(n, len(self.io[_v(ch)][2]))
 
+    def _node(self, ch, nd):
+        return self.io[_v(ch)][2][_v(nd)]
+
     def _FDwfAnalogIOChannelNodeName(self, h, ch, nd, name, units):
-        name.value = self.io[_v(ch)][2][_v(nd)].encode()
-        units.value = self.io[_v(ch)][3][_v(nd)].encode()
+        n = self._node(ch, nd)
+        name.value = n[0].encode()
+        units.value = n[1].encode()
+
+    def _FDwfAnalogIOChannelNodeInfo(self, h, ch, nd, kind):
+        _put(kind, self._node(ch, nd)[2])
+
+    def _FDwfAnalogIOChannelNodeSetInfo(self, h, ch, nd, lo, hi, steps):
+        a, b, n = self._node(ch, nd)[3]
+        _put(lo, float(a)); _put(hi, float(b)); _put(steps, n)
+
+    def _FDwfAnalogIOChannelNodeStatusInfo(self, h, ch, nd, lo, hi, steps):
+        a, b, n = self._node(ch, nd)[4]
+        _put(lo, float(a)); _put(hi, float(b)); _put(steps, n)
 
     def _FDwfAnalogIOChannelNodeGet(self, h, ch, nd, out):
         _put(out, self.io_set.get((_v(ch), _v(nd)), 0.0))
 
     def _FDwfAnalogIOChannelNodeStatus(self, h, ch, nd, out):
-        ch, nd = _v(ch), _v(nd)
-        if ch == 2:
-            _put(out, 5.02 if nd == 0 else 0.31)
-            return
-        on = self.io_set[(ch, 0)] and self.io_master
-        node = self.io[ch][2][nd]
-        _put(out, (self.io_set[(ch, 1)] if on else 0.0) if node == "Voltage" else 0.001)
+        # the supplies' status nodes read nothing useful on the AD2 (0 steps);
+        # the monitors read their value
+        _put(out, self._node(ch, nd)[5])
 
     def _FDwfAnalogIOChannelNodeSet(self, h, ch, nd, v): self.io_set[(_v(ch), _v(nd))] = _v(v)
     def _FDwfAnalogIOEnableGet(self, h, out): _put(out, self.io_master)
     def _FDwfAnalogIOEnableSet(self, h, v): self.io_master = _v(v)
-
-    def _FDwfAnalogIOChannelNodeInfo(self, h, ch, nd, lo, hi, steps):
-        _put(lo, 0.0 if _v(ch) == 0 else -5.0)
-        _put(hi, 5.0 if _v(ch) == 0 else 0.0)
-        _put(steps, 501)

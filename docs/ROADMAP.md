@@ -259,7 +259,10 @@ frame (`last_deep()`).
   * **smb / windfreak / hp8648 / shsg**: frequency, power, phase (software
     ramps via softramp.py; measured false unless a read-back is cheap -- the
     smb over GPIB may be fast enough to read `FREQ?` per step; check).
-  * **afg** and the **AD2** waveform generator: frequency / amplitude / offset.
+  * **afg** and the **AD2** waveform generator: DONE 2026-10-10 (frequency /
+    amplitude / offset / phase per channel, software ramps, measured false;
+    the follower follows each step). Simulation; the lab tries them on the
+    bench.
   * **superk** (Fianium + SELECT): wavelength (software ramp over the RF
     driver's frequency; measured false) -- and the **cs260** monochromator
     (a hardware scan if its firmware has one; else stepped stays).

@@ -321,6 +321,13 @@ class _RemoteGen:
         self._c = client
         info = client._cmd({"cmd": "gen_info"}).get("info", {}) or {}
         self.channels = tuple(info.get("channels") or ("w1", "w2"))
+        # the generator's config (the Sweep box offers its default rates)
+        from ..generator.config import GenConfig
+        from .protocol import apply_config_dict
+        self.cfg = GenConfig()
+        r = client._cmd({"cmd": "gen_get_config"})
+        if r.get("ok") and isinstance(r.get("config"), dict):
+            apply_config_dict(self.cfg, r["config"])
         self.caps = {"model": info.get("model", ""), "channels": len(self.channels),
                      "waveforms": list(info.get("waveforms") or ()),
                      "ramp_symmetry": bool(info.get("ramp_symmetry", True)),
@@ -360,3 +367,7 @@ class _RemoteGen:
     def set_phase_offset(self, deg):     return self._g("set_phase_offset", deg=float(deg))
     def align_phase(self):               return self._g("align_phase")
     def outputs_off(self):               return self._g("outputs_off")
+    def ramp_stop(self):                 return self._g("ramp_stop")
+
+    def ramp_start(self, ch, knob, to, rate):
+        return self._g("ramp_start", channel=ch, knob=knob, to=float(to), rate=float(rate))

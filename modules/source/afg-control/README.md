@@ -116,9 +116,35 @@ doubles at high-Z; the lab limits (Settings) stay where they are.
 | `set_phase_offset` | `deg` | scannable |
 | `align_phase` | -- | reply `op_id`; restarts both outputs together |
 | `outputs_off` | -- | reply `op_id`; the safety verb |
+| `ramp_start` | `channel`, `knob` (frequency / amplitude / offset / phase), `to`, `rate` | reply `ramp_id`; a sweep (see below) |
+| `ramp_stop` | -- | ends a sweep where it is (safety) |
+| `stream_start` / `stream_read` / `stream_stop` | -- | the sweeps' record |
 
 Plus the universal `status`, `info`, `get_config`, `set_config`, `describe`,
 `shutdown{keep_outputs?}` (true = restart, outputs left as they are).
+
+## Sweeps (fly scans over any knob)
+
+Since 2026-10-10 every channel's **frequency, amplitude, offset and phase** can
+be SWEPT at a set pace -- a fly scan (scan-core, `type: fly`) then flies the
+knob like a stage (INSTRUMENT_MODULE_GUIDE 6b, "Ramps"):
+
+* `ramp_start {channel, knob, to, rate}` -> `{ramp_id}`; the SERVICE walks the
+  knob (`softramp.py`, a byte-identical copy of suite-common's), one command
+  every `hardware.ramp_dt_s` (50 ms), each value computed from the elapsed
+  time. Status: `ramping`, `ramp_id`, `ramp_knob`, `ramp_value`, `ramp_target`.
+* The record is the value SENT (`measured: false`): `stream_start / _read /
+  _stop`, group `ramp`, one channel per knob (`ch1_frequency`, ...) with its own
+  time stamps (`t_ch`). Reading the AFG back on every step would halve the step
+  rate; a generator that took a command IS at that value well within a step.
+* Clamped like a set (lab limits, the instrument's range, the peak rule
+  between amplitude and offset), with a warn; rates within
+  `hardware.ramp_*_rate_min/max`.
+* CH2 following CH1 follows every step of a CH1 sweep (re-aligned at the end);
+  a sweep of the FOLLOWING knob (CH2 frequency / phase) is refused.
+* A sweep never switches an output. A set of the knob, `ramp_stop` (a safety
+  verb: a viewer may send it) and `outputs_off` end it where it is.
+* The window's **Sweep** card: channel, knob, target, rate, Sweep, Stop.
 
 ## What a scan sees (`describe`)
 
@@ -263,7 +289,7 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q          # 83 tests, offline: sim + a fake SCPI instrument
+uv run pytest -q          # 122 tests, offline: sim + a fake SCPI instrument
                           # (two profiles: the manual's, and FV:V1.0.2 as measured)
 python ..\..\..\tools\check_modules.py afg --live
 ```

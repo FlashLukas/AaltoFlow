@@ -81,6 +81,7 @@ TRIGGER_OPTIONS = {"ch1": {"level": True, "slope": True}, "ch2": {"level": True,
                    "ext1": {"level": False, "slope": True}, "ext2": {"level": False, "slope": True},
                    "w1": {"level": False, "slope": False}, "w2": {"level": False, "slope": False}}
 _AUTO_TIMEOUT_S = 0.2                    # auto mode: free-run after this long without a trigger
+_IO_ENABLE, _IO_VOLTAGE, _IO_CURRENT = 1, 2, 3   # AnalogIO node types (NodeInfo)
 
 
 class DwfError(RuntimeError):
@@ -253,22 +254,51 @@ class DwfDevice:
 
     # ---- the power supplies (AnalogIO) ------------------------------------------------
     def _io_channels(self) -> list:
-        """[(index, name, label, [node names], [node units])] of AnalogIO."""
+        """AnalogIO as the device describes it: one dict per channel,
+        {"ch", "name", "label", "nodes": [{"index", "name", "unit", "type",
+        "set": (min, max, steps), "status": (min, max, steps)}]}.
+
+        `type` is the node's KIND (FDwfAnalogIOChannelNodeInfo: 1 enable,
+        2 voltage, 3 current, ...); `set` the range it can be SET to
+        (...NodeSetInfo), `status` the range it can be READ in
+        (...NodeStatusInfo; steps 0 = no reading at all). Measured on the lab
+        AD2 (runtime 3.24.4, 2026-10-10): 'Positive Supply' Enable (set 0..1),
+        Voltage (set 0.5..5 V, 4000 steps; status 0 steps = NO readback),
+        Current (set 0..1 in 1 step: not a current limit; status 0..0);
+        'Negative Supply' the same with -5..-0.5 V; 'USB Monitor' Voltage,
+        Current, Temperature; 'Auxiliary Monitor'; 'Power Supply' Limit."""
         out = []
+
+        def rng(fn, ch, nd):
+            lo, hi, st = ctypes.c_double(), ctypes.c_double(), ctypes.c_int()
+            try:
+                self.call(fn, ctypes.c_int(ch), ctypes.c_int(nd), ctypes.byref(lo),
+                          ctypes.byref(hi), ctypes.byref(st))
+            except DwfError:
+                return (0.0, 0.0, 0)
+            return (lo.value, hi.value, st.value)
+
         for ch in range(self.get_int("FDwfAnalogIOChannelCount")):
             name = ctypes.create_string_buffer(32)
             label = ctypes.create_string_buffer(16)
             self.call("FDwfAnalogIOChannelName", ctypes.c_int(ch), name, label)
-            nodes, units = [], []
+            nodes = []
             for nd in range(self.get_int("FDwfAnalogIOChannelInfo", ctypes.c_int(ch))):
                 nn = ctypes.create_string_buffer(32)
                 uu = ctypes.create_string_buffer(16)
                 self.call("FDwfAnalogIOChannelNodeName", ctypes.c_int(ch), ctypes.c_int(nd),
                           nn, uu)
-                nodes.append(nn.value.decode("ascii", "replace"))
-                units.append(uu.value.decode("ascii", "replace"))
-            out.append((ch, name.value.decode("ascii", "replace"),
-                        label.value.decode("ascii", "replace"), nodes, units))
+                try:
+                    kind = self.get_int("FDwfAnalogIOChannelNodeInfo", ctypes.c_int(ch),
+                                        ctypes.c_int(nd))
+                except DwfError:
+                    kind = 0
+                nodes.append({"index": nd, "name": nn.value.decode("ascii", "replace"),
+                              "unit": uu.value.decode("ascii", "replace"), "type": kind,
+                              "set": rng("FDwfAnalogIOChannelNodeSetInfo", ch, nd),
+                              "status": rng("FDwfAnalogIOChannelNodeStatusInfo", ch, nd)})
+            out.append({"ch": ch, "name": name.value.decode("ascii", "replace"),
+                        "label": label.value.decode("ascii", "replace"), "nodes": nodes})
         return out
 
 
@@ -515,87 +545,95 @@ class DwfScope:
 
     # ---- power supplies (V+ / V-) -----------------------------------------------------
     def _supply_map(self) -> dict:
-        """{"vplus": (channel, {node name: index}), "vminus": ...} by NAME, so
-        an AD3 with other channel numbers works too."""
+        """{"vplus": {...}, "vminus": {...}, "monitors": [...]}: the supplies
+        found by node TYPE (an Enable node, type 1, and a Voltage node, type
+        2, settable) -- V+ the one whose voltage range is positive, V- the
+        negative one -- so an AD3 with other channel numbers works too; every
+        node that can be READ elsewhere is a monitor (USB voltage / current /
+        temperature)."""
         if self._io is None:
-            io = {}
-            for ch, name, label, nodes, _units in self.dev._io_channels():
-                key = ("vplus" if "+" in name or "+" in label else
-                       "vminus" if "-" in name or "-" in label else None)
-                if key and key not in io and "Enable" in " ".join(nodes):
-                    io[key] = (ch, {n: k for k, n in enumerate(nodes)})
-            self._io = io
+            sup, mons = {}, []
+            for c in self.dev._io_channels():
+                by_type = {}
+                for n in c["nodes"]:
+                    by_type.setdefault(n["type"], n)
+                en, vo = by_type.get(_IO_ENABLE), by_type.get(_IO_VOLTAGE)
+                if en and vo and vo["set"][2] > 1:
+                    lo, hi = vo["set"][0], vo["set"][1]
+                    key = "vplus" if hi > 0 >= lo or lo >= 0 else "vminus"
+                    if key not in sup:
+                        cur = by_type.get(_IO_CURRENT)
+                        sup[key] = {"ch": c["ch"], "enable": en["index"],
+                                    "voltage": vo["index"], "range": (lo, hi),
+                                    # a reading only where the device has one
+                                    "v_read": vo["index"] if vo["status"][2] > 0 else None,
+                                    "a_read": (cur["index"] if cur and cur["status"][2] > 0
+                                               and cur["status"][1] > cur["status"][0]
+                                               else None)}
+                        continue
+                for n in c["nodes"]:
+                    if n["status"][2] > 0 and n["type"] not in (_IO_ENABLE,):
+                        mons.append((c["ch"], n["index"],
+                                     f"{c['name']} {n['name']} {n['unit']}".strip()))
+            self._io = {"supplies": sup, "monitors": mons}
         return self._io
 
     def read_supplies(self) -> dict:
         """{"vplus": {"on", "V", "V_meas", "A_meas"}, "vminus": {...},
-            "monitors": {"USB Monitor Voltage V": 5.01, ...}} -- queries only."""
+            "monitors": {"USB Monitor Voltage V": 4.756, ...}} -- queries only.
+        V_meas / A_meas are None where the device has NO reading (the AD2's
+        supplies: status range with 0 steps -- an echo of the setting would
+        pass for a measurement)."""
         d = self.dev
         d.call("FDwfAnalogIOStatus")
+        io = self._supply_map()
+
+        def node(fn, ch, nd):
+            v = ctypes.c_double()
+            d.call(fn, ctypes.c_int(ch), ctypes.c_int(nd), ctypes.byref(v))
+            return v.value
+
         out = {"monitors": {}}
-        smap = self._supply_map()
-        for key, (ch, nodes) in smap.items():
-            s = {}
-            for node, field in (("Enable", "on"), ("Voltage", "V")):
-                if node in nodes:
-                    v = ctypes.c_double()
-                    d.call("FDwfAnalogIOChannelNodeGet", ctypes.c_int(ch),
-                           ctypes.c_int(nodes[node]), ctypes.byref(v))
-                    s[field] = bool(v.value) if field == "on" else v.value
-            for node, field in (("Voltage", "V_meas"), ("Current", "A_meas")):
-                if node in nodes:
-                    v = ctypes.c_double()
-                    try:
-                        d.call("FDwfAnalogIOChannelNodeStatus", ctypes.c_int(ch),
-                               ctypes.c_int(nodes[node]), ctypes.byref(v))       # VERIFY
-                        s[field] = v.value
-                    except DwfError:
-                        pass
-            out[key] = s
-        for ch, name, label, nodes, units in self.dev._io_channels():
-            if any(ch == c for c, _n in smap.values()):
-                continue
-            for nd, (nn, uu) in enumerate(zip(nodes, units)):
-                v = ctypes.c_double()
-                try:
-                    d.call("FDwfAnalogIOChannelNodeStatus", ctypes.c_int(ch),
-                           ctypes.c_int(nd), ctypes.byref(v))
-                except DwfError:
-                    continue
-                out["monitors"][f"{name} {nn} {uu}".strip()] = v.value
+        for key, sp in io["supplies"].items():
+            out[key] = {
+                "on": bool(node("FDwfAnalogIOChannelNodeGet", sp["ch"], sp["enable"])),
+                "V": node("FDwfAnalogIOChannelNodeGet", sp["ch"], sp["voltage"]),
+                "V_meas": (None if sp["v_read"] is None else
+                           node("FDwfAnalogIOChannelNodeStatus", sp["ch"], sp["v_read"])),
+                "A_meas": (None if sp["a_read"] is None else
+                           node("FDwfAnalogIOChannelNodeStatus", sp["ch"], sp["a_read"]))}
+        for ch, nd, name in io["monitors"]:
+            try:
+                out["monitors"][name] = node("FDwfAnalogIOChannelNodeStatus", ch, nd)
+            except DwfError:
+                pass
         try:
-            out["master_on"] = bool(d.get_int("FDwfAnalogIOEnableGet"))         # VERIFY
+            out["master_on"] = bool(d.get_int("FDwfAnalogIOEnableGet"))
         except DwfError:
             pass
         return out
 
     def set_supply(self, which: str, on: bool | None = None, volts: float | None = None) -> None:
         d = self.dev
-        smap = self._supply_map()
-        if which not in smap:
+        sp = self._supply_map()["supplies"].get(which)
+        if sp is None:
             raise ValueError(f"this device has no {which} supply")
-        ch, nodes = smap[which]
-        if volts is not None and "Voltage" in nodes:
-            d.call("FDwfAnalogIOChannelNodeSet", ctypes.c_int(ch),
-                   ctypes.c_int(nodes["Voltage"]), ctypes.c_double(float(volts)))
+        if volts is not None:
+            d.call("FDwfAnalogIOChannelNodeSet", ctypes.c_int(sp["ch"]),
+                   ctypes.c_int(sp["voltage"]), ctypes.c_double(float(volts)))
         if on is not None:
-            d.call("FDwfAnalogIOChannelNodeSet", ctypes.c_int(ch),
-                   ctypes.c_int(nodes["Enable"]), ctypes.c_double(1.0 if on else 0.0))
+            d.call("FDwfAnalogIOChannelNodeSet", ctypes.c_int(sp["ch"]),
+                   ctypes.c_int(sp["enable"]), ctypes.c_double(1.0 if on else 0.0))
             if on:
-                # the AD2's supplies also need the master switch      # VERIFY
+                # the supplies also need the master switch (0 at rest on the AD2)
                 d.call("FDwfAnalogIOEnableSet", ctypes.c_int(1))
 
     def supply_range(self, which: str) -> tuple[float, float]:
-        """The device's own range of a supply's voltage node."""
-        smap = self._supply_map()
-        if which not in smap or "Voltage" not in smap[which][1]:
-            return (0.0, 0.0)
-        ch, nodes = smap[which]
-        lo, hi, steps = ctypes.c_double(), ctypes.c_double(), ctypes.c_int()
-        self.dev.call("FDwfAnalogIOChannelNodeInfo", ctypes.c_int(ch),
-                      ctypes.c_int(nodes["Voltage"]), ctypes.byref(lo), ctypes.byref(hi),
-                      ctypes.byref(steps))                                      # VERIFY
-        return (lo.value, hi.value)
+        """The voltage a supply can be SET to (FDwfAnalogIOChannelNodeSetInfo):
+        AD2 V+ 0.5 .. 5 V, V- -5 .. -0.5 V. Between 0 and the first value is a
+        dead band the device cannot make (0 V = switch the supply off)."""
+        sp = self._supply_map()["supplies"].get(which)
+        return tuple(sp["range"]) if sp else (0.0, 0.0)
 
 
 # ======================================================================================
@@ -771,6 +809,13 @@ class DwfWaveGen:
     def set_phase(self, ch: int, deg: float) -> None:
         self._set("FDwfAnalogOutNodePhaseSet", ch, float(deg) % 360.0)
         self._sync_start()          # a phase between two outputs needs a common start
+
+    def ramp_set_phase(self, ch: int, deg: float) -> None:
+        """A step of a phase SWEEP: the new phase only, no synced restart of
+        both outputs (that would glitch on every step). With dynamic
+        auto-configure the running output takes it as it runs.   # VERIFY on
+        the AD2: does a running channel's phase move by the step?"""
+        self._set("FDwfAnalogOutNodePhaseSet", ch, float(deg) % 360.0)
 
     def set_duty(self, ch: int, pct: float) -> None:
         self._shape_extra.setdefault(ch, {"duty_pct": 50.0, "symmetry_pct": 50.0})["duty_pct"] = pct

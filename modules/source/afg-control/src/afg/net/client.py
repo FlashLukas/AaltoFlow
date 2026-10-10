@@ -169,6 +169,14 @@ class AfgClient(ControlClient):
     def outputs_off(self):
         return self._cmd({"cmd": "outputs_off"})
 
+    def ramp_start(self, ch, knob: str, to: float, rate: float):
+        """Sweep `knob` of `ch` to `to` at `rate` per second; reply has ramp_id."""
+        return self._cmd({"cmd": "ramp_start", "channel": ch, "knob": knob,
+                          "to": float(to), "rate": float(rate)})
+
+    def ramp_stop(self):
+        return self._cmd({"cmd": "ramp_stop"})
+
     def shutdown(self):
         """Close the client. Does NOT stop the remote service."""
         self.stop_heartbeat()

@@ -144,6 +144,25 @@ class Hardware:
     visa: str = "USB0::0x0699::0x0353::SERIAL::INSTR"
     timeout_ms: int = 3000
     poll_hz: float = 2.0
+    # SWEEPS (ramp_start: fly scans over any knob, 2026-10-10). One command
+    # per step every ramp_dt_s (softramp.py); each value is computed from the
+    # elapsed time, so a late step does not slow the sweep. The rates are
+    # what a sweep may be asked for, per second (min / max / the default a
+    # client is offered first); the instrument's range and the lab limits
+    # bound the VALUES as for a set.
+    ramp_dt_s: float = 0.05
+    ramp_freq_rate_min: float = 1e-3
+    ramp_freq_rate_max: float = 1e7
+    ramp_freq_rate_default: float = 10.0
+    ramp_amp_rate_min: float = 1e-4
+    ramp_amp_rate_max: float = 100.0
+    ramp_amp_rate_default: float = 0.1
+    ramp_offset_rate_min: float = 1e-4
+    ramp_offset_rate_max: float = 100.0
+    ramp_offset_rate_default: float = 0.1
+    ramp_phase_rate_min: float = 0.01
+    ramp_phase_rate_max: float = 3600.0
+    ramp_phase_rate_default: float = 10.0
     phase_unit: str = "rad"
 
 

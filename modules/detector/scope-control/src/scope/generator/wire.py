@@ -66,6 +66,23 @@ def params(gen_params: list, group_prefix: str = "Generator") -> list:
                         blk[k] = key(blk[k])
         if p.get("wait") and "target_key" in p["wait"]:
             p["wait"]["target_key"] = key(p["wait"]["target_key"])
+        r = p.get("ramp")
+        if r:
+            # a sweep: its verbs, its status keys and its record's verbs are
+            # the generator's (gen_ramp_start, gen_ramping, gen_stream_read)
+            for blk in (r.get("start"), r.get("stop")):
+                if blk and blk.get("verb"):
+                    blk["verb"] = "gen_" + blk["verb"]
+            dn = r.get("done") or {}
+            for k in ("key", "id_key"):
+                if k in dn:
+                    dn[k] = key(dn[k])
+            st = (r.get("readback") or {}).get("stream")
+            if st:
+                st["start_verb"] = "gen_stream_start"
+                st["read_verb"] = "gen_stream_read"
+                st["stop_verb"] = "gen_stream_stop"
+                st["group"] = "gen_" + st.get("group", "ramp")
         g = p.get("group", "")
         p["group"] = g if g in ("W1", "W2") else f"{group_prefix} {g.lower()}".strip()
         out.append(p)

@@ -182,8 +182,26 @@ def test_supplies_by_name_and_keep_on_restart(fake, monkeypatch):
         scope.set_supply("vplus", on=True, volts=3.0)
         assert f.io_set[(0, 0)] == 1.0 and f.io_set[(0, 1)] == 3.0 and f.io_master == 1
         st = scope.status()
-        assert st["supply_vplus_on"] and st["supply_vplus_meas_V"] == pytest.approx(3.0)
-        assert scope.supply_limits("vminus") == (-5.0, 0.0)
+        assert st["supply_vplus_on"] and st["supply_vplus_V"] == pytest.approx(3.0)
+        # the AD2's supplies have NO readback (status range with 0 steps):
+        # nothing measured -- not an echo (lab 2026-10-10: V- "read" -0.2057)
+        assert st["supply_vplus_meas_V"] is None and st["supply_vminus_meas_V"] is None
+        assert st["supply_vplus_meas_A"] is None
+        # the SETTABLE range (NodeSetInfo; NodeInfo is the node TYPE: lab
+        # 2026-10-10 "allowed 9.88e-324 .. 0 V")
+        assert scope.supply_limits("vplus") == (0.5, 5.0)
+        assert scope.supply_limits("vminus") == (-5.0, -0.5)
+        with pytest.raises(ValueError, match="switch the supply off"):
+            scope.set_supply("vplus", volts=0.2)         # the dead band: refused
+        with pytest.raises(ValueError, match="switch the supply off"):
+            scope.set_supply("vminus", volts=-0.3)
+        scope.set_supply("vminus", volts=-7.0)            # beyond: clamped, warned
+        assert f.io_set[(1, 1)] == -5.0
+        assert any("clamped to -5" in m for _, m in events)
+        mon = st["monitors"]
+        assert mon["USB Monitor Voltage V"] == pytest.approx(4.756)
+        assert mon["USB Monitor Temperature C"] == pytest.approx(39.0)
+        assert not any("Supply" in k for k in mon)       # supplies are not monitors
         scope.gen.set_output("w1", True)
         deadline = time.monotonic() + 5
         while not f.aout[0]["running"] and time.monotonic() < deadline:

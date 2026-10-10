@@ -26,6 +26,10 @@ Commands (a reply means ACCEPTED, not done -- poll status for the effect):
     set_phase_offset  {deg}
     align_phase       {}  -> {"op_id": n}
     outputs_off       {}  -> {"op_id": n}           the safety verb
+    ramp_start        {channel, knob: "frequency"|"amplitude"|"offset"|"phase",
+                       to, rate} -> {"ramp_id": n}   sweep a knob (fly scans)
+    ramp_stop         {}  end a sweep where it is (safety: a stop)
+    stream_start / stream_read / stream_stop   the sweeps' record (group "ramp")
   + the universal verbs status, info, get_config, set_config, describe, shutdown.
 """
 
@@ -84,9 +88,11 @@ class AfgService:
         #   same thing for one channel -- the same verb also switches an
         #   output ON.
         #   READ: none beyond get_/read_/list_ and the universal verbs.
+        # A sweep (ramp_start) is ended by ramp_stop: a stop, so a viewer may
+        # send it too; stream_read only reads the sweep's record.
         self.control = ControlLease(
-            safety={"outputs_off"},
-            read=set(),
+            safety={"outputs_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -284,6 +290,19 @@ class AfgService:
                 return {"ok": True, "op_id": g.align_phase()}
             elif cmd == "outputs_off":
                 return {"ok": True, "op_id": g.outputs_off()}
+            elif cmd == "ramp_start":
+                # a SWEEP for fly scans: the reply's ramp_id is what status
+                # `ramp_id` shows while and after this sweep runs
+                return {"ok": True, "ramp_id": g.ramp_start(
+                    ch, str(msg["knob"]), float(msg["to"]), float(msg["rate"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": g.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": g.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": g.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": g.stream_stop()}
             elif cmd == "status":
                 return {"ok": True, "status": self.status_payload()}
             elif cmd == "describe":

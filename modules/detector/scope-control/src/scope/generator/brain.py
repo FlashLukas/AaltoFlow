@@ -46,10 +46,40 @@ import time
 from .base import WaveGen
 from .config import GenConfig as Config, CHANNEL_NAMES
 from . import waveforms
+from ..softramp import SoftRamp   # src/scope/softramp.py (the master's copy)
 
 _KNOBS = ("waveform", "frequency_Hz", "amplitude_Vpp", "offset_V", "phase_deg",
           "duty_pct", "symmetry_pct", "load_ohm")
 _NAN = float("nan")
+#: the knobs a RAMP can sweep (fly scans over any knob, 2026-10-10): wire name
+#: -> (setting key, backend setter, unit of the rate)
+RAMP_KNOBS = {"frequency": ("frequency_Hz", "set_frequency", "Hz/s"),
+              "amplitude": ("amplitude_Vpp", "set_amplitude", "Vpp/s"),
+              "offset": ("offset_V", "set_offset", "V/s"),
+              "phase": ("phase_deg", "set_phase", "deg/s")}
+
+
+class _Locked:
+    """The backend behind ONE lock. Until ramps, only the brain's worker ever
+    called the backend; a ramp's steps come from the ramp's own thread, so
+    every call -- worker and ramp alike -- now goes through this lock."""
+
+    def __init__(self, backend, lock):
+        self._b = backend
+        self._l = lock
+
+    def __getattr__(self, name):
+        attr = getattr(self._b, name)
+        if not callable(attr):
+            return attr
+        lock = self._l
+
+        def call(*args, **kw):
+            with lock:
+                return attr(*args, **kw)
+        return call
+
+
 #: how often the rarely changing settings (load, burst / sweep / modulation)
 #: are read back; the rest is read every poll and after every push
 _FULL_READ_S = 5.0
@@ -93,8 +123,8 @@ def _same(key: str, a, b, phase_tol: float = 0.05) -> bool:
     if a is None or b is None:
         return False
     if key == "frequency_Hz":
-        # 1e-6 relative: the Analog Discovery's DDS holds 1000 Hz as
-        # 1000.0000222 (lab AD2, 2026-10-08) -- a rounding, not a coercion
+        # 1e-6 relative: a DDS holds 1000 Hz as 1000.0000222 (the Analog
+        # Discovery's, lab 2026-10-08) -- a rounding, not a coercion
         return abs(a - b) <= 2e-6 + 1e-6 * abs(a)
     if key == "amplitude_Vpp":
         return abs(a - b) <= 1e-4 + 5e-4 * abs(a)
@@ -124,7 +154,8 @@ def _relevant(setting: dict) -> tuple:
 
 class Generator:
     def __init__(self, backend: WaveGen, cfg: Config | None = None):
-        self.backend = backend
+        self._io = threading.RLock()        # every backend call (see _Locked)
+        self.backend = _Locked(backend, self._io)
         self.cfg = cfg or Config()
         # capabilities are a pure description (no I/O), safe to ask before open
         self.caps = dict(backend.capabilities())
@@ -176,6 +207,24 @@ class Generator:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread = None
+        # RAMPS (fly scans over any knob): one SoftRamp per channel and knob,
+        # ONE running at a time (a fly axis flies one knob). The module numbers
+        # them itself (ramp_id), so "my sweep is over" is one id for all.
+        self._ramps = {}
+        for ch in self.channels:
+            for knob in RAMP_KNOBS:
+                self._ramps[(ch, knob)] = SoftRamp(
+                    (lambda v, ch=ch, knob=knob: self._ramp_step(ch, knob, v)),
+                    (lambda ch=ch, knob=knob: self._want[ch][RAMP_KNOBS[knob][0]]),
+                    limits=(lambda ch=ch, knob=knob: self.ramp_limits(ch, knob)),
+                    dt_s=float(getattr(self.cfg.hardware, "ramp_dt_s", 0.05)),
+                    on_done=(lambda rid, reason, ch=ch, knob=knob:
+                             self._ramp_done(ch, knob, reason)),
+                    channel=f"{ch}_{knob}", name=f"sweep-{ch}-{knob}")
+        self._ramp_active = None             # (ch, knob) of the running / last sweep
+        self._ramp_id = 0
+        self._ramp_quiet_until = 0.0         # no "changed at the instrument" before this
+        self._stream_id = 0
         self._seen = self._cfg_snapshot()
         self._snapshot = self._build_snapshot("")
         # replaced by the service to forward events; default = no-op
@@ -274,6 +323,7 @@ class Generator:
         restart switched off outputs he was using): close the instrument and
         release its address exactly the same, but change no output -- the
         next start adopts the state, as every start does."""
+        self.ramp_stop(quiet=True)          # no sweep step may follow the outputs off
         self._stop.set()
         self._wake.set()
         if self._thread is not None:
@@ -455,16 +505,20 @@ class Generator:
 
     def set_frequency(self, ch, hz: float) -> None:
         self._refuse_if_following(ch, "frequency")
+        self._take_over(ch, "frequency")
         self._change(ch, f"frequency {float(hz):g} Hz", frequency_Hz=float(hz))
 
     def set_amplitude(self, ch, vpp: float) -> None:
+        self._take_over(ch, "amplitude")
         self._change(ch, f"amplitude {float(vpp):g} Vpp", amplitude_Vpp=float(vpp))
 
     def set_offset(self, ch, volts: float) -> None:
+        self._take_over(ch, "offset")
         self._change(ch, f"offset {float(volts):g} V", offset_V=float(volts))
 
     def set_phase(self, ch, deg: float) -> None:
         self._refuse_if_following(ch, "phase")
+        self._take_over(ch, "phase")
         self._change(ch, f"phase {float(deg):g} deg", phase_deg=float(deg))
 
     def set_duty(self, ch, pct: float) -> None:
@@ -589,8 +643,203 @@ class Generator:
             self._persist()
             self._emit("warn", f"W2 changed at the instrument: {dropped} switched OFF")
 
+    # ---- RAMPS: sweep a knob at a set pace (fly scans over any knob) ----------
+
+    def ramp_limits(self, ch: str, knob: str) -> tuple[float, float]:
+        """The range a sweep of `knob` may cover NOW: the same clamps as a set
+        (lab limits AND the instrument's range; amplitude and offset by the
+        peak rule against the other's present value)."""
+        key = RAMP_KNOBS[knob][0]
+        with self._lock:
+            w = dict(self._want[ch])
+        env = self.envelope(ch)
+        lim = self.cfg.limits(ch)
+        peak = min(float(env["peak_max_V"]), float(lim.peak_max_V))
+        if key == "frequency_Hz":
+            if env.get("freq_max_Hz") is None:
+                raise ValueError(f"{ch.upper()} has no frequency for {w['waveform']}")
+            return (float(env["freq_min_Hz"]),
+                    min(float(env["freq_max_Hz"]), float(lim.freq_max_Hz)))
+        if key == "amplitude_Vpp":
+            hi = min(float(env["amp_max_Vpp"]), float(lim.amplitude_max_Vpp),
+                     2.0 * max(0.0, peak - abs(float(w["offset_V"]))))
+            return float(env["amp_min_Vpp"]), max(float(env["amp_min_Vpp"]), hi)
+        if key == "offset_V":
+            half = 0.0 if w["waveform"] == "dc" else float(w["amplitude_Vpp"]) / 2.0
+            room = max(0.0, peak - half)
+            return -room, room
+        return -180.0, 360.0                     # phase: as a set
+
+    def ramp_rate_limits(self, knob: str) -> tuple[float, float, float]:
+        """(min, max, default) of a sweep's pace, in the knob's unit per second
+        (config group `hardware`, ramp_rate_*)."""
+        hw = self.cfg.hardware
+        name = {"frequency": "freq", "amplitude": "amp", "offset": "offset",
+                "phase": "phase"}[knob]
+        lo = float(getattr(hw, f"ramp_{name}_rate_min"))
+        hi = float(getattr(hw, f"ramp_{name}_rate_max"))
+        df = float(getattr(hw, f"ramp_{name}_rate_default"))
+        return lo, hi, min(max(df, lo), hi)
+
+    def ramp_start(self, ch, knob: str, to: float, rate: float) -> int:
+        """Sweep `knob` of channel `ch` from where it is to `to` at `rate`
+        (knob units per second). Returns the sweep's number.
+
+        Clamped like a set (warned); the follower's knob (W2 frequency /
+        phase while it follows W1) is REFUSED -- sweep W1, W2 follows each
+        step as it follows a set. Never switches an output: a sweep of an
+        output that is off moves its setting, nothing comes out. A running
+        sweep of any knob is stopped first (one at a time)."""
+        ch = parse_channel(ch)
+        knob = str(knob).strip().lower()
+        if knob not in RAMP_KNOBS:
+            raise ValueError(f"cannot sweep {knob!r} (use {', '.join(RAMP_KNOBS)})")
+        if ch not in self.channels:
+            raise ValueError(f"{ch} does not exist on this instrument")
+        self._refuse_if_following(ch, knob if knob in ("frequency", "phase") else "")
+        to, rate = float(to), abs(float(rate))
+        if not (to == to and rate == rate) or rate <= 0:
+            raise ValueError("a sweep needs a finite target and a rate > 0")
+        lo, hi = self.ramp_limits(ch, knob)
+        rlo, rhi, _ = self.ramp_rate_limits(knob)
+        to_c = min(max(to, lo), hi)
+        rate_c = min(max(rate, rlo), rhi)
+        self.ramp_stop(quiet=True)
+        unit = RAMP_KNOBS[knob][2]
+        with self._lock:
+            self._ramp_id += 1
+            rid = self._ramp_id
+            self._ramp_active = (ch, knob)
+        self._ramp_quiet_until = float("inf")
+        self._ramps[(ch, knob)].start(to_c, rate_c)
+        if to_c != to or rate_c != rate:
+            self._emit("warn", f"{ch.upper()}: sweep of {knob} limited to {to_c:g} at "
+                               f"{rate_c:g} {unit} (asked {to:g} at {rate:g})")
+        self._emit("info", f"{ch.upper()}: {knob} sweep -> {to_c:g} at {rate_c:g} {unit} "
+                           f"(#{rid})")
+        return rid
+
+    def ramp_stop(self, quiet: bool = False) -> bool:
+        """End the running sweep WHERE IT IS. True if one was running."""
+        was = False
+        for r in self._ramps.values():
+            was = r.stop() or was
+        if was and not quiet and self._ramp_active is not None:
+            ch, knob = self._ramp_active
+            self._emit("info", f"{ch.upper()}: {knob} sweep stopped at "
+                               f"{self._want[ch][RAMP_KNOBS[knob][0]]:g}")
+        return was
+
+    def _take_over(self, ch, knob: str) -> None:
+        """A set of a knob that is being swept takes it over: the sweep stops
+        first (BEFORE any lock its step may be waiting for)."""
+        ch = parse_channel(ch)
+        act = self._ramp_active
+        if act is not None and self._ramps[act].running and (
+                act == (ch, knob) or (self._follows() and ch == "w1"
+                                      and act[1] in ("frequency", "phase"))):
+            self._ramps[act].stop()
+            self._emit("info", f"{act[0].upper()}: {act[1]} sweep stopped by a set")
+
+    def ramping(self) -> bool:
+        return any(r.running for r in self._ramps.values())
+
+    def _ramp_step(self, ch: str, knob: str, v: float) -> None:
+        """One step of a sweep, on the sweep's thread: straight to the
+        instrument (one command), bypassing the worker's push -- and the
+        desired / sent / read-back records updated to it, so the worker
+        neither pushes the old value back nor takes the change for a hand at
+        the front panel. A follower (W2 while it follows W1) gets its step
+        in the same breath. Quiet: no event per step."""
+        key, setter, _ = RAMP_KNOBS[knob]
+        steps = [(ch, key, v)]
+        if ch == "w1" and len(self.channels) > 1 and self._follows():
+            if key == "frequency_Hz":
+                steps.append(("w2", key, v))
+            if self._phase_follows() and key == "phase_deg":
+                steps.append(("w2", key,
+                              waveforms.wrap_phase(v + self.cfg.coupling.phase_offset_deg)))
+        for c, k, val in steps:
+            send = self.phase_to_send(val) if k == "phase_deg" else val
+            # a backend may have a lighter call for a sweep step (the Analog
+            # Discovery: a phase step WITHOUT the synced restart of both
+            # outputs a phase set does -- that would glitch on every step)
+            fn = getattr(self.backend, "ramp_" + setter, None) or getattr(self.backend, setter)
+            fn(_index(c), send)
+            with self._lock:
+                self._want[c][k] = val
+                if self._applied[c] is not None:
+                    self._applied[c][k] = val
+                if self._readback[c] is not None:
+                    self._readback[c][k] = val
+                if k in ("amplitude_Vpp", "offset_V") and c in self._asked:
+                    self._asked[c][k] = val
+
+    def _ramp_done(self, ch: str, knob: str, reason: str) -> None:
+        """A sweep ended (reached, stopped, failed): the config follows the
+        value, a follower is re-aligned, and the read-back may judge again
+        once the instrument has caught up."""
+        with self._lock:
+            for c in self.channels:
+                self._to_cfg(c)
+            self._seen = self._cfg_snapshot()
+        if (len(self.channels) > 1 and self._follows() and ch == "w1"
+                and knob in ("frequency", "phase")):
+            self._align_pending = True          # the follower in phase again
+        self._ramp_quiet_until = time.monotonic() + 1.5
+        self._wake.set()
+        if reason.startswith("error"):
+            self._emit("error", f"{ch.upper()}: {knob} sweep failed: {reason[7:]}")
+        elif reason == "done":
+            self._emit("info", f"{ch.upper()}: {knob} sweep done")
+
+    def ramp_status(self) -> dict:
+        act = self._ramp_active
+        r = self._ramps.get(act) if act else None
+        st = r.status() if r else {}
+        return {"ramping": self.ramping(), "ramp_id": int(self._ramp_id),
+                "ramp_knob": f"{act[0]}_{act[1]}" if act else "",
+                "ramp_target": st.get("ramp_target"), "ramp_rate": st.get("ramp_rate"),
+                "ramp_value": st.get("ramp_value"), "ramp_error": st.get("ramp_error", "")}
+
+    # ---- the sweeps' record, in the stream format (fly scans bin by it) ------
+
+    def stream_start(self) -> int:
+        """Start recording every sweepable knob (group "ramp"): each channel
+        of the stream is one knob, with its own time stamps (t_ch)."""
+        for r in self._ramps.values():
+            r.stream_start()
+        with self._lock:
+            self._stream_id += 1
+            return self._stream_id
+
+    def stream_read(self) -> dict:
+        return self._merge([r.stream_read() for r in self._ramps.values()])
+
+    def stream_stop(self) -> dict:
+        return self._merge([r.stream_stop() for r in self._ramps.values()])
+
+    def _merge(self, chunks: list) -> dict:
+        """One reply from every knob's record: values and own stamps per
+        channel (t_ch); `t` = the stamps of the knob being swept (or the
+        first), as a default for clients that look at `t` alone."""
+        values, t_ch, delay = {}, {}, {}
+        overflow = False
+        for c in chunks:
+            for name, vals in (c.get("values") or {}).items():
+                values[name] = vals
+                t_ch[name] = list(c.get("t") or [])
+                delay[name] = 0.0
+            overflow = overflow or bool(c.get("overflow"))
+        act = self._ramp_active
+        main = f"{act[0]}_{act[1]}" if act else next(iter(t_ch), None)
+        return {"id": self._stream_id, "t": t_ch.get(main, []), "t_ch": t_ch,
+                "values": values, "delay_s": delay, "overflow": overflow,
+                "now": time.time()}
+
     def outputs_off(self) -> int:
         """Every output OFF (the safety action). Returns the operation number."""
+        self.ramp_stop(quiet=True)
         for ch in self.channels:
             with self._lock:
                 self._force_off[ch] = True
@@ -659,6 +908,14 @@ class Generator:
                               "offset_V", "phase_deg", "duty_pct", "symmetry_pct"):
                         snap[f"{ch}_{k}"] = w[k]
                     snap[f"{ch}_settled"] = False
+            if self.ramping():
+                # a sweep moves the setpoint between two worker cycles: show
+                # where it is now
+                for ch in self.channels:
+                    w = self._want[ch]
+                    for k in ("frequency_Hz", "amplitude_Vpp", "offset_V", "phase_deg"):
+                        snap[f"{ch}_{k}"] = w[k]
+            snap.update(self.ramp_status())
             snap["follow"] = self._follows()
             snap["phase_follow"] = self._phase_follows()
             snap["phase_follow_set"] = bool(getattr(self.cfg.coupling, "ch2_phase_follows", True))
@@ -941,7 +1198,8 @@ class Generator:
             prev = self._readback[ch] or {}
             gen = self._applied_gen[ch]
             pending = self._gen[ch] != gen
-        if not just_pushed and not pending and prev:
+        if (not just_pushed and not pending and prev and not self.ramping()
+                and time.monotonic() >= self._ramp_quiet_until):
             # compared with the PREVIOUS read-back, at the instrument's own
             # resolution: only a real change counts, never a re-reading
             changed = [k for k in _KNOBS + ("output", "mode")

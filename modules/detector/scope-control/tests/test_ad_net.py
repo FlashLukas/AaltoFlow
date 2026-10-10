@@ -71,7 +71,7 @@ def test_generator_over_the_wire(pair):
 
 def test_supplies_over_the_wire(pair):
     svc, cli, sim = pair
-    assert cli.has_supplies() and cli.supply_limits("vminus") == (-5.0, 0.0)
+    assert cli.has_supplies() and cli.supply_limits("vminus") == (-5.0, -0.5)
     assert cli.set_supply("vplus", on=True, volts=1.8)["ok"]
     st = wait_for(cli, lambda s: s["supply_vplus_on"])
     assert st["supply_vplus_V"] == pytest.approx(1.8)

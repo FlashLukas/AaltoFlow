@@ -160,4 +160,8 @@ def test_describe_has_generator_and_supplies(ad):
     missing = [p["id"] for p in m["parameters"]
                if p.get("read_path") and p["read_path"][0] != "sample"
                and p["type"] != "string" and read_path(st, p["read_path"]) is None]
-    assert not missing, missing
+    # the AD2's supplies have no readback: their "measured" fields are null
+    # by design (an echo of the setting would pass for a measurement)
+    assert sorted(missing) == sorted(f"supply_{k}_meas_{u}" for k in ("vplus", "vminus")
+                                     for u in ("V", "A")), missing
+    assert "monitor_usb_monitor_temperature_c" in ids

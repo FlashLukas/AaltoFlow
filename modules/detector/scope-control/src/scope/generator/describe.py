@@ -46,7 +46,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
        settle=None, args=None, danger=False, help="", timeout_s=None,
-       wait=None, resolution=None):
+       wait=None, resolution=None, ramp=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -59,7 +59,7 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
                  ("timeout_s", timeout_s), ("wait", wait), ("help", help),
-                 ("resolution", resolution)):
+                 ("resolution", resolution), ("ramp", ramp)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -103,6 +103,26 @@ def read_path(status: dict, path):
             return None
         cur = cur[key]
     return cur
+
+
+def ramp_block(gen, ch: str, knob: str) -> dict:
+    """The `ramp` block of a sweepable control (INSTRUMENT_MODULE_GUIDE 6b,
+    "Ramps"): the SERVICE walks the knob (softramp.py), one command per step,
+    and records every value it SENT -- the fly scan bins by that commanded
+    value (measured: false; reading the instrument back on every step would
+    halve the step rate, and a generator that has taken a command IS at that
+    value well within a step)."""
+    from .brain import RAMP_KNOBS
+    lo, hi, df = gen.ramp_rate_limits(knob)
+    return {"kind": "software",
+            "start": {"verb": "ramp_start", "args": {"to": "to", "rate": "rate"},
+                      "extra": {"channel": ch, "knob": knob}},
+            "stop": {"verb": "ramp_stop"},
+            "rate": {"unit": RAMP_KNOBS[knob][2], "min": lo,
+                     "max": hi, "default": df},
+            "readback": {"stream": {"group": "ramp", "channel": f"{ch}_{knob}"},
+                         "measured": False},
+            "done": {"key": "ramping", "id_key": "ramp_id"}}
 
 
 def _channel_params(gen, ch: str, base_order: int) -> list:
@@ -165,6 +185,7 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                       read_path=[f"{ch}_frequency_Hz"],
                       set={"verb": "set_frequency", "arg": "frequency_Hz", "extra": extra},
                       settle=settle(f"{ch}_frequency_Hz"), timeout_s=10.0,
+                      ramp=ramp_block(gen, ch, "frequency"),
                       help="The maximum depends on the waveform (AFG1062: sine 60 MHz, "
                            "square / pulse 25 MHz, ramp 1 MHz) and on the lab limit."))
     else:
@@ -179,6 +200,7 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                       read_path=[f"{ch}_amplitude_Vpp"],
                       set={"verb": "set_amplitude", "arg": "amplitude_Vpp", "extra": extra},
                       settle=settle(f"{ch}_amplitude_Vpp"), timeout_s=10.0,
+                      ramp=ramp_block(gen, ch, "amplitude"),
                       help="Peak-to-peak INTO THE LOAD SETTING (double on an open "
                            "input when the load is 50 ohm). |offset| + amplitude/2 "
                            "may not pass the peak limit; the amplitude stops there."))
@@ -193,6 +215,7 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                   read_path=[f"{ch}_offset_V"],
                   set={"verb": "set_offset", "arg": "offset_V", "extra": extra},
                   settle=settle(f"{ch}_offset_V"), timeout_s=10.0,
+                  ramp=ramp_block(gen, ch, "offset"),
                   help="Into the load setting. Limited so that |offset| + "
                        "amplitude/2 stays within the peak limit (the offset stops "
                        "there when it is the one being set)."))
@@ -202,6 +225,7 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                       min=-180.0, max=360.0, read_path=[f"{ch}_phase_deg"],
                       set={"verb": "set_phase", "arg": "phase_deg", "extra": extra},
                       settle=settle(f"{ch}_phase_deg"), timeout_s=10.0,
+                      ramp=ramp_block(gen, ch, "phase"),
                       resolution=phase_res,
                       help="Start phase. Kept as asked (-90 stays -90); the instrument "
                            "gets the same angle in 0..360, in its own steps (AFG1062: "
@@ -325,6 +349,12 @@ def generator_params(gen) -> list:
                 "viewer (the safety action)."),
         _p("all_off", "All outputs off (state)", "indicator", "bool",
            group="Output", order=2, read_path=["all_off"]),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Output", order=3,
+           read_path=["ramping"],
+           help="True while a sweep (ramp_start) walks a knob; ramp_knob says which."),
+        _p("ramp_stop", "Stop sweep", "action", "action", group="Output", order=4,
+           wait={"ready": {"policy": "immediate"}},
+           help="End a running sweep where it is. Allowed for anyone, also a viewer."),
     ]
     return params
 

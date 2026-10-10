@@ -345,11 +345,22 @@ def build_manifest(scope) -> dict:
                         f"lab's limit, Settings > Supplies)."),
                 _p(f"supply_{k}_meas_V", f"{name} measured", "indicator", "float",
                    unit="V", group="Supplies", order=10 * i + 3, decimals=3, plottable=True,
-                   read_path=[f"supply_{k}_meas_V"]),
+                   read_path=[f"supply_{k}_meas_V"],
+                   help="Empty (null) where the device cannot measure it (the AD2)."),
                 _p(f"supply_{k}_meas_A", f"{name} current", "indicator", "float",
                    unit="A", group="Supplies", order=10 * i + 4, decimals=4, plottable=True,
-                   read_path=[f"supply_{k}_meas_A"]),
+                   read_path=[f"supply_{k}_meas_A"],
+                   help="Empty (null) where the device cannot measure it (the AD2)."),
             ]
+        # the device's own monitors (AD2: USB voltage / current / temperature)
+        mons = (scope.status().get("monitors") or {})
+        for i, name in enumerate(sorted(mons)):
+            unit = name.rsplit(" ", 1)[-1] if " " in name else ""
+            params.append(_p("monitor_" + "".join(ch if ch.isalnum() else "_"
+                                                  for ch in name.lower()).strip("_"),
+                             name, "indicator", "float", unit=unit, group="Supplies",
+                             order=40 + i, decimals=3, plottable=True,
+                             read_path=["monitors", name]))
         params.append(_p("supplies_off", "All supplies off", "action", "action",
                          group="Supplies", order=30, wait={"ready": {"policy": "immediate"}},
                          help="Switch V+ and V- off. Allowed for anyone, also a viewer."))

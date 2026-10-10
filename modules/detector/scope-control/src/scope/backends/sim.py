@@ -352,9 +352,12 @@ class SimulatedADScope(SimulatedScope):
 
     # ---- V+ / V- -----------------------------------------------------------------------
     def read_supplies(self) -> dict:
-        out = {k: {"on": s["on"], "V": s["V"], "V_meas": s["V"] if s["on"] else 0.0,
-                   "A_meas": 0.0} for k, s in self.supplies.items()}
-        out["monitors"] = {"USB Monitor Voltage V": 5.02, "USB Monitor Current A": 0.31}
+        # like the AD2 (lab 2026-10-10): the supplies have NO readback -- the
+        # measured fields are None, not an echo of the setting
+        out = {k: {"on": s["on"], "V": s["V"], "V_meas": None, "A_meas": None}
+               for k, s in self.supplies.items()}
+        out["monitors"] = {"USB Monitor Voltage V": 4.756, "USB Monitor Current A": 0.2985,
+                           "USB Monitor Temperature C": 39.0}
         return out
 
     def set_supply(self, which: str, on: bool | None = None, volts: float | None = None) -> None:
@@ -368,4 +371,5 @@ class SimulatedADScope(SimulatedScope):
             self.supplies[which]["on"] = bool(on)
 
     def supply_range(self, which: str) -> tuple:
-        return (0.0, 5.0) if which == "vplus" else (-5.0, 0.0)
+        # the AD2's settable ranges (FDwfAnalogIOChannelNodeSetInfo, lab 2026-10-10)
+        return (0.5, 5.0) if which == "vplus" else (-5.0, -0.5)

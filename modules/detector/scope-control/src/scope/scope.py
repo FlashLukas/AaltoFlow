@@ -447,6 +447,13 @@ class Scope:
         if volts is not None:
             v = _finite(volts, f"{name} voltage")
             lo, hi = self.supply_limits(which)
+            # Between 0 V and the device's first value is a DEAD BAND it cannot
+            # make (AD2: |V| < 0.5 V, lab 2026-10-10). Refused, not clamped:
+            # 0.2 V silently becoming 0.5 V would be a surprise on a circuit.
+            # For 0 V switch the supply off.
+            if (which == "vplus" and 0.0 <= v < lo) or (which == "vminus" and hi < v <= 0.0):
+                raise ValueError(f"{name} cannot be set to {v:g} V: this device makes "
+                                 f"{lo:g} .. {hi:g} V (switch the supply off for 0 V)")
             if not lo <= v <= hi:
                 self._emit("warn", f"{name} {v:g} V clamped to {min(max(v, lo), hi):g} V "
                                    f"(allowed {lo:g} .. {hi:g} V; Settings > Supplies)")

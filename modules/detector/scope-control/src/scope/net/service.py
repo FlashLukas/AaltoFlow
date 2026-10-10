@@ -27,6 +27,8 @@ Verbs (a reply means ACCEPTED; poll status for the effect):
                    gen_set_duty  gen_set_symmetry  gen_set_follow {on, phase_offset_deg?,
                    phase?}  gen_set_phase_follow {on}  gen_set_phase_offset {deg}
                    gen_align_phase {} -> {op_id}  gen_outputs_off {} -> {op_id} (safety)
+                   gen_ramp_start {channel, knob, to, rate} -> {ramp_id}  (a sweep)
+                   gen_ramp_stop {} (safety)  gen_stream_start|read|stop (its record)
                    gen_get_config {}  gen_set_config {config}  gen_info {}
   + status, info, get_config, set_config, describe, shutdown.
 """
@@ -90,10 +92,10 @@ class ScopeService:
         # safe" actions are theirs too: every output off, every supply off --
         # verbs that can ONLY switch off, so a viewer may always send them.
         self.control = ControlLease(
-            safety={"abort", "stop", "gen_outputs_off", "supplies_off"},
+            safety={"abort", "stop", "gen_outputs_off", "gen_ramp_stop", "supplies_off"},
             # the generator's reads carry the gen_ prefix, so the get_/read_
             # rule does not see them: named here
-            read={"gen_info", "gen_envelope", "gen_get_config"},
+            read={"gen_info", "gen_envelope", "gen_get_config", "gen_stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -391,6 +393,18 @@ class ScopeService:
                 return {"ok": True, "op_id": g.align_phase()}
             elif cmd == "outputs_off":
                 return {"ok": True, "op_id": g.outputs_off()}
+            elif cmd == "ramp_start":
+                # a SWEEP of an output's knob (fly scans): reply carries ramp_id
+                return {"ok": True, "ramp_id": g.ramp_start(
+                    ch, str(msg["knob"]), float(msg["to"]), float(msg["rate"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": g.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": g.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": g.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": g.stream_stop()}
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(g.cfg)}
             elif cmd == "set_config":
