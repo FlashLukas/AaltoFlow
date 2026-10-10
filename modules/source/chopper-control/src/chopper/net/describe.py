@@ -95,6 +95,34 @@ def read_path(status: dict, path):
     return cur
 
 
+#: The sweep pace a client is offered first (Hz/s): slow enough for the
+#: wheel's PLL to follow closely and for a lock-in referenced to it.
+SWEEP_RATE_DEFAULT_HZ_PER_S = 5.0
+
+
+def _frequency_ramp(cfg, blind: bool) -> dict:
+    """The `ramp` block of the frequency (guide 6b, "Ramps"): the SERVICE
+    walks the synthesiser (softramp.py). Binned by the MEASURED wheel
+    frequency (REF OUT on a slot sensor) -- or, while REF OUT is on 'target'
+    and the wheel cannot be seen, honestly by the COMMANDED frequency
+    (measured: false). The shape follows the output mode, so describe's
+    revision moves when it changes."""
+    lim = cfg.limits
+    lo, hi = sorted((float(lim.sweep_rate_min_Hz_per_s), float(lim.sweep_rate_max_Hz_per_s)))
+    return {
+        "kind": "software",
+        "start": {"verb": "ramp_frequency",
+                  "args": {"to": "frequency_Hz", "rate": "rate_Hz_per_s"}},
+        "stop": {"verb": "ramp_stop"},
+        "rate": {"unit": "Hz/s", "min": lo, "max": hi,
+                 "default": max(lo, min(hi, SWEEP_RATE_DEFAULT_HZ_PER_S))},
+        "readback": {"stream": {"group": "wheel",
+                                "channel": "commanded" if blind else "frequency"},
+                     "measured": not blind},
+        "done": {"key": "ramping", "id_key": "ramp_id"},
+    }
+
+
 def build_manifest(ch) -> dict:
     """The chopper's manifest, built from the brain's LIVE state."""
     cfg = ch.cfg
@@ -154,13 +182,22 @@ def build_manifest(ch) -> dict:
             settle={"policy": "adopt_then_flag",
                     "setpoint_key": "setpoint_frequency_Hz", "flag_key": "locked"},
             timeout_s=lock_s,
+            # a CONTINUOUS SWEEP for fly scans (2026-10-10)
+            ramp=_frequency_ramp(cfg, st.lock_source == "timer"),
             help=f"{blade.name}, {st.ref_mode}: {lo:g}..{hi:g} Hz. A scan waits until "
                  f"the wheel is locked at the new frequency."))
     params += [
         _p("measured_frequency", f"Measured frequency{ring_txt}", "indicator", "float",
            unit="Hz", group="Frequency", order=21, decimals=max(dec, 2), plottable=True,
            read_path=["frequency_Hz"],
+           # every poll, for fly scans (one group: one start/read/stop)
+           stream={"group": "wheel", "channel": "frequency"},
            help="From the slot sensor (REF OUT). null while REF OUT is on 'target'."),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Frequency", order=24,
+           read_path=["ramping"],
+           help="True while a frequency sweep (ramp_frequency) walks the setpoint."),
+        _p("ramp_stop", "Stop the sweep", "action", "action", group="Run", order=15,
+           help="End a frequency sweep where it is. Allowed for anyone, also a viewer."),
         _p("freq_error", "Frequency error", "indicator", "float", unit="Hz",
            group="Frequency", order=22, decimals=3, plottable=True,
            read_path=["freq_error_Hz"]),

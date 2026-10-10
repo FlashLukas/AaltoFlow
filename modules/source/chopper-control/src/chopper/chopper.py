@@ -22,6 +22,14 @@ repeats the set value and the wheel is invisible; then the brain waits
 external reference (then the frequency is not ours to set; `describe` turns it
 into an indicator).
 
+A frequency SWEEP for fly scans (ramp_frequency, 2026-10-10): the SERVICE
+walks the synthesiser frequency at a set pace (softramp.py) and the poll
+thread -- faster while it runs -- records every REF OUT reading with its time,
+so a fly scan bins by the MEASURED wheel frequency (by the commanded one,
+honestly declared, while REF OUT sits on 'target' and the wheel is blind).
+While the setpoint moves the wheel is never "locked"; at the end the lock is
+judged afresh. A set, standby and a blade / reference change stop it.
+
 What it deliberately does NOT do: stop or start the wheel at start-up. A
 spinning chopper is harmless, and somebody's lock-in may be using it; the brain
 ADOPTS blade, modes, frequency, phase and the run state. At shutdown it leaves
@@ -51,6 +59,8 @@ from dataclasses import dataclass, field
 from .backends.base import ChopperBackend
 from .blades import Blade, blade_by_index, blade_by_name, parse_owned
 from .config import Config
+from .softramp import SoftRamp
+from .stream import StreamRecorder
 
 _NAN = float("nan")
 
@@ -91,6 +101,12 @@ class Status:
     owned_blades: list = field(default_factory=list)
     readings: int = 0
     poll_ms: float = _NAN
+    # the frequency SWEEP (ramp_frequency, fly scans): ramp_id = the newest
+    # sweep started; it is over when ramp_id is yours and `ramping` is False
+    ramping: bool = False
+    ramp_id: int = 0
+    ramp_target_Hz: float = _NAN
+    ramp_rate_Hz_per_s: float = _NAN
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -173,6 +189,22 @@ class Chopper:
         # replaced by the service to forward events; default = no-op
         self._on_event = lambda level, msg: None
 
+        # THE FREQUENCY SWEEP (suite_common/softramp.py, copied as softramp.py).
+        # Live limits = the referenced ring AND the envelope, read every step.
+        self._sent_hz = _NAN                # last value written by the sweep (grid)
+        self._sweep = SoftRamp(self._sweep_step, lambda: self._freq_sp,
+                               limits=self.freq_limits,
+                               dt_s=float(getattr(self.cfg.hardware, "ramp_dt_s", 0.1)),
+                               on_done=self._sweep_done, channel="commanded",
+                               name="chopper-sweep")
+        # THE STREAM (fly scans): every poll's REF OUT reading with its time --
+        # the wheel frequency on the referenced ring (NaN while blind) and the
+        # raw REF OUT value. The COMMANDED frequency comes from the sweep's own
+        # record (softramp.py: every value sent, stamped when it was sent),
+        # with its own time stamps (`t_ch`) -- sampling it at the poll would
+        # lose the last step until the next poll.
+        self.recorder = StreamRecorder(["frequency", "refout"])
+
     # ---- lifecycle ---------------------------------------------------------
 
     def start(self, poll: bool = True) -> None:
@@ -221,6 +253,7 @@ class Chopper:
         keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
         the wheel is left as it is even with stop_on_exit set -- the next start
         adopts it."""
+        self._sweep.stop()           # no sweep step may follow (before any lock)
         self._stop.set()
         t = self._thread
         if t is not None and t is not threading.current_thread():
@@ -284,7 +317,10 @@ class Chopper:
         # scan would time out.
         dev_f = float(st["freq"])
         same = max(self._blade.resolution_Hz, 1.0) + 1e-9
+        # NOT while a sweep moves the setpoint: the unit then legitimately
+        # lags it by a step, and "adopting" that would walk the sweep back.
         if (not self._blade.is_external(self._ref) and math.isfinite(self._freq_sp)
+                and not self._sweep.running
                 and abs(dev_f - self._freq_sp) > same):
             self._freq_sp = dev_f
             self._restart_lock()
@@ -310,7 +346,9 @@ class Chopper:
             with self._hw:
                 state = self._read_config_locked() if full else None
                 enable = self.backend.get_enable()
+                tw0 = time.time()
                 refout = self.backend.read_refout_frequency()
+                t_wall = 0.5 * (tw0 + time.time())
                 inp = self.backend.read_input_frequency() if external else _NAN
         except Exception as exc:
             with self._lock:
@@ -350,8 +388,16 @@ class Chopper:
                 # REF OUT may follow the OTHER ring of a 10/100 blade: scale it
                 # to the ring the reference locks to (same wheel, other slots)
                 self._measured = self._refout * b.slots(ring_ref) / b.slots(ring_out)
+            # into the stream, stamped at the middle of the read (wall clock:
+            # the coordinator may sit on another PC)
+            self.recorder.append(t_wall, (self._measured, self._refout))
             if self._gen != gen0:
                 return          # _apply_read above adopted a front-panel change: judge it next poll
+            if self._sweep.running:
+                # the setpoint MOVES: there is nothing to be locked to yet
+                self._locked = False
+                self._band_since = None
+                return
             target = self._target_locked()
             s = self.cfg.settle
             if ring_out is None:
@@ -391,8 +437,121 @@ class Chopper:
         while not self._stop.is_set():
             t0 = time.monotonic()
             self.poll_once()
-            dt = 1.0 / max(float(self.cfg.hardware.poll_hz), 0.2)
-            self._stop.wait(max(0.0, dt - (time.monotonic() - t0)))
+            hw = self.cfg.hardware
+            fast = self._sweep.running or self.recorder.running
+            hz = float(getattr(hw, "stream_poll_hz", hw.poll_hz) if fast else hw.poll_hz)
+            dt = 1.0 / max(hz, 0.2)
+            # deadline + short time.sleep slices, not Event.wait(timeout): on
+            # Windows a timed wait sleeps at least one 15.6 ms tick (gotcha #34)
+            end = t0 + dt
+            while not self._stop.is_set():
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                time.sleep(min(left, 0.01))
+
+    # ---- the frequency SWEEP (fly scans) -----------------------------------------
+
+    def ramp_frequency(self, hz: float, rate_Hz_per_s: float) -> int:
+        """Sweep the chopping frequency to `hz` at `rate_Hz_per_s` (internal
+        reference only); returns the sweep's number. The target is clamped to
+        the live range (blade ring AND envelope) and the rate to
+        limits.sweep_rate_*, each with a warning. It does not start the wheel:
+        in standby only the setpoint walks."""
+        self._require_connected()
+        hz = _finite(hz, "frequency")
+        rate = abs(_finite(rate_Hz_per_s, "rate"))
+        if not rate > 0:
+            raise ValueError("rate must be > 0")
+        with self._lock:
+            if self._blade.is_external(self._ref):
+                raise ValueError("on external reference the frequency comes from EXT REF IN "
+                                 "(times N/D); a sweep needs an internal reference")
+            running = self._enabled
+        lim = self.cfg.limits
+        lo_r, hi_r = sorted((float(lim.sweep_rate_min_Hz_per_s),
+                             float(lim.sweep_rate_max_Hz_per_s)))
+        r, rclamped = _clamp(rate, lo_r, hi_r)
+        lo, hi = self.freq_limits()
+        value, clamped = _clamp(hz, lo, hi)
+        self._sweep.stop()           # a new sweep replaces a running one, from where it is
+        rid = self._sweep.start(value, r)
+        if clamped or rclamped:
+            self._emit("warn", f"sweep clamped to {value:g} Hz at {r:g} Hz/s "
+                               f"(range {lo:g}..{hi:g} Hz, {lo_r:g}..{hi_r:g} Hz/s)")
+        self._emit("info", f"frequency sweep #{rid} -> {value:g} Hz at {r:g} Hz/s"
+                   + ("" if running else " (standby: only the setpoint walks)"))
+        return rid
+
+    def ramp_stop(self) -> bool:
+        """End a sweep WHERE IT IS (a scan's Abort; a safety verb). True if
+        one was running."""
+        was = self._sweep.stop()
+        if was:
+            self._emit("info", f"frequency sweep stopped at {self._freq_sp:g} Hz")
+        return was
+
+    # the stream verbs: the poll thread's REF OUT readings, plus the sweep's
+    # record of what it commanded (channel "commanded", its own stamps)
+    def stream_start(self) -> int:
+        self._sweep.stream_start()
+        return self.recorder.start()
+
+    def stream_read(self) -> dict:
+        return self._merge(self.recorder.read(), self._sweep.stream_read())
+
+    def stream_stop(self) -> dict:
+        return self._merge(self.recorder.stop(), self._sweep.stream_stop())
+
+    @staticmethod
+    def _merge(chunk: dict, sweep: dict) -> dict:
+        """The poll's chunk with the sweep's commanded values added as a
+        channel of their own, on their own time stamps (`t_ch`, guide 6b)."""
+        chunk["values"]["commanded"] = sweep["values"]["commanded"]
+        chunk.setdefault("t_ch", {})["commanded"] = sweep["t"]
+        chunk["delay_s"]["commanded"] = 0.0
+        chunk["overflow"] = bool(chunk["overflow"] or sweep["overflow"])
+        return chunk
+
+    def _stop_sweep(self, why: str) -> None:
+        """Stop a running sweep because `why` takes the frequency over.
+        Called WITHOUT a lock held (the step in progress may need one)."""
+        if self._sweep.stop():
+            self._emit("info", f"frequency sweep stopped by {why} at {self._freq_sp:g} Hz")
+
+    def _sweep_step(self, hz: float) -> None:
+        """One step, on the sweep's thread: the synthesiser gets the value on
+        its grid -- written only when that grid value changes (1 Hz grid at a
+        few Hz/s: most steps change nothing and send nothing) -- and the
+        setpoint follows exactly. NOT a _restart_lock() per step: bumping the
+        generation would make the poll throw away every reading taken during
+        the sweep (see poll_once), and the sweep needs exactly those. The poll
+        keeps `locked` False while a sweep runs instead."""
+        with self._lock:
+            if self._blade.is_external(self._ref):
+                raise RuntimeError("the reference became external")
+            sent = self._quantize(float(hz))
+        if sent != self._sent_hz:
+            with self._hw:
+                self.backend.set_frequency(sent)
+            self._sent_hz = sent
+        with self._lock:
+            self._freq_sp = float(hz)
+            self._locked = False
+            self._band_since = None
+            self._changed_at = self._clock()
+
+    def _sweep_done(self, rid: int, reason: str) -> None:
+        with self._lock:
+            # judge the lock afresh at where the sweep ended (a new generation:
+            # a reading taken before this moment must not count)
+            self._restart_lock()
+            here = self._freq_sp
+        self._sent_hz = _NAN
+        if reason == "done":
+            self._emit("info", f"frequency sweep #{rid} done at {here:g} Hz")
+        elif reason.startswith("error"):
+            self._emit("error", f"frequency sweep #{rid} ended: {reason}")
 
     # ---- limits --------------------------------------------------------------
 
@@ -441,6 +600,9 @@ class Chopper:
             if self._blade.is_external(self._ref):
                 raise ValueError("on external reference the frequency comes from EXT REF IN "
                                  "(times N/D); switch to an internal reference to set it")
+        # a set takes the frequency over from a sweep (stopped BEFORE the locks
+        # a sweep step may be waiting for)
+        self._stop_sweep("a frequency set")
         lo, hi = self.freq_limits()
         value, clamped = _clamp(hz, lo, hi)
         # Send the value on the synthesiser grid; KEEP the setpoint exactly as
@@ -483,6 +645,8 @@ class Chopper:
         command: status `lock_gen` equal to it plus `locked` = THIS start locked."""
         self._require_connected()
         on = bool(on)
+        if not on:
+            self._stop_sweep("standby")
         with self._hw:
             self.backend.set_enable(on)
         with self._lock:
@@ -506,6 +670,7 @@ class Chopper:
             raise ValueError(f"blade {blade.name} is not in blades.owned "
                              f"({self.cfg.blades.owned}); add it in Settings first")
         self._require_standby("the blade")
+        self._stop_sweep("a blade change")
         with self._lock:
             old_ref, old_out = self._ref, self._output
         # The ref / output INDICES mean different things on a different blade
@@ -535,6 +700,7 @@ class Chopper:
             raise ValueError(f"reference mode {mode!r} does not exist for "
                              f"{self._blade.name}; choose one of {', '.join(refs)}")
         self._require_standby("the reference mode")
+        self._stop_sweep("a reference-mode change")
         with self._hw:
             self.backend.set_ref(refs.index(mode))
         with self._lock:
@@ -606,6 +772,7 @@ class Chopper:
         """A snapshot of what the poll thread last stored. Never touches hardware."""
         lo, hi = self.freq_limits()
         owned = parse_owned(self.cfg.blades.owned)
+        r = self._sweep.status()             # in memory: the sweep's live state
         with self._lock:
             target = self._target_locked()
             err = (self._measured - target) if math.isfinite(self._measured) else _NAN
@@ -622,7 +789,10 @@ class Chopper:
                 lock_gen=self._gen,
                 phase_deg=self._phase, nharmonic=self._nh, dharmonic=self._dh,
                 freq_min_Hz=lo, freq_max_Hz=hi, owned_blades=owned,
-                readings=self._readings, poll_ms=self._poll_ms)
+                readings=self._readings, poll_ms=self._poll_ms,
+                ramping=bool(r["ramping"]), ramp_id=int(r["ramp_id"]),
+                ramp_target_Hz=_NAN if r["ramp_target"] is None else float(r["ramp_target"]),
+                ramp_rate_Hz_per_s=_NAN if r["ramp_rate"] is None else float(r["ramp_rate"]))
 
     # ---- settings (Settings dialog / wire use these) ------------------------------
 

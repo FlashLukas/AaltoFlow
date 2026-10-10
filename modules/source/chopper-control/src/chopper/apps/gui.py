@@ -341,6 +341,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq_set.clicked.connect(self._set_frequency)
         frow.addWidget(self.freq_spin, 1); frow.addWidget(self.freq_set)
         flay.addLayout(frow)
+        # SWEEP (2026-10-10): walk the frequency CONTINUOUSLY to the value
+        # above at a set pace -- what a fly scan does row by row, by hand.
+        # "Stop" ends it where it is.
+        srow = QtWidgets.QHBoxLayout()
+        lim = self.cfg.limits
+        self.sweep_rate = QtWidgets.QDoubleSpinBox()
+        self.sweep_rate.setDecimals(2); self.sweep_rate.setSuffix("  Hz/s")
+        self.sweep_rate.setRange(lim.sweep_rate_min_Hz_per_s, lim.sweep_rate_max_Hz_per_s)
+        self.sweep_rate.setValue(max(lim.sweep_rate_min_Hz_per_s,
+                                     min(lim.sweep_rate_max_Hz_per_s, 5.0)))
+        self.sweep_btn = QtWidgets.QPushButton("Sweep to")
+        self.sweep_btn.setToolTip("Sweep the frequency continuously to the value above "
+                                  "at this pace")
+        self.sweep_btn.clicked.connect(
+            lambda: self._try(self.ctrl.ramp_frequency, self.freq_spin.value(),
+                              self.sweep_rate.value()))
+        sweep_stop = QtWidgets.QPushButton("Stop sweep")
+        sweep_stop.setToolTip("End the sweep where it is (the wheel keeps running; the motor Stop is above)")
+        sweep_stop.clicked.connect(lambda: self._try(self.ctrl.ramp_stop))
+        mark_always(sweep_stop)      # ramp_stop is a safety verb: a viewer may stop
+        srow.addWidget(self.sweep_rate, 1); srow.addWidget(self.sweep_btn)
+        srow.addWidget(sweep_stop)
+        flay.addLayout(srow)
         self.range_hint = QtWidgets.QLabel("")
         self.range_hint.setObjectName("hint")
         self.range_hint.setStyleSheet(f"color:{COLORS['muted']}; font-size:11px;")
@@ -535,6 +558,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.range_hint.setText(f"{s.blade}: {s.freq_min_Hz:g} - {s.freq_max_Hz:g} Hz")
         self.freq_spin.setEnabled(not s.external)
         self.freq_set.setEnabled(not s.external)
+        self.sweep_btn.setEnabled(not s.external)     # a sweep needs internal reference
         if s.external:
             self.range_hint.setText("external reference: frequency = EXT REF IN x N / D")
 

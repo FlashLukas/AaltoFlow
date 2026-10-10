@@ -76,7 +76,9 @@ src/chopper/
     base.py              ChopperBackend Protocol -- the interface everything depends on
     sim.py               SimulatedMC2000B -- first-order spin-up, jitter, standby rules
     mc2000b.py           SerialMC2000B -- the real controller (lazy pyserial import)
-  chopper.py             Chopper -- adopts, clamps, polls, decides "locked"
+  chopper.py             Chopper -- adopts, clamps, polls, decides "locked", sweeps
+  softramp.py            the frequency sweep's walk (a byte-identical copy of suite-common's)
+  stream.py              the record of every REF OUT reading, for fly scans
   sim_system.py          build_sim_system(cfg) -- the simulator wired into a Chopper
   net/
     protocol.py          wire shapes + default ports (5609/5610)
@@ -107,6 +109,43 @@ tests/                   pytest: config, blades, brain (manual clock), net, desc
 
 plus the universal `status`, `info`, `get_config`, `set_config`, `describe`,
 `shutdown`. A reply means *accepted*; the wheel being there is `locked`.
+
+## Sweep (fly scans)
+
+The chopping frequency (internal reference) can be swept continuously at a
+set pace, so a scan-core fly axis can fly it: the chopper sweeps over each
+row, the detectors stream, and every sample is binned by the wheel frequency
+the module **measures** on the slot sensor.
+
+| verb | args | |
+|---|---|---|
+| `ramp_frequency` | `frequency_Hz`, `rate_Hz_per_s` | sweep to the target at this pace; reply `{"ramp_id": n}` |
+| `ramp_stop` | | end it where it is (safety verb, also a describe action) |
+| `stream_start` / `stream_read` / `stream_stop` | | every REF OUT reading with its time (`frequency` on the referenced ring, `refout`), plus `commanded` (every value the sweep sent, on its own stamps `t_ch`) |
+
+* The service walks the synthesiser (`softramp.py`, a copy of
+  `suite-common/src/suite_common/softramp.py`); a `freq=` write goes out only
+  when the value on the blade's grid changes (at most every
+  `hardware.ramp_dt_s`). While it runs (or a stream records) the poll reads at
+  `hardware.stream_poll_hz` (10 Hz; VERIFY the serial budget).
+* **Measured, or honestly commanded.** With REF OUT on a sensor (`actual`,
+  `outer`, `inner`) the ramp's readback is the measured wheel frequency -- the
+  wheel lags a fast sweep through its PLL and inertia, and the data says so.
+  With REF OUT on `target` the wheel is invisible: describe then declares the
+  readback as the commanded frequency (`measured: false`).
+* While the setpoint moves the wheel is never `locked`; at the end the lock is
+  judged afresh (a new `lock_gen`). A front-panel change is not adopted during
+  a sweep (the unit legitimately lags the setpoint by a step).
+* A frequency set, standby (the `stop` verb), a blade or reference-mode change
+  stop a sweep; on external reference a sweep is refused. Targets are clamped
+  to the live range (blade ring and envelope), rates to
+  `limits.sweep_rate_*_Hz_per_s` (VERIFY on the wheel), each with a warning.
+  It does not start the wheel: in standby only the setpoint walks.
+* Status: `ramping`, `ramp_id` (the newest sweep), `ramp_target_Hz`,
+  `ramp_rate_Hz_per_s`.
+
+The GUI's frequency card has the pace, **Sweep to** (the value above) and
+**Stop sweep** (the wheel keeps running; the motor **Stop** is above it).
 
 ## Controller commands used (real backend)
 

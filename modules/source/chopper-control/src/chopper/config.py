@@ -42,6 +42,15 @@ class Limits:
     freq_max_Hz: float = 10_000.0
     phase_min_deg: float = 0.0
     phase_max_deg: float = 360.0          # the controller's own range (manual 8.1)
+    # The frequency SWEEP (ramp_frequency, for fly scans, 2026-10-10): the
+    # pace a sweep may be asked for. The wheel follows a moving synthesiser
+    # through its PLL and its inertia ("locks within a few seconds", manual
+    # 5.1, i.e. a time constant of a fraction of a second): far above a few
+    # tens of Hz/s it lags behind the command and a lock-in referenced to it
+    # sees a sliding reference. The fly scan bins by the MEASURED wheel
+    # frequency, so a lag is recorded, not hidden. VERIFY on the wheel.
+    sweep_rate_min_Hz_per_s: float = 0.01
+    sweep_rate_max_Hz_per_s: float = 100.0
 
 
 @dataclass
@@ -83,6 +92,13 @@ class Hardware:
     baud: int = 115200
     timeout_s: float = 0.5                # per reply; the controller answers in ms
     poll_hz: float = 5.0                  # measured-frequency reads per second
+    # ...while a frequency SWEEP runs or a fly scan records the stream (each
+    # poll = enable? + refoutfreq?, a few ms at 115200 baud -- VERIFY on the
+    # unit that 10 Hz leaves room for the sweep's freq= writes)
+    stream_poll_hz: float = 10.0
+    # one freq= write per sweep step at most every ramp_dt_s (and only when the
+    # value on the synthesiser grid changes)
+    ramp_dt_s: float = 0.1
     stop_on_exit: bool = False            # True: disable the motor when the service stops
     # Start-up only READS the controller (Lukas, 2026-09-27). The one write the
     # real backend used to make at connect, `verbose=0`, is now opt-in: set True

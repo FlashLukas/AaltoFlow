@@ -35,7 +35,8 @@ class RemoteStatus:
 
     _NUM = ("setpoint_frequency_Hz", "target_frequency_Hz", "frequency_Hz",
             "freq_error_Hz", "refout_frequency_Hz", "input_frequency_Hz",
-            "freq_min_Hz", "freq_max_Hz", "poll_ms")
+            "freq_min_Hz", "freq_max_Hz", "poll_ms", "ramp_target_Hz",
+            "ramp_rate_Hz_per_s")
 
     def __init__(self, d: dict):
         for k in self._NUM:
@@ -58,6 +59,9 @@ class RemoteStatus:
         self.dharmonic = int(d.get("dharmonic", 1) or 1)
         self.owned_blades = list(d.get("owned_blades", []) or [])
         self.readings = int(d.get("readings", 0) or 0)
+        # the frequency SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = int(d.get("ramp_id", 0) or 0)
         # None from a service that predates `describe`.
         self.describe_rev = d.get("describe_rev")
 
@@ -144,6 +148,15 @@ class ChopperClient(ControlClient):
     def set_frequency(self, hz: float) -> float:
         return self._checked({"cmd": "set_frequency", "frequency_Hz": float(hz)}).get(
             "frequency_Hz", float(hz))
+
+    def ramp_frequency(self, hz: float, rate_Hz_per_s: float) -> int:
+        """Sweep the chopping frequency at a set pace (fly scans, the GUI's Sweep)."""
+        return self._checked({"cmd": "ramp_frequency", "frequency_Hz": float(hz),
+                              "rate_Hz_per_s": float(rate_Hz_per_s)}).get("ramp_id")
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._checked({"cmd": "ramp_stop"}).get("stopped")
 
     def set_phase(self, deg: float) -> float:
         return self._checked({"cmd": "set_phase", "phase_deg": float(deg)}).get(

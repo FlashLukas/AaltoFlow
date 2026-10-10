@@ -67,8 +67,10 @@ class ChopperService:
         #   and `start` obviously is not.
         #   READ: none beyond get_/read_/list_ and the universal verbs.
         self.control = ControlLease(
-            safety={"stop"},
-            read=set(),
+            # `ramp_stop` ends a frequency sweep where it is: a stop, so a
+            # viewer may send it; `stream_read` only reads the record
+            safety={"stop", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -228,6 +230,19 @@ class ChopperService:
             if cmd == "set_frequency":
                 return {"ok": True,
                         "frequency_Hz": self.ch.set_frequency(float(msg["frequency_Hz"]))}
+            elif cmd == "ramp_frequency":
+                # the frequency SWEEP (fly scans): the reply's ramp_id is what
+                # status `ramp_id` shows while, and after, this sweep runs
+                return {"ok": True, "ramp_id": self.ch.ramp_frequency(
+                    float(msg["frequency_Hz"]), float(msg["rate_Hz_per_s"]))}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": self.ch.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": self.ch.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": self.ch.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": self.ch.stream_stop()}
             elif cmd == "set_phase":
                 return {"ok": True, "phase_deg": self.ch.set_phase(float(msg["phase_deg"]))}
             elif cmd == "set_enable":
