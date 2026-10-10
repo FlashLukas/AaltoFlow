@@ -65,8 +65,10 @@ class K2450Service:
         #   the sample other clients wait on.
         #   READ: none beyond get_/read_/list_ and the universal verbs.
         self.control = ControlLease(
-            safety={"output_off"},
-            read=set(),
+            # `ramp_stop` ends a level sweep where it is: a stop, so a viewer
+            # may send it; `stream_read` only reads the record of readings
+            safety={"output_off", "ramp_stop"},
+            read={"stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -233,6 +235,27 @@ class K2450Service:
                     s.set_current(float(msg["current_uA"]) * 1e-6)
                 else:
                     s.set_current(float(msg["current_A"]))
+            elif cmd == "ramp_voltage":
+                # the level SWEEPS (fly scans): the reply's ramp_id is what
+                # status `ramp_id` shows while, and after, this sweep runs
+                return {"ok": True, "ramp_id": s.ramp_voltage(
+                    float(msg["voltage_V"]), float(msg["rate_V_per_s"]))}
+            elif cmd == "ramp_current":
+                # uA + uA/s (scan-core, like set_current's uA spelling) or
+                # A + A/s (people and scripts)
+                if "current_uA" in msg:
+                    amps, rate = float(msg["current_uA"]) * 1e-6, float(msg["rate_uA_per_s"]) * 1e-6
+                else:
+                    amps, rate = float(msg["current_A"]), float(msg["rate_A_per_s"])
+                return {"ok": True, "ramp_id": s.ramp_current(amps, rate)}
+            elif cmd == "ramp_stop":
+                return {"ok": True, "stopped": s.ramp_stop()}
+            elif cmd == "stream_start":
+                return {"ok": True, "stream_id": s.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": s.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": s.stream_stop()}
             elif cmd == "set_current_limit":
                 s.set_current_limit(float(msg["current_limit_A"]))
             elif cmd == "set_voltage_limit":

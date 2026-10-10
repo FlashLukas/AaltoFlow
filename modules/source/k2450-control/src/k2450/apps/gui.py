@@ -432,6 +432,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.limit_label = QtWidgets.QLabel("Limit")
         form.addRow(self.limit_label, mrow)
 
+        # SWEEP (2026-10-10): walk the level CONTINUOUSLY to the value above
+        # at a set pace -- what a fly scan does row by row, by hand. It never
+        # switches the output on; "Stop" ends it where it is.
+        self.sweep_rate = _dspin(0, 100, 4, 0.1)
+        self.sweep_btn = QtWidgets.QPushButton("Sweep to")
+        self.sweep_btn.setToolTip("Sweep the level continuously to the value above "
+                                  "at this pace")
+        self.sweep_btn.clicked.connect(self._sweep_level)
+        sweep_stop = QtWidgets.QPushButton("Stop")
+        sweep_stop.setToolTip("End the sweep where it is")
+        sweep_stop.clicked.connect(lambda: self._call(self.ctrl.ramp_stop))
+        mark_always(sweep_stop)      # ramp_stop is a safety verb: a viewer may stop
+        wrow = QtWidgets.QHBoxLayout()
+        wrow.addWidget(self.sweep_rate, 1); wrow.addWidget(self.sweep_btn)
+        wrow.addWidget(sweep_stop)
+        form.addRow("Sweep", wrow)
+
         self.srange_combo = QtWidgets.QComboBox()
         self.srange_combo.activated.connect(self._set_source_range)
         form.addRow("Range", self.srange_combo)
@@ -569,6 +586,16 @@ class MainWindow(QtWidgets.QMainWindow):
         lim = self.cfg.limits
         for w in (self.level_spin, self.limit_spin):
             w.blockSignals(True)
+        # the sweep pace in the level's own units (V/s, or mA/s like the level)
+        if fn == "voltage":
+            self.sweep_rate.setRange(lim.sweep_rate_min_V_per_s, lim.sweep_rate_max_V_per_s)
+            self.sweep_rate.setSuffix("  V/s")
+            self.sweep_rate.setValue(0.1)
+        else:
+            self.sweep_rate.setRange(lim.sweep_rate_min_A_per_s * 1e3,
+                                     lim.sweep_rate_max_A_per_s * 1e3)
+            self.sweep_rate.setSuffix("  mA/s")
+            self.sweep_rate.setValue(0.001)
         if fn == "voltage":
             self.level_label.setText("Voltage")
             self.level_spin.setDecimals(6)
@@ -652,6 +679,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._call(self.ctrl.set_voltage, self.level_spin.value())
         else:
             self._call(self.ctrl.set_current, self.level_spin.value() * 1e-3)
+
+    def _sweep_level(self):
+        if self._shown_fn == "voltage":
+            self._call(self.ctrl.ramp_voltage, self.level_spin.value(),
+                       self.sweep_rate.value())
+        else:
+            self._call(self.ctrl.ramp_current, self.level_spin.value() * 1e-3,
+                       self.sweep_rate.value() * 1e-3)
 
     def _set_limit(self):
         if self._shown_fn == "voltage":

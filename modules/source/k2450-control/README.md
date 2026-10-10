@@ -57,7 +57,9 @@ src/k2450/
     base.py              SourceMeterBackend Protocol, the range tables, Reading
     sim.py               SimulatedK2450 -- fake 2450 + pretend sample (compliance, 2/4-wire, noise, NPLC timing)
     scpi_2450.py         VisaK2450 -- the real instrument, SCPI over VISA (lazy pyvisa import)
-  smu.py                 SourceMeter -- clamps, safety, settling, polling thread, acquire
+  smu.py                 SourceMeter -- clamps, safety, settling, polling thread, acquire, sweeps
+  softramp.py            the level sweep's walk (a byte-identical copy of suite-common's)
+  stream.py              the record of every reading, for fly scans
   sim_system.py          build_sim_system(cfg) -- wire the simulator into a SourceMeter
   net/
     protocol.py          wire shapes + default ports (5623/5624)
@@ -98,6 +100,45 @@ tests/                   pytest: config, brain + physics, describe, network, GUI
 Switch the output on before the scan (the `output` control, or by hand):
 `acquire` refuses with the output off, so a forgotten output fails loudly
 instead of recording zeros.
+
+## Sweep (fly scans)
+
+The level of the active source function can be swept continuously at a set
+pace, so a scan-core fly axis can fly it: the SMU sweeps over each row, the
+detectors stream, and every sample is binned by the **measured** value (the
+source readback the 2450 reports with every reading).
+
+| verb | args | |
+|---|---|---|
+| `ramp_voltage` | `voltage_V`, `rate_V_per_s` | sourcing voltage only; reply `{"ramp_id": n}` |
+| `ramp_current` | `current_uA`, `rate_uA_per_s` (or `current_A`, `rate_A_per_s`) | sourcing current only; uA like `set_current` for scan-core |
+| `ramp_stop` | | end it where it is (safety verb, also a describe action) |
+| `stream_start` / `stream_read` / `stream_stop` | | every reading with its time: `voltage`, `current`, `current_uA`, `level` |
+
+* **A software ramp, not the 2450's own sweep.** `:SOUR:SWE` is a stepped
+  list run by the trigger model: while it runs the instrument is busy, the
+  poll cannot read in between, and the readback exists only as a buffer at
+  the end. So the service walks the level (`softramp.py`, a copy of
+  `suite-common/src/suite_common/softramp.py`), one level write every
+  `hardware.ramp_dt_s` (50 ms; VERIFY the bus budget).
+* **Compliance is respected.** Every step is clamped to the live level
+  envelope (your limits, the 2450 boxes, the compliance limit, a fixed range),
+  and a reading **in compliance** stops the sweep: the limit then sets the
+  operating point and the swept level no longer applies.
+* **It never switches the output on.** With the output off the stored level
+  walks (and is sent, as a set would send it) and nothing reaches the sample;
+  the poll still reads (the 2450 measures ~0 with the output off -- VERIFY),
+  so the stream covers the row.
+* A level set, output off, a source-function change and new settings stop a
+  sweep; a new sweep replaces a running one from where it got to. Targets and
+  rates are clamped with a warning (`limits.sweep_rate_*`, VERIFY with the
+  real sample).
+* Status: `ramping`, `ramp_id` (the newest sweep), `sweep_function`,
+  `sweep_target`, `sweep_rate` (V and V/s, or A and A/s); `settled` is False
+  while the level moves.
+
+The GUI's source card has a **Sweep** row: the pace (V/s or mA/s), **Sweep
+to** (the level above) and **Stop**.
 
 ## SCPI commands used (real backend)
 

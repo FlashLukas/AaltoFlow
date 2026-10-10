@@ -37,7 +37,7 @@ class RemoteStatus:
     _FLOATS = ("source_voltage_set_V", "source_current_set_A", "source_current_set_uA",
                "current_limit_A", "voltage_limit_V", "level_max", "limit_min",
                "limit_max", "source_range", "measure_range", "nplc", "voltage_V",
-               "current_A", "resistance_ohm", "read_ms")
+               "current_A", "resistance_ohm", "read_ms", "sweep_target", "sweep_rate")
     _SAMPLE_FLOATS = ("voltage_V", "voltage_std_V", "current_A", "current_std_A",
                       "resistance_ohm", "resistance_std_ohm")
 
@@ -61,6 +61,10 @@ class RemoteStatus:
         self.acq_id = d.get("acq_id", 0)
         self.acquiring = d.get("acquiring", False)
         self.acq_progress = d.get("acq_progress", 0.0)
+        # the level SWEEP (an older service has none: never sweeping)
+        self.ramping = bool(d.get("ramping", False))
+        self.ramp_id = d.get("ramp_id", 0) or 0
+        self.sweep_function = d.get("sweep_function", "") or ""
         self.sample = {k: _num(v) if k in self._SAMPLE_FLOATS else v
                        for k, v in (d.get("sample") or {}).items()}
         self.describe_rev = d.get("describe_rev")
@@ -141,6 +145,20 @@ class K2450Client(ControlClient):
 
     def set_current(self, amps: float):
         return self._cmd({"cmd": "set_current", "current_A": float(amps)})
+
+    def ramp_voltage(self, volts: float, rate_V_per_s: float) -> int:
+        """Sweep the source voltage at a set pace (fly scans, the GUI's Sweep)."""
+        return self._checked({"cmd": "ramp_voltage", "voltage_V": float(volts),
+                              "rate_V_per_s": float(rate_V_per_s)}).get("ramp_id")
+
+    def ramp_current(self, amps: float, rate_A_per_s: float) -> int:
+        """Sweep the source current at a set pace (amperes, A/s)."""
+        return self._checked({"cmd": "ramp_current", "current_A": float(amps),
+                              "rate_A_per_s": float(rate_A_per_s)}).get("ramp_id")
+
+    def ramp_stop(self) -> bool:
+        """End a sweep where it is (a safety verb: allowed also while viewing)."""
+        return self._checked({"cmd": "ramp_stop"}).get("stopped")
 
     def set_current_limit(self, amps: float):
         return self._cmd({"cmd": "set_current_limit", "current_limit_A": float(amps)})

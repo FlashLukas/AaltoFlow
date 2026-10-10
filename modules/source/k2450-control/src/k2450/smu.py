@@ -30,6 +30,18 @@ Safety rules, all enforced here (not in the backends):
   * a level/limit combination outside the 2450's output boxes (21 V x 1.05 A,
     210 V x 105 mA) is clamped: the limit bounds the level and vice versa.
 
+Level SWEEPS for fly scans (ramp_voltage / ramp_current, 2026-10-10): the
+SERVICE walks the level of the ACTIVE source function at a set pace
+(softramp.py, one level write per step) and the poll thread records every
+reading with its time, so a fly scan bins by the MEASURED value (the source
+readback). Why not the 2450's own sweep (:SOUR:SWE:...)? It is a stepped list
+run by the instrument's trigger model; while it runs the instrument is busy
+and the poll cannot interleave readings, so the readback would only exist as
+a buffer at the end -- no live stream, no stop where it is. A sweep never
+switches the output on, and the compliance rules stay: every step is clamped
+to the live level envelope, and a reading IN COMPLIANCE stops the sweep (the
+SMU then regulates the other quantity, so the level no longer applies).
+
 Threads and locks (the suite's two rules, gotcha #1 and #28):
   * ONE polling thread owns the readings. `status()` only copies what that
     thread stored and never touches the hardware.
@@ -52,6 +64,8 @@ from .backends.base import (BOX_I, BOX_V, FUNCS, I_MAX, NPLC_MAX, NPLC_MIN,
                             OVERRANGE, V_MAX, InstrumentState,
                             SourceMeterBackend, other, range_table, snap_range)
 from .config import Config
+from .softramp import SoftRamp
+from .stream import StreamRecorder
 
 _NAN = float("nan")
 
@@ -105,6 +119,15 @@ class Status:
     acquiring: bool = False
     acq_progress: float = 0.0
     sample: dict = field(default_factory=dict)
+    # The level SWEEP (ramp_voltage / ramp_current, fly scans). ramp_id = the
+    # newest sweep started; it is over when ramp_id is yours and `ramping` is
+    # False. sweep_function = which level sweeps; target / rate in its units
+    # (V and V/s, or A and A/s).
+    ramping: bool = False
+    ramp_id: int = 0
+    sweep_function: str = ""
+    sweep_target: float = _NAN
+    sweep_rate: float = _NAN
 
 
 def _clamp(value: float, lo: float, hi: float) -> tuple[float, bool]:
@@ -200,6 +223,21 @@ class SourceMeter:
         self._stop = threading.Event()
         # replaced by the service / GUI to forward events; default = no-op
         self._on_event = lambda level, msg: None
+
+        # THE LEVEL SWEEP (suite_common/softramp.py, copied as softramp.py):
+        # one walk at a time, of the function that was active when it started
+        # (_sweep_fn); its limits are that function's LIVE level envelope, so
+        # a compliance limit changed meanwhile narrows it at once.
+        self._sweep_fn = self.cfg.source.function
+        self._sweep = SoftRamp(self._sweep_step, self._sweep_level,
+                               limits=lambda: self.level_limits(self._sweep_fn),
+                               dt_s=float(getattr(self.cfg.hardware, "ramp_dt_s", 0.05)),
+                               on_done=self._sweep_done, channel="commanded",
+                               name="k2450-sweep")
+        # THE STREAM (fly scans): every reading the poll thread takes, with its
+        # time: V, I, I in uA (the unit the current control speaks) and the
+        # level commanded at that moment. Recording only while started.
+        self.recorder = StreamRecorder(["voltage", "current", "current_uA", "level"])
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -325,6 +363,7 @@ class SourceMeter:
         keep_outputs=True is a RESTART for a code update (Lukas 2026-10-06):
         stop polling and disconnect the same, but leave the output as it is --
         the next start adopts it."""
+        self._sweep.stop()           # no level step may follow (before any lock)
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)
@@ -409,6 +448,7 @@ class SourceMeter:
         if fn == self.cfg.source.function and not self._sense_bad:
             self._emit("info", f"already sourcing {fn}")
             return
+        self._stop_sweep("a source-function change")
         if self._output:
             self.set_output(False)
             self._emit("warn", "output switched OFF before changing the source function")
@@ -421,9 +461,13 @@ class SourceMeter:
                            f"limit {self._limit_text()} (output OFF)")
 
     def set_voltage(self, volts: float) -> None:
+        # a set takes the level over from a sweep (stopped BEFORE the locks a
+        # sweep step may be waiting for)
+        self._stop_sweep("a voltage set")
         self._set_level("voltage", volts)
 
     def set_current(self, amps: float) -> None:
+        self._stop_sweep("a current set")
         self._set_level("current", amps)
 
     def _set_level(self, fn: str, value) -> None:
@@ -610,6 +654,7 @@ class SourceMeter:
             self._emit("warn", f"OUTPUT ON: {fn} {fmt_si(level, u)}, "
                                f"limit {fmt_si(limit, lu)}")
         else:
+            self._stop_sweep("output off")
             if self._connected:
                 with self._hw:
                     self.backend.set_output(False)
@@ -631,6 +676,112 @@ class SourceMeter:
     def output_off(self) -> None:
         """The one-click safe state (also a scan-routine action)."""
         self.set_output(False)
+
+    # ---- the level SWEEP (fly scans) -------------------------------------------------
+
+    def ramp_voltage(self, volts: float, rate_V_per_s: float) -> int:
+        """Sweep the source VOLTAGE to `volts` at `rate_V_per_s` (sourcing
+        voltage only). Returns the sweep's number."""
+        return self._start_sweep("voltage", volts, rate_V_per_s)
+
+    def ramp_current(self, amps: float, rate_A_per_s: float) -> int:
+        """Sweep the source CURRENT to `amps` at `rate_A_per_s` (sourcing
+        current only). Returns the sweep's number."""
+        return self._start_sweep("current", amps, rate_A_per_s)
+
+    def ramp_stop(self) -> bool:
+        """End a sweep WHERE IT IS: the level stays at the value reached (a
+        scan's Abort; a safety verb). True if one was running."""
+        was = self._sweep.stop()
+        if was:
+            fn = self._sweep_fn
+            self._emit("info", f"{fn} sweep stopped at "
+                               f"{fmt_si(self._sweep_level(), self._unit(fn))}")
+        return was
+
+    # the stream verbs: the poll thread's readings
+    def stream_start(self) -> int:
+        return self.recorder.start()
+
+    def stream_read(self) -> dict:
+        return self.recorder.read()
+
+    def stream_stop(self) -> dict:
+        return self.recorder.stop()
+
+    def _start_sweep(self, fn: str, value, rate) -> int:
+        """Clamp, check and start a sweep of the level of `fn`. It never
+        switches the output on: with the output OFF the stored level walks
+        (and is sent, as a set would send it) but nothing reaches the sample."""
+        unit = self._unit(fn)
+        value = _finite(value, f"{fn} level")
+        r = abs(_finite(rate, "rate"))
+        if not r > 0:
+            raise ValueError("rate must be > 0")
+        if self.cfg.source.function != fn:
+            raise ValueError(f"ramp_{fn} needs sourcing {fn} (select the source "
+                             f"function first)")
+        lim = self.cfg.limits
+        lo_r, hi_r = sorted((float(getattr(lim, f"sweep_rate_min_{unit}_per_s")),
+                             float(getattr(lim, f"sweep_rate_max_{unit}_per_s"))))
+        rate_c, rclamped = _clamp(r, lo_r, hi_r)
+        lo, hi = self.level_limits(fn)
+        target, clamped = _clamp(value, lo, hi)
+        self._sweep.stop()           # a new sweep replaces a running one, from where it is
+        self._sweep_fn = fn
+        rid = self._sweep.start(target, rate_c)
+        if clamped or rclamped:
+            self._emit("warn", f"{fn} sweep clamped to {fmt_si(target, unit)} at "
+                               f"{fmt_si(rate_c, unit)}/s (level "
+                               f"{fmt_si(lo, unit)} .. {fmt_si(hi, unit)}, rate "
+                               f"{fmt_si(lo_r, unit)}/s .. {fmt_si(hi_r, unit)}/s)")
+        self._emit("info", f"{fn} sweep #{rid} -> {fmt_si(target, unit)} at "
+                           f"{fmt_si(rate_c, unit)}/s"
+                           + ("" if self._output else
+                              " (output OFF: the level walks, nothing is applied)"))
+        return rid
+
+    def _stop_sweep(self, why: str) -> None:
+        """Stop a running sweep because `why` takes the level over. Called
+        WITHOUT any lock held: stop() waits for the step in progress, which
+        may be waiting for the hardware lock."""
+        if self._sweep.stop():
+            fn = self._sweep_fn
+            self._emit("info", f"{fn} sweep stopped by {why} at "
+                               f"{fmt_si(self._sweep_level(), self._unit(fn))}")
+
+    def _sweep_level(self) -> float:
+        src = self.cfg.source
+        return src.voltage_V if self._sweep_fn == "voltage" else src.current_A
+
+    def _sweep_step(self, value: float) -> None:
+        """One step of the sweep, on the sweep's thread: the level, exactly as
+        a set would send it, but quiet (no event per step). "Not settled" is
+        written BEFORE the new level becomes visible (gotcha #1 / #28): a scan
+        acquiring meanwhile must not take a reading of a moving level."""
+        fn = self._sweep_fn
+        src = self.cfg.source
+        if src.function != fn:
+            raise RuntimeError(f"the source function is no longer {fn}")
+        with self._lock:
+            self._settle_at = self._clock() + src.settle_s
+            if fn == "voltage":
+                src.voltage_V = float(value)
+            else:
+                src.current_A = float(value)
+        if self._connected:
+            with self._hw:
+                self.backend.set_level(fn, float(value))
+            with self._lock:
+                self._settle_at = self._clock() + src.settle_s
+
+    def _sweep_done(self, rid: int, reason: str) -> None:
+        fn = self._sweep_fn
+        if reason == "done":
+            self._emit("info", f"{fn} sweep #{rid} done at "
+                               f"{fmt_si(self._sweep_level(), self._unit(fn))}")
+        elif reason.startswith("error"):
+            self._emit("error", f"{fn} sweep #{rid} ended: {reason}")
 
     # ---- acquisition ----------------------------------------------------------------
 
@@ -673,6 +824,7 @@ class SourceMeter:
         fn = src.function
         _, lmax = self.level_limits(fn)
         llo, lhi = self.limit_limits(fn)
+        r = self._sweep.status()             # in memory: the sweep's live state
         with self._lock:
             a = self._acq
             settled = (not self._output) or self._clock() >= self._settle_at
@@ -694,6 +846,10 @@ class SourceMeter:
                 acq_id=self._acq_id, acquiring=a is not None,
                 acq_progress=0.0 if a is None else len(a["v"]) / a["want"],
                 sample=dict(self._sample),
+                ramping=bool(r["ramping"]), ramp_id=int(r["ramp_id"]),
+                sweep_function=self._sweep_fn if r["ramp_id"] else "",
+                sweep_target=_NAN if r["ramp_target"] is None else float(r["ramp_target"]),
+                sweep_rate=_NAN if r["ramp_rate"] is None else float(r["ramp_rate"]),
             )
 
     # ---- config (Settings dialog / wire) ---------------------------------------------
@@ -707,6 +863,7 @@ class SourceMeter:
         when the new config changes the source function: that goes through the
         same rule as set_source_function (output OFF first), because a
         set_config or a loaded .ini must not be a back door around it."""
+        self._stop_sweep("new settings")     # they re-send the level from cfg
         if self._output and self.cfg.source.function != self._pushed_fn:
             self.set_output(False)
             self._emit("warn", "output switched OFF: the new settings change "
@@ -739,8 +896,14 @@ class SourceMeter:
     def poll_once(self) -> None:
         """One reading while the output is on, then advance any acquisition.
         Public so tests and single-threaded scripts can drive it."""
+        # While a sweep runs or a fly scan records the stream, read with the
+        # output OFF too: the 2450 measures with the output off (it reads ~0,
+        # which is what the sample sees) -- VERIFY on the instrument that
+        # :READ? is answered with the output off. Such a reading goes into the
+        # stream only; the live values and acquisitions stay output-on only.
+        streaming = self.recorder.running or self._sweep.running
         with self._lock:
-            if not self._output or self._sense_bad:
+            if self._sense_bad or not (self._output or streaming):
                 return
         try:
             with self._hw:
@@ -748,8 +911,11 @@ class SourceMeter:
                 # _hw, so it cannot slip in between this and the reading
                 fn = self.cfg.source.function
                 t_start = self._clock()
+                tw0 = time.time()
                 rd = self.backend.measure()
+                tw1 = time.time()
                 t_end = self._clock()
+                level = self.cfg.source.voltage_V if fn == "voltage" else self.cfg.source.current_A
         except Exception as exc:          # never let the polling thread die
             self._report_hw_error(exc)
             return
@@ -760,6 +926,15 @@ class SourceMeter:
             v, i = rd.measured, rd.source
         r = v / i if (math.isfinite(v) and math.isfinite(i) and i != 0.0) else _NAN
         flag = "overflow" if rd.overflow else ("compliance" if rd.tripped else "")
+        # into the stream, stamped at the middle of the reading (wall clock:
+        # the coordinator may sit on another PC)
+        self.recorder.append(0.5 * (tw0 + tw1), (v, i, i * 1e6, level))
+        if rd.tripped and self._sweep.running:
+            # IN COMPLIANCE: the limit now sets the operating point and the
+            # swept level no longer applies -- stop where it is (no lock held)
+            if self._sweep.stop():
+                self._emit("warn", f"{fn} sweep stopped: in compliance (limit "
+                                   f"{self._limit_text()}); the level no longer applies")
 
         recovered = False
         with self._lock:

@@ -114,6 +114,16 @@ class Limits:
     nplc_max: float = 10.0
     readings_min: int = 1
     readings_max: int = 10000
+    # The level SWEEPS (ramp_voltage / ramp_current, for fly scans,
+    # 2026-10-10): the pace a sweep may be asked for. The 2450 itself settles
+    # a level step in well under a millisecond; what limits the pace is the
+    # SAMPLE (a capacitive or a heating device) and how finely a fly row is
+    # binned. Clamped with a warning, like every setter. VERIFY with the
+    # real sample in place.
+    sweep_rate_min_V_per_s: float = 1e-6
+    sweep_rate_max_V_per_s: float = 100.0
+    sweep_rate_min_A_per_s: float = 1e-12
+    sweep_rate_max_A_per_s: float = 1.0
 
 
 @dataclass
@@ -136,6 +146,11 @@ class Hardware:
     terminals: str = "front"
     line_freq_Hz: float = 50.0        # Finland: 50 Hz. Sets how long one NPLC is.
     poll_hz: float = 20.0             # upper bound; one reading takes >= NPLC / line_freq
+    # One level step of a SWEEP every this many seconds (softramp.py): each
+    # step is one :SOUR:VOLT / :SOUR:CURR write next to the poll's readings.
+    # 50 ms = 20 steps a second. VERIFY the bus budget on the 2450 (USB-TMC
+    # or GPIB) at the NPLC in use.
+    ramp_dt_s: float = 0.05
 
 
 @dataclass

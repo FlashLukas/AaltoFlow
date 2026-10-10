@@ -49,7 +49,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, acquire=None, wait=None, help=""):
+       settle=None, args=None, danger=False, acquire=None, wait=None, help="",
+       ramp=None, stream=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -61,7 +62,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("acquire", acquire), ("wait", wait), ("help", help)):
+                 ("acquire", acquire), ("wait", wait), ("help", help),
+                 ("ramp", ramp), ("stream", stream)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -110,6 +112,29 @@ def _acquire_timeout(cfg) -> float:
     per = m.nplc / max(1.0, float(cfg.hardware.line_freq_Hz)) + 0.05
     expected = int(a.readings) * per + cfg.source.settle_s
     return round(max(float(a.timeout_s), 3.0 * expected + 5.0), 1)
+
+
+#: The sweep paces a client is offered first: 0.1 V/s and 1 uA/s.
+SWEEP_DEFAULT_V_PER_S = 0.1
+SWEEP_DEFAULT_UA_PER_S = 1.0
+
+
+def _ramp(verb: str, to_arg: str, rate_arg: str, unit: str, lo: float, hi: float,
+          default: float, channel: str) -> dict:
+    """A `ramp` block (guide 6b, "Ramps"): the SERVICE walks the level
+    (softramp.py); a fly scan bins by the MEASURED value the poll streams
+    (the source readback). In the control's own units (uA for the current)."""
+    lo, hi = sorted((float(lo), float(hi)))
+    return {
+        "kind": "software",
+        "start": {"verb": verb, "args": {"to": to_arg, "rate": rate_arg}},
+        "stop": {"verb": "ramp_stop"},
+        "rate": {"unit": unit, "min": lo, "max": hi,
+                 "default": max(lo, min(hi, default))},
+        "readback": {"stream": {"group": "read", "channel": channel},
+                     "measured": True},
+        "done": {"key": "ramping", "id_key": "ramp_id"},
+    }
 
 
 def build_manifest(smu) -> dict:
@@ -168,6 +193,10 @@ def build_manifest(smu) -> dict:
                set={"verb": "set_voltage", "arg": "voltage_V"},
                settle={"policy": "adopt_then_flag",
                        "setpoint_key": "source_voltage_set_V", "flag_key": "settled"},
+               # a CONTINUOUS SWEEP for fly scans (2026-10-10)
+               ramp=_ramp("ramp_voltage", "voltage_V", "rate_V_per_s", "V/s",
+                          lim.sweep_rate_min_V_per_s, lim.sweep_rate_max_V_per_s,
+                          SWEEP_DEFAULT_V_PER_S, "voltage"),
                help="Limited to +-21 V while the current limit is above 105 mA."),
             _p("current_limit", "Current limit", "control", "float", unit="A",
                group="Source", order=30, decimals=9,
@@ -194,6 +223,12 @@ def build_manifest(smu) -> dict:
                set={"verb": "set_current", "arg": "current_uA"},
                settle={"policy": "adopt_then_flag",
                        "setpoint_key": "source_current_set_uA", "flag_key": "settled"},
+               # a CONTINUOUS SWEEP for fly scans (2026-10-10), in uA and uA/s
+               # like the set; binned by the measured current in uA
+               ramp=_ramp("ramp_current", "current_uA", "rate_uA_per_s", "uA/s",
+                          lim.sweep_rate_min_A_per_s * 1e6,
+                          lim.sweep_rate_max_A_per_s * 1e6,
+                          SWEEP_DEFAULT_UA_PER_S, "current_uA"),
                help="In uA so a scan's settle check resolves 1 pA (see describe.py). "
                     "Limited to +-105 mA while the voltage limit is above 21 V."),
             _p("voltage_limit", "Voltage limit", "control", "float", unit="V",
@@ -299,9 +334,17 @@ def build_manifest(smu) -> dict:
 
         # -- live (panels, not scans) -----------------------------------------------------
         _p("live_voltage", "Voltage (live)", "indicator", "float", unit="V",
-           group="Live", order=10, decimals=7, plottable=True, read_path=["voltage_V"]),
+           group="Live", order=10, decimals=7, plottable=True, read_path=["voltage_V"],
+           # every poll reading, for fly scans (one group: one start/read/stop)
+           stream={"group": "read", "channel": "voltage"}),
         _p("live_current", "Current (live)", "indicator", "float", unit="A",
-           group="Live", order=20, decimals=10, plottable=True, read_path=["current_A"]),
+           group="Live", order=20, decimals=10, plottable=True, read_path=["current_A"],
+           stream={"group": "read", "channel": "current"}),
+        _p("ramping", "Sweeping", "indicator", "bool", group="Source", order=70,
+           read_path=["ramping"],
+           help="True while a level sweep (ramp_voltage / ramp_current) runs."),
+        _p("ramp_stop", "Stop the sweep", "action", "action", group="Output", order=5,
+           help="End a level sweep where it is. Allowed for anyone, also a viewer."),
         _p("live_resistance", "Resistance (live)", "indicator", "float", unit="ohm",
            group="Live", order=30, decimals=4, plottable=True,
            read_path=["resistance_ohm"]),
