@@ -48,8 +48,11 @@ def _registry(n_axes=4, fail=None):
     return reg, events
 
 
-def _axes(shape):
-    return [{"type": "array", "param": f"p{i}", "values": list(range(n))}
+def _axes(shape, zigzag=False):
+    """Array axes p0 (outer) .. pN; with `zigzag` every axis inside the
+    outermost one zig-zags (per axis)."""
+    return [{"type": "array", "param": f"p{i}", "values": list(range(n)),
+             **({"zigzag": True} if zigzag and i > 0 else {})}
             for i, n in enumerate(shape)]
 
 
@@ -82,8 +85,8 @@ def test_start_of_each_sweep_4d(axis, block, zigzag):
     not which points begin a sweep."""
     shape = (3, 4, 3, 2)
     reg, events = _registry()
-    run(Recipe(axes=_axes(shape), detectors=["d"], hooks=[_af(axis)],
-               zigzag=zigzag), reg, created_iso="t")
+    run(Recipe(axes=_axes(shape, zigzag), detectors=["d"], hooks=[_af(axis)]),
+        reg, created_iso="t")
     assert _read_indices_before_af(events) == list(range(0, 72, block))
 
 
@@ -91,11 +94,11 @@ def test_zigzag_row_boundary_is_not_missed():
     """The case after_axis gets wrong: in zig-zag the inner index does not
     change at a turnaround, so 'x changed' misses the row. each_sweep does not."""
     reg, events = _registry(2)
-    run(Recipe(axes=_axes((3, 4)), detectors=["d"], zigzag=True,
+    run(Recipe(axes=_axes((3, 4), True), detectors=["d"],
                hooks=[_af("p1")]), reg, created_iso="t")
     assert _read_indices_before_af(events) == [0, 4, 8]
     old, events2 = _registry(2)
-    run(Recipe(axes=_axes((3, 4)), detectors=["d"], zigzag=True,
+    run(Recipe(axes=_axes((3, 4), True), detectors=["d"],
                hooks=[{"when": "after_axis", "axis": "p1", "action": "call",
                        "args": {"action": "AF"}}]), old, created_iso="t")
     # after_axis fires on every inner step and NOT at the turnarounds

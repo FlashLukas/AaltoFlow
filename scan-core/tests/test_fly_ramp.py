@@ -76,8 +76,8 @@ def test_frequency_flown_is_binned_by_command():
     reg._state.lockin_tc_s = 0.005
     r = _recipe([{"type": "array", "param": "field", "values": [40.0, 60.0]},
                  {"type": "fly", "param": "rf_freq", "start": 700, "stop": 1100,
-                  "num": 41, "speed": 200.0}],
-                fixed={"pos_x": 30.0, "pos_y": 50.0}, zigzag=True)
+                  "num": 41, "speed": 200.0, "zigzag": True}],
+                fixed={"pos_x": 30.0, "pos_y": 50.0})
     assert r.validate(reg) == []
     ds = run(r, reg)
     assert ds["rf_freq"].attrs["fly_binned_by"] == "command"
@@ -95,7 +95,7 @@ def test_zigzag_field_rows_agree_with_lag_correction():
     reg = build_sim_registry()
     reg._state.lockin_tc_s = 0.02                 # 40 ms group delay = 0.8 mT at 20 mT/s
     r = _recipe([{"type": "array", "param": "rf_freq", "values": [900.0, 900.0]},
-                 _field_fly()], fixed={"pos_x": 30.0, "pos_y": 50.0}, zigzag=True)
+                 _field_fly(zigzag=True)], fixed={"pos_x": 30.0, "pos_y": 50.0})
     ds = run(r, reg)
     fwd, bwd = ds["lockin_r"].values
     f = ds["field"].values

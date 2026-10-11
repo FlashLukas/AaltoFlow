@@ -268,9 +268,9 @@ def test_two_point_channels_find_the_field_of_their_frequency():
     reg = build_sim_registry()
     st = reg._state
     dets = ["s21_pt1", "s21_pt2"]
-    r = Recipe(name="pts", fixed=WHERE, detectors=dets, zigzag=True,
+    r = Recipe(name="pts", fixed=WHERE, detectors=dets,
                axes=[{"type": "array", "param": "rf_power", "values": [-10.0, -10.0]},
-                     _field_fly(start=20.0, stop=100.0, num=41, speed=16.0)])
+                     _field_fly(start=20.0, stop=100.0, num=41, speed=16.0, zigzag=True)])
     assert r.validate(reg) == []
     ds = run(r, reg)
     step = run(Recipe(name="pts_step", fixed=WHERE, detectors=dets,

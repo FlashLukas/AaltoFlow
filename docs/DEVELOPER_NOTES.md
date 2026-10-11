@@ -1219,19 +1219,23 @@ Reset; scan-core README "Advanced axis settings") now also holds the axis's
 and its coarse pass all call it): dim k is reversed on every other SWEEP of
 it, counting sweeps by the flat index of the dims outside it
 (`engine._serpentine`). `recipe.dim_zigzag` maps axes to dims (a raster's flag
-covers both its dims; a repeat never zig-zags, validate refuses it), and
-`recipe.zigzag_plan` returns `(flags, legacy)`.
+covers both its dims; a repeat never zig-zags, validate refuses it). The
+flags of a recipe are `dim_zigzag(recipe.axes)`; there is nothing else.
 
-Backward compatibility: the old scan-wide `Recipe.zigzag` is still read, and
-when it is true the OLD rule `engine._zigzag` (reverse dim k when the SUM of
-the outer raw indices is odd; a fly row backwards on the same sum) runs
-unchanged, so an old recipe gives exactly the old order. The two rules agree
-in 2-D; in 3-D+ with an even-sized middle axis the old one starts the first
-row after each outer step at the wrong end. The builder translates the old
-flag into per-axis flags (every axis with a dim >= 1) when it loads a recipe
-and never writes the scan-wide key as true. The file gets `zigzag = 1` on each
-coordinate that really zig-zagged (`axis_attrs`), next to the older
-`fly_zigzag`.
+The OLD scan-wide rule is REMOVED (2026-10-11, Lukas: "lets only focus on the
+new code... old code does not need to be compatible"): `engine._zigzag`
+(reverse dim k when the SUM of the outer raw indices is odd), every `legacy`
+branch (engine, flyscan, scout) and the `Recipe.zigzag` field are gone. The
+two rules agreed in 2-D; in 3-D+ with an even-sized middle axis the old one
+started the first row after each outer step at the wrong end. An old
+definition (a .yaml, or the recipe_json of an older .nc) that still says
+scan-wide `zigzag: true` is translated ONCE in `Recipe.from_dict` by
+`recipe.upgrade_scan_wide_zigzag` -- `zigzag: true` on every axis with a dim
+>= 1 (every axis but the outermost, plus an outermost raster, whose fast dim
+is inner; never a repeat) -- and then runs in the per-axis order; `to_dict`
+never writes the scan-wide key. The file gets `zigzag = 1` on each coordinate
+that really zig-zagged (`axis_attrs`), and `fly_zigzag` on a fly coordinate
+is the fly axis's own flag.
 
 Autofocus before a scout: `scout.autofocus_warning(recipe)` returns
 `scout.NO_AUTOFOCUS_WARNING` for a MEASURED scout pass with no before_scan

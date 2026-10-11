@@ -969,11 +969,13 @@ nothing outside it advances (the box is greyed there; a raster row is the
 exception, its fast dim zig-zags inside the row); a repeat axis cannot zig-zag.
 The data are the same either way, only the path between points changes. Tick
 it on several axes and the path is one continuous line: every step moves one
-axis by one point. An old recipe with the scan-wide `zigzag: true` still loads
-and runs exactly as before; opened in the Scan tab it shows zig-zag on every
-inner axis, and saved again it says so per axis (same order for a 2-D scan; in
-3-D and up the per-axis rule also removes one fly-back per outer step that the
-old rule made when a middle axis had an even number of points).
+axis by one point. The old scan-wide switch and its rule are GONE (removed
+2026-10-11): an old recipe that still says `zigzag: true` at the top is read
+as `zigzag: true` on every axis inside the outermost one (never on a repeat)
+and runs in the per-axis order -- the same order for a 2-D scan; in 3-D and up
+without the extra fly-back per outer step the old rule made when a middle axis
+had an even number of points. Saved again, it says so per axis; the scan-wide
+key is never written.
 
 **Copy from axis...** takes the fly, zig-zag and scout settings of another
 row, except what does not fit (a speed in um/s onto an axis in deg, fly onto

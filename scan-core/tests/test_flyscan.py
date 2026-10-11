@@ -160,10 +160,11 @@ def test_row_seconds_is_the_run_in_to_run_out_time():
 
 
 def test_the_fly_axis_survives_a_yaml_round_trip(tmp_path, reg):
-    r = _recipe(zigzag=True)
+    r = _recipe(axes=[{"type": "array", "param": "pos_y", "values": [0.0, 1.0]},
+                      _fly(zigzag=True)])
     r.save(tmp_path / "fly.yaml")
     back = Recipe.load(tmp_path / "fly.yaml")
-    assert back.axes == r.axes and back.zigzag and back.validate(reg) == []
+    assert back.axes == r.axes and back.axes[1]["zigzag"] and back.validate(reg) == []
 
 
 def test_the_schema_accepts_a_fly_axis():
@@ -220,7 +221,7 @@ def _centroids(reg, lag_correction):
     reg._state.lockin_tc_s = 0.025
     r = _recipe(axes=[{"type": "array", "param": "pos_z", "values": [0.0, 0.0]},
                       _fly(start=-14, stop=14, num=57, speed=60,
-                           lag_correction=lag_correction)], zigzag=True)
+                           lag_correction=lag_correction, zigzag=True)])
     r.detectors = ["lockin_x"]
     ds = run(r, reg)
     x = ds["pos_x"].values
@@ -314,7 +315,7 @@ def test_zigzag_rows_do_not_switch_speed_when_already_at_the_run_in(reg):
     orig = p._set
     p._set = lambda v: (sets.append(v), orig(v))[1]
     r = _recipe(axes=[{"type": "array", "param": "pos_z", "values": [0.0, 0.0, 0.0]},
-                      _fly(start=-4, stop=4, num=9, speed=40)], zigzag=True)
+                      _fly(start=-4, stop=4, num=9, speed=40, zigzag=True)])
     ds = run(r, reg)
     assert np.all(ds["lockin_r_n"].values >= 2)
     assert sets == [40.0, 0.0], sets
@@ -355,7 +356,7 @@ def test_the_already_there_check_uses_the_recorded_position_not_a_stale_status(r
     sp._set = lambda v: (sets.append(v), orig(v))[1]
     try:
         r = _recipe(axes=[{"type": "array", "param": "pos_z", "values": [0.0, 0.0, 0.0]},
-                          _fly(start=-4, stop=4, num=9, speed=40)], zigzag=True)
+                          _fly(start=-4, stop=4, num=9, speed=40, zigzag=True)])
         ds = run(r, reg)
     finally:
         stop.set()

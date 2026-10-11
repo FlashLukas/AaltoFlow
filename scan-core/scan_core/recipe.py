@@ -17,9 +17,6 @@ settle:    {default_timeout_s}
 axes:      [Axis, ...]      # OUTER→INNER. axes[0] is the slowest (outermost) loop.
 detectors: [param_id, ...]  # gettables recorded at every point
 hooks:     [Hook, ...]       # optional actions bound to a level/cadence
-zigzag:    bool              # OLD scan-wide serpentine switch (still read and
-                             # run exactly as before; the builder now writes
-                             # `zigzag: true` on each AXIS instead -- see below)
 diagonal:  bool              # at a row change send all setpoints, then wait
 window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
                              # array detector only around the predicted FMR line
@@ -46,10 +43,13 @@ Axis types (the `type` field discriminates)
 Every axis except a repeat may carry `zigzag: true` (2026-10-11, Lukas: "Zig
 zag goes to the advanced settings of each axis"): that axis is swept
 BACKWARDS on every other sweep, i.e. every other time the axes outside it
-advance (dim_zigzag / zigzag_plan below; engine.visit_index). On a fly axis
+advance (dim_zigzag below; engine.visit_index). On a fly axis
 it means every other row is flown back. On the outermost axis it does
 nothing (nothing outside it advances) -- except on a raster, whose inner
-(fast) dim then zig-zags.
+(fast) dim then zig-zags. The OLD scan-wide `zigzag: true` (before
+2026-10-11) is gone: a definition that still has it is translated into
+per-axis flags when it is read (upgrade_scan_wide_zigzag) and is never
+written that way again.
 
 linear : {type, param, start, stop, num, [name]}          -> 1 dim
 array  : {type, param, values:[...], [name]}              -> 1 dim
@@ -163,19 +163,6 @@ class Recipe:
     hooks: list[dict] = field(default_factory=list)
     output: dict = field(default_factory=lambda: {"dir": ".", "basename": "scan", "format": "netcdf"})
     settle: dict = field(default_factory=lambda: {"default_timeout_s": 20.0})
-    #: THE OLD SCAN-WIDE SWITCH (before 2026-10-11). Since then zig-zag is set
-    #: PER AXIS (`zigzag: true` on an axis dict, see dim_zigzag). This flag is
-    #: still read, and a recipe that has it runs EXACTLY as before (the old
-    #: rule, engine._zigzag, on every inner dim); the builder turns it into
-    #: per-axis flags when it loads such a recipe.
-    #: Sweep every other pass of an inner axis BACKWARDS (boustrophedon), so the
-    #: stage does not fly back to the start of each row. Saves the fly-back on a
-    #: slow axis -- on a 20 x 20 camera-array scan, 19 returns across the sample.
-    #: OFF by default: it is only safe where a point does not depend on the
-    #: direction it was approached from, and an open-loop slip-stick stage with
-    #: 40 % direction asymmetry, or any axis with backlash or hysteresis (the
-    #: magnet), reaches a slightly different place coming the other way.
-    zigzag: bool = False
     #: At a point where SEVERAL axes change (the start of a new row), send
     #: every new setpoint first and only then wait for them all, instead of
     #: one axis after the other (2026-10-08, from the first rig test of the XY
@@ -213,9 +200,13 @@ class Recipe:
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
-                                   "hooks", "output", "settle", "zigzag", "window",
+                                   "hooks", "output", "settle", "window",
                                    "scout", "mask", "diagonal")
                  if f in d}
+        if d.get("zigzag") is True and "axes" in known:
+            # an OLD definition (or the recipe_json of an older .nc) with the
+            # scan-wide switch: translated ONCE, here, into the per-axis flags
+            known["axes"] = upgrade_scan_wide_zigzag(known["axes"])
         return cls(**known)
 
     def to_dict(self) -> dict:
@@ -541,16 +532,24 @@ def dim_zigzag(axes) -> list[bool]:
     return out
 
 
-def zigzag_plan(recipe) -> tuple[list[bool], bool]:
-    """(per-dim flags, legacy). `legacy` = the recipe still has the OLD
-    scan-wide `zigzag: true`: then every inner dim zig-zags by the OLD rule
-    (engine._zigzag), exactly as before 2026-10-11, and the per-axis flags are
-    not looked at."""
-    legacy = bool(getattr(recipe, "zigzag", False))
-    flags = dim_zigzag(getattr(recipe, "axes", None) or [])
-    if legacy:
-        flags = [False] + [True] * max(0, len(flags) - 1)
-    return flags, legacy
+def upgrade_scan_wide_zigzag(axes) -> list:
+    """The OLD scan-wide `zigzag: true` (before 2026-10-11) as per-axis flags:
+    `zigzag: true` on every axis that has a dim inside the outermost one --
+    every axis but the first, and also the first when it is a raster (its
+    fast dim is inner). A repeat gets none (it moves nothing). The ORDER is
+    the per-axis rule's: the same as the old one in 2-D; in 3-D and up it
+    saves the extra fly-back per outer step the old rule made when a middle
+    axis had an even number of points. Returns new axis dicts (the input is
+    not changed)."""
+    out, first_dim = [], 0
+    for ax in axes or []:
+        n = _axis_n_dims(ax)
+        if (isinstance(ax, dict) and ax.get("type") != "repeat"
+                and first_dim + n - 1 >= 1):
+            ax = {**ax, "zigzag": True}
+        out.append(ax)
+        first_dim += n
+    return out
 
 
 def zigzag_dim_names(recipe) -> list[str]:
@@ -560,7 +559,7 @@ def zigzag_dim_names(recipe) -> list[str]:
         dims = recipe.compile().dims
     except Exception:
         return []
-    flags, _ = zigzag_plan(recipe)
+    flags = dim_zigzag(getattr(recipe, "axes", None) or [])
     return [d.name for k, (d, f) in enumerate(zip(dims, flags)) if f and k > 0]
 
 
@@ -691,9 +690,8 @@ def axis_attrs(recipe, units=None, registry=None) -> dict:
         if ax.get("timeout_s"):
             a["fly_timeout_s"] = float(ax["timeout_s"])
         # on a fly row zig-zag decides whether every other row was flown
-        # backwards: per axis since 2026-10-11 (or the old scan-wide switch)
-        a["fly_zigzag"] = int(bool(getattr(recipe, "zigzag", False))
-                              or ax.get("zigzag") is True)
+        # backwards: the fly axis's own flag
+        a["fly_zigzag"] = int(ax.get("zigzag") is True)
         # ONE MEAN PER ROW (flyscan.collapse_rows): said on the coordinate,
         # with whether the pixels were kept (only when it is on, so a file of
         # an ordinary fly scan looks exactly as before)

@@ -131,7 +131,7 @@ def test_pool_bins_is_the_shared_formula():
 
 def _rows(collapse="mean", keep=None, repeat=None):
     fly = {"type": "fly", "param": "x", "start": 0.0, "stop": 20.0, "num": 21,
-           "speed": 20.0, "speed_param": "speed"}
+           "speed": 20.0, "speed_param": "speed", "zigzag": True}
     if collapse:
         fly["collapse"] = collapse
     if keep is not None:
@@ -139,7 +139,7 @@ def _rows(collapse="mean", keep=None, repeat=None):
     axes = [{"type": "repeat", "num": 2, "mode": "keep", "name": "row"}, fly]
     if repeat:
         axes.insert(0, {"type": "repeat", "num": repeat, "mode": "average"})
-    return Recipe(name="rows", axes=axes, detectors=["d"], zigzag=True)
+    return Recipe(name="rows", axes=axes, detectors=["d"])
 
 
 def test_engine_row_mean_next_to_the_pixels_and_in_the_file(tmp_path):
@@ -212,10 +212,9 @@ def test_repeat_average_then_row_mean_in_the_engine():
 def test_vna_trace_row_mean_per_frequency_with_zigzag():
     reg = build_sim_registry()
     r = Recipe(name="vna_rows", fixed={"pos_x": 30.0, "pos_y": 50.0}, detectors=["s21"],
-               zigzag=True,
                axes=[{"type": "repeat", "num": 2, "mode": "keep", "name": "row"},
                      {"type": "fly", "param": "field", "start": 40.0, "stop": 60.0,
-                      "num": 6, "speed": 10.0, "collapse": "mean"}])
+                      "num": 6, "speed": 10.0, "collapse": "mean", "zigzag": True}])
     assert r.validate(reg) == []
     ds = run(r, reg)
     assert ds["s21_rowmean_real"].dims == ("row", "vna_freq")
@@ -232,10 +231,9 @@ def test_lag_corrected_sim_rows_have_a_row_mean():
     reg = build_sim_registry()
     reg._state.lockin_tc_s = 0.01
     r = Recipe(name="lag", fixed={"pos_x": 30.0, "pos_y": 50.0}, detectors=["lockin_r"],
-               zigzag=True,
                axes=[{"type": "repeat", "num": 2, "mode": "keep", "name": "row"},
                      {"type": "fly", "param": "field", "start": 30.0, "stop": 70.0,
-                      "num": 11, "speed": 20.0, "collapse": "mean"}])
+                      "num": 11, "speed": 20.0, "collapse": "mean", "zigzag": True}])
     ds = run(r, reg)
     rm = ds["lockin_r_rowmean"].values
     assert np.all(np.isfinite(rm))

@@ -196,7 +196,7 @@ def build_recipes(freqs_GHz, steps, spowers, counts=SLOPE_COUNTS, *,
     sa_fixed = {S_SPAN: SPAN_MHZ, S_RBW: RBW_KHZ, S_VBW: VBW_KHZ, S_REF: float(ref_level)}
     hooks = ([{"when": "after_scan", "action": "call", "args": {"set": {D_RF: 0}}}]
              if rf_off_after else [])
-    common = {"detectors": [S_LEVEL, S_PEAKF, S_OVER], "zigzag": False,
+    common = {"detectors": [S_LEVEL, S_PEAKF, S_OVER],
               "settle": {"default_timeout_s": 30.0},
               "output": {"dir": ".", "basename": name, "format": "netcdf"}}
     way = "down" if descending else "up"

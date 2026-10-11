@@ -858,30 +858,22 @@ class Visit:
         return bool(end - self.before[lo] > 0)
 
 
-def visiting_order(shape, zigzag) -> np.ndarray:
+def visiting_order(shape, flags=()) -> np.ndarray:
     """The flat (C-order) index of the n-th point VISITED -- the engine's
     odometer, zig-zag included, for every point at once.
 
-    `zigzag`: True/False = the OLD scan-wide switch (engine._zigzag); a list
-    of per-dim flags = the per-axis zig-zag of 2026-10-11
-    (engine._serpentine: dim k reversed on every other sweep of it)."""
+    `flags`: one per dim, the per-axis zig-zag (recipe.dim_zigzag;
+    engine._serpentine: dim k reversed on every other sweep of it)."""
     shape = tuple(int(s) for s in shape)
     total = int(np.prod(shape)) if shape else 0
     idx = np.array(np.unravel_index(np.arange(total), shape))   # [ndim, total]
-    if not isinstance(zigzag, (bool, np.bool_)):
-        flags = list(zigzag or [])
-        if total and any(flags):
-            out = idx.copy()
-            for k in range(1, len(shape)):
-                if k < len(flags) and flags[k]:
-                    sweep = np.ravel_multi_index(tuple(idx[:k]), shape[:k])
-                    out[k] = np.where(sweep % 2 == 1, shape[k] - 1 - idx[k], idx[k])
-            idx = out
-    elif zigzag:
+    flags = list(flags or [])
+    if total and any(flags):
         out = idx.copy()
         for k in range(1, len(shape)):
-            flip = idx[:k].sum(axis=0) % 2 == 1
-            out[k] = np.where(flip, shape[k] - 1 - idx[k], idx[k])
+            if k < len(flags) and flags[k]:
+                sweep = np.ravel_multi_index(tuple(idx[:k]), shape[:k])
+                out[k] = np.where(sweep % 2 == 1, shape[k] - 1 - idx[k], idx[k])
         idx = out
     return np.ravel_multi_index(tuple(idx), shape) if total else np.zeros(0, int)
 
@@ -924,13 +916,12 @@ class ScoutRunner:
         self.fine = [np.asarray(dims[k].coord, float) for k in self.ks]
         self.coarse_idx = [coarse_indices(dims[k].size, s)
                            for k, s in zip(self.ks, self.steps)]
-        from .recipe import zigzag_plan
-        zz_flags, zz_legacy = zigzag_plan(recipe)
-        #: the zig-zag of the scan (old switch, or per axis), for the coarse
-        #: pass too: legacy -> True, else the per-dim flags
-        self.zz_legacy = zz_legacy
+        from .recipe import dim_zigzag
+        zz_flags = dim_zigzag(recipe.axes)
+        #: the per-axis zig-zag of the scan, one flag per dim (the coarse
+        #: pass walks in it too)
         self.zz_flags = list(zz_flags) + [False] * (len(self.shape) - len(zz_flags))
-        self.order = visiting_order(self.shape, True if zz_legacy else self.zz_flags)
+        self.order = visiting_order(self.shape, self.zz_flags)
         self.done_blocks: set = set()
         self.scout_s = 0.0               # seconds spent scouting (not in the per-point ETA)
         self.kept = 0                    # measured points decided so far (scouted blocks)
@@ -1172,10 +1163,9 @@ class ScoutRunner:
             for flat in range(total):
                 ci = np.unravel_index(flat, cshape)
                 # the coarse pass walks the scouted dims in the scan's own
-                # zig-zag (old switch: every one; per axis: each its own)
+                # zig-zag (each scouted dim by its own axis's flag)
                 ci = visit_index(tuple(int(c) for c in ci), cshape,
-                                 [False] + [self.zz_flags[k] for k in self.ks[1:]],
-                                 self.zz_legacy)
+                                 [False] + [self.zz_flags[k] for k in self.ks[1:]])
                 fi = [int(self.coarse_idx[j][c]) for j, c in enumerate(ci)]
                 label = f"scout point {flat + 1}/{total}"
                 if self.should_abort and self.should_abort():

@@ -284,8 +284,9 @@ def test_a_mid_scan_routine_cannot_leave_the_inner_axis_elsewhere(zigzag):
     under a coordinate that says otherwise."""
     reg, events, _ = _diary_registry()
     recipe = Recipe(axes=[{"type": "array", "param": "o", "values": [0, 1, 2]},
-                          {"type": "array", "param": "b", "values": [10, 20, 30]}],
-                    detectors=["b_now"], zigzag=zigzag,
+                          {"type": "array", "param": "b", "values": [10, 20, 30],
+                           "zigzag": zigzag}],
+                    detectors=["b_now"],
                     hooks=[_hook("before_axis", {"b": 400.0}, axis="o")])
     ds = run(recipe, reg, created_iso="t")
     measured = ds["b_now"].values

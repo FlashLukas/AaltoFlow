@@ -34,7 +34,7 @@
       "properties": {"default_timeout_s": {"type": "number"}}
     },
     "zigzag": {"type": "boolean",
-               "description": "OLD scan-wide serpentine switch (before 2026-10-11): still read and run exactly as before (every inner axis reversed on every other pass); new definitions set `zigzag` on each axis instead"},
+               "description": "REMOVED scan-wide switch (before 2026-10-11): an old definition that has it is translated on load into `zigzag` on every axis inside the outermost one (and then runs in the per-axis order); never written"},
     "diagonal": {"type": "boolean",
                  "description": "where several axes change at once (a new row), send every setpoint first, then wait for all"},
     "window": {"$ref": "#/$defs/window"},
