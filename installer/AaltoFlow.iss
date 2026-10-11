@@ -28,6 +28,13 @@
 #ifndef StageDir
   #define StageDir "build\stage"
 #endif
+; The folder the wizard proposes. build_installer.ps1 -DefaultDir overrides it,
+; e.g. C:\Users\Public\AaltoFlow for an install that is prepared on one PC and
+; COPIED to an offline one: the .venvs hold absolute paths, so the folder must
+; be the same on both PCs, and the default below contains the user name.
+#ifndef DefaultDir
+  #define DefaultDir "{localappdata}\Programs\AaltoFlow"
+#endif
 
 [Setup]
 ; AppId identifies the product for upgrades/uninstall. NEVER change it, or a
@@ -41,7 +48,7 @@ AppVersion={#AppVersion}
 AppVerName=AaltoFlow {#AppVersion}
 AppPublisher=Aalto University - NanoSpin group
 AppPublisherURL=https://github.com/FlashLukas/AaltoFlow
-DefaultDirName={localappdata}\Programs\AaltoFlow
+DefaultDirName={#DefaultDir}
 DefaultGroupName=AaltoFlow
 DisableProgramGroupPage=yes
 ; not the previous group: an upgraded TRMOKE install would keep a "TRMOKE" menu

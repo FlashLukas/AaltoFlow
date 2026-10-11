@@ -25,7 +25,11 @@ What it does, and why:
 
 param(
     # Build from another commit/tag/branch instead of HEAD.
-    [string]$Ref = "HEAD"
+    [string]$Ref = "HEAD",
+    # The folder the wizard proposes (default: %LOCALAPPDATA%\Programs\AaltoFlow).
+    # Use a path without the user name, e.g. C:\Users\Public\AaltoFlow, when an
+    # install is built on one PC and copied to an offline one.
+    [string]$DefaultDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -103,7 +107,9 @@ if ($LASTEXITCODE -ne 0) { throw "make_icons.py failed (exit $LASTEXITCODE)" }
 Say "Compiling with $iscc" "Cyan"
 Push-Location $here
 try {
-    & $iscc "/DAppVersion=$version" "/DStageDir=build\stage" "AaltoFlow.iss"
+    $isccArgs = @("/DAppVersion=$version", "/DStageDir=build\stage")
+    if ($DefaultDir) { $isccArgs += "/DDefaultDir=$DefaultDir" }
+    & $iscc @isccArgs "AaltoFlow.iss"
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
 } finally { Pop-Location }
 
