@@ -69,6 +69,10 @@ LicenseFile={#StageDir}\LICENSE
 ; Re-run on the same folder to ADD modules ("Modify"): Setup pre-ticks what is
 ; already installed.
 UsePreviousAppDir=yes
+; ...but ALWAYS show the folder page. Inno's default ("auto") hides it when an
+; install already exists, so a second copy (e.g. one prepared in
+; C:\Users\Public\AaltoFlow for an offline PC) could not be put anywhere else.
+DisableDirPage=no
 UsePreviousSetupType=yes
 UninstallDisplayName=AaltoFlow
 
