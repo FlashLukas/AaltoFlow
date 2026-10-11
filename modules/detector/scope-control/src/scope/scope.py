@@ -36,6 +36,22 @@ Threads and locks, the ccs200 / pm16 rules:
   * the sample and "acquiring = False" are published in ONE critical section
     (gotcha #28); acquisitions are numbered (gotcha #17).
   * time.sleep, not Event.wait (gotcha #34).
+
+FLY SCANS: THE RECORD STREAM (2026-10-11). While a stream runs
+(stream_start), every record the trace thread takes ALSO goes into a
+continuous record (stream.py), one sample per record: the record's own
+numbers (per channel mean, rms, peak-to-peak, amplitude, frequency; the
+phase CH2 - CH1) -- the same ids as the scan detectors, computed on THAT
+record alone (filtered like the live view), not on the running average.
+Each sample is stamped with the moment the record ENDED (best estimate: the
+middle between the poll that found it and the one before, which did not),
+plus its start (end - record length); every channel declares half a record
+as its `delay_s`, so scan-core files the record at its MIDDLE. Nothing about
+the scope is changed by streaming (adopt rule), and the live view and an
+acquisition go on as before: the stream only listens. The scope keeps only
+its latest record, so a record made while the module was still reading the
+previous one is never seen: the module ESTIMATES those from the gaps and
+reports them as `missed` -- said, never silent.
 """
 
 from __future__ import annotations
@@ -48,6 +64,7 @@ import time
 import numpy as np
 
 from . import analysis
+from .stream import StreamRecorder
 from .config import (Config, CHANNEL_NAMES, COUPLINGS, TRIGGER_SOURCES, TRIGGER_SLOPES,
                      TRIGGER_MODES)
 
@@ -108,6 +125,32 @@ _SETTINGS_REREAD_S = 3.0            # how often the scope's settings are re-read
 #: limits for the module's own numbers (sanity, not physics)
 POINTS_RANGE = (16, 100_000)
 AVERAGES_RANGE = (1, 100_000)
+
+
+#: the per-record numbers a stream carries, per channel: the scalar scan
+#: detectors of describe (`ch1_pk2pk` ...), so a detector id IS its channel
+STREAM_VALUES = ("mean", "rms", "pk2pk", "amplitude", "frequency")
+STREAM_CHANNELS = tuple(f"{ch}_{k}" for ch in CHANNEL_NAMES for k in STREAM_VALUES) \
+    + ("phase_21",)
+
+
+def _floor125(x: float) -> float:
+    """x rounded DOWN to 1, 2, 5 x 10^n (0 stays 0): a coarse, stable number
+    for a rate that is measured and jitters."""
+    if not (x > 0 and math.isfinite(x)):
+        return 0.0
+    e = math.floor(math.log10(x))
+    for m in (5.0, 2.0, 1.0):
+        if m * 10.0 ** e <= x * (1 + 1e-9):
+            return m * 10.0 ** e
+    return 10.0 ** e
+
+
+def _sig2(x: float) -> float:
+    """Two significant digits (0 stays 0)."""
+    if not (x > 0 and math.isfinite(x)):
+        return 0.0
+    return float(f"{x:.2g}")
 
 
 def _finite(v, what):
@@ -182,6 +225,15 @@ class Scope:
         self._poll_now = None
         self._alias_warned = False
         self._roll_warned = False
+        # THE RECORD STREAM for fly scans (module docstring, stream.py): one
+        # sample per record taken while it runs
+        self.stream = StreamRecorder(STREAM_CHANNELS, delay_fn=self.stream_delays)
+        self._stream_span = 0.0             # length of the last streamed record
+        self._stream_last_end = None        # wall time the last streamed record ended
+        self._stream_gaps = collections.deque(maxlen=20)
+        # when records were taken SINCE the last record-shaping change (the
+        # measured record rate for rate_hz; _trigger_times spans changes)
+        self._rate_times = collections.deque(maxlen=20)
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -777,6 +829,7 @@ class Scope:
                   "settings_settled": (self._connected and not self._hw_error
                                        and self._settings_done == self._settings_gen),
                   "acq_id": self._acq_id, "acquiring": a is not None,
+                  "stream_running": self.stream.running,
                   "acq_progress": (a["n"] / a["want"]) if a else 0.0,
                   "sample": dict(self._sample),
                   "live": dict(self._live_numbers)}
@@ -801,6 +854,7 @@ class Scope:
                 st[f"trigger_{k}_set"] = self._requested.get(f"trigger_{k}",
                                                              getattr(c.trigger, k))
             sp = dict(self._supplies)
+        st["stream_rate_Hz"] = self.stream_rate_hz()
         st["supplies"] = self.has_supplies()
         if self.has_supplies():
             for k in _SUPPLY_NAMES:
@@ -939,7 +993,17 @@ class Scope:
         self._cycle_ms = {"settings": 1000 * (t_poll - t_cycle),
                           "poll": 1000 * (t_ready - t_poll),
                           "read": 1000 * (t_read - t_ready)}
-        self._take(t, volts, rev0, now)
+        # WHEN the record ended, for the fly-scan stream: after the previous
+        # poll (which did not find it) and before this one -- the middle of
+        # the two (at most a quarter record apart, see _next_poll), on the
+        # wall clock (time.time(), what every stream is stamped with).
+        # VERIFY on the Siglent: that "C1:WF? DAT2" hands over the record that
+        # was COMPLETE when it was asked (not one still being captured) -- the
+        # end estimate assumes it. The Analog Discovery's "done" status says so.
+        prev = self._poll_prev
+        end_mono = 0.5 * (prev + now) if (prev is not None and prev < now) else now
+        t_end_wall = time.time() - (self._clock() - end_mono)
+        self._take(t, volts, rev0, now, t_end_wall)
         self._cycle_ms["take"] = 1000 * (time.perf_counter() - t_read)
         with self._lock:
             if self._last_record:
@@ -1002,8 +1066,10 @@ class Scope:
             self._emit("warn", msg)
         self._restart(None)
 
-    def _take(self, t, volts: dict, rev0: int, now: float) -> None:
-        """One triggered record into the running average and the acquisition."""
+    def _take(self, t, volts: dict, rev0: int, now: float,
+              t_end_wall: float | None = None) -> None:
+        """One triggered record into the running average, the acquisition and
+        (while one runs) the fly-scan stream."""
         c = self.cfg
         phys = {}
         clipped = set()
@@ -1064,6 +1130,7 @@ class Scope:
                 self._prev_take = (rev0, key, now, nth, bool(info.get("identical")))
             self._records += 1
             self._trigger_times.append(now)
+            self._rate_times.append(now)
             if self._live_t.size != tr.size or not np.allclose(self._live_t, tr):
                 if self._running and self._live_t.size > 1 and \
                         abs((tr[-1] - tr[0]) - (self._live_t[-1] - self._live_t[0])) \
@@ -1151,6 +1218,10 @@ class Scope:
                                f"; read ms {_brief(info.get('ms') or {})})"
             recs = [r for _, r in self._running]
             n_live = len(recs)
+        if self.stream.running:
+            # THIS record's numbers into the fly-scan stream (outside the lock)
+            self._stream_record(np.asarray(t, float), phys, span,
+                                time.time() if t_end_wall is None else t_end_wall)
         # live numbers (outside the lock: a few ms of numpy)
         mean = {ch: np.mean([r[ch] for r in recs], axis=0) for ch in red}
         proc = self._process(tr, mean, n_live)
@@ -1183,6 +1254,107 @@ class Scope:
                                f"{', '.join(c.upper() for c in latched['clipped'])} CLIPPED "
                                f"at the screen edge -- raise V/div")
 
+    # ---- the fly-scan stream ---------------------------------------------------------
+
+    def _stream_record(self, t: np.ndarray, phys: dict, span: float,
+                       t_end: float) -> None:
+        """One record's numbers into the stream (module docstring). Filtered
+        like the live view; computed on the full record, never the reduced
+        trace (see _process)."""
+        f = self.cfg.filter
+        dt = float(t[1] - t[0]) if t.size > 1 else 0.0
+        filt = {ch: analysis.zero_phase(y, dt, f.lowpass_Hz, f.highpass_Hz, f.order)
+                for ch, y in phys.items()}
+        vals = {}
+        for ch, y in filt.items():
+            for k, v in analysis.channel_values(t, y).items():
+                vals[f"{ch}_{k}"] = v
+        if "ch1" in filt and "ch2" in filt:
+            vals["phase_21"] = analysis.phase_detail(t, filt["ch1"], filt["ch2"])[0]
+        # records the scope made that were never read: a gap much longer than
+        # the usual one between the records that WERE read (an estimate)
+        missed = 0
+        with self._lock:
+            self._stream_span = span
+            last = self._stream_last_end
+            self._stream_last_end = t_end
+            if last is not None and t_end > last:
+                gap = t_end - last
+                gaps = sorted(self._stream_gaps)
+                if len(gaps) >= 3:
+                    usual = gaps[len(gaps) // 2]
+                    if usual > 0 and gap > 2.5 * usual:
+                        missed = int(round(gap / usual)) - 1
+                if not missed:
+                    self._stream_gaps.append(gap)
+        self.stream.note_missed(missed)
+        self.stream.append(t_end, [vals.get(c, _NAN) for c in STREAM_CHANNELS],
+                           t_start=t_end - span, t_end=t_end)
+
+    def stream_start(self) -> int:
+        """Start recording every record's numbers (changes nothing at the
+        scope). Returns the stream id."""
+        with self._lock:
+            self._stream_last_end = None
+            self._stream_gaps.clear()
+        sid = self.stream.start()
+        self._emit("info", f"record stream #{sid} started (~{self.stream_rate_hz():.3g} "
+                           f"records/s expected)")
+        return sid
+
+    def stream_read(self) -> dict:
+        return self.stream.read()
+
+    def stream_stop(self) -> dict:
+        return self.stream.stop()
+
+    def stream_delays(self) -> dict:
+        """How late each streamed channel is: half a record. A sample is
+        stamped at the record's END, its numbers describe the whole record,
+        whose middle is half a record earlier."""
+        with self._lock:
+            span = self._stream_span
+        d = 0.5 * (span if span > 0 else self._record_len_s())
+        return {c: d for c in STREAM_CHANNELS}
+
+    def _record_len_s(self) -> float:
+        """The most likely length of one record at the current time/div (for
+        the expected record RATE): the span of the records received at it if
+        any, else the scope's SANU / SARA, else the screen. (record_s() takes
+        the LONGEST of the three -- right for a timeout, too slow for a rate:
+        the Analog Discovery's record is 10 divisions, not the screen's 14.)"""
+        tdiv = self._tdiv()
+        with self._lock:
+            span = self._span_at.get(_tdiv_key(tdiv), 0.0)
+            if span > 0:
+                return span
+            if "tdiv_s" not in self._pending_keys:
+                sara = float(self._actual.get("sample_rate_Hz") or 0.0)
+                if self._sanu > 0 and sara > 0:
+                    return self._sanu / sara
+        return _SCREEN_DIV * tdiv
+
+    def stream_rate_hz(self) -> float:
+        """Records per second the stream can expect, for scan-core's
+        samples-per-pixel estimate (describe `rate_hz`). From the settings:
+        one record lasts record_s, plus the backend's transfer time per
+        record (`transfer_s`) -- two significant digits, so it moves only
+        when a setting does. If the records actually come clearly SLOWER
+        (a slow trigger), the measured rate since the last setting change,
+        rounded down to 1-2-5. 0 when no records come (stopped, rolling)."""
+        mode = self._setting("trigger_mode", self.cfg.trigger.mode)
+        if mode == "stop" or self.rolling() or not self._connected:
+            return 0.0
+        period = self._record_len_s() + float(getattr(self.backend, "transfer_s", 0.0) or 0.0)
+        est = _sig2(1.0 / period) if period > 0 else 0.0
+        with self._lock:
+            ts = list(self._rate_times)
+        if len(ts) >= 5 and ts[-1] > ts[0]:
+            measured = (len(ts) - 1) / (ts[-1] - ts[0])
+            if measured < 0.7 * est:
+                return _floor125(measured)
+        return est
+
     def _restart(self, msg: str | None) -> None:
         """A record-shaping change: empty the running average and restart a
         running acquisition from scratch."""
@@ -1190,6 +1362,7 @@ class Scope:
         with self._lock:
             self._rev += 1
             self._running.clear()
+            self._rate_times.clear()
             if self._acq is not None:
                 restarted = self._acq["id"]
                 self._acq = self._new_acq(restarted)

@@ -137,6 +137,11 @@ def parse_block(raw: bytes) -> np.ndarray:
 
 class SiglentSDS:
     simulated = False
+    #: seconds per record on top of the record itself, for the brain's
+    #: expected record rate (the fly-scan stream's describe `rate_hz`): the
+    #: re-arm plus reading both channels, ~0.1 s per "C<n>:WF? DAT2" over USB
+    #: (lab PC 2026-10-07, read ms in status last_record).        # VERIFY
+    transfer_s = 0.2
 
     def __init__(self, resource: str, timeout_ms: int = 5000):
         self._resource = resource

@@ -18,6 +18,8 @@ Verbs (a reply means ACCEPTED; poll status for the effect):
                    restart_average {}  set_sim {name, value} (simulator)
   measuring        acquire {} -> {acq_id}   abort {} (safety)   stop {} (safety, = abort)
                    get_trace {which: "live"|"sample"}   get_time {}   get_sample {}
+  fly scans        stream_start {} -> {stream_id}   stream_read {} -> {stream}
+                   stream_stop {} -> {stream}   (one sample per record: its numbers)
   supplies         set_supply {supply: "vplus"|"vminus", on?, volts?}
                    supplies_off {} (safety)                (an instrument with supplies)
   generator        gen_<verb> = afg-control's verbs for the outputs W1/W2
@@ -95,7 +97,11 @@ class ScopeService:
             safety={"abort", "stop", "gen_outputs_off", "gen_ramp_stop", "supplies_off"},
             # the generator's reads carry the gen_ prefix, so the get_/read_
             # rule does not see them: named here
-            read={"gen_info", "gen_envelope", "gen_get_config", "gen_stream_read"},
+            # `stream_read` only drains the recorded fly-scan records (a read);
+            # `stream_start` / `stream_stop` are not reads: they reset / end
+            # the record a running fly scan is waiting on (as in hf2)
+            read={"gen_info", "gen_envelope", "gen_get_config", "gen_stream_read",
+                  "stream_read"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
     # -------------------------------------------------------------- lifecycle
@@ -323,6 +329,13 @@ class ScopeService:
                 return {"ok": True, "values": json_safe(v.get_time())}
             elif cmd == "get_sample":
                 return {"ok": True, "sample": json_safe(v.status()["sample"])}
+            elif cmd == "stream_start":
+                # a fly scan: every record's numbers from now on (scope.py)
+                return {"ok": True, "stream_id": v.stream_start()}
+            elif cmd == "stream_read":
+                return {"ok": True, "stream": v.stream_read()}
+            elif cmd == "stream_stop":
+                return {"ok": True, "stream": v.stream_stop()}
             elif cmd == "status":
                 return {"ok": True, "status": self.status_payload()}
             elif cmd == "describe":
