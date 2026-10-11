@@ -38,7 +38,7 @@ THE RECIPE BLOCK (key `scout`; every key optional except `axes`, and
       keep: above                  # above | below | deviates
       threshold: auto              # above/below: auto (Otsu) | a number | {fraction: f}
       k: 4                         # deviates: |value - median| > k x noise
-      margin: auto                 # grid points: auto (= half the coarse step) |
+      margin: auto                 # grid points: auto (= half the coarse step, rounded up) |
                                    # n | {axis: n}
       per_outer: once              # once | each (see OUTER AXES)
       settings: {hf2.tc1: 0.001}   # held during the scout only
@@ -98,6 +98,8 @@ smaller margin lost island points, half a step lost none) and confirmed on the
 rig (2026-10-08: 1-2 of 39 boundary points above the threshold, none lost; it
 costs ~28 % of the second pass). An element smaller than about one coarse step
 can fall between the scout's points entirely -- use a smaller step for that.
+Since 2026-10-11 auto is ROUNDED UP to whole points (step 3 -> 2, Lukas: an
+edge between two scout points is safer with one more ring).
 
 CONSERVATIVE BY DESIGN. Whenever the mask cannot tell -- a scout reading that
 is NaN, a point outside the area a file covers, a block not yet scouted --
@@ -668,12 +670,18 @@ def grow(keep, radii):
 def margin_radii(spec, names, source_steps) -> list[float]:
     """The margin per scouted axis, in grid points. `source_steps` = how many
     fine grid points one step of the SOURCE spans on each axis (the scout's
-    step, or a file's pixel pitch over the scan's): auto = half of it."""
+    step, or a file's pixel pitch over the scan's): auto = half of it,
+    rounded up to whole points."""
     m = spec["margin"]
     out = []
     for name, s in zip(names, source_steps):
         v = m.get(name, "auto") if isinstance(m, dict) else m
-        out.append(0.5 * float(s) if v == "auto" else float(v or 0.0))
+        # auto = half the step ROUNDED UP to whole points (Lukas 2026-10-11):
+        # step 3 -> 2 points, 5 -> 3. Rounding down (1.5 -> 1) lost no island
+        # point on the rig, but an edge that falls between two scout points is
+        # safer with one more ring measured.
+        out.append(float(math.ceil(0.5 * float(s) - 1e-9)) if v == "auto"
+                   else float(v or 0.0))
     return out
 
 

@@ -813,7 +813,7 @@ happening.* It works for any scan with something to measure:
      background is most of what the scout sees.
 
    The kept area is grown by a `margin` in **grid points** (default `auto` =
-   half the coarse step: 1.5 points for every 3rd), so edges are measured too.
+   half the coarse step rounded up: 2 points for every 3rd), so edges are measured too.
 3. **The scan** then visits only the kept points. The others are never moved to
    (no travel, no settle) and stay NaN, so the result is still the full matrix.
 

@@ -81,9 +81,11 @@ def test_otsu_splits_two_populations():
         M.otsu([np.nan])
 
 
-def test_auto_margin_is_half_the_source_step_in_grid_points():
+def test_auto_margin_is_half_the_source_step_rounded_up():
     names = ["a", "b"]
-    assert M.margin_radii(M.spec_of({}), names, [3, 2]) == [1.5, 1.0]
+    # Lukas 2026-10-11: half a step ROUNDED UP to whole points (3 -> 2)
+    assert M.margin_radii(M.spec_of({}), names, [3, 2]) == [2.0, 1.0]
+    assert M.margin_radii(M.spec_of({}), names, [5, 4]) == [3.0, 2.0]
     assert M.margin_radii(M.spec_of({"margin": 0.7}), names, [3, 2]) == [0.7, 0.7]
     assert M.margin_radii(M.spec_of({"margin": {"a": 2}}), names, [3, 2]) == [2.0, 1.0]
 

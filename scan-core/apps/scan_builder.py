@@ -968,7 +968,7 @@ class AxisRow(_StackRow):
         """SCOUT (scan_core/scout.py): look at this axis quickly first -- every
         k-th point -- and measure in detail only where the scout saw
         something. Any axis that moves something can be scouted, one or
-        several. The margin is PER AXIS here (auto = half this axis's step);
+        several. The margin is PER AXIS here (auto = half this axis's step, rounded up);
         what the scout looks at and how it decides are scan-wide, in the SCOUT
         PASS section under the stack.
 
@@ -990,9 +990,9 @@ class AxisRow(_StackRow):
         self.margin_auto = QtWidgets.QCheckBox("auto")
         self.margin_auto.setChecked(True)
         self.margin_auto.setToolTip(
-            "Half this axis's scout step (1.5 points for every 3rd): about how\n"
-            "well the scout can place an edge. On the rig it lost no rim\n"
-            "(2026-10-08).")
+            "Half this axis's scout step, rounded up to whole points (2 points\n"
+            "for every 3rd): about how well the scout can place an edge, plus\n"
+            "one ring to spare (Lukas, 2026-10-11).")
         self.margin_spin = QtWidgets.QDoubleSpinBox()
         self.margin_spin.setRange(0, 1000); self.margin_spin.setDecimals(1)
         self.margin_spin.setValue(2.0); self.margin_spin.setSuffix(" pts")
