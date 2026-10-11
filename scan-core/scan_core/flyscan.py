@@ -639,6 +639,116 @@ def validate_fly(recipe, registry) -> list[str]:
     return errs
 
 
+# ──────────────────── will the streams fill the pixels? ──────────────────────
+#
+# Lukas, 2026-10-11: "before starting a scan we calculate the approx time for a
+# sweep and if an empty pixel happens we inform the user ... it is up to the
+# user to verify the fly scanning is capturing data properly -- we just warn."
+# A stream delivers what it delivers (a lock-in 50 samples/s, an oscilloscope
+# one sample per RECORD, perhaps 2 per second); if a pixel lasts shorter than
+# one sample, pixels stay EMPTY (NaN). Before the run the module's declared
+# rate (describe stream `rate_hz`) gives the estimate; during the run the
+# empty pixels are counted (fly_sweep). Never blocks anything.
+
+#: below this many expected samples per pixel the estimate WARNS (empty pixels)
+MIN_PER_PIXEL = 1.0
+#: ... and this many is what the warning recommends for a usable average
+GOOD_PER_PIXEL = 3.0
+
+
+def sampling_estimate(recipe, registry) -> dict | None:
+    """What a fly row will take and how many samples each streamed detector
+    should put into a pixel. None for a stepped scan (or a fly axis whose
+    pace is unknown -- validate says why).
+
+    {"row_s": seconds per row, "pixel_s": seconds per pixel, "pixels": n,
+     "speed": pace, "unit": pace unit ("um/s"),
+     "detectors": {det: {"rate_hz": r or None, "per_pixel": r * pixel_s or None,
+                         "speed_for_1": pace giving 1 per pixel,
+                         "speed_for_3": ... 3 per pixel}}}
+    """
+    ax = fly_axis(recipe)
+    if ax is None:
+        return None
+    try:
+        num = int(ax.get("num") or 0)
+    except (TypeError, ValueError):
+        return None
+    speed = fly_rate(ax, registry)
+    row_s = row_seconds(ax, registry)
+    if num < 2 or not (math.isfinite(row_s) and row_s > 0
+                       and math.isfinite(speed) and speed > 0):
+        return None
+    pixel_s = row_s / num                 # = pixel width / speed
+    ramp = ramp_of(ax, registry)
+    if ramp is not None:
+        unit = ramp.rate_unit
+    else:
+        p = registry.get(ax.get("param"))
+        unit = f"{getattr(p, 'unit', '') or ''}/s"
+    dets = {}
+    for det in getattr(recipe, "detectors", None) or []:
+        q = registry.get(det)
+        if q is None or getattr(q, "stream", None) is None:
+            continue
+        r = getattr(q, "stream_rate_hz", None)
+        if r is None:
+            dets[det] = {"rate_hz": None, "per_pixel": None,
+                         "speed_for_1": None, "speed_for_3": None}
+            continue
+        r = float(r)
+        per = r * pixel_s
+        # samples per pixel go as 1/speed: the pace that gives k per pixel
+        dets[det] = {"rate_hz": r, "per_pixel": per,
+                     "speed_for_1": speed * per / MIN_PER_PIXEL,
+                     "speed_for_3": speed * per / GOOD_PER_PIXEL}
+    return {"row_s": row_s, "pixel_s": pixel_s, "pixels": num, "speed": speed,
+            "unit": unit, "detectors": dets}
+
+
+def sampling_summary(est: dict) -> str:
+    """The estimate as one log line (ASCII, gotcha #14)."""
+    parts = []
+    for det, d in est["detectors"].items():
+        if d["per_pixel"] is None:
+            parts.append(f"{det} (rate not declared)")
+        else:
+            parts.append(f"{det} ~{d['per_pixel']:.3g}")
+    return (f"fly: a row takes ~{est['row_s']:.3g} s ({est['pixels']} pixels, "
+            f"{est['pixel_s'] * 1e3:.3g} ms each at {est['speed']:g} {est['unit']}); "
+            f"expected samples per pixel: " + (", ".join(parts) or "no streamed detector"))
+
+
+def fly_warnings(recipe, registry) -> list[str]:
+    """WARNINGS for a fly scan whose streams cannot fill its pixels: a
+    detector expected to deliver fewer than one sample per pixel. Said in the
+    Scan Builder's summary and logged at the start of the run; never blocks
+    it (the module's rate is an estimate, the user decides)."""
+    try:
+        est = sampling_estimate(recipe, registry)
+    except Exception:
+        return []
+    if est is None:
+        return []
+    out = []
+    for det, d in est["detectors"].items():
+        per = d["per_pixel"]
+        if per is None or per >= MIN_PER_PIXEL:
+            continue
+        if d["rate_hz"] <= 0:
+            out.append(f"{det} streams NOTHING at its module's current settings "
+                       f"(rate 0: stopped, or no records) -- every pixel will be empty")
+            continue
+        unit = est["unit"]
+        out.append(
+            f"{det}: ~{per:.2g} samples per pixel expected ({d['rate_hz']:.3g}/s "
+            f"from its module, {est['pixel_s'] * 1e3:.3g} ms per pixel at "
+            f"{est['speed']:g} {unit}) -- pixels will be EMPTY. Fly at <= "
+            f"{d['speed_for_1']:.3g} {unit} for >= 1 per pixel, <= "
+            f"{d['speed_for_3']:.3g} {unit} for >= 3 (or use fewer pixels)")
+    return out
+
+
 # ────────────────────────────── the engine part ──────────────────────────────
 
 def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
@@ -751,6 +861,19 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             + ("the MEASURED value" if binned_by == "measurement" else
                "the COMMANDED value and its time stamp (the module cannot "
                "report the real one while sweeping)"))
+
+    # How many samples each stream should put into a pixel, and a WARNING
+    # where that is below one (fly_warnings; the builder said it already)
+    est = sampling_estimate(recipe, registry)
+    if est is not None:
+        log(sampling_summary(est))
+    for w in fly_warnings(recipe, registry):
+        log("fly: WARNING: " + w)
+    # EMPTY PIXELS while flying (Lukas 2026-10-11: "we just warn"): per
+    # detector, {row: empty pixels} of the rows flown; said at the first row
+    # that has any, and summed up at the end of the scan
+    empty: dict = {det: {} for det in dets}
+    missed: dict = {}                     # stream group -> samples it never read
 
     # The speed the stage had before: the approach to each row runs at it (a
     # fly speed is usually slow, and crawling back across the sample to the
@@ -918,6 +1041,9 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
         if any(c.get("overflow") for cs in chunks.values() for c in cs):
             log("fly: a stream buffer overflowed -- samples were lost on this "
                 "row (slow the stream or shorten the row)")
+        if not aborted:
+            _count_empty(data, oidx, row, empty, npix, log)
+        _count_missed(chunks, groups, missed, row, log)
         return aborted, oidx, backwards
 
     def blank_row(oidx):
@@ -995,6 +1121,8 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 spec.stop()
             except Exception:
                 pass
+        for line in _empty_summary(empty, missed):
+            log(line)
         if state["fly_speed"]:
             try:
                 use_speed(orig_speed)
@@ -1492,6 +1620,57 @@ def _bin_into(chunks, rb, params, edges, lag, data, oidx):
         data[f"{det}_std"][tuple(oidx)] = s
 
 
+def _count_empty(data, oidx, row, empty, npix, log):
+    """Count this row's EMPTY pixels per detector (n == 0: no sample fell
+    in them) into `empty`; warn at the first row of a detector that has any.
+    A row flown again after a fault replaces its own count."""
+    for det, rows in empty.items():
+        n = data.get(f"{det}_n")
+        if n is None:
+            continue
+        k = int(np.sum(np.asarray(n[tuple(oidx)]) == 0))
+        first = k > 0 and not any(rows.values())
+        rows[row] = k
+        if first:
+            log(f"fly: WARNING: {det}: {k} of {npix} pixels EMPTY on row {row + 1} "
+                f"(no sample fell in them; NaN in the data) -- its stream is too "
+                f"slow for this speed and pixel size: fly slower or use fewer "
+                f"pixels. (Further rows are counted and summed up at the end.)")
+
+
+def _count_missed(chunks, groups, missed, row, log):
+    """Samples a module SAYS went by unread (`missed` in a stream chunk: an
+    oscilloscope's records made while it was still reading the previous
+    one). Said once per stream, summed up at the end."""
+    for key, cs in chunks.items():
+        n = sum(int(c.get("missed") or 0) for c in cs)
+        if n <= 0:
+            continue
+        group = getattr(groups.get(key), "group", "stream")
+        if group not in missed:
+            log(f"fly: WARNING: {group}: ~{n} sample(s) went by unread on row "
+                f"{row + 1} (the instrument made them faster than its module "
+                f"read them) -- they are not in the data")
+        missed[group] = missed.get(group, 0) + n
+
+
+def _empty_summary(empty, missed) -> list[str]:
+    """The end-of-scan lines: empty pixels per detector, unread samples per
+    stream. Nothing when every pixel got a sample."""
+    out = []
+    for det, rows in empty.items():
+        total = sum(rows.values())
+        if total:
+            bad = sum(1 for k in rows.values() if k)
+            out.append(f"fly: WARNING: {det}: {total} empty pixel(s) in {bad} of "
+                       f"{len(rows)} rows -- slow down the fly speed (or use fewer "
+                       f"pixels)")
+    for group, n in missed.items():
+        out.append(f"fly: WARNING: {group}: ~{n} sample(s) went by unread during "
+                   f"the scan")
+    return out
+
+
 def _var_attrs(params, fly, ax, rb_id, speed) -> dict:
     """Attributes for the dataset: what each variable is, and how it was flown.
     (How the AXIS was flown -- speed, mode, `fly_binned_by` -- is written by
@@ -1541,6 +1720,4 @@ def _warn_quality(chunks, rb, params, data, oidx, speed, width, log):
         if med < 3:
             log(f"fly: {det} has only ~{med:.0f} samples per pixel; the "
                 f"average is thin -- fly slower or use fewer pixels.")
-        if np.any(n == 0):
-            log(f"fly: {int(np.sum(n == 0))} pixel(s) of {det} got no sample "
-                f"on the first row (NaN in the data).")
+        # (EMPTY pixels are counted on every row: _count_empty)

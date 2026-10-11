@@ -19,6 +19,10 @@ processing module, from the recorded traces.)
 The `acquire` block makes scan-core trigger and wait for THAT acquisition
 (acq_id, gotcha #17) before reading -- a cold read would return the previous
 point's trace and nothing would raise.
+The scalar numbers (per channel and phase_21) also carry a `stream` block,
+group "records": in a FLY scan each triggered record gives one sample of them
+(scope.py "FLY SCANS"), and `rate_hz` says how many records per second to
+expect at the current settings -- scan-core's samples-per-pixel estimate.
 
 THE CONTROLS. The scope's own settings (V/div, offset, coupling, probe,
 time/div, delay, trigger) settle on "the module echoes what was ASKED
@@ -290,17 +294,31 @@ def build_manifest(scope) -> dict:
                 help=f"{cfg.channel(ch).phys_label or ch.upper()}, averaged over the "
                      f"acquisition" + ("" if raw else ", filtered") + "."))
             order += 1
+    # THE SAME NUMBERS CAN BE STREAMED, one sample per triggered record, for
+    # a FLY scan (stream_start / stream_read / stream_stop; scope.py "FLY
+    # SCANS"). `rate_hz` = the records per second to expect, so scan-core can
+    # say before a fly scan how many records will fall into each pixel.
+    rate = scope.stream_rate_hz()
+
+    def stream(channel):
+        return {"group": "records", "channel": channel, "rate_hz": rate}
+
+    fly_help = (f" In a FLY scan each triggered RECORD gives one sample "
+                f"(~{rate:.3g} per second at these settings), stamped at its "
+                f"middle, computed on that record alone -- not averaged.")
     for ch in chans:
         for key, what, u in _VALUES:
             params.append(_p(f"{ch}_{key}", f"{ch.upper()} {what}", "indicator", "float",
                              unit=u or unit[ch], group="Measurement", order=order,
-                             read_path=["sample", ch, key], acquire=acquire))
+                             read_path=["sample", ch, key], acquire=acquire,
+                             stream=stream(f"{ch}_{key}"), help=fly_help.strip()))
             order += 1
     if len(chans) > 1:
         params.append(_p("phase_21", "Phase CH2 - CH1", "indicator", "float", unit="deg",
                          group="Measurement", order=order, decimals=2,
                          read_path=["sample", "phase_21_deg"], acquire=acquire,
-                         help="At CH1's fundamental; positive = CH2 leads."))
+                         stream=stream("phase_21"),
+                         help="At CH1's fundamental; positive = CH2 leads." + fly_help))
         order += 1
     # -- live (not scan-safe: the running average now) -------------------------------------
     for ch in chans:

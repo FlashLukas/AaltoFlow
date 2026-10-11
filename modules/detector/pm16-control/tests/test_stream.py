@@ -55,7 +55,9 @@ def test_an_overrange_reading_is_streamed_as_nan():
 def test_the_power_detector_declares_its_stream():
     meter, _ = build_sim_system(realtime=False)
     params = {p["id"]: p for p in build_manifest(meter)["parameters"]}
-    assert params["power"]["stream"] == {"group": "power", "channel": "power"}
+    # rate_hz: the samples per second a fly scan can expect (~17 readings/s)
+    assert params["power"]["stream"] == {"group": "power", "channel": "power",
+                                         "rate_hz": 17.0}
     assert params["power"]["scale"] == 1e-3     # the stream is W, the scan records mW
     assert "stream" not in params["power_std"]
 

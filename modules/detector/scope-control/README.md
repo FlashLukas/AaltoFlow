@@ -95,6 +95,50 @@ knows it. The scope snaps some time/div values (the lab's: 20 ms -> 10 ms,
 The trace length, the time base and the units must not change during a scan
 (scan-core refuses ragged data); sweep them only as an outer axis, if at all.
 
+## Fly scans: one sample per record
+
+In a FLY scan (scan-core `type: fly`: the stage -- or a field, a frequency --
+moves without stopping, and every sample is binned by the measured position)
+the scope does not average: **every triggered record it takes is one
+sample**. `stream_start` / `stream_read` / `stream_stop` (group `records`)
+hand out, per record, the same numbers the scan detectors offer --
+`ch1_mean`, `ch1_rms`, `ch1_pk2pk`, `ch1_amplitude`, `ch1_frequency`, the
+same for CH2, and `phase_21` -- computed on THAT record alone (filtered like
+the live view), not on the running average.
+
+- **Time stamp.** A record lasts 14 divisions (the Analog Discovery's 10).
+  Each sample is stamped with the moment the record ENDED -- the middle
+  between the poll that found it and the one before, which did not (polls are
+  at most a quarter record apart) -- with `t_start` / `t_end` next to it, and
+  every channel declares **half a record as its `delay_s`**: scan-core moves
+  each sample back by it, so a record is filed at its MIDDLE. What remains is
+  smearing over one record, which scan-core logs.
+- **How many.** As many as the scope delivers: one record per record length
+  plus the transfer (`transfer_s` of the backend: simulator 0.05 s, Siglent
+  0.2 s `# VERIFY`, Analog Discovery 0.01 s `# VERIFY`) -- at 5 ms/div about
+  8 a second, at 0.1 s/div below one. describe says it as the stream's
+  `rate_hz` (status `stream_rate_Hz`); when the records come clearly slower
+  (a slow trigger) the measured rate is used. scan-core turns it into
+  "expected samples per pixel" before the run and WARNS below one (pixels
+  would stay empty) -- see `scan-core`, fly scans.
+- **Nothing silent.** The scope keeps only its latest record; one made while
+  the module was still reading the previous one is never seen. The module
+  estimates those from the gaps between the records it did read and reports
+  them as `missed` (scan-core warns); `overflow` = the bounded buffer dropped
+  samples nobody read.
+- **Nothing changed.** Streaming writes nothing to the scope (adopt rule); the
+  live view, the running average and `acquire` go on as before. Set the
+  scope up (time/div, trigger NORMAL, V/div) before the fly scan and leave it:
+  a setting changed during the scan changes what a record means.
+- Choose the time base for the fly: a pixel should last at least one record
+  (better three). At 20 ms/div a record is 0.28 s + transfer, so a 100-pixel
+  row needs ~50 s.
+
+Verified in the simulator (both backends) only. On the Siglent: whether
+`C1:WF? DAT2` hands over the record that was COMPLETE when asked (the end
+estimate assumes it) is `# VERIFY` -- compare a fly scan forward and backward
+over a sharp edge.
+
 ## Rules it keeps
 
 - **Start changes nothing.** The scope's settings (V/div, offset, coupling,
@@ -198,6 +242,8 @@ Scope settings: `set_channel_enabled`, `set_vdiv`, `set_offset`,
 `set_keep_raw`, `set_filter {lowpass_Hz?, highpass_Hz?, order?}`,
 `set_physical {channel, scale?, offset?, unit?, label?}`, `restart_average`, `set_sim` (simulator). Measuring: `acquire -> {acq_id}`,
 `abort`/`stop`, `get_trace {which: live|sample}`, `get_time`, `get_sample`.
+Fly scans: `stream_start -> {stream_id}`, `stream_read`, `stream_stop`
+(`-> {stream}`: one sample per record, see [Fly scans](#fly-scans-one-sample-per-record)).
 Plus `status`, `info`, `get_config`, `set_config`, `describe`, `shutdown`.
 
 ## Setup (lab PC)
@@ -283,7 +329,7 @@ Then record the result in `docs/VERIFIED_INSTRUMENTS.md`.
 ## Tests
 
 ```powershell
-uv run pytest -q        # 109 tests, offline: the simulated bench, a simulated
+uv run pytest -q        # 126 tests, offline: the simulated bench, a simulated
                         # Analog Discovery, a fake SDS1000CML+ and a fake dwf library
 python ..\..\..\tools\check_modules.py scope --live
 ```

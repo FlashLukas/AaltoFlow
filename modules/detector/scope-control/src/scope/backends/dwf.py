@@ -314,6 +314,10 @@ class DwfScope:
     # measured on the lab AD2 (2026-10-08): opening the device resets it, so
     # outputs / supplies do NOT survive a restart (keep_outputs) -- said at shutdown
     resets_on_open = True
+    #: seconds per record on top of the record itself (re-arm + copying the
+    #: buffer out over USB 2), for the expected record rate of the fly-scan
+    #: stream (describe `rate_hz`). Not measured on the lab AD2 yet. # VERIFY
+    transfer_s = 0.01
 
     def __init__(self, device: DwfDevice, hysteresis_div: float = 0.05):
         self.dev = device

@@ -44,6 +44,12 @@ def _snap(value: float, steps: list) -> float:
 
 class SimulatedScope:
     simulated = True
+    #: seconds per record on top of the record itself: the re-arm plus the
+    #: transfer of both channels (the real SDS1000CML+ over USB: ~0.1 s per
+    #: channel read, lab PC 2026-10-07; the simulator is kinder so tests stay
+    #: quick). Paces the simulated record rate AND tells the brain what record
+    #: rate to expect (describe `rate_hz` of the fly-scan stream).
+    transfer_s = 0.05
 
     def __init__(self, sim_cfg, clock=time.monotonic, seed: int | None = None):
         self.sim = sim_cfg                 # the live config group: edits apply at once
@@ -152,9 +158,9 @@ class SimulatedScope:
         now = self._clock()
         period = 1.0 / max(self.sim.frequency_Hz, 1e-3)
         span = _H_DIV * self.settings["tdiv_s"]
-        # a record needs its own span plus ~5 ms of dead time, and the next
+        # a record needs its own span plus the dead time transfer_s, and the next
         # trigger edge; never faster than the drive repeats
-        dead = max(period, span + 0.005)
+        dead = max(period, span + self.transfer_s)
         phi = self._trigger_phase()
         if phi is None:
             if mode != "auto" or now - self._last_record_t < 0.05:
@@ -226,6 +232,8 @@ class SimulatedADScope(SimulatedScope):
     back what they are set to)."""
 
     keeps_outputs_on_close = True
+    #: the AD2 hands a finished record over in a few ms (USB 2 bulk)
+    transfer_s = 0.005
 
     def __init__(self, sim_cfg, gen, clock=time.monotonic, seed: int | None = None):
         super().__init__(sim_cfg, clock=clock, seed=seed)
@@ -327,7 +335,7 @@ class SimulatedADScope(SimulatedScope):
             return False
         now = self._clock()
         span = 10.0 * self.settings["tdiv_s"]
-        if now - self._last_record_t < span + 0.005:
+        if now - self._last_record_t < span + self.transfer_s:
             return False
         t_abs = now - self._t_start
         t_trig = self._trigger_time(t_abs, span)

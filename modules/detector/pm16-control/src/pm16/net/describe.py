@@ -88,6 +88,9 @@ def _finite_or_none(v):
 
 def build_manifest(meter) -> dict:
     cfg = meter.cfg
+    # fly-scan stream: one sample per reading; the PM16 makes ~17 a second
+    # (each ~58 ms), the poll loop asks at most poll_hz times a second
+    rate = round(min(max(1.0, float(cfg.hardware.poll_hz)), 17.0), 1)
     lim = cfg.limits
     wlo, whi = meter.wavelength_limits()
     rlo, rhi = meter.range_limits()
@@ -159,7 +162,7 @@ def build_manifest(meter) -> dict:
            acquire=acquire,
            # a FLY scan records every reading instead (in W, like status;
            # the scale above makes it mW) and bins it by the stage position
-           stream={"group": "power", "channel": "power"},
+           stream={"group": "power", "channel": "power", "rate_hz": rate},
            help="Mean of fresh readings latched by `acquire`: safe to record in a scan. "
                 "In a FLY scan every reading is recorded instead (~17 per second)."),
         _p("power_std", "Power std. dev.", "indicator", "float", unit="mW",

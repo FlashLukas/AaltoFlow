@@ -776,7 +776,13 @@ way declares (added 2026-09-27):
 
 `group` = the parameters recorded together (one start / read / stop for all of
 them, like an acquire group); `channel` = this parameter's name in the stream
-reply. Declare it on the DETECTORS a fly scan should record and on the POSITION
+reply. Optional `rate_hz` (2026-10-11): how many samples per second the module
+expects to deliver at its CURRENT settings (a lock-in its poll rate, an
+oscilloscope 1 / (record length + transfer)) -- live, so a setting that changes
+it moves the manifest revision; keep it stable (round it) so jitter does not.
+scan-core uses it only to estimate the samples per pixel before a fly scan and
+to WARN when fewer than one is expected; leave it out when unknown, never
+guess high. Declare it on the DETECTORS a fly scan should record and on the POSITION
 it should bin by (kim: `position_x/y/z`, group `position`). The same parameter
 keeps its `acquire` block for ordinary stepped scans.
 
@@ -791,6 +797,9 @@ Three verbs, all optional -- a module without `stream` blocks needs none:
                "values": {"x1": [...], ...},          # one list per channel, len(t) each; NaN -> null
                "delay_s": {"x1": 0.04, ...},          # how LATE each channel is (see below)
                "overflow": false,                     # the bounded buffer dropped samples
+               "missed": 0,                           # optional: samples the INSTRUMENT made
+                                                      # that the module never read (a scope's
+                                                      # records while it read the previous one)
                "now": 1790499384.81}                  # time.time() at the reply
 
 Rules that matter:

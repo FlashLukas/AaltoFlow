@@ -38,6 +38,9 @@ class SimStreamer:
                  derive=None, max_samples: int = 500_000):
         self.group = group
         self._sample = sample_fn
+        #: samples per second it aims at: what a module's describe says as the
+        #: stream's `rate_hz` (the fly scan's samples-per-pixel estimate)
+        self.rate_hz = float(rate_hz)
         self._period = 1.0 / float(rate_hz)
         self._filtered = set(filtered)
         self._tau_fn = tau_fn or (lambda: 0.0)

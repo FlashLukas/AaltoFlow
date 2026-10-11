@@ -591,6 +591,14 @@ def stream_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
             return len(re)
         return len(v) if isinstance(v, list) else -1
 
+    # `rate_hz` (optional): samples per second to expect, for scan-core's
+    # samples-per-pixel estimate before a fly scan -- a number >= 0 if given
+    for p in manifest.get("parameters", []):
+        s = p.get("stream")
+        if isinstance(s, dict) and "rate_hz" in s:
+            r = s["rate_hz"]
+            if isinstance(r, bool) or not isinstance(r, (int, float)) or not r >= 0:
+                problems.append(f"{p.get('id')}: stream rate_hz {r!r} is not a number >= 0")
     if not chunks:
         problems.append("stream_start / stream_read / stream_stop not answered ok")
     else:

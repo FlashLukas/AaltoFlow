@@ -6156,6 +6156,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if hasattr(self, "scout_section"):
             self.scout_section.set_autofocus_warning(af)
         warnings = [af] if af else []
+        # A FLY scan whose streams cannot fill its pixels (fewer than one
+        # sample per pixel expected from a module's declared rate): said, the
+        # run is not blocked (Lukas 2026-10-11: "we just warn")
+        from scan_core.flyscan import fly_warnings
+        warnings += fly_warnings(recipe, self.registry)
         conditions = ("   ·   " + ", ".join(
             f"{r.param.label} = {r.value():g}{(' ' + r.param.unit) if r.param.unit else ''}"
             for r in self.fixed_rows)) if self.fixed_rows else ""
@@ -6201,6 +6206,15 @@ class ScanBuilder(QtWidgets.QMainWindow):
             t_row = row_seconds(fly, self.registry)
             eta = rows * (t_row + self.per_pt.value())
             how = f"fly: {rows} row(s) × {t_row:.3g} s"
+            # the thinnest stream: samples per pixel it should deliver (from
+            # the modules' declared rates; fly_warnings warns below 1)
+            from scan_core.flyscan import sampling_estimate
+            est = sampling_estimate(recipe, self.registry)
+            pers = [(d["per_pixel"], det) for det, d in (est or {}).get("detectors", {}).items()
+                    if d["per_pixel"] is not None]
+            if pers:
+                per, det = min(pers)
+                how += f", ~{per:.2g} samples/pixel ({det})"
             self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} px (fly)")
         else:
             eta = n * self.per_pt.value()
