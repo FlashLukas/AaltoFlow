@@ -253,7 +253,7 @@ def test_the_suite_header_shows_it_next_to_running(tmp_path, monkeypatch):
         assert win.run_state.text() == "RUNNING"
         assert "point 7 / 12" in win.where_lbl.text()
         assert "~1m 05s left" in win.where_lbl.text()
-        assert b.where_lbl.isHidden()                 # the suite shows it once, up here
+        assert win.where_lbl is b.where_lbl           # one line, the run pane's own
         monkeypatch.setattr(win, "scan_running", lambda: False)
         b._run_finished()
         win._tick()

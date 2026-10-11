@@ -5680,6 +5680,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_info = RunInfoCard()
         self.run_info.toggle.hide()              # always open in its panel
         self.run_info.body.show()
+        self.run_info.body.layout().setContentsMargins(0, 4, 0, 0)   # no arrow to indent under
         self.run_info_panel = PopupPanel("Run info", card)
         self.run_info_panel.setMinimumWidth(600)
         self.run_info_panel.body.addWidget(self.run_info)

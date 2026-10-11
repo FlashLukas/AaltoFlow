@@ -53,6 +53,7 @@ PROJECTS.update({
     "suite-catalogue": ("scan-core", True),
     "suite-queue": ("scan-core", True),
     "suite-queue-dialog": ("scan-core", True),
+    "suite-run-info": ("scan-core", True),
     "suite-fly-scan": ("scan-core", True),
     "suite-repeat-scan": ("scan-core", True),
     "suite-scout-scan": ("scan-core", True),

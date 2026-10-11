@@ -107,6 +107,7 @@ SIZES = {
     "suite-watch": (1500, 990),
     "suite-watch-remote": (1500, 1040),
     "suite-queue-dialog": (760, 430),
+    "suite-run-info": (640, 260),
     "suite-fly-scan": (1500, 950),
     "suite-image-scan": (1500, 950),
     "suite-repeat-scan": (1500, 950),
@@ -726,6 +727,23 @@ def _queue_dialog(win):
     dlg.show()
     win._render_keep = dlg              # keep it alive until the grab
     return dlg
+
+
+def _run_info_popup(win):
+    """The Run info POP-UP of the Measurement tab (2026-10-12), filled with
+    neutral sample values -- NOT saved (save=False): a render must not write
+    the run info of whatever suite_local.json it runs against. Returns the
+    panel, which is photographed instead of the window."""
+    _scan_then_show_run(win)
+    b = win.builder
+    b.run_info.set_values({"sample": "YIG islands, chip 3", "structure": "disc array D7",
+                           "operator": "operator", "project": "magnonics",
+                           "series": "field-frequency maps",
+                           "tags": "FMR, YIG, calibration",
+                           "comment": "first map after the antenna change"}, save=False)
+    b.run_info_btn.click()
+    win._render_keep = b.run_info_panel
+    return b.run_info_panel
 
 
 def _queue_running(win):
@@ -1595,6 +1613,7 @@ TARGETS = {
     "suite-watch-remote": _suite("Measurement", lambda w: _watch_server(w, remote=True),
                                  settle=4.0),
     "suite-queue-dialog": _suite("Measurement", _queue_dialog, settle=1.0),
+    "suite-run-info": _suite("Measurement", _run_info_popup, settle=1.5),
     "suite-fly-scan": _suite("Scan", _fly(run=False), settle=2.0),
     "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),
     "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
