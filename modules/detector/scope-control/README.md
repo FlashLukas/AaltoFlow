@@ -210,6 +210,12 @@ has 3.24.4), close the WaveForms program (one process per device), and start
 uv run scripts/run_service.py --real --driver dwf --cmd-port 5635 --pub-port 5636
 ```
 
+From Mission Control: press **+** on the Oscilloscope card (*Add instance…*),
+name it `dwf`, keep the suggested ports 5635/5636 and give the extra
+arguments `--driver dwf`. The copy gets its own card (tick `real` there) and
+its parameters appear in the measurement suite as `scope_dwf.*`, next to the
+Siglent's `scope.*` (mission-control README, "Two copies of one module").
+
 The Siglent and the Analog Discovery are TWO services of this module, each
 with its own settings file next to the project: `scope.ini` (siglent, the
 default) and `scope-dwf.ini` + `scope-dwf-generator.ini` (dwf). The driver is

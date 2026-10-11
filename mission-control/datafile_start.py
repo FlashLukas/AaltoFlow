@@ -188,7 +188,9 @@ def plan_rows(result: dict, modules, up=None, owned=None) -> list[FileRow]:
     up = up or {}
     owned = set(owned or ())
     by_slug = {m.slug: m for m in modules}
-    local = {m.key: m for m in modules if not m.remote}
+    # the modules themselves: an instance ("scope#dwf") shares the key and is
+    # found by its slug ("scope_dwf") in by_slug instead
+    local = {m.key: m for m in modules if not m.remote and not getattr(m, "instance", "")}
     remotes_by_key: dict[str, list] = {}
     for m in modules:
         if m.remote:

@@ -19,7 +19,14 @@ Services on OTHER PCs are added by hand ("Add remote...") and can be deleted
 again. They get a card too, with a GUI button, but no Start/Stop: they belong
 to whoever runs that PC.
 
-Everything this PC chooses -- ports, real/sim, remote services -- is saved in
+A local module can also run TWICE (or more) on this PC: "Add instance..." on
+its card (the + button, or right-click) adds a copy with its own name, ports
+and extra service arguments -- e.g. the scope module once for the Siglent and
+once with `--driver dwf` for an Analog Discovery. Each instance gets its own
+card (Service / Stop / GUI / Ports / Remove instance), its own place in the
+profiles and its own parameter prefix in the measurement suite ("scope_dwf").
+
+Everything this PC chooses -- ports, real/sim, remote services, instances -- is saved in
 <root>/suite_local.json, which scan-core reads too. That file is how the
 measurement suite "follows" the launcher.
 
@@ -50,6 +57,8 @@ from suite_common import (ENDPOINTS_ENV, PRODUCT, add_remote, default_root,
                           discover, endpoints_json, gui_args, probe,
                           remove_remote, service_args, set_address, set_ports, set_real,
                           setup_name, start_order, title as suite_title)
+from suite_common import (RESERVED_ARGS, add_instance, args_text, free_ports_after,
+                          parse_args_text, remove_instance)
 from suite_common.catalog import (DEFAULT_CATALOG_URL, CatalogError, InstallPlan,
                                   ModuleSource, asset_url, download, env_steps,
                                   fetch_catalog, install, module_version,
@@ -560,7 +569,10 @@ class PortsDialog(QtWidgets.QDialog):
             self.error.setText("; ".join(clashes))
             return
         default = (cmd, pub) == (self.spec.default_cmd, self.spec.default_pub)
-        self.result_ports = (None, None) if default else (cmd, pub)
+        # an instance HAS no module.toml default: its ports are what it was
+        # added with, so they are always saved as they are
+        self.result_ports = ((None, None) if default and not self.spec.instance
+                             else (cmd, pub))
         self.accept()
 
 
@@ -687,7 +699,8 @@ class InstrumentsDialog(QtWidgets.QDialog):
                             "a module probe a few)")
         ask = self.ask_visa.isChecked()
         probes = self.run_probes.isChecked()
-        modules = list(self.modules)
+        # an instance shares its module's folder and probe: probe it once
+        modules = [m for m in self.modules if not m.instance]
 
         def run():
             # VISA + COM in this thread, the list-only sources (probes, USB
@@ -785,16 +798,17 @@ class InstrumentsDialog(QtWidgets.QDialog):
         fits = finder.modules_for(f, self.modules) if f is not None else []
         for spec, address in fits:
             now = f"  (now: {spec.address})" if spec.address else ""
-            a = menu.addAction(f"{spec.name} [{spec.key}]: {address}{now}")
+            a = menu.addAction(f"{spec.name} [{spec.id}]: {address}{now}")
             a.triggered.connect(lambda _=False, s=spec, ad=address: self.use_for(s, ad))
         self.use_btn.setEnabled(bool(fits))
 
     def use_for(self, spec: ModuleSpec, address: str):
-        set_address(spec.key, address, ROOT)
+        # by id: an instance ("scope#dwf") opens its OWN instrument
+        set_address(spec.id, address, ROOT)
         spec.address = address
-        self.log(f"[{spec.key}] instrument address on this PC: {address} -- used when the "
+        self.log(f"[{spec.id}] instrument address on this PC: {address} -- used when the "
                  f"service starts with 'real' ticked ({spec.address_arg} {address})")
-        self.status.setText(f"{spec.key} -> {address}")
+        self.status.setText(f"{spec.id} -> {address}")
         self._selected()
 
     def _copy(self):
@@ -855,6 +869,8 @@ class AddRemoteDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add a remote service")
         self.setMinimumWidth(460)
+        # module TYPES: the modules themselves, never a remote copy or an instance
+        local_modules = [m for m in local_modules if not m.remote and not m.instance]
         self.local = {m.key: m for m in local_modules}
         form = QtWidgets.QFormLayout(self)
 
@@ -964,6 +980,107 @@ class AddRemoteDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class AddInstanceDialog(QtWidgets.QDialog):
+    """Add another copy (an INSTANCE) of a local module on this PC.
+
+    Example: the scope module runs for the Siglent on 5633/5634; an instance
+    "dwf" on 5635/5636 with the extra arguments `--driver dwf` runs for an
+    Analog Discovery 2 at the same time. Saved in suite_local.json
+    (modules.<key>.instances); see suite_common.modules.add_instance.
+
+    Nothing here checks that the two copies open DIFFERENT instruments: the
+    address lock does that when a real backend opens (hwlock, gotcha #37) --
+    the second one is refused and its card says who holds the address.
+    """
+
+    def __init__(self, base: ModuleSpec, modules: list[ModuleSpec], parent=None):
+        super().__init__(parent)
+        self.base, self.modules = base, list(modules)
+        self.setWindowTitle(f"Add an instance - {base.name}")
+        self.setMinimumWidth(480)
+        form = QtWidgets.QFormLayout(self)
+        self.name = QtWidgets.QLineEdit()
+        self.name.setPlaceholderText(f"e.g. dwf, b, lab2  (parameters become {base.key}_<name>.*)")
+        # the first free pair above the module's own ports (5633 -> 5635)
+        try:
+            cmd, pub = free_ports_after(self.modules, base.cmd)
+        except ValueError:
+            cmd, pub = base.cmd + 2, base.cmd + 3
+        self.cmd = QtWidgets.QSpinBox(); self.cmd.setRange(1024, 65535); self.cmd.setValue(cmd)
+        self.pub = QtWidgets.QSpinBox(); self.pub.setRange(1024, 65535); self.pub.setValue(pub)
+        self._pub_follows = True
+        self.cmd.valueChanged.connect(
+            lambda v: self._pub_follows and self.pub.setValue(min(65535, v + 1)))
+        self.pub.editingFinished.connect(lambda: setattr(self, "_pub_follows", False))
+        self.args = QtWidgets.QLineEdit()
+        self.args.setPlaceholderText("extra service arguments, e.g. --driver dwf")
+        self.config = QtWidgets.QLineEdit()
+        self.config_ok = takes_config(base)
+        if self.config_ok:
+            self.config.setPlaceholderText(f"optional, e.g. {base.key}-b.ini "
+                                           f"(in the module folder; passed as --config)")
+        else:
+            self.config.setPlaceholderText("this module's service takes no --config")
+            self.config.setEnabled(False)
+        form.addRow("instance name", self.name)
+        form.addRow("command port (REQ/REP)", self.cmd)
+        form.addRow("status port (PUB/SUB)", self.pub)
+        form.addRow("extra arguments", self.args)
+        form.addRow("settings file", self.config)
+        hint = QtWidgets.QLabel(
+            f"A second {base.name} service on this PC, with its own card, ports and "
+            f"real/sim switch. The extra arguments go to its service after the "
+            f"launcher's own ({', '.join(RESERVED_ARGS)} are set by the launcher). "
+            f"Two copies cannot open the same instrument: the second is refused its "
+            f"address. Saved on this PC only ({LOCAL_FILE}).")
+        hint.setWordWrap(True); hint.setObjectName("meta")
+        form.addRow(hint)
+        self.error = QtWidgets.QLabel(""); self.error.setWordWrap(True)
+        self.error.setStyleSheet(f"color:{C['danger']};")
+        form.addRow(self.error)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.added_id: str | None = None
+
+    def _ok(self):
+        name = self.name.text().strip()
+        cmd, pub = self.cmd.value(), self.pub.value()
+        try:
+            args = parse_args_text(self.args.text())
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            return
+        if name and cmd != pub:
+            # the same clash check as the Ports dialog, before anything is saved
+            probe_spec = ModuleSpec(id=f"{self.base.key}#{name}", key=self.base.key,
+                                    name=name, cmd=cmd, pub=pub)
+            clashes = [c for c in port_conflicts([probe_spec] + self.modules)
+                       if probe_spec.id in c]
+            if clashes:
+                self.error.setText("; ".join(clashes))
+                return
+        try:
+            self.added_id = add_instance(
+                self.base.key, name, cmd, pub, args=args,
+                config=self.config.text().strip() if self.config_ok else "", root=ROOT)
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            return
+        self.accept()
+
+
+def takes_config(spec: ModuleSpec) -> bool:
+    """Does the module's service script accept --config? (39 of 40 do.) Read
+    from the script's text: the launcher never imports a module."""
+    try:
+        return '"--config"' in (spec.dir / spec.service).read_text("utf-8", errors="replace")
+    except (OSError, TypeError):
+        return False
+
+
 class ProfileEditor(QtWidgets.QDialog):
     """Create / rename / delete profiles and toggle their members.
 
@@ -996,6 +1113,8 @@ class ProfileEditor(QtWidgets.QDialog):
         self.checks: dict[str, QtWidgets.QCheckBox] = {}
         for m in modules:
             where = f"remote {m.host}" if m.remote else (m.dir.name if m.dir else "")
+            if m.instance:
+                where += f"  ·  instance, ports {m.cmd}/{m.pub}"
             cb = QtWidgets.QCheckBox(f"{m.name}  ·  {where}")
             cb.toggled.connect(lambda on, k=m.id: self._toggle_member(k, on))
             self.checks[m.id] = cb
@@ -1738,6 +1857,13 @@ class ModuleCard(QtWidgets.QFrame):
         self.btn_ports = QtWidgets.QPushButton("Ports")
         self.btn_ports.setToolTip("Change this module's ports on this PC")
         self.btn_ports.clicked.connect(self.edit_ports)
+        # "+" = Add instance...: run another copy of this module on this PC
+        # (e.g. the scope module for a second instrument, `--driver dwf`)
+        self.btn_instance = QtWidgets.QToolButton(); self.btn_instance.setText("+")
+        self.btn_instance.setToolTip("Add instance… -- run another copy of this module on "
+                                     "this PC, with its own ports and arguments")
+        self.btn_instance.setFixedSize(28, 26)
+        self.btn_instance.clicked.connect(self.add_instance)
         self.btn_remove = QtWidgets.QPushButton("Remove"); self.btn_remove.setObjectName("danger")
         self.btn_remove.setToolTip("Delete this remote service from the list "
                                    "(the service on the other PC is not touched)")
@@ -1748,6 +1874,7 @@ class ModuleCard(QtWidgets.QFrame):
         for b in (self.btn_ports, self.btn_remove):
             b.setFixedWidth(84)
             row.addWidget(b)
+        row.addWidget(self.btn_instance)
         self.btn_vars.setFixedWidth(112)          # "Variables 35" must fit
         row.addWidget(self.btn_vars)
 
@@ -1775,13 +1902,18 @@ class ModuleCard(QtWidgets.QFrame):
         if not self.spec.is_instrument:
             return                      # pinned at the top: nothing to move
         menu = QtWidgets.QMenu(self)
+        inst = menu.addAction("Add instance…") if self.can_add_instance else None
+        if inst is not None:
+            menu.addSeparator()
         top = menu.addAction("Move to top")
         bottom = menu.addAction("Move to bottom")
         menu.addSeparator()
         reset = menu.addAction("Reset order (the modules' own order)")
         reset.setEnabled(self.win.has_custom_order())
         chosen = menu.exec(event.globalPos())
-        if chosen is top:
+        if chosen is not None and chosen is inst:
+            self.add_instance()
+        elif chosen is top:
             self.win.move_card(self.spec.id, "top")
         elif chosen is bottom:
             self.win.move_card(self.spec.id, "bottom")
@@ -1793,6 +1925,13 @@ class ModuleCard(QtWidgets.QFrame):
         self.btn_down.setEnabled(can_down)
 
     @property
+    def can_add_instance(self) -> bool:
+        """Only a LOCAL instrument module (not a remote, not an instance of
+        it, not the scan server) can be copied."""
+        s = self.spec
+        return s.can_start and s.is_instrument and not s.instance
+
+    @property
     def owns_service(self) -> bool:
         return self.service_proc is not None and self.service_proc.state() != QtCore.QProcess.NotRunning
 
@@ -1800,7 +1939,8 @@ class ModuleCard(QtWidgets.QFrame):
         """(Re)apply a discovered spec: ports, flags and labels may have changed."""
         self.spec = spec
         self.icon.setPixmap(module_icon(spec))
-        self.name.setText(spec.name + ("   [remote]" if spec.remote else ""))
+        self.name.setText(spec.name + ("   [remote]" if spec.remote else
+                                       "   [instance]" if spec.instance else ""))
         self.desc.setText(spec.description or "")
         where = f"{spec.host}" if spec.remote else (spec.dir.name if spec.dir else "")
         ports = f"cmd {spec.cmd} · pub {spec.pub}"
@@ -1808,6 +1948,11 @@ class ModuleCard(QtWidgets.QFrame):
             ports += f"  (changed; default {spec.default_cmd}/{spec.default_pub})"
         extra = "" if spec.has_gui else ("  ·  no GUI (headless)" if spec.dir else
                                          "  ·  not installed on this PC (no GUI)")
+        if spec.instance:
+            # what makes this copy different from the module itself
+            bits = ([args_text(spec.extra_args)] if spec.extra_args else []) + \
+                   ([f"--config {spec.config}"] if spec.config else [])
+            extra += "  ·  " + (" ".join(bits) if bits else "no extra arguments")
         self.meta.setText(f"{where}   ·   {ports}{extra}")
         # a coordinator (the scan server) drives no hardware of its own: no
         # "real" box, and it is pinned at the top, so no move arrows either
@@ -1826,7 +1971,14 @@ class ModuleCard(QtWidgets.QFrame):
                                 else "real")
         for b in (self.btn_service, self.btn_stop, self.btn_restart, self.btn_ports):
             b.setVisible(not spec.remote)
-        self.btn_remove.setVisible(spec.remote)
+        self.btn_remove.setVisible(spec.remote or bool(spec.instance))
+        if spec.instance:
+            self.btn_remove.setToolTip("Remove this instance from this PC's list "
+                                       "(the module itself and its card stay)")
+        else:
+            self.btn_remove.setToolTip("Delete this remote service from the list "
+                                       "(the service on the other PC is not touched)")
+        self.btn_instance.setVisible(self.can_add_instance)
         self.btn_gui.setEnabled(spec.has_gui)
         self.btn_gui.setToolTip("" if spec.has_gui else "No GUI for this module on this PC.")
         self.set_up(self.up)
@@ -2036,7 +2188,7 @@ class ModuleCard(QtWidgets.QFrame):
     # ---- settings ---------------------------------------------------------
 
     def _real_clicked(self, on: bool):
-        set_real(self.spec.key, on, ROOT)
+        set_real(self.spec.id, on, ROOT)         # the id: an instance has its own flag
         self.spec.real = on
         self.win.sync_all_box()
 
@@ -2050,12 +2202,24 @@ class ModuleCard(QtWidgets.QFrame):
         dlg = PortsDialog(self.spec, others, self)
         if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.result_ports is not None:
             cmd, pub = dlg.result_ports
-            set_ports(self.spec.key, cmd, pub, ROOT)
+            set_ports(self.spec.id, cmd, pub, ROOT)
             self.win.log(f"[{self.spec.id}] ports "
                          + ("reset to default" if cmd is None else f"set to {cmd}/{pub}"))
             self.win.rescan(force=True)
 
-    def remove(self):
+    def add_instance(self) -> "AddInstanceDialog | None":
+        if not self.can_add_instance:
+            return None
+        dlg = AddInstanceDialog(self.spec, self.win.found.modules, self)
+        if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.added_id:
+            self.win.log(f"added instance {dlg.added_id}")
+            self.win.rescan(force=True)
+        return dlg
+
+    def remove(self, confirm: bool = True):
+        if self.spec.instance:
+            self.remove_instance(confirm)
+            return
         ok = QtWidgets.QMessageBox.question(
             self, "Remove remote service",
             f"Remove '{self.spec.name}' ({self.spec.host}:{self.spec.cmd}) from the list?\n\n"
@@ -2064,6 +2228,24 @@ class ModuleCard(QtWidgets.QFrame):
             remove_remote(self.spec.id, ROOT)
             self.win.log(f"removed remote {self.spec.id}")
             self.win.rescan(force=True)
+
+    def remove_instance(self, confirm: bool = True) -> bool:
+        """Forget this instance (not while its service runs from here)."""
+        if self.owns_service:
+            QtWidgets.QMessageBox.information(
+                self, "Remove instance", "Stop its service first.")
+            return False
+        if confirm:
+            ok = QtWidgets.QMessageBox.question(
+                self, "Remove instance",
+                f"Remove the instance '{self.spec.name}' (ports {self.spec.cmd}/"
+                f"{self.spec.pub}) from this PC?\n\nThe module itself and its card stay.")
+            if ok != QtWidgets.QMessageBox.Yes:
+                return False
+        remove_instance(self.spec.id, ROOT)
+        self.win.log(f"removed instance {self.spec.id}")
+        self.win.rescan(force=True)
+        return True
 
     # ---- status + variables -----------------------------------------------
 
@@ -2478,8 +2660,16 @@ class MainWindow(QtWidgets.QMainWindow):
         (pinned_modules) and never move."""
         rank = {mid: i for i, mid in enumerate(self.custom_order())}
         own = {m.id: i for i, m in enumerate(self.found.modules)}
-        return sorted([m for m in self.found.modules if m.is_instrument],
-                      key=lambda m: (0, rank[m.id]) if m.id in rank else (1, own[m.id]))
+
+        def place(m):
+            if m.id in rank:
+                return (0, rank[m.id], 0)
+            # an instance never moved by hand follows its module ("scope#dwf"
+            # right under "scope"), not the end of the list
+            if m.instance and m.key in rank:
+                return (0, rank[m.key], 1 + own[m.id])
+            return (1, own[m.id], 0)
+        return sorted([m for m in self.found.modules if m.is_instrument], key=place)
 
     def pinned_modules(self) -> list:
         """The coordinators (scan server), local first, in the modules' own order."""
@@ -2607,7 +2797,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return done
 
     def add_remote(self):
-        dlg = AddRemoteDialog([m for m in self.found.modules if not m.remote], self)
+        dlg = AddRemoteDialog([m for m in self.found.modules
+                               if not m.remote and not m.instance], self)
         if dlg.exec() == QtWidgets.QDialog.Accepted and dlg.added_id:
             self.log(f"added remote {dlg.added_id}")
             self.rescan(force=True)
@@ -2731,7 +2922,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for card in self.local_cards():
             if not card.spec.is_instrument:
                 continue                # the scan server has no "real" mode
-            set_real(card.spec.key, on, ROOT)
+            set_real(card.spec.id, on, ROOT)
             card.spec.real = on
             card.real_check.setChecked(on)
         self.sync_all_box()

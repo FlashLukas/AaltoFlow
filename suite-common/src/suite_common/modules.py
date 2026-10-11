@@ -14,9 +14,10 @@ Now there are exactly two sources, and both are data, not code:
    copy would go stale.
 
 2. `<root>/suite_local.json` -- THIS PC's choices, written by the launcher and
-   NOT committed: port overrides, real-hardware flags, and the remote services
-   someone added by hand. Keeping it out of git is the point: the lab PC runs
-   kim on real hardware, a laptop does not.
+   NOT committed: port overrides, real-hardware flags, the remote services
+   someone added by hand, and the extra INSTANCES of a local module (a second
+   copy of one module run side by side, see add_instance). Keeping it out of
+   git is the point: the lab PC runs kim on real hardware, a laptop does not.
 
 Everything that needs the module list (launcher, scan-core, tools) calls
 `discover()` and gets the same answer.
@@ -30,7 +31,8 @@ import re
 import socket
 import tempfile
 import tomllib
-from dataclasses import dataclass, field
+import shlex
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .fileio import replace_retry
@@ -78,6 +80,17 @@ def getenv(name: str) -> str | None:
 #: A key is used as an id, a JSON key, a registry prefix ("kim.position_x") and
 #: a folder-name stem, so it is kept boring on purpose.
 _KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+#: An instance name ("dwf", "b", "lab2") becomes part of a slug ("scope_dwf")
+#: and so of every parameter id the scan engine registers ("scope_dwf.ch1"):
+#: letters, digits and _ only, for the same reason as a key.
+_INSTANCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]*$")
+#: Separates key and instance name in an instance's id ("scope#dwf"). Like the
+#: '@' of a remote id it can never appear in a key, so ids cannot collide.
+INSTANCE_SEP = "#"
+#: Flags an instance may NOT carry in its extra arguments, because the
+#: launcher passes them itself (service_args): its ports, --real, the bind
+#: host, and --config (the instance's own `config` field is the place for it).
+RESERVED_ARGS = ("--cmd-port", "--pub-port", "--real", "--host", "--config")
 
 
 #: What a module is FOR -- the first question when you are looking for one
@@ -128,7 +141,8 @@ def default_root() -> Path:
 class ModuleSpec:
     """One module the suite can show, start or connect to."""
 
-    id: str                          # unique in a list: key (local) or key@host:cmd (remote)
+    id: str                          # unique in a list: key (local), key#name (an
+                                     # instance) or key@host:cmd (remote)
     key: str                         # the module TYPE; equals "module" in its describe
     name: str
     description: str = ""
@@ -173,6 +187,20 @@ class ModuleSpec:
     #: True for a module.toml in one of the suite's own projects (SUITE_PROJECTS,
     #: directly in the root): scan-core's scan server. Set by discover_local.
     suite_project: bool = False
+    #: An INSTANCE: a second (third, ...) copy of a LOCAL module, run side by
+    #: side with the first on this PC -- e.g. the scope module once for the
+    #: Siglent and once with `--driver dwf` for an Analog Discovery. "" = the
+    #: module itself. An instance has its own ports, real flag and address,
+    #: plus `extra_args` for its service and optionally its own settings file
+    #: (`config`, passed as --config). All of it is THIS PC's choice
+    #: (suite_local.json, modules.<key>.instances); see add_instance.
+    instance: str = ""
+    extra_args: list = field(default_factory=list)
+    config: str = ""
+
+    @property
+    def is_instance(self) -> bool:
+        return bool(self.instance)
 
     @property
     def is_instrument(self) -> bool:
@@ -206,8 +234,10 @@ class Discovery:
         return next((m for m in self.modules if m.id == id), None)
 
     def by_key(self, key: str) -> ModuleSpec | None:
-        """The LOCAL module of this type (remote copies have other ids)."""
-        return next((m for m in self.modules if m.key == key and not m.remote), None)
+        """The LOCAL module of this type (remote copies and instances have
+        other ids)."""
+        return next((m for m in self.modules
+                     if m.key == key and not m.remote and not m.instance), None)
 
 
 # ---------------------------------------------------------------- manifests
@@ -422,10 +452,15 @@ def save_local(data: dict, root: Path | None = None) -> None:
 
 def set_ports(key: str, cmd: int | None, pub: int | None,
               root: Path | None = None) -> None:
-    """Override a local module's ports on this PC; None, None = back to default."""
+    """Override a local module's ports on this PC; None, None = back to default.
+
+    `key` may also be an instance id ("scope#dwf"); an instance HAS no default
+    ports (its ports are what it was added with), so None is refused there."""
     data = load_local(root)
-    entry = data["modules"].setdefault(key, {})
+    entry = _local_entry(data, key)
     if cmd is None:
+        if split_id(key)[1]:
+            raise ValueError("an instance has no default ports to go back to")
         entry.pop("cmd", None)
         entry.pop("pub", None)
     else:
@@ -434,16 +469,18 @@ def set_ports(key: str, cmd: int | None, pub: int | None,
 
 
 def set_real(key: str, real: bool, root: Path | None = None) -> None:
+    """Real hardware or simulator for a local module (or an instance id)."""
     data = load_local(root)
-    data["modules"].setdefault(key, {})["real"] = bool(real)
+    _local_entry(data, key)["real"] = bool(real)
     save_local(data, root)
 
 
 def set_address(key: str, address: str | None, root: Path | None = None) -> None:
     """Which instrument a local module opens on this PC (passed to its service
-    with the module's [hardware] address_arg); None or "" = its own config."""
+    with the module's [hardware] address_arg); None or "" = its own config.
+    `key` may be an instance id: each copy opens its own instrument."""
     data = load_local(root)
-    entry = data["modules"].setdefault(key, {})
+    entry = _local_entry(data, key)
     if address:
         entry["address"] = str(address).strip()
     else:
@@ -538,6 +575,182 @@ def remove_remote(id: str, root: Path | None = None) -> bool:
     return True
 
 
+# ------------------------------------------------------ module instances
+#
+# Lukas 2026-10-11: run two copies of ONE module side by side -- the scope
+# module for the Siglent AND for the Analog Discovery 2 (`--driver dwf`). A
+# module.toml can only describe one service, so the extra copies are THIS PC's
+# choice, kept beside the module's other local settings in suite_local.json:
+#
+#     "modules": {"scope": {"real": true,
+#                           "instances": [{"name": "dwf", "cmd": 5635, "pub": 5636,
+#                                          "args": ["--driver", "dwf"],
+#                                          "config": "", "real": true, "address": ""}]}}
+#
+# Each instance becomes a ModuleSpec of its own: id "scope#dwf", slug
+# "scope_dwf" (gotcha #20: two copies of one module need distinct prefixes,
+# so the scan engine registers scope.* AND scope_dwf.*). Nothing here stops
+# two copies from opening the SAME instrument; the address lock does: the
+# second real backend is refused its address (hwlock, gotcha #37) and exits
+# with code 4, which the launcher shows on the card.
+
+def instance_id(key: str, name: str) -> str:
+    return f"{key}{INSTANCE_SEP}{name}"
+
+
+def split_id(id: str) -> tuple[str, str]:
+    """(key, instance name) of a LOCAL id: "scope" -> ("scope", ""),
+    "scope#dwf" -> ("scope", "dwf")."""
+    key, _sep, name = str(id).partition(INSTANCE_SEP)
+    return key, name
+
+
+def parse_args_text(text: str) -> list[str]:
+    """Extra arguments typed on one line ("--driver dwf --dwf-device #1") ->
+    a list, split the way a command line is (quotes group words)."""
+    try:
+        return shlex.split(str(text or ""), posix=True)
+    except ValueError as exc:                       # e.g. an unclosed quote
+        raise ValueError(f"cannot read the arguments: {exc}") from None
+
+
+def args_text(args) -> str:
+    """The inverse of parse_args_text, to show an instance's arguments."""
+    return " ".join(shlex.quote(str(a)) for a in (args or []))
+
+
+def check_instance_args(args) -> list[str]:
+    """The extra arguments as a clean list of strings, or ValueError naming a
+    flag the launcher sets itself (RESERVED_ARGS)."""
+    out = [str(a) for a in (args or [])]
+    for a in out:
+        flag = a.split("=", 1)[0]
+        if flag in RESERVED_ARGS:
+            raise ValueError(f"{flag} is set by the launcher (ports / real / the "
+                             f"settings-file field), not in the extra arguments")
+    return out
+
+
+def _instances(entry) -> list:
+    inst = entry.get("instances") if isinstance(entry, dict) else None
+    return inst if isinstance(inst, list) else []
+
+
+def add_instance(key: str, name: str, cmd: int, pub: int | None = None,
+                 args=(), config: str = "", root: Path | None = None) -> str:
+    """Remember another copy of the local module `key` on this PC. Returns
+    its id ("scope#dwf").
+
+    `args` go to its service after the launcher's own (e.g. ["--driver",
+    "dwf"]); `config` is a settings file (relative to the module's folder, or
+    absolute) passed as `--config` -- for a module whose service takes one.
+    The ports are NOT checked against the other modules here: discover()
+    reports a clash as a problem, and the launcher's dialog refuses one first.
+    """
+    if not _KEY.match(key or ""):
+        raise ValueError(f"module key {key!r} is not valid")
+    name = str(name or "").strip()
+    if not _INSTANCE.match(name):
+        raise ValueError(f"instance name {name!r}: letters, digits and _ only "
+                         f"(it becomes part of the parameter ids, e.g. "
+                         f"{key}_{name or 'b'}.x)")
+    cmd = int(cmd)
+    pub = int(pub) if pub is not None else cmd + 1
+    for p in (cmd, pub):
+        if not 1024 <= p <= 65535:
+            raise ValueError(f"port {p} outside 1024..65535")
+    if cmd == pub:
+        raise ValueError("the two ports must differ")
+    args = check_instance_args(args)
+    data = load_local(root)
+    entry = data["modules"].setdefault(key, {})
+    if not isinstance(entry.get("instances"), list):
+        entry["instances"] = []
+    if any(isinstance(i, dict) and str(i.get("name", "")).lower() == name.lower()
+           for i in entry["instances"]):
+        raise ValueError(f"{instance_id(key, name)} is already in the list")
+    item = {"name": name, "cmd": cmd, "pub": pub, "args": args}
+    if str(config or "").strip():
+        item["config"] = str(config).strip()
+    entry["instances"].append(item)
+    save_local(data, root)
+    return instance_id(key, name)
+
+
+def remove_instance(id: str, root: Path | None = None) -> bool:
+    """Forget an instance. Returns False if there was none with this id."""
+    key, name = split_id(id)
+    if not name:
+        return False
+    data = load_local(root)
+    entry = data["modules"].get(key)
+    items = _instances(entry)
+    keep = [i for i in items if not (isinstance(i, dict) and i.get("name") == name)]
+    if len(keep) == len(items):
+        return False
+    if keep:
+        entry["instances"] = keep
+    else:
+        entry.pop("instances", None)
+    save_local(data, root)
+    return True
+
+
+def free_ports_after(modules: list[ModuleSpec], cmd: int) -> tuple[int, int]:
+    """A port pair for a new instance: the first cmd+2n / cmd+2n+1 above the
+    module's own ports that no module on THIS PC uses (instances included;
+    remote services listen elsewhere and do not count)."""
+    used = {p for m in modules
+            if not m.remote or m.host.lower() in _LOCAL_HOSTS for p in (m.cmd, m.pub)}
+    c = int(cmd) + 2
+    while c + 1 <= 65535:
+        if c not in used and c + 1 not in used:
+            return c, c + 1
+        c += 2
+    raise ValueError("no free port pair above that port")
+
+
+def _local_entry(data: dict, id: str) -> dict:
+    """The suite_local.json dict a LOCAL id's settings live in: the module's
+    own for "scope", the instance's for "scope#dwf"."""
+    key, name = split_id(id)
+    entry = data["modules"].setdefault(key, {})
+    if not name:
+        return entry
+    for i in _instances(entry):
+        if isinstance(i, dict) and i.get("name") == name:
+            return i
+    raise ValueError(f"no instance {id!r} on this PC")
+
+
+def _instance_spec(base: ModuleSpec, item) -> tuple[ModuleSpec | None, str]:
+    """The ModuleSpec of one instance entry of `base`, or (None, why)."""
+    if not isinstance(item, dict):
+        return None, "not an object"
+    name = str(item.get("name", "")).strip()
+    if not _INSTANCE.match(name):
+        return None, f"bad name {name!r}"
+    try:
+        cmd = int(item["cmd"])
+        pub = int(item.get("pub", cmd + 1))
+    except (KeyError, TypeError, ValueError):
+        return None, "no valid ports"
+    try:
+        args = check_instance_args(item.get("args") or [])
+    except ValueError as exc:
+        return None, str(exc)
+    return replace(
+        base,
+        id=instance_id(base.key, name), name=f"{base.name} ({name})",
+        # the instance's own ports ARE its defaults: there is nothing to reset to
+        cmd=cmd, pub=pub, default_cmd=cmd, default_pub=pub,
+        real=bool(item.get("real", False)),
+        address=str(item.get("address", "") or "").strip() if base.address_arg else "",
+        instance=name, extra_args=args, config=str(item.get("config", "") or "").strip(),
+        start_after=list(base.start_after), tags=list(base.tags),
+    ), ""
+
+
 # ------------------------------------------------------------- the answer
 
 def discover(root: Path | None = None) -> Discovery:
@@ -558,6 +771,25 @@ def discover(root: Path | None = None) -> Discovery:
             m.cmd, m.pub = m.default_cmd, m.default_pub
         m.real = bool(over.get("real", False))
         m.address = str(over.get("address", "") or "").strip() if m.address_arg else ""
+
+    instances = []
+    for m in local:
+        names = set()
+        for item in _instances(settings["modules"].get(m.key)):
+            spec, why = _instance_spec(m, item)
+            if spec is not None and spec.instance.lower() in names:
+                spec, why = None, "its name is used twice"
+            if spec is None:
+                problems.append(f"{LOCAL_FILE}: an instance of {m.key} was skipped: "
+                                f"{why} ({item!r})")
+                continue
+            names.add(spec.instance.lower())
+            instances.append(spec)
+    installed = {m.key for m in local}
+    for key, entry in settings["modules"].items():
+        if key not in installed and _instances(entry):
+            problems.append(f"{LOCAL_FILE}: instances of module {key!r} are set up, "
+                            f"but that module is not installed on this PC; skipped")
 
     remote = []
     for r in settings["remote"]:
@@ -583,7 +815,10 @@ def discover(root: Path | None = None) -> Discovery:
             remote=True,
         ))
 
-    modules = sorted(local, key=lambda m: (m.order, m.name.lower()))
+    # an instance sits right after its module (same order, same base name)
+    base_name = {m.key: m.name.lower() for m in local}
+    modules = sorted(local + instances,
+                     key=lambda m: (m.order, base_name[m.key], m.instance.lower()))
     modules += sorted(remote, key=lambda m: (m.order, m.name.lower(), m.id))
     _assign_slugs(modules)
     problems += port_conflicts(modules)
@@ -591,12 +826,22 @@ def discover(root: Path | None = None) -> Discovery:
 
 
 def _assign_slugs(modules: list[ModuleSpec]) -> None:
-    """key for local modules; key_host for remote ones (key_host_port if that
-    is still ambiguous). Unique within the list."""
-    taken = {m.key for m in modules if not m.remote}
+    """key for local modules; key_name for an instance ("scope_dwf"); key_host
+    for remote ones (key_host_port if that is still ambiguous). Unique within
+    the list: module keys are claimed first, then instances, then remotes."""
+    taken = {m.key for m in modules if not m.remote and not m.instance}
+    for m in modules:
+        if not m.remote and not m.instance:
+            m.slug = m.key
+    for m in modules:
+        if m.instance and not m.remote:
+            slug = f"{m.key}_{m.instance}"
+            if slug in taken:                 # e.g. another module's key "scope_dwf"
+                slug = f"{slug}_{m.cmd}"
+            m.slug = slug
+            taken.add(slug)
     for m in modules:
         if not m.remote:
-            m.slug = m.key
             continue
         host = re.sub(r"[^A-Za-z0-9]+", "_", m.host).strip("_") or "remote"
         slug = f"{m.key}_{host}"
@@ -675,6 +920,15 @@ def service_args(m: ModuleSpec) -> list[str]:
         # with --real: the simulator opens nothing
         if m.address and m.address_arg:
             args += [m.address_arg, m.address]
+    if m.instance:
+        # an instance's own settings file, so two copies do not overwrite each
+        # other's .ini; a relative name means inside the module's folder
+        if m.config:
+            cfg = Path(m.config)
+            if not cfg.is_absolute() and m.dir is not None:
+                cfg = m.dir / cfg
+            args += ["--config", str(cfg)]
+        args += list(m.extra_args)           # e.g. --driver dwf
     return args
 
 
@@ -690,11 +944,12 @@ def endpoints_json(modules: list[ModuleSpec]) -> str:
     """Where every module listens, for the AALTOFLOW_ENDPOINTS environment variable.
 
     Local modules are listed under their key, so a module that talks to another
-    (camera -> kim) can find it by type. Remote ones only under their full id:
-    a remote kim must not silently replace the local one.
+    (camera -> kim) can find it by type. Remote ones and instances only under
+    their full id ("kim@lab2:5567", "scope#dwf"): neither may silently replace
+    the local module of that type.
     """
     table = {}
     for m in modules:
-        name = m.id if m.remote else m.key
+        name = m.id if (m.remote or m.instance) else m.key
         table[name] = [m.host, m.cmd, m.pub]
     return json.dumps(table)
