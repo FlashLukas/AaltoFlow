@@ -157,6 +157,56 @@ uv run python -m scan_core.catalogue search [DATA_DIR] --sample B7 \
 or in Python: `from scan_core import catalogue; catalogue.scan(d);
 rows = catalogue.search(d, sample="B7", tags="fmr")` (each row has `path`).
 
+### Sending runs to eLabFTW (2026-10-11)
+
+A run can go into an [eLabFTW](https://www.elabftw.net) electronic lab notebook
+as one **experiment**: title = scan name + date; body = setup, start / end /
+duration, the axes with their ranges and points, the detectors, the fixed
+conditions, the run info (sample, operator, ...) and the file's path on the
+measurement PC; tags = `AaltoFlow`, the setup, the run's tags and every axis
+and detector id; plus a **preview figure** (the first detector, as a line or a
+map). The `.nc` file itself is attached only if you tick it (off by default,
+and never above a size limit, 200 MB by default -- the notebook is not the data
+archive).
+
+**Set it up once per PC** (suite, Settings tab, card *ELN (eLabFTW)*):
+
+1. In eLabFTW: click your name (top right) > **Settings** (the user panel) >
+   **API keys**, give the key a name, pick **Read/Write** (a read-only key
+   cannot create experiments) and create it. Copy it: eLabFTW shows it once.
+2. In the suite: type the address of your eLabFTW (the start page, e.g.
+   `https://eln.example.org` -- not `/api/v2`), paste the key and press **Save
+   key**, then **Test connection** (it says who the key belongs to).
+
+The address and the options are kept in this PC's `suite_local.json`. The key
+is **not**: it goes into the Windows Credential Manager (or the system keyring
+if the `keyring` package is installed); only on a PC with neither does it go
+into a per-user file (`%APPDATA%\AaltoFlow\eln_key`), and the card then warns
+in red. The key is never shown again or written to a log.
+
+**Sending:** on the Catalogue tab, select one or more runs (Ctrl / Shift),
+right-click > **Send to eLabFTW**. It runs in the background; the line under
+the table then links to each new experiment, and the **eln** column shows the
+experiment number. A run that was sent before is not duplicated silently: the
+suite asks whether to **update** that entry, **skip** it, or make a **new**
+one. Which run went where is kept in `eln_uploads.json` in the data folder
+(not in `catalogue.sqlite`, which is rebuilt from the files at any time).
+
+**After every scan:** tick *Upload automatically after each scan is saved*
+(off by default). It runs in the background after the final save; a failed
+upload (server down, wrong key) is a line in the log and never stops or fails
+the scan. (Scans run on a SCAN SERVER are not uploaded by the watching PC: the
+file is on the server's PC.)
+
+From a terminal (the key from the store, or the environment variable
+`AALTOFLOW_ELN_KEY`):
+
+```bash
+uv run python -m scan_core.eln set-key                 # asks for the key, not echoed
+uv run python -m scan_core.eln test                    # who am I on the server?
+uv run python -m scan_core.eln upload out/2026-10-11/101500_map.nc [--attach-data] [--update|--skip|--new]
+```
+
 ## Layout
 
 ```
@@ -179,10 +229,12 @@ scan_core/
   view.py       # re-exports aaltoview.view (N-D cube -> map / line)
   data.py       # re-exports aaltoview.data (read measurements back)
   catalogue.py  # the run catalogue: SQLite index of the data folder + search + CLI
+  eln.py        # send a run to eLabFTW (API v2): entry, preview, upload ledger, key store, CLI
 apps/
   scan_builder.py  # PySide6 cockpit
   suite.py         # the measurement suite (Control / Navigator / Scan / Measurement / Data / Catalogue / Settings)
-  catalogue_view.py # the suite's Catalogue tab
+  catalogue_view.py # the suite's Catalogue tab (+ "Send to eLabFTW")
+  eln_settings.py  # the Settings tab's ELN (eLabFTW) card
 
   suite.py         # the measurement suite (Control / Scan / Measurement / Data / Settings)
   recall.py        # "Recall settings...": file snapshot vs instruments now
