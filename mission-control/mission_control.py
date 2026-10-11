@@ -2091,7 +2091,9 @@ class ModuleCard(QtWidgets.QFrame):
         the service was stopped and a new one started."""
         if not self.owns_service:
             return False
-        self.win.log(f"[{self.spec.id}] restarting (outputs left as they are)…")
+        # outputs are kept where the module allows it; the magnets, the chopper
+        # and cs260 refuse and do a safe stop (Lukas 2026-10-11)
+        self.win.log(f"[{self.spec.id}] restarting (outputs kept where the module allows)…")
         if not self.stop_service(keep_outputs=True):
             self.win.log(f"[{self.spec.id}] restart: the service did not stop by itself; "
                          f"not started again", "warn")
