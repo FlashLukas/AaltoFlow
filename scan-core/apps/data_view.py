@@ -86,9 +86,12 @@ class DataView(QtWidgets.QWidget):
         #: where add_action() puts a host's own button, so a page does not need
         #: a second toolbar of its own above this one
         self._action_slot = top.count()
-        top.addStretch(1)
+        # ONE row of controls (2026-10-12: the Measurement tab gives the plot
+        # at least half its height, and two rows of combos above it were a
+        # row too many): show, X, Y on the left, colour and drawing right
+        top.addSpacing(10)
         top.addWidget(QtWidgets.QLabel("show"))
-        self.det_combo = QtWidgets.QComboBox(); self.det_combo.setMinimumWidth(130)
+        self.det_combo = QtWidgets.QComboBox(); self.det_combo.setMinimumWidth(110)
         self.det_combo.currentIndexChanged.connect(self._det_changed)
         top.addWidget(self.det_combo)
         self.part_combo = QtWidgets.QComboBox()
@@ -102,21 +105,21 @@ class DataView(QtWidgets.QWidget):
             "cancel the signal too if the phase were drifting).")
         self.part_combo.currentIndexChanged.connect(lambda *_: self.refresh())
         top.addWidget(self.part_combo)
-        v.addLayout(top)
         for combo in (self.det_combo, self.part_combo):
             combo.currentIndexChanged.connect(self._user_changed)
 
-        axr = QtWidgets.QHBoxLayout()
+        axr = top
+        axr.addSpacing(10)
         axr.addWidget(QtWidgets.QLabel("X"))
         self.x_combo = QtWidgets.QComboBox()
-        self.x_combo.setFixedWidth(180)
+        self.x_combo.setMinimumWidth(90); self.x_combo.setMaximumWidth(180)
         self.x_combo.setToolTip("Which dimension runs along the bottom of the plot.")
         self.x_combo.currentIndexChanged.connect(self._axes_changed)
         axr.addWidget(self.x_combo)
-        axr.addSpacing(14)
+        axr.addSpacing(8)
         axr.addWidget(QtWidgets.QLabel("Y"))
         self.y_combo = QtWidgets.QComboBox()
-        self.y_combo.setFixedWidth(180)
+        self.y_combo.setMinimumWidth(90); self.y_combo.setMaximumWidth(180)
         self.y_combo.setToolTip(f"Which dimension runs up the side.\n"
                                 f"{NONE_TEXT} plots a line against X instead of an image.")
         self.y_combo.currentIndexChanged.connect(self._axes_changed)
@@ -137,7 +140,7 @@ class DataView(QtWidgets.QWidget):
         self.z_lo = QtWidgets.QLineEdit(); self.z_hi = QtWidgets.QLineEdit()
         for w, tip in ((self.z_lo, "colour scale minimum"),
                        (self.z_hi, "colour scale maximum")):
-            w.setFixedWidth(80); w.setToolTip(tip); w.setPlaceholderText(tip.split()[-1])
+            w.setFixedWidth(72); w.setToolTip(tip); w.setPlaceholderText(tip.split()[-1])
             # parsed with float(), not a QDoubleValidator: the validator follows
             # the Windows locale and would want "0,004" (root gotcha #18)
             w.editingFinished.connect(self._z_typed)
@@ -146,7 +149,7 @@ class DataView(QtWidgets.QWidget):
         axr.addWidget(QtWidgets.QLabel("drawing"))
         self.reduce_combo = self._build_drawing_combo()
         axr.addWidget(self.reduce_combo)
-        v.addLayout(axr)
+        v.addLayout(top)
         for combo in (self.x_combo, self.y_combo, self.reduce_combo):
             combo.currentIndexChanged.connect(self._user_changed)
 

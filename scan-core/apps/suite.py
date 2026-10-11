@@ -167,14 +167,18 @@ class Suite(QtWidgets.QMainWindow):
         self.navigator.design_opened.connect(lambda _p: setattr(self, "_shared_design", None))
         self.tabs.addTab(self._wrap(self.builder.centralWidget()), "Scan")
         self.tabs.addTab(self._build_measurement(), "Measurement")
-        self.tabs.addTab(self._build_data(), "Data")
+        # Data and Catalogue in scroll areas: their own minimum widths (the
+        # viewer's ~1480 px) used to be the WINDOW's minimum, so on a 1280 px
+        # screen the suite did not fit at all (2026-10-12). Now those two tabs
+        # scroll sideways on a narrow window and every other tab simply fits.
+        self.tabs.addTab(self._scrolled(self._build_data()), "Data")
         # The run catalogue: an index of the data folder, searchable by sample,
         # operator, tags, conditions and instrument values. A tab of its own
         # rather than a pane in Data: the viewer already has its file list on
         # the left, and a search over a year of runs wants the full width.
         self.catalogue = CatalogueWidget(self.out_dir, open_file=self.open_in_viewer,
                                          on_log=self.log, settings_root=self.root)
-        self.tabs.addTab(self.catalogue, "Catalogue")
+        self.tabs.addTab(self._scrolled(self.catalogue), "Catalogue")
         # in a scroll area: with the SCAN SERVER card (2026-10-05) the page no
         # longer fits a short window, and a squeezed page draws the module
         # list's buttons over the list
@@ -192,7 +196,14 @@ class Suite(QtWidgets.QMainWindow):
         self.logbox.setObjectName("log")
         self.logbox.setReadOnly(True)
         self.logbox.setFixedHeight(96)
-        outer.addWidget(self.logbox)
+        # its home on every tab but Measurement (there it sits under the plot,
+        # next to the queue card -- _place_log)
+        self._log_home = QtWidgets.QWidget()
+        home = QtWidgets.QVBoxLayout(self._log_home)
+        home.setContentsMargins(0, 0, 0, 0)
+        home.addWidget(self.logbox)
+        outer.addWidget(self._log_home)
+        self._place_log(self.tabs.tabText(self.tabs.currentIndex()) == "Measurement")
 
         self.control.set_source(registry=self.registry)
         self.navigator.set_source(registry=self.registry)
@@ -228,6 +239,15 @@ class Suite(QtWidgets.QMainWindow):
         self._avail_thread.start()
 
     # ---- small helpers ---------------------------------------------------
+
+    @staticmethod
+    def _scrolled(widget) -> QtWidgets.QScrollArea:
+        """A tab page that scrolls when the window is narrower than it wants."""
+        area = QtWidgets.QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        area.setWidget(widget)
+        return area
 
     @staticmethod
     def _wrap(widget) -> QtWidgets.QWidget:
@@ -275,51 +295,55 @@ class Suite(QtWidgets.QMainWindow):
     # ---- Measurement -----------------------------------------------------
 
     def _build_measurement(self) -> QtWidgets.QWidget:
+        """The Measurement tab: the builder's run pane, adopted rather than
+        reimplemented, with this suite's own pieces put INTO it.
+
+        Rebuilt 2026-10-12 around the plot (Lukas: "way too cramped to see
+        any data" -- at 2000x1280 the RESULT had ~90 px): the old header card
+        (state, elapsed, where) is now the pane's run bar, the scan-server
+        banner is ONE thin line, and the log sits next to the queue card UNDER
+        the plot, in the pane's splitters, instead of across the whole window.
+        """
+        from apps.run_bar import ElidedLabel
         page = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(page)
         v.setContentsMargins(0, 8, 0, 0); v.setSpacing(10)
+        b = self.builder
 
-        strip = QtWidgets.QFrame(); strip.setObjectName("card")
-        h = QtWidgets.QHBoxLayout(strip); h.setContentsMargins(14, 10, 14, 10)
-        self.run_state = QtWidgets.QLabel("idle")
-        self.run_state.setStyleSheet(f"color:{C['accent']}; font-size:20px; font-weight:800;")
-        h.addWidget(self.run_state)
-        h.addSpacing(20)
-        self.elapsed_lbl = QtWidgets.QLabel("elapsed 0:00")
-        self.elapsed_lbl.setStyleSheet(f"color:{C['muted']};")
-        h.addWidget(self.elapsed_lbl)
-        h.addSpacing(20)
+        # the run bar's state word and clock are this tab's header now; the
+        # names stay, so everything that drives them is unchanged
+        self.run_state = b.state_lbl
+        self.elapsed_lbl = b.time_lbl
         # WHERE the running scan is -- point n / N, each axis's value (i/len),
         # the MEASURED time left, the routine step in progress, the queue
         # position (ScanBuilder.run_status_text, pushed at every point through
-        # builder.on_status, and again by _tick). Before 2026-10-02 the only
-        # number here was the elapsed time.
-        self.where_lbl = QtWidgets.QLabel("")
-        self.where_lbl.setWordWrap(True)
-        self.where_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        h.addWidget(self.where_lbl, 1)
+        # builder.on_status, and again by _tick). One label, the pane's own.
+        self.where_lbl = b.where_lbl
         self.hint = QtWidgets.QLabel("define the scan on the Scan tab")
         self.hint.setStyleSheet(f"color:{C['muted']};")
-        h.addWidget(self.hint)
-        v.addWidget(strip)
-        self.builder.on_status = self._show_status
+        b.info_row.addWidget(self.hint)
+        b.on_status = self._show_status
 
         # WATCHING A SCAN SERVER: whose scan this tab shows, who has control of
-        # the server, and the way back to running scans in this window. Hidden
-        # unless a server is watched (Settings tab, or the Scan server card).
-        self.server_strip = QtWidgets.QFrame(); self.server_strip.setObjectName("card")
+        # the server, and the way back to running scans in this window. ONE
+        # thin line (it used to be a tall amber banner); hidden unless a server
+        # is watched (Settings tab, or the Scan server card).
+        self.server_strip = QtWidgets.QFrame(); self.server_strip.setObjectName("serverLine")
         self.server_strip.setStyleSheet(
-            f"QFrame#card {{ border: 1px solid {C['accent']}; border-radius: 6px; }}")
-        sh = QtWidgets.QHBoxLayout(self.server_strip); sh.setContentsMargins(14, 6, 14, 6)
+            f"QFrame#serverLine {{ background:{C['panel_hi']}; "
+            f"border-left: 3px solid {C['accent']}; border-radius: 4px; }}")
+        sh = QtWidgets.QHBoxLayout(self.server_strip)
+        sh.setContentsMargins(10, 2, 4, 2); sh.setSpacing(10)
         self.server_lbl = QtWidgets.QLabel("")
         self.server_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:700;")
         self.server_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         sh.addWidget(self.server_lbl)
-        sh.addSpacing(16)
-        self.server_ctrl_lbl = QtWidgets.QLabel("")
+        self.server_ctrl_lbl = ElidedLabel("")
         self.server_ctrl_lbl.setStyleSheet(f"color:{C['muted']};")
         sh.addWidget(self.server_ctrl_lbl, 1)
+        small = "QPushButton { padding: 2px 8px; }"
         self.server_ctrl_btn = QtWidgets.QPushButton("Take control")
+        self.server_ctrl_btn.setStyleSheet(small)
         self.server_ctrl_btn.setToolTip(
             "Control of the scan server: who may start scans, edit the running\n"
             "queue, resume, answer its pause questions and clear faults -- from\n"
@@ -328,16 +352,103 @@ class Suite(QtWidgets.QMainWindow):
         self.server_ctrl_btn.clicked.connect(self._server_control_clicked)
         sh.addWidget(self.server_ctrl_btn)
         unwatch = QtWidgets.QPushButton("Stop watching")
+        unwatch.setStyleSheet(small)
         unwatch.setToolTip("Back to running scans in this window. The server's scan\n"
                            "goes on: closing a window never stops it.")
         unwatch.clicked.connect(self.stop_watching)
         sh.addWidget(unwatch)
         self.server_strip.hide()
-        v.addWidget(self.server_strip)
+        b.head_slot.addWidget(self.server_strip)
 
-        # The builder's own run pane, adopted rather than reimplemented.
-        v.addWidget(self.builder.right_pane, 1)
+        # the LOG's place on this tab: right of the queue card, under the plot
+        # (_place_log moves the one log widget here and back)
+        self.log_slot = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(self.log_slot)
+        lay.setContentsMargins(0, 0, 0, 0)
+        b.bottom_split.addWidget(self.log_slot)
+        b.bottom_split.setStretchFactor(0, 1)
+        b.bottom_split.setStretchFactor(1, 1)
+        b._sync_bottom()
+        self._splits_applied = False
+        b.run_split.splitterMoved.connect(lambda *_: self._save_splits())
+        b.bottom_split.splitterMoved.connect(lambda *_: self._save_splits())
+
+        v.addWidget(b.right_pane, 1)
         return page
+
+    # ---- the Measurement tab's splitters and log ------------------------------
+    #: share of the plot / queue+log split the plot gets until the operator
+    #: drags the handle (then theirs, remembered in suite_local.json)
+    PLOT_SHARE = 0.72
+    SETTING_SPLITS = "measurement_splits"
+
+    def _apply_splits(self) -> None:
+        """Size the splitters from the remembered shares (or the defaults).
+        Shares, not pixels: the same choice fits a 1280 px laptop and a
+        2000 px monitor."""
+        b = self.builder
+        try:
+            saved = get_setting(self.SETTING_SPLITS, None, root=self.root) or {}
+        except Exception:
+            saved = {}
+
+        def share(key, default):
+            try:
+                f = float(saved.get(key, default))
+            except (TypeError, ValueError, AttributeError):
+                f = default
+            return min(0.9, max(0.15, f))   # never a pane squeezed to nothing
+
+        total = max(b.run_split.height(), 400)
+        top = share("plot", self.PLOT_SHARE)
+        b.run_split.setSizes([int(total * top), int(total * (1 - top))])
+        width = max(b.bottom_split.width(), 400)
+        left = share("queue", 0.5)
+        b.bottom_split.setSizes([int(width * left), int(width * (1 - left))])
+        self._splits_applied = True
+
+    def _save_splits(self) -> None:
+        """The operator moved a handle: remember the shares on this PC."""
+        b = self.builder
+
+        def share(split):
+            sizes = split.sizes()
+            return round(sizes[0] / sum(sizes), 3) if len(sizes) == 2 and sum(sizes) else None
+
+        plot = share(b.run_split)
+        out = {"plot": plot}
+        if b.server_box.isVisibleTo(b.bottom_split):    # only a real choice counts
+            out["queue"] = share(b.bottom_split)
+        else:
+            try:
+                old = get_setting(self.SETTING_SPLITS, None, root=self.root) or {}
+                if "queue" in old:
+                    out["queue"] = old["queue"]
+            except Exception:
+                pass
+        try:
+            set_setting(self.SETTING_SPLITS, {k: x for k, x in out.items() if x is not None},
+                        root=self.root)
+        except Exception:
+            pass                    # a read-only settings file must not break the tab
+
+    def _place_log(self, on_measurement: bool) -> None:
+        """ONE log widget: under the plot on the Measurement tab, across the
+        bottom of the window on every other tab."""
+        if not hasattr(self, "logbox"):
+            return
+        if on_measurement:
+            self.log_slot.layout().addWidget(self.logbox)
+            self.logbox.setMinimumHeight(60)
+            self.logbox.setMaximumHeight(16777215)          # QWIDGETSIZE_MAX
+            self._log_home.hide()
+            if not self._splits_applied:
+                # after this event: the tab has its real size by then
+                QtCore.QTimer.singleShot(0, self._apply_splits)
+        else:
+            self._log_home.layout().addWidget(self.logbox)
+            self.logbox.setFixedHeight(96)
+            self._log_home.show()
 
     # ---- Data ------------------------------------------------------------
 
@@ -475,9 +586,11 @@ class Suite(QtWidgets.QMainWindow):
         return open_recall(self, self.lab, start_dir=str(self.out_dir))
 
     def _show_status(self, text: str):
-        """The header's WHERE line; the "define the scan" hint when idle."""
+        """The WHERE line under the run bar; the "define the scan" hint when
+        idle with nothing defined."""
         self.where_lbl.setText(text)
-        self.hint.setVisible(not text)
+        self.where_lbl.setVisible(bool(text))
+        self.hint.setVisible(not text and not self.builder.rows)
 
     def _tick(self):
         if self.watch is not None and self.builder.worker is None:
@@ -490,8 +603,9 @@ class Suite(QtWidgets.QMainWindow):
             # (the same word the header shows for a scan server's scan)
             paused = self.builder.is_user_paused() or bool(self.builder.paused_faults)
             self.run_state.setText("PAUSED" if paused else "RUNNING")
-            secs = int(time.monotonic() - self._t0)
-            self.elapsed_lbl.setText(f"elapsed {secs // 60}:{secs % 60:02d}")
+            prog = self.builder.run_progress
+            self.builder.set_elapsed(time.monotonic() - self._t0,
+                                     prog[2] if prog else None)
             self._show_status(self.builder.run_status_text())
         else:
             self._show_status("")
@@ -912,9 +1026,10 @@ class Suite(QtWidgets.QMainWindow):
             self.run_state.setText({"running": "RUNNING", "paused": "PAUSED",
                                     "waiting_operator": "YOUR TURN"}.get(
                                         st.get("state"), "idle"))
-        secs = int(st.get("elapsed_s") or 0)
-        self.elapsed_lbl.setText(f"elapsed {secs // 60}:{secs % 60:02d}")
-        self._show_status(st.get("where") or "" if st.get("busy") else "")
+        busy = bool(st.get("busy"))
+        self.builder.set_elapsed(st.get("elapsed_s") or 0,
+                                 st.get("eta_s") if busy else None)
+        self._show_status(st.get("where") or "" if busy else "")
 
     # ---- Settings --------------------------------------------------------
 
@@ -1241,6 +1356,7 @@ class Suite(QtWidgets.QMainWindow):
 
     def _on_tab_changed(self, index: int) -> None:
         tab = self.tabs.tabText(index)
+        self._place_log(tab == "Measurement")
         if tab == "Scan":
             self.builder.refresh_axis_limits()
         elif tab == "Data" and self.data_view.ds is None and self.builder.dataset is not None:
