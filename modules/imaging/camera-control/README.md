@@ -240,6 +240,19 @@ the two places.
 - `autofocus.af_trip_settle_s` (120 s): the longest wait to arrive at the AF
   position, and again back. Simulation only so far.
 
+## The live pattern is saved by itself (2026-10-11)
+
+Whatever pattern is live -- the template, its backup patterns, the scan array
+pinned to it and the selected point -- is written to
+`autosave/pattern_live.png` (next to `camera.ini`) within 2 s of any change,
+and once more when the service stops. The previous version is kept as
+`autosave/pattern_live.prev.png`. The next start loads it again and says so in
+the log ("live pattern RESTORED from the last session ..."). Tracking and the
+stabiliser stay OFF after a restore: the sample may have moved while the camera
+was off, so you check the pattern, then switch them on. The file is an ordinary
+pattern PNG (Load pattern... opens it too). Pattern tab > Autosave turns it off
+(`pattern.autosave`). The folder is gitignored: lab images stay on the PC.
+
 ## Hardware pass (at the lab PC — later session)
 
 The simulator needs no hardware. To go live:

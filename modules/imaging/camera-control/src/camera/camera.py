@@ -54,6 +54,23 @@ from .template_io import BackupPattern, Reference, load_template, save_template
 # measured spot position and tuned thresholds survive a restart.
 DEFAULT_CONFIG_NAME = "camera.ini"
 
+# The live pattern autosave (cfg.pattern.autosave): a folder next to
+# camera.ini, gitignored (lab images are private). The previous version is
+# kept as pattern_live.prev.png, so one bad capture can be undone by hand.
+# AALTOFLOW_CAMERA_AUTOSAVE_DIR moves it (the tests point it at a temp folder,
+# so a test run can never overwrite the rig's live pattern).
+AUTOSAVE_NAME = "pattern_live.png"
+AUTOSAVE_PREV_NAME = "pattern_live.prev.png"
+AUTOSAVE_EVERY_S = 2.0
+
+
+def autosave_dir() -> str:
+    env = os.environ.get("AALTOFLOW_CAMERA_AUTOSAVE_DIR")
+    if env:
+        return env
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "autosave")
+
 
 # The autofocus mechanisms measured on the spot around its centre (not the
 # whole image): the threshold-free sizes and the peak.
@@ -407,6 +424,10 @@ class Camera:
 
         # Reference (template + array offset + meta); None until captured/loaded.
         self.reference: Reference | None = None
+        # pattern autosave: the signature of what was last written (None =
+        # nothing yet) and the thread that compares it every AUTOSAVE_EVERY_S
+        self._autosave_sig = None
+        self._autosave_thread: threading.Thread | None = None
 
         # Live state (guarded by _lock).  Create the lock/status FIRST so the
         # objective application below (which touches them) is safe.
@@ -576,9 +597,86 @@ class Camera:
             self._status.pixel_size_x = self.cfg.image.pixel_size_x_um
             self._status.pixel_size_y = self.cfg.image.pixel_size_y_um
         self._stop.clear()
+        if self.cfg.pattern.autosave:
+            self._restore_autosaved_pattern()
         self._engine = threading.Thread(target=self._run, name="camera-engine", daemon=True)
         self._engine.start()
+        if self.cfg.pattern.autosave:
+            self._autosave_thread = threading.Thread(
+                target=self._autosave_loop, name="camera-pattern-autosave", daemon=True)
+            self._autosave_thread.start()
         self._emit("info", "camera engine started")
+
+    # -- the live pattern autosave (cfg.pattern.autosave) ------------------ #
+    def autosave_path(self) -> str:
+        return os.path.join(autosave_dir(), AUTOSAVE_NAME)
+
+    def _pattern_signature(self):
+        """What the autosave compares: the template and backups (by object --
+        a new capture is a new array), their offsets rounded to whole pixels
+        (the backup offsets are refined a little every frame; that is not a
+        new pattern), and the scanning definition the file carries."""
+        with self._lock:
+            ref = self.reference
+            if ref is None:
+                return None
+            backups = tuple((id(b.template), round(float(b.offset_px[0])),
+                             round(float(b.offset_px[1]))) for b in ref.backups)
+            off = (round(float(ref.array_center_offset_px[0])),
+                   round(float(ref.array_center_offset_px[1])))
+            tpl = id(ref.template)
+        meta = json.dumps(self._reference_meta(), sort_keys=True, default=str)
+        return (tpl, off, backups, meta)
+
+    def _autosave_pattern_if_changed(self) -> bool:
+        """Write the live pattern when it differs from the last one written.
+        Atomic (a temp file, then os.replace), and the previous file is kept as
+        the .prev copy. Returns True when a file was written."""
+        sig = self._pattern_signature()
+        if sig is None or sig == self._autosave_sig:
+            return False
+        folder = autosave_dir()
+        path = os.path.join(folder, AUTOSAVE_NAME)
+        tmp = os.path.join(folder, AUTOSAVE_NAME + ".writing")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with self._lock:
+                ref = self.reference
+                if ref is None:
+                    return False
+                ref.meta = self._reference_meta()
+                save_template(tmp, ref)
+            if os.path.exists(path):
+                os.replace(path, os.path.join(folder, AUTOSAVE_PREV_NAME))
+            os.replace(tmp, path)
+        except Exception as exc:        # a full disk must not stop the camera
+            self._emit("warn", f"pattern autosave failed: {exc}")
+            return False
+        self._autosave_sig = sig
+        return True
+
+    def _autosave_loop(self) -> None:
+        while not self._stop.wait(AUTOSAVE_EVERY_S):
+            self._autosave_pattern_if_changed()
+
+    def _restore_autosaved_pattern(self) -> bool:
+        """At start: load the pattern the last session left (template,
+        backups, array, selected point). Tracking and the stabiliser are NOT
+        switched on -- the sample may have moved while the camera was off."""
+        path = self.autosave_path()
+        if self.reference is not None or not os.path.exists(path):
+            return False
+        try:
+            self.load_pattern(path, load_arrays=True)
+        except Exception as exc:
+            self._emit("warn", f"autosaved pattern not restored ({exc}); "
+                               f"capture or load one by hand")
+            return False
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
+        self._autosave_sig = self._pattern_signature()     # no needless rewrite
+        self._emit("warn", f"live pattern RESTORED from the last session (saved {when}); "
+                           f"tracking and stabiliser are off -- check it, then switch on")
+        return True
 
     def _adopt_exposure(self) -> None:
         """Read ExposureTime from the camera into cfg.camera.exposure_us (read only)."""
@@ -610,6 +708,9 @@ class Camera:
         self._stop.set()
         if self._engine is not None:
             self._engine.join(timeout=2.0)
+        if self.cfg.pattern.autosave and self._autosave_thread is not None:
+            self._autosave_thread.join(timeout=1.0)
+            self._autosave_pattern_if_changed()   # a change in the last 2 s too
         # A run interrupted by the shutdown restores the working exposure in
         # its own finally; if the engine did not get that far (stuck in a
         # grab), do it here, before the camera is closed -- the camera must end

@@ -336,6 +336,13 @@ class Pattern:
     # lost AGAIN sooner latches the fault at once (a flickering pattern must
     # not keep the Z walking).
     recovery_min_interval_s: float = 300.0
+    # AUTOSAVE (2026-10-11, Lukas). The live pattern -- template, backups,
+    # the array pinned to it, the selected point -- is written to
+    # autosave/pattern_live.png (next to camera.ini) whenever it changes,
+    # and restored at the next start. A restart lost a 63x template that
+    # had never been saved by hand. Tracking and the stabiliser stay OFF
+    # after a restore: a person checks the pattern first.
+    autosave: bool = True
 
 
 @dataclass
