@@ -34,6 +34,7 @@ import pyqtgraph as pg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # find scan_core
 from scan_core import Recipe, build_sim_registry, run
+from scan_core.recipe import zigzag_dim_names
 from scan_core.errors import RoutineError, ScanAborted, ScanFault
 from scan_core.preview import preview_axis, step_summary
 from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
@@ -279,6 +280,7 @@ class _StackRow(QtWidgets.QFrame):
         is no per-axis dwell or settle timeout in the engine, so none is
         offered here."""
         self.point_group, g = self.advanced.add_group("POINT")
+        self.point_grid = g                # AxisRow adds its direction here
         self.name_edit = QtWidgets.QLineEdit()
         self.name_edit.setFixedWidth(120)
         self.name_edit.setToolTip(
@@ -357,7 +359,7 @@ class AxisRow(_StackRow):
     #: axis carries is kept in `extra` and written back unchanged
     MODELLED = {"type", "param", "start", "stop", "num", "step", "speed",
                 "row_time_s", "speed_param", "move", "readback", "lag_correction", "timeout_s",
-                "collapse", "collapse_keep_pixels", "name"}
+                "collapse", "collapse_keep_pixels", "name", "zigzag"}
 
     def __init__(self, param, level_getter, speed_param=None, move_choices=(),
                  speed_lookup=None, registry=None):
@@ -366,7 +368,6 @@ class AxisRow(_StackRow):
         self._raw = None                   # set for non-editable (raster/zip) rows
         self._level_getter = level_getter
         self._registry = registry
-        self._zigzag = False
         #: unmodelled keys of a loaded axis (written back as they came)
         self.extra: dict = {}
         #: a loaded scout margin that differs between the dims of one row (a
@@ -421,6 +422,7 @@ class AxisRow(_StackRow):
         self._build_scout()
         self._point_group(with_name=True)
         self.name_edit.setPlaceholderText(param.id)
+        self._build_direction()
         self._build_side()
         self.changed.connect(self.refresh_tags)
         self._fly_toggled(False)
@@ -441,6 +443,10 @@ class AxisRow(_StackRow):
         self.fly_group.setVisible(plain)
         self.name_lbl.setVisible(plain)
         self.name_edit.setVisible(plain)
+        if isinstance(value, dict):
+            # a raster / zip / array row zig-zags too: its direction box
+            # shows the loaded axis's own flag
+            self.set_zigzag(value.get("zigzag") is True)
         self.refresh_tags()
 
     # ---- FLY ---------------------------------------------------------------------
@@ -545,18 +551,6 @@ class AxisRow(_StackRow):
             "(none): the stage moves at whatever speed it has; the number is\n"
             "then only used for the time estimate.")
 
-        self.dir_box = QtWidgets.QComboBox()
-        self.dir_box.addItem("one-way", False)
-        self.dir_box.addItem("zig-zag", True)
-        self.dir_box.setToolTip(
-            "zig-zag: every other row is flown BACKWARDS -- the fly-back saved,\n"
-            "and the best check of the lag correction (a forward and a backward\n"
-            "row must put an edge in the same place).\n"
-            "This is the scan's zig-zag setting (the box next to Run): it also\n"
-            "reverses every other pass of stepped inner axes.")
-        self.dir_box.currentIndexChanged.connect(
-            lambda *_: self._dir_changed())
-
         self.timeout_auto = QtWidgets.QCheckBox("auto")
         self.timeout_auto.setChecked(True)
         self.timeout_spin = QtWidgets.QDoubleSpinBox()
@@ -628,8 +622,9 @@ class AxisRow(_StackRow):
         g.addWidget(self.pace_box, 0, 2); g.addLayout(sp_box, 0, 3)
         g.addWidget(self.knob_lbl, 1, 0); g.addWidget(self.knob_box, 1, 1)
         g.addWidget(self.move_lbl, 1, 2); g.addWidget(self.move_box, 1, 3)
-        g.addWidget(_muted("direction"), 2, 0); g.addWidget(self.dir_box, 2, 1)
-        g.addWidget(_muted("row timeout"), 2, 2); g.addLayout(to_box, 2, 3)
+        # (the row DIRECTION, one-way / zig-zag, is in POINT since 2026-10-11:
+        # every axis can zig-zag now, not only a flown one)
+        g.addWidget(_muted("row timeout"), 2, 0); g.addLayout(to_box, 2, 1)
         g.addWidget(self.lag_box, 3, 0, 1, 2)
         g.addWidget(self.readback_lbl, 3, 2); g.addWidget(self.readback_box, 3, 3)
         # the long label spans three columns, so the FLY group gets no wider
@@ -902,7 +897,7 @@ class AxisRow(_StackRow):
 
     def _fly_toggled(self, on):
         on = bool(on)
-        for w in (self.move_box, self.knob_box, self.dir_box,
+        for w in (self.move_box, self.knob_box,
                   self.timeout_auto, self.lag_box, self.readback_box,
                   self.collapse_box):
             w.setEnabled(on and self.streams)
@@ -915,24 +910,58 @@ class AxisRow(_StackRow):
     def is_fly(self) -> bool:
         return self._raw is None and self.fly.isChecked()
 
-    def _dir_changed(self):
-        self._zigzag = bool(self.dir_box.currentData())
-        self.zigzag_changed.emit(self._zigzag)
-        self.changed.emit()
+    # ---- DIRECTION (zig-zag, per axis since 2026-10-11) ---------------------
+    def _build_direction(self):
+        """DIRECTION, in POINT: one-way, or zig-zag = this axis runs BACKWARDS
+        on every other sweep (every other time the axes outside it advance),
+        so the stage does not go back to the start of each row. On a flown
+        axis: every other row is flown back. Lukas, 2026-10-11: "Zig zag goes
+        to the advanced settings of each axis" -- it used to be ONE switch
+        next to Run for the whole scan.
 
-    #: the direction box was changed here: the builder sets the scan's zig-zag
-    zigzag_changed = QtCore.Signal(bool)
+        Greyed on the outermost axis (refresh_level): nothing outside it
+        advances, so there is nothing to alternate with -- except on a
+        raster row, whose inner dim zig-zags inside the row."""
+        self.dir_box = QtWidgets.QComboBox()
+        self.dir_box.addItem("one-way", False)
+        self.dir_box.addItem("zig-zag", True)
+        self.dir_box.setToolTip(
+            "zig-zag: this axis runs BACKWARDS on every other sweep (every other\n"
+            "time the axes outside it advance), so it does not go back to its\n"
+            "start each time. On a flown axis every other row is flown back --\n"
+            "the fly-back saved, and the best check of the lag correction.\n"
+            "The data is identical; only the path between points is shorter.\n\n"
+            "Off by default: it is only safe where a point does not depend on\n"
+            "the direction it was approached from. An open-loop slip-stick\n"
+            "stage, backlash or magnetic hysteresis all land somewhere slightly\n"
+            "different coming back.")
+        self.dir_lbl = _muted("direction")
+        self.point_grid.addWidget(self.dir_lbl, 2, 0)
+        self.point_grid.addWidget(self.dir_box, 2, 1)
+        self.dir_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
+
+    def is_zigzag(self) -> bool:
+        """Does this axis zig-zag (as written in the recipe)?"""
+        return bool(self.dir_box.currentData())
+
+    def zigzag_effective(self) -> bool:
+        """...and does it actually do anything where the row sits now? Not on
+        the outermost axis -- unless it is a raster (two dims of its own)."""
+        if not self.is_zigzag():
+            return False
+        raster = isinstance(self._raw, dict) and self._raw.get("type") == "raster"
+        try:
+            level = self._level_getter(self)
+        except Exception:
+            level = 1
+        return raster or level > 0
 
     def set_zigzag(self, on: bool) -> None:
-        """The scan's zig-zag, shown in this row's direction box."""
+        """Set this axis's direction (a loaded recipe, Copy from axis)."""
         on = bool(on)
-        if on == self._zigzag and self.dir_box.currentData() == on:
+        if self.dir_box.currentData() == on:
             return
-        self._zigzag = on
-        self.dir_box.blockSignals(True)
-        self.dir_box.setCurrentIndex(1 if on else 0)
-        self.dir_box.blockSignals(False)
-        self.refresh_tags()
+        self.dir_box.setCurrentIndex(1 if on else 0)    # emits changed -> tags
 
     # ---- SCOUT -------------------------------------------------------------------
     def _build_scout(self):
@@ -1069,7 +1098,7 @@ class AxisRow(_StackRow):
         self.copy_btn.setText("Copy from axis…")
         self.copy_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         self.copy_btn.setToolTip(
-            "Take the fly and scout settings of another axis. Only what makes\n"
+            "Take the fly, zig-zag and scout settings of another axis. Only what makes\n"
             "sense here is copied (no um/s speed onto a frequency axis); what\n"
             "is skipped is said below and in the log.")
         menu = QtWidgets.QMenu(self.copy_btn)
@@ -1168,6 +1197,10 @@ class AxisRow(_StackRow):
                 copied.append("fly off")
         elif src.is_fly():
             skipped.append("fly (a raster / zip row cannot fly)")
+        # DIRECTION (zig-zag fits every axis that moves something)
+        if src.is_zigzag() != self.is_zigzag():
+            self.set_zigzag(src.is_zigzag())
+            copied.append("zig-zag" if src.is_zigzag() else "one-way")
         # SCOUT
         if src.is_scout():
             self.scout.setChecked(True)
@@ -1198,11 +1231,12 @@ class AxisRow(_StackRow):
                    self.lag_box, self.timeout_auto, self.collapse_box, self.keep_box,
                    self.timeout_spin, self.readback_box, self.scout,
                    self.scout_step, self.margin_auto, self.margin_spin,
-                   self.name_edit)
+                   self.name_edit, self.dir_box)
         for w in widgets:
             w.blockSignals(True)
         try:
             self.fly.setChecked(False)
+            self.dir_box.setCurrentIndex(0)           # one-way
             self.speed.setValue(self._default_speed)
             self.row_time.setValue(60.0)
             self.pace_box.setCurrentIndex(0)          # speed
@@ -1248,8 +1282,6 @@ class AxisRow(_StackRow):
             out.append(t)
             if self.move_param():
                 out.append(f"moves {self.move_param()}")
-            if self._zigzag:
-                out.append("zig-zag")
             if not self.lag_box.isChecked():
                 out.append("no lag correction")
             if self.collapse_box.isChecked():
@@ -1265,6 +1297,11 @@ class AxisRow(_StackRow):
             default = default.id if default is not None else self._default_knob
             if knob != default and not self.is_ramp():
                 out.append(f"speed knob {knob or 'none'}")
+        if self.is_zigzag():
+            # said even where it does nothing (the outermost axis), so a
+            # setting that came with the row is not hidden
+            out.append("zig-zag" if self.zigzag_effective()
+                       else "zig-zag (outermost: no effect)")
         if self.is_scout():
             t = f"scout x{self.scout_step.value()}"
             m = set(str(v) for v in self.scout_margins().values())
@@ -1371,6 +1408,15 @@ class AxisRow(_StackRow):
         level = self._level_getter(self)
         self.level_lbl.setText(str(level))
         self._indent(level)
+        # zig-zag needs an axis OUTSIDE this one to alternate with: greyed on
+        # the outermost row (the setting is kept, and comes back into force
+        # when the row moves inwards) -- a raster zig-zags inside itself
+        raster = isinstance(self._raw, dict) and self._raw.get("type") == "raster"
+        self.dir_box.setEnabled(level > 0 or raster or self.is_zigzag())
+        self.dir_lbl.setToolTip("" if (level > 0 or raster) else
+                                "The outermost axis: nothing outside it advances,\n"
+                                "so zig-zag has no effect here.")
+        self.refresh_tags()
         self.setToolTip(f"loop level {level} — "
                         + ("the OUTERMOST (slowest) axis" if level == 0
                            else "inside " + ", ".join(
@@ -1385,7 +1431,11 @@ class AxisRow(_StackRow):
 
     def to_axis(self) -> dict:
         if self._raw is not None:                # loaded raster/zip: pass through
-            return self._raw
+            ax = dict(self._raw)                 # ... with its direction from the box
+            ax.pop("zigzag", None)
+            if self.is_zigzag():
+                ax["zigzag"] = True
+            return ax
         if self.is_fly():
             ax = {"type": "fly", "param": self.param.id,
                   "start": self.start.value(), "stop": self.stop.value(),
@@ -1420,6 +1470,10 @@ class AxisRow(_StackRow):
                   "num": self.num.value()}
         if self.dim_name() and self.dim_name() != self.param.id:
             ax["name"] = self.dim_name()
+        if self.is_zigzag():
+            # only when on, like every other advanced setting: a plain axis
+            # is written exactly as before
+            ax["zigzag"] = True
         for k, v in self.extra.items():
             ax.setdefault(k, v)
         return ax
@@ -1435,6 +1489,7 @@ class AxisRow(_StackRow):
         self.extra = {k: v for k, v in ax.items() if k not in self.MODELLED}
         if ax.get("name") and ax["name"] != self.param.id:
             self.name_edit.setText(str(ax["name"]))
+        self.set_zigzag(ax.get("zigzag") is True)
         if ax.get("type") != "fly":
             return missing
         self.fly.setChecked(True)
@@ -1601,7 +1656,10 @@ class RepeatRow(_StackRow):
         return {}
 
     def set_zigzag(self, on: bool) -> None:
-        pass                               # nothing to fly
+        pass                               # moves nothing: nothing to reverse
+
+    def is_zigzag(self) -> bool:
+        return False
 
     def refresh_limits(self):
         pass                               # no parameter, no limits
@@ -4037,6 +4095,22 @@ class ScoutSection(QtWidgets.QFrame):
         self.state.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                  QtWidgets.QSizePolicy.Preferred)
         head.addWidget(self.state, 1)
+        # NO AUTOFOCUS BEFORE THE SCOUT (2026-10-11, Lukas chose "warn"): the
+        # threshold follows focus. IN the head line, so it is seen with the
+        # section closed too, and the section never changes height (the
+        # cards below must not jump); cut, never widening the window, like
+        # the state. Never blocks Run; the summary says it in full too.
+        self.af_warn = QtWidgets.QLabel("")
+        self.af_warn.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                   QtWidgets.QSizePolicy.Preferred)
+        self.af_warn.setStyleSheet(f"color:{C['danger']}; font-weight:700;")
+        self.af_warn.setToolTip(
+            "The scout thresholds what it measures (Otsu), and an out-of-focus\n"
+            "reading is lower and flatter, so the threshold -- and the mask --\n"
+            "follows focus. Add the camera's Find focus to ROUTINES > BEFORE\n"
+            "SCAN. Only a warning: the scan runs either way.")
+        self.af_warn.hide()
+        head.addWidget(self.af_warn, 2)
         v.addLayout(head)
 
         # The body is WIDE and SHORT on purpose: in the suite the middle
@@ -4240,6 +4314,13 @@ class ScoutSection(QtWidgets.QFrame):
 
     def expanded(self) -> bool:
         return self._expanded
+
+    def set_autofocus_warning(self, text: str) -> None:
+        """Show (text) or hide ("") the no-autofocus warning."""
+        shown = f"! {text}" if text else ""
+        if self.af_warn.text() != shown:
+            self.af_warn.setText(shown)
+        self.af_warn.setVisible(bool(text))
 
     # ---- contents -------------------------------------------------------------
     def set_registry(self, registry) -> None:
@@ -5376,16 +5457,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.per_pt = QtWidgets.QDoubleSpinBox(); self.per_pt.setRange(0.0, 100); self.per_pt.setDecimals(3)
         self.per_pt.setValue(0.05); self.per_pt.valueChanged.connect(lambda *_: self._rebuild_summary())
         row.addWidget(self.per_pt)
-        self.zigzag_box = QtWidgets.QCheckBox("zig-zag")
-        self.zigzag_box.setToolTip(
-            "Sweep every other pass of the inner axis BACKWARDS, so the stage does not\n"
-            "fly back to the start of each row. The data is identical -- only the path\n"
-            "between points is shorter.\n\n"
-            "Off by default: it is only safe where a point does not depend on the\n"
-            "direction it was approached from. An open-loop slip-stick stage, backlash,\n"
-            "or magnetic hysteresis all land somewhere slightly different coming back.")
-        self.zigzag_box.toggled.connect(lambda *_: self._rebuild_summary())
-        row.addWidget(self.zigzag_box)
+        # (zig-zag used to be a box here, one switch for the whole scan; since
+        # 2026-10-11 each axis has its own, in its Advanced > POINT > direction)
         self.diagonal_box = QtWidgets.QCheckBox("diagonal")
         self.diagonal_box.setToolTip(
             "At the start of a new row, send BOTH new coordinates and then wait,\n"
@@ -5597,14 +5670,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       move_choices=choices, speed_lookup=lookup,
                       registry=self.registry)
         row.raw = raw
-        if hasattr(self, "zigzag_box"):
-            row.set_zigzag(self.zigzag_box.isChecked())
         row.changed.connect(self._rebuild_summary)
         row.remove.connect(self._remove_row)
         row.move.connect(self._move_row)
         row.preview.connect(self.preview_row)
         self._wire_advanced(row)
-        row.zigzag_changed.connect(self._zigzag_from_row)
         self.rows.append(row)
         self.stack_lay.insertWidget(self.stack_lay.count() - 1, row)  # before stretch
         self._relevel(); self._rebuild_summary()
@@ -5665,12 +5735,6 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _advanced_log(self, msg: str) -> None:
         if self.on_log is not None:
             self.on_log(msg)
-
-    def _zigzag_from_row(self, on: bool) -> None:
-        """A fly row's direction box IS the scan's zig-zag: one setting, two
-        places to reach it (the run pane, and the fly axis it matters most for)."""
-        if self.zigzag_box.isChecked() != bool(on):
-            self.zigzag_box.setChecked(bool(on))
 
     def _axis_routines(self, recipe) -> list[list[str]]:
         """Per row, the routines bound to its axis (each_sweep / before_axis /
@@ -5828,7 +5892,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       hooks=self._compose_hooks(),
                       # ONE comment: the run info's is the recipe's
                       comment=self.run_info.values()["comment"],
-                      zigzag=self.zigzag_box.isChecked(),
+                      # zig-zag is on each axis now (AxisRow.to_axis)
                       diagonal=self.diagonal_box.isChecked(),
                       window=(self.window_card.to_block()
                               if hasattr(self, "window_card") else None),
@@ -5958,9 +6022,6 @@ class ScanBuilder(QtWidgets.QMainWindow):
         show.
         """
         missing = []
-        self.zigzag_box.blockSignals(True)
-        self.zigzag_box.setChecked(bool(getattr(recipe, "zigzag", False)))
-        self.zigzag_box.blockSignals(False)
         self.diagonal_box.blockSignals(True)
         self.diagonal_box.setChecked(bool(getattr(recipe, "diagonal", False)))
         self.diagonal_box.blockSignals(False)
@@ -6005,6 +6066,21 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 # raster/zip/array: keep as a pass-through row on the first member
                 self.add_axis(pid, raw=ax)
                 self.rows[-1].hint = ax["type"]
+        if getattr(recipe, "zigzag", False):
+            # THE OLD SCAN-WIDE ZIG-ZAG (before 2026-10-11) becomes the
+            # per-axis setting on every axis it reversed: every dim but the
+            # outermost one (a raster's two dims count separately, a repeat
+            # moves nothing). Saved again, the definition says it per axis.
+            # Same order for a 2-D scan; in 3-D and up the per-axis rule also
+            # saves the one extra fly-back per outer step the old rule made
+            # when a middle axis had an even number of points (engine.py).
+            first_dim = 0
+            for row in self.rows:
+                raw = getattr(row, "raw", None)
+                n = 2 if isinstance(raw, dict) and raw.get("type") == "raster" else 1
+                if first_dim + n - 1 >= 1 and isinstance(row, AxisRow):
+                    row.set_zigzag(True)
+                first_dim += n
         want = set(recipe.detectors)
         have = {it.data(0, QtCore.Qt.UserRole) for it in self._det_items()}
         missing += [d for d in recipe.detectors if d not in have]
@@ -6080,11 +6156,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._sync_window_card()
         self._sync_scout_section()
         recipe = self.build_recipe()
-        zig = self.zigzag_box.isChecked()
         for row, lines in zip(self.rows, self._axis_routines(recipe)):
-            row.set_zigzag(zig)               # a fly row's direction box
             row.set_axis_routines(lines)      # POINT: routines on this axis
         errs = recipe.validate(self.registry)
+        # WARNINGS: said, never blocking (Run stays enabled). The first one:
+        # a measured scout pass with no autofocus before it (scout.py).
+        from scan_core.scout import autofocus_warning
+        af = autofocus_warning(recipe)
+        if hasattr(self, "scout_section"):
+            self.scout_section.set_autofocus_warning(af)
+        warnings = [af] if af else []
         conditions = ("   ·   " + ", ".join(
             f"{r.param.label} = {r.value():g}{(' ' + r.param.unit) if r.param.unit else ''}"
             for r in self.fixed_rows)) if self.fixed_rows else ""
@@ -6104,6 +6185,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if parked:
             conditions += (f"   ·   {parked} detector(s) set aside while flying "
                            f"(they cannot be recorded continuously)")
+        for w in warnings:
+            conditions += f"   ·   WARNING: {w}"
         self._detail_parts = None            # set again below, if there is an ETA
         if not self.rows:
             self.summary.setText("no axes")
@@ -6112,7 +6195,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if errs:
             self.summary.setText("invalid")
             self.summary.setStyleSheet(f"color:{C['danger']}; font-size:22px; font-weight:800;")
-            self.detail.setText("• " + "\n• ".join(errs)); return
+            self.detail.setText("• " + "\n• ".join(errs + [f"WARNING: {w}" for w in warnings]))
+            return
         self.summary.setStyleSheet("")
         comp = recipe.compile(self.registry)
         shape = "×".join(str(s) for s in comp.shape)
@@ -6185,7 +6269,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._detail_parts = (
             f"dims: {', '.join(d.name for d in comp.dims)}   ·   ",
             f"ETA ≈ {int(eta // 60):d}m {int(eta % 60):02d}s {how} (dwell only)",
-            ("   ·   zig-zag" if self.zigzag_box.isChecked() else "")
+            # which axes zig-zag (per axis since 2026-10-11): named, since it
+            # is no longer one switch for the whole scan
+            ((f"   ·   zig-zag: {', '.join(zz)}") if (zz := zigzag_dim_names(recipe)) else "")
             + ("   ·   diagonal row change" if self.diagonal_box.isChecked() else "")
             + conditions)
         self._show_detail()

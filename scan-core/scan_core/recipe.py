@@ -17,7 +17,9 @@ settle:    {default_timeout_s}
 axes:      [Axis, ...]      # OUTER→INNER. axes[0] is the slowest (outermost) loop.
 detectors: [param_id, ...]  # gettables recorded at every point
 hooks:     [Hook, ...]       # optional actions bound to a level/cadence
-zigzag:    bool              # serpentine order (off by default)
+zigzag:    bool              # OLD scan-wide serpentine switch (still read and
+                             # run exactly as before; the builder now writes
+                             # `zigzag: true` on each AXIS instead -- see below)
 diagonal:  bool              # at a row change send all setpoints, then wait
 window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
                              # array detector only around the predicted FMR line
@@ -41,6 +43,14 @@ restricted evaluator in expr.py and are checked by validate().
 
 Axis types (the `type` field discriminates)
 -------------------------------------------
+Every axis except a repeat may carry `zigzag: true` (2026-10-11, Lukas: "Zig
+zag goes to the advanced settings of each axis"): that axis is swept
+BACKWARDS on every other sweep, i.e. every other time the axes outside it
+advance (dim_zigzag / zigzag_plan below; engine.visit_index). On a fly axis
+it means every other row is flown back. On the outermost axis it does
+nothing (nothing outside it advances) -- except on a raster, whose inner
+(fast) dim then zig-zags.
+
 linear : {type, param, start, stop, num, [name]}          -> 1 dim
 array  : {type, param, values:[...], [name]}              -> 1 dim
 file   : {type, param, path, [name]}                      -> 1 dim (values from CSV/txt)
@@ -153,6 +163,11 @@ class Recipe:
     hooks: list[dict] = field(default_factory=list)
     output: dict = field(default_factory=lambda: {"dir": ".", "basename": "scan", "format": "netcdf"})
     settle: dict = field(default_factory=lambda: {"default_timeout_s": 20.0})
+    #: THE OLD SCAN-WIDE SWITCH (before 2026-10-11). Since then zig-zag is set
+    #: PER AXIS (`zigzag: true` on an axis dict, see dim_zigzag). This flag is
+    #: still read, and a recipe that has it runs EXACTLY as before (the old
+    #: rule, engine._zigzag, on every inner dim); the builder turns it into
+    #: per-axis flags when it loads such a recipe.
     #: Sweep every other pass of an inner axis BACKWARDS (boustrophedon), so the
     #: stage does not fly back to the start of each row. Saves the fly-back on a
     #: slow axis -- on a 20 x 20 camera-array scan, 19 returns across the sample.
@@ -235,6 +250,14 @@ class Recipe:
     def validate(self, registry) -> list[str]:
         """Return a list of human-readable problems ([] means valid)."""
         errs: list[str] = []
+        for i, ax in enumerate(self.axes):
+            if isinstance(ax, dict) and "zigzag" in ax:
+                if not isinstance(ax["zigzag"], bool):
+                    errs.append(f"axis {i + 1}: zigzag must be true or false, "
+                                f"not {ax['zigzag']!r}")
+                elif ax["zigzag"] and ax.get("type") == "repeat":
+                    errs.append(f"axis {i + 1}: a repeat cannot zig-zag (it "
+                                f"moves nothing)")
         for ax in self.axes:
             for pid in _axis_param_ids(ax):
                 p = registry.get(pid)
@@ -497,6 +520,50 @@ class Recipe:
         return CompiledScan(dims=dims, detectors=list(self.detectors), hooks=list(self.hooks))
 
 
+# ─────────────────────────── zig-zag, per axis (2026-10-11) ───────────────────
+
+def _axis_n_dims(ax: dict) -> int:
+    """How many dims an axis compiles to (a raster: two), without compiling
+    it (a `file` axis would read its file)."""
+    return 2 if isinstance(ax, dict) and ax.get("type") == "raster" else 1
+
+
+def dim_zigzag(axes) -> list[bool]:
+    """One flag per compiled dim: is this dim swept backwards on every other
+    sweep? An axis's `zigzag` applies to every dim it makes (both dims of a
+    raster); a repeat never zig-zags (it moves nothing, and reversing it would
+    only shuffle which repeat is which). The flag of dim 0 has no effect."""
+    out: list[bool] = []
+    for ax in axes or []:
+        on = (isinstance(ax, dict) and ax.get("zigzag") is True
+              and ax.get("type") != "repeat")
+        out += [bool(on)] * _axis_n_dims(ax)
+    return out
+
+
+def zigzag_plan(recipe) -> tuple[list[bool], bool]:
+    """(per-dim flags, legacy). `legacy` = the recipe still has the OLD
+    scan-wide `zigzag: true`: then every inner dim zig-zags by the OLD rule
+    (engine._zigzag), exactly as before 2026-10-11, and the per-axis flags are
+    not looked at."""
+    legacy = bool(getattr(recipe, "zigzag", False))
+    flags = dim_zigzag(getattr(recipe, "axes", None) or [])
+    if legacy:
+        flags = [False] + [True] * max(0, len(flags) - 1)
+    return flags, legacy
+
+
+def zigzag_dim_names(recipe) -> list[str]:
+    """The names of the dims that really zig-zag (dim 0 never does), for the
+    summary and the file. Names as compile() gives them, without a registry."""
+    try:
+        dims = recipe.compile().dims
+    except Exception:
+        return []
+    flags, _ = zigzag_plan(recipe)
+    return [d.name for k, (d, f) in enumerate(zip(dims, flags)) if f and k > 0]
+
+
 # ─────────────────────────── axis → Dim(s) helpers ────────────────────────────
 
 def _axis_param_ids(ax: dict) -> list[str]:
@@ -623,9 +690,10 @@ def axis_attrs(recipe, units=None, registry=None) -> dict:
         a["fly_lag_correction"] = int(ax.get("lag_correction", True) is not False)
         if ax.get("timeout_s"):
             a["fly_timeout_s"] = float(ax["timeout_s"])
-        # zig-zag is scan-wide in the recipe; on a fly row it decides whether
-        # every other row was flown backwards, so it belongs here too
-        a["fly_zigzag"] = int(bool(getattr(recipe, "zigzag", False)))
+        # on a fly row zig-zag decides whether every other row was flown
+        # backwards: per axis since 2026-10-11 (or the old scan-wide switch)
+        a["fly_zigzag"] = int(bool(getattr(recipe, "zigzag", False))
+                              or ax.get("zigzag") is True)
         # ONE MEAN PER ROW (flyscan.collapse_rows): said on the coordinate,
         # with whether the pixels were kept (only when it is on, so a file of
         # an ordinary fly scan looks exactly as before)
@@ -634,6 +702,11 @@ def axis_attrs(recipe, units=None, registry=None) -> dict:
             a["fly_collapse"] = "mean"
             a["fly_collapse_keep_pixels"] = int(keeps_pixels(ax))
         out.setdefault(ax.get("name") or ax.get("param"), {}).update(a)
+    # ZIG-ZAG (2026-10-11): `zigzag = 1` on every coordinate that was swept
+    # backwards on every other sweep -- only where it really happened (not on
+    # the outermost dim, where it has no effect), so plain files are unchanged
+    for name in zigzag_dim_names(recipe):
+        out.setdefault(name, {})["zigzag"] = 1
     block = getattr(recipe, "scout", None)
     if isinstance(block, dict) and block:
         from .scout import spec_of

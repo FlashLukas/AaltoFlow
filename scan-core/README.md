@@ -534,16 +534,17 @@ really was.
 
 In the Scan Builder, open **Advanced** on the innermost axis row and tick
 **fly this axis** in its FLY group; give a speed, and `pts` become pixels. The
-same group holds the speed knob, the direction (one-way or zig-zag), the row
-timeout, the lag correction and the readback. In a recipe:
+same group holds the speed knob, the row timeout, the lag correction and the
+readback; the direction (one-way or zig-zag) is in the POINT group of the same
+panel. In a recipe:
 
 ```yaml
 axes:
   - {type: linear, param: kim.position_y, start: 0, stop: 20, num: 21}   # stepped
   - {type: fly, param: kim.position_x, start: 0, stop: 50, num: 101,     # flown
-     speed: 5, speed_param: kim.velocity_x}
+     speed: 5, speed_param: kim.velocity_x,
+     zigzag: true}      # every other row flown backwards
 detectors: [hf2.x1, hf2.y1]
-zigzag: true            # every other row flown backwards
 ```
 
 ![a fly scan](../front-panels/suite-fly.png)
@@ -620,9 +621,9 @@ binned by the ramp's readback.
 axes:
   - {type: linear, param: dssg.frequency, start: 2000, stop: 6000, num: 41}   # stepped
   - {type: fly, param: clMag.field, start: -50, stop: 50, num: 201,          # flown
-     speed: 2}                       # mT/s -- or row_time_s: 60, or nothing: the module's default
+     speed: 2,                       # mT/s -- or row_time_s: 60, or nothing: the module's default
+     zigzag: true}
 detectors: [hf2.r1]
-zigzag: true
 ```
 
 **Binned by measurement, or by command.** Each ramp says what its readback is:
@@ -638,8 +639,8 @@ tell later whether an axis is what the instrument reported or only what it was
 told. A knob that can do neither (no stream of its value, no ramp block) is
 refused before anything moves: "cannot be flown -- step it with a linear
 axis". The row ends when the module says its numbered sweep is over (never on
-a settle rule); Abort stops the sweep where it is; `zigzag` sweeps every other
-row backwards; the lag correction works as for a stage.
+a settle rule); Abort stops the sweep where it is; `zigzag: true` on the fly
+axis sweeps every other row backwards; the lag correction works as for a stage.
 
 ```bash
 uv run python run_fly_any_demo.py      # a field x frequency map: stepped, field flown, frequency flown
@@ -900,25 +901,51 @@ and pts. Everything else about the axis sits behind its **Advanced** button,
 which opens a panel under the row (one row at a time):
 
 - **FLY**: fly this axis, its speed and speed knob, the stage that moves it
-  (for a measured coordinate), the direction, the row timeout, the lag
-  correction, the readback, and one mean per row (with or without the pixel
-  data);
+  (for a measured coordinate), the row timeout, the lag correction, the
+  readback, and one mean per row (with or without the pixel data);
 - **SCOUT**: scout this axis, its coarse step and its margin in grid points;
-- **POINT**: the axis's name in the data file, and the routines bound to it
-  (edited under ROUTINES > THROUGHOUT).
+- **POINT**: the axis's name in the data file, its **direction** (one-way or
+  zig-zag, below), and the routines bound to it (edited under ROUTINES >
+  THROUGHOUT).
 
-**Copy from axis...** takes the fly and scout settings of another row, except
-what does not fit (a speed in um/s onto an axis in deg, fly onto an axis that
-is not streamed); the skipped parts are named in the panel and in the log.
-**Reset** goes back to plain stepping. Anything that is not the default shows
-as an amber tag on the row ("fly 60 um/s", "zig-zag", "scout x3"), so a closed
-panel hides nothing.
+**Zig-zag, per axis** (since 2026-10-11; before, one "zig-zag" box next to Run
+applied to the whole scan). `zigzag: true` on an axis sweeps that axis
+BACKWARDS on every other sweep of it -- every other time the axes outside it
+advance -- so it does not go back to its start each time. On a fly axis every
+other row is flown back. It works on any axis but the outermost one, where
+nothing outside it advances (the box is greyed there; a raster row is the
+exception, its fast dim zig-zags inside the row); a repeat axis cannot zig-zag.
+The data are the same either way, only the path between points changes. Tick
+it on several axes and the path is one continuous line: every step moves one
+axis by one point. An old recipe with the scan-wide `zigzag: true` still loads
+and runs exactly as before; opened in the Scan tab it shows zig-zag on every
+inner axis, and saved again it says so per axis (same order for a 2-D scan; in
+3-D and up the per-axis rule also removes one fly-back per outer step that the
+old rule made when a middle axis had an even number of points).
+
+**Copy from axis...** takes the fly, zig-zag and scout settings of another
+row, except what does not fit (a speed in um/s onto an axis in deg, fly onto
+an axis that is not streamed); the skipped parts are named in the panel and in
+the log. **Reset** goes back to plain stepping. Anything that is not the
+default shows as an amber tag on the row ("fly 60 um/s", "zig-zag", "scout
+x3"), so a closed panel hides nothing; the summary names the axes that
+zig-zag.
 
 The data file carries these settings on each axis's coordinate as well as in
 `recipe_json`: `fly`, `fly_speed`, `fly_speed_units`, `fly_speed_param`,
 `fly_move`, `fly_readback`, `fly_lag_correction`, `fly_timeout_s`,
-`fly_zigzag`, `fly_collapse`, `fly_collapse_keep_pixels`, `scout_every`, `scout_margin` (`auto`) and
+`fly_zigzag`, `fly_collapse`, `fly_collapse_keep_pixels`, `zigzag` (1 on every
+coordinate that really zig-zagged), `scout_every`, `scout_margin` (`auto`) and
 `scout_margin_points`. Only what is set is written.
+
+**No autofocus before the scout pass** (a warning, 2026-10-11): a measured
+scout thresholds its reading with Otsu, and that threshold follows focus. When
+the scan has a scout pass and no BEFORE SCAN routine runs an autofocus (any
+action whose name contains "autofocus": Find focus, autofocus at the AF
+position, the simulator's), the SCOUT PASS line and the summary say "No
+autofocus before the scout pass: the threshold follows focus -- add Find focus
+to BEFORE SCAN". It never stops the run. A scout read from a file is not
+warned about.
 
 ![an axis row's Advanced panel](../front-panels/suite-axis-advanced.png)
 
@@ -930,8 +957,7 @@ Routines "at the start of each row" run at the first *measured* point of the
 row, and "every n points" counts measured points. Examples:
 `recipes/scout_xy.yaml`, `recipes/scout_field_freq.yaml`.
 
-**Diagonal row change** (`diagonal: true`, the "diagonal" box next to
-zig-zag): at a point where several axes change at once (a new row), every new
+**Diagonal row change** (`diagonal: true`, the "diagonal" box next to Run): at a point where several axes change at once (a new row), every new
 setpoint is sent first and only then are they all waited for. Without it the
 outer axis moves first, so a camera scan settles at (last column, next row)
 before going to the first column. The first rig test of the mask measured that

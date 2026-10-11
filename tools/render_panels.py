@@ -671,7 +671,7 @@ def _axis_advanced_ramp(win):
     row.start.setValue(10.0); row.stop.setValue(90.0); row.num.setValue(41)
     row.fly.setChecked(True)
     row.speed.setValue(30.0)
-    b.zigzag_box.setChecked(True)
+    row.set_zigzag(True)                  # per axis since 2026-10-11
     for it in b._det_items():
         it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole)
                          == "lockin_r" else QtCore.Qt.Unchecked)
@@ -857,7 +857,7 @@ def _fly(run: bool):
         row.fly.setChecked(True)
         # 1 um pixels at 60 um/s with the sim's 200 Hz stream: ~3 samples each
         row.speed.setValue(60.0)
-        b.zigzag_box.setChecked(True)
+        row.set_zigzag(True)              # per axis since 2026-10-11
         for it in b._det_items():
             it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole)
                              == "lockin_r" else QtCore.Qt.Unchecked)

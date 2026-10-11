@@ -850,13 +850,26 @@ class Visit:
         return bool(end - self.before[lo] > 0)
 
 
-def visiting_order(shape, zigzag: bool) -> np.ndarray:
+def visiting_order(shape, zigzag) -> np.ndarray:
     """The flat (C-order) index of the n-th point VISITED -- the engine's
-    odometer, zig-zag included, for every point at once."""
+    odometer, zig-zag included, for every point at once.
+
+    `zigzag`: True/False = the OLD scan-wide switch (engine._zigzag); a list
+    of per-dim flags = the per-axis zig-zag of 2026-10-11
+    (engine._serpentine: dim k reversed on every other sweep of it)."""
     shape = tuple(int(s) for s in shape)
     total = int(np.prod(shape)) if shape else 0
     idx = np.array(np.unravel_index(np.arange(total), shape))   # [ndim, total]
-    if zigzag:
+    if not isinstance(zigzag, (bool, np.bool_)):
+        flags = list(zigzag or [])
+        if total and any(flags):
+            out = idx.copy()
+            for k in range(1, len(shape)):
+                if k < len(flags) and flags[k]:
+                    sweep = np.ravel_multi_index(tuple(idx[:k]), shape[:k])
+                    out[k] = np.where(sweep % 2 == 1, shape[k] - 1 - idx[k], idx[k])
+            idx = out
+    elif zigzag:
         out = idx.copy()
         for k in range(1, len(shape)):
             flip = idx[:k].sum(axis=0) % 2 == 1
@@ -903,7 +916,13 @@ class ScoutRunner:
         self.fine = [np.asarray(dims[k].coord, float) for k in self.ks]
         self.coarse_idx = [coarse_indices(dims[k].size, s)
                            for k, s in zip(self.ks, self.steps)]
-        self.order = visiting_order(self.shape, bool(getattr(recipe, "zigzag", False)))
+        from .recipe import zigzag_plan
+        zz_flags, zz_legacy = zigzag_plan(recipe)
+        #: the zig-zag of the scan (old switch, or per axis), for the coarse
+        #: pass too: legacy -> True, else the per-dim flags
+        self.zz_legacy = zz_legacy
+        self.zz_flags = list(zz_flags) + [False] * (len(self.shape) - len(zz_flags))
+        self.order = visiting_order(self.shape, True if zz_legacy else self.zz_flags)
         self.done_blocks: set = set()
         self.scout_s = 0.0               # seconds spent scouting (not in the per-point ETA)
         self.kept = 0                    # measured points decided so far (scouted blocks)
@@ -1117,7 +1136,7 @@ class ScoutRunner:
         them; inner unscouted axes go to their FIRST value. The scout-only
         `settings` hold during the pass and are put back afterwards -- also
         when it is aborted or fails. Returns the dims it moved."""
-        from .engine import _hold_for_operator, _zigzag
+        from .engine import _hold_for_operator, visit_index
         from .errors import ScanAborted
         registry, recipe, dims = self.registry, self.recipe, self.dims
         log = self.ctx["log_fn"]
@@ -1144,8 +1163,11 @@ class ScoutRunner:
             t_start = time.monotonic()
             for flat in range(total):
                 ci = np.unravel_index(flat, cshape)
-                if getattr(recipe, "zigzag", False):
-                    ci = _zigzag(tuple(int(c) for c in ci), cshape)
+                # the coarse pass walks the scouted dims in the scan's own
+                # zig-zag (old switch: every one; per axis: each its own)
+                ci = visit_index(tuple(int(c) for c in ci), cshape,
+                                 [False] + [self.zz_flags[k] for k in self.ks[1:]],
+                                 self.zz_legacy)
                 fi = [int(self.coarse_idx[j][c]) for j, c in enumerate(ci)]
                 label = f"scout point {flat + 1}/{total}"
                 if self.should_abort and self.should_abort():
@@ -1273,6 +1295,59 @@ class ScoutRunner:
 
 
 # ───────────────────────────── for the builder ──────────────────────────────
+
+#: The warning the builder shows (Lukas chose "warn", not "insert one",
+#: 2026-10-11): the scout thresholds what it MEASURES, and a reflectivity or
+#: camera reading out of focus is lower and flatter -- Otsu's threshold then
+#: lands somewhere else and the mask keeps the wrong points.
+NO_AUTOFOCUS_WARNING = ("No autofocus before the scout pass: the threshold "
+                        "follows focus -- add Find focus to BEFORE SCAN")
+
+
+def _is_autofocus(action_id) -> bool:
+    """Is this action an autofocus? camera.autofocus, sim_autofocus,
+    camera.autofocus_at_position, ... -- any action whose name says so."""
+    return isinstance(action_id, str) and "autofocus" in action_id.lower()
+
+
+def has_autofocus_before_scan(recipe) -> bool:
+    """Does a before_scan routine run an autofocus? Either the hook action
+    `autofocus` itself, or a `call` routine with an autofocus step in it
+    (original {action: ...} or ordered {steps: [...]} form)."""
+    from .hooks import routine_steps
+    for h in getattr(recipe, "hooks", None) or []:
+        if not isinstance(h, dict) or h.get("when") != "before_scan":
+            continue
+        if h.get("action") == "autofocus":
+            return True
+        if h.get("action") != "call":
+            continue
+        try:
+            steps = routine_steps(h.get("args") or {})
+        except Exception:
+            continue                       # validate() reports a bad routine
+        if any(s and s[0] == "action" and _is_autofocus(s[1]) for s in steps):
+            return True
+    return False
+
+
+def autofocus_warning(recipe) -> str:
+    """NO_AUTOFOCUS_WARNING when the recipe has a MEASURED scout pass and no
+    autofocus before the scan, else "". Only a warning: it never stops a run
+    (a sample that does not need focusing, or focus set by hand just before).
+    A scout from a FILE (a picture, an earlier scan) measures nothing now, so
+    focus does not matter for it."""
+    block = getattr(recipe, "scout", None)
+    if not isinstance(block, dict) or not block:
+        return ""
+    try:
+        spec = spec_of(block)
+    except Exception:
+        return ""
+    if spec.get("from"):
+        return ""
+    return "" if has_autofocus_before_scan(recipe) else NO_AUTOFOCUS_WARNING
+
 
 def estimate(recipe) -> dict | None:
     """What the builder can say BEFORE the run: the scout's own points and
