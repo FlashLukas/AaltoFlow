@@ -86,8 +86,9 @@ def test_a_fly_row_that_is_not_innermost_shows_as_invalid(builder):
 
 def test_a_fly_definition_comes_back_when_loaded(builder, tmp_path):
     _fly_row(builder, speed=25.0)
-    builder.zigzag_box.setChecked(True)
+    builder.rows[-1].set_zigzag(True)
     recipe = builder.build_recipe()
+    assert recipe.axes[-1]["zigzag"] is True
     builder.load_recipe(recipe.__class__(name="other", axes=[]))
     assert builder.rows == []
     assert builder.load_recipe(recipe) == []

@@ -373,25 +373,30 @@ def _axis_text(ax: dict) -> str:
         x, y = ax.get("x") or {}, ax.get("y") or {}
         return (f"raster  {x.get('param', '?')} {_num(x.get('start'))} -> "
                 f"{_num(x.get('stop'))} ({x.get('num', '?')})  x  {y.get('param', '?')} "
-                f"{_num(y.get('start'))} -> {_num(y.get('stop'))} ({y.get('num', '?')})")
+                f"{_num(y.get('start'))} -> {_num(y.get('stop'))} ({y.get('num', '?')})") + _zz(ax)
     if t == "zip":
         parts = [f"{m.get('param', '?')} {_num(m.get('start'))} -> {_num(m.get('stop'))}"
                  for m in ax.get("params") or ax.get("members") or []]
-        return f"together ({ax.get('num', '?')} pts):  " + ",  ".join(parts)
+        return f"together ({ax.get('num', '?')} pts):  " + ",  ".join(parts) + _zz(ax)
     if t == "repeat":
         how = "averaged" if ax.get("mode") == "average" else "every run kept"
         every = f", every {_num(ax['interval_s'])} s" if ax.get("interval_s") else ""
         return f"repeat x{ax.get('num', '?')} ({how}{every})"
     if t == "array":
-        return f"{ax.get('param', '?')}: {len(ax.get('values') or [])} listed values"
+        return f"{ax.get('param', '?')}: {len(ax.get('values') or [])} listed values" + _zz(ax)
     if t == "file":
-        return f"{ax.get('param', '?')}: values from {ax.get('path') or ax.get('file', '?')}"
+        return f"{ax.get('param', '?')}: values from {ax.get('path') or ax.get('file', '?')}" + _zz(ax)
     text = (f"{ax.get('param', '?')}  {_num(ax.get('start'))} -> {_num(ax.get('stop'))}, "
             f"{ax.get('num', '?')} pts")
     if t == "fly":
         text += f"  (fly at {_num(ax.get('speed'))}/s" + (
             f", moving {ax['move']}" if ax.get("move") else "") + ")"
-    return text
+    return text + _zz(ax)
+
+
+def _zz(ax: dict) -> str:
+    """The axis's own zig-zag (per axis since 2026-10-11)."""
+    return "  zig-zag" if ax.get("zigzag") is True else ""
 
 
 def _routine_text(hook: dict) -> str:
@@ -443,7 +448,8 @@ def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str,
     if dets:
         out.append(("detectors", ", ".join(dets)))
     if recipe.get("zigzag"):
-        out.append(("axes", "zig-zag"))
+        # the OLD scan-wide switch (per axis since 2026-10-11: on each axis line)
+        out.append(("axes", "zig-zag (every inner axis)"))
     if recipe.get("diagonal"):
         out.append(("axes", "diagonal row change"))
     # the scout pass (and an older definition's XY mask, which is the same thing)

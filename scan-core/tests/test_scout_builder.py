@@ -223,3 +223,64 @@ def test_the_run_pane_shows_the_scout(builder):
                        "of": 3721, "measured": 1262, "total": 3721})
     assert "threshold 0.5013 -> 1,262 of 3,721 points (34 %)" in builder.detail.text()
     builder._running = False
+
+
+# ─────────────── no autofocus before the scout: a WARNING (2026-10-11) ───────
+#
+# Lukas chose "warn", not "insert": the scout thresholds what it measures, and
+# that follows focus. The builder says so -- in the scout section and in the
+# summary -- and still lets the scan run.
+
+SCOUT = {"axes": {"pos_x": 3, "pos_y": 3}, "detector": "reflectivity",
+         "keep": "above", "threshold": "auto", "margin": "auto"}
+
+
+def test_autofocus_warning_rules():
+    from scan_core.scout import NO_AUTOFOCUS_WARNING, autofocus_warning
+    plain = Recipe(axes=[RASTER], detectors=["lockin_r"])
+    assert autofocus_warning(plain) == ""                       # no scout: nothing to say
+    r = Recipe(axes=[RASTER], detectors=["lockin_r"], scout=dict(SCOUT))
+    assert autofocus_warning(r) == NO_AUTOFOCUS_WARNING
+    assert "add Find focus to BEFORE SCAN" in NO_AUTOFOCUS_WARNING
+    for hook in ({"when": "before_scan", "action": "call",
+                  "args": {"action": "camera.autofocus"}},
+                 {"when": "before_scan", "action": "call",       # ordered form
+                  "args": {"steps": [{"set": {"field": 40}},
+                                     {"action": "sim_autofocus"}]}},
+                 {"when": "before_scan", "action": "call",       # at the AF position
+                  "args": {"action": "camera.autofocus_at_position"}},
+                 {"when": "before_scan", "action": "autofocus"}):  # the old hook
+        r.hooks = [hook]
+        assert autofocus_warning(r) == "", hook
+    # an autofocus AFTER the scan, or during it, is not before the scout
+    r.hooks = [{"when": "after_scan", "action": "call", "args": {"action": "sim_autofocus"}},
+               {"when": "before_scan", "action": "call", "args": {"set": {"field": 0}}}]
+    assert autofocus_warning(r) == NO_AUTOFOCUS_WARNING
+    # a scout read from a FILE measures nothing now: focus does not matter
+    r.hooks = []
+    r.scout = {"axes": {"pos_x": 3, "pos_y": 3}, "from": "mask.png"}
+    assert autofocus_warning(r) == ""
+
+
+def test_the_builder_warns_without_blocking_the_run(builder):
+    builder.load_recipe(Recipe(axes=[RASTER], detectors=["lockin_r"], scout=dict(SCOUT)))
+    builder._rebuild_summary()
+    _pump()
+    sec = builder.scout_section
+    assert sec.af_warn.isVisible()
+    assert "No autofocus before the scout pass" in sec.af_warn.text()
+    assert "WARNING: No autofocus before the scout pass" in builder.detail.text()
+    assert builder.summary.text() != "invalid"                 # a warning, not an error
+    assert builder.build_recipe().validate(builder.registry) == []
+    assert builder.run_btn.isEnabled()
+    # the section does not change height for it (the cards below stay put)
+    h = sec.height()
+    # add Find focus to BEFORE SCAN: the warning goes
+    builder.load_recipe(Recipe(axes=[RASTER], detectors=["lockin_r"], scout=dict(SCOUT),
+                               hooks=[{"when": "before_scan", "action": "call",
+                                       "args": {"action": "sim_autofocus"}}]))
+    builder._rebuild_summary()
+    _pump()
+    assert not sec.af_warn.isVisible()
+    assert "No autofocus" not in builder.detail.text()
+    assert sec.height() == h

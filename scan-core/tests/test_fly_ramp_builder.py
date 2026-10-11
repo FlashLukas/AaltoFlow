@@ -252,15 +252,15 @@ def test_a_field_flown_map_built_in_the_window_runs_like_the_demo(builder):
     _row(builder, "rf_freq", 850.0, 950.0, 2, fly=False)
     row = _row(builder, "field", 10.0, 90.0, 41)
     row.speed.setValue(30.0)
-    builder.zigzag_box.setChecked(True)
+    row.set_zigzag(True)                  # per axis since 2026-10-11
     builder.per_pt.setValue(0.0)
     r = builder.build_recipe()
     # the demo's axes and conditions (run_fly_any_demo.py, 'field' recipe)
     assert r.axes == [{"type": "linear", "param": "rf_freq", "start": 850.0,
                        "stop": 950.0, "num": 2},
                       {"type": "fly", "param": "field", "start": 10.0, "stop": 90.0,
-                       "num": 41, "speed": 30.0}]
-    assert r.fixed == {"pos_x": 30.0, "pos_y": 50.0} and r.zigzag
+                       "num": 41, "speed": 30.0, "zigzag": True}]
+    assert r.fixed == {"pos_x": 30.0, "pos_y": 50.0}
     builder.run_scan(block=True)
     ds = builder.dataset
     assert ds["field"].attrs["fly_binned_by"] == "measurement"

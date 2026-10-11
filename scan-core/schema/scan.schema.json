@@ -34,7 +34,7 @@
       "properties": {"default_timeout_s": {"type": "number"}}
     },
     "zigzag": {"type": "boolean",
-               "description": "serpentine order: reverse inner axes on every other pass"},
+               "description": "OLD scan-wide serpentine switch (before 2026-10-11): still read and run exactly as before (every inner axis reversed on every other pass); new definitions set `zigzag` on each axis instead"},
     "diagonal": {"type": "boolean",
                  "description": "where several axes change at once (a new row), send every setpoint first, then wait for all"},
     "window": {"$ref": "#/$defs/window"},
@@ -44,6 +44,8 @@
   },
   "required": ["axes", "detectors"],
   "$defs": {
+    "axis_zigzag": {"type": "boolean",
+                    "description": "zig-zag this axis (2026-10-11): sweep it BACKWARDS on every other sweep, i.e. every other time the axes outside it advance; no effect on the outermost axis. Not on a repeat axis"},
     "linspec": {
       "type": "object",
       "properties": {
@@ -61,7 +63,8 @@
             "param": {"type": "string"},
             "start": {"type": "number"}, "stop": {"type": "number"},
             "num": {"type": "integer"}, "step": {"type": "number"},
-            "name": {"type": "string"}
+            "name": {"type": "string"},
+            "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },
           "required": ["type", "param"]
         },
@@ -72,7 +75,8 @@
             "type": {"const": "array"},
             "param": {"type": "string"},
             "values": {"type": "array", "items": {"type": "number"}},
-            "name": {"type": "string"}
+            "name": {"type": "string"},
+            "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },
           "required": ["type", "param", "values"]
         },
@@ -83,7 +87,8 @@
             "type": {"const": "file"},
             "param": {"type": "string"},
             "path": {"type": "string"},
-            "name": {"type": "string"}
+            "name": {"type": "string"},
+            "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },
           "required": ["type", "param", "path"]
         },
@@ -101,7 +106,8 @@
                                "values": {"type": "array"}},
                 "required": ["param"]
               }
-            }
+            },
+            "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },
           "required": ["type", "members"]
         },
@@ -114,7 +120,9 @@
                   "properties": {"param": {"type": "string"}}, "required": ["param"]},
             "y": {"allOf": [{"$ref": "#/$defs/linspec"}],
                   "properties": {"param": {"type": "string"}}, "required": ["param"]},
-            "fast": {"type": "string", "enum": ["x", "y"]}
+            "fast": {"type": "string", "enum": ["x", "y"]},
+            "zigzag": {"$ref": "#/$defs/axis_zigzag",
+                       "description": "both dims of the raster zig-zag: the fast one every other row, the slow one every other sweep of the axis outside the raster"}
           },
           "required": ["type", "x", "y"]
         },
@@ -140,7 +148,9 @@
                          "description": "mean: ALSO store one mean per row, <det>_rowmean / _rowmean_n / _rowmean_std without the fly dimension (a trace keeps its own), pooled over the pixels weighted by their samples (= the mean and spread of every sample of the row; with a repeat average, the repeats are pooled first). Default none"},
             "collapse_keep_pixels": {"type": "boolean",
                                      "description": "with collapse: mean, keep the pixel variables (<det>, <det>_n, <det>_std) in the file too (default true); false keeps only the row means. The live plot shows the pixels either way"},
-            "name": {"type": "string"}
+            "name": {"type": "string"},
+            "zigzag": {"$ref": "#/$defs/axis_zigzag",
+                       "description": "every other row is flown BACKWARDS"}
           },
           "required": ["type", "param", "start", "stop", "num"]
         },

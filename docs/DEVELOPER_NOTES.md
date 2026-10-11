@@ -1149,6 +1149,36 @@ module's other local settings (`suite_common/modules.py`, "module instances"):
   new module that lands on an instance's ports shows up as a port clash in
   the launcher -- move the instance (Ports).
 
+### 4h. Advanced axis settings: zig-zag per axis, autofocus warning (2026-10-11)
+
+The Advanced panel of an axis row (FLY / SCOUT / POINT, Copy from axis,
+Reset; scan-core README "Advanced axis settings") now also holds the axis's
+**direction**: `zigzag: true` on the axis dict. One rule, in
+`engine.visit_index` (stepped odometer, fly rows, the scout's visiting order
+and its coarse pass all call it): dim k is reversed on every other SWEEP of
+it, counting sweeps by the flat index of the dims outside it
+(`engine._serpentine`). `recipe.dim_zigzag` maps axes to dims (a raster's flag
+covers both its dims; a repeat never zig-zags, validate refuses it), and
+`recipe.zigzag_plan` returns `(flags, legacy)`.
+
+Backward compatibility: the old scan-wide `Recipe.zigzag` is still read, and
+when it is true the OLD rule `engine._zigzag` (reverse dim k when the SUM of
+the outer raw indices is odd; a fly row backwards on the same sum) runs
+unchanged, so an old recipe gives exactly the old order. The two rules agree
+in 2-D; in 3-D+ with an even-sized middle axis the old one starts the first
+row after each outer step at the wrong end. The builder translates the old
+flag into per-axis flags (every axis with a dim >= 1) when it loads a recipe
+and never writes the scan-wide key as true. The file gets `zigzag = 1` on each
+coordinate that really zig-zagged (`axis_attrs`), next to the older
+`fly_zigzag`.
+
+Autofocus before a scout: `scout.autofocus_warning(recipe)` returns
+`scout.NO_AUTOFOCUS_WARNING` for a MEASURED scout pass with no before_scan
+routine running an action whose id contains "autofocus" (or the old
+`{action: autofocus}` hook). The builder shows it in the SCOUT PASS head line
+and as "WARNING: ..." in the summary detail; it is deliberately not in
+`validate()`, so it never blocks Run (Lukas chose "warn", not auto-insert).
+
 ---
 
 ## 5. Shared code conventions

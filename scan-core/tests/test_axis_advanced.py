@@ -90,9 +90,9 @@ def test_tags_reflect_the_settings(builder):
     x.fly.setChecked(True)
     x.speed.setValue(5.0)
     assert x.tag_texts() == ["fly 5 um/s"]
-    builder.zigzag_box.setChecked(True)               # the scan-wide setting ...
-    assert "zig-zag" in x.tag_texts()                 # ... shows on the fly row
-    assert x.dir_box.currentData() is True
+    x.dir_box.setCurrentIndex(x.dir_box.findData(True))   # this axis zig-zags
+    assert "zig-zag" in x.tag_texts()
+    assert "zig-zag" not in y.tag_texts()             # per axis, not scan-wide
     x.lag_box.setChecked(False)
     x.timeout_auto.setChecked(False); x.timeout_spin.setValue(90)
     assert {"no lag correction", "row max 90 s"} <= set(x.tag_texts())
@@ -110,14 +110,46 @@ def test_tags_reflect_the_settings(builder):
     assert y.tag_texts() == []
 
 
-def test_the_direction_box_is_the_scans_zig_zag(builder):
+def test_the_direction_box_is_this_axis_zig_zag(builder):
+    """Since 2026-10-11 the direction is PER AXIS, in Advanced > POINT, for a
+    stepped axis as well as a flown one; nothing scan-wide is written."""
+    builder.add_axis("field")
     builder.add_axis("pos_x")
-    row = builder.rows[0]
+    outer, row = builder.rows
     row.fly.setChecked(True)
     row.dir_box.setCurrentIndex(row.dir_box.findData(True))
-    assert builder.zigzag_box.isChecked() and builder.build_recipe().zigzag
-    builder.zigzag_box.setChecked(False)
-    assert row.dir_box.currentData() is False
+    r = builder.build_recipe()
+    assert r.axes[1]["zigzag"] is True and "zigzag" not in r.axes[0]
+    assert not r.zigzag
+    # a stepped axis zig-zags too (fly off: the box stays in force)
+    row.fly.setChecked(False)
+    assert builder.build_recipe().axes[1] == {
+        "type": "linear", "param": "pos_x", "start": row.start.value(),
+        "stop": row.stop.value(), "num": row.num.value(), "zigzag": True}
+    # the outermost axis: greyed, nothing outside it to alternate with
+    assert not outer.dir_box.isEnabled() and row.dir_box.isEnabled()
+    builder._move_row(row, -1)                         # now the outermost
+    assert builder.rows[0] is row and row.dir_box.isEnabled()  # still on: can be turned off
+    assert "zig-zag (outermost: no effect)" in row.tag_texts()
+    row.dir_box.setCurrentIndex(0)
+    assert "zigzag" not in builder.build_recipe().axes[0]
+
+
+def test_the_advanced_panel_shows_the_direction(builder):
+    """GUI smoke: the direction box sits in the open Advanced panel, and Copy
+    from axis and Reset carry it."""
+    builder.add_axis("pos_y")
+    builder.add_axis("pos_x")
+    builder.add_axis("field")
+    y, x, f = builder.rows
+    builder.open_advanced(x)
+    assert x.advanced_open() and x.dir_box.isVisibleTo(x)
+    assert x.dir_box.itemText(0) == "one-way" and x.dir_box.itemText(1) == "zig-zag"
+    x.set_zigzag(True)
+    msg = f.copy_from(x)
+    assert f.is_zigzag() and "zig-zag" in msg
+    f.reset_advanced()
+    assert not f.is_zigzag()
 
 
 # ─────────────────────────────── open / close ─────────────────────────────────
@@ -302,8 +334,10 @@ def test_every_fly_option_has_a_box_and_round_trips(builder, tmp_path):
     assert row.dim_name() == "x_fly" and row.dir_box.currentData() is True
     assert set(row.tag_texts()) >= {"fly 30 um/s", "zig-zag", "no lag correction",
                                     "row max 90 s", "readback pos_y", "name x_fly"}
-    assert builder.build_recipe().axes == r.axes
-    assert builder.build_recipe().zigzag
+    # the OLD scan-wide zig-zag comes back PER AXIS: on the inner (fly) axis,
+    # not on the outermost one, and nothing scan-wide any more
+    assert builder.build_recipe().axes == [r.axes[0], {**r.axes[1], "zigzag": True}]
+    assert not builder.build_recipe().zigzag
 
 
 def test_unknown_axis_keys_survive_the_builder(builder):
@@ -405,7 +439,8 @@ def test_axis_attrs_only_what_is_set():
     assert set(a) == {"pos_x"}
     assert a["pos_x"] == {"fly": "true", "fly_speed": 3.0, "fly_speed_units": "um/s",
                           "fly_speed_param": "stage_speed", "fly_lag_correction": 1,
-                          "fly_zigzag": 1, "fly_binned_by": "measurement"}
+                          "fly_zigzag": 1, "fly_binned_by": "measurement",
+                          "zigzag": 1}
 
 
 def test_the_coordinates_carry_the_fly_settings_in_the_file(tmp_path):
