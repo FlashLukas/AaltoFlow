@@ -99,6 +99,14 @@ class Suite(QtWidgets.QMainWindow):
         self._shared_design: str | None = None    # design path last shared (lab side)
         self._mirror_design: str | None = None    # design name shown here (watching)
         self._pending_nav: dict | None = None     # nav state waiting for its design
+        #: the watched scan server's parameters as a PROXY registry
+        #: (scan_core/registry_wire.py, from its get_registry), or None: while
+        #: watching, the Scan tab builds and validates against THIS -- the
+        #: instruments the server drives -- whether or not this PC can reach
+        #: them. The Control tab and the Navigator keep `self.registry` (they
+        #: need live connections). None on a server older than 2026-10-11.
+        self._proxy = None
+        self._proxy_rev = None
         self.registry = build_sim_registry()
         # Where measurements land, most specific first: --out-dir for this
         # launch, then what was chosen on this PC last time, then the project's
@@ -491,7 +499,10 @@ class Suite(QtWidgets.QMainWindow):
         w.live.connect(self.builder.show_server_dataset)
         w.connection.connect(self._on_server_connection)
         w.design.connect(self._on_server_design)
+        w.registry_info.connect(self._on_server_registry)
         self.watch = w
+        if w.registry_reply is not None:      # fetched before the connect above
+            self._on_server_registry(w.registry_reply)
         self.builder.attach_server(w, can_submit=self._may_submit(w))
         self.server_strip.show()
         self._sync_server_header()
@@ -508,7 +519,14 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.detach_server()
         w.close()
         w.deleteLater()
+        had_proxy = self._proxy is not None
+        self._proxy, self._proxy_rev = None, None
         self._end_mirror()
+        if had_proxy:
+            # this PC's own instruments again (_end_mirror already did that for
+            # a watched lab on another PC; for this PC's server it is here). The
+            # definition is kept: on this PC the names are usually the same.
+            self._adopt_scan_registry(keep_definition=True)
         self.server_strip.hide()
         if not quiet:
             self.log(f"stopped watching the scan server on {w.label} "
@@ -603,6 +621,76 @@ class Suite(QtWidgets.QMainWindow):
                 # the server's PC shares its Navigator design with watchers
                 self._shared_design = d.path
                 self.watch.set_design(d.path, d.kind, d.cell, d.width_um)
+
+    # ---- the server's parameters on the Scan tab (get_registry) -------------
+    #
+    # 2026-10-11 (Lukas: yes): a scan the watched server will run must be
+    # defined against THE SERVER's instruments -- its limits, units, fly and
+    # ramp capabilities, action arguments. The server sends its registry as a
+    # manifest; the Scan tab builds on a PROXY of it (set / read raise: the
+    # scan runs there). This closes the gap of a server with a FIXED registry
+    # (--sim), which reports no instruments to connect to, and of a lab whose
+    # modules this PC cannot reach. A server from before 2026-10-11 sends
+    # nothing, and everything stays as it was.
+
+    def _scan_registry(self):
+        """The registry the Scan tab builds on: the watched server's proxy,
+        else this suite's own."""
+        if self.watch is not None and self._proxy is not None:
+            return self._proxy
+        return self.registry
+
+    def _adopt_scan_registry(self, keep_definition: bool = False) -> None:
+        """Give the Scan tab _scan_registry() (nothing happens when it has it
+        already). `keep_definition`: carry the axis stack, conditions and
+        routines over by parameter id (a proxy that was rebuilt because a
+        module came or went on the lab); names that are gone are logged."""
+        reg = self._scan_registry()
+        b = self.builder
+        if b.registry is not reg:
+            keep = b.definition_state() if (keep_definition and b.has_definition()) else None
+            b.set_registry(reg, group_names=self._group_names())
+            if keep:
+                missing = b.apply_definition(keep)
+                if missing:
+                    self.log("the Scan tab's definition names parameters the scan "
+                             "server does not have: " + ", ".join(missing))
+        # a proxy's limits follow registry_rev (the server refreshes them from
+        # its modules); this PC's own connections are refreshed by describe_rev
+        b.limits_refresher = None if reg is self._proxy else self._refresh_limits
+
+    def _on_server_registry(self, reply) -> None:
+        """A new get_registry reply: update the proxy in place when only
+        values moved (a limit: the axis rows are re-clamped, nothing is
+        dropped), else build a new one and give it to the Scan tab."""
+        from scan_core.registry_wire import registry_from_wire, update_proxy
+        if self.watch is None or not isinstance(reply, dict):
+            return
+        wire, rev = reply.get("registry"), reply.get("registry_rev")
+        if not isinstance(wire, dict) or (self._proxy is not None and rev == self._proxy_rev):
+            return
+
+        def read_from():
+            return self.registry      # a direct connection, when there is one
+        if self._proxy is not None and update_proxy(self._proxy, wire, read_from):
+            self._proxy_rev = rev
+            if self.builder.registry is self._proxy:
+                self.builder.refresh_axis_limits()
+            return
+        try:
+            proxy = registry_from_wire(wire, read_from)
+        except Exception as exc:
+            self.log(f"the scan server's parameter list could not be read: {exc}")
+            return
+        first = self._proxy is None
+        self._proxy, self._proxy_rev = proxy, rev
+        where = (self.watch.last or {}).get("pc") or self.watch.host
+        self.log(("the Scan tab now offers" if first else "the scan server's parameters "
+                  "changed; the Scan tab offers")
+                 + f" the parameters of the scan server on {where}: "
+                 f"{len(proxy.settables())} settables, {len(proxy.gettables())} "
+                 f"detectors, {len(proxy.actions())} actions")
+        self._adopt_scan_registry(keep_definition=True)
 
     # ---- watching a server on ANOTHER PC: show that lab as the lab sees it ----
     #
@@ -1258,14 +1346,18 @@ class Suite(QtWidgets.QMainWindow):
         self.log("switched to the simulated registry")
 
     def _adopt_source(self):
-        self.builder.set_registry(self.registry, group_names=self._group_names())
+        if self._scan_registry() is self.registry:
+            self.builder.set_registry(self.registry, group_names=self._group_names())
+        # (while a watched scan server's proxy is in use, the Scan tab keeps
+        # it: the server's instruments decide what a scan may use there)
         if self.lab is not None:
             # Abort must reach an instrument that is mid-settle, not only the
             # engine between points.
             self.lab.set_abort(self.builder.is_aborting)
         # ... and the Scan tab's ranges must follow the instruments, not stay
-        # as they were when we connected.
-        self.builder.limits_refresher = self._refresh_limits
+        # as they were when we connected (_adopt_scan_registry: a proxy's
+        # follow the server's registry_rev instead)
+        self._adopt_scan_registry()
         # the PAUSED banner's "Clear fault on <module>" buttons
         self.builder.fault_lab = self.lab
         # "Recall settings..." compares a file with these live instruments

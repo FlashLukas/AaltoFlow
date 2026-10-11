@@ -6571,9 +6571,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
             tip = ("This pane is watching a scan server on another PC, and another PC\n"
                    "holds control of it. 'Take control' (above) to start scans here.")
         self.run_btn.setToolTip(tip)
-        # the queue card mirrors what the server runs: not needed on the lab
-        # PC's own suite while it is the one submitting (it IS the lab)
-        self.server_box.setVisible(not (local and submit))
+        # the queue card: what the server runs, with the queue edits. Shown on
+        # the lab PC's own suite too (2026-10-11: its queue edits used to need
+        # a watcher view or a script) -- there without "show what the lab
+        # shows" (it IS the lab) and "Copy to this PC" (the files are here)
+        self.server_box.setVisible(True)
+        own = local and submit
+        self.follow_view_box.setVisible(not own)
+        self.fetch_btn.setVisible(not own)
         for w in (self.name_lbl, self.name_edit, self.run_info, self.per_pt_lbl, self.per_pt):
             w.setVisible(submit)
         self._fill_server_tree()

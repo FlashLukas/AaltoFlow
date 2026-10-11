@@ -41,7 +41,8 @@ What it is made of -- nothing new where something tested exists:
     itself -- scan-core depends on it, so no copies are needed.
 
 Control (who may do what):
-  * watching -- status, info, describe, get_config, get_live, get_log -- is
+  * watching -- status, info, describe, get_config, get_live, get_log,
+    get_registry (the parameters its scans can use, registry_wire.py) -- is
     free for everyone;
   * `abort`, `stop_queue` and `pause` are SAFETY verbs: always allowed, for any client
     on any PC (like a stage's `stop`): whoever sees a scan going wrong must be
@@ -423,6 +424,13 @@ class ScanServer:
         self.instruments: dict = {}
         self._connected_key: frozenset | None = None
         self._failed_key: frozenset | None = None
+        # the registry's MANIFEST for watchers (get_registry, registry_wire.py)
+        # and its revision, in every status frame: a watcher builds its Scan
+        # tab against the instruments THIS server drives, and re-fetches only
+        # when the revision moves (a module started / stopped here, a limit
+        # moved). Kept up to date by the follower thread and get_registry.
+        self._registry_wire: dict | None = None
+        self._registry_rev = 0
 
         # what runs
         self._busy = False                   # a queue is running (or starting)
@@ -480,7 +488,9 @@ class ScanServer:
             safety={"abort", "stop_queue", "pause"},
             # set_view changes nothing on an instrument: not behind the control
             # lease, but only from this PC (_set_view)
-            read={"set_view", "set_design"},
+            # get_registry is a read like describe (the get_ prefix makes it
+            # one anyway; named so the intent is written down)
+            read={"set_view", "set_design", "get_registry"},
             on_event=lambda level, msg: self.log(msg, level))
 
     def _reset_scan_state(self):
@@ -538,6 +548,9 @@ class ScanServer:
         if self.follow:
             self._threads.append(threading.Thread(target=self._follower,
                                                   name="scanserver-follow", daemon=True))
+        # the manifest of the registry it starts with: a FIXED one (--sim, a
+        # test) never changes again, and has no follower to compute it
+        self.registry_manifest()
         for t in self._threads:
             t.start()
         self.log(f"scan server ready on {cmd_addr} (cmd) / {pub_addr} (pub), "
@@ -619,8 +632,42 @@ class ScanServer:
             first = False
             try:
                 self.follow_once()
+                self.refresh_limits()
+                self.registry_manifest()
             except Exception as exc:          # never let the thread die
                 self.log(f"following the launcher failed: {exc}", "warn")
+
+    def refresh_limits(self) -> list:
+        """Re-read `describe` of every module whose describe_rev moved and
+        put the new LIMITS into the registry (lab.refresh_stale) -- only while
+        no scan runs (the scan's thread uses those connections). The ids whose
+        limits changed; a watcher sees them through registry_rev."""
+        if self._busy:
+            return []
+        with self._follow_lock:
+            with self._lock:
+                lab, reg = self.lab, self.registry
+            if lab is None or self._busy:
+                return []
+            moved = lab.refresh_stale(reg, prefix=True,
+                                      on_warn=lambda m: self.log(f"note: {m}"))
+        if moved:
+            self.log(f"limits refreshed: {', '.join(moved)}")
+        return moved
+
+    def registry_manifest(self) -> tuple[dict, int]:
+        """(manifest, revision) of the registry as it is NOW (registry_wire.py).
+        The revision is a CRC of the manifest: it moves exactly when something
+        a watcher's Scan tab shows has changed."""
+        from .registry_wire import registry_to_wire, wire_revision
+        with self._lock:
+            reg = self.registry
+        wire = registry_to_wire(reg)
+        rev = wire_revision(wire)
+        with self._lock:
+            if self.registry is reg:          # not replaced meanwhile
+                self._registry_wire, self._registry_rev = wire, rev
+        return wire, rev
 
     def _wanted(self) -> dict:
         """{slug: (host, cmd, pub)} of the INSTRUMENT modules that answer now."""
@@ -807,6 +854,9 @@ class ScanServer:
                 "view_rev": self._view_rev,
                 "instruments": dict(self.instruments),
                 "design_rev": self._design_rev,
+                # moves when get_registry would answer differently (a watcher
+                # then re-fetches it); absent on a server older than 2026-10-11
+                "registry_rev": self._registry_rev,
             }
         st["describe_rev"] = build_manifest()["revision"]
         st["control"] = self.control.status()
@@ -940,6 +990,12 @@ class ScanServer:
             return self._clear_fault(str(req.get("module") or ""), req)
         if cmd == "get_scan":
             return self._get_scan()
+        if cmd == "get_registry":
+            # the parameters this server's scans can use, with their live
+            # limits (registry_wire.py) -- what a watcher's Scan tab builds on
+            wire, rev = self.registry_manifest()
+            return {"ok": True, "registry_rev": rev, "registry": wire,
+                    "follow": self.follow, "modules": list(self.connected)}
         if cmd == "get_view":
             with self._lock:
                 return {"ok": True, "view": dict(self._view), "view_rev": self._view_rev,
@@ -1267,6 +1323,13 @@ class ScanServer:
         will drive, with their LIVE limits. Whatever a remote suite checked
         on its own side, this is the check that counts."""
         out = []
+        if self.follow:
+            # LIVE limits: a module's describe_rev may have moved since the
+            # follower last looked (a calibration loaded a second ago)
+            try:
+                self.refresh_limits()
+            except Exception as exc:
+                self.log(f"could not refresh limits: {exc}", "warn")
         with self._lock:
             reg = self.registry
         for e in entries:

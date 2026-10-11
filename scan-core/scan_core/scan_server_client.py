@@ -278,6 +278,14 @@ class ScanServerClient(ControlClient):
         info and result, `current` (index running, -1 when idle)."""
         return self.command("get_scan")
 
+    def get_registry(self) -> dict:
+        """{registry_rev, registry (registry_wire manifest), follow, modules}:
+        the parameters the server's scans can use, with their live limits.
+        `scan_core.registry_wire.registry_from_wire(r["registry"])` turns it
+        into a PROXY registry to build and validate scans against. A server
+        older than 2026-10-11 raises ScanServerError (unknown command)."""
+        return self.command("get_registry", _timeout_ms=max(self.timeout_ms, 10000))
+
     def get_view(self) -> dict:
         """{view, view_rev, by}: the plot choice of the suite on the server's PC."""
         return self.command("get_view")

@@ -400,7 +400,8 @@ def test_the_local_suite_without_the_setting_hides_run_info(qapp, rig):
     win.run_on_server_box.setChecked(True)
     pump(qapp, lambda: b.server_submit)
     assert _visible(b.run_info, b) and _visible(b.per_pt, b)
-    assert not _visible(b.server_box, b)            # the lab's own suite
+    assert _visible(b.server_box, b)                # the lab's own suite: queue card too
+    assert _visible(b.queue_add_btn, b) and not _visible(b.fetch_btn, b)
     win.run_on_server_box.setChecked(False)
     assert not _visible(b.run_info, b) and _visible(b.server_box, b)
     win.stop_watching()

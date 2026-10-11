@@ -148,8 +148,9 @@ def test_the_watcher_lists_the_queue_with_definitions_and_copies_one(qapp, rig):
     b.server_tree.setCurrentItem(b.server_tree.topLevelItem(1))
     assert b.copy_def_btn.isEnabled()
     missing = b._copy_server_definition()
-    assert missing == ["slow"]          # the server's own detector: not on this PC
-    assert "not available on this PC: slow" in b.detail.text()
+    # the server's own detector "slow" is offered here too: since 2026-10-11
+    # the Scan tab builds on the server's registry (get_registry)
+    assert missing == []
     assert b.name_edit.text() == "second"
     assert b.build_recipe().axes[0]["num"] == 7
     b.abort_btn.click()
@@ -181,7 +182,11 @@ def test_the_suite_on_the_servers_pc_publishes_its_view(qapp, rig):
     srv, win, c = rig(settings={"run_on_scan_server": True})
     b = win.builder
     pump(qapp, lambda: b.server_submit)
-    assert not b.server_box.isVisibleTo(b.right_pane)     # it IS the lab: nothing to mirror
+    # the queue card is shown on the lab PC too (2026-10-11), without the
+    # follow box (it IS the lab) and Copy to this PC (the files are here)
+    assert b.server_box.isVisibleTo(b.right_pane)
+    assert not b.follow_view_box.isVisibleTo(b.right_pane)
+    assert not b.fetch_btn.isVisibleTo(b.right_pane)
     c.submit(recipe(num=60, dets=("lockin_r", "slow")))
     pump(qapp, lambda: b.view.ds is not None and b.det_combo.count() >= 2)
     want = "slow" if b.det_combo.currentText() != "slow" else "lockin_r"
@@ -239,6 +244,13 @@ def test_watching_another_pc_follows_its_scan_definition_and_navigator(
                                   "name": "Magnet field"}}
     pump(qapp, lambda: win.registry.get("magnet.field") is not None, timeout=20)
     assert win._group_names() == {"magnet": "Magnet field"}     # the lab's names
+    # the server's REGISTRY must hold what it reports as instruments (faked
+    # here): the Scan tab builds on it (get_registry, 2026-10-11)
+    from scan_core.registry import Settable
+    srv.registry.add(Settable("magnet.field", "Field", "mT", (-100.0, 100.0),
+                              lambda v: None, lambda: 0.0))
+    srv.registry_manifest()
+    pump(qapp, lambda: win.builder.registry.get("magnet.field") is not None)
 
     lib = gdstk.Library()
     cell = lib.new_cell("CHIP")

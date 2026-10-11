@@ -1053,7 +1053,10 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
 4. **Start scans from the office**: while your suite holds control of the
    server (the header's **Take control**) -- or nobody holds it -- **Run**
    on the Scan tab starts the scan ON THE LAB PC: the Scan tab shows the
-   lab's instruments, their units and live limits; the server checks the
+   lab's instruments, their units and live limits -- the server sends its
+   own parameter list (`get_registry`), so this works even when the office
+   cannot reach the lab's modules, and for a server started with the
+   simulator (`--sim`); the server checks the
    scan against its own instruments before it starts (a refusal is shown in
    full); the file gets the run info typed HERE (the RUN INFO card shows up
    exactly when you may start scans) and is saved on the lab PC.
@@ -1062,7 +1065,9 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
    **Down** change the scans that have not started (the running one is
    ended with Abort). Every watcher sees the change at once; the server's
    log says who made it. A queue loaded with Load scan... while the server
-   is busy goes to the end of the running queue too.
+   is busy goes to the end of the running queue too. The suite on the lab
+   PC itself shows the same card and buttons (with *Run scans on this PC's
+   scan server* ticked).
 6. **Copy to this PC** on a finished scan (or, with none selected, the last
    one saved) brings a copy of its file here and opens it in the Data tab.
 
@@ -1083,7 +1088,8 @@ saved, the after-scan routine runs) and exits.
 From a script or a console the same works with
 `scan_core.scan_server_client.ScanServerClient` (`submit`, `status`,
 `get_live`, `abort`, `queue_add`, `queue_remove`, `queue_move`, `download`,
-...). Details: docs/DEVELOPER_NOTES.md, section 4f.
+`get_registry` -> `scan_core.registry_wire.registry_from_wire` to validate a
+recipe against the server's instruments, ...). Details: docs/DEVELOPER_NOTES.md, section 4f.
 
 ## Run info, instrument snapshots, and recalling settings
 

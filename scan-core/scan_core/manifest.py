@@ -804,8 +804,12 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
                                       f"{got!r} (expected {_check.get('equals')!r})")
         return reply
 
-    return Action(aid, label, run_fn, help=d.get("help", "") or d.get("description", ""),
-                  arg_specs=d.get("args") or [])
+    act = Action(aid, label, run_fn, help=d.get("help", "") or d.get("description", ""),
+                 arg_specs=d.get("args") or [])
+    # kept for the scan server's get_registry (registry_wire.py): a watcher
+    # shows how a routine step waits for this action
+    act.wait = dict(d["wait"]) if isinstance(d.get("wait"), dict) else None
+    return act
 
 
 def describe_or_none(inst: Instrument):
