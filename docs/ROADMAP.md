@@ -221,6 +221,28 @@ Still open:
 
 ## Open work
 
+- **eLabFTW: TEST on a real instance** (Lukas, 2026-10-11; built and tested
+  against a fake server only, see "Run catalogue -> ELN upload" below).
+  Needs the group's eLabFTW address and a read/write API key (entered by
+  Lukas in Settings > ELN; never in a tracked file). Check, with one run:
+  * Test connection answers (GET /users/me) and a wrong key gives the 401 text;
+  * Send to eLabFTW creates ONE experiment: title, HTML body (axes, detectors,
+    conditions, run info, file path), tags, preview PNG; the id is read from
+    the `Location` header and the link under the Catalogue table opens it
+    (link format `<root>/experiments.php?mode=view&id=N` on the group's
+    version);
+  * PATCH with `content_type: 1` is accepted (the body shows as HTML, not text);
+  * sending the same run again: Update changes that entry, re-posting an
+    existing tag is harmless; Skip and New entry behave as named;
+  * "attach data file" with a small .nc, and one above the server's own
+    upload limit (the error text);
+  * a self-signed certificate with "check the server certificate" unticked,
+    if the group's server uses one;
+  * auto-upload after a scan: on, run a short sim scan, the entry appears;
+    with the server unreachable the scan still saves and the log says why.
+  Afterwards: note the version tested in developer notes 4c and fix what
+  differed.
+
 - **Fly scans over any knob -- the remaining modules** (the contract and three
   pilots DONE 2026-10-09: a `ramp` block in describe, guide 6b "Ramps";
   `suite_common/softramp.py`; clMag field, dssg frequency, ppms field).
