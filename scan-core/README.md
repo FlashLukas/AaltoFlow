@@ -45,6 +45,30 @@ grid index and the axis values to `on_progress` as a `where=` keyword
 callback with the old `(done, total, eta)` signature is still called that way.
 The live map outlines the point just measured (a vertical line on a 1-D plot).
 
+**The Measurement tab** (rebuilt 2026-10-12 around the plot) is one run bar
+-- state (idle / RUNNING / PAUSED / YOUR TURN), the scan name, a thin progress
+bar, elapsed and the measured time left, **Run** / **Pause** / **Abort** (and
+**Stop queue** in a queue) -- then one line with the scan summary (dims, N,
+ETA; a WARNING in amber, an invalid definition in red; the whole text is the
+tooltip, a click shows it). The plot gets at least half the tab; under it, in
+a splitter, the ON THE SCAN SERVER queue card (only while a server is
+watched) and the log. Drag the handles: the shares are remembered on this PC
+(`suite_local.json`, setting `measurement_splits`). Three buttons open
+pop-up panels (Esc closes them; they reopen where they were left):
+
+- **Run info** -- sample, operator, project, tags, comment ... The button says
+  how many fields are filled in, and *Run info (empty)* in amber when none is.
+- **Options** -- the per-point time the pre-run ETA assumes, and *diagonal row
+  change*.
+- **Files** -- Load scan..., Save scan..., Recall settings..., Save data
+  (.nc)..., where the data goes, and (watching a server) Copy to this PC. When
+  the data folder cannot be written the button turns red, *Files (!)*, so it
+  is seen without opening it.
+
+![the Measurement tab](../front-panels/suite-measurement.png)
+
+![the Run info pop-up](../front-panels/suite-run-info.png)
+
 The live map is AaltoView's `MapImage`: with more points than pixels, each pixel
 shows a block of points by their average, max (keeps peaks -- a one-point tone
 in a 21 000-point spectrum) or min (keeps dips), picked with **drawing** next to
@@ -238,7 +262,8 @@ apps/
 
   suite.py         # the measurement suite (Control / Scan / Measurement / Data / Settings)
   recall.py        # "Recall settings...": file snapshot vs instruments now
-  run_info_card.py # the RUN INFO card of the run pane
+  run_info_card.py # the RUN INFO card (the run pane's Run info pop-up)
+  run_bar.py       # the run pane's pieces: elided line, wrapping bar, pop-up panel
   viewer.py        # starts the data viewer (aaltoview)
   theme.py
 recipes/        # example YAML recipes (2-D, 3-D, XY-raster, repeat)
@@ -1130,7 +1155,8 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
    server* > pick it, or type `lab-pc:5551`.) The instruments start at port 5555;
    if your network opens only the instruments' range, either have 5551-5552
    opened too or give the server a free pair inside it (its card's **Ports**).
-2. The Measurement tab then says *watching scan server on lab-pc (setup ...)*
+2. The Measurement tab then says, in one line under the run bar, *watching
+   scan server on lab-pc (setup ...)*
    and shows the scan live: progress, ETA, where it is, the live map, the
    server's log (lines marked `[server ...]`), the PAUSED fault banner with
    *Clear fault on ...*, the operator banner (*Continue / Abort scan / Abort
@@ -1144,15 +1170,15 @@ the office -- becomes a client of it. Closing a suite never stops its scan.
    range; untick it to look at something else -- the lab's screen never
    changes either way.
 4. **Start scans from the office**: while your suite holds control of the
-   server (the header's **Take control**) -- or nobody holds it -- **Run**
+   server (**Take control** on the server line) -- or nobody holds it -- **Run**
    on the Scan tab starts the scan ON THE LAB PC: the Scan tab shows the
    lab's instruments, their units and live limits -- the server sends its
    own parameter list (`get_registry`), so this works even when the office
    cannot reach the lab's modules, and for a server started with the
    simulator (`--sim`); the server checks the
    scan against its own instruments before it starts (a refusal is shown in
-   full); the file gets the run info typed HERE (the RUN INFO card shows up
-   exactly when you may start scans) and is saved on the lab PC.
+   full); the file gets the run info typed HERE (the **Run info** button
+   shows up exactly when you may start scans) and is saved on the lab PC.
 5. **Edit the running queue** on the ON THE SCAN SERVER card: **+ Add to
    queue** puts this Scan tab's definition at the end, **Remove** / **Up** /
    **Down** change the scans that have not started (the running one is
@@ -1186,8 +1212,8 @@ recipe against the server's instruments, ...). Details: docs/DEVELOPER_NOTES.md,
 
 ## Run info, instrument snapshots, and recalling settings
 
-**Run info.** The **RUN INFO** line under the scan name (click the arrow to
-open it) holds sample, structure, operator, project, series, tags
+**Run info.** The **Run info** pop-up (its button is in the Measurement
+tab's run bar) holds sample, structure, operator, project, series, tags
 (comma-separated keywords) and comment. They are remembered on this PC between
 scans and launches, and written into every data file as attributes with
 exactly those names (empty ones are left out; the comment is the scan
@@ -1216,7 +1242,7 @@ own, so it is kept; untick *Store each instrument's identity* on the Settings
 tab (suite setting `snapshot_include_idn`) to leave idn / serial out, e.g.
 before sharing files.
 
-**Recall settings...** (Measurement tab, next to Load scan, and on the Data
+**Recall settings...** (Measurement tab, **Files** pop-up, and on the Data
 tab for the file shown there): pick a measured `.nc`; the dialog lists, per
 instrument in the file, every setting whose value NOW differs from the file
 (*Show all settings* for the rest). Nothing is ticked by default: tick what

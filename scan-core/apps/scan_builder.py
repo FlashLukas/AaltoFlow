@@ -126,6 +126,30 @@ def _muted(text: str, small: bool = False) -> QtWidgets.QLabel:
     return w
 
 
+from apps.run_bar import ElidedLabel  # noqa: E402  (after _muted: no cycle, kept close to its use)
+
+
+class _DetailLabel(ElidedLabel):
+    """The run pane's ONE summary line (dims, ETA, conditions, warnings).
+
+    Elided to one line, the whole text in its tooltip (and on a click), and
+    coloured by what it says -- so a warning is seen without reading it:
+    an error list ("• ...", an invalid definition) in red, a WARNING in the
+    accent colour, everything else muted. Colours are read from COLORS at
+    each setText, never cached (gotcha #6)."""
+
+    def setText(self, text: str) -> None:                    # noqa: N802 (Qt name)
+        text = "" if text is None else str(text)
+        if text.startswith("• "):
+            colour = C["danger"]
+        elif "WARNING" in text or "REFUSED" in text:
+            colour = C["accent"]
+        else:
+            colour = C["muted"]
+        self.setStyleSheet(f"color:{colour};")
+        super().setText(text)
+
+
 class AdvancedPanel(QtWidgets.QFrame):
     """The ADVANCED panel of one axis row: opened IN PLACE under its row.
 
@@ -5416,66 +5440,65 @@ class ScanBuilder(QtWidgets.QMainWindow):
         return box
 
     def _build_right(self) -> QtWidgets.QWidget:
+        """The RUN pane (rebuilt 2026-10-12 around the plot -- Lukas: "way too
+        cramped to see any data", the RESULT had ~90 px at 2000x1280).
+
+          run bar      state word · name · progress · elapsed/ETA ·
+                       Run / Pause / Abort (/ Stop queue) · Run info · Options · Files
+          one line     the scan summary (dims, N, ETA, warnings), elided
+          head_slot    the host's lines (suite: the scan-server line)
+          banners      PAUSED / YOUR TURN -- only when they need attention
+          run_split    the RESULT plot (>= half the height) over bottom_split:
+                       the queue card | the host's log
+
+        Run info, Options and Files are POP-UP panels (apps/run_bar.py). The
+        widgets in them are the ones this pane always had -- moved, not
+        copied -- so every method and test that holds them still works.
+        """
+        from apps.run_bar import ElidedLabel, PopupPanel, WrapBar
         card = QtWidgets.QFrame(); card.setObjectName("card")
-        # Fixed width only makes sense as the third column of the standalone
-        # builder. On the suite's Measurement tab this pane IS the page, so let
-        # it expand rather than stranding it in a 560 px strip.
+        # As the third column of the standalone builder the pane needs a
+        # width of its own; on the suite's Measurement tab it IS the page.
         if not getattr(self, "embedded", False):
-            card.setFixedWidth(560)
-        v = QtWidgets.QVBoxLayout(card); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(8)
+            card.setMinimumWidth(600)
+        v = QtWidgets.QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
 
-        v.addWidget(self._tag("SCAN"))
-        self.summary = QtWidgets.QLabel("—"); self.summary.setObjectName("big")
-        v.addWidget(self.summary)
-        self.detail = QtWidgets.QLabel(""); self.detail.setStyleSheet(f"color:{C['muted']};")
-        self.detail.setWordWrap(True); v.addWidget(self.detail)
-
+        # ---- the RUN BAR: one row, two or three on a narrow window ----------
+        self.run_bar = bar = WrapBar(3)
+        g_run, g_btn, g_pop = bar.rows
+        # the state word (idle / RUNNING / PAUSED / YOUR TURN / NOT ANSWERING);
+        # the suite drives it as `run_state`, the standalone builder itself
+        self.state_lbl = QtWidgets.QLabel("idle")
+        self.state_lbl.setStyleSheet(f"color:{C['accent']}; font-size:16px; font-weight:800;")
+        self.state_lbl.setMinimumWidth(70)
+        g_run.addWidget(self.state_lbl)
         # The NAME of the measurement, here, before it runs -- not a default you
         # discover afterwards in the log. It goes into the file name and into the
         # scan definition the file carries.
-        nrow = QtWidgets.QHBoxLayout()
         self.name_lbl = QtWidgets.QLabel("name")
-        nrow.addWidget(self.name_lbl)
+        self.name_lbl.setStyleSheet(f"color:{C['muted']};")
+        g_run.addWidget(self.name_lbl)
         self.name_edit = QtWidgets.QLineEdit("scan")
         self.name_edit.setToolTip(
-            "Goes into the file name: <data dir>\\<date>\\<time>_<name>.nc\n"
+            "The scan's name. Goes into the file name:\n"
+            "<data dir>\\<date>\\<time>_<name>.nc\n"
             "The time is always there, so repeating a scan never overwrites the\n"
             "one before it. Characters a file name cannot hold become '_'.")
-        # wide enough for a real name ("Harmonics12GHz_vernier_series") without
-        # scrolling inside the box (Lukas 2026-10-06: "wider")
-        self.name_edit.setMinimumWidth(420)
-        self.name_edit.setMaximumWidth(700)
+        # room for a real name ("Harmonics12GHz_vernier_series") on a wide
+        # window, and still a sensible box on a narrow one
+        self.name_edit.setMinimumWidth(150)
+        self.name_edit.setMaximumWidth(380)
         self.name_edit.textChanged.connect(lambda *_: self._refresh_save_target())
-        nrow.addWidget(self.name_edit)
-        nrow.addStretch(1)
-        v.addLayout(nrow)
+        g_run.addWidget(self.name_edit, 2)
+        self.progress = QtWidgets.QProgressBar(); self.progress.setValue(0)
+        self.progress.setFixedHeight(20)
+        self.progress.setMinimumWidth(120)
+        g_run.addWidget(self.progress, 3)
+        # elapsed and, while a scan runs, the MEASURED time left
+        self.time_lbl = QtWidgets.QLabel("")
+        self.time_lbl.setStyleSheet(f"color:{C['muted']};")
+        g_run.addWidget(self.time_lbl)
 
-        # RUN INFO: sample, operator, project ... -- remembered on this PC and
-        # written into every file (scan_core/run_info.py). Collapsed to one
-        # line so the run pane stays as it was.
-        self.run_info = RunInfoCard()
-        v.addWidget(self.run_info)
-
-        row = QtWidgets.QHBoxLayout()
-        self.per_pt_lbl = QtWidgets.QLabel("per-point (s)")
-        row.addWidget(self.per_pt_lbl)
-        self.per_pt = QtWidgets.QDoubleSpinBox(); self.per_pt.setRange(0.0, 100); self.per_pt.setDecimals(3)
-        self.per_pt.setValue(0.05); self.per_pt.valueChanged.connect(lambda *_: self._rebuild_summary())
-        row.addWidget(self.per_pt)
-        # (zig-zag used to be a box here, one switch for the whole scan; since
-        # 2026-10-11 each axis has its own, in its Advanced > POINT > direction)
-        self.diagonal_box = QtWidgets.QCheckBox("diagonal")
-        self.diagonal_box.setToolTip(
-            "At the start of a new row, send BOTH new coordinates and then wait,\n"
-            "so the stage (or the camera's stabiliser) goes straight to the first\n"
-            "point of the next row -- instead of first settling at (last column,\n"
-            "next row), one wasted settle per row.\n\n"
-            "Off by default: two moves at once must be allowed by the hardware.\n"
-            "Fine for the camera's array point (one target); a KIM101 moving two\n"
-            "channels together is not verified yet.")
-        self.diagonal_box.toggled.connect(lambda *_: self._rebuild_summary())
-        row.addWidget(self.diagonal_box)
-        row.addStretch(1)
         self.run_btn = QtWidgets.QPushButton("▶  Run scan"); self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self.run_scan)
         # PAUSE (Lukas, 2026-10-07): hold the scan between two points -- to
@@ -5499,22 +5522,64 @@ class ScanBuilder(QtWidgets.QMainWindow):
                                        "(Abort alone skips to the next scan.)")
         self.stop_queue_btn.clicked.connect(self.stop_queue)
         self.stop_queue_btn.hide()
-        row.addWidget(self.run_btn); row.addWidget(self.pause_btn)
-        row.addWidget(self.abort_btn); row.addWidget(self.stop_queue_btn)
-        v.addLayout(row)
+        for b in (self.run_btn, self.pause_btn, self.abort_btn, self.stop_queue_btn):
+            g_btn.addWidget(b)
+
+        # the three POP-UP panels and their buttons
+        self.run_info_btn = QtWidgets.QPushButton("Run info")
+        self.run_info_btn.setToolTip(
+            "Sample, operator, project, tags, comment ... -- written into every\n"
+            "data file, remembered on this PC. The number is how many fields are\n"
+            "filled in; '(empty)' when none is.")
+        self.options_btn = QtWidgets.QPushButton("Options")
+        self.options_btn.setToolTip("Run options: the per-point time the ETA assumes, "
+                                    "diagonal row changes.")
+        self.files_btn = QtWidgets.QPushButton("Files")
+        for b in (self.run_info_btn, self.options_btn, self.files_btn):
+            g_pop.addWidget(b)
+        v.addWidget(bar)
+
+        # ---- the summary line: dims, N, ETA, warnings -- ONE line ----------
+        self.info_row = QtWidgets.QHBoxLayout(); self.info_row.setSpacing(10)
+        self.summary = QtWidgets.QLabel("—")
+        self._summary_style(False)
+        self.info_row.addWidget(self.summary)
+        self.detail = _DetailLabel("")
+        self.info_row.addWidget(self.detail, 1)
+        v.addLayout(self.info_row)
+
+        # WHERE the running scan is (run_status_text): point n / N, every
+        # axis's value, the routine step in progress. Hidden when idle.
+        self.where_lbl = ElidedLabel("")
+        self.where_lbl.setStyleSheet(f"color:{C['accent']};")
+        self.where_lbl.hide()
+        # "Scan 2 of 5 · name" while a QUEUE runs; its summary when it ends.
+        # On the same line as WHERE (one line, not two, for a running queue).
+        self.queue_lbl = ElidedLabel("")
+        self.queue_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:700;")
+        self.queue_lbl.hide()
+        status_row = QtWidgets.QHBoxLayout(); status_row.setSpacing(16)
+        status_row.addWidget(self.where_lbl, 3)
+        status_row.addWidget(self.queue_lbl, 2)
+        v.addLayout(status_row)
+        #: lines a host puts under the bar (the suite: the scan-server line)
+        self.head_slot = QtWidgets.QVBoxLayout(); self.head_slot.setSpacing(4)
+        v.addLayout(self.head_slot)
 
         # The PAUSED banner: a fault (a camera that lost its pattern, a failed
         # hardware read, a service that went silent) stops the scan BEFORE a
         # wrong number is recorded, and this says why and what to do. The scan
         # resumes by itself once every fault is gone, and measures the point
-        # again; Abort (above) still ends it.
+        # again; Abort (above) still ends it. Compact: text left, buttons right.
         self.pause_box = QtWidgets.QFrame(); self.pause_box.setObjectName("card")
         self.pause_box.setStyleSheet(
             f"QFrame#card {{ border: 2px solid {C['danger']}; border-radius: 6px; }}")
-        pb = QtWidgets.QVBoxLayout(self.pause_box)
-        pb.setContentsMargins(10, 8, 10, 8)
+        pb_row = QtWidgets.QHBoxLayout(self.pause_box)
+        pb_row.setContentsMargins(10, 6, 10, 6)
+        pb = QtWidgets.QVBoxLayout(); pb.setSpacing(2)
+        pb_row.addLayout(pb, 1)
         self.pause_title = QtWidgets.QLabel("PAUSED -- the scan is waiting")
-        self.pause_title.setStyleSheet(f"color:{C['danger']}; font-weight:800; font-size:14px;")
+        self.pause_title.setStyleSheet(f"color:{C['danger']}; font-weight:800; font-size:13px;")
         pb.addWidget(self.pause_title)
         self.pause_lbl = QtWidgets.QLabel("")
         self.pause_lbl.setWordWrap(True)
@@ -5528,7 +5593,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         pb.addWidget(self.pause_hint)
         self.pause_btns = QtWidgets.QHBoxLayout()
         self.pause_btns.addStretch(1)            # buttons go in before it
-        pb.addLayout(self.pause_btns)
+        pb_row.addLayout(self.pause_btns)
         self.clear_fault_btns: dict = {}         # module name -> its button
         self.pause_box.hide()
         v.addWidget(self.pause_box)
@@ -5540,10 +5605,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.ask_box = QtWidgets.QFrame(); self.ask_box.setObjectName("card")
         self.ask_box.setStyleSheet(
             f"QFrame#card {{ border: 2px solid {C['accent']}; border-radius: 6px; }}")
-        ab = QtWidgets.QVBoxLayout(self.ask_box)
-        ab.setContentsMargins(10, 8, 10, 8)
+        ab_row = QtWidgets.QHBoxLayout(self.ask_box)
+        ab_row.setContentsMargins(10, 6, 10, 6)
+        ab = QtWidgets.QVBoxLayout(); ab.setSpacing(2)
+        ab_row.addLayout(ab, 1)
         ask_title = QtWidgets.QLabel("YOUR TURN -- the scan is waiting for you")
-        ask_title.setStyleSheet(f"color:{C['accent']}; font-weight:800; font-size:14px;")
+        ask_title.setStyleSheet(f"color:{C['accent']}; font-weight:800; font-size:13px;")
         ab.addWidget(ask_title)
         self.ask_lbl = QtWidgets.QLabel("")
         self.ask_lbl.setWordWrap(True)
@@ -5551,7 +5618,6 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.ask_lbl.setStyleSheet("font-size:13px;")
         ab.addWidget(self.ask_lbl)
         arow = QtWidgets.QHBoxLayout()
-        arow.addStretch(1)
         self.ask_continue_btn = QtWidgets.QPushButton("Continue")
         self.ask_continue_btn.setObjectName("primary")
         self.ask_continue_btn.clicked.connect(lambda: self.answer_pause(True))
@@ -5567,35 +5633,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.ask_abort_all_btn.clicked.connect(lambda: self.answer_pause("all"))
         arow.addWidget(self.ask_continue_btn); arow.addWidget(self.ask_abort_btn)
         arow.addWidget(self.ask_abort_all_btn)
-        ab.addLayout(arow)
+        ab_row.addLayout(arow)
         self._ask_answer = None
         self.ask_box.hide()
         v.addWidget(self.ask_box)
 
-        # "Scan 2 of 5 · name" while a QUEUE runs; its summary when it ends.
-        self.queue_lbl = QtWidgets.QLabel("")
-        self.queue_lbl.setStyleSheet(f"color:{C['accent']}; font-weight:700;")
-        self.queue_lbl.setWordWrap(True)
-        self.queue_lbl.hide()
-        v.addWidget(self.queue_lbl)
-
-        # WHERE the running scan is (run_status_text). In the suite the same
-        # line sits in the Measurement tab's header, next to RUNNING, so this
-        # copy is only shown in the standalone builder.
-        self.where_lbl = QtWidgets.QLabel("")
-        self.where_lbl.setStyleSheet(f"color:{C['accent']};")
-        self.where_lbl.setWordWrap(True)
-        self.where_lbl.hide()
-        v.addWidget(self.where_lbl)
-
-        self.progress = QtWidgets.QProgressBar(); self.progress.setValue(0)
-        v.addWidget(self.progress)
-        self.save_lbl = QtWidgets.QLabel(""); self.save_lbl.setObjectName("hint")
-        self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
-        self.save_lbl.setWordWrap(True)
-        v.addWidget(self.save_lbl)
-        v.addWidget(self._build_server_box())
-
+        # ---- the plot, then the queue card and the log --------------------
         # Result: the general N-D viewer, not a fixed pair of axes. The same
         # widget serves the Data tab, so what you watch during a run behaves
         # exactly like what you open a saved file with.
@@ -5603,14 +5646,83 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # the newest CAMERA frame next to the map, shown only while a scan
         # records an image detector (apps/image_live.py, 2026-10-10)
         self.live_image = LiveImage()
-        res_row = QtWidgets.QHBoxLayout()
+        result = QtWidgets.QWidget()
+        res_row = QtWidgets.QHBoxLayout(result)
+        res_row.setContentsMargins(0, 0, 0, 0)
         res_row.setSpacing(8)
         res_row.addWidget(self.view, 1)
         res_row.addWidget(self.live_image)
-        v.addLayout(res_row, 1)
+        result.setMinimumHeight(220)
+        self.result_box = result
         self.det_combo = self.view.det_combo       # kept: callers/tests use it
         self.plot, self.img, self.curve = self.view.plot, self.view.img, self.view.curve
 
+        # below the plot, side by side: what the scan server runs (only while
+        # one is watched) and the host's log (the suite adds it). A splitter
+        # each, so the operator decides how much the plot gets; the suite
+        # remembers the sizes.
+        self.bottom_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.bottom_split.setChildrenCollapsible(False)
+        self.bottom_split.addWidget(self._build_server_box())
+        self.run_split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.run_split.setChildrenCollapsible(False)
+        self.run_split.addWidget(result)
+        self.run_split.addWidget(self.bottom_split)
+        self.run_split.setStretchFactor(0, 1)
+        self.run_split.setStretchFactor(1, 0)
+        self.run_split.setSizes([700, 260])
+        v.addWidget(self.run_split, 1)
+        self._sync_bottom()
+
+        # ---- the pop-up panels ---------------------------------------------
+        # RUN INFO: sample, operator, project ... -- remembered on this PC and
+        # written into every file (scan_core/run_info.py)
+        self.run_info = RunInfoCard()
+        self.run_info.toggle.hide()              # always open in its panel
+        self.run_info.body.show()
+        self.run_info.body.layout().setContentsMargins(0, 4, 0, 0)   # no arrow to indent under
+        self.run_info_panel = PopupPanel("Run info", card)
+        self.run_info_panel.setMinimumWidth(600)
+        self.run_info_panel.body.addWidget(self.run_info)
+        note = _muted("Written into every data file of a scan started here (empty "
+                      "fields are left out); remembered on this PC.", small=True)
+        note.setWordWrap(True)
+        self.run_info_panel.body.addWidget(note)
+        self.run_info_panel.on_open = self.run_info.refresh_suggestions
+        self.run_info.filled_changed.connect(self._sync_run_info_btn)
+        self._sync_run_info_btn(self.run_info.filled_count())
+
+        self.options_panel = PopupPanel("Run options", card)
+        og = QtWidgets.QGridLayout(); og.setHorizontalSpacing(10); og.setVerticalSpacing(8)
+        self.per_pt_lbl = QtWidgets.QLabel("per-point (s)")
+        og.addWidget(self.per_pt_lbl, 0, 0)
+        self.per_pt = QtWidgets.QDoubleSpinBox(); self.per_pt.setRange(0.0, 100); self.per_pt.setDecimals(3)
+        self.per_pt.setLocale(QtCore.QLocale.c())          # "0.050", never "0,050" (gotcha #18)
+        self.per_pt.setToolTip("The time per point the ETA assumes before a scan runs\n"
+                               "(dwell only: settling and routines are not known yet).\n"
+                               "Once the scan runs, the MEASURED time left replaces it.")
+        self.per_pt.setValue(0.05); self.per_pt.valueChanged.connect(lambda *_: self._rebuild_summary())
+        og.addWidget(self.per_pt, 0, 1)
+        # (zig-zag used to be a box here, one switch for the whole scan; since
+        # 2026-10-11 each axis has its own, in its Advanced > POINT > direction)
+        self.diagonal_box = QtWidgets.QCheckBox("diagonal row change")
+        self.diagonal_box.setToolTip(
+            "At the start of a new row, send BOTH new coordinates and then wait,\n"
+            "so the stage (or the camera's stabiliser) goes straight to the first\n"
+            "point of the next row -- instead of first settling at (last column,\n"
+            "next row), one wasted settle per row.\n\n"
+            "Off by default: two moves at once must be allowed by the hardware.\n"
+            "Fine for the camera's array point (one target); a KIM101 moving two\n"
+            "channels together is not verified yet.")
+        self.diagonal_box.toggled.connect(lambda *_: self._rebuild_summary())
+        og.addWidget(self.diagonal_box, 1, 0, 1, 2)
+        og.setColumnStretch(2, 1)
+        self.options_panel.body.addLayout(og)
+        hint = _muted("Zig-zag is set per axis (Scan tab, the axis's Advanced).", small=True)
+        self.options_panel.body.addWidget(hint)
+
+        self.files_panel = PopupPanel("Files", card)
+        self.files_panel.setMinimumWidth(560)
         brow = QtWidgets.QHBoxLayout()
         load = QtWidgets.QPushButton("Load scan…"); load.clicked.connect(self._load_dialog)
         load.setToolTip("Fill the axis stack and detectors from a saved definition:\n"
@@ -5626,11 +5738,118 @@ class ScanBuilder(QtWidgets.QMainWindow):
         recall.setToolTip("Compare the instrument settings stored in a measured .nc\n"
                           "with the instruments' settings NOW, and set chosen ones\n"
                           "back. Nothing is sent before you confirm.")
+        self.load_btn, self.save_btn, self.save_data_btn = load, save, savd
         self.recall_btn = recall
         brow.addWidget(load); brow.addWidget(save); brow.addWidget(recall)
         brow.addStretch(1); brow.addWidget(savd)
-        v.addLayout(brow)
+        self.files_panel.body.addLayout(brow)
+        self.files_panel.body.addWidget(self._tag("WHERE THE DATA GOES"))
+        self.save_lbl = QtWidgets.QLabel(""); self.save_lbl.setObjectName("hint")
+        self.save_lbl.setWordWrap(True)
+        self.save_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.files_panel.body.addWidget(self.save_lbl)
+        # watching a scan server: its files are on ITS PC -- the same action as
+        # the queue card's "Copy to this PC" (the selected scan, else the last
+        # one saved)
+        self.files_fetch_btn = QtWidgets.QPushButton("Copy to this PC")
+        self.files_fetch_btn.setToolTip(self.fetch_btn.toolTip())
+        self.files_fetch_btn.clicked.connect(self._fetch_clicked)
+        self.files_fetch_btn.hide()
+        frow = QtWidgets.QHBoxLayout(); frow.addStretch(1); frow.addWidget(self.files_fetch_btn)
+        self.files_panel.body.addLayout(frow)
+        self._save_ok = True
+        self._set_save_state("", True)
+
+        for btn, panel in ((self.run_info_btn, self.run_info_panel),
+                           (self.options_btn, self.options_panel),
+                           (self.files_btn, self.files_panel)):
+            panel.button = btn
+            btn.clicked.connect(panel.toggle)
+
+        # the standalone builder keeps its own state word and clock (the suite
+        # drives them from its own timer, with a scan server's status too)
+        self._t_run0 = None
+        if not getattr(self, "embedded", False):
+            self._run_clock = QtCore.QTimer(card)
+            self._run_clock.timeout.connect(self._tick_run_bar)
+            self._run_clock.start(500)
         return card
+
+    # ---- the run bar's small helpers -----------------------------------------
+    def _summary_style(self, invalid: bool) -> None:
+        """The summary's look: accent, or red when the definition is invalid."""
+        self.summary.setStyleSheet(
+            f"color:{C['danger'] if invalid else C['accent']}; font-weight:800;")
+
+    def _sync_run_info_btn(self, n: int) -> None:
+        """'Run info (3)', or '(empty)' in the warning colour: a scan without a
+        sample is easy to start by mistake, and the button says so without
+        being opened."""
+        if n:
+            self.run_info_btn.setText(f"Run info ({n})")
+            self.run_info_btn.setStyleSheet("")
+        else:
+            self.run_info_btn.setText("Run info (empty)")
+            self.run_info_btn.setStyleSheet(
+                f"QPushButton {{ color:{C['accent']}; border:1px solid {C['accent']}; }}")
+
+    def _set_save_state(self, text: str, ok: bool) -> None:
+        """Where the data goes (the Files panel), and -- when it CANNOT go
+        there -- the Files button in red, so a run that would not be saved is
+        visible without opening anything."""
+        self._save_ok = bool(ok)
+        self.save_lbl.setText(text)
+        self.save_lbl.setStyleSheet(
+            f"color:{C['muted'] if ok else C['danger']}; font-size:11px;")
+        if ok:
+            self.files_btn.setText("Files")
+            self.files_btn.setStyleSheet("")
+        else:
+            self.files_btn.setText("Files (!)")
+            self.files_btn.setStyleSheet(
+                f"QPushButton {{ background:{C['danger']}; color:#1a1a1a; border:none; }}")
+        self.files_btn.setToolTip(
+            "Load / save a scan definition, recall settings, save the data.\n\n"
+            + (text or "where the data goes"))
+
+    def save_target_ok(self) -> bool:
+        """False while the Files button shows the save target in red."""
+        return self._save_ok
+
+    def _sync_bottom(self) -> None:
+        """The area under the plot only when something is in it: in the
+        standalone builder (no log) it is empty unless a server is watched."""
+        if not hasattr(self, "bottom_split"):
+            return
+        any_shown = any(not self.bottom_split.widget(i).isHidden()
+                        for i in range(self.bottom_split.count()))
+        self.bottom_split.setVisible(any_shown)
+
+    def set_elapsed(self, secs: float | None, left_s: float | None = None) -> None:
+        """The run bar's clock: 'elapsed 3:12 · ~5m 10s left'."""
+        if secs is None:
+            self.time_lbl.setText("")
+            return
+        secs = int(secs)
+        text = f"elapsed {secs // 60}:{secs % 60:02d}"
+        if left_s is not None:
+            text += f"  ·  ~{_fmt_duration(left_s)} left"
+        self.time_lbl.setText(text)
+
+    def _tick_run_bar(self) -> None:
+        """Standalone only: the state word and the clock (the suite has its own)."""
+        if self.server is not None:
+            return
+        if self._running:
+            if self._t_run0 is None:
+                self._t_run0 = time.monotonic()
+            paused = self._user_paused or bool(self.paused_faults)
+            self.state_lbl.setText("PAUSED" if paused else "RUNNING")
+            left = self.run_progress[2] if self.run_progress else None
+            self.set_elapsed(time.monotonic() - self._t_run0, left)
+        else:
+            self._t_run0 = None
+            self.state_lbl.setText("idle")
 
     def _tag(self, t):
         l = QtWidgets.QLabel(t); l.setObjectName("tag"); return l
@@ -6189,10 +6408,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
             return
         if errs:
             self.summary.setText("invalid")
-            self.summary.setStyleSheet(f"color:{C['danger']}; font-size:22px; font-weight:800;")
+            self._summary_style(True)
             self.detail.setText("• " + "\n• ".join(errs + [f"WARNING: {w}" for w in warnings]))
             return
-        self.summary.setStyleSheet("")
+        self._summary_style(False)
         comp = recipe.compile(self.registry)
         shape = "×".join(str(s) for s in comp.shape)
         n = comp.n_points
@@ -6445,9 +6664,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.worker.ask.connect(self._on_ask)
         self.worker.window.connect(self.window_card.show_state)
         self.worker.scout.connect(self._on_scout)
-        self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
-        self.save_lbl.setText(f"saving to {path}" if path else
-                              "not saving automatically (no data directory set)")
+        self._set_save_state(f"saving to {path}" if path else
+                             "not saving automatically (no data directory set)", True)
         self.worker.start()
         return self.worker
 
@@ -6512,7 +6730,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if eta_s is None:
             try:
                 comp = q[i].recipe.compile(self.registry)
-                self.summary.setStyleSheet("")
+                self._summary_style(False)
                 self.summary.setText(f"{len(comp.dims)}-D   "
                                      f"{'×'.join(str(n) for n in comp.shape)} = "
                                      f"{comp.n_points:,} pts")
@@ -6620,7 +6838,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._server_answered = ("", 0.0)
         self.abort_btn.setEnabled(False)
         self._show_pause_state(False, enabled=False)
-        self.save_lbl.setText(f"watching the scan server on {watch.label}")
+        self._set_save_state(f"watching the scan server on {watch.label}", True)
         # phase 2 of watching: the definitions and the lab's view
         self._server_scan = dict(getattr(watch, "scan", {}) or {})
         self._server_tree_key = None
@@ -6666,11 +6884,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # a watcher view or a script) -- there without "show what the lab
         # shows" (it IS the lab) and "Copy to this PC" (the files are here)
         self.server_box.setVisible(True)
+        self._sync_bottom()
         own = local and submit
         self.follow_view_box.setVisible(not own)
         self.fetch_btn.setVisible(not own)
-        for w in (self.name_lbl, self.name_edit, self.run_info, self.per_pt_lbl, self.per_pt):
+        self.files_fetch_btn.setVisible(not own)
+        # the run info belongs to a scan started HERE: its button goes too
+        for w in (self.name_lbl, self.name_edit, self.run_info, self.run_info_btn,
+                  self.per_pt_lbl, self.per_pt):
             w.setVisible(submit)
+        if not submit:
+            self.run_info_panel.close()
         self._fill_server_tree()
         self._sync_queue_buttons()
         if local and submit:
@@ -6696,7 +6920,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 except (RuntimeError, TypeError):
                     pass
         self.server_box.hide()
-        for w in (self.name_lbl, self.name_edit, self.run_info, self.per_pt_lbl, self.per_pt):
+        self.files_fetch_btn.hide()
+        self._sync_bottom()
+        for w in (self.name_lbl, self.name_edit, self.run_info, self.run_info_btn,
+                  self.per_pt_lbl, self.per_pt):
             w.show()
         self._server_scan = {}
         self.server_tree.clear()
@@ -6805,6 +7032,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.queue_down_btn.setEnabled(waiting and i is not None and i + 1 < n)
         self.fetch_btn.setEnabled(self.on_fetch_file is not None
                                   and bool(self._fetch_target()))
+        self.files_fetch_btn.setEnabled(self.fetch_btn.isEnabled())
         self.copy_def_btn.setEnabled(self._selected_server_entry() is not None)
         for b in (self.queue_add_btn, self.queue_remove_btn, self.queue_up_btn,
                   self.queue_down_btn):
@@ -6913,12 +7141,10 @@ class ScanBuilder(QtWidgets.QMainWindow):
         path = st.get("last_saved") or st.get("save_path") or ""
         pc = st.get("pc") or "?"
         if err:
-            self.save_lbl.setText(err)
-            self.save_lbl.setStyleSheet(f"color:{C['danger']}; font-size:11px;")
+            self._set_save_state(err, False)
         else:
-            self.save_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
-            self.save_lbl.setText((f"the server saves to {path} (on {pc})" if path else
-                                   f"data folder on {pc}: {st.get('data_dir', '?')}"))
+            self._set_save_state((f"the server saves to {path} (on {pc})" if path else
+                                  f"data folder on {pc}: {st.get('data_dir', '?')}"), True)
         if path:
             self.last_saved = Path(path)
         # buttons: Abort while anything runs; Run only when we may submit
@@ -6942,7 +7168,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._show_pause_state(user_paused,
                                enabled=busy and (not user_paused or self._server_may_resume()))
         if busy:
-            self.summary.setStyleSheet("")
+            self._summary_style(False)
             self.summary.setText(f"on the scan server:  {st.get('scan', '')}")
         elif getattr(self, "_server_was_busy", False):
             # the server's scan ended: back to this tab's own definition
@@ -7082,7 +7308,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
             rows += 1
             it = tree.itemBelow(it)
         h = tree.sizeHintForRow(0) if tree.topLevelItemCount() else 18
-        tree.setFixedHeight(min(SERVER_TREE_MAX, max(1, rows) * max(h, 16) + 6))
+        # in its own pane under the plot (2026-10-12) the tree takes the
+        # pane's height; this is only its minimum
+        tree.setMinimumHeight(min(SERVER_TREE_MAX // 3, max(1, rows) * max(h, 16) + 6))
 
     def _selected_server_entry(self, strict: bool = False) -> int | None:
         """The index of the selected scan of the server's queue. Not
@@ -7190,9 +7418,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _refresh_save_target(self) -> bool:
         """Show where the next run goes, and whether it can be written there."""
         ok, msg = self.check_save_target()
-        self.save_lbl.setText(msg)
-        self.save_lbl.setStyleSheet(
-            f"color:{C['muted'] if ok else C['danger']}; font-size:11px;")
+        self._set_save_state(msg, ok)
         return ok
 
     #: Set to False by a test (or a headless caller) that must never block on a
@@ -7219,8 +7445,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
     def _on_saved(self, path: str, done: int, total: int):
         self.last_saved = Path(path)
-        self.save_lbl.setText(f"saved {done}/{total} points to {path}" if done < total
-                              else f"saved to {path}")
+        self._set_save_state(f"saved {done}/{total} points to {path}" if done < total
+                             else f"saved to {path}", True)
         if done >= total and self.on_run_saved is not None:
             try:
                 self.on_run_saved(Path(path))
@@ -7232,8 +7458,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         """The FILE could not be written (full disk, share gone). The scan goes
         on -- so this must NOT end the run in the UI the way `failed` does:
         say it in red where the file name is shown, and in the log."""
-        self.save_lbl.setText(message)
-        self.save_lbl.setStyleSheet(f"color:{C['danger']}; font-size:11px;")
+        self._set_save_state(message, False)
         self.run_log.append(message)
         if self.on_log is not None:
             self.on_log(message)
@@ -7384,7 +7609,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _show_where(self):
         text = self.run_status_text()
         self.where_lbl.setText(text)
-        self.where_lbl.setVisible(bool(text) and not self.embedded)
+        self.where_lbl.setVisible(bool(text))
         if self.on_status is not None:
             self.on_status(text)
 

@@ -273,7 +273,15 @@ def remote_rig(rig, monkeypatch):
 
 
 def _visible(w, b):
-    return w.isVisibleTo(b.right_pane)
+    """Shown in the run pane -- or, for a widget in one of its pop-up panels
+    (Run info, Options; 2026-10-12), shown when that panel opens AND the
+    button that opens it is shown."""
+    win = w.window()
+    if win is b.right_pane.window():
+        return w.isVisibleTo(b.right_pane)
+    opener = getattr(win, "button", None)
+    return (w.isVisibleTo(win) and opener is not None
+            and opener.isVisibleTo(b.right_pane))
 
 
 def test_the_watcher_may_submit_under_control_and_shows_run_info_then(qapp, remote_rig):

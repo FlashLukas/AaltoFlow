@@ -46,6 +46,9 @@ class RunInfoCard(QtWidgets.QFrame):
     """The fields, a collapse arrow, and persistence."""
 
     changed = QtCore.Signal()
+    #: how many fields are filled in, after ANY change (typed, loaded,
+    #: restored) -- the run pane's "Run info" button shows it
+    filled_changed = QtCore.Signal(int)
     _suggested = QtCore.Signal(object)       # {field: [values], "tags": [...]}, from a thread
 
     def __init__(self, root=None, parent=None):
@@ -256,3 +259,8 @@ class RunInfoCard(QtWidgets.QFrame):
         text = "  ·  ".join(parts) if parts else "(nothing filled in)"
         self.summary.setText(text)
         self.summary.setToolTip("\n".join(f"{f}: {v}" for f, v in vals.items() if v))
+        self.filled_changed.emit(self.filled_count())
+
+    def filled_count(self) -> int:
+        """The number of run-info fields with something in them."""
+        return sum(1 for v in self.values().values() if v)

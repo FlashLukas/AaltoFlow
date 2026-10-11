@@ -616,10 +616,13 @@ what it was taken *under* and *how*, not only what was swept:
 ![scan tab](front-panels/suite-scan.png)
 
 Then watch it run on the Measurement tab. Defining takes a minute; running takes
-an hour, and they want different screens. While it runs, the header says where
-it is -- point n of N, each axis's value with its position along the axis, the
-measured time left and the routine step in progress (an autofocus, say) -- and
-the live map outlines the point just measured:
+an hour, and they want different screens. The plot gets at least half of the
+tab; one run bar on top holds the state, name, progress and Run / Pause /
+Abort, and the run info, options and file actions open as pop-ups. While it
+runs, a line under the bar says where it is -- point n of N, each axis's value
+with its position along the axis, the measured time left and the routine step
+in progress (an autofocus, say) -- and the live map outlines the point just
+measured:
 
 ![measurement tab](front-panels/suite-measurement.png)
 
