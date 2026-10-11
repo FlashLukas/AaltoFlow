@@ -105,6 +105,9 @@ _MEASURED = (
 
 def build_manifest(lockin) -> dict:
     cfg = lockin.cfg
+    # fly-scan stream: one sample per poll of the demodulators (lockin.py
+    # poll loop, deadline-scheduled -- gotcha #34): samples per second to expect
+    rate = max(1.0, float(cfg.hardware.poll_hz))
     lim = cfg.limits
     acq = cfg.acquisition
 
@@ -213,7 +216,7 @@ def build_manifest(lockin) -> dict:
                 f"{stem}{n}", f"Ch{n} {label}", "indicator", "float", unit=unit,
                 group="Measurement", order=100 + 10 * i + j,
                 decimals=dec, read_path=["sample", key, i], acquire=acquire,
-                stream={"group": "demod", "channel": f"{stem}{n}"},
+                stream={"group": "demod", "channel": f"{stem}{n}", "rate_hz": rate},
                 help="Settled and latched by `acquire`: safe to record in a scan. "
                      "In a FLY scan it is recorded continuously instead (stream)."))
             params.append(_p(
@@ -226,7 +229,7 @@ def build_manifest(lockin) -> dict:
             f"aux{k + 1}", f"AUX IN {k + 1}", "indicator", "float", unit="V",
             group="Measurement", order=150 + k, decimals=4,
             read_path=["sample", "aux_in", k], acquire=acquire,
-            stream={"group": "demod", "channel": f"aux{k + 1}"},
+            stream={"group": "demod", "channel": f"aux{k + 1}", "rate_hz": rate},
             help="Latched with the demodulator sample, averaged over the same window."))
         params.append(_p(
             f"live_aux{k + 1}", f"AUX IN {k + 1} (live)", "indicator", "float",

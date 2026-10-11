@@ -99,7 +99,9 @@ def test_every_scan_detector_declares_its_stream_channel():
     m = build_manifest(li)
     streamed = {p["id"]: p["stream"] for p in m["parameters"] if "stream" in p}
     assert set(streamed) == set(STREAM_CHANNELS)
-    assert all(s == {"group": "demod", "channel": pid} for pid, s in streamed.items())
+    rate = max(1.0, float(li.cfg.hardware.poll_hz))      # one sample per poll
+    assert all(s == {"group": "demod", "channel": pid, "rate_hz": rate}
+               for pid, s in streamed.items())
 
 
 def test_the_stream_verbs_over_the_wire():
