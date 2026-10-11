@@ -31,6 +31,11 @@ class Parameter:
     #: wire value = value in `unit` x stream_scale (a module's descriptor
     #: `scale`): the fly scan divides streamed values by it
     stream_scale = 1.0
+    #: How many samples per second the stream delivers for this parameter, as
+    #: the module says (describe stream `rate_hz`, live): the fly scan's
+    #: samples-per-pixel estimate before a run (flyscan.sampling_estimate).
+    #: None = the module does not say.
+    stream_rate_hz = None
     #: How a recorded value is STORED in the data file (storage.py): a
     #: Storage built from the module's describe (type, min/max, bits, options,
     #: store). None = undeclared, stored as a float64 as it always was.
@@ -230,6 +235,13 @@ class StreamSpec:
                                        pin_reset()
         "t_start", "t_end": [...]      when each sample's measurement began and
                                        ended (a sweep takes time)
+        "missed":   n                  samples the instrument made that its
+                                       module never read (an oscilloscope
+                                       keeps only its latest record; 2026-10-11)
+
+    A parameter's `stream_rate_hz` (describe stream `rate_hz`) is how many
+    samples per second the module expects to deliver: only for the estimate
+    before a fly scan (flyscan.sampling_estimate), never for the binning.
 
     Complex values travel as {"re": [...], "im": [...]} (JSON has no complex
     numbers), nested one level deeper for a trace.
@@ -330,6 +342,10 @@ def normalize_chunk(chunk) -> dict:
     settings = chunk.get("settings")
     out = {"t": t, "values": values, "delay_s": delay,
            "overflow": bool(chunk.get("overflow", False)),
+           # samples the INSTRUMENT made that its module never read (an
+           # oscilloscope keeps only its latest record), as the module counts
+           # them; 0 when it does not say (flyscan warns about them)
+           "missed": int(chunk.get("missed") or 0),
            "t_ch": t_ch,
            "errors": {str(k): str(v) for k, v in (chunk.get("errors") or {}).items()},
            "settings": settings if isinstance(settings, dict) else None}
@@ -1063,13 +1079,15 @@ def _attach_sim_streams(reg: Registry, s: SimState) -> None:
     lockin.derived = {"R", "phi"}
 
     stage_spec, lockin_spec = stage.spec(), lockin.spec()
+    # (and the samples per second each delivers, as a module's describe
+    # `rate_hz` says it: the fly scan's samples-per-pixel estimate)
     for pid, ch in (("pos_x", "x"), ("pos_y", "y")):
         p = reg.get(pid)
-        p.stream, p.stream_channel = stage_spec, ch
+        p.stream, p.stream_channel, p.stream_rate_hz = stage_spec, ch, stage.rate_hz
     for pid, ch in (("lockin_r", "R"), ("lockin_x", "x"), ("lockin_y", "y"),
                     ("lockin_phi", "phi"), ("aux_in", "aux")):
         p = reg.get(pid)
-        p.stream, p.stream_channel = lockin_spec, ch
+        p.stream, p.stream_channel, p.stream_rate_hz = lockin_spec, ch, lockin.rate_hz
 
     # The VNA: whole traces (s21, u, ln_ratio) and single points (s21_ptN),
     # all from ONE stream of back-to-back sweeps (sim_stream.SimSweepStreamer).
@@ -1105,3 +1123,5 @@ def _attach_sim_streams(reg: Registry, s: SimState) -> None:
                     *((f"s21_pt{k[1:]}", k) for k in points)):
         p = reg.get(pid)
         p.stream, p.stream_channel = vna_spec, ch
+        # one sample per sweep (sweep time as it is when the registry is built)
+        p.stream_rate_hz = 1.0 / s.vna_sweep_s if s.vna_sweep_s > 0 else None

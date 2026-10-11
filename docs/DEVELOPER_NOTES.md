@@ -192,6 +192,19 @@ still assumes piezo/zpiezo.
   whole scan (scan-core pins it across rows), `t_start` / `t_end` say how long
   a sample took (scan-core waits that long at a row's end). Traces are binned
   as the element-wise coherent mean; `<det>_n` counts traces per pixel.
+  Two more optional keys (2026-10-11, the scope, which streams one sample per
+  triggered RECORD): the descriptor's stream block may carry `rate_hz` -- the
+  samples per second the module expects to deliver at its current settings
+  (live; part of the manifest, so a change moves `describe_rev`) -- and a
+  chunk may carry `missed`, samples the INSTRUMENT made that the module never
+  read (the scope keeps only its latest record). scan-core never blocks on
+  either: from `rate_hz` it estimates the samples per pixel before a fly scan
+  and WARNS below one (Scan Builder summary + the run log, with the speed that
+  would give >= 1 / >= 3), and while flying it warns at the first row with
+  EMPTY pixels and sums them up at the end ("37 empty pixel(s) in 12 of 40
+  rows"); `missed` is warned the same way (flyscan.sampling_estimate /
+  fly_warnings / _count_empty). Declared so far: scope, hf2 (poll_hz), pm16
+  (~17/s) and the simulator's streams.
   Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Streams"; `check_modules.py --live`
   checks the verbs wherever a stream is declared.
 - **Binary reply parts (optional, 2026-10-10) -- large arrays.** A request

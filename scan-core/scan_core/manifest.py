@@ -671,6 +671,18 @@ def _attach_stream(param, d: dict, inst: Instrument, module: str,
     param.stream_channel = channel
     # the stream carries WIRE units, like status: convert with the same scale
     param.stream_scale = float(d.get("scale", 1.0) or 1.0)
+    # samples per second to expect (optional): only for the estimate before a
+    # fly scan -- what the stream really delivers is what gets binned
+    param.stream_rate_hz = _rate(spec.get("rate_hz"))
+
+
+def _rate(v):
+    """A declared stream rate as a float >= 0, or None (not said / nonsense)."""
+    try:
+        r = float(v)
+    except (TypeError, ValueError):
+        return None
+    return r if (r >= 0 and r == r and r != float("inf")) else None
 
 
 def _stream_from(group: str, spec: dict, inst: Instrument) -> StreamSpec:

@@ -617,6 +617,19 @@ What it takes care of:
 
   The correction removes the SHIFT; features finer than speed x delay are still
   smeared, and the run log says so after the first row.
+* **Enough samples per pixel? -- a warning, never a refusal** (2026-10-11).
+  A stream delivers what it delivers: a lock-in 50 samples a second, an
+  oscilloscope one per RECORD (a few a second, fewer at a slow time base). A
+  module may say how many in its `stream` block (`rate_hz`); from it the
+  Scan Builder's summary shows the expected samples per pixel of the thinnest
+  stream ("~0.25 samples/pixel (scope.ch1_pk2pk)") and a WARNING below one,
+  naming the detector and the speed that gives >= 1 and >= 3 per pixel. Run
+  stays enabled: the user decides. The run log repeats the estimate at the
+  start, says the first row with EMPTY pixels (no sample fell in them: NaN in
+  the data), and ends with a count -- "scope.ch1_pk2pk: 37 empty pixel(s) in
+  12 of 40 rows -- slow down the fly speed". Samples a module says went by
+  unread (`missed`: a scope that was still reading the previous record) are
+  warned the same way. `flyscan.sampling_estimate` / `fly_warnings`.
 * **Only streamable parameters.** Every detector, and the position, must be one
   its module can record continuously (a `stream` block in `describe`; hf2's scan
   detectors, the PM16's power, kim's positions, the camera's laser position and

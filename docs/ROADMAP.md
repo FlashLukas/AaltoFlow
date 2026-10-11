@@ -243,6 +243,21 @@ Still open:
   Afterwards: note the version tested in developer notes 4c and fix what
   differed.
 
+- **Scope records in a fly scan: the rig test** (built 2026-10-11 in
+  simulation: scope-control README "Fly scans", scan-core's samples-per-pixel
+  warning and empty-pixel count, developer notes section 4 "Streams"). On the
+  bench: AFG square into the Siglent, trigger NORMAL, a slow fly (or a dssg /
+  AFG ramp) with `scope.ch1_pk2pk` as the detector --
+  * check the records per second against status `stream_rate_Hz` and set the
+    backends' `transfer_s` (Siglent 0.2 s, AD 0.01 s, both `# VERIFY`) from it;
+  * fly a sharp edge forward and backward: if the rows do not line up, the
+    end-of-record estimate is off (does `C1:WF? DAT2` return the record that
+    was complete when asked? `# VERIFY`);
+  * provoke a too-fast fly: the builder's WARNING, the empty-pixel lines and
+    `missed` in the log should all appear.
+  Optional, not built: `rate_hz` for kim / camera / the other streaming
+  modules (only scope, hf2, pm16 and the simulator declare it).
+
 - **Fly scans over any knob -- the remaining modules** (the contract and three
   pilots DONE 2026-10-09: a `ramp` block in describe, guide 6b "Ramps";
   `suite_common/softramp.py`; clMag field, dssg frequency, ppms field).

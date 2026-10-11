@@ -70,7 +70,8 @@ def _stream(p) -> dict | None:
         return None
     return {"group": str(getattr(s, "group", "") or ""),
             "channel": getattr(p, "stream_channel", None),
-            "scale": _num(getattr(p, "stream_scale", 1.0)) or 1.0}
+            "scale": _num(getattr(p, "stream_scale", 1.0)) or 1.0,
+            "rate_hz": _num(getattr(p, "stream_rate_hz", None))}
 
 
 def _ramp(r) -> dict | None:
@@ -174,6 +175,7 @@ class _ReadbackStub:
     stream = None
     stream_channel = None
     stream_scale = 1.0
+    stream_rate_hz = None
 
 
 def _storage_from(d):
@@ -201,6 +203,8 @@ def _attach_stream(p, d, streams: dict):
     p.stream = spec
     p.stream_channel = s.get("channel")
     p.stream_scale = float(s.get("scale") or 1.0)
+    r = s.get("rate_hz")
+    p.stream_rate_hz = float(r) if isinstance(r, (int, float)) and r >= 0 else None
 
 
 def _ramp_from(d):
@@ -292,7 +296,8 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
 
 #: what update_proxy copies onto a proxy parameter that is still there
 _PARAM_ATTRS = ("label", "unit", "limits", "integer", "resolution", "storage", "ramp",
-                "stream", "stream_channel", "stream_scale", "axes", "dtype", "acquire",
+                "stream", "stream_channel", "stream_scale", "stream_rate_hz", "axes",
+                "dtype", "acquire",
                 "window", "_send")
 _ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait")
 
