@@ -149,7 +149,10 @@ still assumes piezo/zpiezo.
   outputs as it is (RF, field, waveform, laser emission, a park) -- the next start
   ADOPTS it. A plain shutdown still makes sources safe. A motion module still
   STOPS a running move (an unsupervised move must not outlive its service), but
-  moves nothing back. Reply `kept_outputs: true|false`. Mission Control's card
+  moves nothing back. Reply `kept_outputs: true|false`. EXCEPTIONS (Lukas,
+  2026-10-11): the magnets (clMag, mag2d, mag2dcal, kepco) ramp to zero, the
+  chopper stops its wheel and the cs260 closes its shutter even on a restart --
+  the service replies `kept_outputs: false` plus a `note`. Mission Control's card
   button **Restart** sends it; a service that predates it ignores the argument
   and switches off (the safe side).
 - **`describe` (added 2026-09-10) is how a client builds a UI for a module it has

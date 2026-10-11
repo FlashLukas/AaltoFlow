@@ -243,6 +243,10 @@ zero, emission off, a park position). The next start adopts the state. Stopping 
 running MOVE is not an output change: do it anyway. Parse the flag tolerantly
 (`"false"` is False, gotcha #3) and reply `kept_outputs` so a caller can tell an
 old service (which ignores it and switches off) from a new one.
+A module whose output must never outlive its service may REFUSE the flag in the
+verb handler and reply `kept_outputs: false` with a `note` (the magnets, the
+chopper and cs260 do, Lukas 2026-10-11: nobody should come back to a coil left
+driven by a code update).
 
 `protocol.py` holds the port constants, topic bytes, and the
 `status_to_dict` / `config_to_dict` / `apply_config_dict` helpers — one file so

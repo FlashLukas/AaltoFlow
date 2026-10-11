@@ -120,16 +120,16 @@ def test_shutdown_verb(service_and_client):
     assert svc.mono.backend._shutter is False      # close_on_shutdown (default)
 
 
-def test_shutdown_verb_keep_outputs_leaves_the_shutter(service_and_client):
+def test_shutdown_verb_keep_outputs_still_closes_the_shutter(service_and_client):
+    # Lukas 2026-10-11: a restart closes the shutter like a plain shutdown
     svc, cli = service_and_client
     sim = svc.mono.backend
     assert sim._shutter is True
-    calls = []
-    sim.set_shutter = lambda open_: calls.append(open_)   # spy: any shutter write
     r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
-    assert r == {"ok": True, "stopping": True, "kept_outputs": True}
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is False
+    assert "not honoured" in r["note"]
     svc.stop()
-    assert calls == [] and sim._shutter is True
+    assert sim._shutter is False
     assert svc.mono.status().connected is False
 
 

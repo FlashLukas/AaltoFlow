@@ -114,7 +114,7 @@ def test_shutdown_verb_ramps_down_and_stops():
         cli.shutdown()
 
 
-def test_shutdown_verb_keep_outputs_is_a_restart():
+def test_shutdown_verb_keep_outputs_is_refused():
     cfg = Config()
     cfg.ramp.rate_A_per_s = 5.0
     supply, sim = build_sim_system(cfg, seed=0)
@@ -126,12 +126,11 @@ def test_shutdown_verb_keep_outputs_is_a_restart():
         cli.set_current(2.0)
         cli.set_output(True)
         assert wait_for(lambda: not cli.status().ramping and cli.status().output)
+        # Lukas 2026-10-11: the BOP drives magnets -- a restart ramps down too
         r = cli._cmd({"cmd": "shutdown", "keep_outputs": True})
-        assert r["ok"] is True and r["kept_outputs"] is True
-        n = len(sim.writes)
+        assert r["ok"] is True and r["kept_outputs"] is False
         svc.stop()
-        assert sim.writes[n:] == []               # no ramp, no OUTP OFF
-        assert sim.output_on is True
+        assert sim.output_on is False
         assert supply.status().connected is False
     finally:
         cli.shutdown()

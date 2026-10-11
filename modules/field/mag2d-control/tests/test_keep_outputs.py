@@ -53,14 +53,14 @@ def _energized_service():
     return svc, sim
 
 
-def test_keep_outputs_leaves_the_coils_driven():
+def test_keep_outputs_is_refused_a_restart_ramps_down():
+    # Lukas 2026-10-11: magnets ramp to zero on a restart too
     svc, sim = _energized_service()
     r = svc._dispatch({"cmd": "shutdown", "keep_outputs": True})
-    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is False
+    assert "not honoured" in r["note"]
     svc.stop()
-    assert sim.main_writes == []                 # no AO / enable write at all
-    assert sim.enable is True and max(abs(v) for v in sim.ao) > 0.1
-    assert sim.is_open is False                  # but closed all the same
+    assert sim.ao == [0.0, 0.0] and sim.enable is False
 
 
 def test_plain_shutdown_still_ramps_to_zero():

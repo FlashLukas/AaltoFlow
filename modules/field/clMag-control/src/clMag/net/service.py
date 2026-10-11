@@ -295,10 +295,18 @@ class ClMagService:
                 # ends serve_forever, whose finally: stop() shuts the brain down.
                 # keep_outputs=true: a restart for a code update -- close and
                 # release everything, but leave the outputs as they are.
-                self._keep_outputs = _as_bool(msg.get("keep_outputs", False))
+                # ...EXCEPT here (Lukas, 2026-10-11): even a restart is a
+                # safe stop for this module -- the magnet is ramped to zero and switched off.
+                # Nobody should come back to an instrument left running by
+                # a code update. The reply says the request was not honoured.
+                asked = _as_bool(msg.get("keep_outputs", False))
+                self._keep_outputs = False
                 self._stop.set()
                 return {"ok": True, "stopping": True,
-                        "kept_outputs": self._keep_outputs}
+                        "kept_outputs": False,
+                        **({"note": "keep_outputs is not honoured by this "
+                                    "module: a restart is a safe stop"}
+                           if asked else {})}
             else:
                 return {"ok": False, "error": f"unknown command: {cmd!r}"}
             return {"ok": True}

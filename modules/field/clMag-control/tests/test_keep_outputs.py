@@ -53,16 +53,15 @@ def _service():
     return svc, kepco, rec
 
 
-def test_keep_outputs_leaves_the_supply_driving():
+def test_keep_outputs_is_refused_a_restart_ramps_down():
+    # Lukas 2026-10-11: magnets ramp to zero on a restart too
     svc, kepco, rec = _service()
     r = svc._dispatch({"cmd": "shutdown", "keep_outputs": True})
-    assert r["ok"] and r["stopping"] and r["kept_outputs"] is True
-    n = len(rec.calls)
+    assert r["ok"] and r["stopping"] and r["kept_outputs"] is False
+    assert "not honoured" in r["note"]
     svc.stop()
-    assert not [c for c in rec.calls[n:] if c in WRITES]   # no CURR, no OUTP
-    assert kepco.read_output() is True
-    assert kepco.read_current() == pytest.approx(1.2)
-    assert "close" in rec.calls[n:] and kepco._open is False   # closed all the same
+    assert "set_current" in rec.calls             # the ramp to zero
+    assert kepco.read_output() is False and kepco.read_current() == 0.0
 
 
 def test_plain_shutdown_still_ramps_down_and_switches_off():
