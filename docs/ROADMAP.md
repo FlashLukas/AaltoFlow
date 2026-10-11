@@ -320,12 +320,16 @@ Still open:
     frequencies the lab's suite shows. Values for short axes in the manifest,
     or a `get_axis_values` verb, would close that.
 
-- **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
+- **Run catalogue -> ELN upload**: DONE. The catalogue (2026-10-04: the
   suite's Catalogue tab, `scan_core/catalogue.py`, `python -m
-  scan_core.catalogue`; see the scan-core README and developer notes 4c).
-  Still open: uploading a run (its header + a preview figure, optionally the
-  file) to an electronic lab notebook -- which ELN, and whether the upload
-  happens automatically after each scan or from the Catalogue's context menu.
+  scan_core.catalogue`; see the scan-core README and developer notes 4c) and
+  the upload to **eLabFTW** (Lukas's choice, 2026-10-11: `scan_core/eln.py`,
+  the Catalogue's right-click "Send to eLabFTW", optional auto-upload after
+  each scan, Settings card "ELN (eLabFTW)", `python -m scan_core.eln`). Tested
+  against a fake eLabFTW only -- the first try on a real instance is still to
+  come (developer notes 4c, "What is not verified"). Possible next: an
+  eLabFTW category / template per setup, linking the experiment to a
+  "resource" (the sample) in eLabFTW, uploads from a scan server's PC.
   Smaller follow-ups: a `where` over AXIS ranges ("field covers 50"), `or`
   in `where`, and a scan-status flag in the file (aborted / complete) so the
   catalogue can show it.

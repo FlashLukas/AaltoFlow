@@ -762,6 +762,67 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
 - **Run status**: no attribute says "aborted" today; the catalogue reads
   `outcome` / `run_status` / `status` / `aborted` / `complete` if a later
   writer adds one, else leaves it empty.
+- **Upload to eLabFTW (2026-10-11)**: `scan_core/eln.py` (no Qt),
+  `apps/eln_settings.py` (Settings card), the Catalogue's "Send to eLabFTW",
+  `Suite._run_saved` (auto-upload). User side: scan-core README, "Sending runs
+  to eLabFTW".
+  * **API v2, stdlib only** (urllib; scan-core has no `requests`): `POST
+    /api/v2/experiments {"title"}` -> 201 + `Location: .../experiments/<id>`;
+    `PATCH .../<id> {"title", "body", "content_type": 1}` (1 = HTML); `POST
+    .../<id>/tags {"tag"}` one per call (the `{"tags": [...]}` form is newer);
+    `POST .../<id>/uploads` multipart `file` + `comment`; `GET /users/me` =
+    the connection test. Header `Authorization: <key>`. The browser link is
+    `<root>/experiments.php?mode=view&id=<id>`. `normalise_base_url` cuts a
+    pasted `/api/v2...` or `*.php?...` back to the instance root.
+  * **Errors name the cause**: 401 -> "eLabFTW refused the API key (401)",
+    403 -> the key must be READ/WRITE, 404 -> wrong root / too old an
+    instance, 413 -> the server's upload limit, TLS -> the "check the
+    certificate" box. The key is in a private attribute, never in `repr`, an
+    error or a log line.
+  * **The upload LEDGER `<data dir>/eln_uploads.json`** (`{"version": 1,
+    "runs": {relpath: {id, url, base_url, uploaded, size, mtime_ns,
+    data_attached, title, complete}}}`), written atomically under a lock. NOT
+    a table of catalogue.sqlite: the index is disposable and "run X is
+    experiment 42" is in no .nc file. The Catalogue tab's `eln` column reads
+    it. A run is recorded right after the POST with `complete: false`, so a
+    failure later in the sequence leaves a record a retry UPDATES instead of
+    an orphan entry plus a duplicate. `upload_run(if_exists=)`: `error`
+    (raise AlreadyUploaded; the GUI asks Update / Skip / New, the CLI names
+    the flags), `update`, `skip`, `new`.
+  * **The entry** is built from `catalogue.read_entry` (headers only); the
+    preview is drawn with matplotlib's Agg canvas directly (no pyplot: safe in
+    a worker thread, leaves Qt's backend alone): first numeric detector,
+    complex pairs as |z|, a line for 1-D, a map of the two INNERMOST axes with
+    any outer axis averaged. No matplotlib or nothing plottable -> no preview,
+    a warning, never a failed upload. The data file is attached only with
+    `attach_data` and up to `max_data_mb` (default 200); a bigger one is left
+    out and both the result and the entry body say so.
+  * **The key** (`get_api_key` / `set_api_key`): env `AALTOFLOW_ELN_KEY`
+    first, then the `keyring` package if installed (not a dependency), then
+    the Windows Credential Manager through advapi32 `CredWriteW/CredReadW`
+    (ctypes, generic credential `AaltoFlow/eLabFTW`), then a per-user file
+    `%APPDATA%\AaltoFlow\eln_key` -- the Settings card shows which, in red
+    for the file. Settings (`eln_url`, `eln_attach_data`, `eln_auto_upload`,
+    `eln_max_data_mb`, `eln_verify_tls`) are suite settings; defaults are
+    stored as absent.
+  * **Threads**: the Catalogue's upload and the card's connection test run in
+    a `threading.Thread` and report through queued Qt signals. The
+    auto-upload hangs on `ScanBuilder.on_run_saved` (called by `_on_saved`
+    for the FINAL save, done == total -- aborted runs included), runs
+    `eln.auto_upload` in a daemon thread, which never raises (everything goes
+    to the log via `Suite._log_threadsafe`, queued into the GUI thread) and
+    uses `if_exists="skip"`. Scans on a scan server are not auto-uploaded by
+    a watching PC.
+  * **Tests**: `tests/test_eln.py` runs a fake eLabFTW (http.server on a free
+    local port) that checks the header and records requests; `tests/
+    test_eln_gui.py` drives the card, the context menu and a real suite scan
+    whose upload fails with 500. No test touches the real Credential Manager
+    (the store is monkeypatched to a temp file).
+  * **What is not verified**: no real eLabFTW instance was used. To check on
+    the first one: the `Location` header form, that PATCH accepts
+    `content_type`, that re-posting an existing tag on "update" is harmless
+    (a refusal is only a warning here), the upload size limit of the server,
+    and the browser-link form on that version.
 
 ### 4d. Snapshots and recall (2026-10-04)
 

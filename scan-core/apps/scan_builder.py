@@ -4769,6 +4769,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         #: which is what the standalone builder and the tests want.
         self.autosave_dir = None
         self.last_saved: Path | None = None
+        #: Called with the path of a run's FINAL save (done == total; every
+        #: scan that measured anything, aborted ones included). The suite hangs
+        #: the eLabFTW auto-upload here. It must return at once and never
+        #: raise into the scan -- the call is guarded anyway.
+        self.on_run_saved = None
         #: Set by the suite to its log: routine messages ("before_scan: set
         #: mag2d.field = 150 mT ... done") land there, and in `run_log`.
         self.on_log = None
@@ -7217,6 +7222,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.last_saved = Path(path)
         self.save_lbl.setText(f"saved {done}/{total} points to {path}" if done < total
                               else f"saved to {path}")
+        if done >= total and self.on_run_saved is not None:
+            try:
+                self.on_run_saved(Path(path))
+            except Exception as exc:          # a hook never breaks a scan
+                if self.on_log is not None:
+                    self.on_log(f"after-save hook failed: {exc}")
 
     def _on_save_failed(self, message: str):
         """The FILE could not be written (full disk, share gone). The scan goes

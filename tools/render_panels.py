@@ -100,7 +100,7 @@ SIZES = {
     "suite-scan": (1500, 950),
     "suite-measurement": (1500, 950),
     "suite-data": (1500, 950),
-    "suite-settings": (1500, 1080),     # + the SCAN SERVER card (2026-10-05)
+    "suite-settings": (1500, 1480),     # + SCAN SERVER (2026-10-05) + ELN (2026-10-11) cards
     "suite-catalogue": (1500, 760),
     "suite-navigator": (1500, 950),
     "suite-queue": (1500, 950),
@@ -999,6 +999,14 @@ def _catalogue_demo(win):
         path.parent.mkdir(parents=True, exist_ok=True)
         ds.to_netcdf(path)
     (folder / "2026-10-03" / "093000_interrupted.nc").write_bytes(b"truncated")
+    # two runs already sent to eLabFTW (the "eln" column); example.org only --
+    # a render must never name a real server
+    ledger = {"version": 1, "runs": {
+        "2026-09-29/143000_fmr_islands.nc": {"id": 118, "complete": True,
+            "url": "https://eln.example.org/experiments.php?mode=view&id=118"},
+        "2026-10-01/112000_cold_fmr_vs_field.nc": {"id": 121, "complete": True,
+            "url": "https://eln.example.org/experiments.php?mode=view&id=121"}}}
+    (folder / "eln_uploads.json").write_text(json.dumps(ledger), encoding="utf-8")
     cat = win.catalogue
     cat.set_data_dir(folder)
     cat.rescan(); cat.wait_scan()
