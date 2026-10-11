@@ -68,7 +68,7 @@ def _brain(autosave=True):
     return Camera(StillCamera(), SimXYStage(), SimZFocus(), cfg)
 
 
-def test_a_captured_pattern_is_saved_and_restored_at_the_next_start(folder):
+def test_a_captured_pattern_is_saved_and_restored_at_the_next_start(folder, capsys):
     b = _brain()
     b.start()
     try:
@@ -94,6 +94,9 @@ def test_a_captured_pattern_is_saved_and_restored_at_the_next_start(folder):
         assert (sc.points_x, sc.points_y) == (30, 28)
         assert (sc.selected_index_x, sc.selected_index_y) == (27, 23)
         assert any("RESTORED" in m for _l, m in events)
+        # printed too: at start no client listens to the events yet
+        out = capsys.readouterr().out
+        assert "live pattern RESTORED" in out and out.isascii()
         st = b2.status()
         assert not getattr(st, "stabilize", False)       # left OFF
     finally:

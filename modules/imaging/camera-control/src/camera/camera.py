@@ -669,13 +669,20 @@ class Camera:
         try:
             self.load_pattern(path, load_arrays=True)
         except Exception as exc:
-            self._emit("warn", f"autosaved pattern not restored ({exc}); "
-                               f"capture or load one by hand")
+            msg = f"autosaved pattern not restored ({exc}); capture or load one by hand"
+            self._emit("warn", msg)
+            print(f"camera: {msg}", flush=True)
             return False
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
         self._autosave_sig = self._pattern_signature()     # no needless rewrite
-        self._emit("warn", f"live pattern RESTORED from the last session (saved {when}); "
-                           f"tracking and stabiliser are off -- check it, then switch on")
+        msg = (f"live pattern RESTORED from the last session (saved {when}; "
+               f"{self.reference.describe()}); tracking and stabiliser are off -- "
+               f"check it, then switch on")
+        self._emit("warn", msg)
+        # also to the service window / launcher log: at start no client is
+        # subscribed yet, so the event alone reaches nobody (lab, 2026-10-11).
+        # Printed text stays ASCII (gotcha #14).
+        print(f"camera: {msg}", flush=True)
         return True
 
     def _adopt_exposure(self) -> None:
