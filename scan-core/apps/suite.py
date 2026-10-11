@@ -138,6 +138,8 @@ class Suite(QtWidgets.QMainWindow):
         self.builder = ScanBuilder(registry=self.registry, embedded=True)
         self.builder.autosave_dir = self.out_dir      # save runs without being asked
         self.builder.on_log = self.log                # routines say what they are doing
+        # every finished (or aborted) run, once saved: eLabFTW, if ticked
+        self.builder.on_run_saved = self._run_saved
         # the RUN INFO is remembered in THIS root's suite_local.json
         self.builder.run_info.set_root(self.root)
         self.builder.run_info.set_data_dir(self.out_dir)   # its lists come from these files
@@ -171,7 +173,7 @@ class Suite(QtWidgets.QMainWindow):
         # rather than a pane in Data: the viewer already has its file list on
         # the left, and a search over a year of runs wants the full width.
         self.catalogue = CatalogueWidget(self.out_dir, open_file=self.open_in_viewer,
-                                         on_log=self.log)
+                                         on_log=self.log, settings_root=self.root)
         self.tabs.addTab(self.catalogue, "Catalogue")
         # in a scroll area: with the SCAN SERVER card (2026-10-05) the page no
         # longer fits a short window, and a squeezed page draws the module
@@ -238,6 +240,29 @@ class Suite(QtWidgets.QMainWindow):
 
     def log(self, msg: str) -> None:
         self.logbox.appendPlainText(f"{time.strftime('%H:%M:%S')}  {msg}")
+
+    def _log_threadsafe(self, msg: str) -> None:
+        """log() from ANY thread: a worker (the eLabFTW upload) must not touch
+        the log widget itself, so the line is queued into the GUI thread."""
+        QtCore.QMetaObject.invokeMethod(self, "_log_slot", QtCore.Qt.QueuedConnection,
+                                        QtCore.Q_ARG(str, msg))
+
+    @QtCore.Slot(str)
+    def _log_slot(self, msg: str) -> None:
+        self.log(msg)
+
+    def _run_saved(self, path) -> None:
+        """A run's final save: upload it to eLabFTW in the background if
+        'after each scan' is ticked. Never blocks, never fails the scan --
+        eln.auto_upload catches everything and reports to the log."""
+        from scan_core import eln
+        try:
+            if not eln.ElnSettings.load(self.root).auto_upload:
+                return
+        except Exception:
+            return
+        self._eln_auto = eln.start_auto_upload(path, root=self.root, data_dir=self.out_dir,
+                                               log=self._log_threadsafe)
 
     def scan_running(self) -> bool:
         # A queue counts between its scans too: following the launcher then
@@ -974,6 +999,12 @@ class Suite(QtWidgets.QMainWindow):
             lambda on: set_setting("snapshot_include_idn", bool(on), root=self.root))
         o.addWidget(self.idn_box)
         v.addWidget(out)
+
+        # ELN (eLabFTW): where the Catalogue's "Send to eLabFTW" and the
+        # optional after-scan upload go (apps/eln_settings.py)
+        from apps.eln_settings import ElnSettingsCard
+        self.eln_card = ElnSettingsCard(root=self.root, on_log=self._log_threadsafe)
+        v.addWidget(self.eln_card)
 
         # THE SCAN SERVER: run scans in a service instead of this window, and
         # watch a server's scan (this PC's, or the lab PC's from the office)
