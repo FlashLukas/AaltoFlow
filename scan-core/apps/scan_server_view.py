@@ -51,6 +51,10 @@ class ServerWatch(QtCore.QObject):
     scan_info = QtCore.Signal(object)       # get_scan: the submitted definitions
     view = QtCore.Signal(object)            # get_view: the server PC's plot choice
     design = QtCore.Signal(object)          # the server PC's Navigator design, as a local copy
+    #: get_registry: the parameters the server's scans can use (a registry
+    #: manifest, scan_core/registry_wire.py); emitted when registry_rev moves.
+    #: Never emitted by a server older than 2026-10-11 (no registry_rev).
+    registry_info = QtCore.Signal(object)
 
     def __init__(self, host: str = "localhost", cmd_port: int = DEFAULT_CMD_PORT,
                  pub_port: int | None = None, parent=None, poll_s: float = POLL_S):
@@ -69,6 +73,9 @@ class ServerWatch(QtCore.QObject):
         self.design_meta: dict | None = None  # the last design fetched (+ "path" here)
         self.scan: dict = {}                 # the last get_scan reply
         self.last_view: dict = {}            # the last get_view reply
+        self._registry_rev = None            # the registry_rev last fetched
+        #: the last get_registry reply ({registry_rev, registry, ...}), or None
+        self.registry_reply: dict | None = None
         self._stop = threading.Event()
         self._poll = ScanServerClient(host, self.cmd_port, self.pub_port, timeout_ms=4000,
                                       kind="gui", name="measurement suite (watching)")
@@ -124,6 +131,7 @@ class ServerWatch(QtCore.QObject):
                 self.status.emit(st)
                 self._send_view()
                 self._fetch_log(st)
+                self._fetch_registry(st)
                 self._fetch_scan_and_view(st)
                 if int(st.get("live_rev") or 0) > self._poll.live_rev \
                         or self._poll.live_notice > self._poll.live_rev:
@@ -164,6 +172,25 @@ class ServerWatch(QtCore.QObject):
             self._view_rev = int(r.get("view_rev", rev))
             self.last_view = r
             self.view.emit(r)
+
+    def _fetch_registry(self, st: dict):
+        """The server's parameter manifest, when its revision moved. A server
+        from before 2026-10-11 has no registry_rev: nothing is fetched and the
+        suite keeps its old behaviour (its own connections decide)."""
+        rev = st.get("registry_rev")
+        if rev is None or rev == self._registry_rev:
+            return
+        try:
+            r = self._poll.get_registry()
+        except ScanServerError:
+            self._registry_rev = rev          # refused: do not ask again for it
+            return
+        if not isinstance(r.get("registry"), dict):
+            self._registry_rev = rev
+            return
+        self._registry_rev = r.get("registry_rev", rev)
+        self.registry_reply = r
+        self.registry_info.emit(r)
 
     def _fetch_design(self, rev: int):
         """The server PC's design file, written to a local cache folder (the

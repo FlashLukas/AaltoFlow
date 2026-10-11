@@ -403,6 +403,9 @@ class Action:
     """
 
     kind = "action"
+    #: the module's describe `wait` block (how a routine waits for it), or
+    #: None; informative -- run() already blocks. Sent by get_registry.
+    wait = None
 
     def __init__(self, id: str, label: str, run_fn, help: str = "",
                  arg_specs: list | None = None):
