@@ -597,6 +597,13 @@ def run_app(ctrl, cfg: Config, remote: bool = False) -> int:
     # paintEvent reads the right COLORS.  Startup-only: there is no live toggle.
     theme.set_theme(getattr(cfg.ui, "theme", "dark"))
 
+    # Numbers in the C locale: on a Windows set to a comma decimal separator
+    # Qt would show 2000,000000 MHz and parse a typed "2.5" wrongly
+    # (docs/DEVELOPER_NOTES.md gotcha #18).
+    from PySide6.QtCore import QLocale as _QLocale
+    _loc = _QLocale.c()
+    _loc.setNumberOptions(_QLocale.OmitGroupSeparator)
+    _QLocale.setDefault(_loc)
     app = QApplication.instance() or QApplication([])
     # The module's own icon in the title bar, Alt-Tab and the taskbar.
     from .theme import apply_window_icon

@@ -554,6 +554,13 @@ def run_app(ctrl, cfg, cal, remote: bool = False) -> int:
     """Start the Qt app with whatever controller-like object is given (a real
     in-process Controller, or a ClMagClient facade for a remote service)."""
     set_theme(getattr(cfg.ui, "theme", "dark"))     # choose palette BEFORE building widgets
+    # Numbers in the C locale: on a Windows set to a comma decimal separator
+    # Qt would show 2000,000000 MHz and parse a typed "2.5" wrongly
+    # (docs/DEVELOPER_NOTES.md gotcha #18).
+    from PySide6.QtCore import QLocale as _QLocale
+    _loc = _QLocale.c()
+    _loc.setNumberOptions(_QLocale.OmitGroupSeparator)
+    _QLocale.setDefault(_loc)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     # The module's own icon in the title bar, Alt-Tab and the taskbar.
     from .theme import apply_window_icon
