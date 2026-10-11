@@ -1219,7 +1219,7 @@ recalling.
 ## Tests
 
 ```bash
-uv run pytest -q        # 1072 pass + 5 skipped (2026-10-09), all offline
+uv run pytest -q        # 1174 pass + 6 skipped (2026-10-11), all offline
 ```
 
 `tests/conftest.py` holds a small fake service that speaks the wire contract, so
