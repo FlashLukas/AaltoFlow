@@ -380,10 +380,11 @@ Still open:
   2026-10-09, pixels pooled over the repeats. Collapsing the flown axis into
   one mean per row: DONE 2026-10-10, `collapse: mean` on the fly axis.)
 
-- **Encryption (CurveZMQ)**: in every module since 2026-10-04; the lab runs
-  `warn` for every module (`"*"`) since 2026-10-04 -- the week of `warn` is
-  over. Next: `enforce` (Lukas's decision) -- before that, make the keyring
-  folder writable only by the lab's admin. The installer does not ship
+- **Encryption (CurveZMQ)**: in every module since 2026-10-04; `warn` for a
+  week, **`enforce` for every module (`"*"`) since 2026-10-11** (the policy
+  file in the shared keyring folder, so the office PC enforces too; checked
+  from the office: scan server + kim / pm16 / camera connect). Still open:
+  make the keyring folder writable only by the lab's admin. The installer does not ship
   `tools/` yet, so an installed PC has no `tools/keys.py`.
   `camera-control/scripts/kim_xy_calibration.py` still talks plain.
 - **Control as an option** (off by default; encryption forces it on; one scan
