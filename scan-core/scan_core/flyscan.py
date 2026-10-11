@@ -66,8 +66,7 @@ How it plugs in (everything stepped stays exactly as it was):
     proven path through new code for no gain; ramp_of() picks the path
     (`speed_param` or `move` named = stage, else a ramp block = ramp).
 
-  * `zigzag: true` on the fly axis (per axis since 2026-10-11; an old
-    recipe's scan-wide `zigzag` still works as before) means what it means
+  * `zigzag: true` on the fly axis (per axis since 2026-10-11) means what it means
     for a stepped axis: every other row is flown BACKWARDS. That is the fly-back saved -- and also the
     best check that the lag correction is right: a forward and a backward row
     over the same edge must put it in the same place.
@@ -666,22 +665,18 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     outer_shape = tuple(shape[:-1])
     npix = fly.size
     n_rows = int(np.prod(outer_shape)) if outer_shape else 1
-    # ZIG-ZAG (recipe.zigzag_plan): the outer dims are walked like the
-    # stepped odometer walks them; the fly dim's own flag says whether every
-    # other row is flown back. Per axis since 2026-10-11; an old recipe's
-    # scan-wide switch keeps its old rule (backwards when the SUM of the outer
-    # indices is odd), so it flies exactly as before.
-    from .recipe import zigzag_plan
+    # ZIG-ZAG (recipe.dim_zigzag, per axis): the outer dims are walked like
+    # the stepped odometer walks them; the fly dim's own flag says whether
+    # every other row is flown back.
+    from .recipe import dim_zigzag
     from .engine import visit_index
-    zz_flags, zz_legacy = zigzag_plan(recipe)
+    zz_flags = dim_zigzag(recipe.axes)
     zz_flags = list(zz_flags) + [False] * (len(shape) - len(zz_flags))
 
     def outer_index(raw):
-        return visit_index(raw, outer_shape, zz_flags[:-1], zz_legacy) if outer_shape else raw
+        return visit_index(raw, outer_shape, zz_flags[:-1]) if outer_shape else raw
 
     def row_backwards(row, raw) -> bool:
-        if zz_legacy:
-            return sum(raw) % 2 == 1
         # the fly dim reversed on every other sweep = every other ROW (the row
         # number is the flat index of the outer dims)
         return bool(zz_flags[-1]) and len(shape) > 1 and row % 2 == 1

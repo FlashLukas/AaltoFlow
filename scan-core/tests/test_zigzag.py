@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scan_core.engine import _unravel, _zigzag, run, visit_index
+from scan_core.engine import _unravel, run, visit_index
 from scan_core.recipe import Recipe
 from scan_core.registry import Gettable, Registry, Settable
 
@@ -35,13 +35,14 @@ def _recording_registry():
 
 
 def _recipe(zigzag: bool) -> Recipe:
-    return Recipe(name="zz", zigzag=zigzag, detectors=["xy"], axes=[
+    return Recipe(name="zz", detectors=["xy"], axes=[
         {"type": "linear", "param": "y", "start": 0, "stop": 2, "num": 3},   # outer
-        {"type": "linear", "param": "x", "start": 0, "stop": 2, "num": 3}])  # inner
+        {"type": "linear", "param": "x", "start": 0, "stop": 2, "num": 3,
+         "zigzag": zigzag}])                                                 # inner
 
 
 def test_zigzag_reverses_every_other_row():
-    idx = [_zigzag(_unravel(f, (3, 3)), (3, 3)) for f in range(9)]
+    idx = [visit_index(_unravel(f, (3, 3)), (3, 3), [False, True]) for f in range(9)]
     assert idx == [(0, 0), (0, 1), (0, 2),      # row 0 forwards
                    (1, 2), (1, 1), (1, 0),      # row 1 BACKWARDS
                    (2, 0), (2, 1), (2, 2)]      # row 2 forwards again
@@ -70,10 +71,12 @@ def test_the_data_is_identical_either_way():
     assert zig["xy"].values.tolist() == [[0, 1, 2], [10, 11, 12], [20, 21, 22]]
 
 
-def test_off_by_default_and_carried_in_the_definition():
-    assert Recipe().zigzag is False
-    assert Recipe.from_dict(Recipe(zigzag=True).to_dict()).zigzag is True
-    assert Recipe.from_dict({"axes": []}).zigzag is False       # an older file
+def test_off_by_default_and_carried_on_the_axis():
+    # the scan-wide switch is gone (2026-10-11): no field, never written
+    assert not hasattr(Recipe(), "zigzag")
+    assert "zigzag" not in Recipe().to_dict()
+    back = Recipe.from_dict(_recipe(zigzag=True).to_dict())
+    assert back.axes[1]["zigzag"] is True and "zigzag" not in back.to_dict()
 
 
 def test_the_builder_offers_it_unticked():
@@ -92,12 +95,12 @@ def test_the_builder_offers_it_unticked():
         assert not hasattr(win, "zigzag_box")
         win.add_axis("pos_y"); win.add_axis("pos_x")
         assert all(not r.is_zigzag() for r in win.rows)
-        assert win.build_recipe().zigzag is False
+        assert "zigzag" not in win.build_recipe().to_dict()
         assert all("zigzag" not in ax for ax in win.build_recipe().axes)
         win.rows[1].set_zigzag(True)
         assert win.build_recipe().axes[1]["zigzag"] is True
         assert "zig-zag: pos_x" in win.detail.text()
-        win.load_recipe(Recipe(axes=[], detectors=[], zigzag=False))
+        win.load_recipe(Recipe(axes=[], detectors=[]))
         assert win.rows == []
     finally:
         win.close()
@@ -106,8 +109,9 @@ def test_the_builder_offers_it_unticked():
 # ───────────────────── zig-zag PER AXIS (2026-10-11) ─────────────────────────
 #
 # Lukas: "Zig zag goes to the advanced settings of each axis." An axis with
-# `zigzag: true` runs backwards on every other sweep of it; the old scan-wide
-# switch still loads and runs exactly as before.
+# `zigzag: true` runs backwards on every other sweep of it. The old scan-wide
+# switch (and its rule) was removed the same day: an old definition that
+# still has it loads as per-axis flags and runs in the per-axis order.
 
 def _registry_3d():
     """z, y, x settables; the detector notes WHERE it was read (z, y, x)."""
@@ -127,14 +131,14 @@ def _registry_3d():
     return reg, visited
 
 
-def _recipe_3d(zz=(False, False, False), legacy=False, ny=2) -> Recipe:
+def _recipe_3d(zz=(False, False, False), ny=2) -> Recipe:
     axes = [{"type": "linear", "param": "z", "start": 0, "stop": 1, "num": 2},
             {"type": "linear", "param": "y", "start": 0, "stop": ny - 1, "num": ny},
             {"type": "linear", "param": "x", "start": 0, "stop": 2, "num": 3}]
     for ax, on in zip(axes, zz):
         if on:
             ax["zigzag"] = True
-    return Recipe(name="zz3", detectors=["pos"], axes=axes, zigzag=legacy)
+    return Recipe(name="zz3", detectors=["pos"], axes=axes)
 
 
 def _visit(recipe):
@@ -182,20 +186,40 @@ def test_zigzag_on_the_outermost_axis_does_nothing():
     assert a == b
 
 
-def test_an_old_recipe_with_the_scan_wide_switch_runs_exactly_as_before():
-    """The OLD rule (engine._zigzag over every dim) is kept for it, even where
-    the per-axis rule would order a 3-D scan differently."""
-    order, _ = _visit(_recipe_3d(legacy=True))
-    shape = (2, 2, 3)
-    want = [_zigzag(_unravel(f, shape), shape) for f in range(12)]
-    assert order == want
-    # (and that IS different from all-axes-per-axis here: an even middle axis)
-    per_axis, _ = _visit(_recipe_3d(zz=(True, True, True)))
-    assert per_axis != order
-    # in 2-D the two rules agree, so an old 2-D recipe is unchanged either way
-    two_d = [_zigzag(_unravel(f, (3, 3)), (3, 3)) for f in range(9)]
-    assert [visit_index(_unravel(f, (3, 3)), (3, 3), [False, True])
-            for f in range(9)] == two_d
+def test_an_old_recipe_with_the_scan_wide_switch_runs_in_the_new_order():
+    """An old definition with the scan-wide `zigzag: true` (the switch and
+    its rule are gone since 2026-10-11) is translated ONCE, when the Recipe
+    is made: `zigzag: true` on every axis but the outermost one. It then runs
+    in the PER-AXIS order -- here (even middle axis) one continuous path,
+    where the old rule started the first row after the outer step at the
+    wrong end."""
+    d = _recipe_3d().to_dict()
+    d["zigzag"] = True
+    r = Recipe.from_dict(d)
+    assert [ax.get("zigzag", False) for ax in r.axes] == [False, True, True]
+    assert "zigzag" not in r.to_dict()                 # never written again
+    order, _ = _visit(r)
+    new, _ = _visit(_recipe_3d(zz=(False, True, True)))
+    assert order == new
+    for a, b in zip(order, order[1:]):                 # every step: one axis, one point
+        assert sum(abs(p - q) for p, q in zip(a, b)) == 1, (a, b)
+    # the old rule (sum of the outer indices odd) would have visited
+    # (1, 0, 2) right after (0, 1, 0) -- the extra fly-back that is gone
+    assert order[5:7] == [(0, 1, 0), (1, 1, 0)]
+
+
+def test_the_scan_wide_translation_skips_repeats_and_keeps_a_raster():
+    from scan_core.recipe import upgrade_scan_wide_zigzag
+    raster = {"type": "raster", "x": {"param": "x", "start": 0, "stop": 1, "num": 2},
+              "y": {"param": "y", "start": 0, "stop": 1, "num": 2}}
+    rep_ax = {"type": "repeat", "num": 2}
+    lin = {"type": "linear", "param": "z", "start": 0, "stop": 1, "num": 2}
+    out = upgrade_scan_wide_zigzag([raster, rep_ax, lin])
+    # the outermost raster has its fast dim inside: it zig-zags; a repeat never
+    assert [ax.get("zigzag", False) for ax in out] == [True, False, True]
+    assert "zigzag" not in raster                      # the input is not changed
+    out = upgrade_scan_wide_zigzag([lin, dict(lin, param="x")])
+    assert [ax.get("zigzag", False) for ax in out] == [False, True]
 
 
 def test_the_old_switch_loads_from_a_yaml_and_still_validates(tmp_path):
@@ -206,7 +230,8 @@ def test_the_old_switch_loads_from_a_yaml_and_still_validates(tmp_path):
                  encoding="utf-8")
     r = Recipe.load(p)
     reg, visited = _registry_3d()
-    assert r.zigzag is True and r.validate(reg) == []
+    assert r.axes[1]["zigzag"] is True and "zigzag" not in r.axes[0]
+    assert r.validate(reg) == []
     run(r, reg, created_iso="t")
     assert [x for _, _, x in visited] == [0, 1, 2, 2, 1, 0, 0, 1, 2]
 
@@ -217,7 +242,7 @@ def test_per_axis_zigzag_round_trips_through_yaml_and_nc(tmp_path):
     r.save(tmp_path / "zz.yaml")
     back = Recipe.load(tmp_path / "zz.yaml")
     assert back.axes == r.axes and back.axes[2]["zigzag"] is True
-    assert "zigzag" not in back.axes[0] and back.zigzag is False
+    assert "zigzag" not in back.axes[0] and "zigzag" not in back.to_dict()
     _, ds = _visit(back)
     ds.to_netcdf(tmp_path / "zz.nc")
     with xr.open_dataset(tmp_path / "zz.nc") as f:
@@ -273,17 +298,13 @@ def test_the_scout_visiting_order_matches_the_engine():
         want = [np.ravel_multi_index(visit_index(_unravel(f, shape), shape, flags), shape)
                 for f in range(12)]
         assert visiting_order(shape, flags).tolist() == want
-    # the old switch: the old order
-    want = [np.ravel_multi_index(_zigzag(_unravel(f, shape), shape), shape)
-            for f in range(12)]
-    assert visiting_order(shape, True).tolist() == want
 
 
 def test_a_per_axis_fly_zigzag_flies_every_other_row_back():
     """3-D: two outer axes, the fly axis zig-zags on its own. Every row then
     starts where the last one ended -- so the stage speed is switched to the
     fly speed once and back once, never to the approach speed in between
-    (the check test_flyscan uses for the old switch)."""
+    (the check test_flyscan uses for a 2-D fly scan)."""
     from scan_core.registry import build_sim_registry
     reg = build_sim_registry()
     reg._state.lockin_tc_s = 0.004

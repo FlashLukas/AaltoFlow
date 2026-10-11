@@ -220,7 +220,9 @@ def test_zigzag_measures_exactly_its_mask():
     # the readings' noise depends on the visiting order, so the two masks may
     # differ by a point at a rim -- but each scan measures exactly ITS mask
     a = run(_recipe(), build_sim_registry())
-    b = run(_recipe(zigzag=True), build_sim_registry())
+    zz = _recipe()
+    zz.axes[0]["zigzag"] = True                 # the raster's fast dim
+    b = run(zz, build_sim_registry())
     for ds in (a, b):
         keep = ds.scan_mask.values.astype(bool)
         assert (np.isfinite(ds.lockin_r.values) == keep).all()
@@ -253,11 +255,11 @@ def test_routines_fire_on_measured_points():
 
 def test_visit_counts_measured_points():
     keep = np.array([[False, True, False], [False, False, False], [True, True, False]])
-    v = M.visit_of(keep, M.visiting_order((3, 3), False))
+    v = M.visit_of(keep, M.visiting_order((3, 3)))
     assert v.measured.tolist() == keep.ravel().tolist()
     assert v.before.tolist() == [0, 0, 1, 1, 1, 1, 1, 2, 3]
     assert v.any_in(0, 3) and not v.any_in(3, 6) and not v.any_in(2, 2)
-    z = M.visit_of(keep, M.visiting_order((3, 3), True))
+    z = M.visit_of(keep, M.visiting_order((3, 3), [False, True]))
     # row 1 is reversed in visiting order
     assert z.measured.tolist() == [False, True, False, False, False, False,
                                    True, True, False]

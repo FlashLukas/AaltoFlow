@@ -102,11 +102,11 @@ def build(world):
 
 def _recipe(**over):
     ax = {"type": "fly", "param": "cam.lx", "start": -8.0, "stop": 12.0, "num": 41,
-          "move": "stage.x", "speed": 8.0, "speed_param": "stage.speed"}
+          "move": "stage.x", "speed": 8.0, "speed_param": "stage.speed", "zigzag": True}
     ax.update(over)
     return Recipe(name="camfly",
                   axes=[{"type": "array", "param": "dummy.row", "values": [0, 1, 2]}, ax],
-                  detectors=["det.a"], zigzag=True)
+                  detectors=["det.a"])
 
 
 def test_flying_in_camera_coordinates_lands_every_row_in_the_right_place():
@@ -222,8 +222,9 @@ def test_rows_placed_by_camera_y_return_fast_and_fly_both_ways(zigzag):
     r = Recipe(name="rig", axes=[
         {"type": "linear", "param": "camera.laser_y", "start": -2, "stop": 2, "num": 3},
         {"type": "fly", "param": "camera.laser_x", "start": -6.0, "stop": 6.0, "num": 25,
-         "move": "kim.position_x", "speed": fly_speed, "speed_param": "kim.velocity_x"}],
-        detectors=["pm16.power", "camera.laser_y"], zigzag=zigzag)
+         "move": "kim.position_x", "speed": fly_speed, "speed_param": "kim.velocity_x",
+         "zigzag": zigzag}],
+        detectors=["pm16.power", "camera.laser_y"])
     assert r.validate(reg) == []
     t0 = time.monotonic()
     ds = run(r, reg)

@@ -30,7 +30,7 @@ if os.name == "nt":
     os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scan_core.engine import _unravel, _zigzag, run
+from scan_core.engine import _unravel, run, visit_index
 from scan_core.recipe import Recipe
 from scan_core.registry import Gettable, Registry, Settable, build_sim_registry
 
@@ -47,9 +47,10 @@ def _registry():
 
 
 def _recipe(zigzag=False):
-    return Recipe(name="where", zigzag=zigzag, detectors=["xy"], axes=[
+    return Recipe(name="where", detectors=["xy"], axes=[
         {"type": "linear", "param": "y", "start": 0, "stop": 20, "num": 3},    # outer
-        {"type": "linear", "param": "x", "start": 0, "stop": 3, "num": 4}])    # inner
+        {"type": "linear", "param": "x", "start": 0, "stop": 3, "num": 4,
+         "zigzag": zigzag}])                                                   # inner
 
 
 # ─────────────────────────────── the engine ──────────────────────────────────
@@ -64,7 +65,7 @@ def test_on_progress_gets_the_index_and_the_axis_values(zigzag):
     for flat, (done, total, where) in enumerate(seen):
         idx = _unravel(flat, shape)
         if zigzag:
-            idx = _zigzag(idx, shape)
+            idx = visit_index(idx, shape, [False, True])
         assert total == 12
         assert where["index"] == idx                  # the order the engine VISITED
         assert where["flat"] == flat

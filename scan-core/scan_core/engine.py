@@ -226,29 +226,14 @@ def _unravel(flat: int, shape: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(reversed(idx))
 
 
-def _zigzag(idx: tuple[int, ...], shape: tuple[int, ...]) -> tuple[int, ...]:
-    """Serpentine order: reverse a dim on every other pass of the dims outside it.
-
-    The ORDER of visiting changes; the index does not. Each point is still
-    stored at its own coordinate, so the dataset is identical to a normal
-    scan's -- only the path between points is shorter, by one fly-back per row.
-    """
-    out = list(idx)
-    for k in range(1, len(shape)):
-        if sum(idx[:k]) % 2:
-            out[k] = shape[k] - 1 - idx[k]
-    return tuple(out)
-
-
-# ZIG-ZAG PER AXIS (2026-10-11). _zigzag above is the OLD scan-wide rule and
-# is kept, unchanged, for recipes that still say `zigzag: true` at the top
-# (recipe.zigzag_plan -> legacy): they must run exactly as before. The
-# per-axis rule below is "dim k runs backwards on every other SWEEP of k",
-# counting the sweeps by the flat index of the dims outside it. For a 2-D
-# scan the two rules are the same. They differ in 3-D and up when a middle
-# axis has an even number of points: the old rule then starts the first row
-# of the next outer step at the wrong end (one extra fly-back per outer
-# step); counting sweeps never does, whichever axes zig-zag.
+# ZIG-ZAG PER AXIS (2026-10-11): "dim k runs backwards on every other SWEEP
+# of k", counting the sweeps by the flat index of the dims outside it. This is
+# the ONLY zig-zag rule. (The old scan-wide rule -- reverse dim k when the SUM
+# of the outer indices is odd -- was removed the same day, Lukas: "only focus
+# on the new code". It started the first row after each outer step at the
+# wrong end when a middle axis had an even number of points. A recipe that
+# still says scan-wide `zigzag: true` is translated into per-axis flags when
+# it is read: recipe.upgrade_scan_wide_zigzag.)
 
 def _serpentine(idx: tuple[int, ...], shape: tuple[int, ...], flags) -> tuple[int, ...]:
     """Per-axis zig-zag: dim k (flags[k] True, k >= 1) is reversed on every
@@ -263,13 +248,10 @@ def _serpentine(idx: tuple[int, ...], shape: tuple[int, ...], flags) -> tuple[in
     return tuple(out)
 
 
-def visit_index(idx: tuple[int, ...], shape: tuple[int, ...], flags,
-                legacy: bool = False) -> tuple[int, ...]:
+def visit_index(idx: tuple[int, ...], shape: tuple[int, ...], flags) -> tuple[int, ...]:
     """The grid index the odometer visits at raw (C-order) index `idx`.
-    `flags`/`legacy` come from recipe.zigzag_plan (sliced to `shape`'s dims
-    when only some dims are walked: a fly scan's outer dims, a scout's)."""
-    if legacy:
-        return _zigzag(idx, shape)
+    `flags` come from recipe.dim_zigzag (sliced to `shape`'s dims when only
+    some dims are walked: a fly scan's outer dims, a scout's)."""
     if any(flags):
         return _serpentine(idx, shape, flags)
     return idx
@@ -807,16 +789,16 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                                          ds_attrs=dict(ctx.get("ds_attrs") or {}),
                                          extra=ctx.get("ds_extra")))
 
-    # which dims zig-zag (per axis, or the old scan-wide switch)
-    from .recipe import zigzag_plan
-    zz_flags, zz_legacy = zigzag_plan(recipe)
+    # which dims zig-zag (the `zigzag` flag of each axis)
+    from .recipe import dim_zigzag
+    zz_flags = dim_zigzag(recipe.axes)
     for flat in range(total):
         if should_abort and should_abort():
             return True
         # the operator's Pause: here, between points, where Abort is checked
         if _hold_for_operator(ctx, should_abort, f"point {flat + 1}"):
             return True
-        idx = visit_index(_unravel(flat, shape), shape, zz_flags, zz_legacy)
+        idx = visit_index(_unravel(flat, shape), shape, zz_flags)
         ctx["flat"] = flat
         ctx["index"] = idx
 

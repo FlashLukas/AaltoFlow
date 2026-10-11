@@ -61,12 +61,12 @@ def main() -> int:
         "stepped": Recipe(name="fly_any_stepped", fixed=WHERE, detectors=dets,
                           axes=[{"type": "linear", **freq},
                                 {"type": "linear", **field}]),
-        "field": Recipe(name="fly_any_field", fixed=WHERE, detectors=dets, zigzag=True,
+        "field": Recipe(name="fly_any_field", fixed=WHERE, detectors=dets,
                         axes=[{"type": "linear", **freq},
-                              {"type": "fly", **field, "speed": args.rate_field}]),
-        "freq": Recipe(name="fly_any_freq", fixed=WHERE, detectors=dets, zigzag=True,
+                              {"type": "fly", **field, "speed": args.rate_field, "zigzag": True}]),
+        "freq": Recipe(name="fly_any_freq", fixed=WHERE, detectors=dets,
                        axes=[{"type": "linear", **field},
-                             {"type": "fly", **freq, "speed": args.rate_freq}]),
+                             {"type": "fly", **freq, "speed": args.rate_freq, "zigzag": True}]),
     }
     results = {}
     OUT.mkdir(exist_ok=True)

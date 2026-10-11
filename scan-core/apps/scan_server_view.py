@@ -438,7 +438,13 @@ def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str,
     for k in RUN_INFO_KEYS:
         if attrs.get(k):
             out.append(("run info", f"{k}: {attrs[k]}"))
-    for i, ax in enumerate(recipe.get("axes") or []):
+    axes = recipe.get("axes") or []
+    if recipe.get("zigzag") is True:
+        # an older definition with the removed scan-wide switch: shown as the
+        # per-axis flags it runs as (recipe.upgrade_scan_wide_zigzag)
+        from scan_core.recipe import upgrade_scan_wide_zigzag
+        axes = upgrade_scan_wide_zigzag(axes)
+    for i, ax in enumerate(axes):
         out.append(("axes", f"{i + 1}. " + _axis_text(ax)))
     for k, v in (recipe.get("fixed") or {}).items():
         out.append(("conditions", f"{k} = {_num(v)}"))
@@ -447,9 +453,6 @@ def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str,
     dets = recipe.get("detectors") or []
     if dets:
         out.append(("detectors", ", ".join(dets)))
-    if recipe.get("zigzag"):
-        # the OLD scan-wide switch (per axis since 2026-10-11: on each axis line)
-        out.append(("axes", "zig-zag (every inner axis)"))
     if recipe.get("diagonal"):
         out.append(("axes", "diagonal row change"))
     # the scout pass (and an older definition's XY mask, which is the same thing)

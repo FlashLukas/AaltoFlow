@@ -56,8 +56,9 @@ def sim(args) -> int:
                    "num": args.rows},
                   {"type": "fly", "param": "pos_x", "start": -40, "stop": 40,
                    "num": args.pixels, "speed": args.speed,
-                   "speed_param": "stage_speed", "lag_correction": lag}],
-            detectors=["lockin_x"], zigzag=True)
+                   "speed_param": "stage_speed", "lag_correction": lag,
+                   "zigzag": True}],
+            detectors=["lockin_x"])
         errs = recipe.validate(reg)
         if errs:
             print("recipe is not valid:\n  " + "\n  ".join(errs))
@@ -114,9 +115,8 @@ def lab(args) -> int:
                    "stop": y0 + args.row_pitch * (args.rows - 1), "num": args.rows},
                   {"type": "fly", "param": "kim.position_x", "start": args.lo,
                    "stop": args.hi, "num": args.pixels, "speed": args.speed,
-                   "speed_param": "kim.velocity_x"}],
-            detectors=(["hf2.x1", "hf2.r1"] if det == "hf2" else ["pm16.power"]),
-            zigzag=args.zigzag)
+                   "speed_param": "kim.velocity_x", "zigzag": bool(args.zigzag)}],
+            detectors=(["hf2.x1", "hf2.r1"] if det == "hf2" else ["pm16.power"]))
         errs = recipe.validate(reg)
         if errs:
             print("recipe is not valid:\n  " + "\n  ".join(errs))

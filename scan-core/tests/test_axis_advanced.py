@@ -120,7 +120,7 @@ def test_the_direction_box_is_this_axis_zig_zag(builder):
     row.dir_box.setCurrentIndex(row.dir_box.findData(True))
     r = builder.build_recipe()
     assert r.axes[1]["zigzag"] is True and "zigzag" not in r.axes[0]
-    assert not r.zigzag
+    assert "zigzag" not in r.to_dict()
     # a stepped axis zig-zags too (fly off: the box stays in force)
     row.fly.setChecked(False)
     assert builder.build_recipe().axes[1] == {
@@ -322,8 +322,8 @@ def test_every_fly_option_has_a_box_and_round_trips(builder, tmp_path):
           "speed": 30.0, "speed_param": "stage_speed", "lag_correction": False,
           "readback": "pos_y", "timeout_s": 90.0, "name": "x_fly"}
     r = Recipe(axes=[{"type": "linear", "param": "pos_y", "start": -45.0,
-                      "stop": 45.0, "num": 3}, ax],
-               detectors=["lockin_r"], zigzag=True)
+                      "stop": 45.0, "num": 3}, {**ax, "zigzag": True}],
+               detectors=["lockin_r"])
     path = tmp_path / "fly.yaml"
     r.save(path)
     assert builder.load_recipe(Recipe.load(path)) == []
@@ -334,10 +334,9 @@ def test_every_fly_option_has_a_box_and_round_trips(builder, tmp_path):
     assert row.dim_name() == "x_fly" and row.dir_box.currentData() is True
     assert set(row.tag_texts()) >= {"fly 30 um/s", "zig-zag", "no lag correction",
                                     "row max 90 s", "readback pos_y", "name x_fly"}
-    # the OLD scan-wide zig-zag comes back PER AXIS: on the inner (fly) axis,
-    # not on the outermost one, and nothing scan-wide any more
-    assert builder.build_recipe().axes == [r.axes[0], {**r.axes[1], "zigzag": True}]
-    assert not builder.build_recipe().zigzag
+    # zig-zag stays on the inner (fly) axis, and nothing scan-wide is written
+    assert builder.build_recipe().axes == r.axes
+    assert "zigzag" not in builder.build_recipe().to_dict()
 
 
 def test_unknown_axis_keys_survive_the_builder(builder):
@@ -372,7 +371,6 @@ def test_every_example_recipe_comes_back_unchanged(builder, path):
             for ax in ref.axes]
     assert got.axes == want
     assert got.scout == ref.scout
-    assert got.zigzag == ref.zigzag
 
 
 def test_per_axis_margins_show_on_their_rows_and_save_back(builder, tmp_path):
@@ -434,7 +432,7 @@ def test_axis_attrs_only_what_is_set():
     assert axis_attrs(r) == {}
     r = Recipe(axes=[{"type": "linear", "param": "pos_y", "start": 0, "stop": 1, "num": 2},
                      {"type": "fly", "param": "pos_x", "start": 0, "stop": 1, "num": 5,
-                      "speed": 3.0, "speed_param": "stage_speed"}], zigzag=True)
+                      "speed": 3.0, "speed_param": "stage_speed", "zigzag": True}])
     a = axis_attrs(r, lambda pid: "um")
     assert set(a) == {"pos_x"}
     assert a["pos_x"] == {"fly": "true", "fly_speed": 3.0, "fly_speed_units": "um/s",
@@ -450,8 +448,8 @@ def test_the_coordinates_carry_the_fly_settings_in_the_file(tmp_path):
     r = Recipe(axes=[{"type": "linear", "param": "pos_y", "start": -5, "stop": 5, "num": 2},
                      {"type": "fly", "param": "pos_x", "start": -10, "stop": 10, "num": 11,
                       "speed": 80.0, "speed_param": "stage_speed", "timeout_s": 60.0,
-                      "lag_correction": False}],
-               detectors=["lockin_r"], zigzag=True)
+                      "lag_correction": False, "zigzag": True}],
+               detectors=["lockin_r"])
     ds = run(r, reg)
     path = tmp_path / "fly.nc"
     ds.to_netcdf(path)

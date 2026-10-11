@@ -150,10 +150,10 @@ def _noisy_rig(seed=0):
 
 def _row(num_repeats=None, mode="average", zigzag=False):
     axes = [{"type": "fly", "param": "x", "start": 0.0, "stop": 20.0, "num": 41,
-             "speed": 20.0, "speed_param": "speed"}]
+             "speed": 20.0, "speed_param": "speed", "zigzag": zigzag}]
     if num_repeats:
         axes.insert(0, {"type": "repeat", "num": num_repeats, "mode": mode})
-    return Recipe(name="noise", axes=axes, detectors=["d"], zigzag=zigzag)
+    return Recipe(name="noise", axes=axes, detectors=["d"])
 
 
 def test_three_repeats_of_a_noisy_row_converge_like_one_over_sqrt3():
@@ -210,10 +210,9 @@ def test_zigzag_and_lag_corrected_rows_average_on_the_simulator():
     reg = build_sim_registry()
     reg._state.lockin_tc_s = 0.01                 # 20 ms group delay, corrected per row
     r = Recipe(name="avg", fixed={"pos_x": 30.0, "pos_y": 50.0}, detectors=["lockin_r"],
-               zigzag=True,
                axes=[{"type": "repeat", "num": 2, "mode": "average"},
                      {"type": "fly", "param": "field", "start": 30.0, "stop": 70.0,
-                      "num": 21, "speed": 20.0}])
+                      "num": 21, "speed": 20.0, "zigzag": True}])
     assert r.validate(reg) == []
     ds = run(r, reg)
     keep = run(Recipe.from_dict({**r.to_dict(),
@@ -236,10 +235,9 @@ def test_vna_traces_are_averaged_over_repeats():
     reg = build_sim_registry()
     st = reg._state
     r = Recipe(name="vna_avg", fixed={"pos_x": 30.0, "pos_y": 50.0}, detectors=["s21"],
-               zigzag=True,
                axes=[{"type": "repeat", "num": 2, "mode": "average"},
                      {"type": "fly", "param": "field", "start": 40.0, "stop": 60.0,
-                      "num": 6, "speed": 10.0}])
+                      "num": 6, "speed": 10.0, "zigzag": True}])
     assert r.validate(reg) == []
     ds = run(r, reg)
     assert ds["s21_real"].dims == ("field", "vna_freq")

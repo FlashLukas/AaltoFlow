@@ -207,7 +207,7 @@ def test_fly_over_a_swept_frequency(readback, port):
         r = Recipe(name="wire", axes=[
             {"type": "array", "param": "gen.power", "values": [0.0, 0.0]},
             {"type": "fly", "param": "gen.freq", "start": 2400, "stop": 2500,
-             "num": 51, "speed": 100.0}], detectors=["det.a"], zigzag=True)
+             "num": 51, "speed": 100.0, "zigzag": True}], detectors=["det.a"])
         assert r.validate(reg) == []
         ds = run(r, reg)
         f = ds["gen.freq"].values

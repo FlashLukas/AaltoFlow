@@ -6071,21 +6071,6 @@ class ScanBuilder(QtWidgets.QMainWindow):
                 # raster/zip/array: keep as a pass-through row on the first member
                 self.add_axis(pid, raw=ax)
                 self.rows[-1].hint = ax["type"]
-        if getattr(recipe, "zigzag", False):
-            # THE OLD SCAN-WIDE ZIG-ZAG (before 2026-10-11) becomes the
-            # per-axis setting on every axis it reversed: every dim but the
-            # outermost one (a raster's two dims count separately, a repeat
-            # moves nothing). Saved again, the definition says it per axis.
-            # Same order for a 2-D scan; in 3-D and up the per-axis rule also
-            # saves the one extra fly-back per outer step the old rule made
-            # when a middle axis had an even number of points (engine.py).
-            first_dim = 0
-            for row in self.rows:
-                raw = getattr(row, "raw", None)
-                n = 2 if isinstance(raw, dict) and raw.get("type") == "raster" else 1
-                if first_dim + n - 1 >= 1 and isinstance(row, AxisRow):
-                    row.set_zigzag(True)
-                first_dim += n
         want = set(recipe.detectors)
         have = {it.data(0, QtCore.Qt.UserRole) for it in self._det_items()}
         missing += [d for d in recipe.detectors if d not in have]
