@@ -22,7 +22,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 |---|---|---|---|
 | [`pm16`](../modules/detector/pm16-control) | Thorlabs PM16-121 USB power meter | **verified**, incl. a scan-core scan | 2026-09-15 |
 | [`kim`](../modules/motion/kim-control) | Thorlabs KIM101 + 3x PIA25 inertia stage | **verified** (moves, datum, camera calibration, rasters) | 2026-09-25 |
-| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma / D86 / Gauss, AF exposure, auto exposure, re-drawn template keeps the scan array) | 2026-10-08 |
+| [`camera`](../modules/imaging/camera-control) | IDS U3-38xCP (IDS peak) + KIM stage | **partly verified** (camera, features, spot, stabiliser, laser placement, save, spot-size metrics, one-way autofocus with D4sigma / D86 / Gauss, AF exposure, auto exposure, re-drawn template keeps the scan array, pattern autosave + restore) | 2026-10-11 |
 | [`signalhound`](../modules/detector/signalhound-control) | Signal Hound SA44B + USB-TG44A | **verified** (spectrum mode, TG CW + TG sweep via shsg / shsna) | 2026-09-28 |
 | [`shsg`](../modules/source/shsg-control) | the USB-TG44A as a CW source (client of signalhound) | **verified** (CW level/frequency, RF off = park, restore after a TG sweep) | 2026-09-28 |
 | [`shsna`](../modules/detector/shsna-control) | scalar network analyser on the TG sweep (client of signalhound) | **verified** (reference + transmission, grid) | 2026-09-28 |
@@ -103,6 +103,14 @@ in the live panel, 1936 x 1096 Mono8 at 20 fps), Set Z through kim, the spot
 calibration at 63x, template tracking, the "stage not answering" handling with
 kim switched off, and `save_picture` / `save_scan_pattern` from a real scan's
 before/after routines.
+
+**Checked (2026-10-11, 135ea20): pattern autosave + restore.** A live pattern
+(158 x 181 px template, 20 x 20 array) loaded into the real service was written
+to `autosave/pattern_live.png` within 4 s. After a clean restart of the service,
+the pattern came back loaded, with the same selected point and objective, and
+tracking and stabiliser OFF (the user switches them on). The KIM stage did not
+move. Why it matters: a restart used to lose a template that had not been saved
+by hand.
 
 **Simulation only (2026-10-10): images as a scan detector** (`camera.image`,
 recording region / binning, binary reply parts, auto exposure / gain held off
