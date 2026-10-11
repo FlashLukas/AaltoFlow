@@ -48,7 +48,10 @@ from .registry import Gettable, Registry, Settable
 
 def known_ports(root=None) -> dict[str, tuple[int, int]]:
     """{key: (cmd, pub)} for every LOCAL module, with this PC's overrides."""
-    return {m.key: (m.cmd, m.pub) for m in discover(root).modules if not m.remote}
+    # not the INSTANCES (a second copy, "scope#dwf"): they share the key and
+    # would overwrite the module itself here; they are reached by slug instead
+    return {m.key: (m.cmd, m.pub) for m in discover(root).modules
+            if not m.remote and not m.instance}
 
 
 def module_prefix(inst: Instrument, manifest: dict | None = None) -> str:

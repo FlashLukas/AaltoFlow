@@ -552,7 +552,8 @@ class Suite(QtWidgets.QMainWindow):
 
     def _local_server_target(self) -> str | None:
         found = self.found or discover(self.root)
-        m = next((m for m in found.modules if m.key == "scanserver" and not m.remote), None)
+        m = next((m for m in found.modules
+                  if m.key == "scanserver" and not m.remote and not m.instance), None)
         return f"localhost:{m.cmd}:{m.pub}" if m is not None else None
 
     def _watch_local_server(self) -> None:

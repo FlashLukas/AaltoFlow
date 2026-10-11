@@ -127,6 +127,8 @@ def build_catalog(modules: list[ModuleSpec]) -> dict:
     # not a SUITE PROJECT's module.toml (scan-core's scan server): it ships
     # with its project and is never downloaded as a module of its own
     mods = sorted((m for m in modules if not m.remote and m.dir is not None
+                   # an instance is this PC's second copy, not a module
+                   and not getattr(m, "instance", "")
                    and not getattr(m, "suite_project", False)),
                   key=lambda m: (m.order, m.key))
     return {
