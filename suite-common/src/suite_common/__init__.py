@@ -19,7 +19,7 @@ from .modules import (Discovery, ManifestError, ModuleSpec, add_remote,
                       gui_args, load_local, port_conflicts, probe,
                       remove_remote, save_local, service_args, set_ports,
                       set_address, set_real, set_setting, start_order)
-from .modules import (INSTANCE_SEP, RESERVED_ARGS, add_instance, args_text,
+from .modules import (INSTANCE_SEP, RESERVED_ARGS, add_instance, args_text, free_ports_after,
                       instance_id, parse_args_text, remove_instance, split_id)
 from .settings_bundle import (ImportPlan, apply_import, export_bundle,
                               read_bundle)
@@ -34,7 +34,7 @@ __all__ = [
     "is_legacy_location", "rel_to_root", "is_suite_project", "SUITE_PROJECTS",
     "COORDINATOR_KEYS",
     "INSTANCE_SEP", "RESERVED_ARGS", "add_instance", "args_text", "instance_id",
-    "parse_args_text", "remove_instance", "split_id",
+    "parse_args_text", "remove_instance", "split_id", "free_ports_after",
     "CATEGORIES", "InstallPlan", "ModuleSource", "build_catalog", "catalog_text",
     "env_steps", "install", "is_lab_data", "plan_install", "search",
     "ImportPlan", "apply_import", "export_bundle", "read_bundle",

@@ -696,6 +696,20 @@ def remove_instance(id: str, root: Path | None = None) -> bool:
     return True
 
 
+def free_ports_after(modules: list[ModuleSpec], cmd: int) -> tuple[int, int]:
+    """A port pair for a new instance: the first cmd+2n / cmd+2n+1 above the
+    module's own ports that no module on THIS PC uses (instances included;
+    remote services listen elsewhere and do not count)."""
+    used = {p for m in modules
+            if not m.remote or m.host.lower() in _LOCAL_HOSTS for p in (m.cmd, m.pub)}
+    c = int(cmd) + 2
+    while c + 1 <= 65535:
+        if c not in used and c + 1 not in used:
+            return c, c + 1
+        c += 2
+    raise ValueError("no free port pair above that port")
+
+
 def _local_entry(data: dict, id: str) -> dict:
     """The suite_local.json dict a LOCAL id's settings live in: the module's
     own for "scope", the instance's for "scope#dwf"."""

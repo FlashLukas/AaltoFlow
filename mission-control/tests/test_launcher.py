@@ -885,3 +885,103 @@ def test_a_long_visa_address_is_shortened_on_the_card(env):
     card = win.cards["magnet"]
     assert card.real_check.maximumWidth() <= 150
     assert card.name.minimumWidth() >= 170
+
+
+def test_add_an_instance_gives_it_a_card_of_its_own_and_remove_takes_it_away(env, monkeypatch):
+    """Lukas 2026-10-11: two copies of one module side by side (the scope for
+    the Siglent and, with --driver dwf, for the Analog Discovery)."""
+    mc, win, root, app = env
+    base = win.cards["lockin"]
+    assert base.can_add_instance and not base.btn_instance.isHidden()
+    assert win.cards["magnet"].can_add_instance
+    # the dialog, filled in as a person would, accepted by its OK handler
+    dlg = mc.AddInstanceDialog(base.spec, win.found.modules, win)
+    assert (dlg.cmd.value(), dlg.pub.value()) == (16112, 16113)   # first free above 16110
+    dlg.name.setText("dwf")
+    dlg.args.setText("--driver dwf")
+    # a clash with another card's ports is refused before anything is saved
+    dlg.cmd.setValue(16100)
+    dlg._ok()
+    assert dlg.added_id is None and "16100" in dlg.error.text()
+    dlg.cmd.setValue(16140)
+    assert dlg.pub.value() == 16141
+    dlg._ok()
+    assert dlg.added_id == "lockin#dwf"
+    win.rescan(force=True)
+    try:
+        ids = [m.id for m in win.found.modules]
+        assert ids.index("lockin#dwf") == ids.index("lockin") + 1
+        card = win.cards["lockin#dwf"]
+        spec = card.spec
+        assert spec.instance == "dwf" and spec.slug == "lockin_dwf"
+        assert "[instance]" in card.name.text() and "--driver dwf" in card.meta.text()
+        assert not card.btn_service.isHidden() and not card.btn_ports.isHidden()
+        assert not card.btn_remove.isHidden() and card.btn_instance.isHidden()
+        assert "instance" in card.btn_remove.toolTip()
+        assert mc.service_args(spec) == ["--cmd-port", "16140", "--pub-port", "16141",
+                                         "--driver", "dwf"]
+        assert mc.gui_args(spec, connect=True) == ["--connect", "localhost",
+                                                   "--cmd-port", "16140", "--pub-port", "16141"]
+        # its own real flag and ports, the module's untouched
+        card.real_check.setChecked(True); card._real_clicked(True)
+        monkeypatch.setattr(mc.PortsDialog, "exec", lambda self: (
+            self.cmd.setValue(16150), self._save(), QtDialogAccepted())[-1])
+        card.edit_ports()
+        win.rescan(force=True)
+        card = win.cards["lockin#dwf"]
+        assert card.spec.real and not win.cards["lockin"].spec.real
+        assert (card.spec.cmd, card.spec.pub) == (16150, 16151)
+        assert win.cards["lockin"].spec.cmd == 16110
+        # both are in the endpoints, the instance under its id; and in Full suite
+        table = json.loads(mc.endpoints_json(win.found.modules))
+        assert table["lockin"] == ["localhost", 16110, 16111]
+        assert table["lockin#dwf"] == ["localhost", 16150, 16151]
+        assert win.found.problems == []
+        # a profile names the instance by id and brings up that card
+        started = []
+        monkeypatch.setattr(mc.ModuleCard, "start_service",
+                            lambda self: started.append(self.spec.id))
+        monkeypatch.setattr(mc.ModuleCard, "open_gui", lambda self: None)
+        win.activate_profile({"name": "Two scopes", "members": ["lockin", "lockin#dwf"]},
+                             open_guis=False)
+        _pump(app, 1.0)
+        assert sorted(started) == ["lockin", "lockin#dwf"]
+    finally:
+        assert win.cards["lockin#dwf"].remove_instance(confirm=False)
+    assert "lockin#dwf" not in win.cards and "lockin" in win.cards
+    from suite_common import load_local
+    assert "instances" not in load_local(root)["modules"].get("lockin", {})
+
+
+def test_an_instance_follows_its_module_in_a_custom_card_order(env):
+    mc, win, root, app = env
+    old = mc.get_setting(mc.CARD_ORDER_SETTING, None, mc.ROOT)
+    mc.set_setting(mc.CARD_ORDER_SETTING, ["focus", "lockin", "magnet"], mc.ROOT)
+    iid = mc.add_instance("lockin", "x", 16170, root=root)
+    try:
+        win.rescan(force=True)
+        ids = [m.id for m in win.ordered_modules()]
+        assert ids.index(iid) == ids.index("lockin") + 1 < ids.index("magnet")
+    finally:
+        mc.remove_instance(iid, root)
+        mc.set_setting(mc.CARD_ORDER_SETTING, old, mc.ROOT)
+        win.rescan(force=True)
+
+
+def QtDialogAccepted():
+    from PySide6 import QtWidgets
+    return QtWidgets.QDialog.Accepted
+
+
+def test_an_instance_is_never_a_type_to_add_remotely(env):
+    mc, win, root, app = env
+    iid = mc.add_instance("magnet", "b", 16160, root=root)
+    try:
+        win.rescan(force=True)
+        dlg = mc.AddRemoteDialog(win.found.modules, win)
+        kinds = [dlg.kind.itemData(i) for i in range(dlg.kind.count())]
+        assert kinds.count("magnet") == 1 and dlg.local["magnet"].instance == ""
+        dlg.close()
+    finally:
+        mc.remove_instance(iid, root)
+        win.rescan(force=True)
