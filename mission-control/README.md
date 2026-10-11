@@ -34,6 +34,31 @@ remembered after the service stops, marked "last seen".
   `suite_local.json`) and only changes what you see: services still start in
   the order they need (the camera after kim).
 
+## Two copies of one module (instances)
+
+One module can run more than once on this PC -- e.g. the oscilloscope module
+for the Siglent scope and, at the same time, for an Analog Discovery 2. Press
+**+** on the module's card (or right-click it > *Add instance…*) and give the
+copy:
+
+- a **name** (letters, digits, `_`), e.g. `dwf`. Its parameters in the
+  measurement suite become `scope_dwf.*`, next to the module's own `scope.*`,
+  so both can be used in one scan;
+- its own **ports** (the first free pair above the module's is suggested;
+  clashes are refused);
+- **extra arguments** for its service, e.g. `--driver dwf`;
+- optionally its own **settings file** (passed as `--config`; relative to the
+  module folder), so the two copies do not share one `.ini`.
+
+The copy gets a card of its own, marked `[instance]`, with Service / Stop /
+Restart / GUI / Ports / real and **Remove** (forgets the copy; the module's
+own card stays). It has its own real/sim switch and its own instrument
+address (*Instruments…* offers it separately), can be put in profiles, and its
+GUI connects to its own ports. Two copies cannot open the same instrument: the
+second real service is refused its address ("address busy" on the card).
+Saved in `../suite_local.json` under `modules.<key>.instances` (developer
+notes, section 4g).
+
 ## Security (encryption)
 
 **Security...** (next to *Instruments...*) manages this PC's key, the lab
@@ -54,7 +79,7 @@ card has a GUI button but no Start/Stop, since the service belongs to that PC.
 
 ## Where the choices are saved
 
-Ports, real/sim flags, the card order and remote services go in `../suite_local.json`, which is
+Ports, real/sim flags, the card order, remote services and instances go in `../suite_local.json`, which is
 this PC's file (not in git). The measurement suite in scan-core reads the same
 file, which is how it follows the launcher. Profiles are in `profiles.json`
 next to this script.

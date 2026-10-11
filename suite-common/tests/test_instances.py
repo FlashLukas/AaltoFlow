@@ -156,6 +156,14 @@ def test_start_order_with_an_instance(root):
     assert order.index("camera") > order.index("kim")
 
 
+def test_free_ports_after_skips_every_local_port_but_not_remote_ones(root):
+    mods = M.discover(root).modules
+    assert M.free_ports_after(mods, 5563) == (5567 + 2, 5567 + 3)   # 5565 zpiezo, 5567 kim
+    M.add_instance("kim", "b", 5569, root=root)
+    M.add_remote("lab2", 5571, 5572, "kim", root=root)            # elsewhere: free here
+    assert M.free_ports_after(M.discover(root).modules, 5567) == (5571, 5572)
+
+
 def test_the_catalog_never_lists_an_instance(root):
     from suite_common.catalog import build_catalog
     M.add_instance("kim", "b", 6100, root=root)

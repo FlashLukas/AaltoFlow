@@ -84,7 +84,8 @@ checkouts and installs made before the move.
 ## 3. Architecture overview
 
 ```
-suite-common     ── module discovery: <root>/modules/<category>/*/module.toml + suite_local.json (this PC)
+suite-common     ── module discovery: <root>/modules/<category>/*/module.toml + suite_local.json (this PC:
+                    port overrides, real flags, remote services, module instances -- section 4g)
 mission-control  ── discovers modules, spawns run_service.py / run_gui.py (never imports them)
 scan-core suite  ── follows the launcher: connects to the discovered modules that are running
 
@@ -1050,6 +1051,77 @@ buttons; while this PC HOLDS control the lab's Scan-tab definition is no
 longer followed (this PC is the one defining scans). Closing the suite closes
 its connections only.
 
+### 4g. Module instances: two copies of one module on one PC (2026-10-11)
+
+Lukas: run the scope module for the Siglent AND, with `--driver dwf`, for the
+Analog Discovery 2, side by side. A `module.toml` describes ONE service, so the
+extra copies are this PC's choice, kept in `suite_local.json` next to the
+module's other local settings (`suite_common/modules.py`, "module instances"):
+
+```json
+"modules": {"scope": {"real": true,
+                      "instances": [{"name": "dwf", "cmd": 5635, "pub": 5636,
+                                     "args": ["--driver", "dwf"],
+                                     "config": "", "real": true, "address": ""}]}}
+```
+
+- **Discovery** (`discover()`) turns each entry into a ModuleSpec of its own,
+  sorted right after its module: `id` **`scope#dwf`** (key `#` name, in the
+  style of a remote's `key@host:cmd`; `#` cannot occur in a key), `slug`
+  **`scope_dwf`**, `name` "Oscilloscope (dwf)", `instance` "dwf", its own
+  `cmd/pub` (which are also its "defaults": nothing to reset to), its own
+  `real` and `address`, plus `extra_args` and `config`. `dir`, scripts, icon,
+  category and `start_after` are the module's. A bad entry (bad name, no
+  ports, a name used twice, a reserved flag, a module not installed here) is
+  a reported problem, never a crash. **No `instances` key = discovery exactly
+  as before.**
+- **Names:** letters, digits and `_` (the name becomes part of every
+  parameter id, `scope_dwf.ch1`). Slugs are claimed in the order module keys,
+  then instances, then remotes; an instance slug that equals another
+  module's key gets `_<cmd>` appended.
+- **Service command line:** `service_args` = the launcher's own
+  `--cmd-port/--pub-port [--real [<address_arg> <address>]]`, then
+  `--config <file>` if the instance has one (relative = in the module
+  folder; 39 of 40 services take `--config`), then the extra args. The extra
+  args may NOT contain `--cmd-port`, `--pub-port`, `--real`, `--host` or
+  `--config` (`RESERVED_ARGS`): those belong to the launcher. The GUI gets
+  `--connect localhost --cmd-port/--pub-port` of the instance (it pulls its
+  config from the service), and runs its own simulator when the service is
+  down, like any card.
+- **Writing:** `add_instance(key, name, cmd, pub, args, config)`,
+  `remove_instance(id)`; `set_ports` / `set_real` / `set_address` take an
+  instance id as well as a key (`_local_entry`). `free_ports_after(modules,
+  cmd)` is the first free pair above the module's ports (scope 5633 -> 5635).
+  Clashes: `port_conflicts` covers instances like any local module.
+- **Endpoints:** `endpoints_json` lists the module under its key and an
+  instance only under its id (`"scope#dwf"`), like a remote: a module that
+  finds another by TYPE (camera -> kim) must never be handed a copy. Consumers
+  that build `{key: ...}` maps skip instances (`Discovery.by_key`,
+  `lab.known_ports`, the catalog, Add remote's type list, the data-file start
+  plan) -- otherwise the copy, sorted after its module, would overwrite it.
+- **scan-core** needs nothing new: follow-the-launcher (`api._discover_endpoints`,
+  the suite, the scan server) works by slug, `build_lab_registry(endpoints=)`
+  uses the slug as the prefix (gotcha #20), so `scope.*` and `scope_dwf.*`
+  are both registered and usable in one scan. `_check_identity` accepts
+  `scope_dwf` for a service whose describe says `scope` (key + `_`).
+- **One instrument, one service still holds:** nothing in the launcher stops
+  two copies from being pointed at the same instrument; the address lock
+  (hwlock, gotcha #37) does -- the second real backend is refused its address
+  and exits with code 4, and the card says who holds it. The card's "holds"
+  line matches hwlock entries by module KEY, so with two copies running both
+  cards list both addresses.
+- **Mission Control:** the `+` button on a local instrument card (or
+  right-click > Add instance...) opens `AddInstanceDialog`: name, ports
+  (first free pair, refused on a clash), extra arguments (one line, split like
+  a command line), settings file (only if the service script mentions
+  `"--config"`). The instance card has Service / Stop / Restart / GUI / Ports /
+  real / Remove (instance); profiles list it by id; with a custom card order
+  it sits under its module until moved.
+- **Port numbers:** `tools/new_module.py` picks the next free pair from the
+  committed module.toml files only; it does not see this PC's instances. A
+  new module that lands on an instance's ports shows up as a port clash in
+  the launcher -- move the instance (Ports).
+
 ---
 
 ## 5. Shared code conventions
@@ -1203,7 +1275,8 @@ zpiezo has no GUI.
 20. **Two copies of one module need distinct prefixes** (2026-09-15). A remote hf2
     and the local hf2 would both register `hf2.r1` and share the acquire group
     `hf2.sample`. scan-core names each connection by its discovery slug
-    (`hf2_lab2`) via `endpoints=`/`inst.alias`.
+    (`hf2_lab2`) via `endpoints=`/`inst.alias`. The same holds for a second
+    LOCAL copy, a module instance (`scope_dwf`, section 4g).
 21. **Probing a switched-off remote host blocks for the whole timeout**
     (2026-09-15). Both the launcher and the suite probe on background threads.
 22. **One global flag the launcher passes must exist in EVERY script.** clMag's
