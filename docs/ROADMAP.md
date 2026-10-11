@@ -303,19 +303,22 @@ Still open:
   only while the suite may submit. On hardware since 2026-10-06 (AFG + scope
   on the lab PC's server, watched from the office over 5551); phase 2 is
   simulation-tested only -- first real try: submit from the office with
-  control, add a scan to a running queue, copy the file. Still open:
-  * the watching suite's Scan tab builds against the lab's instruments only
-    when the server reports them (`instruments` in its status, i.e. a
-    server that follows the launcher); a server started with a FIXED
-    registry (`--sim`) exposes no parameter list, so the watcher's Scan tab
-    shows its own simulator and only the server's verdict at submit is the
-    lab's. A `get_registry` verb (the server's parameter manifest) would
-    close that gap;
+  control, add a scan to a running queue, copy the file. DONE 2026-10-11
+  (simulation-tested): the `get_registry` verb (the server's parameter
+  manifest, `registry_rev` in its status) -- a watching suite's Scan tab
+  builds on a PROXY of the server's registry, also for a server with a
+  FIXED registry (`--sim`) and whether or not the watcher reaches the lab's
+  modules (developer notes 4f, "The server's registry decides"); and the lab
+  PC's own suite (run on its server) shows the queue card with its edit
+  buttons. Still open:
   * inserting at a chosen place from the GUI: "+ Add to queue" (and a
     queue loaded with Load scan... while the server is busy) appends; Up /
     Down then place it. The verb takes an `index` already;
-  * the lab PC's own suite (run on its server) still has no queue card --
-    queue edits there go through a watcher view or a script.
+  * a proxy axis of an array detector knows its name, unit and declared
+    length, not its coordinate VALUES (a VNA's frequency grid: the module
+    computes it): a watcher's window card and previews cannot show the
+    frequencies the lab's suite shows. Values for short axes in the manifest,
+    or a `get_axis_values` verb, would close that.
 
 - **Run catalogue -> ELN upload**: the catalogue is done (2026-10-04: the
   suite's Catalogue tab, `scan_core/catalogue.py`, `python -m

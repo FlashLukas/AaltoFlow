@@ -904,9 +904,10 @@ or there is nothing to mirror. Not mirrored on purpose: which tab is open,
 plot zoom.
 **Phase 2 (built 2026-10-10; Lukas: "define and submit from the office"):**
 (a) a suite on ANOTHER PC defines and submits scans. Its Scan tab builds
-against the lab's instruments -- the mirror already connects the server's
-`instruments` under the server's slugs, so parameters, units and live limits
-are the lab's -- and the SERVER validates every submitted scan against its own
+against the lab's instruments -- since 2026-10-11 a proxy of the SERVER's
+registry (`get_registry`, see "The server's registry decides" below); before,
+the mirror's own connections to the server's `instruments` -- and the SERVER
+validates every submitted scan against its own
 registry; that verdict is the one that counts (the watcher sends even when its
 local check complains, and shows the server's refusal word for word). The
 "same PC only" submit rule is replaced by CONTROL: the ControlLease gate lets a
@@ -954,6 +955,7 @@ large map never rides the PUB socket.
 | `clear_fault` | `module` | yes* | forwarded to that module (`Lab.clear_fault`) |
 | `set_config` | `{server: {live_every_s}}` | yes* | `data_dir` is shown, never set over the wire |
 | `get_scan` | | no | `{scan_rev, queue_rev, entries [{id, name, recipe, attrs, n_points, result, path, rel_path, error, added_by}], current, busy, started_by}`; `rel_path` = a finished scan's file relative to the data folder, the name `get_file` takes |
+| `get_registry` | | no (a read) | `{registry_rev, registry, follow, modules}`: the server's PARAMETER MANIFEST (`scan_core/registry_wire.py`) -- settables (limits, unit, label, integer, resolution, storage, stream, ramp), detectors (dtype, storage, array axes with name/unit/length, acquire group, window, stream), actions (args, wait block). Works for a FIXED registry (`--sim`) too. `registry_rev` = CRC-32 of the manifest (stable across restarts) |
 | `get_view` | | no | `{view, view_rev, by}`: the plot choice of the suite on the server's PC |
 | `set_view` | `view` (JSON object, <= 20 kB) | no, but THIS PC only | refused `not_this_pc` from anywhere else: a watcher never steers the lab's screen |
 | `shutdown` | | never | while a scan runs: ABORT it and the queue, wait for the after-scan routine and the save, then exit |
@@ -969,7 +971,11 @@ stop_reason, summary}, `done`, `total`, `progress`, `eta_s`, `queue_eta_s`,
 `where_axes`, `now`, `faults` [{module, message, can_clear}], `pause_message`,
 `save_path`, `last_saved`, `save_error`, `live_rev`, `log_tail`, `log_n`,
 `error`, `pc`, `setup_name`, `data_dir`, `modules`, `phase` (2), `control`,
-`describe_rev`, `scan_rev`, `queue_rev`, `view_rev`. `scan_rev` moves on a
+`describe_rev`, `scan_rev`, `queue_rev`, `view_rev`, `registry_rev`
+(2026-10-11; moves when `get_registry` would answer differently -- a module
+started / stopped on the server's PC, a limit moved -- kept up to date by the
+follower thread every 3 s, which also refreshes limits from each module's
+`describe_rev` while idle; absent on an older server). `scan_rev` moves on a
 new submission, `queue_rev` on ANY change of the list (a submission, a queue
 edit, a scan that finished and so has a file): a watcher re-reads `get_scan`
 when either moves, and closes the definitions it had open only on a new
@@ -1002,11 +1008,24 @@ trust my readings" to a scan engine, and the server is not an instrument.
   Pause, Stop queue stay safety verbs). Each edit is logged
   ("QUEUE: 'x' added as scan 4 of 4 by office suite (anna@office-pc)") and
   the queue card shows "added by" on the scan.
-- *The server's registry decides.* A watcher's Scan tab uses the lab's
-  instruments through its own connections; it can lag a module that just
-  restarted on the lab PC, and a server with a FIXED registry (`--sim`)
-  reports no instruments at all. So a remote submit is sent even when the
-  local check complains, and the server's refusal is shown.
+- *The server's registry decides.* Since 2026-10-11 a watcher's Scan tab
+  builds on a PROXY of the server's own registry (`get_registry` ->
+  `registry_wire.registry_from_wire`): the same Settable / Gettable / Action
+  objects with the server's limits, units and capabilities, whose set / read
+  / run raise `RemoteOnly` (reads may go through a direct connection of the
+  watcher, `read_from`). So palette, validation, ETA and the advanced axis
+  settings show the lab's instruments whether or not the watcher can reach
+  them, and a server with a FIXED registry (`--sim`) is covered too. The
+  Control tab and the Navigator keep the watcher's direct connections (they
+  need live values). A moved limit updates the proxy IN PLACE
+  (`update_proxy`: the axis rows hold those objects and are re-clamped); a
+  module that came or went rebuilds it and the Scan tab's definition is
+  carried over by id. Not sent: an array detector's coordinate VALUES (the
+  module computes them; a proxy axis knows name, unit and declared length
+  only). The proxy can still lag the server by a poll, so a remote submit is
+  still sent when the local check complains, and the server's refusal is
+  shown. A server without `registry_rev` (older than 2026-10-11): the old
+  behaviour -- the watcher's own connections decide.
 - *Shutdown aborts instead of refusing.* Mission Control kills a service
   whose shutdown is refused; a kill would lose the after-scan routine and the
   final save. Mission Control asks before stopping a busy scan server and
@@ -1046,7 +1065,12 @@ on the suite side: `Suite._may_submit` = on the server's PC the setting, on
 another PC `ServerWatch.may_submit()` (control is ours or free), recomputed at
 every status frame; `ScanBuilder.server_submit` is a property whose setter
 re-shows the name / RUN INFO / per-point widgets and the queue card's edit
-buttons; while this PC HOLDS control the lab's Scan-tab definition is no
+buttons. The queue card is shown on the server's own PC too (2026-10-11,
+with the setting on: the lab's queue edits no longer need a watcher view or
+a script), there without "show what the lab shows" and "Copy to this PC".
+The Scan tab's registry while watching: `Suite._scan_registry()` (the proxy
+from `ServerWatch.registry_info`, else `self.registry`), given by
+`_adopt_scan_registry`. While this PC HOLDS control the lab's Scan-tab definition is no
 longer followed (this PC is the one defining scans). Closing the suite closes
 its connections only.
 
