@@ -273,6 +273,15 @@ run_demo.py
 run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + pm16 or hf2)
 ```
 
+## The `grid` axis: two knobs in one entry (2026-10-12)
+
+`{type: grid, x: {param, start, stop, num}, y: {...}, fast: x}` is ONE axis
+entry that makes TWO dimensions: a 2-D grid of any two knobs -- an XY map,
+but just as well field x frequency. `x` / `y` only name its two members;
+`fast` is the inner one. It was called `raster` until 2026-10-12; a
+definition (or the recipe_json of an older .nc) that says `raster` is read as
+`grid` and saved as `grid`.
+
 ## Axes that are not numbers: enum and string knobs (2026-10-12)
 
 A knob whose module declares it as an `enum` (with `options`) or a `string`
@@ -960,7 +969,7 @@ happening.* It works for any scan with something to measure:
 
 ```yaml
 axes:
-  - {type: raster, x: {param: pos_x, start: -45, stop: 45, num: 61},
+  - {type: grid, x: {param: pos_x, start: -45, stop: 45, num: 61},
                    y: {param: pos_y, start: -45, stop: 45, num: 61}}
 detectors: [lockin_r]
 scout: {axes: {pos_x: 3, pos_y: 3}, detector: reflectivity, keep: above}
@@ -1054,7 +1063,7 @@ applied to the whole scan). `zigzag: true` on an axis sweeps that axis
 BACKWARDS on every other sweep of it -- every other time the axes outside it
 advance -- so it does not go back to its start each time. On a fly axis every
 other row is flown back. It works on any axis but the outermost one, where
-nothing outside it advances (the box is greyed there; a raster row is the
+nothing outside it advances (the box is greyed there; a grid row is the
 exception, its fast dim zig-zags inside the row); a repeat axis cannot zig-zag.
 The data are the same either way, only the path between points changes. Tick
 it on several axes and the path is one continuous line: every step moves one

@@ -199,7 +199,7 @@ def is_picture(path) -> bool:
 
 def _raster_xy(axes_list) -> list[str] | None:
     rasters = [ax for ax in axes_list or []
-               if isinstance(ax, dict) and ax.get("type") == "raster"]
+               if isinstance(ax, dict) and ax.get("type") in ("grid", "raster")]
     if len(rasters) != 1:
         return None
     r = rasters[0]

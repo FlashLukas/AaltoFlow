@@ -119,6 +119,21 @@ def test_a_file_axis_may_hold_text(tmp_path):
     assert list(run(r, reg, created_iso="t")["input"].values) == ["A", "A-B"]
 
 
+def test_an_old_raster_axis_is_read_as_a_grid(tmp_path):
+    """`raster` (until 2026-10-12, "spatial XY") is the 2-D `grid` of any
+    two knobs; an old definition is translated when it is read."""
+    from scan_core import build_sim_registry
+    old = {"type": "raster", "x": {"param": "field", "start": 0, "stop": 10, "num": 3},
+           "y": {"param": "rf_freq", "start": 1000, "stop": 2000, "num": 2}, "fast": "x"}
+    for r in (Recipe(axes=[dict(old)], detectors=["lockin_r"]),
+              Recipe.from_dict({"axes": [dict(old)], "detectors": ["lockin_r"]})):
+        assert r.axes[0]["type"] == "grid"
+        assert r.validate(build_sim_registry()) == []
+        assert [d.name for d in r.compile().dims] == ["rf_freq", "field"]
+    r.save(tmp_path / "g.yaml")
+    assert "raster" not in (tmp_path / "g.yaml").read_text(encoding="utf-8")
+
+
 def test_the_yaml_round_trip_keeps_text_values(tmp_path):
     r = Recipe(axes=[{"type": "array", "param": "input", "values": INPUTS}], detectors=["sig"])
     r.save(tmp_path / "e.yaml")

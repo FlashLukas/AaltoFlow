@@ -8,8 +8,9 @@ matching hooks, reads every detector, and stores the values at the multi-index.
 Result: an xarray.Dataset with one named/units-carrying coordinate per dim and
 one data variable per detector — self-describing, arbitrary-N-D, netCDF-ready.
 
-There is no loop-count limit: 1-D, 2-D, 5-D are all the same code path. XY
-imaging is just two of the dims (from a raster axis).
+There is no loop-count limit: 1-D, 2-D, 5-D are all the same code path. A
+2-D grid of two knobs (an XY map, field x frequency) is just two of the dims
+(from a `grid` axis).
 """
 
 from __future__ import annotations

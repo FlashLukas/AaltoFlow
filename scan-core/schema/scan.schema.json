@@ -113,17 +113,17 @@
           "required": ["type", "members"]
         },
         {
-          "title": "raster (XY imaging = two dimensions)",
+          "title": "grid (a 2-D grid of any two knobs = two dimensions; an XY map, field x frequency ...). The old name 'raster' is read as grid",
           "type": "object",
           "properties": {
-            "type": {"const": "raster"},
+            "type": {"enum": ["grid", "raster"]},
             "x": {"allOf": [{"$ref": "#/$defs/linspec"}],
                   "properties": {"param": {"type": "string"}}, "required": ["param"]},
             "y": {"allOf": [{"$ref": "#/$defs/linspec"}],
                   "properties": {"param": {"type": "string"}}, "required": ["param"]},
             "fast": {"type": "string", "enum": ["x", "y"]},
             "zigzag": {"$ref": "#/$defs/axis_zigzag",
-                       "description": "both dims of the raster zig-zag: the fast one every other row, the slow one every other sweep of the axis outside the raster"}
+                       "description": "both dims of the grid zig-zag: the fast one every other row, the slow one every other sweep of the axis outside the grid"}
           },
           "required": ["type", "x", "y"]
         },

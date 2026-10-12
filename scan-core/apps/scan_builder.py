@@ -973,7 +973,7 @@ class AxisRow(_StackRow):
         the outermost axis -- unless it is a raster (two dims of its own)."""
         if not self.is_zigzag():
             return False
-        raster = isinstance(self._raw, dict) and self._raw.get("type") == "raster"
+        raster = isinstance(self._raw, dict) and self._raw.get("type") in ("grid", "raster")
         try:
             level = self._level_getter(self)
         except Exception:
@@ -1066,7 +1066,7 @@ class AxisRow(_StackRow):
         """The scan dims this row makes, X before Y for a raster (a picture's
         columns are the FIRST scouted axis, scout.picture_xy)."""
         ax = self.to_axis()
-        if ax.get("type") == "raster":
+        if ax.get("type") in ("grid", "raster"):
             return [ax["x"].get("name") or ax["x"]["param"],
                     ax["y"].get("name") or ax["y"]["param"]]
         try:
@@ -1435,7 +1435,7 @@ class AxisRow(_StackRow):
         # zig-zag needs an axis OUTSIDE this one to alternate with: greyed on
         # the outermost row (the setting is kept, and comes back into force
         # when the row moves inwards) -- a raster zig-zags inside itself
-        raster = isinstance(self._raw, dict) and self._raw.get("type") == "raster"
+        raster = isinstance(self._raw, dict) and self._raw.get("type") in ("grid", "raster")
         self.dir_box.setEnabled(level > 0 or raster or self.is_zigzag())
         self.dir_lbl.setToolTip("" if (level > 0 or raster) else
                                 "The outermost axis: nothing outside it advances,\n"

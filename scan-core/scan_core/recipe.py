@@ -45,7 +45,7 @@ zag goes to the advanced settings of each axis"): that axis is swept
 BACKWARDS on every other sweep, i.e. every other time the axes outside it
 advance (dim_zigzag below; engine.visit_index). On a fly axis
 it means every other row is flown back. On the outermost axis it does
-nothing (nothing outside it advances) -- except on a raster, whose inner
+nothing (nothing outside it advances) -- except on a grid, whose inner
 (fast) dim then zig-zags. The OLD scan-wide `zigzag: true` (before
 2026-10-11) is gone: a definition that still has it is translated into
 per-axis flags when it is read (upgrade_scan_wide_zigzag) and is never
@@ -55,7 +55,12 @@ linear : {type, param, start, stop, num, [name]}          -> 1 dim
 array  : {type, param, values:[...], [name]}              -> 1 dim
 file   : {type, param, path, [name]}                      -> 1 dim (values from CSV/txt)
 zip    : {type, name, members:[{param, ...spec}], }       -> 1 dim, several params in lockstep
-raster : {type, x:{param,start,stop,num}, y:{...}, fast}  -> 2 dims (spatial XY, first-class)
+grid   : {type, x:{param,start,stop,num}, y:{...}, fast}  -> 2 dims: a 2-D grid of ANY
+          two knobs in one entry (an XY map, field x frequency, ...). `x` and
+          `y` are only the names of its two members; `fast` (x or y) is the
+          inner one. Until 2026-10-12 this was `raster`; a definition that
+          still says so is read as `grid` (upgrade_axes) and never written
+          that way again.
 fly    : {type, param, start, stop, num, speed, [speed_param, readback,
           lag_correction, name]}                          -> 1 dim, INNERMOST only:
           one continuous move per row, binned by the measured position
@@ -70,9 +75,9 @@ repeat : {type, num, [mode: keep|average, interval_s, name]} -> 1 dim that sets
           keeps every repeat as a dimension; `average` stores mean/_std/_n.
 
 `compile(registry)` turns the axis list into an ordered list of Dim objects
-(raster expands to two dims), which the engine iterates as an odometer. Keeping
+(a grid expands to two dims), which the engine iterates as an odometer. Keeping
 "how you describe a scan" (axes) separate from "how you run it" (dims) is what
-lets XY imaging be one entry in the UI yet a genuine 2 dimensions in the data.
+lets a 2-D grid be one entry in the UI yet a genuine 2 dimensions in the data.
 """
 
 from __future__ import annotations
@@ -225,6 +230,8 @@ class Recipe:
     mask: dict | None = None
 
     def __post_init__(self):
+        # `raster` -> `grid` (2026-10-12), before anything reads the axes
+        self.axes = upgrade_axes(self.axes)
         if self.mask and not self.scout:
             from .scout import from_mask
             self.scout = from_mask(self.mask, self.axes)
@@ -249,6 +256,8 @@ class Recipe:
                                    "hooks", "output", "settle", "window",
                                    "scout", "mask", "diagonal")
                  if f in d}
+        if "axes" in known:
+            known["axes"] = upgrade_axes(known["axes"])
         if d.get("zigzag") is True and "axes" in known:
             # an OLD definition (or the recipe_json of an older .nc) with the
             # scan-wide switch: translated ONCE, here, into the per-axis flags
@@ -486,7 +495,7 @@ class Recipe:
                 if not ok:
                     errs.append(f"hook '{name}' every_n_points needs n >= 1")
             if when == "each_sweep":
-                # The axis is a DIM name, as in the data file: a raster gives
+                # The axis is a DIM name, as in the data file: a grid gives
                 # two of them. Checked here because a routine bound to an axis
                 # that was since removed from the stack would never fire.
                 if dim_names is not None and h.get("axis") not in dim_names:
@@ -613,15 +622,15 @@ def _check_text_axis(p, vals, text_vals: bool) -> list[str]:
 # ─────────────────────────── zig-zag, per axis (2026-10-11) ───────────────────
 
 def _axis_n_dims(ax: dict) -> int:
-    """How many dims an axis compiles to (a raster: two), without compiling
+    """How many dims an axis compiles to (a grid: two), without compiling
     it (a `file` axis would read its file)."""
-    return 2 if isinstance(ax, dict) and ax.get("type") == "raster" else 1
+    return 2 if isinstance(ax, dict) and _axis_type(ax) == "grid" else 1
 
 
 def dim_zigzag(axes) -> list[bool]:
     """One flag per compiled dim: is this dim swept backwards on every other
     sweep? An axis's `zigzag` applies to every dim it makes (both dims of a
-    raster); a repeat never zig-zags (it moves nothing, and reversing it would
+    grid); a repeat never zig-zags (it moves nothing, and reversing it would
     only shuffle which repeat is which). The flag of dim 0 has no effect."""
     out: list[bool] = []
     for ax in axes or []:
@@ -631,10 +640,21 @@ def dim_zigzag(axes) -> list[bool]:
     return out
 
 
+def upgrade_axes(axes) -> list:
+    """An OLD axis list in today's words: a `raster` axis (until
+    2026-10-12: "spatial XY") is a `grid` -- the same 2-D grid of any two
+    knobs, renamed because nothing in it is spatial. Returns new dicts for
+    the axes it changed; the others are the same objects. Not a list: as is."""
+    if not isinstance(axes, list):
+        return axes
+    return [{**ax, "type": "grid"} if isinstance(ax, dict) and ax.get("type") == "raster"
+            else ax for ax in axes]
+
+
 def upgrade_scan_wide_zigzag(axes) -> list:
     """The OLD scan-wide `zigzag: true` (before 2026-10-11) as per-axis flags:
     `zigzag: true` on every axis that has a dim inside the outermost one --
-    every axis but the first, and also the first when it is a raster (its
+    every axis but the first, and also the first when it is a grid (its
     fast dim is inner). A repeat gets none (it moves nothing). The ORDER is
     the per-axis rule's: the same as the old one in 2-D; in 3-D and up it
     saves the extra fly-back per outer step the old rule made when a middle
@@ -664,8 +684,16 @@ def zigzag_dim_names(recipe) -> list[str]:
 
 # ─────────────────────────── axis → Dim(s) helpers ────────────────────────────
 
-def _axis_param_ids(ax: dict) -> list[str]:
+def _axis_type(ax: dict) -> str:
+    """An axis dict's type, with the OLD name `raster` read as `grid`: a
+    single axis dict can reach the helpers below without going through a
+    Recipe (the builder's rows, the axis preview)."""
     t = ax["type"]
+    return "grid" if t == "raster" else t
+
+
+def _axis_param_ids(ax: dict) -> list[str]:
+    t = _axis_type(ax)
     if t == "repeat":
         return []                         # sets nothing
     if t in ("linear", "array", "file"):
@@ -677,13 +705,13 @@ def _axis_param_ids(ax: dict) -> list[str]:
                 + ([ax["move"]] if ax.get("move") else []))
     if t == "zip":
         return [m["param"] for m in ax["members"]]
-    if t == "raster":
+    if t == "grid":
         return [ax["x"]["param"], ax["y"]["param"]]
     raise ValueError(f"unknown axis type {t!r}")
 
 
 def _compile_axis(ax: dict) -> list[Dim]:
-    t = ax["type"]
+    t = _axis_type(ax)
     if t == "repeat":
         from .repeat import interval_of, mode_of, num_of
         n = num_of(ax)
@@ -711,13 +739,13 @@ def _compile_axis(ax: dict) -> list[Dim]:
         name = ax.get("name") or "+".join(p for p, _ in vecs)
         return [Dim(name=name, params=vecs, size=n, kind="zip")]
 
-    if t == "raster":
+    if t == "grid":
         xv = _values_from_spec(ax["x"]);  xp = ax["x"]["param"]
         yv = _values_from_spec(ax["y"]);  yp = ax["y"]["param"]
         xname = ax["x"].get("name") or xp
         yname = ax["y"].get("name") or yp
-        xdim = Dim(name=xname, params=[(xp, xv)], size=len(xv), kind="raster_x")
-        ydim = Dim(name=yname, params=[(yp, yv)], size=len(yv), kind="raster_y")
+        xdim = Dim(name=xname, params=[(xp, xv)], size=len(xv), kind="grid_x")
+        ydim = Dim(name=yname, params=[(yp, yv)], size=len(yv), kind="grid_y")
         # `fast` axis becomes the INNER (last) dim so it varies quickest
         fast = ax.get("fast", "x")
         return [xdim, ydim] if fast == "y" else [ydim, xdim]

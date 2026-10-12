@@ -1317,6 +1317,17 @@ looks an instrument up by its id.
   is written as `str` objects (`engine._coord_values`, h5netcdf vlen
   strings); a text condition as a scalar text coordinate. `registry_wire`
   carries dtype + options. Bools stay numeric 0/1.
+- **`raster` -> `grid`.** The 2-D axis entry is a grid of ANY two knobs, not
+  "spatial XY": `type: grid`. `recipe.upgrade_axes` translates `raster` in
+  `Recipe.from_dict` and `__post_init__` (so it is never written again);
+  the axis helpers (`_axis_type`) also read a lone `raster` dict, because
+  the builder's rows and the axis preview pass dicts that never went through
+  a Recipe. Dim kinds are `grid_x` / `grid_y`.
+- **Settle timeout.** `settle.default_timeout_s` (20) is written into every
+  definition but read by nothing (checked 2026-10-12); a knob waits for its
+  module's describe `timeout_s`, 60 s when undeclared (manifest.py). Wiring
+  it in would cut every undeclared wait to 20 s in all saved definitions --
+  left for a decision.
 
 ---
 
