@@ -1427,6 +1427,65 @@ measured peak.*
   and a "track" combo. Values are kept per predictor across a switch.
   Render targets `suite-window-kittel`, `suite-window-expression`.
 
+### 4k. The suite GUI without a rig: demo, spacing, options, positioner (2026-10-12)
+
+The GUI half of the de-rig audit (4i is the scan-core half). The rule is the
+same: nothing on screen may assume the TR-MOKE rig, and nothing may pass the
+simulator off as instruments.
+
+- **DEMO, never silent.** `build_sim_registry()` marks its registry
+  `demo = True` (`Registry.demo`, False otherwise; `registry_wire` sends
+  `"demo": true` only when set, so a lab's manifest revision is unchanged).
+  The suite shows a red-outlined "DEMO -- simulated instruments" badge
+  (`scan_builder.demo_badge`, one text `DEMO_TEXT`) in its header, in the run
+  bar (`ScanBuilder.demo_lbl`, `is_demo()`) and on the Settings tab ("Now
+  using:"); the startup / switch log lines say DEMO; the button is "Use
+  simulator (demo)". `Suite.is_demo()` = no Lab and the Scan tab's registry
+  is a demo one (a watched scan server running `--sim` counts). The ENGINE
+  writes the file attribute `source = "demo"` when `registry.demo` -- so a
+  script or a scan server on the simulator marks its files as well.
+- **Axis spacing** (`AxisRow.spacing_box`: linear / log / list / file). Each
+  maps to an existing recipe type: linear -> `linear`; log -> `linear` with
+  the new key `spacing: log` (`recipe._values_from_spec`: `np.geomspace`;
+  from / to of one sign and not 0, `num` required -- else a compile error in
+  validate); list -> `array` (`values`); file -> `file` (`path`). `load_recipe`
+  loads `array` / `file` into an editable row (only `grid` and `zip` stay
+  pass-through rows, which now SAY what they are, `_raw_axis_text`). Fly is
+  offered with linear spacing only. A typed list keeps a token that is not a
+  number as text, so validate names it. An axis with no values is refused.
+- **Non-numeric knobs** (`registry.is_numeric_param` False: enum / string):
+  the row offers only "list" -- `OptionPicker` (a multi-select of
+  `p.options` with "all options", values in the declared order) for an enum,
+  a ';'-separated text box for a string knob; no fly, no scout. Conditions,
+  routine set steps and scout settings use `OptionBox` (a combo of the
+  options, editable for a string knob) through `_value_box` / `_set_box`;
+  their `value()` returns the option itself. Nothing formats such a value
+  with float() or `:g` (`preview.format_value`; the axis preview's
+  `_member` keeps text, `step_summary` says "N values" or "log, xR per step").
+- **Old `{action: autofocus}` hooks** are migrated by role when a definition
+  is loaded into the builder (`load_recipe` calls `recipe.migrate_roles`;
+  a problem is listed with the missing ids).
+- **Scout warning**: the tooltip names the connected action(s) with
+  `role: autofocus`, not a camera.
+- **Fly in the builder**: the speed-control combo comes from
+  `flyscan.find_speed_param` (declared `speed_param` first) plus every rate
+  of the moving knob's module in ANY rate unit; the speed box stays in the
+  knob's unit per second, its range is the control's limits converted with
+  `flyscan.speed_factor`, and the label shows what the control receives
+  ("um/s  (= 120000 nm/min)"). User-facing: "bins", "samples/bin",
+  "N bins (fly)", "positioner".
+- **Wording**: "2-D grid", generic tooltips (diagonal row change, scout
+  settings, routine examples). "Diagonal row change" is shown only with two
+  or more STEPPED dims (`ScanBuilder._stepped_dims`; a grid counts two, a
+  flown axis and a repeat none).
+- **Navigator**: the tab is shown only when `navigator.stage_pairs(registry)`
+  finds a pair (`Suite._sync_navigator_tab`). X and Y are two combos over
+  `length_settables` (preselected: the best-ranked pair), turned into a pair
+  by `make_pair` -- a mismatch (one knob twice, two units) is explained on
+  the card instead of moved. Sessions and the published nav state store
+  `stage: {x: id, y: id}` (an older session's pair label is still matched).
+  Wording: "reference point", "positioner", "field of view".
+
 ## 5. Shared code conventions
 
 The full blueprint is `INSTRUMENT_MODULE_GUIDE.md` in the root. **It dates from

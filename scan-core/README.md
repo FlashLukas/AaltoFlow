@@ -309,6 +309,38 @@ and the data file gets a TEXT coordinate (netCDF-4 variable-length string)
 that `scan_core.data.load` reads back. Linear / log spacing is for numbers
 only. Bool knobs stay numeric (0/1; `true`/`false` are accepted in a list).
 
+In the Scan Builder such a knob's row offers only the spacing **list**: a
+drop-down with a tick per option and "all options" (all of them by default);
+a string knob gets a text box (values separated by ';'). As a condition or a
+routine's "set" step it is a combo of its options.
+
+## Axis spacing in the Scan Builder: linear / log / list / file (2026-10-12)
+
+Every axis row has a **spacing** box next to its unit; each choice is one of
+the recipe's own axis types:
+
+| spacing | recipe | points |
+|---|---|---|
+| linear | `{type: linear, start, stop, num}` | equal steps |
+| log | `{type: linear, start, stop, num, spacing: log}` | equal RATIOS (`np.geomspace`): 1, 10, 100 ... -- from and to of one sign, neither 0 |
+| list | `{type: array, values: [...]}` | as typed (numbers by commas or spaces) |
+| file | `{type: file, path: ...}` | one value per line of a text file |
+
+Fly is offered with linear spacing only (a flown row is binned in equal
+steps). A definition with an `array` or `file` axis loads into an editable
+row; only a 2-D `grid` and a `zip` stay rows that are shown, not edited. An
+axis with no values (nothing picked, an empty file) is refused before the run.
+
+## The DEMO: the suite with nothing connected (2026-10-12)
+
+With no module connected the suite and the Scan Builder run on the toy
+MOKE / FMR simulator (`build_sim_registry`) -- kept on purpose, to try the
+software out -- and SAY so: a red "DEMO -- simulated instruments" badge in the
+header, the run bar and the Settings tab ("Use simulator (demo)" there), and
+the log. Every file measured on it carries the attribute `source = "demo"`
+(written by the engine, so scripts and a scan server running `--sim` do it
+too); a watched scan server on the simulator shows the badge as well.
+
 **Settle timeout.** How long a knob may take to settle is its module's
 `timeout_s` in `describe`; a module that declares none gets **60 s**
 (`scan_core/manifest.py`). The recipe's `settle: {default_timeout_s: 20}` is
@@ -664,7 +696,7 @@ stepped scan gives -- same coordinates, same file -- built from where the stage
 really was.
 
 In the Scan Builder, open **Advanced** on the innermost axis row and tick
-**fly this axis** in its FLY group; give a speed, and `pts` become pixels. The
+**fly this axis** in its FLY group; give a speed, and `pts` become bins. The
 same group holds the speed knob, the row timeout, the lag correction and the
 readback; the direction (one-way or zig-zag) is in the POINT group of the same
 panel. In a recipe:
@@ -690,7 +722,11 @@ stage, smaract and ddr25 do); only for a module that does not say, the
 builder guesses a control of the same module whose unit is a rate of the
 position's (`flyscan.find_speed_param`). A control in another rate unit is
 converted (`flyscan.speed_factor`, `units.rate_factor`: 2 um/s is set as
-120000 on a `nm/min` control; /s, /min and /h, within one unit family).
+120000 on a `nm/min` control; /s, /min and /h, within one unit family). The
+builder's FLY group lists the declared control first, then every other rate
+of that module; the speed box stays in um/s (the knob's unit per second),
+its range is the control's limits converted, and the label says what the
+control will receive ("um/s  (= 120000 nm/min)").
 User-facing messages call the samples' cells "bins" and the moving
 instrument "the positioner".
 
@@ -711,8 +747,8 @@ What it takes care of:
   A stream delivers what it delivers: a lock-in 50 samples a second, an
   oscilloscope one per RECORD (a few a second, fewer at a slow time base). A
   module may say how many in its `stream` block (`rate_hz`); from it the
-  Scan Builder's summary shows the expected samples per pixel of the thinnest
-  stream ("~0.25 samples/pixel (scope.ch1_pk2pk)") and a WARNING below one,
+  Scan Builder's summary shows the expected samples per bin of the thinnest
+  stream ("~0.25 samples/bin (scope.ch1_pk2pk)") and a WARNING below one,
   naming the detector and the speed that gives >= 1 and >= 3 per pixel. Run
   stays enabled: the user decides. The run log repeats the estimate at the
   start, says the first row with EMPTY pixels (no sample fell in them: NaN in
