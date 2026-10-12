@@ -94,7 +94,8 @@ def _settable(p) -> dict:
             "storage": _storage(getattr(p, "storage", None)),
             "stream": _stream(p),
             "ramp": _ramp(getattr(p, "ramp", None)),
-            "role": getattr(p, "role", None)}
+            "role": getattr(p, "role", None),
+            "speed_param": getattr(p, "speed_param", None)}
 
 
 def _gettable(p) -> dict:
@@ -263,6 +264,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
         p.storage = _storage_from(d.get("storage"))
         p.ramp = _ramp_from(d.get("ramp"))
         p.role = d.get("role") if isinstance(d.get("role"), str) else None
+        p.speed_param = d.get("speed_param") if isinstance(d.get("speed_param"), str) else None
         _attach_stream(p, d, streams)
         reg.add(p)
     for d in wire.get("gettables") or []:
@@ -306,7 +308,8 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
 _PARAM_ATTRS = ("label", "unit", "limits", "integer", "resolution", "storage", "ramp",
                 "stream", "stream_channel", "stream_scale", "stream_rate_hz", "axes",
                 "dtype", "acquire",
-                "window", "_send", "role", "focus_sensitive")
+                "window", "_send", "role", "focus_sensitive",
+                "speed_param")
 _ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait",
                  "role")
 

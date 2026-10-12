@@ -641,6 +641,17 @@ detectors: [hf2.x1, hf2.y1]
 *A zig-zag fly scan over the simulated islands: Y stepped, X flown at 60 um/s,
 31 x 91 pixels in under a minute.*
 
+**The speed knob.** `speed` is always in the flown knob's unit per SECOND.
+The control it is set on (`speed_param`) is the one the module declares in
+`describe` (`speed_param: velocity_x` on its position knob -- kim, piezo,
+stage, smaract and ddr25 do); only for a module that does not say, the
+builder guesses a control of the same module whose unit is a rate of the
+position's (`flyscan.find_speed_param`). A control in another rate unit is
+converted (`flyscan.speed_factor`, `units.rate_factor`: 2 um/s is set as
+120000 on a `nm/min` control; /s, /min and /h, within one unit family).
+User-facing messages call the samples' cells "bins" and the moving
+instrument "the positioner".
+
 What it takes care of:
 
 * **The lock-in lag.** A lock-in's output describes where the stage was a few

@@ -120,13 +120,13 @@ def test_a_well_formed_fly_scan_validates(reg):
      ("lockin_r",), (), "innermost"),
     ([_fly(speed=0)], ("lockin_r",), (), "speed > 0"),
     ([_fly(speed=900)], ("lockin_r",), (), "outside the limits"),
-    ([_fly(num=1)], ("lockin_r",), (), "at least 2 pixels"),
+    ([_fly(num=1)], ("lockin_r",), (), "at least 2 bins"),
     ([_fly(param="pos_z")], ("lockin_r",), (), "cannot be recorded continuously"),
     ([_fly()], ("fmr",), (), "does not stream traces"),
     ([_fly()], ("lockin_r",), ({"when": "before_point", "action": "wait_ms"},),
-     "stage does not stop"),
+     "positioner does not stop"),
     ([_fly()], ("lockin_r",), ({"when": "every_n_points", "n": 5, "action": "wait_ms"},),
-     "stage does not stop"),
+     "positioner does not stop"),
     ([_fly()], ("lockin_r",), ({"when": "before_axis", "axis": "pos_x",
                                 "action": "wait_ms"},), "changes continuously"),
     ([_fly(speed_param="nothing")], ("lockin_r",), (), "not available"),
@@ -153,6 +153,60 @@ def test_stepped_recipes_are_untouched_by_the_fly_rules(reg):
 def test_the_speed_knob_is_found_for_a_position(reg):
     assert find_speed_param(reg, "pos_x") == "stage_speed"
     assert find_speed_param(reg, "field") is None
+
+
+def test_the_declared_speed_param_wins_and_other_rate_units_convert():
+    """2026-10-12: describe `speed_param` is used first (any name, any
+    unit); the fallback guess accepts any rate of the position's unit
+    (nm/min), and the fly speed (um/s) is converted into it."""
+    from scan_core.flyscan import speed_factor
+    from scan_core.registry import Registry, Settable
+    r = Registry()
+    seen = []
+    pos = r.add(Settable("m.position_x", "X", "um", (-100, 100), lambda v: None, lambda: 0.0))
+    r.add(Settable("m.velocity_x", "V", "um/s", (0, 10), lambda v: None, lambda: 0.0))
+    r.add(Settable("m.feed", "Feed", "nm/min", (0, 1e6), seen.append, lambda: 0.0))
+    assert find_speed_param(r, "m.position_x") == "m.velocity_x"      # the guess
+    pos.speed_param = "m.feed"                                         # the module says
+    assert find_speed_param(r, "m.position_x") == "m.feed"
+    ax = {"type": "fly", "param": "m.position_x", "start": 0, "stop": 1, "num": 3,
+          "speed": 2.0, "speed_param": "m.feed"}
+    assert speed_factor(ax, r) == pytest.approx(60000.0)
+    # only a nm/min control: found by the fallback too
+    r2 = Registry()
+    r2.add(Settable("m.position_x", "X", "um", (-100, 100), lambda v: None, lambda: 0.0))
+    r2.add(Settable("m.feed", "Feed", "nm/min", (0, 1e6), lambda v: None, lambda: 0.0))
+    r2.add(Settable("m.field_rate", "B rate", "mT/min", (0, 9), lambda v: None, lambda: 0.0))
+    assert find_speed_param(r2, "m.position_x") == "m.feed"
+    # validate converts before comparing with the control's limits ...
+    from scan_core.flyscan import validate_fly
+    rec = Recipe(axes=[dict(ax, speed=20.0)], detectors=[])     # 20 um/s = 1.2e6 nm/min
+    assert any("20 um/s = 1.2e+06 nm/min" in e and "outside the limits" in e
+               for e in validate_fly(rec, r))
+    # ... and refuses a control whose unit is no rate of the position's
+    rec = Recipe(axes=[dict(ax, speed_param="m.field_rate")], detectors=[])
+    assert any("not a rate of 'um'" in e for e in validate_fly(rec, r2))
+
+
+def test_a_fly_row_sets_the_converted_speed():
+    """The speed control receives the fly speed in ITS unit (nm/min)."""
+    reg = build_sim_registry()
+    s = reg._state
+    from scan_core.registry import Settable
+    got = []
+
+    def set_feed(v):
+        got.append(v)
+        s.stage_speed_um_s = v / 60000.0          # nm/min -> um/s for the sim
+    reg.add(Settable("feed", "Feed", "nm/min", (0, 1e8), set_feed,
+                     lambda: s.stage_speed_um_s * 60000.0))
+    reg.get("pos_x").speed_param = "feed"
+    ax = {"type": "fly", "param": "pos_x", "start": -5, "stop": 5, "num": 11,
+          "speed": 100.0, "speed_param": "feed"}
+    r = Recipe(axes=[ax], detectors=["lockin_r"])
+    assert r.validate(reg) == []
+    run(r, reg, created_iso="t")
+    assert pytest.approx(6.0e6) in got                     # 100 um/s in nm/min
 
 
 def test_row_seconds_is_the_run_in_to_run_out_time():

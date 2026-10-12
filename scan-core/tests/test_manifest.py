@@ -262,3 +262,40 @@ def test_refresh_stale_respects_the_prefix(fake_service):
         assert reg.get("fake.field").limits == (-5.0, 5.0)
     finally:
         lab.close()
+
+
+def test_roles_and_links_come_from_the_manifest():
+    """2026-10-12: `role`, `speed_param` (prefixed like every id) and
+    `focus_sensitive` reach the registry -- and survive the scan server's
+    get_registry round trip."""
+    from scan_core.registry_wire import registry_from_wire, registry_to_wire
+
+    class _Stub:
+        name = "m"
+
+        def status(self):
+            return {}
+
+        def command(self, verb, **kw):
+            return {"ok": True}
+
+    man = {"module": "m", "parameters": [
+        {"id": "position_x", "label": "X", "kind": "control", "type": "float",
+         "unit": "um", "set": {"verb": "move", "arg": "v"}, "role": "stage_x",
+         "speed_param": "velocity_x"},
+        {"id": "velocity_x", "label": "V", "kind": "control", "type": "float",
+         "unit": "um/s", "set": {"verb": "vel", "arg": "v"}},
+        {"id": "refl", "label": "R", "kind": "indicator", "type": "float",
+         "read_path": ["r"], "focus_sensitive": True},
+        {"id": "af", "label": "AF", "kind": "action", "type": "action",
+         "role": "autofocus", "wait": {"ready": {"policy": "immediate"}}}]}
+    reg = Registry()
+    register_manifest(reg, _Stub(), man, prefix=True)
+    for r in (reg, registry_from_wire(registry_to_wire(reg))):
+        assert r.get("m.position_x").role == "stage_x"
+        assert r.get("m.position_x").speed_param == "m.velocity_x"
+        assert r.get("m.velocity_x").speed_param is None
+        assert r.get("m.refl").focus_sensitive is True
+        assert [a.id for a in r.actions_with_role("autofocus")] == ["m.af"]
+    from scan_core.flyscan import find_speed_param
+    assert find_speed_param(reg, "m.position_x") == "m.velocity_x"

@@ -35,7 +35,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help=""):
+       settle=None, args=None, danger=False, help="",
+       role=None, speed_param=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -47,7 +48,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("help", help)):
+                 ("help", help), ("role", role),
+                 ("speed_param", speed_param)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -119,6 +121,11 @@ def build_manifest(brain) -> dict:
         params += [
             _p(f"position_{low}", f"Position {ax}", "control", "float",
                unit="um", group="Position", order=10 + i,
+               # `speed_param` (guide 6b): the control that sets how fast
+               # this knob moves -- a fly scan sets its speed there;
+               # `role` stage_x / stage_y: the navigator offers this pair first
+               speed_param=f"velocity_{low}",
+               role={"x": "stage_x", "y": "stage_y"}.get(low),
                min=lim.travel_min, max=hi, step=cfg.motion.jog_step,
                decimals=3, plottable=True, read_path=["position", i],
                set={"verb": "move_axis", "arg": "position",

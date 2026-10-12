@@ -354,6 +354,12 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # narrow the storage (storage.py, from_descriptor).
             param.storage = Storage.from_descriptor(d, use_bounds=False)
             param.role = _role(d)
+            # describe `speed_param: <id>` (guide 6b): the control that sets
+            # how fast this knob moves -- what a fly scan sets the fly speed on
+            # (flyscan.find_speed_param). Prefixed like every id of the module.
+            sp = d.get("speed_param")
+            if isinstance(sp, str) and sp.strip():
+                param.speed_param = f"{module}.{sp.strip()}" if prefix else sp.strip()
             added.append(pid)
 
         elif kind == "indicator" or (kind == "control" and not d.get("set")):

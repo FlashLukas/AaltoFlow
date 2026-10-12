@@ -1292,6 +1292,18 @@ looks an instrument up by its id.
   > `other` (any two in the same unit factor, each unordered pair once).
   `StagePair.rank` says which; `length_settables` lists the candidates and
   `make_pair(x, y)` builds the user's own pick (ValueError on mixed units).
+- **Fly speed control** (`flyscan.find_speed_param`): describe
+  `speed_param` on the moving knob (`Parameter.speed_param`, prefixed by
+  manifest.py) wins; the old guess (same module, `<unit>/s`, same axis
+  letter) is only the fallback and now accepts any rate of the unit.
+  `flyscan.speed_factor(ax, registry)` converts the fly speed (knob unit per
+  second, as `speed` is always written) into the control's own unit
+  (`units.rate_factor`); `validate_fly` checks the CONVERTED value against
+  the control's limits and refuses a unit that is no rate of the knob's.
+  User-facing fly messages say "bins" and "positioner" (not pixels / stage);
+  the per-bin count's file label is "samples per bin".
+- `scan_core/units.py` is the one place for unit facts: length detection
+  (exact um factors), unit families, rate conversion (/s, /min, /h).
 
 ---
 

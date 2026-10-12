@@ -508,6 +508,7 @@ optional fields on the descriptor:
 |---|---|---|
 | `"role": "autofocus"` | an action with a `wait` block | THE autofocus of the setup. An old recipe's built-in `autofocus` hook is translated into a routine step running it; the scout pass warns when none runs before it. Declare it on one action per module. |
 | `"role": "stage_x"` / `"stage_y"` | a length control | the navigator offers this pair first as its X / Y. |
+| `"speed_param": "velocity_x"` | a control that MOVES (a position, an angle) | the id (within the module) of the control that sets how fast it moves. A fly scan sets its speed there; the speed is converted when that control's unit is another rate of the knob's unit (`nm/min` for a knob in `um`; /s, /min, /h). Declared by kim, piezo, stage, smaract, ddr25. |
 | `"focus_sensitive": true` | an indicator (detector) | its reading changes with focus (a reflectivity, a camera image): the scout pass warns when no autofocus runs before it, whatever axes it scouts. |
 
 `role` is a plain string; scan-core reads it with

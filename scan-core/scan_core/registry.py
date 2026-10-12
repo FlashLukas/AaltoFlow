@@ -53,6 +53,10 @@ class Parameter:
     #: `focus_sensitive: true`): a reflectivity, a camera image. The scout
     #: pass warns when no autofocus runs before it (scout.autofocus_warning).
     focus_sensitive = False
+    #: The id of the settable that sets how FAST this knob moves (describe
+    #: `speed_param`): a fly scan sets its speed there (flyscan.find_speed_param).
+    #: None = the module does not say (a same-module rate unit is guessed).
+    speed_param = None
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
@@ -907,7 +911,9 @@ def build_sim_registry() -> Registry:
                          set_fn=lambda v, a=attr: s.move(a, v),
                          get_fn=lambda a=attr: getattr(s, a),
                          send_fn=lambda v, a=attr: send_move(a, v))
-                ).role = "stage_" + pid[-1]   # the navigator's default pair
+                )
+        reg.get(pid).role = "stage_" + pid[-1]   # the navigator's default pair
+        reg.get(pid).speed_param = "stage_speed"  # what a fly scan sets the speed on
     settable("pos_z",     "Position Z",     "um",  (-50, 50),   "z_um")
     settable("stage_speed", "Stage speed (0 = instant)", "um/s", (0, 500),
              "stage_speed_um_s")

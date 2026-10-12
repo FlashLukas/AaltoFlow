@@ -188,3 +188,24 @@ def test_declared_types_fit_status():
         _check_types(build_manifest(brain), status_to_dict(brain.status()))
     finally:
         brain.shutdown()
+
+
+def test_position_names_its_speed_control():
+    """describe `speed_param` (2026-10-12): the knob a fly scan sets the
+    speed on is declared, not guessed -- it exists, is a writable control,
+    and its unit is the position's unit per second. X and Y declare role stage_x / stage_y."""
+    cfg, brain = _brain()
+    try:
+        p = _by_id(build_manifest(brain))
+        for pos, vel in [('position_x', 'velocity_x'), ('position_y', 'velocity_y'), ('position_z', 'velocity_z')]:
+            d = p[pos]
+            assert d["speed_param"] == vel
+            v = p[vel]
+            assert v["kind"] == "control" and v.get("set")
+            assert v["unit"] == d["unit"] + "/s"
+        # an XY sample stage: the navigator offers this pair first
+        assert p["position_x"]["role"] == "stage_x"
+        assert p["position_y"]["role"] == "stage_y"
+        assert "role" not in p.get("position_z", {})
+    finally:
+        brain.shutdown()
