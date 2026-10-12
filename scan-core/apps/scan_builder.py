@@ -1635,7 +1635,7 @@ class AxisRow(_StackRow):
                 self.fly.setChecked(False)
                 copied.append("fly off")
         elif src.is_fly():
-            skipped.append("fly (a raster / zip row cannot fly)")
+            skipped.append("fly (a 2-D grid / zip row cannot fly)")
         # DIRECTION (zig-zag fits every axis that moves something)
         if src.is_zigzag() != self.is_zigzag():
             self.set_zigzag(src.is_zigzag())
@@ -4968,7 +4968,8 @@ class ScoutSection(QtWidgets.QFrame):
             "scouted axes); or an earlier scan of the same axes (.nc).")
         self.det_box = QtWidgets.QComboBox()
         self.det_box.setToolTip("What the scout reads: any detector that gives ONE\n"
-                                "number per point (a reflectivity, a power, a lock-in R).")
+                                "number per point (a reflectivity, a power, a signal\n"
+                                "amplitude -- whatever shows where something is).")
         self.det_box.setMinimumWidth(160)
         self.det_box.currentIndexChanged.connect(lambda *_: self._edited())
         self.det_label = lbl("look at")
@@ -4985,7 +4986,8 @@ class ScoutSection(QtWidgets.QFrame):
         self.var_edit = QtWidgets.QLineEdit()
         self.var_edit.setPlaceholderText("variable")
         self.var_edit.setFixedWidth(110)
-        self.var_edit.setToolTip("The variable read from the earlier scan (e.g. lockin_r).")
+        self.var_edit.setToolTip("The variable read from the earlier scan: the id of the\n"
+                                 "detector it recorded.")
         self.var_edit.editingFinished.connect(self._edited)
         self.file_label = lbl("file")
         r1 = row()
@@ -5034,15 +5036,15 @@ class ScoutSection(QtWidgets.QFrame):
             "once -- one scout at their first values, one mask for all of them\n"
             "  (a patterned sample does not move with the field);\n"
             "each -- a new scout at every step of them, for a feature that moves\n"
-            "  with them (an FMR line drifting with the angle).\n"
+            "  with them (a resonance drifting with an angle or a field).\n"
             "Axes INSIDE a scouted one are held at their first value during the\n"
             "scout, and the mask holds for all their values.")
         self.outer_label = lbl("outer axes")
         self.add_setting = QtWidgets.QComboBox()
         self.add_setting.setToolTip(
             "A setting held ONLY during the scout and put back for the real scan\n"
-            "-- also after an Abort or an error: a short lock-in time constant,\n"
-            "one scope average, a higher power. The scout is then fast even with\n"
+            "-- also after an Abort or an error: a shorter filter time constant,\n"
+            "fewer averages, a higher power. The scout is then fast even with\n"
             "the same instrument.")
         self.add_setting.setMaximumWidth(190)
         self.add_setting.activated.connect(self._add_setting_from_combo)
@@ -6033,7 +6035,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         head = QtWidgets.QHBoxLayout()
         tag = QtWidgets.QLabel("THROUGHOUT SCAN"); tag.setObjectName("tag")
         head.addWidget(tag)
-        self.throughout_empty = QtWidgets.QLabel("nothing -- e.g. autofocus once per row")
+        self.throughout_empty = QtWidgets.QLabel("nothing -- e.g. an action once per row")
         self.throughout_empty.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
         self.throughout_empty.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                             QtWidgets.QSizePolicy.Preferred)
@@ -6041,7 +6043,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         head.addStretch(1)
         new = QtWidgets.QPushButton("＋ New")
         new.setToolTip("A routine that runs during the scan: every N points, or\n"
-                       "once per sweep of an axis (e.g. autofocus before every row).\n"
+                       "once per sweep of an axis (e.g. an action before every row).\n"
                        "The scan waits until it has finished.")
         new.clicked.connect(lambda: self.add_throughout())
         head.addWidget(new)
@@ -6124,6 +6126,18 @@ class ScanBuilder(QtWidgets.QMainWindow):
             if p is not None:
                 out[name] = p.label
         return out
+
+    def _stepped_dims(self) -> int:
+        """How many STEPPED dims the stack makes (a 2-D grid: two; a flown
+        axis and a repeat: none -- they set nothing between points). The
+        diagonal row change needs two of them to have a row change at all."""
+        n = 0
+        for r in self.rows:
+            if not isinstance(r, AxisRow) or r.is_fly():
+                continue
+            n += 2 if (isinstance(r.raw, dict)
+                       and r.raw.get("type") in ("grid", "raster")) else 1
+        return n
 
     def _dim_names(self) -> list[str]:
         """The scan's dims (outer -> inner) as the axis stack stands now."""
@@ -6520,13 +6534,14 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # 2026-10-11 each axis has its own, in its Advanced > POINT > direction)
         self.diagonal_box = QtWidgets.QCheckBox("diagonal row change")
         self.diagonal_box.setToolTip(
-            "At the start of a new row, send BOTH new coordinates and then wait,\n"
-            "so the stage (or the camera's stabiliser) goes straight to the first\n"
-            "point of the next row -- instead of first settling at (last column,\n"
-            "next row), one wasted settle per row.\n\n"
+            "At the start of a new row, send ALL the new setpoints and then wait\n"
+            "for them together, so the knobs go straight to the first point of\n"
+            "the next row -- instead of first settling at (last column, next\n"
+            "row), one wasted settle per row.\n\n"
             "Off by default: two moves at once must be allowed by the hardware.\n"
-            "Fine for the camera's array point (one target); a KIM101 moving two\n"
-            "channels together is not verified yet.")
+            "Fine for two independent instruments, or one controller that takes\n"
+            "a 2-D target; check your controller before moving two of its\n"
+            "channels together. Offered with two or more stepped axes.")
         self.diagonal_box.toggled.connect(lambda *_: self._rebuild_summary())
         og.addWidget(self.diagonal_box, 1, 0, 1, 2)
         og.setColumnStretch(2, 1)
@@ -7186,6 +7201,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if hasattr(self, "routines_card"):
             self.routines_card.arrange()      # a new step may no longer fit side by side
         parked = self._sync_fly_detectors()
+        # "diagonal row change" only where there is a row change: two or
+        # more stepped axes (a ticked box stays ticked while hidden, and is
+        # written -- the engine ignores it with nothing to move together)
+        if hasattr(self, "diagonal_box"):
+            self.diagonal_box.setVisible(self._stepped_dims() >= 2)
         self._sync_window_card()
         self._sync_scout_section()
         recipe = self.build_recipe()

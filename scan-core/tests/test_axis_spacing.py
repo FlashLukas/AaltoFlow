@@ -214,6 +214,19 @@ def test_conditions_and_set_steps_offer_the_options(qapp):
     assert txt.value() == "run 3"
 
 
+def test_diagonal_row_change_is_offered_with_two_stepped_axes(qapp):
+    b = _builder(build_sim_registry())
+    b.add_axis("pos_y")
+    assert b.diagonal_box.isHidden()              # one axis: no row change
+    b.add_axis("pos_x")
+    assert not b.diagonal_box.isHidden()
+    b.rows[-1].fly.setChecked(True)               # a flown inner axis is not stepped
+    b._rebuild_summary()
+    assert b.diagonal_box.isHidden()
+    assert "camera" not in b.diagonal_box.toolTip().lower()
+    assert "kim" not in b.diagonal_box.toolTip().lower()
+
+
 def test_a_grid_row_says_what_it_is(qapp):
     b = _builder(build_sim_registry())
     grid = {"type": "grid", "x": {"param": "pos_x", "start": 0, "stop": 10, "num": 3},
