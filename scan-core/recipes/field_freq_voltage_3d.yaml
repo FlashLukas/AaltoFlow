@@ -8,4 +8,3 @@ detectors: [lockin_r]
 hooks:
   - {when: every_n_points, n: 200, on_error: stop, action: call, args: {action: sim_autofocus}}   # demo: periodic action
 output: {dir: ., basename: field_freq_voltage_cube, format: netcdf}
-settle: {default_timeout_s: 20.0}

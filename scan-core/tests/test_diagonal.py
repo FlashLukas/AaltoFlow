@@ -184,3 +184,21 @@ def test_the_lab_setter_splits_into_send_and_wait():
     inst.log.clear()
     x.set(5)                                                # set = send + wait
     assert [e[0] for e in inst.log] == ["cmd", "wait"]
+
+
+def test_the_flag_is_not_written_where_it_cannot_apply():
+    """Fewer than two STEPPED dims = no row change to make diagonal: the
+    builder hides the option, and the definition does not carry it."""
+    from scan_core.recipe import stepped_dims
+    one = {"type": "linear", "param": "x", "start": 0, "stop": 1, "num": 2}
+    fly = {"type": "fly", "param": "y", "start": 0, "stop": 1, "num": 2, "speed": 1}
+    rep = {"type": "repeat", "num": 3}
+    assert stepped_dims([one]) == 1
+    assert stepped_dims([one, fly, rep]) == 1
+    assert stepped_dims(_grid().axes) == 2
+    assert "diagonal" not in Recipe(axes=[one], diagonal=True).to_dict()
+    assert "diagonal" not in Recipe(axes=[rep, one, fly], diagonal=True).to_dict()
+    assert Recipe(axes=[one, dict(one, param="y")], diagonal=True).to_dict()["diagonal"]
+    # validate does not complain about it (it is simply not used)
+    reg, _ = _logged_registry()
+    assert Recipe(axes=[one], detectors=["d"], diagonal=True).validate(reg) == []

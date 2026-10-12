@@ -7,4 +7,3 @@ axes:
 detectors: [lockin_r]
 hooks: []
 output: {dir: ., basename: freq_sweep_every_minute, format: netcdf}
-settle: {default_timeout_s: 20.0}

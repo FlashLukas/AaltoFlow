@@ -16,4 +16,3 @@ hooks:
   - {when: before_scan, action: call, args: {set: {k2450.source_current: 0, k2450.output: 1}}}
   - {when: after_scan,  action: call, args: {set: {k2450.source_current: 0, k2450.output: 0}}}
 output: {dir: ., basename: transport_iv_temperature, format: netcdf}
-settle: {default_timeout_s: 600.0}

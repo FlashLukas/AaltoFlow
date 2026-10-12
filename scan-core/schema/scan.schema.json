@@ -29,14 +29,10 @@
         "format": {"type": "string", "enum": ["netcdf"]}
       }
     },
-    "settle": {
-      "type": "object",
-      "properties": {"default_timeout_s": {"type": "number", "description": "written into every definition (default 20) but NOT read by the engine today: how long a knob may take to settle is the module's describe timeout_s, and 60 s when a module declares none (scan_core/manifest.py)"}}
-    },
     "zigzag": {"type": "boolean",
                "description": "REMOVED scan-wide switch (before 2026-10-11): an old definition that has it is translated on load into `zigzag` on every axis inside the outermost one (and then runs in the per-axis order); never written"},
     "diagonal": {"type": "boolean",
-                 "description": "where several axes change at once (a new row), send every setpoint first, then wait for all"},
+                 "description": "where several axes change at once (a new row), send every setpoint first, then wait for all; written only when the axes make two or more stepped dims (a grid counts two, a fly axis and a repeat none)"},
     "window": {"$ref": "#/$defs/window"},
     "scout": {"$ref": "#/$defs/scout"},
     "mask": {"$ref": "#/$defs/mask",

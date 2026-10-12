@@ -13,7 +13,6 @@ Top-level shape
 name:      str
 comment:   str
 output:    {dir, basename, format}
-settle:    {default_timeout_s}
 axes:      [Axis, ...]      # OUTER→INNER. axes[0] is the slowest (outermost) loop.
 detectors: [param_id, ...]  # gettables recorded at every point
 hooks:     [Hook, ...]       # optional actions bound to a level/cadence
@@ -213,12 +212,6 @@ class Recipe:
     detectors: list[str] = field(default_factory=list)
     hooks: list[dict] = field(default_factory=list)
     output: dict = field(default_factory=lambda: {"dir": ".", "basename": "scan", "format": "netcdf"})
-    #: Written into every definition, but NOT read by the engine (checked
-    #: 2026-10-12): a knob's settle wait is its module's describe `timeout_s`,
-    #: or 60 s when the module declares none (manifest.py). See the README
-    #: ("Settle timeout") before wiring this in -- it would shorten every
-    #: undeclared wait to 20 s in all saved definitions.
-    settle: dict = field(default_factory=lambda: {"default_timeout_s": 20.0})
     #: At a point where SEVERAL axes change (the start of a new row), send
     #: every new setpoint first and only then wait for them all, instead of
     #: one axis after the other (2026-10-08, from the first rig test of the XY
@@ -276,9 +269,13 @@ class Recipe:
     @classmethod
     def _from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
-                                   "hooks", "output", "settle", "window",
+                                   "hooks", "output", "window",
                                    "scout", "mask", "diagonal")
                  if f in d}
+        # An old definition's `settle: {default_timeout_s}` (written until
+        # 2026-10-12, read by nothing: a knob waits for its module's describe
+        # timeout_s, 60 s when undeclared) is simply not picked up above, so
+        # it is dropped and never written again.
         if "axes" in known:
             known["axes"] = upgrade_axes(known["axes"])
         if d.get("zigzag") is True and "axes" in known:
@@ -296,8 +293,10 @@ class Recipe:
         if not d.get("scout"):
             d.pop("scout", None)           # the same for the scout pass
         d.pop("mask", None)                # only ever READ (translated to scout)
-        if not d.get("diagonal"):
-            d.pop("diagonal", None)        # ... and for diagonal row changes
+        if not d.get("diagonal") or stepped_dims(self.axes) < 2:
+            # ... and for diagonal row changes -- also when the flag is on
+            # but cannot apply (fewer than two stepped dims: no row change)
+            d.pop("diagonal", None)
         return d
 
     @classmethod
@@ -653,6 +652,20 @@ def _axis_n_dims(ax: dict) -> int:
     """How many dims an axis compiles to (a grid: two), without compiling
     it (a `file` axis would read its file)."""
     return 2 if isinstance(ax, dict) and _axis_type(ax) == "grid" else 1
+
+
+def stepped_dims(axes) -> int:
+    """How many STEPPED dims the axes make: a grid two, a flown axis and a
+    repeat none (they set nothing between points), anything else one. A
+    `diagonal` row change needs at least two -- with fewer there is no row
+    change to make diagonal, so the flag is not written (Recipe.to_dict)
+    and the builder hides it."""
+    n = 0
+    for ax in axes or []:
+        if not isinstance(ax, dict) or ax.get("type") in ("fly", "repeat"):
+            continue
+        n += _axis_n_dims(ax)
+    return n
 
 
 def dim_zigzag(axes) -> list[bool]:

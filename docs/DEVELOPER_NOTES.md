@@ -1329,11 +1329,15 @@ looks an instrument up by its id.
   the axis helpers (`_axis_type`) also read a lone `raster` dict, because
   the builder's rows and the axis preview pass dicts that never went through
   a Recipe. Dim kinds are `grid_x` / `grid_y`.
-- **Settle timeout.** `settle.default_timeout_s` (20) is written into every
-  definition but read by nothing (checked 2026-10-12); a knob waits for its
-  module's describe `timeout_s`, 60 s when undeclared (manifest.py). Wiring
-  it in would cut every undeclared wait to 20 s in all saved definitions --
-  left for a decision.
+- **Settle timeout.** A knob waits for its module's describe `timeout_s`,
+  60 s when undeclared (manifest.py). The recipe's `settle:
+  {default_timeout_s: 20}` -- written into every definition until
+  2026-10-12 and read by nothing -- is REMOVED (Lukas, 2026-10-12): an old
+  definition that has it loads (the key is dropped) and is saved without it.
+- **Diagonal row change** is written only where it can apply:
+  `Recipe.to_dict` drops `diagonal` when the axes make fewer than two
+  stepped dims (`recipe.stepped_dims`: a grid two, a fly axis and a repeat
+  none), and the builder never sets it then (its box is hidden).
 
 ---
 

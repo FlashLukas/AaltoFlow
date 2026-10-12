@@ -6,4 +6,3 @@ axes:
 detectors: [lockin_r, lockin_phi]
 hooks: []
 output: {dir: ., basename: field_sweep_x5, format: netcdf}
-settle: {default_timeout_s: 20.0}

@@ -343,10 +343,9 @@ too); a watched scan server on the simulator shows the badge as well.
 
 **Settle timeout.** How long a knob may take to settle is its module's
 `timeout_s` in `describe`; a module that declares none gets **60 s**
-(`scan_core/manifest.py`). The recipe's `settle: {default_timeout_s: 20}` is
-written into every definition but is NOT read by the engine today -- wiring it
-in as the fallback would shorten every undeclared wait from 60 s to 20 s in
-all saved definitions, so it is left as a recorded value until decided.
+(`scan_core/manifest.py`). A scan definition has no timeout of its own: the
+`settle: {default_timeout_s: ...}` block older definitions carry was never
+read, and is dropped when such a definition is loaded.
 
 ## Running against real instruments
 

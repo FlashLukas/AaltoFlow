@@ -7,4 +7,3 @@ axes:
 detectors: [lockin_r, lockin_x, lockin_y]
 hooks: []
 output: {dir: ., basename: field_freq_avg10, format: netcdf}
-settle: {default_timeout_s: 20.0}

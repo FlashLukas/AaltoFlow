@@ -19,4 +19,3 @@ scout: {axes: {pos_x: 3, pos_y: 3}, detector: reflectivity, keep: above,
         threshold: auto, margin: auto}
 hooks: []
 output: {dir: ., basename: scout_xy_map, format: netcdf}
-settle: {default_timeout_s: 20.0}

@@ -225,6 +225,16 @@ def test_diagonal_row_change_is_offered_with_two_stepped_axes(qapp):
     assert b.diagonal_box.isHidden()
     assert "camera" not in b.diagonal_box.toolTip().lower()
     assert "kim" not in b.diagonal_box.toolTip().lower()
+    # a box ticked while there WAS a row change is not written once there
+    # is none (hidden option = not in the definition)
+    b.rows[-1].fly.setChecked(False)
+    b._rebuild_summary()
+    b.diagonal_box.setChecked(True)
+    assert b.build_recipe().to_dict()["diagonal"] is True
+    b.rows[-1].fly.setChecked(True)
+    b._rebuild_summary()
+    assert b.build_recipe().diagonal is False
+    assert "diagonal" not in b.build_recipe().to_dict()
 
 
 def test_a_grid_row_says_what_it_is(qapp):

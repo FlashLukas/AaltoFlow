@@ -19,4 +19,3 @@ scout: {axes: {field: 2, rf_freq: 3}, detector: lockin_r, keep: deviates, k: 4,
         margin: auto, settings: {rf_power: 10}}
 hooks: []
 output: {dir: ., basename: scout_field_freq, format: netcdf}
-settle: {default_timeout_s: 20.0}

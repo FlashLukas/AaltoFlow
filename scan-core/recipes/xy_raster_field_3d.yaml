@@ -13,4 +13,3 @@ axes:
 detectors: [lockin_r]
 hooks: []
 output: {dir: ., basename: xy_image_vs_field, format: netcdf}
-settle: {default_timeout_s: 20.0}

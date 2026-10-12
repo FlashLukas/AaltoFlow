@@ -6945,7 +6945,11 @@ class ScanBuilder(QtWidgets.QMainWindow):
                       # ONE comment: the run info's is the recipe's
                       comment=self.run_info.values()["comment"],
                       # zig-zag is on each axis now (AxisRow.to_axis)
-                      diagonal=self.diagonal_box.isChecked(),
+                      # only where it can apply: the box is hidden (and
+                      # may still be ticked from an earlier stack) with
+                      # fewer than two stepped dims
+                      diagonal=(self.diagonal_box.isChecked()
+                                and self._stepped_dims() >= 2),
                       window=(self.window_card.to_block()
                               if hasattr(self, "window_card") else None),
                       scout=(self.scout_section.to_block()
@@ -7342,7 +7346,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
             # which axes zig-zag (per axis since 2026-10-11): named, since it
             # is no longer one switch for the whole scan
             ((f"   ·   zig-zag: {', '.join(zz)}") if (zz := zigzag_dim_names(recipe)) else "")
-            + ("   ·   diagonal row change" if self.diagonal_box.isChecked() else "")
+            + ("   ·   diagonal row change"
+               if self.diagonal_box.isChecked() and self._stepped_dims() >= 2 else "")
             + conditions)
         self._show_detail()
 

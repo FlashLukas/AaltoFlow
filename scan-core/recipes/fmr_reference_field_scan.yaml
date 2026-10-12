@@ -15,4 +15,3 @@ hooks:
   - {when: before_scan, action: call, args: {set: {field: 190}, action: vna_reference}}
   - {when: after_scan,  action: call, args: {set: {field: 0}}}
 output: {dir: ., basename: fmr_reference_field_scan, format: netcdf}
-settle: {default_timeout_s: 20.0}

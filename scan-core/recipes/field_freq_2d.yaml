@@ -6,4 +6,3 @@ axes:
 detectors: [lockin_r, lockin_phi]
 hooks: []
 output: {dir: ., basename: field_freq_map, format: netcdf}
-settle: {default_timeout_s: 20.0}
