@@ -508,6 +508,7 @@ optional fields on the descriptor:
 |---|---|---|
 | `"role": "autofocus"` | an action with a `wait` block | THE autofocus of the setup. An old recipe's built-in `autofocus` hook is translated into a routine step running it; the scout pass warns when none runs before it. Declare it on one action per module. |
 | `"role": "stage_x"` / `"stage_y"` | a length control | the navigator offers this pair first as its X / Y. |
+| `"focus_sensitive": true` | an indicator (detector) | its reading changes with focus (a reflectivity, a camera image): the scout pass warns when no autofocus runs before it, whatever axes it scouts. |
 
 `role` is a plain string; scan-core reads it with
 `registry.actions_with_role(role)` / `registry.params_with_role(role)`. A

@@ -111,7 +111,8 @@ def _gettable(p) -> dict:
             "acquire": {"group": acq.group} if acq is not None else None,
             "window": _plain(getattr(p, "window", None)),
             "stream": _stream(p),
-            "role": getattr(p, "role", None)}
+            "role": getattr(p, "role", None),
+            "focus_sensitive": bool(getattr(p, "focus_sensitive", False))}
 
 
 def _action(a) -> dict:
@@ -279,6 +280,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
                      window=d.get("window") if isinstance(d.get("window"), dict) else None,
                      storage=_storage_from(d.get("storage")))
         g.role = d.get("role") if isinstance(d.get("role"), str) else None
+        g.focus_sensitive = d.get("focus_sensitive") is True
         _attach_stream(g, d, streams)
         reg.add(g)
     for d in wire.get("actions") or []:
@@ -304,7 +306,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
 _PARAM_ATTRS = ("label", "unit", "limits", "integer", "resolution", "storage", "ramp",
                 "stream", "stream_channel", "stream_scale", "stream_rate_hz", "axes",
                 "dtype", "acquire",
-                "window", "_send", "role")
+                "window", "_send", "role", "focus_sensitive")
 _ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait",
                  "role")
 

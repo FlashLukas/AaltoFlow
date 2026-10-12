@@ -6371,7 +6371,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         # WARNINGS: said, never blocking (Run stays enabled). The first one:
         # a measured scout pass with no autofocus before it (scout.py).
         from scan_core.scout import autofocus_warning
-        af = autofocus_warning(recipe)
+        af = autofocus_warning(recipe, self.registry)
         if hasattr(self, "scout_section"):
             self.scout_section.set_autofocus_warning(af)
         warnings = [af] if af else []

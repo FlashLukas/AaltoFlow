@@ -378,6 +378,10 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                                      storage=Storage.from_descriptor(d)))
             _attach_stream(param, d, inst, module, streams, on_warn)
             param.role = _role(d)
+            # describe `focus_sensitive: true` (guide 6b): this reading changes
+            # with focus (a reflectivity, a camera image) -- the scout pass
+            # warns when no autofocus runs before it
+            param.focus_sensitive = d.get("focus_sensitive") is True
             added.append(pid)
 
     return added

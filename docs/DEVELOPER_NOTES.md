@@ -1250,10 +1250,13 @@ never writes the scan-wide key. The file gets `zigzag = 1` on each coordinate
 that really zig-zagged (`axis_attrs`), and `fly_zigzag` on a fly coordinate
 is the fly axis's own flag.
 
-Autofocus before a scout: `scout.autofocus_warning(recipe)` returns
-`scout.NO_AUTOFOCUS_WARNING` for a MEASURED scout pass with no before_scan
-routine running an action whose id contains "autofocus" (or the old
-`{action: autofocus}` hook). The builder shows it in the SCOUT PASS head line
+Autofocus before a scout: `scout.autofocus_warning(recipe, registry)` returns
+`scout.NO_AUTOFOCUS_WARNING` for a MEASURED scout pass when the registry has
+an action with describe `role: autofocus`, no before_scan routine runs one
+(or the old `{action: autofocus}` hook), and focus matters -- every scouted
+axis is a length-unit knob (`units.is_length_unit`) or the scout detector
+declares `focus_sensitive: true` (section 4i; until 2026-10-12 it matched
+"autofocus" in action ids). The builder shows it in the SCOUT PASS head line
 and as "WARNING: ..." in the summary detail; it is deliberately not in
 `validate()`, so it never blocks Run (Lukas chose "warn", not auto-insert).
 
@@ -1279,6 +1282,9 @@ looks an instrument up by its id.
   `Recipe.from_dict(d, registry=)` / `Recipe.load(path, registry=)` do it at
   once (ValueError on a problem). Without a registry the old hook stays until
   validate.
+- **`focus_sensitive: true` on a detector** (`Parameter.focus_sensitive`):
+  its reading follows focus. The scout's autofocus warning (4h) uses it and
+  the units of the scouted axes -- never the word "autofocus" in an id.
 
 ---
 

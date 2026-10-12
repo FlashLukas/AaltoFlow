@@ -1038,14 +1038,17 @@ The data file carries these settings on each axis's coordinate as well as in
 coordinate that really zig-zagged), `scout_every`, `scout_margin` (`auto`) and
 `scout_margin_points`. Only what is set is written.
 
-**No autofocus before the scout pass** (a warning, 2026-10-11): a measured
-scout thresholds its reading with Otsu, and that threshold follows focus. When
-the scan has a scout pass and no BEFORE SCAN routine runs an autofocus (any
-action whose name contains "autofocus": Find focus, autofocus at the AF
-position, the simulator's), the SCOUT PASS line and the summary say "No
-autofocus before the scout pass: the threshold follows focus -- add Find focus
-to BEFORE SCAN". It never stops the run. A scout read from a file is not
-warned about.
+**No autofocus before the scout pass** (a warning, 2026-10-11; by role since
+2026-10-12): a measured scout thresholds its reading with Otsu, and that
+threshold follows focus. The SCOUT PASS line and the summary say "No autofocus
+before the scout pass: the threshold follows focus -- add an autofocus step to
+BEFORE SCAN" when ALL of these hold: a module offers an autofocus (an action
+whose describe declares `role: autofocus`), no BEFORE SCAN routine runs it,
+and focus matters for this scout -- every scouted axis is a position (a knob
+in a length unit: m, mm, um, nm ...) or the scout detector declares
+`focus_sensitive: true`. It never stops the run. A scout read from a file is
+not warned about; a scout over field x frequency with an ordinary detector
+is not either. `scout.autofocus_warning(recipe, registry)`.
 
 ![an axis row's Advanced panel](../front-panels/suite-axis-advanced.png)
 

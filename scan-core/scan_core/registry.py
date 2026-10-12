@@ -49,6 +49,10 @@ class Parameter:
     #: ... -- a name the coordinator can look for instead of guessing from
     #: the id. None = the module does not say.
     role = None
+    #: A detector whose reading changes with FOCUS (describe
+    #: `focus_sensitive: true`): a reflectivity, a camera image. The scout
+    #: pass warns when no autofocus runs before it (scout.autofocus_warning).
+    focus_sensitive = False
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
@@ -914,7 +918,8 @@ def build_sim_registry() -> Registry:
     reg.add(Gettable("lockin_y",   "Lock-in Y",   "V",   lambda: s.lockin()["y"]))
     reg.add(Gettable("lockin_phi", "Lock-in phase", "deg", lambda: s.lockin()["phi"]))
     reg.add(Gettable("aux_in",     "Aux in",      "V",   lambda: s.lockin()["aux"]))
-    reg.add(Gettable("reflectivity", "Reflectivity", "", s.reflectivity))
+    reg.add(Gettable("reflectivity", "Reflectivity", "", s.reflectivity)
+            ).focus_sensitive = True        # it follows focus (scout warning)
 
     # Detectors that are NOT floats (2026-10-04), so a simulated scan -- and
     # the tests -- exercise the storage types a module's describe declares
