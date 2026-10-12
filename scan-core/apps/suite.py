@@ -59,7 +59,7 @@ from apps.catalogue_view import CatalogueWidget
 from apps.control_panel import ControlPanel
 from apps.navigator import NavigatorWidget
 from aaltoview.apps.viewer import ViewerWidget
-from apps.scan_builder import ScanBuilder
+from apps.scan_builder import DEMO_TEXT, ScanBuilder, demo_badge
 from apps.scan_server_view import ServerWatch, parse_target
 from apps.theme import C, DEFAULT_THEME, apply, set_theme
 
@@ -128,6 +128,10 @@ class Suite(QtWidgets.QMainWindow):
         self.title_lbl = title
         head.addWidget(title)
         head.addStretch(1)
+        # the DEMO badge next to the title: with nothing connected the suite
+        # runs on the toy simulator, and that must be visible on every tab
+        self.demo_lbl = demo_badge()
+        head.addWidget(self.demo_lbl)
         self.source_lbl = QtWidgets.QLabel()
         self.source_lbl.setStyleSheet(f"color:{C['muted']};")
         head.addWidget(self.source_lbl)
@@ -211,8 +215,8 @@ class Suite(QtWidgets.QMainWindow):
         # Say where the first run will go, and whether it can go there, before
         # anyone presses Run.
         self.builder._refresh_save_target()
-        self.log("suite ready - simulated registry"
-                 + (" - following the launcher" if follow else " (Settings tab to connect)"))
+        self.log("suite ready - " + DEMO_TEXT + " (nothing connected yet)"
+                 + (" - following the launcher" if follow else " - Settings tab to connect"))
 
         if modules:
             QtCore.QTimer.singleShot(200, lambda: self.connect_modules(modules))
@@ -797,6 +801,8 @@ class Suite(QtWidgets.QMainWindow):
         # a proxy's limits follow registry_rev (the server refreshes them from
         # its modules); this PC's own connections are refreshed by describe_rev
         b.limits_refresher = None if reg is self._proxy else self._refresh_limits
+        if hasattr(self, "control"):
+            self._sync_source_label()         # DEMO or not follows the Scan tab's registry
 
     def _on_server_registry(self, reply) -> None:
         """A new get_registry reply: update the proxy in place when only
@@ -898,7 +904,7 @@ class Suite(QtWidgets.QMainWindow):
         self._refresh_module_tree()
         self.log("back to this PC's own instruments"
                  + (" (following the launcher)" if self.follow_box.isChecked() else
-                    " -- connect them on the Settings tab"))
+                    " -- connect them on the Settings tab; until then: " + DEMO_TEXT))
 
     def _set_title(self, setup: str | None, note: str = "") -> None:
         """The header and window title: this PC's setup, or a watched lab's."""
@@ -1045,8 +1051,9 @@ class Suite(QtWidgets.QMainWindow):
         note = QtWidgets.QLabel(
             "The module folders on this PC plus the remote services added in Mission "
             "Control, with this PC's ports. Start and stop services, change ports and "
-            "add remote ones in Mission Control; this list follows it. Nothing here is "
-            "required: the suite works against the simulator with no hardware at all.")
+            "add remote ones in Mission Control; this list follows it. With nothing "
+            "connected the suite runs a DEMO: a toy simulator of a MOKE / FMR setup, "
+            "for trying the software out -- its data files say source=\"demo\".")
         note.setWordWrap(True); note.setStyleSheet(f"color:{C['muted']};")
         g.addWidget(note)
 
@@ -1069,10 +1076,23 @@ class Suite(QtWidgets.QMainWindow):
         conn.clicked.connect(self._connect_clicked)
         allb = QtWidgets.QPushButton("Connect all running")
         allb.clicked.connect(lambda: self.connect_modules(sorted(self.available)))
-        sim = QtWidgets.QPushButton("Use simulator")
+        sim = QtWidgets.QPushButton("Use simulator (demo)")
+        sim.setToolTip("Disconnect the modules and use the toy simulator: a DEMO,\n"
+                       "not instruments. Every file measured on it is marked\n"
+                       "source=\"demo\".")
         sim.clicked.connect(self._simulator_clicked)
         btns.addWidget(conn); btns.addWidget(allb); btns.addWidget(sim); btns.addStretch(1)
         g.addLayout(btns)
+        # what the suite works on NOW, said in words: the connected modules,
+        # or the DEMO (with the same badge as the header)
+        now = QtWidgets.QHBoxLayout(); now.setSpacing(8)
+        now.addWidget(QtWidgets.QLabel("Now using:"))
+        self.settings_demo_lbl = demo_badge()
+        now.addWidget(self.settings_demo_lbl)
+        self.settings_source_lbl = QtWidgets.QLabel("")
+        self.settings_source_lbl.setStyleSheet(f"color:{C['muted']};")
+        now.addWidget(self.settings_source_lbl, 1)
+        g.addLayout(now)
         v.addWidget(card, 1)
 
         out = QtWidgets.QFrame(); out.setObjectName("card")
@@ -1490,7 +1510,7 @@ class Suite(QtWidgets.QMainWindow):
         self.registry = build_sim_registry()
         self._adopt_source()
         self._refresh_module_tree()
-        self.log("switched to the simulated registry")
+        self.log("switched to the " + DEMO_TEXT)
 
     def _adopt_source(self):
         if self._scan_registry() is self.registry:
@@ -1514,12 +1534,28 @@ class Suite(QtWidgets.QMainWindow):
         self.navigator.set_source(registry=self.registry, lab=self.lab)
         self._sync_source_label()
 
+    def is_demo(self) -> bool:
+        """True while the suite works on the toy simulator: nothing
+        connected (and no watched scan server's instruments on the Scan tab).
+        Never a SILENT fallback: the badge, the log and the files say so."""
+        return self.lab is None and bool(getattr(self._scan_registry(), "demo", False))
+
     def _sync_source_label(self):
+        demo = self.is_demo()
         if self.lab is None:
-            self.source_lbl.setText("source: simulator")
+            text = ("source: watched scan server" if not demo else "")
+            detail = (DEMO_TEXT + " (no module connected)" if demo
+                      else "the watched scan server's instruments")
         else:
             names = ", ".join(sorted(self.lab.instruments))
-            self.source_lbl.setText(f"source: live  -  {names}")
+            text = f"source: live  -  {names}"
+            detail = f"connected modules: {names}"
+        self.source_lbl.setText(text)
+        self.demo_lbl.setVisible(demo)
+        if hasattr(self, "settings_demo_lbl"):
+            self.settings_demo_lbl.setVisible(demo)
+            self.settings_source_lbl.setText("" if demo else detail)
+        self.builder._sync_demo_badge()
 
     def closeEvent(self, event):
         self._avail_stop.set()

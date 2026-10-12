@@ -151,10 +151,16 @@ def registry_to_wire(reg) -> dict:
     """The manifest of a registry: {schema, settables, gettables, actions}.
 
     Ordered as the registry holds them (the palette keeps that order)."""
-    return {"schema": SCHEMA,
-            "settables": [_settable(p) for p in reg.settables()],
-            "gettables": [_gettable(p) for p in reg.gettables()],
-            "actions": [_action(a) for a in reg.actions()]}
+    out = {"schema": SCHEMA,
+           "settables": [_settable(p) for p in reg.settables()],
+           "gettables": [_gettable(p) for p in reg.gettables()],
+           "actions": [_action(a) for a in reg.actions()]}
+    if getattr(reg, "demo", False):
+        # a server running the toy simulator: its watchers show the DEMO
+        # badge too (only written when true, so a lab's manifest -- and its
+        # revision number -- is unchanged)
+        out["demo"] = True
+    return out
 
 
 def wire_revision(wire: dict) -> int:
@@ -250,6 +256,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
     reg = Registry()
     #: marks a proxy: the scan tab says the scan server's instruments
     reg.proxy = True
+    reg.demo = bool(wire.get("demo"))     # the server's own simulator: a DEMO
     streams: dict = {}
     for d in wire.get("settables") or []:
         if not isinstance(d, dict) or not d.get("id"):

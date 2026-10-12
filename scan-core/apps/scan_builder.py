@@ -120,6 +120,28 @@ def _gear_icon() -> QtGui.QIcon:
     return QtGui.QIcon(px)
 
 
+#: The words of the DEMO badge, everywhere it is shown (run bar, suite
+#: header, Settings): one text, so nobody has to wonder whether two badges
+#: mean two different things.
+DEMO_TEXT = "DEMO -- simulated instruments"
+
+
+def demo_badge(text: str = DEMO_TEXT) -> QtWidgets.QLabel:
+    """A red-outlined label that says the instruments are SIMULATED. Its
+    colours are read from COLORS when it is made (gotcha #6: never cached in
+    a module constant); the theme is fixed before any widget is built."""
+    lbl = QtWidgets.QLabel(text)
+    lbl.setObjectName("demoBadge")
+    lbl.setStyleSheet(f"QLabel#demoBadge {{ color:{C['danger']}; border:1px solid {C['danger']};"
+                      f" border-radius:4px; padding:1px 6px; font-weight:800; }}")
+    lbl.setToolTip("No instruments are connected: the parameters and detectors are\n"
+                   "a toy MOKE / FMR simulator, for trying the software out.\n"
+                   "Data measured here is marked source=\"demo\" in the file.\n"
+                   "Connect modules on the Settings tab of the suite.")
+    lbl.setVisible(False)
+    return lbl
+
+
 def _muted(text: str, small: bool = False) -> QtWidgets.QLabel:
     w = QtWidgets.QLabel(text)
     w.setStyleSheet(f"color:{C['muted']};" + (" font-size:10px;" if small else ""))
@@ -5192,7 +5214,18 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if not embedded:
             cols.addWidget(self.right_pane, 0)
 
+        self._sync_demo_badge()
         self._rebuild_summary()
+
+    def is_demo(self) -> bool:
+        """True while this builder works on the toy simulator (a DEMO, not
+        instruments): build_sim_registry marks its registry `demo`, and a
+        scan server running it says so in its manifest."""
+        return bool(getattr(self.registry, "demo", False))
+
+    def _sync_demo_badge(self) -> None:
+        if hasattr(self, "demo_lbl"):
+            self.demo_lbl.setVisible(self.is_demo())
 
     def set_registry(self, registry, group_names: dict | None = None):
         """Swap the registry (sim <-> lab) and rebuild what depends on it.
@@ -5223,6 +5256,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self.remove_throughout(section)
         self._hook_template = []
         self._reload_palette()
+        self._sync_demo_badge()
         if hasattr(self, "window_card"):
             self.window_card.load_block(None)
             self.window_card.set_registry(registry)
@@ -5789,6 +5823,12 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.state_lbl.setStyleSheet(f"color:{C['accent']}; font-size:16px; font-weight:800;")
         self.state_lbl.setMinimumWidth(70)
         g_run.addWidget(self.state_lbl)
+        # DEMO badge (2026-10-12, Lukas: keep the demo, but make it clearly
+        # one): shown while the registry is the toy simulator, so a map
+        # measured on it is never taken for the sample's. Its files say
+        # source="demo" too (engine.py).
+        self.demo_lbl = demo_badge()
+        g_run.addWidget(self.demo_lbl)
         # The NAME of the measurement, here, before it runs -- not a default you
         # discover afterwards in the log. It goes into the file name and into the
         # scan definition the file carries.

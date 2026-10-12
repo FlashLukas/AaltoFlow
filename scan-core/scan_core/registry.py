@@ -566,6 +566,10 @@ class Registry:
         #: ScanBusy). None = nothing to claim (the simulator). Set by
         #: build_lab_registry; the engine calls it before the first move.
         self.scan_claim = None
+        #: True for the toy MOKE/FMR simulator of build_sim_registry: a DEMO,
+        #: not instruments. The suite shows a badge, and every data file
+        #: written from it carries the attribute source="demo" (engine.py).
+        self.demo = False
 
     def add(self, p: Parameter) -> Parameter:
         self._params[p.id] = p
@@ -950,6 +954,7 @@ def build_sim_registry() -> Registry:
     """A ready-to-scan simulated instrument suite."""
     s = SimState()
     reg = Registry()
+    reg.demo = True                       # simulated instruments: a DEMO (engine.py)
 
     def settable(id, label, unit, limits, attr):
         reg.add(Settable(id, label, unit, limits,

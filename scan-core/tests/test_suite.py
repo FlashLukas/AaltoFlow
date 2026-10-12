@@ -71,7 +71,33 @@ def test_the_tabs_exist_and_start_on_the_simulator(suite):
          "Settings"]
     assert suite.lab is None, "should not reach for hardware on startup"
     assert suite.registry is not None
-    assert "simulator" in suite.source_lbl.text()
+    # ... and says it is a DEMO, never silently (2026-10-12)
+    assert suite.is_demo()
+    assert not suite.demo_lbl.isHidden() and "DEMO" in suite.demo_lbl.text()
+    assert not suite.builder.demo_lbl.isHidden()        # the run bar's badge
+    assert not suite.settings_demo_lbl.isHidden()       # and the Settings tab's
+    assert any("DEMO" in line for line in suite.logbox.toPlainText().splitlines())
+
+
+def test_a_demo_file_says_source_demo():
+    """A scan on the toy simulator writes source="demo" into its header (the
+    engine does it, so a script or a scan server marks its files too); a
+    registry of real instruments writes no such attribute."""
+    from scan_core import Recipe, build_sim_registry, run
+    from scan_core.registry import Gettable, Registry, Settable
+    r = Recipe(axes=[{"type": "linear", "param": "field", "start": 0, "stop": 1, "num": 2}],
+               detectors=["lockin_r"])
+    assert run(r, build_sim_registry(), created_iso="t").attrs["source"] == "demo"
+    reg = Registry()
+    reg.add(Settable("x", "X", "", (0, 1), lambda v: None, lambda: 0.0))
+    reg.add(Gettable("y", "Y", "", lambda: 1.0))
+    r2 = Recipe(axes=[{"type": "linear", "param": "x", "start": 0, "stop": 1, "num": 2}],
+                detectors=["y"])
+    assert "source" not in run(r2, reg, created_iso="t").attrs
+    # ... and a scan server on the simulator tells its watchers
+    from scan_core.registry_wire import registry_from_wire, registry_to_wire
+    assert registry_from_wire(registry_to_wire(build_sim_registry())).demo
+    assert "demo" not in registry_to_wire(reg)
 
 
 def test_the_run_pane_moved_to_the_measurement_tab(suite):

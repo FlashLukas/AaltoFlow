@@ -468,6 +468,13 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     # instrument snapshot (snapshot.py). Every dataset built from here on
     # (live, checkpoint, abort, end) carries them.
     ds_attrs = {**provenance(), **dict(attrs or {})}
+    if getattr(registry, "demo", False):
+        # DEMO data (2026-10-12, Lukas: keep the demo, but never let it pass
+        # for a measurement): a scan over the toy simulator says so in its
+        # header, so a file that ends up next to real data cannot be mistaken
+        # for one. Set here, not in the GUI, so a script or a scan server
+        # running on the simulator marks its files too.
+        ds_attrs["source"] = "demo"
     start_snap = None
     ctx = {"registry": registry, "recipe": recipe, "current": current,
            "ds_attrs": ds_attrs,
