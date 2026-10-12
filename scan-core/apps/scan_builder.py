@@ -8996,6 +8996,11 @@ def main() -> int:
     pg.setConfigOption("background", C["code_bg"])
     pg.setConfigOption("foreground", C["text"])
 
+    # Numbers in the C locale everywhere in this app (gotcha #18): on a Windows
+    # set to a comma decimal separator every spin box would show 0,0 s.
+    _loc = QtCore.QLocale.c()
+    _loc.setNumberOptions(QtCore.QLocale.OmitGroupSeparator)
+    QtCore.QLocale.setDefault(_loc)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     # The module's own icon in the title bar, Alt-Tab and the taskbar.
     from apps.theme import apply_window_icon

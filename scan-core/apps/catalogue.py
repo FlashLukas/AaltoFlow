@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # find scan_core
 
-from PySide6 import QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtWidgets  # noqa: E402
 
 from suite_common import get_setting, title as suite_title  # noqa: E402
 
@@ -92,6 +92,11 @@ def main(argv=None) -> int:
     ap.add_argument("--theme", choices=["dark", "light"], default=None)
     args = ap.parse_args(argv)
     set_theme(args.theme or DEFAULT_THEME)        # BEFORE any widget is built
+    # Numbers in the C locale everywhere in this app (gotcha #18): on a Windows
+    # set to a comma decimal separator every spin box would show 0,0 s.
+    _loc = QtCore.QLocale.c()
+    _loc.setNumberOptions(QtCore.QLocale.OmitGroupSeparator)
+    QtCore.QLocale.setDefault(_loc)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     from apps.theme import CATALOGUE_ICON, apply_window_icon
     # its own icon and taskbar button: not grouped with the measurement suite
