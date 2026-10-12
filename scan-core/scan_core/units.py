@@ -10,7 +10,8 @@ the honest way to tell:
   declared in another unit (nm/min, K/min, mT/min)? -- the fly scan.
 
 Units are matched as the modules write them (ASCII "um" and the Unicode
-micro signs). An unknown unit is never guessed: the functions return None /
+micro signs), then case-insensitively where that is unique and the unit has
+two letters or more ("ghz", "MM", "Min"; never "m" vs "M"). An unknown unit is never guessed: the functions return None /
 False, and the caller says so.
 """
 
@@ -42,13 +43,47 @@ def _clean(unit) -> str:
     return (unit or "").strip() if isinstance(unit, str) else ""
 
 
+def _folded(tables) -> dict:
+    """lower-cased unit -> its entry, for the names whose lower case is
+    UNIQUE across `tables` (so "ghz" finds GHz; a lower case two units
+    shared would be left out rather than guessed -- none does today, but
+    e.g. "mHz" next to "MHz" would make "mhz" ambiguous). Single letters are
+    never folded: there the case IS the unit (m metre / M molar, G gauss /
+    g gram, s second / S siemens)."""
+    seen: dict = {}
+    clash: set = set()
+    for key, entry in tables:
+        if len(key) < 2:
+            continue
+        low = key.lower()
+        if low in seen and seen[low] != entry:
+            clash.add(low)
+        seen[low] = entry
+    return {k: v for k, v in seen.items() if k not in clash}
+
+
+#: Case-insensitive fallbacks (2026-10-12: a module or a recipe writing
+#: "ghz" or "Mhz" used to be "unknown"; the window code once lower-cased).
+#: The exact spelling is always tried first.
+_FAMILY_FOLD = _folded((u, (fam, f)) for fam, table in _FAMILIES.items()
+                       for u, f in table.items())
+_TIME_FOLD = _folded(_TIME.items())
+
+
 def family_of(unit) -> tuple[str, float] | None:
-    """(family, factor to the family's base unit) of `unit`, or None."""
+    """(family, factor to the family's base unit) of `unit`, or None.
+    Exact spelling first, then a case-insensitive match when it is unique."""
     u = _clean(unit)
     for fam, table in _FAMILIES.items():
         if u in table:
             return fam, table[u]
-    return None
+    return _FAMILY_FOLD.get(u.lower())
+
+
+def _seconds(den: str) -> float | None:
+    den = den.strip()
+    t = _TIME.get(den)
+    return t if t is not None else _TIME_FOLD.get(den.lower())
 
 
 def is_length_unit(unit) -> bool:
@@ -72,7 +107,7 @@ def split_rate(unit) -> tuple[str, float] | None:
     if "/" not in u:
         return None
     num, den = u.rsplit("/", 1)
-    t = _TIME.get(den.strip())
+    t = _seconds(den)
     if t is None:
         return None
     return num.strip(), t

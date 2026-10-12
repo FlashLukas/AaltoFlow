@@ -127,6 +127,12 @@ class Predictor:
     def tracked_for(self, options: dict) -> str | None:
         return self.tracked
 
+    def inactive(self, options: dict) -> set[str]:
+        """Names of the inputs / parameters that do NOT enter the answer
+        with these options (Kittel out-of-plane ignores Hk, the easy axis
+        and the angle). The builder greys them; they are still saved."""
+        return set()
+
     def output_unit_for(self, options: dict) -> str:
         return self.output_unit
 
@@ -325,6 +331,13 @@ class Kittel(Predictor):
     options = (Option("model", "model", resonance.MODELS, "inplane",
                       help="in-plane or out-of-plane geometry"),)
     tracked = "meff_mT"
+
+    def inactive(self, options):
+        # out of plane: the field is along the normal, so the in-plane angle
+        # and the in-plane anisotropy play no part (resonance.kittel_hz)
+        if options.get("model", "inplane") == "outofplane":
+            return {"angle", "hk_mT", "easy_axis_deg"}
+        return set()
 
     def predict(self, x, p, options):
         try:

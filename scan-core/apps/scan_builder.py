@@ -638,6 +638,7 @@ class AxisRow(_StackRow):
             if self.numeric else
             f"{param.label} is not a number: its values are picked from a list.")
         self.spacing_box.setEnabled(self.numeric)
+        self._spacing_tip = self.spacing_box.toolTip()   # restored when fly is off
         self.spacing_w = QtWidgets.QWidget()
         sbox = QtWidgets.QVBoxLayout(self.spacing_w)
         sbox.setContentsMargins(0, 0, 0, 0); sbox.setSpacing(0)
@@ -1342,6 +1343,14 @@ class AxisRow(_StackRow):
         self._update_pace_widgets()               # speed / row time / default
         # a flown row is BINNED: `pts` are the bins the samples are sorted into
         self.num_lbl.setText("bins" if on else "pts")
+        # A flown axis is one continuous move binned into equal steps, so it
+        # has linear spacing only: grey the choice instead of letting "log" /
+        # "list" silently untick fly (_spacing_changed), and say why.
+        self.spacing_box.setEnabled(self.numeric and not on)
+        self.spacing_box.setToolTip(
+            "A flown axis is one continuous move, binned into equal steps: its\n"
+            "spacing is linear. Untick fly (Advanced) to choose log, list or file."
+            if on else self._spacing_tip)
         self.changed.emit()
 
     def is_fly(self) -> bool:
@@ -4586,6 +4595,7 @@ class WindowCard(QtWidgets.QFrame):
         from scan_core.window import normalize
         self.track_box.setText(self._track_text(pred, normalize(
             {"detector": self.det_box.currentData(), **self._current()})))
+        self._sync_enabled()                      # grey what the option leaves out
         self.changed.emit()
 
     def _on_formula(self, *_):
@@ -4648,10 +4658,20 @@ class WindowCard(QtWidgets.QFrame):
     def _sync_enabled(self):
         on = self.enable.isChecked()
         self.body.setEnabled(on)
-        for _role, (box, spin) in self.input_rows.items():
+        # what the predictor ignores with the current options (Kittel
+        # out-of-plane: Hk, easy axis, angle) is greyed -- still saved, so
+        # switching back to in-plane finds the numbers as they were
+        try:
+            unused = self.predictor().inactive(self._current().get("options") or {})
+        except Exception:
+            unused = set()
+        for role, (box, spin) in self.input_rows.items():
             # "fixed:" / "constant:" shows its number; a picked knob hides it
             spin.setVisible(not box.currentData())
-            spin.setEnabled(on)
+            spin.setEnabled(on and role not in unused)
+            box.setEnabled(role not in unused)
+        for name, spin in self.param_spins.items():
+            spin.setEnabled(name not in unused)
         if not on:
             self.live.setText("")
 

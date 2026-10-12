@@ -237,6 +237,21 @@ def test_diagonal_row_change_is_offered_with_two_stepped_axes(qapp):
     assert "diagonal" not in b.build_recipe().to_dict()
 
 
+def test_spacing_is_greyed_while_the_axis_is_flown(qapp):
+    """Choosing log / list on a flown axis used to untick fly silently; now
+    the choice is greyed while fly is on, and the tooltip says why."""
+    b = _builder(build_sim_registry())
+    b.add_axis("pos_x")
+    row = b.rows[0]
+    assert row.spacing_box.isEnabled()
+    tip = row.spacing_box.toolTip()
+    row.fly.setChecked(True)
+    assert row.is_fly() and not row.spacing_box.isEnabled()
+    assert "fly" in row.spacing_box.toolTip() and "linear" in row.spacing_box.toolTip()
+    row.fly.setChecked(False)
+    assert row.spacing_box.isEnabled() and row.spacing_box.toolTip() == tip
+
+
 def test_a_grid_row_says_what_it_is(qapp):
     b = _builder(build_sim_registry())
     grid = {"type": "grid", "x": {"param": "pos_x", "start": 0, "stop": 10, "num": 3},

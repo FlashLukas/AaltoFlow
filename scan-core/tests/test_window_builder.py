@@ -119,9 +119,18 @@ def test_a_fixed_angle_and_out_of_plane(builder):
     card.input_box("angle").setCurrentIndex(card.input_box("angle").findData(""))
     card.input_fixed("angle").setValue(30.0)
     model = card.option_widget("model")
+    assert card.param_spin("hk_mT").isEnabled()
     model.setCurrentIndex(model.findData("outofplane"))
     w = builder.build_recipe().window
     assert w["inputs"]["angle"] == 30.0 and w["options"]["model"] == "outofplane"
+    # out of plane: Hk, the easy axis and the angle play no part -> greyed
+    # (the old FMR card did this; still saved)
+    assert not card.param_spin("hk_mT").isEnabled()
+    assert not card.param_spin("easy_axis_deg").isEnabled()
+    assert not card.input_box("angle").isEnabled()
+    assert card.param_spin("meff_mT").isEnabled()
+    model.setCurrentIndex(model.findData("inplane"))
+    assert card.param_spin("hk_mT").isEnabled() and card.input_box("angle").isEnabled()
 
 
 def test_the_rows_follow_the_predictor_and_come_back(builder):

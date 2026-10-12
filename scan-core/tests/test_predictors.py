@@ -133,6 +133,20 @@ def test_output_units_convert_within_a_family_only():
     assert P.output_factor("GHz", "MHz") == 1000.0
     assert P.output_factor("", "MHz") == 1.0
     assert P.output_factor("Hz", "nm") is None
+    # case-insensitive where unique (the old window code lower-cased)
+    assert P.output_factor("ghz", "MHz") == 1000.0
+    assert P.output_factor("GHz", "mhz") == 1000.0
+
+
+def test_kittel_out_of_plane_ignores_the_in_plane_terms():
+    k = P.get("kittel")
+    assert k.inactive({"model": "inplane"}) == set()
+    assert k.inactive({"model": "outofplane"}) == {"angle", "hk_mT", "easy_axis_deg"}
+    base = {"meff_mT": 1000.0}
+    a = k.predict({"field": 1500, "angle": 0}, {**base, "hk_mT": 0.0}, {"model": "outofplane"})
+    b = k.predict({"field": 1500, "angle": 40}, {**base, "hk_mT": 50.0, "easy_axis_deg": 30},
+                  {"model": "outofplane"})
+    assert a == b
 
 
 def test_a_lab_predictor_registers_itself(tmp_path, monkeypatch):

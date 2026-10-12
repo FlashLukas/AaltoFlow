@@ -11,6 +11,21 @@ from scan_core.units import (is_length_unit, length_factor_um, rate_factor,  # n
                              split_rate)
 
 
+def test_case_insensitive_where_unique():
+    from scan_core.units import family_of
+    assert family_of("ghz") == ("frequency", 1e9)
+    assert family_of("Mhz") == ("frequency", 1e6)
+    assert family_of("MM") == ("length", 1e3)
+    assert family_of("mt") == family_of("mT")
+    assert family_of("mT") == ("field", 1e-3)            # exact first
+    # single letters keep their case: m metre is not M, G gauss is not g
+    assert family_of("M") is None and family_of("g") is None
+    assert family_of("m") == ("length", 1e6)
+    assert rate_factor("um", "um/MIN") == 60.0
+    assert rate_factor("MHZ", "GHz/s") == pytest.approx(1e-3)
+    assert split_rate("K/S") is None                      # S is siemens, not s
+
+
 def test_lengths():
     for u in ("m", "mm", "um", "µm", "nm", " um "):
         assert is_length_unit(u), u

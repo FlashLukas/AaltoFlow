@@ -1310,6 +1310,9 @@ looks an instrument up by its id.
   the per-bin count's file label is "samples per bin".
 - `scan_core/units.py` is the one place for unit facts: length detection
   (exact um factors), unit families, rate conversion (/s, /min, /h).
+  Matching is exact first, then case-insensitive when the lower case is
+  unique and the unit has two letters or more ("ghz" = GHz, "um/MIN"); a
+  single letter keeps its case (m metre / M, G gauss / g, s / S).
 - **Non-numeric axes.** `Settable.dtype` ("float"/"int"/"bool" numeric,
   "enum"/"string" not -- `registry.NON_NUMERIC`) and `Settable.options`;
   manifest.py registers enum/string CONTROLS as settables (until 2026-10-12
@@ -1434,6 +1437,9 @@ measured peak.*
   `role` first, or "fixed:"); the expression predictor has a formula box with
   a live check, one row per name ("constant:" = parameter, or a knob = input)
   and a "track" combo. Values are kept per predictor across a switch.
+  `Predictor.inactive(options)` names what does not enter the answer with
+  those options; the card greys it (Kittel out-of-plane: Hk, easy axis,
+  angle) and still saves it.
   Render targets `suite-window-kittel`, `suite-window-expression`.
 
 ### 4k. The suite GUI without a rig: demo, spacing, options, positioner (2026-10-12)
@@ -1482,7 +1488,8 @@ simulator off as instruments.
   knob's unit per second, its range is the control's limits converted with
   `flyscan.speed_factor`, and the label shows what the control receives
   ("um/s  (= 120000 nm/min)"). User-facing: "bins", "samples/bin",
-  "N bins (fly)", "positioner".
+  "N bins (fly)", "positioner". While an axis is flown its spacing box is
+  greyed (a fly is linear by nature), with a tooltip saying why.
 - **Wording**: "2-D grid", generic tooltips (diagonal row change, scout
   settings, routine examples). "Diagonal row change" is shown only with two
   or more STEPPED dims (`ScanBuilder._stepped_dims`; a grid counts two, a
