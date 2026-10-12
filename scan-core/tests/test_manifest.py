@@ -130,19 +130,14 @@ def test_prefix_namespaces_ids_per_module(fake_service):
         lab.close()
 
 
-def test_falls_back_to_the_builtin_declaration_without_describe(fake_service):
-    """A module that predates the verb must still be usable, and must say so."""
+def test_no_builtin_declaration_without_describe(fake_service):
+    """scan-core keeps no hand-written copy of any module: one that does not
+    describe itself is refused, even under a well-known key."""
+    from scan_core.instrument import InstrumentError
     svc = fake_service(15862, manifest=None)          # answers ok:false
-    warnings = []
-    reg, lab = build_lab_registry(host="127.0.0.1", include=("clMag",),
-                                  ports={"clMag": svc.cmd_port},
-                                  on_warn=warnings.append)
-    try:
-        # scan-core's hand-written clMag declaration was used instead
-        assert reg.get("field") is not None
-        assert any("no `describe`" in w for w in warnings), warnings
-    finally:
-        lab.close()
+    with pytest.raises(InstrumentError, match="section 6b"):
+        build_lab_registry(host="127.0.0.1", include=("clMag",),
+                           ports={"clMag": svc.cmd_port})
 
 
 def test_manifest_limits_are_used_not_scan_cores_own_idea(fake_service):

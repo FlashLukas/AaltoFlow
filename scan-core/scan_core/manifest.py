@@ -1,10 +1,9 @@
 """manifest.py -- turn a service's `describe` manifest into registry Parameters.
 
-This is where the self-description pays off. `lab.py` used to carry a
-hand-written `_build_clMag` / `_build_smb` function naming every knob, its verb,
-its status key and its settle rule. All of that already lives inside the module
-that owns the hardware, so keeping a second copy here meant two places to edit
-and one of them silently wrong whenever a limit moved.
+This is where the self-description pays off. Every knob's verb, status key,
+limits and settle rule already live inside the module that owns the hardware,
+so scan-core keeps NO second copy (one existed once, and was silently wrong
+whenever a limit moved). A service that does not describe itself is refused.
 
 A module that answers `describe` needs no code here at all: walk the manifest,
 make a Settable for each control and a Gettable for each indicator. Adding an
@@ -827,9 +826,8 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
 def describe_or_none(inst: Instrument):
     """Fetch a manifest, or None if this service does not speak `describe` yet.
 
-    Not every module has been taught to describe itself, and a coordinator that
-    refused to talk to the ones that haven't would be useless during the
-    rollout. Callers fall back to a hand-written builder.
+    Every module of the suite describes itself; a None here means the service
+    is not one (or is broken), and build_lab_registry refuses it.
     """
     try:
         return inst.command("describe").get("describe") or None

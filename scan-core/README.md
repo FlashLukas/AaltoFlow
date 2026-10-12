@@ -284,7 +284,7 @@ uv run python run_lab_demo.py            # 1-D field sweep on the live magnet
 
 ```python
 from scan_core.lab import build_lab_registry
-reg, lab = build_lab_registry(include=("clMag", "smb"))
+reg, lab = build_lab_registry(include=("lockin", "stage"), prefix=True)   # module keys
 try:
     ds = run(recipe, reg)          # identical engine, identical recipe
 finally:
@@ -293,17 +293,21 @@ finally:
 
 **scan-core knows the protocol, not the instruments.** Every service in the
 suite speaks one wire contract, so there is a single generic `Instrument` client
-(`scan_core/instrument.py`) and no instrument package is ever imported. Adding a
-knob is therefore a *declaration* in `scan_core/lab.py`, not new code:
+(`scan_core/instrument.py`) and no instrument package is ever imported. Every
+knob comes from the module's own `describe` manifest
+(`INSTRUMENT_MODULE_GUIDE.md` section 6b): its verb, the status key that reads
+it back, its live limits and its settle policy. scan-core holds no copy of any
+module, so a new module needs no edit here; a service that does not answer
+`describe` is refused with an error pointing at that section. `include` is
+required -- there is no default instrument. A control in a manifest looks like:
 
 ```python
-remote_settable(
-    reg, inst,
-    id="field", label="Magnetic field", unit="mT",
-    limits=(lo, hi),                        # read from the service's own info block
-    verb="set_field", arg="field_mT", read_key="measured_field_mT",
-    settle=adopt_then_flag("setpoint_field_mT", "field_stable"),
-)
+{"id": "field", "label": "Magnetic field", "kind": "control", "unit": "mT",
+ "min": -95.0, "max": 95.0,                 # the module's own envelope
+ "set": {"verb": "set_field", "arg": "field_mT"},
+ "read_path": ["measured_field_mT"],
+ "settle": {"policy": "adopt_then_flag",
+            "setpoint_key": "setpoint_field_mT", "flag_key": "field_stable"}}
 ```
 
 The `settle` policy is the part worth understanding. Commands are
@@ -314,11 +318,6 @@ the old value and silently measures the whole grid one step behind.
 `adopt_then_flag` waits for the service to adopt the new setpoint before it
 believes the flag. For set-and-forget instruments with nothing to converge,
 `echoes("power_dBm")` waits for the value to be reported back.
-
-Declared so far: **clMag** (field; measured field, magnet current, AUX AI
-detectors) and **smb** (RF frequency, power, phase). The other five services
-speak the same contract — each needs one `_build_*` function once its settle
-signal has been confirmed against the running service.
 
 ## Detectors that return arrays (a VNA)
 

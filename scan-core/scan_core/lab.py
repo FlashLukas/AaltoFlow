@@ -5,25 +5,27 @@ This module gives you the same Registry shape backed by the actual ZeroMQ
 services, so a recipe written against the simulator runs unchanged against the
 lab. That is the point of putting everything behind Parameters.
 
-Adding a knob here is a DECLARATION, not code: name the verb that sets it, the
-status field that reads it back, and the settle policy that says when it has
-arrived. `instrument.py` does the rest, and the knob then appears in the Scan
-Builder, is scannable on any axis, and lands in the dataset -- with no other
-edits anywhere. That is the expandability guarantee the old LabVIEW VI could not
-make.
+scan-core knows the PROTOCOL, not the instruments: every knob comes from the
+module's own `describe` manifest (INSTRUMENT_MODULE_GUIDE.md section 6b) --
+the verb that sets it, the status field that reads it back, its live limits
+and the settle policy that says when it has arrived. Nothing about any
+particular instrument is written here, so a new module needs no edit in
+scan-core: it appears in the Scan Builder, is scannable on any axis and lands
+in the dataset. A service that does not answer `describe` is refused.
 
 Two things are deliberately NOT hardcoded here:
 
 * **Limits come from the instrument.** Each service reports its own safety
-  envelope in its `info` block, and we read the Settable's limits from that. A
+  envelope in its manifest, and the Settable's limits are read from that. A
   limit written down in two places is a limit that will disagree with itself.
-* **Which instruments to connect is the caller's choice.** You rarely want all
-  seven; `include=` selects, and only those services need to be running.
+* **Which instruments to connect is the caller's choice.** `include=` names
+  them (module keys or discovery slugs), and only those services need to be
+  running.
 
 Usage:
 
     from scan_core.lab import build_lab_registry
-    reg, lab = build_lab_registry(include=("clMag",))
+    reg, lab = build_lab_registry(include=("lockin", "stage"), prefix=True)
     try:
         ds = run(recipe, reg)
     finally:
@@ -35,10 +37,9 @@ from __future__ import annotations
 from suite_common import discover
 
 from .errors import Fault
-from .instrument import (Instrument, InstrumentError, adopt_then_flag, echoes,
-                         flag_only, immediate, status_problem)
+from .instrument import Instrument, InstrumentError, status_problem
 from .manifest import describe_or_none, register_manifest
-from .registry import Gettable, Registry, Settable
+from .registry import Registry
 
 
 # Which modules exist and where they listen is NOT typed here any more. It
@@ -105,8 +106,8 @@ class Lab:
         """Let every instrument see the operator's Abort DURING a settle wait.
 
         The engine only checks `should_abort` between points, so a knob that
-        never settles (a stabiliser that cannot reach its point, a magnet with
-        no calibration) makes Abort look dead for the length of the timeout.
+        never settles (a feedback loop that cannot reach its target, a
+        controller with no calibration) makes Abort look dead for the length of the timeout.
         Pass None to clear it.
         """
         for inst in self.instruments.values():
@@ -125,8 +126,8 @@ class Lab:
           * its status carries a non-empty `hw_error` (the last hardware read
             failed: the published values are not the instrument's);
           * its status carries a non-empty `fault` (the module says measuring
-            now gives wrong data and a person may be needed -- the camera lost
-            its pattern). Such a module may LATCH it until `clear_fault`.
+            now gives wrong data and a person may be needed -- e.g. a
+            tracker lost its reference). Such a module may LATCH it until `clear_fault`.
 
         Never raises: the whole point is to be asked at every scan point, and
         a check that can itself blow up would turn a paused scan into a
@@ -156,8 +157,8 @@ class Lab:
     def can_clear_fault(self, label: str) -> bool:
         """True when this module's `describe` offers an action `clear_fault`.
 
-        A module that LATCHES its fault (the camera, until someone has looked
-        at the sample) offers it; one whose fault clears by itself does not.
+        A module that LATCHES its fault (until someone has looked at the
+        cause) offers it; one whose fault clears by itself does not.
         """
         inst = self._by_label(label)
         manifest = getattr(inst, "manifest", None) or {}
@@ -166,7 +167,7 @@ class Lab:
 
     def clear_fault(self, label: str) -> dict:
         """Send `clear_fault` to that module. Raises InstrumentError if refused
-        (a module refuses while the cause is still there -- mag2d without water)."""
+        (a module refuses while the cause is still there -- an interlock still open)."""
         inst = self._by_label(label)
         if inst is None:
             raise InstrumentError(f"{label}: not connected")
@@ -227,11 +228,11 @@ class Lab:
         is a one-time snapshot. A Settable's limits are baked when the manifest
         is first read, but the limits themselves move:
 
-          * piezo's travel ceiling drops 200 -> 160 um when an axis goes
-            closed-loop
-          * kim's armed leash REPLACES the travel clamp outright
-          * clMag's field range IS the loaded calibration, so measuring or
-            loading one changes it
+          * a positioner's travel can shrink when an axis switches to
+            closed loop
+          * a software leash armed around a datum can REPLACE the travel clamp
+          * a controller's range can BE its loaded calibration, so measuring
+            or loading one changes it
 
         A registry built before any of that lets a recipe sweep past what the
         instrument will now accept. Nothing raises: the service clamps, and the
@@ -319,69 +320,16 @@ def _apply_limits(registry, manifest: dict, prefix: bool, warn, module=None) -> 
     return changed
 
 
-# ------------------------- declaring one knob -------------------------------
-
-def remote_settable(reg: Registry, inst: Instrument, *, id: str, label: str,
-                    unit: str, limits, verb: str, arg: str, read_key: str,
-                    settle, timeout_s: float = 60.0, scale: float = 1.0,
-                    **extra) -> Settable:
-    """Register one settable knob backed by a service verb.
-
-    `scale` converts the unit you scan in to the unit the wire speaks (RF
-    frequency is scanned in MHz and commanded in Hz, so scale=1e6). Keeping the
-    conversion here means the recipe, the axis label and the dataset coordinate
-    all stay in the unit a physicist actually wants to type.
-
-    The returned Settable's `set` BLOCKS until the settle policy is satisfied,
-    which is exactly the contract engine.py relies on: when `set` returns, the
-    detectors may be read.
-    """
-    def set_fn(value: float):
-        inst.command(verb, **{arg: value * scale}, **extra)
-        inst.wait_until(settle(value * scale), timeout_s=timeout_s,
-                        what=f"{id} = {value:g} {unit}")
-
-    def get_fn():
-        v = inst.status().get(read_key)
-        return None if v is None else float(v) / scale
-
-    return reg.add(Settable(id, label, unit, limits, set_fn=set_fn, get_fn=get_fn))
-
-
-def remote_gettable(reg: Registry, inst: Instrument, *, id: str, label: str,
-                    unit: str, read_key: str | None = None,
-                    verb: str | None = None, reply_key: str | None = None,
-                    scale: float = 1.0, **extra) -> Gettable:
-    """Register one detector backed by a service.
-
-    Two flavours, and the difference matters for data quality:
-
-    * `read_key` reads the cached status stream -- cheap, but up to one status
-      period (~100 ms) old. Right for context channels like the magnet current.
-    * `verb`/`reply_key` issues a command for a FRESH sample. Right for anything
-      you are actually measuring, where a stale value is a wrong data point.
-    """
-    if verb is not None:
-        def get_fn():
-            r = inst.command(verb, **extra)
-            return float(r.get(reply_key, "nan")) / scale
-    else:
-        def get_fn():
-            v = inst.status().get(read_key)
-            return float("nan") if v is None else float(v) / scale
-
-    return reg.add(Gettable(id, label, unit, get_fn))
-
-
 # ------------------------- the lab registry ---------------------------------
 
-def build_lab_registry(host: str = "localhost", include=("clMag",),
-                       aux_ai_channels=("Dev1/ai1", "Dev1/ai2", "Dev1/ai3"),
+def build_lab_registry(include, host: str = "localhost",
                        timeout_ms: int = 3000, ports: dict | None = None,
-                       prefix: bool = False, force_builtin: bool = False,
+                       prefix: bool = False,
                        on_warn=None, endpoints: dict | None = None):
     """Connect to the named services and return (Registry, Lab).
 
+    `include` is REQUIRED: the module keys (or discovery slugs) to connect.
+    There is no default instrument -- the suite does not assume any lab's rig.
     Only the services in `include` need to be running. Start them from
     mission-control, or individually with `uv run scripts/run_service.py`.
 
@@ -395,11 +343,12 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
 
     `prefix=True` namespaces parameter ids as "<module>.<id>", which you want as
     soon as two modules are connected, since several own a knob called
-    `position`. `force_builtin=True` ignores `describe` and uses scan-core's
-    hand-written declarations, which is only useful for comparing the two.
-    `on_warn` receives non-fatal problems (a module with no `describe`, an
-    unrecognised settle policy) instead of them vanishing.
+    `position`. `on_warn` receives non-fatal problems (an unrecognised settle
+    policy, a parameter that cannot be scanned) instead of them vanishing.
+    A module that does not answer `describe` raises InstrumentError.
     """
+    if isinstance(include, str):
+        include = (include,)          # "lockin" is one module, not six letters
     reg = Registry()
     lab = Lab()
     ports = ports or {}
@@ -443,7 +392,7 @@ def build_lab_registry(host: str = "localhost", include=("clMag",),
         for name in include:
             before = _known_ids()
             _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
-                         force_builtin, prefix, warn, aux_ai_channels)
+                         prefix, warn)
             for i in _known_ids() - before:
                 owner[i] = name
     except Exception:
@@ -486,8 +435,7 @@ def _check_identity(name: str, manifest: dict) -> None:
             f"Ports of both cards in Mission Control)")
 
 
-def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
-                 force_builtin, prefix, warn, aux_ai_channels):
+def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms, prefix, warn):
     """Connect one service and register its parameters (build_lab_registry)."""
     if name in endpoints:
         ep_host, cmd, pub = endpoints[name]
@@ -500,126 +448,21 @@ def _connect_one(reg, lab, name, host, ports, endpoints, timeout_ms,
         inst = lab.connect(name, host=host, cmd_port=ports.get(name),
                            timeout_ms=timeout_ms)
 
-    # PREFER the module's own self-description. Everything a Parameter
-    # needs -- limits, verb, status key, settle rule -- already lives in
-    # the module that owns the hardware, so asking is always better than
-    # keeping a second copy here that can disagree with it.
-    manifest = None if force_builtin else describe_or_none(inst)
-    if manifest is not None:
-        _check_identity(name, manifest)
-        inst.manifest = manifest
-        register_manifest(reg, inst, manifest, prefix=prefix,
-                          on_warn=warn, module_name=inst.alias)
-        # the revision whose limits the registry now holds (refresh_stale)
-        inst.limits_rev = manifest.get("revision")
-        return
-
-    # Fall back to the hand-written declaration for modules that have
-    # not been taught `describe` yet. Without this the coordinator would
-    # be useless mid-rollout.
-    builder = _BUILDERS.get(name)
-    if builder is None:
+    # The module's own self-description is the ONLY source. Everything a
+    # Parameter needs -- limits, verb, status key, settle rule -- lives in the
+    # module that owns the hardware; a second copy here would disagree with it.
+    manifest = describe_or_none(inst)
+    if manifest is None:
         raise InstrumentError(
-            f"{name}: does not answer `describe` and scan-core has no "
-            f"built-in declaration for it. Teach the module to describe "
-            f"itself (see clMag's net/describe.py).")
-    warn(f"{name}: no `describe` verb; using scan-core's built-in "
-         f"declaration, which may not match the running service")
-    builder(reg, inst, aux_ai_channels=aux_ai_channels)
-
-
-def _build_clMag(reg: Registry, inst: Instrument, aux_ai_channels=(), **_):
-    """Magnet field controller -- the closed-loop case.
-
-    `field` is the interesting one. It is a genuine closed-loop knob: the
-    service ramps, runs a PI seek, and only then raises `field_stable`. The
-    settle policy has to wait for the setpoint to be ADOPTED before believing
-    that flag, or the first poll after a set returns the previous point's
-    success. `adopt_then_flag` is exactly that, and clMag is why it exists.
-    """
-    info = inst.info
-    lo, hi = info.get("field_lo", 0.0), info.get("field_hi", 0.0)
-    if lo == 0.0 and hi == 0.0:
-        raise InstrumentError(
-            "clMag reports no calibration (field range 0..0), so it will refuse "
-            "every setpoint. Run a calibration in the magnet GUI, or load a "
-            "saved one, before scanning field.")
-
-    remote_settable(
-        reg, inst,
-        id="field", label="Magnetic field", unit="mT",
-        limits=(lo, hi),                       # the magnet's own envelope
-        verb="set_field", arg="field_mT", read_key="measured_field_mT",
-        settle=adopt_then_flag("setpoint_field_mT", "field_stable"),
-        timeout_s=60.0, use_pid=True,
-    )
-
-    # Context channels: cheap, read from the status stream.
-    # These ids MUST match what clMag's own `describe` reports (measured_field,
-    # current). This fallback once used field_measured / magnet_current, so the
-    # same instrument had two sets of ids depending on which path built the
-    # registry -- a saved recipe then worked against one and failed against the
-    # other. The module is the source of truth; this copy follows it.
-    remote_gettable(reg, inst, id="measured_field", label="Measured field",
-                    unit="mT", read_key="measured_field_mT")
-    remote_gettable(reg, inst, id="current", label="Magnet current",
-                    unit="A", read_key="current_A")
-
-    # The AUX analog inputs on the same NI card are the actual detectors -- the
-    # photodiode / Kerr signal lands on one of these. Fresh single samples, not
-    # the status cache, because these are the measurement.
-    for ch in aux_ai_channels:
-        short = ch.split("/")[-1]              # "Dev1/ai1" -> "ai1"
-        remote_gettable(reg, inst, id=f"aux_{short}", label=f"AUX {short}",
-                        unit="V", verb="aux_read_ai", reply_key="volts",
-                        channel=ch)
-
-
-def _build_smb(reg: Registry, inst: Instrument, **_):
-    """RF generator -- the set-and-forget case.
-
-    Nothing converges here, so there is no stable flag to wait on. What the
-    service does report is the value it currently holds, so `echoes` waits for
-    that confirmation: weaker than a closed-loop settle, but a real check rather
-    than a sleep.
-    """
-    info = inst.info
-    remote_settable(
-        reg, inst,
-        id="rf_freq", label="RF frequency", unit="MHz",
-        limits=(info.get("freq_min_Hz", 9e3) / 1e6,
-                info.get("freq_max_Hz", 6e9) / 1e6),
-        verb="set_frequency", arg="frequency_Hz", read_key="frequency_Hz",
-        settle=echoes("frequency_Hz", tol=1.0),   # 1 Hz out of GHz
-        scale=1e6, timeout_s=10.0,
-    )
-    remote_settable(
-        reg, inst,
-        id="rf_power", label="RF power", unit="dBm",
-        limits=(info.get("power_min_dBm", -145.0), info.get("power_max_dBm", 18.0)),
-        verb="set_power", arg="power_dBm", read_key="power_dBm",
-        settle=echoes("power_dBm", tol=1e-3), timeout_s=10.0,
-    )
-    remote_settable(
-        reg, inst,
-        id="rf_phase", label="RF phase", unit="deg",
-        limits=(info.get("phase_min_deg", -360.0), info.get("phase_max_deg", 360.0)),
-        verb="set_phase", arg="phase_deg", read_key="phase_deg",
-        settle=echoes("phase_deg", tol=1e-3), timeout_s=10.0,
-    )
-
-
-#: name -> the function that declares that instrument's parameters.
-#: Only clMag and smb are declared so far. The other five services speak the same
-#: contract, so adding one is a `_build_*` function here and nothing else -- but
-#: each needs its settle signal confirmed against the running service first
-#: (stage/piezo/kim report a `moving` flag, which is `flag_only(..., invert=True)`
-#: or `adopt_then_flag(..., invert=True)` if they echo a target). None of them
-#: has been checked yet, so none is guessed at here.
-_BUILDERS = {
-    "clMag": _build_clMag,
-    "smb": _build_smb,
-}
+            f"{name}: does not answer `describe`, so scan-core cannot know its "
+            f"parameters. Every module must describe itself -- see "
+            f"INSTRUMENT_MODULE_GUIDE.md section 6b.")
+    _check_identity(name, manifest)
+    inst.manifest = manifest
+    register_manifest(reg, inst, manifest, prefix=prefix,
+                      on_warn=warn, module_name=inst.alias)
+    # the revision whose limits the registry now holds (refresh_stale)
+    inst.limits_rev = manifest.get("revision")
 
 
 def _add_parameter_values(snap, reg, owner, lab):
@@ -627,7 +470,7 @@ def _add_parameter_values(snap, reg, owner, lab):
 
     Why (lab PC, 2026-10-05): the snapshot holds a module's raw get_config /
     status, whose keys (`sensor.wavelength_nm`) are not the names a person
-    scans with (`pm16.wavelength`), so the catalogue's `where pm16.wavelength
+    scans with (`meter.wavelength`), so the catalogue's `where meter.wavelength
     > 600` found nothing. Each scalar parameter's current value (the readback
     or cached status, never a new acquisition) under its SCAN name fixes that.
     Never raises; arrays and unreadable values are skipped.
