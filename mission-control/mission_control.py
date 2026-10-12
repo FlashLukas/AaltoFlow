@@ -104,7 +104,7 @@ PROBE_PERIOD_S = 1.2          # how often every service's port is checked
 RESCAN_PERIOD_MS = 3000       # how often the folder is checked for new modules
 SECURITY_BADGE_MS = 10000    # how often the security badge re-reads the policy
 GUI_WAIT_S = 30.0             # how long "GUI" waits for a just-started service
-                              # (a real camera or KIM takes several seconds to open)
+                              # (some real instruments take several seconds to open)
 
 
 def find_uv() -> str | None:
@@ -113,27 +113,17 @@ def find_uv() -> str | None:
 
 
 # ────────────────────────────────── profiles ──────────────────────────────
-# A profile is a NAMED SUBSET of module ids you bring up together. Built-in
-# defaults live here; profiles.json next to this script overrides them.
-# Members that are not currently discovered are KEPT (the module may just be
-# missing on this PC today) and skipped when the profile is activated.
+# A profile is a NAMED SUBSET of module ids you bring up together. The suite
+# is for any lab, so the only BUILT-IN chip is "Full suite" (every discovered
+# local module); a setup's own chips live in profiles.json next to this script
+# (written by the Edit... dialog and by "Save as profile", and carried along
+# by Export / Import settings). A profile is a list of names, so a chip none
+# of whose members is installed here is HIDDEN -- a profiles.json copied from
+# another PC does not fill the bar with buttons that do nothing. Members that
+# are not discovered are KEPT (the module may just be missing on this PC
+# today), skipped when the profile is activated, and greyed in the editor.
 
-DEFAULT_PROFILES = [
-    dict(name="KIM rig",         members=["kim", "camera"]),
-    dict(name="MOKE run",        members=["clMag", "zpiezo", "piezo", "camera", "hf2"]),
-    dict(name="Alignment",       members=["stage", "kim", "zpiezo", "camera"]),
-    dict(name="RF / pump-probe", members=["clMag", "smb", "camera", "hf2"]),
-    # Two VNA-FMR chips because the two magnet modules drive the SAME coils and
-    # must not both run: mag2d is the always-on PI, mag2dcal the calibrated seek
-    # that freezes and stabilises. Tick "Exclusive" to swap one for the other.
-    # (Forget it in real mode and the second one is refused anyway: its DAQ
-    # card's address is already claimed -- the address lock, hwlock.)
-    dict(name="VNA-FMR",         members=["mag2d", "vna"]),
-    dict(name="VNA-FMR (cal)",   members=["mag2dcal", "vna"]),
-    # The same measurement in the DynaCool: the cryostat's magnet (ppms) and
-    # the VNA (the Copper Mountain on that PC, set in its vna.ini).
-    dict(name="VNA-FMR (DynaCool)", members=["ppms", "vna"]),
-]
+DEFAULT_PROFILES: list[dict] = []
 FULL_SUITE = "Full suite"      # always present: every discovered local module
 
 PROFILES_FILE = Path(__file__).resolve().parent / "profiles.json"
@@ -156,7 +146,8 @@ def _clean_profiles(raw) -> list[dict]:
 
 
 def load_profiles() -> list[dict]:
-    """profiles.json if present & valid, else the built-in defaults (copied)."""
+    """profiles.json if present & valid, else the built-in defaults (none: only
+    the "Full suite" chip, which the bar adds itself)."""
     if PROFILES_FILE.exists():
         try:
             data = _clean_profiles(json.loads(PROFILES_FILE.read_text("utf-8-sig")))
@@ -1119,6 +1110,12 @@ class ProfileEditor(QtWidgets.QDialog):
             cb.toggled.connect(lambda on, k=m.id: self._toggle_member(k, on))
             self.checks[m.id] = cb
             right.addWidget(cb)
+        # Members that are not installed on this PC have no checkbox; list them
+        # greyed so a profile from another PC shows what it would also start.
+        self.missing_label = QtWidgets.QLabel("")
+        self.missing_label.setWordWrap(True)
+        self.missing_label.setEnabled(False)          # the palette's greyed text
+        right.addWidget(self.missing_label)
         right.addStretch(1)
         body.addLayout(right, 1)
 
@@ -1155,6 +1152,10 @@ class ProfileEditor(QtWidgets.QDialog):
             cb.blockSignals(True)
             cb.setChecked(mid in members)
             cb.blockSignals(False)
+        missing = [k for k in (prof["members"] if prof else []) if k not in self.checks]
+        self.missing_label.setText(
+            "Not on this PC (kept, skipped when started): " + ", ".join(missing)
+            if missing else "")
 
     def _toggle_member(self, mid: str, on: bool):
         prof = self._current()
@@ -2360,7 +2361,7 @@ class ModuleCard(QtWidgets.QFrame):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        # "TR-MOKE · Mission Control" when the installer was told which setup
+        # "<setup> · Mission Control" (e.g. "Cryostat 2 · ...") when the installer was told which setup
         # this PC drives, "AaltoFlow · Mission Control" otherwise
         self.setWindowTitle(suite_title("Mission Control"))
         self.resize(1180, 900)
@@ -2385,7 +2386,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header = QtWidgets.QHBoxLayout()
         tbox = QtWidgets.QVBoxLayout(); tbox.setSpacing(2)
         title = QtWidgets.QLabel(suite_title("Mission Control").upper()); title.setObjectName("title")
-        title.setToolTip("The setup name (e.g. TR-MOKE, VNA-FMR): set it with 'Setup name...'.\n"
+        title.setToolTip("The setup name (e.g. Cryostat 2, Optical bench): set it with 'Setup name...'.\n"
                          "Every data file records it, and the Catalogue can filter by it.")
         self.title_lbl = title
         # the product name moves to the subtitle once a setup name leads the title
@@ -2426,7 +2427,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QStyle.SP_FileDialogContentsView))
         self.catalogue_btn.setToolTip("scan-core: search every saved run -- by setup, sample, "
                                       "operator, project, tags, date or instrument values "
-                                      "(e.g. ppms.temperature between 4 and 6).")
+                                      "(e.g. <module>.temperature between 4 and 6).")
         self.catalogue_btn.clicked.connect(self.open_catalogue)
         stop_all = QtWidgets.QPushButton("  Stop all"); stop_all.setObjectName("danger")
         stop_all.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaStop))
@@ -2434,8 +2435,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # A scan file records which modules it was measured with, so it can
         # bring them up again like a profile (datafile_start.py). Dropping a
         # .nc on the window does the same. Next to "Start all": it is a start.
-        # (Not in the PROFILES row: with the default chips that row already
-        # sets the window's minimum width.)
+        # (Not in the PROFILES row: a setup's own chips can fill that row,
+        # and it would then set the window's minimum width.)
         self.file_btn = QtWidgets.QPushButton("  Start for a data file…")
         self.file_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
         self.file_btn.setToolTip("Start the modules a scan file (.nc) was measured with:\n"
@@ -2508,7 +2509,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                   "(Security… to change it)")
         mrow.addWidget(rescan); mrow.addWidget(inst); mrow.addWidget(add_mod); mrow.addWidget(add)
         setup_btn = QtWidgets.QPushButton("Setup name…")
-        setup_btn.setToolTip("Name this setup (TR-MOKE, VNA-FMR ...). Every scan file records it,\n"
+        setup_btn.setToolTip("Name this setup (Cryostat 2, Optical bench ...). Every scan file records it,\n"
                              "and the Catalogue can search by it.")
         setup_btn.clicked.connect(lambda: self.edit_setup_name())
         mrow.addWidget(exp); mrow.addWidget(imp); mrow.addWidget(setup_btn)
@@ -2820,7 +2821,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if name is None:
             text, ok = QtWidgets.QInputDialog.getText(
                 self, "Setup name",
-                "Name of this setup (e.g. TR-MOKE, VNA-FMR).\n"
+                "Name of this setup (e.g. Cryostat 2, Optical bench).\n"
                 "Every scan file records it; the Catalogue filters by it.\n"
                 "Empty = no setup name.",
                 text=setup_name() or "")
@@ -2954,6 +2955,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for prof in self.profiles + [full]:
             present = [self.cards[k].spec.name for k in prof["members"] if k in self.cards]
             missing = [k for k in prof["members"] if k not in self.cards]
+            if not present and prof is not full:
+                continue          # nothing of it installed here: no dead button
             btn = QtWidgets.QPushButton(prof["name"])
             btn.setObjectName("profile")
             tip = f"Bring up: {', '.join(present) or '(nothing available)'}"

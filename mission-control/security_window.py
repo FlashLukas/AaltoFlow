@@ -232,7 +232,7 @@ class SecurityDialog(QtWidgets.QDialog):
         self.btn_make.clicked.connect(self.make_key)
         self.machine_box = QtWidgets.QCheckBox("this PC may run scans (machine)")
         self.machine_box.setToolTip("Programs on this PC may act as 'machine' on other PCs "
-                                    "(scan-core, the camera driving kim).")
+                                    "(scan-core, or a module that drives another module).")
         self.btn_export = QtWidgets.QPushButton("Save public key to file...")
         self.btn_export.setToolTip("For bringing it to the lab PC on a USB stick or the "
                                    "share. Only the public half: safe to share.")
@@ -372,7 +372,7 @@ class SecurityDialog(QtWidgets.QDialog):
         lay = QtWidgets.QVBoxLayout(w)
         intro = QtWidgets.QLabel(
             "The PCs whose programs may reach the secured modules. 'May run scans' lets "
-            "a PC's programs act as a machine (scan-core, the camera driving kim). A "
+            "a PC's programs act as a machine (scan-core, or a module that drives another module). A "
             "change works within a few seconds on every PC.")
         intro.setWordWrap(True)
         intro.setObjectName("meta")

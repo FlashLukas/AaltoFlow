@@ -99,9 +99,15 @@ and rescans. Restart running services so they read their new `.ini`.
 A chip per named subset: click it and the launcher starts just those services, in
 dependency order (each module's `start_after`, e.g. the camera after kim),
 then opens their GUIs. **Full suite** is always there and means every local
-module. **Exclusive** first stops launcher-started services that are not in
-the profile. **Edit…** adds, renames and removes profiles. A member that is not
-found on this PC today is kept and skipped.
+module; it is the ONLY built-in chip -- the suite does not know your lab's
+setups. Make your own with **Edit…** (adds, renames and removes profiles) or
+**Save as profile…** in *Start for a data file*; they are saved in
+`profiles.json` next to this script and travel with *Export settings…*.
+**Exclusive** first stops launcher-started services that are not in the
+profile. A member that is not found on this PC today is kept, skipped when the
+chip is clicked and greyed in the editor; a chip with NONE of its members
+installed here is hidden (a `profiles.json` brought from another PC does not
+fill the bar with buttons that do nothing).
 
 ## Start for a data file
 

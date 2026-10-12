@@ -231,6 +231,46 @@ def test_profiles_keep_members_that_are_missing_today(env):
     assert cleaned == [{"name": "Run", "members": ["magnet", "not-here"]}]
 
 
+def test_only_full_suite_is_built_in(env, tmp_path, monkeypatch):
+    """The suite is for any lab: a fresh install shows ONE chip, "Full suite".
+    A setup's own chips come from profiles.json."""
+    mc, win, root, app = env
+    monkeypatch.setattr(mc, "PROFILES_FILE", tmp_path / "profiles.json")
+    assert mc.DEFAULT_PROFILES == []
+    assert mc.load_profiles() == []
+    win.profiles = mc.load_profiles()
+    win.build_profile_bar()
+    names = [win.profile_bar.itemAt(i).widget().text() for i in range(win.profile_bar.count())]
+    assert names == [mc.FULL_SUITE]
+
+
+def test_a_chip_with_nothing_installed_is_hidden(env, tmp_path, monkeypatch):
+    """A profiles.json from another PC: a chip none of whose members exists
+    here is hidden; one with at least one member stays (the rest is skipped)."""
+    mc, win, root, app = env
+    monkeypatch.setattr(mc, "PROFILES_FILE", tmp_path / "profiles.json")
+    (tmp_path / "profiles.json").write_text(json.dumps([
+        {"name": "Partly here", "members": ["magnet", "elsewhere"]},
+        {"name": "Other lab", "members": ["elsewhere", "gone"]}]), "utf-8")
+    win.profiles = mc.load_profiles()
+    assert [p["name"] for p in win.profiles] == ["Partly here", "Other lab"]   # kept
+    win.build_profile_bar()
+    names = [win.profile_bar.itemAt(i).widget().text() for i in range(win.profile_bar.count())]
+    assert names == ["Partly here", mc.FULL_SUITE]
+    tip = win.profile_bar.itemAt(0).widget().toolTip()
+    assert "elsewhere" in tip
+    # the editor still lists the hidden chip, its missing members greyed
+    dlg = mc.ProfileEditor(win.profiles, win.found.modules, win)
+    dlg.list.setCurrentRow(1)
+    assert "elsewhere" in dlg.missing_label.text() and "gone" in dlg.missing_label.text()
+    assert not dlg.missing_label.isEnabled()
+    dlg.list.setCurrentRow(0)
+    assert dlg.checks["magnet"].isChecked()
+    dlg.close()
+    win.profiles = []
+    win.build_profile_bar()
+
+
 def test_icon_follows_the_theme(env):
     mc, win, root, app = env
     spec = win.found.get("magnet")
