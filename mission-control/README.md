@@ -87,7 +87,9 @@ next to this script.
 **Export settings…** writes all of it into one `.zip`: `suite_local.json`,
 `profiles.json`, scan-core's panel layouts, and every module's `*.ini`,
 `*calibration*.json` and `Calibrations\` folder (the same "lab data" rule the
-installer protects, so a new module is covered automatically). **Import
+installer protects, so a new module is covered automatically), and the lab's
+own window predictors in `scan-core/lab_predictors/*.py` (Python code: the
+import summary says so, and a bundle can put code nowhere else). **Import
 settings…** reads such a zip back on another PC or install folder: it lists
 what would be new, replaced or skipped (paths outside the suite, modules not
 installed here, anything that is not a settings file), asks, saves the files it

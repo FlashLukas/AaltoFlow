@@ -34,6 +34,12 @@ def _suite(root: Path) -> Path:
     (root / "scan-core").mkdir()
     (root / "scan-core" / "suite_layouts.json").write_text("{}", encoding="utf-8")
     (root / "scan-core" / "notes.txt").write_text("not a setting", encoding="utf-8")
+    # a lab's own window predictor (code, kept like a calibration)
+    (root / "scan-core" / "lab_predictors" / "__pycache__").mkdir(parents=True)
+    (root / "scan-core" / "lab_predictors" / "dispersion.py").write_text(
+        "# my physics\n", encoding="utf-8")
+    (root / "scan-core" / "lab_predictors" / "notes.txt").write_text("x", encoding="utf-8")
+    (root / "scan-core" / "lab_predictors" / "__pycache__" / "d.pyc").write_bytes(b"\0")
     return root
 
 
@@ -43,6 +49,7 @@ EXPECTED = [
     "kim-control/kim.ini",
     "kim-control/px_calibration.json",
     "mission-control/profiles.json",
+    "scan-core/lab_predictors/dispersion.py",
     "scan-core/suite_layouts.json",
     "suite_local.json",
 ]
@@ -87,6 +94,7 @@ def test_round_trip_to_a_fresh_install(old, tmp_path):
     assert not plan.overwrite and not plan.skipped
     assert plan.touches_local_settings
     assert "suite_local.json" in B.summary(plan)
+    assert plan.touches_code and "Python code" in B.summary(plan)
     backup = B.apply_import(plan, new)
     assert backup is None                         # nothing was replaced
     for rel in EXPECTED:
@@ -160,6 +168,24 @@ def test_named_file_of_a_missing_suite_folder_is_skipped(old, tmp_path):
     assert {e.path for e in plan.new} == {"kim-control/kim.ini",
                                           "kim-control/px_calibration.json",
                                           "suite_local.json"}
+
+
+def test_lab_predictors_only_into_scan_core(old, tmp_path):
+    """A bundle may carry predictor code into scan-core/lab_predictors and
+    nowhere else (not a module, not a subfolder)."""
+    bundle = _handmade(tmp_path / "p.zip", {
+        "scan-core/lab_predictors/mine.py": "x = 1\n",
+        "scan-core/lab_predictors/sub/deep.py": "x",
+        "scan-core/lab_predictors/readme.txt": "x",
+        "kim-control/lab_predictors/evil.py": "x",
+    })
+    plan = B.read_bundle(bundle, old)
+    assert [e.path for e in plan.to_write] == ["scan-core/lab_predictors/mine.py"]
+    assert {e.path for e in plan.skipped} == {"scan-core/lab_predictors/sub/deep.py",
+                                              "scan-core/lab_predictors/readme.txt",
+                                              "kim-control/lab_predictors/evil.py"}
+    B.apply_import(plan, old)
+    assert (old / "scan-core/lab_predictors/mine.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
 def test_not_a_bundle_is_refused(tmp_path):

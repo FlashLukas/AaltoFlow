@@ -10,6 +10,7 @@ AaltoFlow and AaltoView are public; some files next to them are not meant to be:
                                       PER PC: stored as suite_local.<PC name>.json
   * mission-control\profiles.json     the launcher profiles of this lab
   * scan-core\suite_layouts.json      saved control-panel layouts
+  * scan-core\lab_predictors\*.py     the lab's own window predictors (its physics)
   * Claude Code's project memory      (optional) %USERPROFILE%\.claude\projects\<this checkout>\memory
 All of them are gitignored in the public repos, so without this script they would
 exist on one disk only. This script copies them into a separate PRIVATE repo
@@ -81,6 +82,17 @@ $skipDirs = @(".venv", ".git", "node_modules", "__pycache__", "build", "dist")
 function Get-PrivateFiles($root) {
     $out = @()
     foreach ($n in $named) { if (Test-Path (Join-Path $root $n)) { $out += $n } }
+    # A lab's own window predictors (2026-10-12): scan-core\lab_predictors\*.py,
+    # gitignored, so like the files above they exist on this disk only. Only the
+    # top level and only .py (the Extension test: -Filter "*.py" alone can also
+    # match longer extensions through 8.3 short names). A restore needs nothing
+    # extra -- it copies every file of the lab repo's AaltoFlow\ back in place.
+    $lp = Join-Path $root "scan-core\lab_predictors"
+    if (Test-Path $lp) {
+        Get-ChildItem -Path $lp -Filter "*.py" -File |
+            Where-Object { $_.Extension -eq ".py" } |
+            ForEach-Object { $out += "scan-core\lab_predictors\$($_.Name)" }
+    }
     Get-ChildItem -Path $root -Recurse -Filter "CLAUDE.local.md" -File -ErrorAction SilentlyContinue |
         Where-Object {
             $rel = $_.FullName.Substring($root.Length).TrimStart('\')

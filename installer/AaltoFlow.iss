@@ -21,6 +21,12 @@
 ; Per-user install (no admin rights): the lab PC account may not be an admin,
 ; and the suite writes .ini, calibration and suite_local.json files next to the
 ; code, which Program Files would forbid.
+;
+; Lab data -- every <module>\*.ini, *calibration*.json, Calibrations\ and
+; scan-core\lab_predictors\*.py (a lab's own window physics) -- is installed
+; "onlyifdoesntexist uninsneveruninstall" by the generated [Files] section
+; (gen_components.py), or not shipped at all (lab_predictors is gitignored):
+; either way an upgrade keeps the lab's copy and uninstall leaves it behind.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"

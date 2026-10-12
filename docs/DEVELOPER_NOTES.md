@@ -1405,7 +1405,12 @@ measured peak.*
   subclassing `Predictor` and calling `register()`; imported on the first
   registry access; an import error is listed in `predictors.plugin_errors`
   (shown by validate when the recipe names an unknown predictor), never fatal.
-  Example in the scan-core README, "Window predictors".
+  Example in the scan-core README, "Window predictors". The folder is the
+  lab's data (gitignored): `catalog.is_lab_data` counts
+  `lab_predictors/*.py`, so the installer would install one only if missing
+  (none is shipped) and Add module keeps it; the settings bundle carries
+  `scan-core/lab_predictors/*.py` and ONLY there (`LAB_PREDICTORS`; the
+  import summary warns that it is code); `tools/lab_backup.ps1` backs it up.
 - **Units**: everything inside `WindowRunner` is in the detector's AXIS unit
   (the frequency-only check is gone: any 1-D array detector with a unit
   qualifies). The predictor's answer and the margin are converted by

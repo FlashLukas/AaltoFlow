@@ -266,10 +266,10 @@ def test_a_conflict_is_never_installed(root, tmp_path):
 
 def test_lab_data_rule_matches_the_installer():
     for rel in ("kim.ini", "KIM.INI", "px_calibration.json", "Calibrations/a.json",
-                "Calibrations/sub/b.txt"):
+                "Calibrations/sub/b.txt", "lab_predictors/mine.py"):
         assert K.is_lab_data(rel), rel
     for rel in ("module.toml", "src/kim/config.ini", "tests/calibration_test.json",
-                "pyproject.toml"):
+                "pyproject.toml", "lab_predictors/sub/x.py", "lab_predictors/a.txt"):
         assert not K.is_lab_data(rel), rel
 
 

@@ -68,11 +68,16 @@ def is_lab_data(rel: str) -> bool:
     """True for the files a rig TUNES and an update must therefore not replace.
 
     Same rule as the installer: <module>/*.ini, <module>/*calibration*.json,
-    and anything under <module>/Calibrations/. `rel` is relative to the module
-    folder, with / separators.
+    anything under <module>/Calibrations/, and <folder>/lab_predictors/*.py
+    (scan-core's: a lab's own window physics, scan_core/predictors.py LAB_DIR
+    -- written by the lab, never shipped, so an update must not touch it).
+    `rel` is relative to the module folder, with / separators.
     """
     parts = rel.split("/")
     if parts[0] == "Calibrations":
+        return True
+    if (len(parts) == 2 and parts[0] == "lab_predictors"
+            and parts[1].lower().endswith(".py")):
         return True
     if len(parts) == 1:
         return (fnmatch.fnmatch(parts[0].lower(), "*.ini")

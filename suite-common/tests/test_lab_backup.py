@@ -110,3 +110,30 @@ def test_backup_writes_suite_local_under_this_pcs_name(tmp_path):
     assert (lab / "AaltoFlow" / f"suite_local.{_pc()}.json").read_text(
         encoding="utf-8") == '{"office": 1}'
     assert not (lab / "AaltoFlow" / "suite_local.json").exists()
+
+
+# ---- a lab's own window predictors (2026-10-12) ------------------------------
+
+def test_lab_predictors_are_backed_up_and_restored(tmp_path):
+    flow, lab = _setup(tmp_path)
+    shutil.rmtree(lab)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "clone", "-q", str(remote), str(lab)], check=True)
+    for k, v in (("user.name", "t"), ("user.email", "t@example.invalid")):
+        subprocess.run(["git", "-C", str(lab), "config", k, v], check=True)
+    lp = flow / "scan-core" / "lab_predictors"
+    lp.mkdir(parents=True)
+    (lp / "dispersion.py").write_text("# my physics\n", encoding="utf-8")
+    (lp / "notes.txt").write_text("not code", encoding="utf-8")
+    _run(flow, "-Mode", "backup")
+    saved = lab / "AaltoFlow" / "scan-core" / "lab_predictors"
+    assert (saved / "dispersion.py").read_text(encoding="utf-8") == "# my physics\n"
+    assert not (saved / "notes.txt").exists()
+    # a fresh checkout gets it back (and -WhatIf only lists it)
+    shutil.rmtree(lp)
+    out = _run(flow, "-Mode", "restore", "-WhatIf")
+    assert r"would restore: scan-core\lab_predictors\dispersion.py" in out
+    assert not lp.exists()
+    _run(flow, "-Mode", "restore")
+    assert (lp / "dispersion.py").read_text(encoding="utf-8") == "# my physics\n"

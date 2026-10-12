@@ -16,6 +16,10 @@ own (installer/gen_components.py and catalog.is_lab_data -- one function, so
     <module>/*.ini                  settings tuned on the rig
     <module>/*calibration*.json     e.g. kim's px_calibration.json
     <module>/Calibrations/**        clMag's calibration folder
+    scan-core/lab_predictors/*.py   a lab's own window predictors (its own
+                                    physics, see scan_core/predictors.py);
+                                    Python CODE, so only in scan-core, and
+                                    the import summary says so
 
 applied to every discovered module folder and to the suite's own folders
 (mission-control, scan-core, suite-common), plus three named files:
@@ -73,6 +77,10 @@ BACKUP_DIR = ".suite_cache"
 #: data -- the installer protects the same three.
 SUITE_FOLDERS = ("suite-common", "mission-control", "scan-core")
 
+#: A lab's own window predictors (scan_core/predictors.py LAB_DIR): the one
+#: place a bundle may carry Python code -- only here, only *.py at its top.
+LAB_PREDICTORS = "scan-core/lab_predictors"
+
 #: Settings files that the folder rule would not catch, by exact path.
 NAMED_FILES = (LOCAL_FILE, "mission-control/profiles.json", "scan-core/suite_layouts.json")
 
@@ -104,7 +112,12 @@ def is_settings_path(rel: str, folders: list[str] | set[str]) -> bool:
     if rel in NAMED_FILES:
         return True
     hit = _split(rel, folders)
-    return hit is not None and bool(hit[1]) and is_lab_data(hit[1])
+    if hit is None or not hit[1] or not is_lab_data(hit[1]):
+        return False
+    if hit[1].startswith("lab_predictors/"):
+        # code that scan-core imports: never into any other folder
+        return f"{hit[0]}/lab_predictors" == LAB_PREDICTORS
+    return True
 
 
 def _old_layout_map(folders) -> dict[str, str]:
@@ -136,6 +149,12 @@ def collect(root: Path | None = None) -> list[str]:
                 rel_parts = f.relative_to(base).parts
                 if f.is_file() and not any(_skipped_dir(p) for p in rel_parts):
                     found.add(folder + "/" + "/".join(rel_parts))
+    lab = root / LAB_PREDICTORS
+    if lab.is_dir():
+        for f in lab.iterdir():
+            rel = f"{LAB_PREDICTORS}/{f.name}"
+            if f.is_file() and is_settings_path(rel, _settings_folders(root)):
+                found.add(rel)
     for rel in NAMED_FILES:
         if (root / rel).is_file():
             found.add(rel)
@@ -226,6 +245,13 @@ class ImportPlan:
     @property
     def to_write(self) -> list[BundleEntry]:
         return self.new + self.overwrite
+
+    @property
+    def touches_code(self) -> bool:
+        """True when a lab predictor (Python code scan-core imports) would be
+        written -- the summary says so: import such a bundle only from a
+        source you trust."""
+        return any(e.path.startswith(LAB_PREDICTORS + "/") for e in self.to_write)
 
     @property
     def touches_local_settings(self) -> bool:
@@ -341,6 +367,10 @@ def summary(plan: ImportPlan) -> str:
         lines.append(f"NOTE: {LOCAL_FILE} holds THIS PC's port overrides, real-hardware "
                      "flags and remote hosts. Importing it replaces them with the ones "
                      "of the PC the bundle came from.")
+    if plan.touches_code:
+        lines.append(f"NOTE: files in {LAB_PREDICTORS} are Python code that the "
+                     "measurement suite runs (a lab's own window predictors). "
+                     "Import them only from a bundle you trust.")
     return "\n".join(lines).rstrip() + "\n"
 
 

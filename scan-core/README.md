@@ -1017,8 +1017,10 @@ sweeps the full band. `options.unit` says what unit the formula's result is
 in (`GHz`); empty = the detector's axis unit.
 
 **Adding your own.** Put a Python file in `scan-core/lab_predictors/` (one
-file per predictor; the folder is yours, updates never touch it). It is
-imported the first time a scan or the builder asks for predictors:
+file per predictor; the folder is yours: it is not in git, updates and
+the installer never touch it, and Mission Control's *Export settings...*
+and `tools/lab_backup.ps1` back it up). It is imported the first time a scan
+or the builder asks for predictors:
 
 ```python
 # scan-core/lab_predictors/cavity.py -- a cavity mode tuned by temperature

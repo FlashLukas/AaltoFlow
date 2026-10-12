@@ -42,6 +42,13 @@ the same protection without anyone remembering to add it here:
     <module>\*.ini                  settings tuned on the rig
     <module>\*calibration*.json     e.g. kim's px_calibration.json
     <module>\Calibrations\*         clMag's calibration folder
+    scan-core\lab_predictors\*.py   a lab's own window predictors
+
+The lab predictors are gitignored, so the staged tree (git archive HEAD)
+normally has none and Setup never writes into that folder: an upgrade leaves
+the lab's files alone, and uninstall -- which removes only what Setup
+installed -- leaves them too. Should a release ever ship one, it gets the
+data flags below like every other lab-data file.
 
 The rule itself is suite_common.catalog.is_lab_data (see _lab_data_rule): the
 same function decides what Mission Control's "Export settings..." saves.
@@ -92,6 +99,10 @@ def data_globs(module_dir: Path, stage: Path) -> list[str]:
              if f.is_file() and is_lab_data(f.name)]
     if (module_dir / "Calibrations").is_dir():
         globs.append(r"Calibrations\*")
+    lab = module_dir / "lab_predictors"
+    if lab.is_dir() and any(is_lab_data(f"lab_predictors/{f.name}")
+                            for f in lab.iterdir() if f.is_file()):
+        globs.append(r"lab_predictors\*.py")
     return globs
 
 
@@ -112,8 +123,8 @@ def files_entry(folder: str, component: str, data: list[str]) -> list[str]:
                      f'Flags: ignoreversion recursesubdirs createallsubdirs')
         for g in data:
             dest = f"{{app}}\\{folder}"
-            if g.endswith(r"Calibrations\*"):
-                dest += r"\Calibrations"
+            if "\\" in g:                     # Calibrations\*, lab_predictors\*.py
+                dest += "\\" + g.rsplit("\\", 1)[0]
             lines.append(f'Source: "{stage}\\{g}"; DestDir: "{dest}"; '
                          f'Components: {component}; '
                          f'Flags: onlyifdoesntexist uninsneveruninstall recursesubdirs createallsubdirs')
