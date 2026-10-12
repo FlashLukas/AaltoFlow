@@ -618,8 +618,11 @@ def entry_from_run(run, setup_name: str | None = None) -> Entry:
     row("duration", _fmt_duration(dur) if dur is not None else "")
     row("points", e.get("n_points"))
     row("status", e.get("status"))
-    for k in ("sample", "structure", "operator", "project", "series"):
+    for k in ("sample", "operator", "project", "series"):
         row(k, e.get(k))
+    for k, v in (e.get("info") or {}).items():     # the lab's own run-info fields
+        if k not in ("sample", "operator", "project", "series"):
+            row(k, v)
     row("tags", ", ".join(e.get("tags") or []))
     row("recipe", e.get("recipe_name") if e.get("recipe_name") not in (None, name) else "")
     row("instruments", ", ".join(s for s, _src in e.get("instruments") or []))

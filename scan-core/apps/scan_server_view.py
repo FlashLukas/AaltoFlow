@@ -355,10 +355,6 @@ class ServerFaults:
 
 # ───────────────── a submitted definition, as lines to read ──────────────────
 
-#: run info attributes shown under a watched scan, in this order
-RUN_INFO_KEYS = ("sample", "structure", "operator", "project", "series", "tags", "comment")
-
-
 def _num(v) -> str:
     try:
         return f"{float(v):g}"
@@ -435,9 +431,9 @@ def definition_lines(recipe: dict, attrs: dict | None = None) -> list[tuple[str,
     (outer first), conditions, routines, detectors. Plain data -> testable."""
     out: list[tuple[str, str]] = []
     attrs = attrs or {}
-    for k in RUN_INFO_KEYS:
-        if attrs.get(k):
-            out.append(("run info", f"{k}: {attrs[k]}"))
+    from scan_core.run_info import from_attrs
+    for k, v in from_attrs(attrs).items():           # standard + the lab's own
+        out.append(("run info", f"{k}: {v}"))
     axes = recipe.get("axes") or []
     if recipe.get("zigzag") is True:
         # an older definition with the removed scan-wide switch: shown as the

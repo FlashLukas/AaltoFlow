@@ -171,6 +171,37 @@ def test_run_info_persists_in_the_settings_file(tmp_path):
     assert again["project"] == ""
 
 
+def test_run_info_default_fields_are_lab_neutral(tmp_path):
+    """No rig-specific field in the default list; this PC can choose its own
+    (suite setting run_info_fields), and comment is always there, last."""
+    assert run_info.fields(tmp_path) == ("sample", "operator", "project", "series",
+                                         "tags", "comment")
+    run_info.set_fields(["Sample", "Substrate", "thickness nm", "bad!name?", "sample"],
+                        root=tmp_path)
+    assert run_info.fields(tmp_path) == ("sample", "substrate", "thickness_nm",
+                                         "badname", "comment")
+    run_info.set_fields(None, root=tmp_path)                # back to the standard list
+    assert run_info.fields(tmp_path)[0] == "sample"
+
+
+def test_extra_run_info_fields_go_into_the_file_prefixed(tmp_path):
+    """A field that is not standard is written as info_<name> (it can never
+    overwrite an attribute the engine writes), and reads back by its name."""
+    vals = run_info.normalise({"sample": "S1", "substrate": " GGG ", "status": "x",
+                               "Bad Key": "dropped", "tags": ""})
+    assert "Bad Key" not in vals
+    attrs = run_info.run_info_attrs(vals)
+    assert attrs == {"sample": "S1", "info_substrate": "GGG", "info_status": "x"}
+    back = run_info.from_attrs({**attrs, "structure": "old file", "name": "scan"})
+    assert back == {"sample": "S1", "structure": "old file", "substrate": "GGG",
+                    "status": "x"}
+    # an extra field is remembered even while empty (it stays in the panel)
+    run_info.save({"sample": "S1", "substrate": "", "project": ""}, root=tmp_path)
+    again = run_info.load(root=tmp_path)
+    assert again["sample"] == "S1" and again["substrate"] == ""
+    assert list(again)[-1] == "substrate"                  # after this PC's list
+
+
 def test_an_instrument_round_trip_is_not_a_difference():
     """The AFG reads its phase back in radians: 178 deg came back as
     177.99999607 and was listed as a difference (lab 2026-10-08)."""

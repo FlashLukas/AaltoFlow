@@ -158,7 +158,7 @@ class RecallDialog(QtWidgets.QDialog):
         rows = [("scan", a.get("name", "")), ("created", a.get("created", "")),
                 ("snapshot", a.get("snapshot_time", "")),
                 ("setup", a.get("setup_name", ""))]
-        rows += [(f, a.get(f, "")) for f in run_info.FIELDS]
+        rows += list(run_info.from_attrs(a).items())     # standard + the lab's own
         self.header_values = {}
         shown = [(k, str(v)) for k, v in rows if str(v or "").strip()]
         for i, (k, val) in enumerate(shown):

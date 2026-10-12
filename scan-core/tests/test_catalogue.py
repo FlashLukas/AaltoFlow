@@ -63,7 +63,9 @@ def folder(tmp_path):
                   "stop": 3000, "num": 4}],
            dets=["lockin_r", "lockin_x"], created="2026-10-02T11:00:00",
            info={"sample": "B7", "operator": "anna", "project": "magnonics",
-                 "tags": "fmr", "series": "S2"},
+                 "tags": "fmr", "series": "S2",
+                 # a lab's own fields, as the suite writes them (run_info.py)
+                 "info_substrate": "GGG", "info_thickness_nm": "35"},
            snapshots={"ppms": {"status": {"temperature": 300.0, "mode": "driven"}}})
     _write(d, "2026-10-03/120000_other.nc", name="other sample",
            created="2026-10-03T12:00:00",
@@ -247,17 +249,35 @@ def test_a_name_alone_in_where_means_the_run_has_it(folder):
     assert cat.parse_where("kim") == [("kim", "exists")]
 
 
-def test_filter_by_structure_name_and_axis(folder):
+def test_filter_by_run_info_name_and_axis(folder):
     cat.scan(folder)
-    assert _names(cat.search(folder, structure="disc")) == ["fmr map"]
-    assert _names(cat.search(folder, structure="FILM")) == ["other sample"]
+    # "structure" is no standard field any more, but older files have it as a
+    # plain attribute: it is a run-info field like any lab's own
+    assert _names(cat.search(folder, info={"structure": "disc"})) == ["fmr map"]
+    assert _names(cat.search(folder, info={"structure": "FILM"})) == ["other sample"]
+    assert _names(cat.search(folder, info={"substrate": "GGG"})) == ["cold sweep"]
     assert _names(cat.search(folder, name="sweep")) == ["cold sweep"]
     assert _names(cat.search(folder, axis="rf_freq")) == ["cold sweep"]
     assert _names(cat.search(folder, axis="freq")) == ["cold sweep"]
     assert _names(cat.search(folder, axis="field")) == ["fmr map", "old run", "other sample"]
     # the point counts in "field(3)" are not names
     assert cat.search(folder, axis="3") == []
-    assert _names(cat.search(folder, axis="field", structure="film")) == ["other sample"]
+    assert _names(cat.search(folder, axis="field", info={"structure": "film"})) == \
+        ["other sample"]
+
+
+def test_a_labs_own_run_info_fields_are_searchable(folder):
+    """An extra field (attribute info_<name>) is indexed under its plain name:
+    where, free text and the drop-down lists find it."""
+    cat.scan(folder)
+    assert _names(cat.search(folder, where='substrate == "GGG"')) == ["cold sweep"]
+    assert _names(cat.search(folder, where="thickness_nm > 20")) == ["cold sweep"]
+    assert _names(cat.search(folder, where="thickness_nm < 20")) == []
+    assert _names(cat.search(folder, where="substrate")) == ["cold sweep"]   # has it
+    assert _names(cat.search(folder, text="GGG")) == ["cold sweep"]
+    assert cat.distinct(folder, "substrate") == ["GGG"]
+    row = [r for r in cat.search(folder) if r["name"] == "cold sweep"][0]
+    assert row["info"]["substrate"] == "GGG" and row["info"]["sample"] == "B7"
 
 
 def test_where_combines_with_the_other_filters(folder):

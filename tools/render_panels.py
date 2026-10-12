@@ -736,7 +736,7 @@ def _run_info_popup(win):
     panel, which is photographed instead of the window."""
     _scan_then_show_run(win)
     b = win.builder
-    b.run_info.set_values({"sample": "YIG islands, chip 3", "structure": "disc array D7",
+    b.run_info.set_values({"sample": "YIG islands, chip 3", "substrate": "GGG",
                            "operator": "operator", "project": "magnonics",
                            "series": "field-frequency maps",
                            "tags": "FMR, YIG, calibration",

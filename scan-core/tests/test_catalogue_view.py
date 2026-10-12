@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6 import QtCore, QtWidgets                                  # noqa: E402
 
-from apps.catalogue_view import NAME_COL, CatalogueWidget               # noqa: E402
+from apps.catalogue_view import CatalogueWidget                         # noqa: E402
 from test_catalogue import folder, _write                              # noqa: E402,F401
 
 
@@ -47,7 +47,7 @@ def _scanned(widget):
 
 
 def _names(widget):
-    return sorted(widget.table.topLevelItem(i).text(NAME_COL)
+    return sorted(widget.table.topLevelItem(i).text(widget.name_col)
                   for i in range(widget.table.topLevelItemCount()))
 
 
@@ -173,19 +173,25 @@ def test_setup_sample_operator_are_pick_lists_of_the_values_present(tmp_path):
     assert w.table.topLevelItemCount() == 1
 
 
-def test_columns_and_filters_share_one_order(qapp, folder):
-    # Lukas, 2026-10-06: date, setup, operator, sample, structure, name --
-    # and the filter fields under them in the same order
-    from apps.catalogue_view import COLUMNS, FILTERS
-    heads = [h for h, _k in COLUMNS]
+def test_columns_and_filters_share_one_order(qapp, folder, tmp_path):
+    # Lukas, 2026-10-06: date, setup, operator, sample, name -- and the
+    # filter fields under them in the same order. A PC's own run-info fields
+    # (suite setting run_info_fields) get a column + filter after sample.
+    from scan_core import run_info
+    run_info.set_fields(["sample", "operator", "structure", "tags"], root=tmp_path)
+    w = CatalogueWidget(folder, settings_root=tmp_path)
+    heads = [h for h, _k in w.columns]
     assert heads[:6] == ["date", "setup", "operator", "sample", "structure", "name"]
-    assert [p for _a, p, _k in FILTERS][:5] == heads[1:6]
-    w = CatalogueWidget(folder)
+    assert [p for _a, p, _k in w.filters][:5] == heads[1:6]
     w.rescan(); w.wait_scan()
-    w.structure_edit.setText("film"); w.refresh()
+    w.info_edits["structure"].setText("film"); w.refresh()
     assert _names(w) == ["other sample"]
-    w.structure_edit.clear(); w.axis_edit.setText("rf_freq"); w.refresh()
+    assert w.table.topLevelItem(0).text(heads.index("structure")) == "film"
+    w.info_edits["structure"].clear(); w.axis_edit.setText("rf_freq"); w.refresh()
     assert _names(w) == ["cold sweep"]
     w.axis_edit.clear(); w.where_edit.setText("ppms"); w.refresh()
     assert _names(w) == ["cold sweep", "fmr map"]
     assert not w.status.text().startswith("where:")
+    # with the standard list there is no extra column
+    plain = CatalogueWidget(folder, settings_root=tmp_path / "elsewhere")
+    assert [h for h, _k in plain.columns][:5] == ["date", "setup", "operator", "sample", "name"]

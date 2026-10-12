@@ -2,13 +2,15 @@
 
 A view over scan_core/catalogue.py (the index; no Qt there). What it adds:
 
-  * a search bar (free text over name, sample, structure, comment, tags) and
-    filter fields (a date range, setup, operator, sample, structure, name,
-    axis; project, series, instrument, tags) plus a `where` line for conditions and snapshot values
-    ("ppms.temperature between 4 and 6");
-  * the results, newest first: date, setup, operator, sample, structure,
-    name, axes, detectors, tags (the filter fields sit in the same order); a file that could not be read is listed in red with the
-    reason as its tooltip;
+  * a search bar (free text over name, sample, comment, tags and every
+    run-info field) and filter fields (a date range, setup, operator, sample,
+    this PC's own run-info fields, name, axis; project, series, instrument,
+    tags) plus a `where` line for conditions, run-info fields and snapshot
+    values ("cryostat.temperature between 4 and 6");
+  * the results, newest first: date, setup, operator, sample, this PC's own
+    run-info fields (suite setting run_info_fields, e.g. "substrate"), name,
+    axes, detectors, tags (the filter fields sit in the same order); a file
+    that could not be read is listed in red with the reason as its tooltip;
   * a details line for the selected run (comment, conditions, instruments,
     the full path);
   * "Rescan folder" with a progress bar. The scan runs in a WORKER THREAD:
@@ -34,21 +36,28 @@ from pathlib import Path
 from PySide6 import QtCore, QtWidgets
 
 from scan_core import catalogue as cat
-from scan_core import eln
+from scan_core import eln, run_info
 from apps.theme import C
 
 #: results columns: (header, row key). The order is the order a run is
 #: thought of in (Lukas, 2026-10-06): when, on which setup, by whom, which
-#: sample and structure, then what the run was.
+#: sample (and whatever else this PC records about it), then what the run was.
+#: A PC's own run-info fields (suite setting run_info_fields beyond the
+#: standard ones) get a column each after "sample", row key "info:<field>".
 COLUMNS = [("date", "created"), ("setup", "setup_name"), ("operator", "operator"),
-           ("sample", "sample"), ("structure", "structure"), ("name", "name"),
+           ("sample", "sample"), ("name", "name"),
            ("axes", "dims_text"), ("detectors", "detectors_text"),
            ("tags", "tags_text"), ("eln", "eln")]
+#: where the PC's own columns go in
+_EXTRA_AT = [k for _h, k in COLUMNS].index("name")
+#: the name / eln column with no extra columns (an instance has name_col /
+#: eln_col, which count them)
 NAME_COL = [k for _h, k in COLUMNS].index("name")
 ELN_COL = [k for _h, k in COLUMNS].index("eln")
 
-#: filters offered as a drop-down of the values the catalogue holds
-PICK_FIELDS = ("setup", "operator", "sample", "structure", "project", "series")
+#: filters offered as a drop-down of the values the catalogue holds (a PC's
+#: own run-info fields are drop-downs too)
+PICK_FIELDS = ("setup", "operator", "sample", "project", "series")
 
 #: the filter fields: (attribute, placeholder, search kwarg). FILTERS sits
 #: under the columns in THE SAME ORDER (after the date range), so the field
@@ -57,7 +66,6 @@ PICK_FIELDS = ("setup", "operator", "sample", "structure", "project", "series")
 FILTERS = [("setup_edit", "setup", "setup"),
            ("operator_edit", "operator", "operator"),
            ("sample_edit", "sample", "sample"),
-           ("structure_edit", "structure", "structure"),
            ("name_edit", "name", "name"),
            ("axis_edit", "axis", "axis")]
 MORE_FILTERS = [("project_edit", "project", "project"),
@@ -102,6 +110,22 @@ class CatalogueWidget(QtWidgets.QWidget):
         self._signals = _ScanSignals()
         self._signals.progress.connect(self._on_progress)
         self._signals.finished.connect(self._on_finished)
+        # this PC's own run-info fields: a column and a filter each
+        try:
+            own = [f for f in run_info.fields(settings_root) if f not in run_info.STANDARD]
+        except Exception:
+            own = []
+        self.extra_fields = own
+        self.columns = (COLUMNS[:_EXTRA_AT] + [(f, f"info:{f}") for f in own]
+                        + COLUMNS[_EXTRA_AT:])
+        keys = [k for _h, k in self.columns]
+        self.name_col, self.eln_col = keys.index("name"), keys.index("eln")
+        at = [a for a, _p, _k in FILTERS].index("name_edit")
+        self.filters = (FILTERS[:at] + [(f"info_{f}_edit", f, f"info:{f}") for f in own]
+                        + FILTERS[at:])
+        self.all_filters = self.filters + MORE_FILTERS
+        #: {field: its filter line edit}
+        self.info_edits: dict[str, QtWidgets.QLineEdit] = {}
 
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 8, 0, 0); v.setSpacing(10)
@@ -113,7 +137,7 @@ class CatalogueWidget(QtWidgets.QWidget):
         r1 = QtWidgets.QHBoxLayout()
         self.text_edit = QtWidgets.QLineEdit()
         self.text_edit.setPlaceholderText(
-            "search name, sample, structure, comment, tags  (every word must match)")
+            "search name, sample, comment, tags, run info  (every word must match)")
         self.text_edit.setClearButtonEnabled(True)
         r1.addWidget(self.text_edit, 1)
         self.clear_btn = QtWidgets.QPushButton("Clear filters")
@@ -145,9 +169,9 @@ class CatalogueWidget(QtWidgets.QWidget):
         # is the combo's line edit, so typing, clearing and the debounce work
         # exactly as for the plain fields.
         self._picks = {}
-        for attr, placeholder, kw in ALL_FILTERS:
-            row = r2 if (attr, placeholder, kw) in FILTERS else r2b
-            if kw in PICK_FIELDS:
+        for attr, placeholder, kw in self.all_filters:
+            row = r2 if (attr, placeholder, kw) in self.filters else r2b
+            if kw in PICK_FIELDS or kw.startswith("info:"):
                 box = QtWidgets.QComboBox()
                 box.setEditable(True)
                 box.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
@@ -163,9 +187,11 @@ class CatalogueWidget(QtWidgets.QWidget):
             edit.setPlaceholderText(placeholder)
             edit.setClearButtonEnabled(True)
             setattr(self, attr, edit)
+            if kw.startswith("info:"):
+                self.info_edits[kw[5:]] = edit
             if kw == "axis":
                 edit.setToolTip("a scan axis whose name contains this, e.g. field, "
-                                "kim.position")
+                                "stage.position")
             row.addWidget(widget, 1)
         r2b.addStretch(1)
         g.addLayout(r2)
@@ -178,15 +204,16 @@ class CatalogueWidget(QtWidgets.QWidget):
         r3.addWidget(lbl)
         self.where_edit = QtWidgets.QLineEdit()
         self.where_edit.setPlaceholderText(
-            "conditions and instrument values, e.g.  ppms.temperature between 4 and 6"
-            "  and  clMag.field == 50   (a name alone, e.g.  kim, = the run has it)")
+            "conditions and instrument values, e.g.  cryostat.temperature between 4 and 6"
+            "  and  magnet.field == 50   (a name alone, e.g.  stage, = the run has it)")
         self.where_edit.setToolTip(
             "Terms joined by 'and' or ',':\n"
             "  key == value   != < <= > >=   key between A and B   key contains text\n"
-            "  a name alone = the run has it (kim -> every run that used kim)\n"
+            "  a name alone = the run has it (stage -> every run that used stage)\n"
             "A key is a fixed condition of the scan (rf_power), a run column\n"
-            "(n_points, duration) or an instrument value from the snapshot:\n"
-            "'ppms.temperature' finds ppms.status.temperature as well.")
+            "(n_points, duration), a run-info field (substrate) or an instrument\n"
+            "value from the snapshot: 'cryostat.temperature' finds\n"
+            "cryostat.status.temperature as well.")
         self.where_edit.setClearButtonEnabled(True)
         r3.addWidget(self.where_edit, 1)
         g.addLayout(r3)
@@ -203,7 +230,7 @@ class CatalogueWidget(QtWidgets.QWidget):
         g.addLayout(r4)
 
         self.table = QtWidgets.QTreeWidget()
-        self.table.setHeaderLabels([h for h, _ in COLUMNS])
+        self.table.setHeaderLabels([h for h, _ in self.columns])
         self.table.setRootIsDecorated(False)
         # several runs can be selected (Ctrl/Shift) -- for "Send to eLabFTW"
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -218,8 +245,10 @@ class CatalogueWidget(QtWidgets.QWidget):
         self.table.currentItemChanged.connect(self._show_details)
         hdr = self.table.header()
         hdr.setStretchLastSection(True)
-        for i, w in enumerate((130, 90, 90, 90, 130, 200, 200, 200, 160)):
-            self.table.setColumnWidth(i, w)
+        widths = {"created": 130, "setup_name": 90, "operator": 90, "sample": 90,
+                  "name": 200, "dims_text": 200, "detectors_text": 200, "tags_text": 160}
+        for i, (_h, key) in enumerate(self.columns):
+            self.table.setColumnWidth(i, widths.get(key, 110))
         g.addWidget(self.table, 1)
 
         self.details = QtWidgets.QLabel("")
@@ -253,7 +282,7 @@ class CatalogueWidget(QtWidgets.QWidget):
 
     def _edits(self):
         return [self.text_edit, self.where_edit, self.from_edit, self.to_edit] + \
-            [getattr(self, a) for a, _p, _k in ALL_FILTERS]
+            [getattr(self, a) for a, _p, _k in self.all_filters]
 
     def set_data_dir(self, path) -> None:
         """The suite's data folder changed: show THAT folder's runs."""
@@ -351,7 +380,7 @@ class CatalogueWidget(QtWidgets.QWidget):
         keeping what is typed or chosen. The first entry is empty = any."""
         for kw, box in self._picks.items():
             try:
-                values = cat.distinct(self.data_dir, kw)
+                values = cat.distinct(self.data_dir, kw.removeprefix("info:"))
             except Exception:
                 continue
             keep = box.lineEdit().text()
@@ -370,8 +399,15 @@ class CatalogueWidget(QtWidgets.QWidget):
               "where": self.where_edit.text().strip() or None,
               "date_from": self.from_edit.text().strip() or None,
               "date_to": self.to_edit.text().strip() or None}
-        for attr, _p, key in ALL_FILTERS:
-            kw[key] = getattr(self, attr).text().strip() or None
+        info = {}
+        for attr, _p, key in self.all_filters:
+            text = getattr(self, attr).text().strip() or None
+            if key.startswith("info:"):
+                if text:
+                    info[key[5:]] = text
+            else:
+                kw[key] = text
+        kw["info"] = info or None
         return kw
 
     def clear_filters(self) -> None:
@@ -424,21 +460,22 @@ class CatalogueWidget(QtWidgets.QWidget):
                         if rec else "")
             r["eln_url"] = rec.get("url") if rec else None
             vals = []
-            for _h, key in COLUMNS:
-                v = r.get(key) or ""
+            for _h, key in self.columns:
+                v = ((r.get("info") or {}).get(key[5:]) if key.startswith("info:")
+                     else r.get(key)) or ""
                 if key == "created":
                     v = str(v)[:16].replace("T", " ")
                 vals.append(str(v))
             item = QtWidgets.QTreeWidgetItem(vals)
             item.setData(0, QtCore.Qt.UserRole, r["path"])
             if r.get("error"):
-                for i in range(len(COLUMNS)):
+                for i in range(len(self.columns)):
                     item.setForeground(i, QtGui.QBrush(QtGui.QColor(C["danger"])))
                     item.setToolTip(i, f"could not be read: {r['error']}")
             else:
-                item.setToolTip(NAME_COL, r["path"])
+                item.setToolTip(self.name_col, r["path"])
             if r.get("eln_url"):
-                item.setToolTip(ELN_COL, f"in eLabFTW: {r['eln_url']}")
+                item.setToolTip(self.eln_col, f"in eLabFTW: {r['eln_url']}")
             self.table.addTopLevelItem(item)
         self.table.setSortingEnabled(True)
 
@@ -465,6 +502,10 @@ class CatalogueWidget(QtWidgets.QWidget):
             bits.append(f"{r.get('n_points') or '?'} points in {r['duration']:.0f} s")
         if r.get("project") or r.get("series"):
             bits.append(f"project {r.get('project') or '-'}, series {r.get('series') or '-'}")
+        other = {k: v for k, v in (r.get("info") or {}).items()
+                 if k not in run_info.STANDARD and k not in self.extra_fields}
+        if other:
+            bits.append(", ".join(f"{k}: {v}" for k, v in other.items()))
         if r.get("instruments_text"):
             bits.append(f"instruments: {r['instruments_text']}")
         ranges = []

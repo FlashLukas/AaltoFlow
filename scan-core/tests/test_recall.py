@@ -373,3 +373,31 @@ def test_suite_recall_when_ready_opens_the_list_for_the_file(qapp, tmp_path, mon
     assert opened == [str(path)]
     assert win.tabs.tabText(win.tabs.currentIndex()) == "Data"
     win.close()
+
+
+def test_run_info_card_extra_fields_and_this_pcs_list(tmp_path):
+    """2026-10-12: '+ field' adds a field of one's own (written as
+    info_<name>), 'x' removes it; 'Fields...' sets this PC's list."""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from apps.run_info_card import RunInfoCard
+    from scan_core import run_info
+    card = RunInfoCard(root=tmp_path)
+    assert "structure" not in card.edits                    # no rig-specific default
+    assert card.add_field("Substrate") == "substrate"
+    card.edits["substrate"].setText("GGG"); card.edits["substrate"].editingFinished.emit()
+    card.edits["sample"].setText("S1"); card.edits["sample"].editingFinished.emit()
+    assert card.attrs() == {"sample": "S1", "info_substrate": "GGG"}
+    assert card.add_field("9lives") is None                 # not a valid name
+    # remembered: a new card (the next launch) shows it again
+    again = RunInfoCard(root=tmp_path)
+    assert again.edits["substrate"].text() == "GGG"
+    again.remove_field("substrate")
+    assert "substrate" not in again.edits
+    assert "substrate" not in run_info.load(tmp_path)
+    # this PC's own list
+    again.set_pc_fields(["sample", "thickness_nm"])
+    assert list(again.edits) == ["sample", "thickness_nm", "comment"]
+    assert run_info.fields(tmp_path) == ("sample", "thickness_nm", "comment")
+    assert again.tag_btn is None                            # tags left the list

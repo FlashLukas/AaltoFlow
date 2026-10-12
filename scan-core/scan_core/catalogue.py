@@ -21,11 +21,14 @@ year of 2-D maps would take minutes to load and the index needs none of it):
   * the detectors: variable names, units, `aaltoflow_type` (storage.py);
   * the conditions: the scalar "fixed" coordinates (rf_power = 5 dBm ...);
   * the run info (written by the suite since the snapshots branch; absent in
-    older files, which is fine): sample, structure, operator, project, tags,
-    series, setup_name, aaltoflow_version, snapshot_time, snapshot_modules;
+    older files, which is fine): sample, operator, project, tags, series,
+    setup_name, aaltoflow_version, snapshot_time, snapshot_modules -- and
+    every other run-info field (a lab's own `info_<name>` attributes, the
+    older plain `structure`), see scan_core/run_info.py. Those land in a
+    key/value table, so `where thickness_nm > 20` finds them;
   * the instrument snapshots `snapshot_<slug>` (JSON: settings + status),
     FLATTENED into key/value rows so they can be searched:
-    `ppms.status.temperature = 5.02`.
+    `cryostat.status.temperature = 5.02`.
 
 Incremental: a rescan re-reads only files whose size or modification time
 changed, and drops the entries of files that are gone. A file that cannot be
@@ -34,10 +37,11 @@ read is recorded WITH its error (the table shows it) and the scan goes on.
 Search (`search(...)`) combines free text, simple field filters, a date range
 and a small `where` language over the conditions and snapshot values:
 
-    ppms.temperature between 4 and 6
-    clMag.field == 50 and rf_power > 0
-    ppms.mode == "persistent"
+    cryostat.temperature between 4 and 6
+    magnet.field == 50 and rf_power > 0
+    cryostat.mode == "persistent"
     n_points >= 100
+    substrate == "GGG"              (a run-info field of the lab's own)
 
 The `where` text is PARSED here (a tokenizer + a tiny grammar), never pasted
 into SQL: keys must look like names, and every value goes to SQLite as a bound
@@ -48,7 +52,7 @@ Command line (for scripts):
 
     uv run python -m scan_core.catalogue scan [DATA_DIR]
     uv run python -m scan_core.catalogue search [DATA_DIR] --sample B7 \
-        --where "ppms.temperature between 4 and 6" [--json]
+        --where "cryostat.temperature between 4 and 6" [--json]
 
 No Qt here: the suite's Catalogue tab (apps/catalogue_view.py) is a view over
 this module, and the tests drive it without a screen.
@@ -69,15 +73,17 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
 
+from . import run_info
+
 #: the index file, inside the data folder
 INDEX_NAME = "catalogue.sqlite"
 
 #: bump when the tables change: an index of another version is simply rebuilt
 #: (it is disposable -- the files are the truth)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: run-info attributes copied verbatim into their own columns
-RUN_INFO = ("sample", "structure", "operator", "comment", "project", "series",
+RUN_INFO = ("sample", "operator", "comment", "project", "series",
             "setup_name", "aaltoflow_version", "snapshot_time")
 
 #: keys a `where` term may name that are columns of the run itself
@@ -108,7 +114,8 @@ CREATE TABLE files (
     detectors_text TEXT,
     instruments_text TEXT,
     tags_text     TEXT,
-    sample TEXT, structure TEXT, operator TEXT, comment TEXT, project TEXT,
+    info_text     TEXT,
+    sample TEXT, operator TEXT, comment TEXT, project TEXT,
     series TEXT, setup_name TEXT, aaltoflow_version TEXT, snapshot_time TEXT,
     indexed_at    TEXT
 );
@@ -119,6 +126,7 @@ CREATE TABLE conditions (file_id INTEGER, key TEXT, num_value REAL,
                          text_value TEXT, units TEXT);
 CREATE TABLE snapshot_values (file_id INTEGER, key TEXT, num_value REAL,
                               text_value TEXT);
+CREATE TABLE run_info (file_id INTEGER, key TEXT, num_value REAL, text_value TEXT);
 CREATE INDEX ix_det ON detectors(file_id);
 CREATE INDEX ix_det_name ON detectors(name);
 CREATE INDEX ix_tags ON tags(tag);
@@ -127,9 +135,12 @@ CREATE INDEX ix_cond ON conditions(key);
 CREATE INDEX ix_snap ON snapshot_values(key);
 CREATE INDEX ix_snap_file ON snapshot_values(file_id);
 CREATE INDEX ix_created ON files(created);
+CREATE INDEX ix_info ON run_info(key);
+CREATE INDEX ix_info_file ON run_info(file_id);
 """
 
-_CHILD_TABLES = ("detectors", "tags", "instruments", "conditions", "snapshot_values")
+_CHILD_TABLES = ("detectors", "tags", "instruments", "conditions", "snapshot_values",
+                 "run_info")
 
 
 class WhereError(ValueError):
@@ -395,6 +406,10 @@ def read_entry(path) -> dict:
         "dims": dims, "detectors": detectors, "conditions": conditions,
         "tags": _as_list(attrs.get("tags")),
         "instruments": instruments, "snapshots": snapshots,
+        # every run-info field but tags/comment (they have their own place):
+        # the standard ones, the lab's own info_* and the older structure
+        "info": {k: v for k, v in run_info.from_attrs(attrs).items()
+                 if k not in ("tags", "comment")},
     }
     for k in RUN_INFO:
         entry[k] = _text(attrs.get(k))
@@ -424,6 +439,7 @@ def _store(con, relpath: str, entry: dict) -> None:
         "detectors_text": ", ".join(d["name"] for d in dets),
         "instruments_text": ", ".join(s for s, _ in insts),
         "tags_text": ", ".join(tags),
+        "info_text": "; ".join(f"{k}: {v}" for k, v in (entry.get("info") or {}).items()),
         "indexed_at": datetime.now().isoformat(timespec="seconds"),
     }
     for k in RUN_INFO:
@@ -451,6 +467,9 @@ def _store(con, relpath: str, entry: dict) -> None:
                          None if val is None else (str(val).lower() if isinstance(val, bool)
                                                    else str(val))))
     con.executemany("INSERT INTO snapshot_values VALUES (?,?,?,?)", rows)
+    con.executemany("INSERT INTO run_info VALUES (?,?,?,?)",
+                    [(fid, k, _num(v), str(v))
+                     for k, v in (entry.get("info") or {}).items()])
 
 
 def _forget(con, fid: int) -> None:
@@ -575,7 +594,7 @@ def parse_where(text: str) -> list[tuple]:
     ("c", "==", "x")]. Terms are joined by `and` or a comma (all must hold).
     Operators: == = != < <= > >= , `between A and B` (inclusive), and
     `contains` / `~` (text contains, case-insensitive).
-    A NAME ALONE ("kim", "ppms.temperature", "rf_power") -> (key, "exists"):
+    A NAME ALONE ("stage", "cryostat.temperature", "rf_power") -> (key, "exists"):
     the run has a condition, a snapshot value or an instrument of that name.
     Typing a module's name to find its runs is the first thing people try,
     and "expected an operator" helped nobody (Lukas, 2026-10-06)."""
@@ -667,13 +686,14 @@ def _fmt(v: float) -> str:
 def _term_sql(term: tuple) -> tuple[str, list]:
     """One where-term -> 'files.id IN (...)' with its parameters.
 
-    A key is looked up in three places, any of which may match:
+    A key is looked up in four places, any of which may match:
       * a run column (n_points, duration, size);
+      * a RUN-INFO field (sample, or a lab's own substrate), by its name;
       * a CONDITION of the scan (a fixed coordinate), by its exact id;
       * a SNAPSHOT value: `slug.key` matches the flattened key exactly, or with
-        any path in between -- `ppms.temperature` finds
-        `ppms.status.temperature` (and `ppms.settings.x.temperature`, if a
-        module had both: either matching is enough).
+        any path in between -- `cryostat.temperature` finds
+        `cryostat.status.temperature` (and `cryostat.settings.x.temperature`,
+        if a module had both: either matching is enough).
     """
     key, op, *args = term
     args = tuple(args)
@@ -684,8 +704,9 @@ def _term_sql(term: tuple) -> tuple[str, list]:
         sql, p = _value_sql(op, args, f"files.{col}", f"CAST(files.{col} AS TEXT)")
         return sql, p
     c_sql, c_p = _value_sql(op, args, "num_value", "text_value")
-    parts = [f"SELECT file_id FROM conditions WHERE key = ? COLLATE NOCASE AND {c_sql}"]
-    params = [key] + c_p
+    parts = [f"SELECT file_id FROM conditions WHERE key = ? COLLATE NOCASE AND {c_sql}",
+             f"SELECT file_id FROM run_info WHERE key = ? COLLATE NOCASE AND {c_sql}"]
+    params = [key] + c_p + [key] + c_p
     if "." in key:
         slug, rest = key.split(".", 1)
         deep = f"{_like_escape(slug)}.%.{_like_escape(rest)}"
@@ -697,18 +718,20 @@ def _term_sql(term: tuple) -> tuple[str, list]:
 
 def _exists_sql(key: str) -> tuple[str, list]:
     """A bare name in `where`: the run HAS it. Matches a run column that is
-    filled in, an instrument slug ("kim"), a condition, or a snapshot key --
-    exactly, as a prefix ("kim" -> "kim.status.position_x") or with a path in
-    between ("ppms.temperature" -> "ppms.status.temperature")."""
+    filled in, a run-info field that is filled in, an instrument slug
+    ("stage"), a condition, or a snapshot key -- exactly, as a prefix
+    ("stage" -> "stage.status.position_x") or with a path in between
+    ("cryostat.temperature" -> "cryostat.status.temperature")."""
     if key.lower() in _RUN_COLUMNS:
         return f"files.{_RUN_COLUMNS[key.lower()]} IS NOT NULL", []
     prefix = f"{_like_escape(key)}.%"
     parts = ["SELECT file_id FROM instruments WHERE slug = ? COLLATE NOCASE",
+             "SELECT file_id FROM run_info WHERE key = ? COLLATE NOCASE",
              "SELECT file_id FROM conditions WHERE key = ? COLLATE NOCASE "
              "OR key LIKE ? ESCAPE '\\'",
              "SELECT file_id FROM snapshot_values WHERE key = ? COLLATE NOCASE "
              "OR key LIKE ? ESCAPE '\\'"]
-    params = [key, key, prefix, key, prefix]
+    params = [key, key, key, prefix, key, prefix]
     if "." in key:
         slug, rest = key.split(".", 1)
         parts.append("SELECT file_id FROM snapshot_values WHERE key LIKE ? ESCAPE '\\'")
@@ -736,18 +759,21 @@ def _day(v, end: bool = False) -> str | None:
 
 def search(data_dir, text=None, sample=None, operator=None, project=None,
            tags=None, series=None, instrument=None, detector=None, setup=None,
-           structure=None, name=None, axis=None,
+           name=None, axis=None, info=None,
            date_from=None, date_to=None, where=None, limit: int | None = None,
            include_errors: bool = True) -> list[dict]:
     """Find runs in the index of `data_dir`, newest first.
 
     text      : words; EVERY word must appear somewhere in name, sample,
-                structure, comment, tags or the file name (case-insensitive)
-    sample, operator, project, series, structure, name : "contains", any case
+                comment, tags, any run-info field or the file name
+                (case-insensitive)
+    sample, operator, project, series, name : "contains", any case
+    info      : {field: text} for any other run-info field (a lab's own
+                "substrate", an older file's "structure"): "contains", any case
     axis      : a scan axis (dimension) name contains this text ("field"
-                finds field and field_x; "kim" finds kim.position_x)
+                finds field and field_x; "stage" finds stage.position_x)
     setup     : the SETUP the file was measured on (attribute setup_name, set by
-                the installer: "TR-MOKE", "VNA-FMR" ...); "contains", any case
+                the installer or in Mission Control); "contains", any case
     tags      : a list or "a, b": the run must carry EVERY tag (exact, any case)
     instrument: a module slug (from the snapshot, or from the parameter ids of
                 an older file)
@@ -764,16 +790,20 @@ def search(data_dir, text=None, sample=None, operator=None, project=None,
         like = f"%{_like_escape(word)}%"
         sql.append("AND (" + " OR ".join(
             f"COALESCE({c},'') LIKE ? ESCAPE '\\'"
-            for c in ("name", "sample", "structure", "comment", "tags_text",
+            for c in ("name", "sample", "info_text", "comment", "tags_text",
                       "relpath")) + ")")
         params += [like] * 6
     for col, val in (("sample", sample), ("operator", operator),
                      ("project", project), ("series", series),
-                     ("setup_name", setup), ("structure", structure),
-                     ("name", name)):
+                     ("setup_name", setup), ("name", name)):
         if val:
             sql.append(f"AND COALESCE({col},'') LIKE ? ESCAPE '\\'")
             params.append(f"%{_like_escape(str(val).strip())}%")
+    for key, val in (info or {}).items():
+        if val not in (None, "") and str(val).strip():
+            sql.append("AND files.id IN (SELECT file_id FROM run_info WHERE "
+                       "key = ? COLLATE NOCASE AND text_value LIKE ? ESCAPE '\\')")
+            params += [str(key), f"%{_like_escape(str(val).strip())}%"]
     if axis:
         # dims_text is "field(41) x rf_freq(81)": match inside a NAME only,
         # never in the "(41)" counts (an axis filter "4" must not find them)
@@ -818,7 +848,12 @@ def search(data_dir, text=None, sample=None, operator=None, project=None,
     with closing(_connect(root)) as con:
         con.row_factory = sqlite3.Row
         rows = [dict(r) for r in con.execute(" ".join(sql), params)]
+        # every run-info field of the runs found: {file id: {field: value}}
+        info: dict[int, dict] = {}
+        for fid, k, v in con.execute("SELECT file_id, key, text_value FROM run_info"):
+            info.setdefault(fid, {})[k] = v
     for r in rows:
+        r["info"] = info.get(r["id"], {})
         r["path"] = str(root / r["relpath"])
         r["dims"] = json.loads(r.pop("dims_json") or "[]")
         r["detectors"] = [x.strip() for x in (r.get("detectors_text") or "").split(",")
@@ -845,8 +880,9 @@ def snapshot_of(data_dir, path) -> dict:
 
 
 def distinct(data_dir, column: str) -> list[str]:
-    """The values a filter field has across the catalogue (for completers)."""
-    allowed = {"sample", "operator", "project", "series", "structure", "setup_name"}
+    """The values a filter field has across the catalogue (for completers).
+    Any run-info field name works too (a lab's own "substrate")."""
+    allowed = {"sample", "operator", "project", "series", "setup_name"}
     if column == "setup":
         column = "setup_name"
     root = Path(data_dir)
@@ -857,12 +893,17 @@ def distinct(data_dir, column: str) -> list[str]:
     elif column in allowed:
         q = (f"SELECT DISTINCT {column} FROM files WHERE {column} IS NOT NULL "
              f"ORDER BY {column} COLLATE NOCASE")
+    elif run_info.valid_name(column):
+        # the name goes in as a bound parameter, never into the SQL text
+        q = ("SELECT DISTINCT text_value FROM run_info WHERE key = ? "
+             "ORDER BY text_value COLLATE NOCASE")
     else:
         raise ValueError(f"no such filter field: {column}")
     if not index_path(root).exists():
         return []
+    args = (column,) if "?" in q else ()
     with closing(_connect(root)) as con:
-        return [r[0] for r in con.execute(q) if r[0]]
+        return [r[0] for r in con.execute(q, args) if r[0]]
 
 
 # ═════════════════════════════════════ CLI ════════════════════════════════════
