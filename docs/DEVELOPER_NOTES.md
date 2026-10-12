@@ -1516,7 +1516,12 @@ zpiezo has no GUI.
     behind an icon actually set) and the installer's shortcuts now declare the
     same ID, which also makes a running window pinnable. **Repairing an already
     poisoned ID needs the shell, not the code**: restarting Explorer cleared it
-    (verified on the lab PC). Two lessons beyond Windows trivia: a symptom that
+    (verified on the lab PC). On the office PC (2026-10-12) neither a restart of
+    Explorer nor a REBOOT helped -- the icon cache files survive both; deleting
+    them did: `Stop-Process -Name explorer -Force; Start-Sleep 3; Remove-Item
+    "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db" -Force;
+    Start-Process explorer`. Quick test first: the same window under a NEW
+    AppUserModelID shows the right icon -> only the cache is stale. Two lessons beyond Windows trivia: a symptom that
     appears in ONE surface (taskbar) but not its siblings (title bar, Alt-Tab)
     names the subsystem, since only the taskbar reads the AppID; and when every
     measurement says the code is right, vary one input at a time against a live
