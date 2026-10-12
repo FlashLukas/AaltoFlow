@@ -868,6 +868,9 @@ Details: [scan-core/README.md](scan-core/README.md), "The scan server".
 
 ## Installing on a lab PC
 
+**Step-by-step manual -- Setup.exe, git (install and update), and a PC with no
+internet: [docs/INSTALL.md](docs/INSTALL.md).**
+
 The quick start above assumes a developer's machine — git, `uv`, a terminal. For
 a PC that only has to *run* the experiment there is a `Setup.exe`, built from
 [`installer/`](installer/README.md):

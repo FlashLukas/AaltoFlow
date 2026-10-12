@@ -10,8 +10,8 @@ Or without cloning first (downloads just this script):
 
     irm https://raw.githubusercontent.com/FlashLukas/AaltoFlow/main/tools/deploy_lab.ps1 -OutFile deploy_lab.ps1
 
-(The repo is PRIVATE, so that raw URL needs you to be signed in; the simplest
-route is to git clone the repo and run tools\deploy_lab.ps1 from inside it.)
+(The simplest route is still to git clone the repo and run
+tools\deploy_lab.ps1 from inside it: docs/INSTALL.md.)
 
 What it does, in order, and stops loudly at the first thing it cannot fix:
 
