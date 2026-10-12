@@ -941,10 +941,79 @@ mask in the file that says which is which:
   measure in detail only where the scout saw something. This covers the
   patterned sample (elements on a substrate) and the FMR line in field x
   frequency.
-- the **resonance window** (`window:`, `scan_core/window.py`): a slow array
-  detector (a spectrum analyser trace) sweeps only a band around the FMR line
-  that a Kittel model predicts at each point. Spec: `docs/DEVELOPER_NOTES.md`
-  and `INSTRUMENT_MODULE_GUIDE.md`, "Resonance window".
+- the **window** (`window:`, `scan_core/window.py`): a slow array detector
+  (a spectrum analyser trace, a spectrometer) sweeps only a band around the
+  peak a **predictor** expects at each point -- FMR by Kittel's formula, a
+  straight line in any knob, a formula you type, or your lab's own (below).
+  Spec: `docs/DEVELOPER_NOTES.md` (4, 4j) and `INSTRUMENT_MODULE_GUIDE.md`,
+  "Window".
+
+### Window predictors
+
+The window needs to know where the peak should be at each point. That is a
+**predictor** (`scan_core/predictors.py`); pick one in the Scan tab's WINDOW
+card (its rows are built from what the predictor declares) or in the recipe:
+
+```yaml
+window:
+  detector: fmr
+  predictor: kittel            # kittel | linear | expression | your own
+  inputs: {field: magnet.field, angle: 30.0}   # a parameter id or a number
+  params: {g: 2.0, meff_mT: 1750, hk_mT: 5}
+  options: {model: inplane}
+  margin: 300                  # half width ...
+  margin_unit: MHz             # ... ("" = the detector's axis unit)
+  track: true                  # correct meff_mT from every clean line
+  full_every: 20
+```
+
+| predictor | peak | inputs | tracks |
+|---|---|---|---|
+| `kittel` | FMR, in-plane (uniaxial Hk) or out-of-plane | `field`, `angle` | `meff_mT` |
+| `linear` | `a + b * x` | `x` (any knob) | `a` |
+| `expression` | your formula, e.g. `0.028*sqrt((B+hk)*(B+hk+meff))` | any name you map to a knob | the parameter named in `options.tracked` |
+
+![The WINDOW card with the expression predictor](../front-panels/suite-window-expression.png)
+
+The expression is parsed by a whitelist, never `eval`'d: numbers, names,
+`+ - * / **`, `sqrt abs sin cos exp log` (radians) and `pi`. A math error
+(a square root of a negative number) means "not valid here" and the point
+sweeps the full band. `options.unit` says what unit the formula's result is
+in (`GHz`); empty = the detector's axis unit.
+
+**Adding your own.** Put a Python file in `scan-core/lab_predictors/` (one
+file per predictor; the folder is yours, updates never touch it). It is
+imported the first time a scan or the builder asks for predictors:
+
+```python
+# scan-core/lab_predictors/cavity.py -- a cavity mode tuned by temperature
+import math
+from scan_core import predictors as P
+
+class Cavity(P.Predictor):
+    name = "cavity"                       # what a recipe writes as `predictor:`
+    label = "Cavity (thermal tuning)"     # what the builder's combo shows
+    help = "f = f0 * (1 - alpha * (T - T0))"
+    output_unit = "GHz"                   # converted to the detector's axis unit
+    inputs = (P.Input("T", "temperature"),)            # read in its own unit (K)
+    params = (P.Param("f0", "f0", "GHz", 9.5, 0, 100),
+              P.Param("alpha", "alpha", "1/K", 1e-5, -1, 1, decimals=8),
+              P.Param("T0", "T0", "K", 300.0, 0, 1000))
+    tracked = "f0"                        # corrected from every clean peak
+
+    def predict(self, x, p, options):     # NaN = "not valid here"
+        return p["f0"] * (1 - p["alpha"] * (x["T"] - p["T0"]))
+
+    # track() is optional: without it the tracked parameter is found by a
+    # 1-D root find; write the closed form when there is one
+    def track(self, peak, x, p, options):
+        return peak / (1 - p["alpha"] * (x["T"] - p["T0"]))
+
+P.register(Cavity())
+```
+
+A file that fails to import does not stop anything: the recipe that names
+it is refused with the import error in the message.
 
 ### The scout pass
 

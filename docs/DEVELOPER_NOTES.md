@@ -264,18 +264,19 @@ still assumes piezo/zpiezo.
   keeping the points so far. A service whose status has not arrived for 2 s and
   that does not answer `status` either is a fault too -- its last frame is
   never served forever.
-- **Resonance window (optional, 2026-09-28) -- for SLOW swept detectors.** An
+- **Window (optional, 2026-09-28; any physics since 2026-10-12) -- for SLOW swept detectors.** An
   array detector whose descriptor carries `"window": {"arg": "window", "unit":
   "bin", "min_bins": n}` accepts `window: [i0, i1]` (inclusive BIN indices of its
   full grid) on its acquire trigger, sweeps only those bins and returns the trace
   FULL LENGTH with `null` outside. A recipe's `window` block (scan-core
-  `window.py`, `resonance.py`) then sweeps only +- margin around the FMR line a
-  Kittel model (in-plane with uniaxial Hk, or out-of-plane) predicts from the
-  field (and angle) at each point, corrects mu0 Meff from every clean measured
+  `window.py`) then sweeps only +- margin around the peak a PREDICTOR
+  (`predictors.py`, section 4j: Kittel/FMR from `resonance.py`, linear, a typed
+  formula, or a lab's own) expects from the inputs at each point, corrects the
+  predictor's tracked parameter (FMR: mu0 Meff) from every clean measured
   line, widens and re-measures a point whose line is not in its window, sweeps
   the full band at the first point and every `full_every`-th, and fills the rest
   from that baseline -- with a `<det>_measured` mask in the file. Stepped scans
-  only. Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Resonance window".
+  only. Spec: `INSTRUMENT_MODULE_GUIDE.md`, "Window".
 - **Target echo (motion settle, 2026-09-28).** A module whose move ends with a
   `moving` flag also publishes the TARGET it is moving to (kim/stage/piezo:
   `target_um`, per axis) and declares
@@ -942,7 +943,7 @@ which runs as a routine of that one step.
   `after_point` the values just committed are put back to what the slot held
   (the "not measured" value of its storage). after_point routines still run
   for a point skipped before it (an end-of-sweep routine on the last point of
-  a row must not be lost), and the resonance window does not learn from a
+  a row must not be lost), and the window does not learn from a
   skipped point. Attrs `skipped_points` (JSON list of grid indices, capped at
   10 000) and `skipped_count`. A `skip_if` inside a routine stops the
   remaining steps but still runs the routine's restore.
@@ -1365,6 +1366,66 @@ rig. What changed, and the rule behind each:
   and the `run_*.py` demos stay MOKE-flavoured on purpose. A non-MOKE example
   recipe, `scan-core/recipes/transport_iv_temperature.yaml` (k2450 x tc200),
   is checked against mocked modules in `tests/test_routines.py`.
+
+### 4j. The window takes any physics: predictors (2026-10-12)
+
+Lukas: "add option for another physics". The window (section 4, "Window")
+had FMR wired into the recipe format (`field`, `angle`, `model`, `meff_mT`).
+Now the engine and `WindowRunner` know only: *a predictor maps the point's
+inputs to an expected peak position, or NaN = "not valid here, sweep the full
+band"; it may name ONE tracked parameter that is corrected from every clean
+measured peak.*
+
+- **Recipe block**: `window: {detector, predictor, inputs: {role: param id |
+  number}, params: {name: number}, options: {name: text}, margin,
+  margin_unit, dip, track, full_every}`. An input given as a parameter id
+  uses the setpoint when it is an axis or condition, else it is READ at the
+  point (as before). `margin_unit` "" = the detector's axis unit.
+- **`scan_core/predictors.py`**: `Predictor` (name, label, help,
+  `output_unit` -- "" = the detector's axis unit --, `inputs` (role, unit
+  family "field"/"angle" converted to mT/deg, or none = as read), `params`
+  (name, unit with `{axis}`/`{<role>}` placeholders, default, range, outlier
+  `floor`), `options`, `tracked`; `predict()`, `track()` -- default: a 1-D
+  root find, `solve_for`, bracket outward from the current value, then
+  bisect). Registry `register/get/names/all_predictors`. Built-ins:
+  * `kittel` -- `resonance.py` unchanged (numbers identical, closed-form
+    inverse), options `model: inplane|outofplane`, tracks `meff_mT`
+    (outlier floor 5 mT, as before), answers in Hz;
+  * `linear` -- `a + b * x`, tracks `a`, option `unit`;
+  * `expression` -- options `formula`, `unit`, `tracked`; every free name
+    of the formula is an input when `inputs` maps it, else a parameter.
+    `Formula` parses with `ast` and walks a WHITELIST (numbers, names,
+    + - * / **, sqrt abs sin cos exp log, pi; every number a float, so
+    `9**9**9` is an overflow -> NaN, not a hang). Never `eval`.
+- **A lab's own predictor**: a `.py` in `scan-core/lab_predictors/`
+  subclassing `Predictor` and calling `register()`; imported on the first
+  registry access; an import error is listed in `predictors.plugin_errors`
+  (shown by validate when the recipe names an unknown predictor), never fatal.
+  Example in the scan-core README, "Window predictors".
+- **Units**: everything inside `WindowRunner` is in the detector's AXIS unit
+  (the frequency-only check is gone: any 1-D array detector with a unit
+  qualifies). The predictor's answer and the margin are converted by
+  `predictors.output_factor` (units.py families); a pair that does not
+  convert is a validation error.
+- **Migration** (`window.upgrade`, called by `Recipe.__post_init__`, so
+  `from_dict`, `load` and the builder's load all get it): a block without
+  `predictor` is the old FMR block -> `kittel` with `inputs {field, angle}`,
+  `options {model}`, `margin = margin_MHz` (default 300) + `margin_unit:
+  MHz`. A definition saved again is in the new form.
+- **Per-point variables renamed** (no legacy path, by design): `<det>_peak_pred`,
+  `_peak_fit`, `_window_lo`, `_window_hi` (axis unit), `_tracked` (attr
+  `tracked_param`; units of that parameter), `_full_sweep`; `_peak_pred` carries
+  attr `predictor`. Files written before 2026-10-12 hold `_fres_pred_Hz`,
+  `_fres_fit_Hz`, `_window_lo_Hz`, `_window_hi_Hz`, `_meff_mT`: they open as
+  ordinary variables (nothing reads them by name), and their recipe_json is
+  migrated on load like any old recipe.
+- **Builder**: `WindowCard` = detector + predictor combo; the option, input
+  and parameter rows are BUILT from the predictor's declaration (inputs: a
+  parameter filtered by the input's unit family and the module's describe
+  `role` first, or "fixed:"); the expression predictor has a formula box with
+  a live check, one row per name ("constant:" = parameter, or a knob = input)
+  and a "track" combo. Values are kept per predictor across a switch.
+  Render targets `suite-window-kittel`, `suite-window-expression`.
 
 ## 5. Shared code conventions
 

@@ -114,6 +114,8 @@ SIZES = {
     "suite-fly": (1500, 950),
     "suite-image": (1500, 950),
     "suite-scout-scan": (1500, 950),
+    "suite-window-kittel": (1500, 950),
+    "suite-window-expression": (1500, 950),
     "suite-scout": (1500, 950),
     "suite-axis-advanced": (1500, 950),
     "suite-axis-advanced-scout": (1500, 950),
@@ -587,6 +589,59 @@ def _scout_scan(win):
         sec.add_scout_setting("rf_power", 12.0)
     sec.set_expanded(True)
     b._rebuild_summary()
+
+
+def _window_scan(predictor: str):
+    """The WINDOW card on the Scan tab (2026-10-12, "add option for another
+    physics"): a field sweep of the simulator's slow swept detector `fmr`,
+    the window on, its rows built from the chosen PREDICTOR -- Kittel (FMR)
+    or the typed expression with its live check."""
+    def warm(win):
+        from PySide6 import QtCore
+        b = win.builder
+        b.name_edit.setText(f"windowed FMR ({predictor})")
+        if b.registry.get("fmr") is None:
+            return
+        b.add_axis("field")
+        row = b.rows[-1]
+        row.start.setValue(30); row.stop.setValue(190); row.num.setValue(41)
+        b.add_fixed("field_angle", 0.0)
+        for it in b._det_items():
+            it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole) == "fmr"
+                             else QtCore.Qt.Unchecked)
+        b._rebuild_summary()
+        card = b.window_card
+        card.enable.setChecked(True)
+        card.set_predictor(predictor)
+        if predictor == "kittel":
+            card.input_box("field").setCurrentIndex(card.input_box("field").findData("field"))
+            card.input_box("angle").setCurrentIndex(
+                card.input_box("angle").findData("field_angle"))
+            card.param_spin("hk_mT").setValue(5.0)
+        else:
+            card.formula_edit.setText("0.027992*sqrt((B+hk)*(B+hk+meff))")
+            card.input_box("B").setCurrentIndex(card.input_box("B").findData("field"))
+            card.input_fixed("hk").setValue(5.0)
+            card.input_fixed("meff").setValue(1750.0)
+            card.option_widget("unit").setText("GHz")
+            card.tracked_box.setCurrentIndex(card.tracked_box.findData("meff"))
+        card.margin_spin.setValue(300.0)
+        b._rebuild_summary()
+        # the card sits below the routines: scroll the middle column (and
+        # the detector list) so the picture shows it
+        for it in b._det_items():
+            if it.data(0, QtCore.Qt.UserRole) == "fmr":
+                b.det_tree.scrollToItem(it)
+        from PySide6 import QtWidgets
+
+        def scroll():
+            w = card.parentWidget()
+            while w is not None and not isinstance(w, QtWidgets.QScrollArea):
+                w = w.parentWidget()
+            if w is not None:
+                w.ensureWidgetVisible(card, 0, 0)
+        QtCore.QTimer.singleShot(400, scroll)
+    return warm
 
 
 def _axis_advanced(win):
@@ -1618,6 +1673,8 @@ TARGETS = {
     "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),
     "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
     "suite-scout-scan": _suite("Scan", _scout_scan, settle=2.0),
+    "suite-window-kittel": _suite("Scan", _window_scan("kittel"), settle=2.0),
+    "suite-window-expression": _suite("Scan", _window_scan("expression"), settle=2.0),
     "suite-scout": _suite("Measurement", _scout_run, settle=3.0),
     "suite-axis-advanced": _suite("Scan", _axis_advanced, settle=2.0),
     "suite-axis-advanced-scout": _suite("Scan", _axis_advanced_scout, settle=2.0),

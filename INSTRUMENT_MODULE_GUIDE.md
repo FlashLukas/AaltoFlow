@@ -756,13 +756,15 @@ REQ socket and fails the scan. If a driver leaves you no choice, pass
 reports readiness in `status` is the suite's contract, and it keeps the command
 thread free.
 
-### Resonance window — sweeping only part of the band (optional, 2026-09-28)
+### Window — sweeping only part of the band (optional, 2026-09-28)
 
 A slow SWEPT array detector (a spectrum analyser with tracking generator, a
-VNA) spends most of an FMR field sweep measuring the empty baseline. scan-core
-can ask it to sweep only a window of bins around the line it predicts from the
-field (recipe `window` block, `scan_core/window.py`). A detector opts in by
-adding one key to its array descriptor:
+VNA, a spectrometer) spends most of a scan measuring the empty baseline.
+scan-core can ask it to sweep only a window of bins around the peak a
+PREDICTOR expects at each point (recipe `window` block, `scan_core/window.py`;
+the physics -- Kittel/FMR, linear, a typed formula or a lab's own -- is
+`scan_core/predictors.py`, nothing the module has to know about). A detector
+opts in by adding one key to its array descriptor:
 
 ```python
 "window": {"arg": "window", "unit": "bin", "min_bins": 5},
@@ -770,8 +772,9 @@ adding one key to its array descriptor:
 
 Meaning, and the whole contract the module must keep:
 
-- The descriptor must be a 1-D array detector (one `dims` entry: the frequency
-  axis) **with an `acquire` block**; the window travels with the trigger.
+- The descriptor must be a 1-D array detector (one `dims` entry: its axis,
+  e.g. frequency or wavelength, with a unit) **with an `acquire` block**; the
+  window travels with the trigger.
 - The acquire trigger verb accepts an extra argument named by `arg`:
   `window: [i0, i1]` = **inclusive bin indices of the module's FULL frequency
   grid** (the grid `coord_verb` returns). The module then sweeps only those
@@ -789,7 +792,8 @@ Meaning, and the whole contract the module must keep:
 
 scan-core fills the unswept bins from the last full sweep (its own resonance
 region bridged by a straight line) and writes a `<det>_measured` mask plus the
-predicted / fitted resonance, the window and the Meff used, per point.
+predicted / fitted peak, the window and the predictor's tracked value (FMR:
+mu0 Meff) used, per point.
 
 ### Streams — recording continuously, for a fly scan
 

@@ -57,6 +57,8 @@ PROJECTS.update({
     "suite-fly-scan": ("scan-core", True),
     "suite-repeat-scan": ("scan-core", True),
     "suite-scout-scan": ("scan-core", True),
+    "suite-window-kittel": ("scan-core", True),
+    "suite-window-expression": ("scan-core", True),
     "suite-scout": ("scan-core", True),
     "suite-fly": ("scan-core", True),
     # a camera IMAGE per point: the Scan tab (its size) and the live frame

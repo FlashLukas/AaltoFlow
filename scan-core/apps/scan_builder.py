@@ -3347,7 +3347,7 @@ class ScanWorker(QtCore.QThread):
     #: resumed / was aborted from the pause ([]). Emitted from the scan
     #: thread; Qt queues it to the GUI thread.
     paused = QtCore.Signal(object)
-    #: RESONANCE WINDOW readout after every point (dict, see WindowRunner.state)
+    #: WINDOW readout after every point (dict, see WindowRunner.state)
     window = QtCore.Signal(object)
     #: SCOUT PASS readout (dict, see engine.run's on_scout): after every scout
     #: point, and once its mask is made
@@ -3704,163 +3704,449 @@ class QueueDialog(QtWidgets.QDialog):
 # ──────────────────────────────── main window ─────────────────────────────────
 
 class WindowCard(QtWidgets.QFrame):
-    """RESONANCE WINDOW: sweep a slow detector only near the predicted FMR line.
+    """WINDOW: sweep a slow detector only near the peak a predictor expects.
 
     Lukas, 2026-09-28: "some devices are terribly slow ... I scan most of the
     time in the dark". Shown only when a ticked detector DECLARES window
     support (its describe has a `window` key): for any other detector the
     choice does not exist, and an always-visible card would only be noise.
 
-    Everything here becomes the recipe's `window` block (scan_core/window.py),
-    so it travels in the saved .yaml and inside every .nc the scan writes. The
-    bottom line is the live readout while a scan runs: where the model put
-    the line, where it was found, the window swept and the Meff in use.
+    2026-10-12 ("add option for another physics"): the physics is a choice.
+    The PREDICTOR combo lists scan_core/predictors.py (Kittel/FMR, linear,
+    a typed formula, any lab predictor); the rows below it -- inputs, numbers,
+    options -- are BUILT from what the chosen predictor declares, so nothing
+    here knows FMR unless Kittel is picked. The expression predictor gets a
+    formula box with a live check; each name in the formula becomes a row
+    that is either a constant (a parameter, trackable) or a knob (an input).
+
+    Everything becomes the recipe's `window` block (scan_core/window.py), so
+    it travels in the saved .yaml and inside every .nc the scan writes. The
+    bottom line is the live readout while a scan runs: where the predictor
+    put the peak, where it was found, the window swept, the tracked value.
     """
 
     changed = QtCore.Signal()
 
-    MODELS = (("in-plane", "inplane"), ("out-of-plane", "outofplane"))
     DIPS = (("dip (minimum)", "min"), ("peak (maximum)", "max"))
 
     def __init__(self):
         super().__init__()
+        from scan_core import predictors as P
+        self._P = P
         self.setObjectName("card")
         self.registry = None
         self._candidates: list[str] = []
-        self._extra_ids: set = set()          # loaded ids the registry lacks
+        #: what the user set per predictor, kept across a switch of predictor
+        #: (and across a rebuild while the formula is typed): name -> block
+        self._cache: dict = {}
+        self._building = False
+        self._shown_name = "kittel"       # the predictor whose rows are built
+        self.input_rows: dict = {}        # role -> (combo, fixed spin)
+        self.param_spins: dict = {}       # name -> spin
+        self.option_widgets: dict = {}    # name -> combo / line edit
+        self.formula_edit = None
+        self.formula_check = None
+        self.tracked_box = None
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(12, 10, 12, 10); v.setSpacing(6)
         head = QtWidgets.QHBoxLayout()
-        tag = QtWidgets.QLabel("RESONANCE WINDOW  ·  sweep only near the FMR line")
+        tag = QtWidgets.QLabel("WINDOW  ·  sweep the detector only near the expected peak")
         tag.setObjectName("tag")
         head.addWidget(tag); head.addStretch(1)
         self.enable = QtWidgets.QCheckBox("on")
         self.enable.setToolTip(
-            "Sweep the detector only within +- margin of the resonance the model\n"
-            "predicts from the field (and angle) at each point. Outside it the\n"
-            "trace is FILLED with the baseline of the last full sweep, and the\n"
-            "file gets a '<detector>_measured' mask saying which bins were\n"
-            "measured. The first point, and every N-th, sweep the full band;\n"
-            "a line not found in its window widens it and measures again.")
+            "Sweep the detector only within +- margin of the peak the predictor\n"
+            "expects from the inputs at each point (a field, a temperature, any\n"
+            "knob). Outside it the trace is FILLED with the baseline of the last\n"
+            "full sweep, and the file gets a '<detector>_measured' mask saying\n"
+            "which bins were measured. The first point, and every N-th, sweep the\n"
+            "full band; a line not found in its window widens it and measures again.")
         self.enable.toggled.connect(self._on_toggle)
         head.addWidget(self.enable)
         v.addLayout(head)
 
         self.body = QtWidgets.QWidget()
-        g = QtWidgets.QGridLayout(self.body)
-        g.setContentsMargins(0, 0, 0, 0); g.setHorizontalSpacing(8); g.setVerticalSpacing(4)
+        bv = QtWidgets.QVBoxLayout(self.body)
+        bv.setContentsMargins(0, 0, 0, 0); bv.setSpacing(4)
 
-        def lbl(text, tip=""):
-            w = QtWidgets.QLabel(text)
-            w.setStyleSheet(f"color:{C['muted']};")
-            if tip:
-                w.setToolTip(tip)
-            return w
-
-        def spin(lo, hi, dec, val, suffix="", width=96):
-            s = QtWidgets.QDoubleSpinBox()
-            s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
-            if suffix:
-                s.setSuffix(suffix)
-            s.setFixedWidth(width)
-            s.valueChanged.connect(lambda *_: self.changed.emit())
-            return s
-
+        top = QtWidgets.QHBoxLayout(); top.setSpacing(8)
         self.det_box = QtWidgets.QComboBox()
-        self.field_box = QtWidgets.QComboBox()
-        self.field_box.setToolTip("The parameter whose value at each point IS the field:\n"
-                                  "an axis or a condition (its setpoint is used), or any\n"
-                                  "field readout (read at the point).")
-        self.angle_box = QtWidgets.QComboBox()
-        self.angle_box.setToolTip("In-plane field angle: a parameter (an axis, a condition\n"
-                                  "or a readout), or a fixed number.")
-        self.angle_fixed = spin(-360, 360, 1, 0.0, " deg", 90)
-        for box in (self.det_box, self.field_box, self.angle_box):
-            box.currentIndexChanged.connect(lambda *_: self._sync_enabled())
-            box.currentIndexChanged.connect(lambda *_: self.changed.emit())
-        g.addWidget(lbl("detector"), 0, 0); g.addWidget(self.det_box, 0, 1)
-        g.addWidget(lbl("field"), 0, 2); g.addWidget(self.field_box, 0, 3)
-        g.addWidget(lbl("angle"), 0, 4); g.addWidget(self.angle_box, 0, 5)
-        g.addWidget(self.angle_fixed, 0, 6)
+        self.pred_box = QtWidgets.QComboBox()
+        for pred in P.all_predictors():
+            self.pred_box.addItem(pred.label or pred.name, pred.name)
+            self.pred_box.setItemData(self.pred_box.count() - 1, pred.help,
+                                      QtCore.Qt.ToolTipRole)
+        self.det_box.currentIndexChanged.connect(lambda *_: self._on_detector())
+        self.pred_box.currentIndexChanged.connect(lambda *_: self._on_predictor())
+        top.addWidget(self._lbl("detector")); top.addWidget(self.det_box)
+        top.addWidget(self._lbl("predictor")); top.addWidget(self.pred_box)
+        top.addStretch(1)
+        bv.addLayout(top)
 
-        self.model_box = QtWidgets.QComboBox()
-        for text, key in self.MODELS:
-            self.model_box.addItem(text, key)
-        self.model_box.setToolTip(
-            "in-plane: field in the film plane, Kittel with the in-plane uniaxial\n"
-            "anisotropy (equilibrium angle solved); out-of-plane: field along the\n"
-            "normal, f = gamma'(B - mu0 Meff), no line below mu0 Meff.")
-        self.model_box.currentIndexChanged.connect(lambda *_: self._sync_enabled())
-        self.model_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
-        self.g_spin = spin(0.5, 10, 4, 2.0, "", 80)
-        self.meff_spin = spin(-5000, 5000, 1, 1750.0, " mT")
-        self.meff_spin.setToolTip("mu0 Meff ASSUMED at the start; with 'track' on the\n"
-                                  "scan corrects it from every clean line it measures.")
-        self.hk_spin = spin(-1000, 1000, 2, 0.0, " mT")
-        self.easy_spin = spin(-360, 360, 1, 0.0, " deg", 90)
-        g.addWidget(lbl("model"), 1, 0); g.addWidget(self.model_box, 1, 1)
-        g.addWidget(lbl("g"), 1, 2); g.addWidget(self.g_spin, 1, 3)
-        g.addWidget(lbl("μ0Meff"), 1, 4); g.addWidget(self.meff_spin, 1, 5)
-        g.addWidget(lbl("Hk / easy"), 2, 4)
-        hk = QtWidgets.QHBoxLayout(); hk.setSpacing(4)
-        hk.addWidget(self.hk_spin); hk.addWidget(self.easy_spin)
-        g.addLayout(hk, 2, 5, 1, 2)
+        # options (model, formula, ...) and then the inputs/numbers: rebuilt
+        # from the predictor's declaration
+        self.opt_area = QtWidgets.QWidget()
+        self.opt_grid = QtWidgets.QGridLayout(self.opt_area)
+        self.opt_grid.setContentsMargins(0, 0, 0, 0)
+        self.opt_grid.setHorizontalSpacing(8); self.opt_grid.setVerticalSpacing(4)
+        bv.addWidget(self.opt_area)
+        self.vars_area = QtWidgets.QWidget()
+        self.vars_grid = QtWidgets.QGridLayout(self.vars_area)
+        self.vars_grid.setContentsMargins(0, 0, 0, 0)
+        self.vars_grid.setHorizontalSpacing(8); self.vars_grid.setVerticalSpacing(4)
+        bv.addWidget(self.vars_area)
 
-        self.margin_spin = spin(1, 1e5, 0, 300.0, " MHz")
-        self.margin_spin.setToolTip("Half width of the window around the predicted line.\n"
-                                    "Make it several linewidths: outside it the line's\n"
-                                    "tail is replaced by the baseline.")
+        g = QtWidgets.QGridLayout(); g.setHorizontalSpacing(8); g.setVerticalSpacing(4)
+        self.margin_spin = QtWidgets.QDoubleSpinBox()
+        self.margin_spin.setRange(1e-9, 1e15); self.margin_spin.setDecimals(4)
+        self.margin_spin.setValue(300.0); self.margin_spin.setFixedWidth(120)
+        self.margin_spin.setToolTip("Half width of the window around the predicted peak,\n"
+                                    "in the detector's axis unit. Make it several\n"
+                                    "linewidths: outside it the line's tail is replaced\n"
+                                    "by the baseline.")
+        self.margin_spin.valueChanged.connect(lambda *_: self._emit())
         self.dip_box = QtWidgets.QComboBox()
         for text, key in self.DIPS:
             self.dip_box.addItem(text, key)
-        self.dip_box.currentIndexChanged.connect(lambda *_: self.changed.emit())
-        self.track_box = QtWidgets.QCheckBox("track Meff")
+        self.dip_box.currentIndexChanged.connect(lambda *_: self._emit())
+        self.track_box = QtWidgets.QCheckBox("track")
         self.track_box.setChecked(True)
-        self.track_box.toggled.connect(lambda *_: self.changed.emit())
+        self.track_box.setToolTip("Correct the predictor's tracked number from every\n"
+                                  "clean peak it measures (the start value is a guess).")
+        self.track_box.toggled.connect(lambda *_: self._emit())
         self.full_spin = QtWidgets.QSpinBox()
         self.full_spin.setRange(0, 100000); self.full_spin.setValue(20)
         self.full_spin.setFixedWidth(80)
         self.full_spin.setToolTip("A full-band sweep every N points (and always at the\n"
                                   "first) refreshes the baseline. 0 = only the first.")
-        self.full_spin.valueChanged.connect(lambda *_: self.changed.emit())
-        g.addWidget(lbl("margin ±"), 2, 0); g.addWidget(self.margin_spin, 2, 1)
-        g.addWidget(lbl("line is a"), 2, 2); g.addWidget(self.dip_box, 2, 3)
-        g.addWidget(self.track_box, 3, 1)
-        g.addWidget(lbl("full sweep every"), 3, 2); g.addWidget(self.full_spin, 3, 3)
-        g.setColumnStretch(7, 1)
+        self.full_spin.valueChanged.connect(lambda *_: self._emit())
+        g.addWidget(self._lbl("margin ±"), 0, 0); g.addWidget(self.margin_spin, 0, 1)
+        g.addWidget(self._lbl("line is a"), 0, 2); g.addWidget(self.dip_box, 0, 3)
+        g.addWidget(self.track_box, 1, 1)
+        g.addWidget(self._lbl("full sweep every"), 1, 2); g.addWidget(self.full_spin, 1, 3)
+        g.setColumnStretch(4, 1)
+        bv.addLayout(g)
         v.addWidget(self.body)
 
         self.live = QtWidgets.QLabel("")
         self.live.setStyleSheet(f"color:{C['accent']}; font-size:11px;")
         self.live.setWordWrap(True)
         v.addWidget(self.live)
+        self._rebuild(full=True)
         self._sync_enabled()
         self.hide()
 
+    # ---- small helpers -------------------------------------------------------
+    def _lbl(self, text, tip=""):
+        w = QtWidgets.QLabel(text)
+        w.setStyleSheet(f"color:{C['muted']};")
+        if tip:
+            w.setToolTip(tip)
+        return w
+
+    def _emit(self):
+        if not self._building:
+            self.changed.emit()
+
+    def predictor(self):
+        return self._P.get(self.pred_box.currentData() or "kittel")
+
+    def axis_unit(self) -> str:
+        """The unit of the chosen detector's axis ('' when unknown)."""
+        det = self.det_box.currentData()
+        g = self.registry.get(det) if (self.registry is not None and det) else None
+        axes = list(getattr(g, "axes", None) or [])
+        return (axes[0].unit or "") if len(axes) == 1 else ""
+
+    def _numeric_params(self):
+        """Every scalar numeric parameter (an input may be any of them)."""
+        if self.registry is None:
+            return []
+        out = []
+        for p in list(self.registry.settables()) + list(self.registry.gettables()):
+            if getattr(p, "axes", None):
+                continue                          # an array, not one number
+            if getattr(p, "dtype", "float") in ("enum", "string"):
+                continue
+            out.append(p)
+        return out
+
+    def _candidates_for(self, inp):
+        """The parameters an input may be (a field input: field units only)."""
+        fam = getattr(inp, "family", None)
+        ps = self._numeric_params()
+        if fam:
+            table = self._P.INPUT_FAMILIES[fam]
+            ps = [p for p in ps if (p.unit or "").strip()
+                  and (p.unit or "").strip().lower() in table]
+        # the module's declared role first (describe `role`), then the rest
+        role = getattr(inp, "role", "")
+        return sorted(ps, key=lambda p: getattr(p, "role", None) != role)
+
+    # ---- rebuilding from the predictor's declaration --------------------------
+    def _current(self) -> dict:
+        """The block the widgets show now (predictor-specific part)."""
+        name = self._shown_name           # whose rows are on screen
+        inputs, params, options = {}, {}, {}
+        for oname, w in self.option_widgets.items():
+            options[oname] = (w.currentData() if isinstance(w, QtWidgets.QComboBox)
+                              else w.text().strip())
+        if self.formula_edit is not None:
+            options["formula"] = self.formula_edit.text().strip()
+        if self.tracked_box is not None:
+            options["tracked"] = self.tracked_box.currentData() or ""
+        for role, (box, spin) in self.input_rows.items():
+            pid = box.currentData()
+            if pid:
+                inputs[role] = pid
+            elif name == "expression":
+                params[role] = float(spin.value())    # a constant: trackable
+            else:
+                inputs[role] = float(spin.value())
+        for pname, spin in self.param_spins.items():
+            params[pname] = float(spin.value())
+        return {"predictor": name, "inputs": inputs, "params": params, "options": options}
+
+    def _remember(self):
+        if not self._building and (self.input_rows or self.param_spins
+                                   or self.option_widgets
+                                   or self.formula_edit is not None):
+            cur = self._current()
+            self._cache[cur["predictor"]] = cur
+
+    @staticmethod
+    def _clear(grid):
+        while grid.count():
+            item = grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _rebuild(self, full: bool, block: dict | None = None) -> None:
+        """Rebuild the predictor's rows from its declaration. `full` = the
+        options area too (a new predictor); else only the inputs/numbers
+        (a formula edited, a detector or the registry changed)."""
+        from scan_core.window import normalize
+        P = self._P
+        name = self.pred_box.currentData() or "kittel"
+        pred = P.get(name)
+        if block is None:
+            block = self._cache.get(name) or {"predictor": name}
+        w = normalize({"detector": self.det_box.currentData(), **block,
+                       "predictor": name})
+        self._building = True
+        try:
+            if full:
+                self._clear(self.opt_grid)
+                self.option_widgets = {}
+                self.formula_edit = self.formula_check = self.tracked_box = None
+                row = 0
+                for o in pred.options:
+                    if name == "expression" and o.name == "formula":
+                        self.formula_edit = QtWidgets.QLineEdit(str(w["options"].get(o.name, "")))
+                        self.formula_edit.setToolTip(o.help + "\n" + pred.help)
+                        self.formula_edit.setMinimumWidth(460)
+                        self.formula_edit.textChanged.connect(self._on_formula)
+                        self.formula_check = QtWidgets.QLabel("")
+                        self.formula_check.setWordWrap(True)
+                        self.opt_grid.addWidget(self._lbl(o.label), row, 0)
+                        self.opt_grid.addWidget(self.formula_edit, row, 1, 1, 3)
+                        row += 1
+                        self.opt_grid.addWidget(self.formula_check, row, 1, 1, 3)
+                        row += 1
+                        continue
+                    if name == "expression" and o.name == "tracked":
+                        continue                  # its combo sits with the names
+                    if o.choices:
+                        wdg = QtWidgets.QComboBox()
+                        for c in o.choices:
+                            wdg.addItem(c, c)
+                        wdg.setCurrentIndex(max(0, wdg.findData(w["options"].get(o.name))))
+                        wdg.currentIndexChanged.connect(lambda *_: self._on_option())
+                    else:
+                        wdg = QtWidgets.QLineEdit(str(w["options"].get(o.name, "") or ""))
+                        wdg.setFixedWidth(90)
+                        wdg.setPlaceholderText(self.axis_unit() or "axis unit")
+                        wdg.textChanged.connect(lambda *_: self._emit())
+                    wdg.setToolTip(o.help)
+                    self.option_widgets[o.name] = wdg
+                    self.opt_grid.addWidget(self._lbl(o.label), row, 0)
+                    self.opt_grid.addWidget(wdg, row, 1)
+                    row += 1
+                self.opt_grid.setColumnStretch(4, 1)
+                self.opt_area.setVisible(row > 0)
+            self._build_vars(pred, w)
+            self._shown_name = name
+            self.track_box.setText(self._track_text(pred, w))
+            self.margin_spin.setSuffix(f" {self.axis_unit()}" if self.axis_unit() else "")
+        finally:
+            self._building = False
+        self._check_formula()
+        self._sync_enabled()
+
+    def _build_vars(self, pred, w) -> None:
+        self._clear(self.vars_grid)
+        self.input_rows, self.param_spins = {}, {}
+        P = self._P
+        axis = self.axis_unit()
+        is_expr = pred.name == "expression"
+        if is_expr:
+            try:
+                names = P.Formula(w["options"].get("formula", "")).names
+            except P.FormulaError:
+                names = []
+            rows = [(P.Input(n, n), n) for n in names]
+        else:
+            rows = [(i, i.role) for i in pred.inputs_for(w)]
+        r = 0
+        input_units = {}
+        for inp, role in rows:
+            box = QtWidgets.QComboBox()
+            box.addItem("constant:" if is_expr else "fixed:", "")
+            for p in self._candidates_for(inp):
+                box.addItem(f"{p.label}  ·  {p.id}", p.id)
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(-1e15, 1e15); spin.setDecimals(4); spin.setFixedWidth(110)
+            if inp.unit:
+                spin.setSuffix(f" {inp.unit}")
+            given = w["inputs"].get(role)
+            if is_expr and given is None:
+                given_num = w["params"].get(role)
+                spin.setValue(float(given_num) if given_num is not None else 0.0)
+            elif isinstance(given, str):
+                i = box.findData(given)
+                if i < 0:
+                    box.addItem(f"(missing)  ·  {given}", given)
+                    i = box.findData(given)
+                box.setCurrentIndex(i)
+            elif given is not None:
+                spin.setValue(float(given))
+            else:
+                spin.setValue(float(inp.default))
+                if inp.required and box.count() > 1 and not is_expr:
+                    box.setCurrentIndex(1)        # the best candidate (role, unit)
+            box.setToolTip(inp.help or "A parameter (an axis or a condition uses its\n"
+                           "setpoint; anything else is read at the point), or a number.")
+            box.currentIndexChanged.connect(lambda *_: self._on_input())
+            spin.valueChanged.connect(lambda *_: self._emit())
+            self.input_rows[role] = (box, spin)
+            self.vars_grid.addWidget(self._lbl(inp.label), r, 0)
+            self.vars_grid.addWidget(box, r, 1)
+            self.vars_grid.addWidget(spin, r, 2)
+            pid = box.currentData()
+            p = self.registry.get(pid) if (pid and self.registry is not None) else None
+            input_units[role] = inp.unit or (getattr(p, "unit", "") or "")
+            r += 1
+        if not is_expr:
+            for par in pred.params_for(w):
+                spin = QtWidgets.QDoubleSpinBox()
+                spin.setRange(par.lo, par.hi); spin.setDecimals(par.decimals)
+                spin.setFixedWidth(120)
+                unit = P.unit_text(par.unit, axis, input_units)
+                if unit:
+                    spin.setSuffix(f" {unit}")
+                val = w["params"].get(par.name, par.default)
+                spin.setValue(float(val if val is not None else 0.0))
+                spin.setToolTip(par.help)
+                spin.valueChanged.connect(lambda *_: self._emit())
+                self.param_spins[par.name] = spin
+                col = 2 * ((len(self.param_spins) - 1) % 2)   # two per row
+                rr = r + (len(self.param_spins) - 1) // 2
+                self.vars_grid.addWidget(self._lbl(par.label, par.help), rr, col)
+                self.vars_grid.addWidget(spin, rr, col + 1)
+            r += (len(self.param_spins) + 1) // 2
+        else:
+            self.tracked_box = QtWidgets.QComboBox()
+            self.tracked_box.addItem("(nothing)", "")
+            for role, (box, _spin) in self.input_rows.items():
+                if not box.currentData():
+                    self.tracked_box.addItem(role, role)
+            self.tracked_box.setCurrentIndex(
+                max(0, self.tracked_box.findData(w["options"].get("tracked", ""))))
+            self.tracked_box.setToolTip("The constant corrected from every clean peak\n"
+                                        "(a 1-D root find of the formula).")
+            self.tracked_box.currentIndexChanged.connect(lambda *_: self._on_option())
+            self.vars_grid.addWidget(self._lbl("track"), r, 0)
+            self.vars_grid.addWidget(self.tracked_box, r, 1)
+            r += 1
+        self.vars_grid.setColumnStretch(6, 1)
+        self.vars_area.setVisible(r > 0)
+
+    def _track_text(self, pred, w) -> str:
+        tracked = pred.tracked_for(w["options"])
+        if not tracked:
+            return "track (nothing to track)"
+        label = next((p.label for p in pred.params_for(w) if p.name == tracked), tracked)
+        return f"track {label}"
+
+    # ---- reactions --------------------------------------------------------------
+    def _on_predictor(self):
+        if self._building:
+            return
+        # remember the old predictor's rows (what _current read before the switch)
+        self._remember()                  # the rows still on screen: the OLD one's
+        self._rebuild(full=True)
+        self.changed.emit()
+
+    def _on_detector(self):
+        if self._building:
+            return
+        self._remember()
+        self._rebuild(full=False)
+        self.changed.emit()
+
+    def _on_input(self):
+        if self._building:
+            return
+        if self.pred_box.currentData() == "expression":
+            # a name turned into a knob (or back): the trackable list changes
+            self._remember()
+            self._rebuild(full=False)
+        else:
+            self._remember()
+            self._rebuild(full=False)      # units of params may follow the input
+        self.changed.emit()
+
+    def _on_option(self):
+        if self._building:
+            return
+        pred = self.predictor()
+        from scan_core.window import normalize
+        self.track_box.setText(self._track_text(pred, normalize(
+            {"detector": self.det_box.currentData(), **self._current()})))
+        self.changed.emit()
+
+    def _on_formula(self, *_):
+        if self._building:
+            return
+        if self._check_formula():
+            self._remember()
+            self._rebuild(full=False)
+        self.changed.emit()
+
+    def _check_formula(self) -> bool:
+        """The live check under the formula: ok + its names, or what is wrong."""
+        if self.formula_edit is None or self.formula_check is None:
+            return True
+        try:
+            f = self._P.Formula(self.formula_edit.text())
+        except self._P.FormulaError as exc:
+            self.formula_check.setText(f"✗ {exc}")
+            self.formula_check.setStyleSheet(f"color:{C['danger']}; font-size:11px;")
+            return False
+        names = ", ".join(f.names) or "no names"
+        self.formula_check.setText(f"✓ ok -- names: {names}. Pick for each a knob (input) "
+                                   f"or keep it a constant.")
+        self.formula_check.setStyleSheet(f"color:{C['ok']}; font-size:11px;")
+        return True
+
     # ---- contents -----------------------------------------------------------
     def set_registry(self, registry) -> None:
-        """Refill the field/angle choices from `registry` (units decide)."""
-        from scan_core.window import ANGLE_UNITS, FIELD_UNITS
+        """Refill the input choices from `registry` (units decide)."""
+        self._remember()
         self.registry = registry
-        params = list(registry.settables()) + list(registry.gettables())
-
-        def fill(box, units, first=None):
-            keep = box.currentData()
-            box.blockSignals(True)
-            box.clear()
-            if first:
-                box.addItem(*first)
-            for p in params:
-                if (p.unit or "").strip().lower() in units and (p.unit or "").strip():
-                    box.addItem(f"{p.label}  ·  {p.id}", p.id)
-            i = box.findData(keep)
-            box.setCurrentIndex(i if i >= 0 else 0)
-            box.blockSignals(False)
-
-        fill(self.field_box, FIELD_UNITS)
-        fill(self.angle_box, ANGLE_UNITS, first=("fixed:", ""))
-        self._extra_ids = set()
-        self._sync_enabled()
+        self._rebuild(full=True)
 
     def set_detectors(self, ids: list[str]) -> None:
         """The ticked detectors that support a window. The card shows itself
@@ -3879,6 +4165,9 @@ class WindowCard(QtWidgets.QFrame):
         i = self.det_box.findData(keep)
         self.det_box.setCurrentIndex(i if i >= 0 else 0)
         self.det_box.blockSignals(False)
+        if self.det_box.currentData() != keep:
+            self._remember()
+            self._rebuild(full=False)     # the axis unit may have changed
         self.setVisible(bool(ids) or self.enable.isChecked())
 
     def _on_toggle(self, *_):
@@ -3888,28 +4177,42 @@ class WindowCard(QtWidgets.QFrame):
     def _sync_enabled(self):
         on = self.enable.isChecked()
         self.body.setEnabled(on)
-        self.angle_fixed.setEnabled(on and not self.angle_box.currentData())
-        inplane = self.model_box.currentData() == "inplane"
-        for w in (self.hk_spin, self.easy_spin):
-            w.setEnabled(on and inplane)
+        for _role, (box, spin) in self.input_rows.items():
+            # "fixed:" / "constant:" shows its number; a picked knob hides it
+            spin.setVisible(not box.currentData())
+            spin.setEnabled(on)
         if not on:
             self.live.setText("")
+
+    # ---- the widgets one by one (tests, scripts) ---------------------------------
+    def input_box(self, role):
+        return self.input_rows[role][0]
+
+    def input_fixed(self, role):
+        return self.input_rows[role][1]
+
+    def param_spin(self, name):
+        return self.param_spins[name]
+
+    def option_widget(self, name):
+        return self.option_widgets[name]
+
+    def set_predictor(self, name: str) -> None:
+        self.pred_box.setCurrentIndex(max(0, self.pred_box.findData(name)))
 
     # ---- recipe round trip ------------------------------------------------------
     def to_block(self) -> dict | None:
         if not self.enable.isChecked() or self.det_box.currentData() is None:
             return None
-        angle = self.angle_box.currentData()
+        cur = self._current()
         return {
             "detector": self.det_box.currentData(),
-            "field": self.field_box.currentData(),
-            "angle": angle if angle else float(self.angle_fixed.value()),
-            "model": self.model_box.currentData(),
-            "params": {"g": float(self.g_spin.value()),
-                       "meff_mT": float(self.meff_spin.value()),
-                       "hk_mT": float(self.hk_spin.value()),
-                       "easy_axis_deg": float(self.easy_spin.value())},
-            "margin_MHz": float(self.margin_spin.value()),
+            "predictor": cur["predictor"],
+            "inputs": cur["inputs"],
+            "params": cur["params"],
+            "options": cur["options"],
+            "margin": float(self.margin_spin.value()),
+            "margin_unit": self.axis_unit(),
             "dip": self.dip_box.currentData(),
             "track": bool(self.track_box.isChecked()),
             "full_every": int(self.full_spin.value()),
@@ -3918,48 +4221,51 @@ class WindowCard(QtWidgets.QFrame):
     def load_block(self, block) -> list[str]:
         """Fill the card from a recipe's `window` block (None = switch it off).
         Returns the ids this registry does not have."""
-        from scan_core.window import normalize
+        from scan_core.window import normalize, upgrade
         missing = []
-        widgets = (self.enable, self.det_box, self.field_box, self.angle_box,
-                   self.model_box, self.dip_box, self.track_box, self.full_spin,
-                   self.g_spin, self.meff_spin, self.hk_spin, self.easy_spin,
-                   self.margin_spin, self.angle_fixed)
+        widgets = (self.enable, self.det_box, self.pred_box, self.dip_box,
+                   self.track_box, self.full_spin, self.margin_spin)
         for w in widgets:
             w.blockSignals(True)
         try:
             if not block:
                 self.enable.setChecked(False)
                 return []
+            block = upgrade(block)
             w = normalize(block)
-
-            def pick(box, pid):
-                if pid is None:
-                    return
-                i = box.findData(pid)
+            det = w.get("detector")
+            if det is not None:
+                i = self.det_box.findData(det)
                 if i < 0:
-                    if self.registry is None or self.registry.get(pid) is None:
-                        missing.append(pid)
-                    box.addItem(f"(missing)  ·  {pid}", pid)
-                    i = box.findData(pid)
-                box.setCurrentIndex(i)
-
-            pick(self.det_box, w.get("detector"))
-            pick(self.field_box, w.get("field"))
-            ang = w.get("angle")
-            if isinstance(ang, str):
-                pick(self.angle_box, ang)
-            else:
-                self.angle_box.setCurrentIndex(max(0, self.angle_box.findData("")))
-                self.angle_fixed.setValue(float(ang or 0.0))
-            self.model_box.setCurrentIndex(max(0, self.model_box.findData(w["model"])))
+                    if self.registry is None or self.registry.get(det) is None:
+                        missing.append(det)
+                    self.det_box.addItem(f"(missing)  ·  {det}", det)
+                    i = self.det_box.findData(det)
+                self.det_box.setCurrentIndex(i)
+            pi = self.pred_box.findData(w["predictor"])
+            if pi < 0:
+                # a lab predictor this PC does not have: say so, keep the name
+                self.pred_box.addItem(f"(missing)  ·  {w['predictor']}", w["predictor"])
+                pi = self.pred_box.findData(w["predictor"])
+                missing.append(w["predictor"])
+            self.pred_box.setCurrentIndex(pi)
+            for v in (block.get("inputs") or {}).values():
+                if isinstance(v, str) and (self.registry is None
+                                           or self.registry.get(v) is None):
+                    missing.append(v)
             self.dip_box.setCurrentIndex(max(0, self.dip_box.findData(w["dip"])))
-            p = w["params"]
-            self.g_spin.setValue(p["g"]); self.meff_spin.setValue(p["meff_mT"])
-            self.hk_spin.setValue(p["hk_mT"]); self.easy_spin.setValue(p["easy_axis_deg"])
-            self.margin_spin.setValue(float(w["margin_MHz"]))
+            # the margin in the detector's axis unit (the card's unit)
+            m = float(w.get("margin", 300.0) or 300.0)
+            fac = self._P.output_factor(w.get("margin_unit") or "", self.axis_unit())
+            self.margin_spin.setValue(m * (fac or 1.0))
             self.track_box.setChecked(bool(w["track"]))
             self.full_spin.setValue(int(w["full_every"]))
             self.enable.setChecked(True)
+            if self._P.get(w["predictor"]) is not None:
+                self._cache[w["predictor"]] = {k: block.get(k) or {} for k in
+                                               ("inputs", "params", "options")}
+                self._cache[w["predictor"]]["predictor"] = w["predictor"]
+                self._rebuild(full=True, block=self._cache[w["predictor"]])
         finally:
             for x in widgets:
                 x.blockSignals(False)
@@ -3972,25 +4278,36 @@ class WindowCard(QtWidgets.QFrame):
         b = self.to_block()
         if not b:
             return ""
-        model = dict((k, t) for t, k in self.MODELS).get(b["model"], b["model"])
-        return (f"window ±{b['margin_MHz']:g} MHz on {b['detector']} ({model}, "
-                f"μ0Meff {b['params']['meff_mT']:g} mT"
-                + (", tracked" if b["track"] else "") + ")")
+        pred = self._P.get(b["predictor"])
+        what = pred.label if pred is not None else b["predictor"]
+        if b["predictor"] == "kittel":
+            what = f"Kittel {b['options'].get('model', '')}"
+        tracked = pred.tracked_for(b["options"]) if pred is not None else None
+        extra = ""
+        if tracked and tracked in b["params"]:
+            extra = f", {tracked} {b['params'][tracked]:g}" + (" tracked" if b["track"] else "")
+        unit = b["margin_unit"]
+        return (f"window ±{b['margin']:g}{(' ' + unit) if unit else ''} on "
+                f"{b['detector']} ({what}{extra})")
 
     # ---- live readout -----------------------------------------------------------
     def show_state(self, st: dict) -> None:
         """What the last KEPT point did (engine on_window, via ScanWorker)."""
-        def ghz(x):
-            return "--" if x is None or not math.isfinite(x) else f"{x / 1e9:.4f}"
-        if not st or "window_lo_Hz" not in st:
+        def num(x):
+            return "--" if x is None or not math.isfinite(x) else f"{x:.6g}"
+        if not st or "window_lo" not in st:
             self.live.setText("")
             return
+        u = st.get("axis_unit", "")
         kind = "FULL sweep" + (f" ({st.get('reason')})" if st.get("reason") else "") \
             if st.get("full_sweep") else "window"
+        tracked = ""
+        if st.get("tracked_label"):
+            tracked = f"   ·   {st['tracked_label']} {num(st.get('tracked'))}"
         self.live.setText(
-            f"point {st['points']}: {kind} {ghz(st['window_lo_Hz'])}-{ghz(st['window_hi_Hz'])} GHz"
-            f"   ·   f_res predicted {ghz(st['fres_pred_Hz'])} GHz, found {ghz(st['fres_fit_Hz'])} GHz"
-            f"   ·   μ0Meff {st['meff_mT']:.1f} mT"
+            f"point {st['points']}: {kind} {num(st['window_lo'])}-{num(st['window_hi'])} {u}"
+            f"   ·   peak predicted {num(st['peak_pred'])}, found {num(st['peak_fit'])} {u}"
+            + tracked +
             f"   ·   {100 * st.get('fraction_measured', float('nan')):.0f} % of the bins measured")
 
 
@@ -5167,7 +5484,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         v.addWidget(self._build_stack(), 1)
         v.addWidget(self._build_conditions(), 0)
         v.addWidget(self._build_routines(), 0)
-        # RESONANCE WINDOW: hidden until a ticked detector supports one
+        # WINDOW (any predictor): hidden until a ticked detector supports one
         self.window_card = WindowCard()
         self.window_card.set_registry(self.registry)
         self.window_card.changed.connect(self._rebuild_summary)
@@ -6541,7 +6858,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
                                     {n: margins.get(n, "auto") for n in axes})
 
     def _sync_window_card(self) -> None:
-        """Offer the resonance window for the TICKED detectors that support it."""
+        """Offer the window for the TICKED detectors that support it."""
         if not hasattr(self, "window_card"):
             return
         ids = [it.data(0, QtCore.Qt.UserRole) for it in self._det_items()
