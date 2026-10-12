@@ -79,6 +79,23 @@ def test_the_tabs_exist_and_start_on_the_simulator(suite):
     assert any("DEMO" in line for line in suite.logbox.toPlainText().splitlines())
 
 
+def test_the_navigator_tab_needs_an_xy_pair(suite):
+    """Shown only when the instruments can move a sample in X and Y."""
+    from scan_core.registry import Registry, Settable
+    i = suite.tabs.indexOf(suite._nav_page)
+    assert suite.tabs.isTabVisible(i)                    # the demo has pos_x / pos_y
+    bare = Registry()
+    bare.add(Settable("lockin.tc", "Time constant", "s", (0, 1), lambda v: None, lambda: 0.1))
+    try:
+        suite.navigator.set_source(registry=bare)
+        suite._sync_navigator_tab()
+        assert not suite.tabs.isTabVisible(i)
+    finally:
+        suite.navigator.set_source(registry=suite.registry)
+        suite._sync_navigator_tab()
+    assert suite.tabs.isTabVisible(i)
+
+
 def test_a_demo_file_says_source_demo():
     """A scan on the toy simulator writes source="demo" into its header (the
     engine does it, so a script or a scan server marks its files too); a

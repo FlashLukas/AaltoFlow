@@ -151,3 +151,52 @@ def test_an_image_design_is_placed_by_its_real_width(qapp, tmp_path):
     # rotation 0 -> design frame == stage frame)
     r = nav._design_group.mapRectToScene(nav._design_group.childrenBoundingRect())
     assert (r.left(), r.bottom(), r.width(), r.height()) == pytest.approx((-75, 37.5, 150, 75))
+
+
+def test_x_and_y_are_picked_from_the_length_settables(qapp, tmp_path):
+    """X and Y: two combos over EVERY length settable (2026-10-12), the
+    best-ranked pair preselected; any two in the same unit make a pair, a
+    mismatch is explained instead of moved; the pick is saved by id."""
+    from scan_core.registry import Settable
+    reg = build_sim_registry()
+    reg.add(Settable("piezo.z", "Focus", "um", (0, 50), lambda v: None, lambda: 0.0))
+    reg.add(Settable("stage.x_mm", "Coarse X", "mm", (0, 25), lambda v: None, lambda: 0.0))
+    nav = NavigatorWidget()
+    nav.set_source(registry=reg)
+    assert nav.has_pairs()
+    items = [nav.x_combo.itemData(i) for i in range(nav.x_combo.count())]
+    assert {"pos_x", "pos_y", "piezo.z", "stage.x_mm"} <= set(items)
+    assert "field" not in items                          # not a length
+    assert (nav.pair.x.id, nav.pair.y.id) == ("pos_x", "pos_y")   # the best pair
+    # any two in one unit: X = pos_x, Y = the focus knob (a side view, say)
+    assert nav.select_pair("pos_x", "piezo.z")
+    assert nav.pair.y.id == "piezo.z" and nav.pair_lbl.isHidden()
+    # two units, or one knob twice: no pair, and the card says why
+    nav.select_pair("pos_x", "stage.x_mm")
+    assert nav.pair is None and "same unit" in nav.pair_lbl.text()
+    assert not nav.go_btn.isEnabled()
+    nav.select_pair("pos_y", "pos_y")
+    assert nav.pair is None and "two different" in nav.pair_lbl.text()
+    # saved and restored by id
+    nav.select_pair("pos_y", "pos_x")
+    assert nav.nav_state()["stage"] == {"x": "pos_y", "y": "pos_x"}
+    path = tmp_path / "s.nav.json"
+    nav.save(path)
+    nav2 = NavigatorWidget()
+    nav2.set_source(registry=reg)
+    assert nav2.load(path)
+    assert (nav2.pair.x.id, nav2.pair.y.id) == ("pos_y", "pos_x")
+    # neutral words: a reference point, not a laser or a camera
+    text = " ".join(w.toolTip() + " " + (w.text() if hasattr(w, "text") else "")
+                    for w in nav.findChildren(QtWidgets.QWidget))
+    assert "laser" not in text.lower() and "kim" not in text.lower()
+
+
+def test_no_length_settable_no_navigator(qapp):
+    from scan_core.registry import Gettable, Registry, Settable
+    reg = Registry()
+    reg.add(Settable("lockin.tc", "Time constant", "s", (0, 1), lambda v: None, lambda: 0.1))
+    reg.add(Gettable("lockin.r", "R", "V", lambda: 0.0))
+    nav = NavigatorWidget()
+    nav.set_source(registry=reg)
+    assert not nav.has_pairs() and nav.pair is None

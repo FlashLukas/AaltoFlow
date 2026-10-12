@@ -2,26 +2,35 @@
 
     1. Open the design: a GDS/OASIS file (drawn as vectors, exact um), or an
        image whose real width you type in.
-    2. Tell it where you are: put a feature under the laser (camera), click the
-       same feature on the design, press "I am here". One point uses the
-       rotation you set by eye; a second point FITS the rotation (and the
-       stage's scale); from three on the residuals say how good it is.
-    3. Click anywhere: the stage coordinates are shown, "Go there" moves.
-    4. On an open-loop stage (KIM) the position drifts: click the feature you
-       actually see and press "correct offset" -- one click, rotation kept.
+    2. Pick the positioner: X and Y are any two settables in a length unit
+       (preselected: the best pair scan_core.navigator.stage_pairs finds --
+       a module's describe `role: stage_x / stage_y` first).
+    3. Tell it where you are: bring a feature to your REFERENCE POINT (the
+       laser spot, a probe tip, the centre of a microscope's view -- wherever
+       your setup measures), click the same feature on the design, press
+       "I am here". One point uses the rotation you set by eye; a second
+       point FITS the rotation (and the positioner's scale); from three on
+       the residuals say how good it is.
+    4. Click anywhere: the positioner coordinates are shown, "Go there" moves.
+    5. An open-loop positioner drifts: click the feature you actually see at
+       the reference point and press "correct offset" -- one click, rotation
+       kept.
+
+The suite shows this tab only when the connected modules offer at least one
+such X / Y pair: with nothing to move there is nothing to navigate.
 
 The maths is in scan_core/navigator.py (no Qt, unit-tested). This file only
 draws and forwards clicks.
 
 The picture is drawn in STAGE coordinates (um, y up): the design is placed
 onto the stage frame by the current registration, so the travel limits, the
-stage crosshair and the camera field of view are drawn as they are, and a
-click is already a stage position. Mouse: click = select, drag = pan, wheel =
-zoom around the cursor.
+stage crosshair and the field of view are drawn as they are, and a click is
+already a stage position. Mouse: click = select, drag = pan, wheel = zoom
+around the cursor.
 
-It moves the stage through the same Settables a scan uses (the module's own
-`describe`), so it works with KIM (um) and the BSC203 (mm) alike, and with the
-simulator when nothing is connected.
+It moves the positioner through the same Settables a scan uses (the module's
+own `describe`), in whatever length unit it declares (um, mm ...), and the
+simulator's when nothing is connected.
 """
 
 from __future__ import annotations
@@ -36,7 +45,7 @@ from apps.theme import C
 from scan_core.lab import module_prefix
 from scan_core.navigator import (
     Design, Registration, image_design, load_gds, load_session, save_session,
-    stage_pairs, waypoints,
+    length_settables, make_pair, stage_pairs, waypoints,
 )
 
 # Layer fill colours. Data colours, not theme colours: a layer must keep its
@@ -188,6 +197,8 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.registry = None
         self.lab = None
         self.pairs = []
+        #: the X / Y pair the two combos make now (None: none, or not a pair)
+        self._pair = None
         self.design: Design | None = None
         self.reg = Registration()
         self.pick = None                 # selected point, DESIGN um
@@ -268,28 +279,40 @@ class NavigatorWidget(QtWidgets.QWidget):
         v.addWidget(self.layer_list)
         sv.addWidget(card)
 
-        # --- stage
-        card, v = self._card("STAGE")
-        row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel("move with"))
-        self.stage_combo = QtWidgets.QComboBox()
-        self.stage_combo.currentIndexChanged.connect(lambda _i: self._refresh_all())
-        row.addWidget(self.stage_combo, 1)
-        v.addLayout(row)
+        # --- stage: X and Y, any two length settables (2026-10-12)
+        card, v = self._card("POSITIONER")
+        xy = QtWidgets.QGridLayout(); xy.setHorizontalSpacing(8)
+        self.x_combo = QtWidgets.QComboBox()
+        self.y_combo = QtWidgets.QComboBox()
+        for c, axis in ((self.x_combo, "X"), (self.y_combo, "Y")):
+            c.setToolTip(f"The settable that moves the sample along the design's {axis}.\n"
+                         "Any knob in a length unit (um, mm ...); X and Y in the\n"
+                         "same unit. Preselected: the best pair found (a module's\n"
+                         "describe role stage_x / stage_y first).")
+            c.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            c.setMinimumContentsLength(12)
+            c.currentIndexChanged.connect(lambda _i: self._pair_changed())
+        xy.addWidget(QtWidgets.QLabel("X"), 0, 0); xy.addWidget(self.x_combo, 0, 1)
+        xy.addWidget(QtWidgets.QLabel("Y"), 1, 0); xy.addWidget(self.y_combo, 1, 1)
+        xy.setColumnStretch(1, 1)
+        v.addLayout(xy)
+        self.pair_lbl = self._muted("")
+        v.addWidget(self.pair_lbl)
         self.pos_lbl = QtWidgets.QLabel("-")
         self.pos_lbl.setStyleSheet(f"color:{C['ok']}; font-weight:700;")
         v.addWidget(self.pos_lbl)
         grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(8)
-        self.fov_w = self._um_spin(0, 1e5, 0, "Width of the camera's field of view, drawn "
-                                    "around the stage position. 0 hides it.")
-        self.fov_h = self._um_spin(0, 1e5, 0, "Height of the camera's field of view.")
-        grid.addWidget(QtWidgets.QLabel("camera view"), 0, 0)
+        self.fov_w = self._um_spin(0, 1e5, 0, "Width of the field of view (a camera, a "
+                                    "microscope), drawn around the position. 0 hides it.")
+        self.fov_h = self._um_spin(0, 1e5, 0, "Height of the field of view.")
+        grid.addWidget(QtWidgets.QLabel("field of view"), 0, 0)
         grid.addWidget(self.fov_w, 0, 1); grid.addWidget(QtWidgets.QLabel("x"), 0, 2)
         grid.addWidget(self.fov_h, 0, 3)
         self.approach = self._um_spin(0, 1e4, 0,
             "Arrive from ONE side: the last part of every move runs in +X and +Y over "
-            "this distance. An open-loop inertia stage (KIM) steps differently in each "
-            "direction, so this makes a position repeatable. 0 = straight there.")
+            "this distance. An open-loop positioner (inertia / slip-stick) steps "
+            "differently in each direction, and backlash does too, so this makes a "
+            "position repeatable. 0 = straight there.")
         grid.addWidget(QtWidgets.QLabel("final approach"), 1, 0)
         grid.addWidget(self.approach, 1, 1, 1, 3)
         v.addLayout(grid)
@@ -298,7 +321,7 @@ class NavigatorWidget(QtWidgets.QWidget):
             s.valueChanged.connect(lambda _v: self._announce())
         row = QtWidgets.QHBoxLayout()
         b = QtWidgets.QPushButton("Fit design"); b.clicked.connect(self.fit_design); row.addWidget(b)
-        b = QtWidgets.QPushButton("Centre on stage"); b.clicked.connect(self._centre_on_stage)
+        b = QtWidgets.QPushButton("Centre on position"); b.clicked.connect(self._centre_on_stage)
         row.addWidget(b)
         v.addLayout(row)
         sv.addWidget(card)
@@ -318,14 +341,15 @@ class NavigatorWidget(QtWidgets.QWidget):
         v.addLayout(row)
         self.here_btn = QtWidgets.QPushButton("I am here: add reference point")
         self.here_btn.setToolTip(
-            "The selected design point is under the laser now. Adds a reference point "
-            "and refits: 1 point = offset, 2 = rotation + scale, 3+ = with residuals.")
+            "The selected design point is at the reference point now (where your setup "
+            "measures). Adds a reference point and refits: 1 point = offset, "
+            "2 = rotation + scale, 3+ = with residuals.")
         self.here_btn.clicked.connect(self.add_reference)
         v.addWidget(self.here_btn)
         self.offset_btn = QtWidgets.QPushButton("I am here: correct offset only")
         self.offset_btn.setToolTip(
-            "For drift (open-loop KIM): shift the whole mapping so the selected point "
-            "is where the stage is now. Rotation and scale are kept.")
+            "For drift (an open-loop positioner): shift the whole mapping so the "
+            "selected point is where the positioner is now. Rotation and scale are kept.")
         self.offset_btn.clicked.connect(self.correct_offset)
         v.addWidget(self.offset_btn)
         sv.addWidget(card)
@@ -357,7 +381,7 @@ class NavigatorWidget(QtWidgets.QWidget):
         self.model_combo.addItems(["auto", "similarity", "affine"])
         self.model_combo.setToolTip(
             "auto: 2-3 points = rotation + one scale, 4+ = affine (separate X/Y scale "
-            "and skew, e.g. KIM X and Y step sizes that disagree).")
+            "and skew, e.g. X and Y step sizes that disagree).")
         self.model_combo.currentTextChanged.connect(self._model_changed)
         grid.addWidget(QtWidgets.QLabel("fit"), 2, 0); grid.addWidget(self.model_combo, 2, 1)
         v.addLayout(grid)
@@ -410,27 +434,88 @@ class NavigatorWidget(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ source --
     def set_source(self, registry=None, lab=None) -> None:
-        """The suite hands over its registry whenever it (re)connects."""
+        """The suite hands over its registry whenever it (re)connects. The X
+        and Y combos list every LENGTH settable (length_settables); the pick
+        is kept by id when both are still there, else the best-ranked pair
+        (stage_pairs) is preselected."""
         self.registry, self.lab = registry, lab
-        keep = self.stage_combo.currentText()
+        keep = (self.x_combo.currentData(), self.y_combo.currentData())
         self.pairs = stage_pairs(registry) if registry is not None else []
-        self.stage_combo.blockSignals(True)
-        self.stage_combo.clear()
-        for p in self.pairs:
-            self.stage_combo.addItem(p.label)
-        i = self.stage_combo.findText(keep)
-        self.stage_combo.setCurrentIndex(i if i >= 0 else 0)
-        self.stage_combo.blockSignals(False)
-        for p in self.pairs:
-            if not p.unit_known:
-                self.on_log(f"navigator: {p.label} reports unit {p.x.unit!r}; assuming um")
+        lengths = length_settables(registry) if registry is not None else []
+        for c in (self.x_combo, self.y_combo):
+            c.blockSignals(True)
+            c.clear()
+            for q in lengths:
+                c.addItem(f"{q.label}  ({q.id}, {q.unit})", q.id)
+            c.blockSignals(False)
+        ids = {q.id for q in lengths}
+        if keep[0] in ids and keep[1] in ids:
+            self.select_pair(*keep)
+        elif self.pairs:
+            self.select_pair(self.pairs[0].x.id, self.pairs[0].y.id)
+        else:
+            self._pair_changed()
         self._pos_um = None
         self._refresh_all()
 
+    def has_pairs(self) -> bool:
+        """At least one usable X / Y pair: the suite shows the tab only then."""
+        return bool(self.pairs)
+
+    def select_pair(self, x_id: str, y_id: str) -> bool:
+        """Pick X and Y by settable id (a saved session, a watched lab)."""
+        ix, iy = self.x_combo.findData(x_id), self.y_combo.findData(y_id)
+        if ix < 0 or iy < 0:
+            return False
+        for c, i in ((self.x_combo, ix), (self.y_combo, iy)):
+            c.blockSignals(True); c.setCurrentIndex(i); c.blockSignals(False)
+        self._pair_changed()
+        return True
+
+    def _select_stage(self, value) -> None:
+        """A stored "stage": {x, y} ids; (an older session: a pair's label)."""
+        if isinstance(value, dict):
+            self.select_pair(value.get("x"), value.get("y"))
+        elif isinstance(value, str) and value:
+            for p in self.pairs:
+                if p.label == value:
+                    self.select_pair(p.x.id, p.y.id)
+                    return
+
+    def _stage_state(self) -> dict:
+        p = self.pair
+        return {"x": p.x.id, "y": p.y.id} if p is not None else {}
+
+    def _pair_changed(self) -> None:
+        """Make the pair from the two combos (make_pair). Two knobs that are
+        not a pair -- the same one twice, or different units -- give none,
+        and the card says why instead of moving anything."""
+        reg = self.registry
+        x = reg.get(self.x_combo.currentData()) if reg is not None else None
+        y = reg.get(self.y_combo.currentData()) if reg is not None else None
+        self._pair, why = None, ""
+        if x is None or y is None:
+            why = "No positioner: no settable in a length unit is connected."
+        else:
+            rank = next((p.rank for p in self.pairs
+                         if {p.x.id, p.y.id} == {x.id, y.id}), "other")
+            try:
+                self._pair = make_pair(x, y, rank)
+            except ValueError as exc:
+                why = str(exc)
+        if self._pair is not None and not self._pair.unit_known:
+            self.on_log(f"navigator: {self._pair.label} reports unit "
+                        f"{self._pair.x.unit!r}; assuming um")
+        self.pair_lbl.setText(why)
+        self.pair_lbl.setStyleSheet(f"color:{C['danger'] if why else C['muted']};")
+        self.pair_lbl.setVisible(bool(why))
+        self._pos_um = None
+        self._refresh_all()
+        self._announce()
+
     @property
     def pair(self):
-        i = self.stage_combo.currentIndex()
-        return self.pairs[i] if 0 <= i < len(self.pairs) else None
+        return self._pair
 
     def stage_um(self):
         """Current stage position in um, or None if it cannot be read."""
@@ -579,7 +664,7 @@ class NavigatorWidget(QtWidgets.QWidget):
             "pick": list(self.pick) if self.pick is not None else None,
             "fov_um": [self.fov_w.value(), self.fov_h.value()],
             "approach_um": self.approach.value(),
-            "stage": self.pair.label if self.pair else ""}
+            "stage": self._stage_state()}
 
     def apply_nav_state(self, st: dict) -> None:
         """Show another PC's navigator state over the design already open here
@@ -609,9 +694,9 @@ class NavigatorWidget(QtWidgets.QWidget):
             for spin, val in ((self.fov_w, fov[0]), (self.fov_h, fov[1]),
                               (self.approach, st.get("approach_um", 0.0))):
                 spin.blockSignals(True); spin.setValue(float(val)); spin.blockSignals(False)
-            i = self.stage_combo.findText(st.get("stage") or "")
-            if i >= 0 and i != self.stage_combo.currentIndex():
-                self.stage_combo.setCurrentIndex(i)
+            want = st.get("stage")
+            if want and want != self._stage_state():
+                self._select_stage(want)
             self._refresh_all()
             self._refresh_pick()
             self._update_stage_marks()
@@ -671,11 +756,13 @@ class NavigatorWidget(QtWidgets.QWidget):
 
     def _ready_for_reference(self):
         if self.design is None or self.pick is None:
-            self.on_log("navigator: open a design and click the feature that is under the laser")
+            self.on_log("navigator: open a design and click the feature that is at "
+                        "your reference point")
             return None
         pos = self.stage_um()
         if pos is None:
-            self.on_log("navigator: no stage position to pin it to (is a stage connected?)")
+            self.on_log("navigator: no position to pin it to (pick X and Y on the "
+                        "POSITIONER card)")
         return pos
 
     def _remove_point(self):
@@ -878,7 +965,7 @@ class NavigatorWidget(QtWidgets.QWidget):
         n = s["points"]
         if n == 0:
             return ("No reference points: the picture uses your rotation and sits at the "
-                    "stage origin. Put a feature under the laser, click it, 'I am here'.")
+                    "origin. Bring a feature to your reference point, click it, 'I am here'.")
         if n == 1:
             return ("1 point: offset only, rotation as set by eye. A second point far "
                     "from the first fits the rotation.")
@@ -907,13 +994,13 @@ class NavigatorWidget(QtWidgets.QWidget):
             lines = [f"design   {_fmt_um(self.pick[0])}, {_fmt_um(self.pick[1])} um"]
             p = self.pair
             if p is not None:
-                lines.append(f"stage    {p.to_unit(tgt[0]):.6g}, {p.to_unit(tgt[1]):.6g} {p.x.unit}")
+                lines.append(f"position {p.to_unit(tgt[0]):.6g}, {p.to_unit(tgt[1]):.6g} {p.x.unit}")
                 here = self._pos_um or self.stage_um()
                 if here is not None:
                     dist = math.hypot(tgt[0] - here[0], tgt[1] - here[1])
                     lines.append(f"distance {_fmt_um(dist)} um")
                 if not p.inside(*tgt):
-                    lines.append("<span style='color:%s'>outside the stage travel</span>" % C["danger"])
+                    lines.append("<span style='color:%s'>outside the travel</span>" % C["danger"])
             self.pick_lbl.setText("<br>".join(lines))
         self._refresh_buttons()
 
@@ -938,7 +1025,7 @@ class NavigatorWidget(QtWidgets.QWidget):
             self.save(path)
 
     def save(self, path) -> None:
-        extra = {"stage": self.pair.label if self.pair else "",
+        extra = {"stage": self._stage_state(),
                  "fov_um": [self.fov_w.value(), self.fov_h.value()],
                  "approach_um": self.approach.value()}
         save_session(path, self.design, self.reg, extra)
@@ -975,9 +1062,7 @@ class NavigatorWidget(QtWidgets.QWidget):
         fov = data.get("fov_um") or [0, 0]
         self.fov_w.setValue(fov[0]); self.fov_h.setValue(fov[1])
         self.approach.setValue(float(data.get("approach_um", 0.0)))
-        i = self.stage_combo.findText(data.get("stage", ""))
-        if i >= 0:
-            self.stage_combo.setCurrentIndex(i)
+        self._select_stage(data.get("stage"))
         self._refresh_all()
         self.on_log(f"navigator: session loaded ({len(self.reg.points)} reference points). "
                     "If the sample was remounted, clear and set the points again.")

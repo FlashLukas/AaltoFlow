@@ -165,7 +165,8 @@ class Suite(QtWidgets.QMainWindow):
         self.control.panel_changed.connect(self.builder._publish_view)
         self.builder.definition_changed.connect(self.builder._publish_view)
         self.navigator = NavigatorWidget(on_log=self.log, is_busy=self.scan_running)
-        self.tabs.addTab(self._wrap(self.navigator), "Navigator")
+        self._nav_page = self._wrap(self.navigator)
+        self.tabs.addTab(self._nav_page, "Navigator")
         self.navigator.nav_changed.connect(lambda: self.builder._publish_view())
         # a new design file: shared again at the next server status
         self.navigator.design_opened.connect(lambda _p: setattr(self, "_shared_design", None))
@@ -211,6 +212,7 @@ class Suite(QtWidgets.QMainWindow):
 
         self.control.set_source(registry=self.registry)
         self.navigator.set_source(registry=self.registry)
+        self._sync_navigator_tab()
         self._sync_source_label()
         # Say where the first run will go, and whether it can go there, before
         # anyone presses Run.
@@ -1532,7 +1534,20 @@ class Suite(QtWidgets.QMainWindow):
         self.builder.autosave_dir = self.out_dir
         self.control.set_source(registry=self.registry, lab=self.lab, prefix=True)
         self.navigator.set_source(registry=self.registry, lab=self.lab)
+        self._sync_navigator_tab()
         self._sync_source_label()
+
+    def _sync_navigator_tab(self) -> None:
+        """The Navigator tab only when the connected modules can move a
+        sample in X and Y (navigator.stage_pairs finds at least one pair of
+        length settables): a lock-in and a magnet have nothing to navigate,
+        and an empty tab would only raise the question why."""
+        i = self.tabs.indexOf(self._nav_page)
+        on = self.navigator.has_pairs()
+        if i >= 0 and self.tabs.isTabVisible(i) != on:
+            if not on and self.tabs.currentIndex() == i:
+                self.tabs.setCurrentIndex(0)
+            self.tabs.setTabVisible(i, on)
 
     def is_demo(self) -> bool:
         """True while the suite works on the toy simulator: nothing
