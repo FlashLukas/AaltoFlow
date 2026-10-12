@@ -44,6 +44,9 @@ suite_local.json
 mission-control/profiles.json
 mission-control/launcher.json
 scan-core/suite_layouts.json
+# a lab's own window predictors (scan_core/predictors.py LAB_DIR): that lab's
+# physics, backed up by Export settings and tools/lab_backup.ps1
+scan-core/lab_predictors/
 # hf2's saved Follow setups (follow_dialog.py): this PC's own presets
 modules/**/follow_presets.json
 modules/**/follow_presets.tmp
