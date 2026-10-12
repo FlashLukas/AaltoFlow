@@ -35,6 +35,7 @@ def fast_polls(monkeypatch):
     monkeypatch.setattr(hooks, "WAIT_POLL_S", 0.01)
     monkeypatch.setattr(hooks, "WAIT_LOG_S", 0.05)
     monkeypatch.setattr(hooks, "PAUSE_POLL_S", 0.01)
+    monkeypatch.setattr(hooks, "DELAY_POLL_S", 0.01)
 
 
 def _call(when, *steps, **extra):
@@ -148,6 +149,74 @@ def test_abort_during_a_wait():
         run(r, reg, should_abort=stop.is_set)
     assert not isinstance(info.value, ScanStopped)      # the OPERATOR's abort
     assert time.monotonic() - t0 < 5.0
+
+
+# ───────────────────────────── delay (2026-10-12) ─────────────────────────────
+
+def test_delay_waits_that_long_and_says_so():
+    reg = build_sim_registry()
+    lines, log = _logged()
+    r = _field_scan([_call("before_scan", {"delay": {"seconds": 0.3}}),
+                     _call("after_point", {"delay": {"seconds": 0.05}})], num=2)
+    assert r.validate(reg) == []
+    t0 = time.monotonic()
+    run(r, reg, on_log=log)
+    assert time.monotonic() - t0 >= 0.4
+    assert any("waiting 0.3 s" in ln for ln in lines), lines
+    assert any("waiting: " in ln for ln in lines)          # progress line
+
+
+def test_abort_interrupts_a_delay():
+    reg = build_sim_registry()
+    stop = threading.Event()
+    threading.Timer(0.15, stop.set).start()
+    r = _field_scan([_call("before_scan", {"delay": {"seconds": 3600}})], num=2)
+    t0 = time.monotonic()
+    with pytest.raises(ScanAborted):
+        run(r, reg, should_abort=stop.is_set)
+    assert time.monotonic() - t0 < 5.0
+
+
+def test_delay_as_a_hook_of_its_own():
+    reg = build_sim_registry()
+    r = _field_scan([{"when": "before_point", "action": "delay",
+                      "args": {"seconds": 0.02}}], num=3)
+    assert r.validate(reg) == []
+    t0 = time.monotonic()
+    run(r, reg)
+    assert time.monotonic() - t0 >= 0.06
+
+
+@pytest.mark.parametrize("seconds", [-1, float("nan"), float("inf"), "ten", True, 1e6])
+def test_delay_validation(seconds):
+    errs = _field_scan([_call("before_scan", {"delay": {"seconds": seconds}})]).validate(
+        build_sim_registry())
+    assert any("delay: seconds" in e for e in errs), errs
+
+
+def test_wait_until_time_suggests_a_delay():
+    errs = _field_scan([_call("before_scan", {"wait_until": {
+        "condition": "time > 200", "timeout_s": 600}})]).validate(build_sim_registry())
+    assert any("unknown parameter 'time'" in e and "wait (delay)" in e for e in errs), errs
+
+
+def test_delay_round_trips_yaml_nc_and_schema(tmp_path):
+    reg = build_sim_registry()
+    r = _field_scan([_call("before_scan", {"delay": {"seconds": 0.01}},
+                           {"set": {"rf_power": -5.0}})], num=2)
+    r.save(tmp_path / "d.yaml")
+    back = Recipe.load(tmp_path / "d.yaml")
+    assert back.to_dict() == r.to_dict()
+    ds = run(back, reg)
+    assert Recipe.from_dict(json.loads(ds.attrs["recipe_json"])).to_dict() == r.to_dict()
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads((Path(__file__).parents[1] / "schema" /
+                         "scan.schema.json").read_text(encoding="utf-8"))
+    jsonschema.validate(r.to_dict(), schema)
+    bad = r.to_dict()
+    bad["hooks"][0]["args"]["steps"][0]["delay"]["seconds"] = -1
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
 
 
 # ──────────────────────────────── abort_if ────────────────────────────────────

@@ -62,6 +62,8 @@ HOOKS = [
         {"pause": {"message": "check the laser", "headless": "continue"}},
         {"comment": {"text": "sample rotated 90 deg; P = {rf_power}"}},
         {"compute_set": {"set": {"rf_freq": "2800 + 28 * field"}}},
+        {"delay": {"seconds": 120}},
+        {"delay": {"seconds": 0.5}},
         {"action": "vna_reference"}]}},
     {"when": "before_point", "on_error": "stop", "action": "call", "args": {"steps": [
         {"abort_if": {"condition": "lockin_r > 0.9"}},
@@ -89,7 +91,7 @@ def test_the_step_combo_offers_the_five_kinds(builder):
         assert combo.itemText(0) == ADD_STEP and combo.isEnabled()
         kinds = [combo.itemData(i) for i in range(1, combo.count())]
         assert kinds == ["wait_until", "abort_if", "skip_if", "pause", "comment",
-                         "compute_set"]
+                         "compute_set", "delay"]
         for i in range(1, combo.count()):
             combo.activated.emit(i)
             assert combo.currentIndex() == 0
@@ -179,6 +181,30 @@ def test_new_steps_write_their_defaults_only_where_needed(builder):
     hook = section.to_hook()
     assert hook["args"]["steps"][-1] == {"pause": {"message": "look"}}
     assert "wait until rf_power < 0, hold 5 s (max 120 s)" in section.describe()
+
+
+def test_the_delay_row(builder):
+    """'wait (delay)': a row "wait [N] s", 0.1 s .. 24 h, C locale."""
+    builder.add_axis("field")
+    from PySide6 import QtCore
+    from apps.scan_builder import STEP_CHOICES
+    assert ("wait (delay)", "delay") in STEP_CHOICES
+    for section in (builder.routines["before_scan"], builder.routines["after_scan"],
+                    builder.add_throughout()):
+        row = section.add_generic("delay")
+        assert row.seconds.minimum() == 0.1 and row.seconds.maximum() == 86400.0
+        assert row.seconds.locale() == QtCore.QLocale.c()
+        row.seconds.setValue(2.5)
+        assert row.to_step() == {"delay": {"seconds": 2.5}} and not row.problems()
+        assert "wait 2.5 s" in section.describe()
+    assert builder.build_recipe().validate(builder.registry) == []
+
+
+def test_wait_until_time_points_at_the_delay_step(builder):
+    row = builder.routines["before_scan"].add_generic("wait_until")
+    row.cond.setText("time > 200")
+    assert "unknown parameter 'time'" in row.err_lbl.text()
+    assert "wait (delay)" in row.err_lbl.text()
 
 
 def test_a_missing_parameter_in_a_condition_is_named(builder):

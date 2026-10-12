@@ -2714,11 +2714,13 @@ STEP_CHOICES = (("wait until ...", "wait_until"),
                 ("skip point if ...", "skip_if"),
                 ("pause for the operator", "pause"),
                 ("comment into the file", "comment"),
-                ("set from a formula", "compute_set"))
+                ("set from a formula", "compute_set"),
+                ("wait (delay)", "delay"))
 
 #: The short word at the left of each generic step (the columns are narrow).
 STEP_TAGS = {"wait_until": "wait until", "abort_if": "abort if", "skip_if": "skip if",
-             "pause": "pause:", "comment": "comment:", "compute_set": "set"}
+             "pause": "pause:", "comment": "comment:", "compute_set": "set",
+             "delay": "wait"}
 
 #: What each generic step does, for its tooltip.
 STEP_HELP = {
@@ -2741,6 +2743,9 @@ STEP_HELP = {
                    "set as a plain set, and restored the same way). A value\n"
                    "outside the parameter's limits makes the step FAIL -- it is\n"
                    "never clamped.",
+    "delay": "Wait this many seconds, then go on (0.1 s to 24 h). Abort\n"
+             "ends the wait at once. To wait for a VALUE instead, use\n"
+             "'wait until ...'.",
 }
 
 #: The defaults of the optional keys: a step writes such a key back only when
@@ -2874,6 +2879,18 @@ class GenericStepRow(QtWidgets.QFrame):
             self.cond = edit(text, "formula, e.g. 2800 + 28 * field",
                              expr_tip.replace("A condition", "A formula"))
             line2.addWidget(self.cond, 1)
+        if kind == "delay":
+            # "wait [N] s": seconds with the C locale (a "," decimal comma on
+            # a Finnish Windows would otherwise read 1,5 as 15 -- gotcha #18)
+            self.seconds = QtWidgets.QDoubleSpinBox()
+            self.seconds.setLocale(QtCore.QLocale.c())
+            self.seconds.setRange(0.1, 86400.0); self.seconds.setDecimals(1)
+            self.seconds.setValue(float(spec.get("seconds", 10.0) or 0.1))
+            self.seconds.setSuffix(" s"); self.seconds.setFixedWidth(108)
+            self.seconds.setToolTip(STEP_HELP["delay"])
+            self.seconds.valueChanged.connect(lambda *_: self._changed())
+            line1.addWidget(self.seconds)
+            line1.addStretch(1)
         if line2.count():
             body.addLayout(line2)
         self.err_lbl = QtWidgets.QLabel("")
@@ -2957,6 +2974,8 @@ class GenericStepRow(QtWidgets.QFrame):
             return out
         if k == "comment":
             return {"text": self.text_edit.text()}
+        if k == "delay":
+            return {"seconds": self._back("seconds", float(self.seconds.value()))}
         return {"set": {self.param_box.currentData() or "": self.cond.text()}}
 
     def to_step(self) -> dict:
@@ -2975,6 +2994,8 @@ class GenericStepRow(QtWidgets.QFrame):
             return f"pause: {s['message']}"
         if self.kind == "comment":
             return f"comment: {s['text']}"
+        if self.kind == "delay":
+            return f"wait {float(s['seconds']):g} s"
         (pid, text), = s["set"].items()
         return f"{pid} = {text}"
 

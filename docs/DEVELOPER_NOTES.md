@@ -912,6 +912,11 @@ which runs as a routine of that one step.
 | `pause` | `message`, `headless` (fail/continue) | engine `on_pause(message, answer)`; Abort scan = `ScanStopped`; no `on_pause` -> fail (RuntimeError) or log |
 | `comment` | `text` | append `{time, point, index, text}` to dataset attr `comments` (JSON); `{param.id}` filled (`%.6g`), unknown left as text + warning |
 | `compute_set` | `set: {pid: formula}` | evaluate, REFUSE (not clamp) outside the limits, blocking `Settable.set`; restored like a `set` |
+| `delay` (2026-10-12) | `seconds` (0 .. `DELAY_MAX_S` = 86400) | sleep, looking at Abort every `DELAY_POLL_S` (0.1 s); log "waiting N s" + progress every `WAIT_LOG_S`; any moment. Builder: "wait (delay)", a row "wait [N] s" (spin 0.1 s .. 24 h, C locale) |
+
+A condition has no clock: an unknown id that reads like one (`time`, `t`,
+`delay`, ... -- `expr.CLOCK_WORDS`) is reported as "unknown parameter 'time'
+-- ... use a 'wait (delay)' step" (Lukas tried `wait until time > 200`).
 
 - **Expressions** (`scan_core/expr.py`): parsed with `ast` and walked by an
   allow-list -- numbers, strings, True/False, dotted parameter ids, `+ - * /

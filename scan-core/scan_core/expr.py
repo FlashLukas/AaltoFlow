@@ -335,10 +335,20 @@ def _eval(node, values):
 
 # ─────────────────────────── against a registry ──────────────────────────────
 
+#: Names someone writes for "the time" in a condition: none is a parameter,
+#: and the error says to use a delay step instead.
+CLOCK_WORDS = ("time", "t", "delay", "elapsed", "now", "seconds", "sec", "clock")
+
+
 def param_problem(registry, pid: str) -> str | None:
     """Why `pid` cannot be read in an expression, or None if it can."""
     p = registry.get(pid) if registry is not None else None
     if p is None:
+        if pid.lower() in CLOCK_WORDS:
+            # "wait until time > 200" (Lukas, 2026-10-12): an expression
+            # reads instruments, it has no clock -- point at the step that does
+            return (f"unknown parameter '{pid}' -- a condition has no clock; "
+                    f"to wait a fixed time use a 'wait (delay)' step")
         return f"unknown parameter '{pid}'"
     if getattr(p, "kind", "") not in ("settable", "gettable"):
         return f"'{pid}' cannot be read"

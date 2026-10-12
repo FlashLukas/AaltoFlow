@@ -78,6 +78,7 @@ and actions), or -- the same thing written alone -- a hook of its own
     {pause:      {message: "Insert the polariser, then Continue", headless: fail}}
     {comment:    {text: "sample rotated 90 deg; T = {ppms.temperature}"}}
     {compute_set: {set: {smb.frequency: "2.8e9 + 28e6 * clMag.field"}}}
+    {delay:      {seconds: 120}}
 
 * wait_until: polls (every WAIT_POLL_S) until the condition has been TRUE
   without a break for hold_s seconds (0 = true once). timeout_s is required;
@@ -101,6 +102,9 @@ and actions), or -- the same thing written alone -- a hook of its own
 * compute_set: evaluates the formula and SETS the parameter (the blocking set,
   as `set` does), refusing a value outside its limits (the step fails, and
   on_error decides). Restored afterwards exactly like a `set`.
+* delay (2026-10-12, Lukas: "wait until time > 200" had nothing to name): a
+  plain wait of `seconds`, at any moment. Abort ends it within DELAY_POLL_S;
+  progress is logged every WAIT_LOG_S. The builder calls it "wait (delay)".
 
 Conditions and formulas use the restricted evaluator in expr.py (no eval), and
 read parameters from the STATUS CACHE -- never a new acquisition.
@@ -132,7 +136,8 @@ EDGES = ("start", "end")
 ON_ERROR = ("stop", "continue")
 
 #: The five generic steps (2026-10-04) plus compute_set's sibling `set`.
-STEP_KINDS = ("wait_until", "abort_if", "skip_if", "pause", "comment", "compute_set")
+STEP_KINDS = ("wait_until", "abort_if", "skip_if", "pause", "comment", "compute_set",
+              "delay")
 
 #: The keys each step's mapping may hold, and which of them are required.
 STEP_KEYS = {
@@ -143,6 +148,7 @@ STEP_KEYS = {
     "pause": ({"message", "headless"}, {"message"}),
     "comment": ({"text"}, {"text"}),
     "compute_set": ({"set"}, {"set"}),
+    "delay": ({"seconds"}, {"seconds"}),
 }
 
 #: Where a step makes sense. Not listed = every moment.
@@ -167,6 +173,11 @@ WAIT_POLL_S = 0.5
 WAIT_LOG_S = 30.0
 #: pause: how often the engine checks for an answer (or Abort) while waiting.
 PAUSE_POLL_S = 0.2
+#: delay: how often Abort is looked at while sleeping (the wait is cut short
+#: within this), and the longest delay a step may ask for (one day: anything
+#: longer is a typo, or a job for a queue).
+DELAY_POLL_S = 0.1
+DELAY_MAX_S = 86400.0
 
 
 def action(name):
@@ -442,6 +453,15 @@ def step_problems(kind: str, spec: dict, registry=None, moment: str | None = Non
             errs.append("pause: message must be text")
         if (spec.get("headless") or "fail") not in PAUSE_HEADLESS:
             errs.append(f"pause: headless must be one of {', '.join(PAUSE_HEADLESS)}")
+    if kind == "delay" and "seconds" in spec:
+        try:
+            v = _number(spec, "seconds")
+            ok = 0 <= v <= DELAY_MAX_S
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            errs.append(f"delay: seconds must be a number from 0 to "
+                        f"{DELAY_MAX_S:g} (one day)")
     if kind == "comment" and "text" in spec and not isinstance(spec["text"], str):
         errs.append("comment: text must be text")
     if kind == "compute_set" and "set" in spec:
@@ -523,6 +543,26 @@ def wait_until(ctx, condition, timeout_s, hold_s=0.0, on_timeout="stop"):
         if true_since is not None:
             left = min(left, hold_s - (now - true_since))
         time.sleep(max(0.0, min(WAIT_POLL_S, left)))
+
+
+def delay(ctx, seconds):
+    """Sleep `seconds`, looking at Abort every DELAY_POLL_S (ScanAborted)."""
+    say = ctx.get("log_fn") or (lambda msg: None)
+    should_abort = ctx.get("should_abort")
+    seconds = float(seconds)
+    t0 = time.monotonic()
+    last_log = t0
+    while True:
+        if should_abort and should_abort():
+            raise ScanAborted(f"aborted while waiting {seconds:g} s")
+        now = time.monotonic()
+        left = seconds - (now - t0)
+        if left <= 0:
+            return
+        if now - last_log >= WAIT_LOG_S:
+            last_log = now
+            say(f"waiting: {now - t0:.0f}/{seconds:g} s")
+        time.sleep(min(DELAY_POLL_S, left))
 
 
 def pause_for_operator(ctx, message, headless="fail"):
@@ -788,6 +828,9 @@ def _call(ctx, **args):
                                                 s.get("on_timeout") or "stop"))
             elif kind in ("abort_if", "skip_if"):
                 condition(kind, ident)
+            elif kind == "delay":
+                step(f"waiting {float(ident['seconds']):g} s",
+                     lambda s=ident: delay(ctx, s["seconds"]))
             elif kind == "pause":
                 step(f"pause: {ident.get('message', '')}",
                      lambda s=ident: pause_for_operator(ctx, s.get("message", ""),

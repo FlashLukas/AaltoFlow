@@ -558,9 +558,9 @@ moves), and are passed to the verb -- plus the declared default of anything
 left out, as before. The simulator offers `sim_focus_at` to try it without a
 rig.
 
-### Five generic steps: wait, check, pause, comment, compute
+### Generic steps: wait, check, pause, comment, compute, delay
 
-Besides "set" and "run an action", a routine's steps can be one of five
+Besides "set" and "run an action", a routine's steps can be one of seven
 generic steps (the **＋ other step ...** list under every routine). They are
 deliberately simple -- no loops, no if/else; several dies are a queue of scans.
 Each sits in a routine's `steps` list, in order with the sets and actions (or,
@@ -635,6 +635,18 @@ decides.
 ```yaml
   - {when: before_point, action: call, args: {steps: [
       {compute_set: {set: {smb.frequency: "2800 + 28 * clMag.field"}}}]}}
+```
+
+**`delay`** ("wait (delay)" in the builder: a row "wait [N] s") -- wait a
+fixed time, from 0.1 s to 24 h, at any moment (before, after or throughout
+the scan). Abort ends it within 0.1 s; the log says "waiting N s" (and the
+progress every 30 s). A condition has no clock: "wait until time > 200" is
+refused with a pointer to this step.
+
+```yaml
+  - {when: before_scan, action: call, args: {steps: [
+      {set: {magnet.field: 0}},
+      {delay: {seconds: 120}}]}}
 ```
 
 **Conditions and formulas** use a small restricted language
