@@ -655,7 +655,16 @@ parameter ids as in the palette (`ppms.temperature`), `+ - * / **`, unary `-`,
 `< <= > >= == !=` (chained: `9.95 < ppms.temperature < 10.05`), `and or not`,
 parentheses, `abs min max round`. Anything else (other calls, indexing,
 attributes, lambdas, ...) and unknown ids are refused when the definition is
-VALIDATED -- the builder shows a red border and the reason as you type.
+VALIDATED -- the builder shows a red border and the reason as you type,
+with the closest ids of the connected instruments ("unknown parameter
+'ppms.temprature' -- did you mean ppms.temperature?"). You need not type ids
+from memory: the box completes the word at the cursor from every parameter
+the connected modules offer (label and unit shown; "temp" finds
+`ppms.temperature`), and its **insert...** button lists them by module, plus
+the functions, and inserts the choice at the cursor. The **＋ run an action
+...** list likewise shows only the actions the connected modules offer,
+grouped by module, and says "(no actions offered by the connected
+instruments)" when there are none.
 **A parameter id reads the status cache**: a settable's readback, a detector's
 current value (a lock-in's last acquired sample) -- never a new acquisition.
 Array detectors (a VNA trace) cannot be used. `==` on measured numbers is

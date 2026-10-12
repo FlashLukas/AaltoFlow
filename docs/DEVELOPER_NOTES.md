@@ -960,6 +960,18 @@ A condition has no clock: an unknown id that reads like one (`time`, `t`,
   every dataset built (`_to_dataset(..., ds_attrs=)`): live snapshots,
   checkpoints, abort/fault datasets, and -- updated after it ran -- the
   after-scan routine's comments.
+- **Pick, do not type** (2026-10-12, Lukas): every expression box has an
+  `ExprAssist` -- a `QCompleter` (completion role = the id, display "id ·
+  label [unit]", MatchContains, case-insensitive) on the word at the cursor
+  over `expr.readable_params(registry)` (settables + scalar detectors) and
+  `EXPR_WORDS`, and an "insert..." `QToolButton` menu grouped by module
+  (`group_by_module`). Submenus are kept in `ExprAssist.submenus`, never
+  looked up through `QAction.menu()` (PySide6 can return a wrapper that
+  deletes the QMenu when collected). Rebuilt in `RoutineSection.set_registry`.
+  `expr.param_problem` adds `expr.suggestions()` (difflib on the ids, and on
+  the part after the module) to "unknown parameter". The action combo is
+  grouped by module (a disabled bold heading once there are two) and reads
+  `NO_ACTIONS` when empty.
 - **GUI**: `GenericStepRow` in `apps/scan_builder.py` (one small form per
   kind, live-validated); a second combo "＋ other step ..." beside "＋ run an
   action ...". THROUGHOUT gained the triggers "before each point" /

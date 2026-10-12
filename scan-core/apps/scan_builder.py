@@ -2348,6 +2348,8 @@ ROUTINE_MOMENTS = (("before_scan", "BEFORE SCAN"), ("after_scan", "AFTER SCAN"))
 #: The label of the first entry of a routine's "add an action" combo. Picking
 #: any OTHER entry appends that action as a step and snaps back to this one.
 ADD_ACTION = "＋ run an action ..."
+#: ... and what it says when no connected module offers one
+NO_ACTIONS = "(no actions offered by the connected instruments)"
 
 
 def _step_frame(row) -> QtWidgets.QHBoxLayout:
@@ -2755,6 +2757,155 @@ STEP_DEFAULTS = {"wait_until": {"hold_s": 0.0, "on_timeout": "stop"},
                  "pause": {"headless": "fail"}}
 
 
+#: What the completer and the "insert..." menu offer besides the parameters:
+#: the expression language's functions and words (expr.py).
+EXPR_WORDS = (("abs(", "absolute value"), ("min(", "smallest of a, b, ..."),
+              ("max(", "largest of a, b, ..."), ("round(", "round(x) or round(x, n)"),
+              ("and", ""), ("or", ""), ("not", ""), ("True", ""), ("False", ""))
+
+#: The word being typed at the cursor: a parameter id (dotted) or a name.
+_TOKEN_RE = re.compile(r"[A-Za-z_][\w.]*$")
+
+
+class ExprAssist(QtCore.QObject):
+    """Pick-from-list help for an expression box (Lukas, 2026-10-12: "we
+    could also just list the possible actions ... based on the available
+    instrumentation").
+
+    * a COMPLETER on the word at the cursor: every parameter an expression
+      can read (expr.readable_params: settables + scalar detectors), shown
+      as "id  ·  label [unit]", plus the functions; matching anywhere in the
+      id, case-insensitive ("temp" finds ppms.temperature);
+    * an "insert..." BUTTON (`button`) with a menu of those parameters
+      grouped by module, and the functions: the choice is inserted at the
+      cursor.
+    Rebuilt by set_registry() when the connected modules change.
+    """
+
+    def __init__(self, edit: QtWidgets.QLineEdit, registry):
+        super().__init__(edit)
+        self.edit = edit
+        self.model = QtGui.QStandardItemModel(self)
+        self.completer = QtWidgets.QCompleter(self.model, self)
+        self.completer.setCompletionRole(QtCore.Qt.UserRole)
+        self.completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        self.completer.setFilterMode(QtCore.Qt.MatchContains)
+        self.completer.setMaxVisibleItems(12)
+        self.completer.setWidget(edit)
+        self.completer.activated[QtCore.QModelIndex].connect(self._completed)
+        edit.textEdited.connect(self._on_edited)
+        self.button = QtWidgets.QToolButton()
+        self.button.setText("insert...")
+        self.button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.button.setToolTip("Insert a parameter of a connected instrument (grouped\n"
+                               "by module) or a function at the cursor.")
+        self.menu = QtWidgets.QMenu(self.button)
+        self.button.setMenu(self.menu)
+        self.set_registry(registry)
+
+    # ---- what is offered -------------------------------------------------------
+    def set_registry(self, registry) -> None:
+        from scan_core import expr as _expr
+        self.registry = registry
+        params = _expr.readable_params(registry)
+        self.model.clear()
+        for p in params:
+            unit = f" [{p.unit}]" if getattr(p, "unit", "") else ""
+            label = p.label if p.label and p.label != p.id else ""
+            it = QtGui.QStandardItem(f"{p.id}" + (f"  ·  {label}" if label else "") + unit)
+            it.setData(p.id, QtCore.Qt.UserRole)
+            it.setToolTip(getattr(p, "help", "") or p.id)
+            self.model.appendRow(it)
+        for word, tip in EXPR_WORDS:
+            it = QtGui.QStandardItem(word + (f"  ·  {tip}" if tip else ""))
+            it.setData(word, QtCore.Qt.UserRole)
+            self.model.appendRow(it)
+        # The submenus are KEPT here, not looked up again through
+        # QAction.menu(): PySide6 can hand back a wrapper that deletes the
+        # QMenu when it is garbage-collected.
+        for old in list(getattr(self, "submenus", {}).values()) + [getattr(self, "fn_menu", None)]:
+            if old is not None and old is not self.menu:
+                old.deleteLater()
+        self.menu.clear()
+        self.submenus: dict[str, QtWidgets.QMenu] = {}
+        groups = group_by_module(params)
+        for module, ps in groups.items():
+            title = module or SIM_GROUP
+            if len(groups) > 1:
+                sub = QtWidgets.QMenu(title, self.menu)
+                self.menu.addMenu(sub)
+            else:                              # one module: no submenu, a heading
+                sub = self.menu
+                head = self.menu.addAction(title)
+                head.setEnabled(False)
+            self.submenus[title] = sub
+            for p in ps:
+                unit = f" [{p.unit}]" if getattr(p, "unit", "") else ""
+                a = sub.addAction(f"{p.label}   ({p.id}){unit}")
+                a.setData(p.id)
+                a.triggered.connect(lambda _=False, t=p.id: self.insert(t))
+        if not params:
+            none = self.menu.addAction("(no parameters offered by the connected instruments)")
+            none.setEnabled(False)
+        self.fn_menu = QtWidgets.QMenu("functions", self.menu)
+        self.menu.addMenu(self.fn_menu)
+        for word, tip in EXPR_WORDS:
+            a = self.fn_menu.addAction(word + (f"   {tip}" if tip else ""))
+            a.setData(word)
+            a.triggered.connect(lambda _=False, t=word: self.insert(
+                t if t.endswith("(") else f" {t} "))
+
+    def completions(self) -> list[str]:
+        """Every id / word the completer can offer (tests, scripts)."""
+        return [self.model.item(i).data(QtCore.Qt.UserRole)
+                for i in range(self.model.rowCount())]
+
+    def menu_ids(self) -> dict[str, list[str]]:
+        """{module (or the simulator's group): [param ids]} as the menu lists them."""
+        return {title: [a.data() for a in sub.actions() if a.data()]
+                for title, sub in self.submenus.items()}
+
+    def menu_action(self, pid_or_word: str):
+        """The menu entry that inserts `pid_or_word` (tests, scripts)."""
+        for sub in list(self.submenus.values()) + [self.fn_menu]:
+            for a in sub.actions():
+                if a.data() == pid_or_word:
+                    return a
+        return None
+
+    # ---- typing / inserting ----------------------------------------------------
+    def _token(self):
+        text, cur = self.edit.text(), self.edit.cursorPosition()
+        return _TOKEN_RE.search(text[:cur]), cur
+
+    def _on_edited(self, _text):
+        m, _cur = self._token()
+        popup = self.completer.popup()
+        if not m:
+            popup.hide()
+            return
+        self.completer.setCompletionPrefix(m.group())
+        if self.completer.completionCount() > 0:
+            self.completer.complete()
+        else:
+            popup.hide()
+
+    def _completed(self, index):
+        word = index.data(QtCore.Qt.UserRole)
+        if not word:
+            return
+        m, cur = self._token()
+        start = m.start() if m else cur
+        text = self.edit.text()
+        self.edit.setText(text[:start] + word + text[cur:])
+        self.edit.setCursorPosition(start + len(word))
+
+    def insert(self, text: str) -> None:
+        """Put `text` at the cursor (replacing a selection), as if typed."""
+        self.edit.insert(text)
+        self.edit.setFocus()
+
+
 class GenericStepRow(QtWidgets.QFrame):
     """A routine step of one of the five generic kinds (hooks.STEP_KINDS):
     wait until / abort if / skip if / pause / comment / set from a formula.
@@ -2819,10 +2970,13 @@ class GenericStepRow(QtWidgets.QFrame):
                     "ppms.temperature), numbers, + - * / **, < <= > >= == !=,\n"
                     "and / or / not, abs min max round. Values come from the\n"
                     "status -- no new measurement is taken.")
+        self.assist = None                     # ExprAssist on self.cond
         if kind in ("wait_until", "abort_if", "skip_if"):
             self.cond = edit(spec.get("condition", ""), "condition, e.g. field > 100",
                              expr_tip)
             line1.addWidget(self.cond, 1)
+            self.assist = ExprAssist(self.cond, registry)
+            line1.addWidget(self.assist.button)
         if kind == "abort_if":
             self.scope = combo((("abort scan", "scan"), ("abort all", "all")),
                                spec.get("scope") or "scan",
@@ -2879,6 +3033,8 @@ class GenericStepRow(QtWidgets.QFrame):
             self.cond = edit(text, "formula, e.g. 2800 + 28 * field",
                              expr_tip.replace("A condition", "A formula"))
             line2.addWidget(self.cond, 1)
+            self.assist = ExprAssist(self.cond, registry)
+            line2.addWidget(self.assist.button)
         if kind == "delay":
             # "wait [N] s": seconds with the C locale (a "," decimal comma on
             # a Finnish Windows would otherwise read 1,5 as 15 -- gotcha #18)
@@ -3188,6 +3344,8 @@ class RoutineSection(QtWidgets.QFrame):
         for row in self.steps:
             if isinstance(row, GenericStepRow):
                 row.registry = registry
+                if row.assist is not None:     # the completer follows the modules
+                    row.assist.set_registry(registry)
                 row._validate()
 
     def add_generic(self, kind: str, spec: dict | None = None) -> GenericStepRow:
@@ -3245,11 +3403,22 @@ class RoutineSection(QtWidgets.QFrame):
                 self.remove_step(row)
         self.add_combo.blockSignals(True)
         self.add_combo.clear()
-        self.add_combo.addItem(ADD_ACTION, None)
-        for a in actions:
-            self.add_combo.addItem(f"{a.label}   ({a.id})", a.id)
-            i = self.add_combo.count() - 1
-            self.add_combo.setItemData(i, a.help or a.id, QtCore.Qt.ToolTipRole)
+        self.add_combo.addItem(ADD_ACTION if actions else NO_ACTIONS, None)
+        # only what the connected modules offer NOW, grouped by module (a
+        # heading per module once there are two or more)
+        groups = group_by_module(actions)
+        for module, acts in groups.items():
+            if len(groups) > 1:
+                self.add_combo.addItem(module
+                                       or SIM_GROUP, None)
+                head = self.add_combo.model().item(self.add_combo.count() - 1)
+                head.setEnabled(False)
+                font = head.font(); font.setBold(True); head.setFont(font)
+            for a in acts:
+                indent = "    " if len(groups) > 1 else ""
+                self.add_combo.addItem(f"{indent}{a.label}   ({a.id})", a.id)
+                i = self.add_combo.count() - 1
+                self.add_combo.setItemData(i, a.help or a.id, QtCore.Qt.ToolTipRole)
         self.add_combo.setCurrentIndex(0)
         # Disabled, with the reason, rather than a list offering nothing and
         # leaving the operator to guess why the reference is not there.

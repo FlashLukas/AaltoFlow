@@ -47,6 +47,7 @@ write abs(a - b) < 0.01 for "equal enough".
 from __future__ import annotations
 
 import ast
+import difflib
 import math
 import operator
 import re
@@ -340,16 +341,62 @@ def _eval(node, values):
 CLOCK_WORDS = ("time", "t", "delay", "elapsed", "now", "seconds", "sec", "clock")
 
 
+def readable_params(registry) -> list:
+    """Every parameter an expression can read (settables and scalar
+    detectors, in the registry's order) -- what the builder offers in its
+    completer and its "insert..." menu."""
+    if registry is None:
+        return []
+    out = []
+    for p in list(registry.settables()) + list(registry.gettables()):
+        if (getattr(p, "axes", None)
+                or getattr(p, "dtype", "float") == "complex"):
+            continue
+        out.append(p)
+    return out
+
+
+def suggestions(registry, pid: str, n: int = 3) -> list[str]:
+    """The readable ids closest to `pid` (a typo, or a name without its
+    module: "temperature" -> "ppms.temperature"), best first; [] = none."""
+    ids = [p.id for p in readable_params(registry)]
+    if not ids or not pid:
+        return []
+    out = difflib.get_close_matches(pid, ids, n=n, cutoff=0.6)
+    tail = pid.rsplit(".", 1)[-1].lower()
+    for i in ids:
+        if len(out) >= n:
+            break
+        if i not in out and i.rsplit(".", 1)[-1].lower() == tail:
+            out.append(i)
+    if len(out) < n:
+        tails = {}
+        for i in ids:
+            tails.setdefault(i.rsplit(".", 1)[-1].lower(), []).append(i)
+        for t in difflib.get_close_matches(tail, list(tails), n=n, cutoff=0.75):
+            for i in tails[t]:
+                if i not in out and len(out) < n:
+                    out.append(i)
+    return out
+
+
 def param_problem(registry, pid: str) -> str | None:
     """Why `pid` cannot be read in an expression, or None if it can."""
     p = registry.get(pid) if registry is not None else None
     if p is None:
+        # Say what IS there (Lukas, 2026-10-12: "list the possible actions,
+        # based on the available instrumentation") -- the closest readable
+        # ids -- and, for a word that means "the time" ("wait until
+        # time > 200"), the step that does wait a fixed time.
+        near = suggestions(registry, pid)
+        msg = f"unknown parameter '{pid}'"
+        if near:
+            msg += f" -- did you mean {', '.join(near)}?"
         if pid.lower() in CLOCK_WORDS:
-            # "wait until time > 200" (Lukas, 2026-10-12): an expression
-            # reads instruments, it has no clock -- point at the step that does
-            return (f"unknown parameter '{pid}' -- a condition has no clock; "
-                    f"to wait a fixed time use a 'wait (delay)' step")
-        return f"unknown parameter '{pid}'"
+            msg += (" -- a condition has no clock; to wait a fixed time use "
+                    "a 'wait (delay)' step" if not near else
+                    " Or, to wait a fixed time, use a 'wait (delay)' step.")
+        return msg
     if getattr(p, "kind", "") not in ("settable", "gettable"):
         return f"'{pid}' cannot be read"
     if getattr(p, "axes", None):
