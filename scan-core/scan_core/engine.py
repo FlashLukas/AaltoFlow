@@ -35,9 +35,11 @@ from . import framestore as FS
 
 # ─────────────────────────── faults and the PAUSE ────────────────────────────
 #
-# Lukas, 2026-09-28: a failed hardware read must be loud (A), and when the
-# camera loses its pattern the measurement must stop or pause for the operator
-# (B). So before the detectors of a point are read, and again after, the engine
+# Lukas, 2026-09-28: a failed hardware read must be loud (A), and when an
+# instrument reports a fault (a lost tracking pattern, an interlock, a
+# hardware error) the measurement must stop or pause for the operator (B).
+# Which instrument does not matter here: each module says so in its status
+# (`hw_error`, `fault`; guide 6b). So before the detectors of a point are read, and again after, the engine
 # asks the registry's `fault_check` whether every instrument the scan uses can
 # be trusted. If not:
 #   * with a pause handler (`on_fault`, the GUI's): PAUSED -- report the faults,
