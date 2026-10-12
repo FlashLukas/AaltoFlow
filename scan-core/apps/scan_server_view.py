@@ -367,7 +367,7 @@ def _axis_text(ax: dict) -> str:
     t = ax.get("type", "linear")
     if t in ("grid", "raster"):
         x, y = ax.get("x") or {}, ax.get("y") or {}
-        return (f"grid  {x.get('param', '?')} {_num(x.get('start'))} -> "
+        return (f"2-D grid  {x.get('param', '?')} {_num(x.get('start'))} -> "
                 f"{_num(x.get('stop'))} ({x.get('num', '?')})  x  {y.get('param', '?')} "
                 f"{_num(y.get('start'))} -> {_num(y.get('stop'))} ({y.get('num', '?')})") + _zz(ax)
     if t == "zip":
@@ -379,11 +379,15 @@ def _axis_text(ax: dict) -> str:
         every = f", every {_num(ax['interval_s'])} s" if ax.get("interval_s") else ""
         return f"repeat x{ax.get('num', '?')} ({how}{every})"
     if t == "array":
-        return f"{ax.get('param', '?')}: {len(ax.get('values') or [])} listed values" + _zz(ax)
+        vals = ax.get("values") or []
+        # a short list is shown as it is (an enum's options read better than
+        # a count); options and text are never formatted as numbers
+        shown = (": " + ", ".join(_num(v) for v in vals)) if 0 < len(vals) <= 6 else ""
+        return (f"{ax.get('param', '?')}: {len(vals)} listed values{shown}") + _zz(ax)
     if t == "file":
         return f"{ax.get('param', '?')}: values from {ax.get('path') or ax.get('file', '?')}" + _zz(ax)
     text = (f"{ax.get('param', '?')}  {_num(ax.get('start'))} -> {_num(ax.get('stop'))}, "
-            f"{ax.get('num', '?')} pts")
+            f"{ax.get('num', '?')} pts" + (", log" if ax.get("spacing") == "log" else ""))
     if t == "fly":
         text += f"  (fly at {_num(ax.get('speed'))}/s" + (
             f", moving {ax['move']}" if ax.get("move") else "") + ")"

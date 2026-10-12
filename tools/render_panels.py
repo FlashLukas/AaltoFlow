@@ -444,6 +444,8 @@ def _stack_two_axes(win):
             b.add_axis(pid)
             row = b.rows[-1]
             row.start.setValue(start); row.stop.setValue(stop); row.num.setValue(num)
+            if pid == "rf_freq" and hasattr(row, "set_spacing"):
+                row.set_spacing("log")        # the spacing choice (2026-10-12) on show
     for pid, value in (("field", 40.0), ("rf_power", 8.0), ("device_v", 0.0)):
         if b.registry.get(pid) is not None:
             b.add_fixed(pid, value)

@@ -49,6 +49,7 @@ PROJECTS.update({
     "suite-watch": ("scan-core", True),
     "suite-watch-remote": ("scan-core", True),
     "suite-data": ("scan-core", True),
+    "suite-navigator": ("scan-core", True),
     "suite-settings": ("scan-core", True),
     "suite-catalogue": ("scan-core", True),
     "suite-queue": ("scan-core", True),
