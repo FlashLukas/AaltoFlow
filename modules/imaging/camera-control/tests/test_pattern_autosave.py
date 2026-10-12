@@ -97,6 +97,7 @@ def test_a_captured_pattern_is_saved_and_restored_at_the_next_start(folder, caps
         # printed too: at start no client listens to the events yet
         out = capsys.readouterr().out
         assert "live pattern RESTORED" in out and out.isascii()
+        assert "0 backup pattern(s)" in out          # backups are named too
         st = b2.status()
         assert not getattr(st, "stabilize", False)       # left OFF
     finally:

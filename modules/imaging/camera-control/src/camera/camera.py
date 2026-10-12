@@ -676,7 +676,9 @@ class Camera:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
         self._autosave_sig = self._pattern_signature()     # no needless rewrite
         msg = (f"live pattern RESTORED from the last session (saved {when}; "
-               f"{self.reference.describe()}); tracking and stabiliser are off -- "
+               f"{self.reference.describe()}, "
+               f"{len(self.reference.backups)} backup pattern(s)); "
+               f"tracking and stabiliser are off -- "
                f"check it, then switch on")
         self._emit("warn", msg)
         # also to the service window / launcher log: at start no client is
