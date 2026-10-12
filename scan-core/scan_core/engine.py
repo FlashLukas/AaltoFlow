@@ -179,11 +179,12 @@ def _used_ids(recipe, compiled, registry) -> set:
                 pass
     w = getattr(recipe, "window", None)
     if isinstance(w, dict):
-        # the resonance window READS the field (and angle) at every point: a
-        # faulted magnet would put the window in the wrong place
-        for key in ("field", "angle"):
-            if isinstance(w.get(key), str):
-                ids.add(w[key])
+        # the window READS its predictor's inputs at every point (a field, an
+        # angle, ...): a faulted magnet would put the window in the wrong place
+        from .window import upgrade as _upgrade_window
+        for v in ((_upgrade_window(w) or {}).get("inputs") or {}).values():
+            if isinstance(v, str):
+                ids.add(v)
     m = getattr(recipe, "scout", None)
     if isinstance(m, dict):
         if isinstance(m.get("detector"), str) and not m.get("from"):
@@ -413,10 +414,11 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
                                       is aborted. Without it a fault STOPS the
                                       scan with ScanFault (a script has nobody
                                       to pause for).
-    on_window(state)                : RESONANCE WINDOW only (recipe.window):
-                                      after every point, a dict with the
-                                      predicted and fitted f_res, the window,
-                                      the Meff in use -- for a live readout.
+    on_window(state)                : WINDOW only (recipe.window): after
+                                      every point, a dict with the predicted
+                                      and fitted peak, the window, the tracked
+                                      parameter in use -- for a live readout
+                                      (WindowRunner.state).
     on_scout(state)                 : SCOUT PASS only (recipe.scout): during
                                       the scout {"phase": "scout", "done",
                                       "total", "eta_s", "where"} after every
@@ -1168,17 +1170,17 @@ def _checked_read(registry, dets, det_axes, data, shape, idx, guard) -> dict:
     return out
 
 
-# ─────────────────────────── the resonance window ────────────────────────────
+# ─────────────────────────── the window (window.py) ───────────────────────────
 
 def _setup_window(recipe, registry, dets, det_axes, det_coords, data, shape, ctx):
     """Build the WindowRunner and allocate the window's own variables."""
-    from .window import RECORD_VARS, WindowRunner, var_names
+    from .window import WindowRunner, var_names
     block = recipe.window
     det = block["detector"]
     g = registry.get(det)
     axis = det_axes[det][0]
     wspec = g.acquire
-    # Every ARRAY detector off the same acquisition and the same frequency
+    # Every ARRAY detector off the same acquisition and the same
     # axis is windowed with it (a module's "raw" trace next to its
     # "transmission"): same bins measured, each filled from its OWN baseline.
     group = [det] + [d for d in dets if d != det
@@ -1200,12 +1202,15 @@ def _setup_window(recipe, registry, dets, det_axes, det_coords, data, shape, ctx
     attrs = {names["mask"]: {
         "long_name": f"bins of {det} actually measured (0 = baseline fill)",
         "window_mask_of": ",".join(group)}}
-    for key, (dtype, unit, text) in RECORD_VARS.items():
+    for key, (dtype, unit, text) in runner.record_vars().items():
         name = names[key]
         data[name] = (np.zeros(shape, dtype=bool) if dtype is bool
                       else np.full(shape, np.nan))
         det_axes[name] = []
         attrs[name] = {"units": unit, "long_name": text}
+        if key == "tracked" and runner.tracked:
+            attrs[name]["tracked_param"] = runner.tracked
+    attrs[names["peak_pred"]]["predictor"] = runner.pred.name
     for d in group:
         # a complex detector is stored as <d>_real / <d>_imag (see _to_dataset)
         split = getattr(registry.get(d), "dtype", "float") == "complex"
@@ -1230,13 +1235,14 @@ def _window_point(runner, plan, wspec, out, registry, det_axes, data, shape,
         if not outcome.retry:
             break
         if guard.should_abort and guard.should_abort():
-            raise ScanAborted("aborted while widening the resonance window")
+            raise ScanAborted("aborted while widening the window")
         nxt = runner.plan(current, attempt=plan.attempt + 1)
+        u = runner.axis_unit
         ctx["log_fn"](
-            f"window: no line in {runner.f[plan.i0] / 1e9:.4f}-"
-            f"{runner.f[plan.i1] / 1e9:.4f} GHz at point {idx}; "
+            f"window: no line in {runner.f[plan.i0]:.6g}-"
+            f"{runner.f[plan.i1]:.6g} {u} at point {idx}; "
             + ("sweeping the full band" if nxt.full else
-               f"widening to +-{nxt.margin_hz / 1e6:.0f} MHz"))
+               f"widening to +-{nxt.margin:.4g} {u}"))
         plan = nxt
         args = plan.args(runner.arg)
         if args:

@@ -145,9 +145,12 @@ def test_bridge_replaces_a_region_with_a_straight_line():
 
 def _recipe(num=30, meff=1750.0, margin=300.0, full_every=20, track=True,
             model="inplane", start=30.0, stop=190.0, dets=("fmr",), **extra):
-    w = {"detector": "fmr", "field": "field", "angle": "field_angle", "model": model,
+    w = {"detector": "fmr", "predictor": "kittel",
+         "inputs": {"field": "field", "angle": "field_angle"},
          "params": {"g": 2.0, "meff_mT": meff, "hk_mT": 5.0},
-         "margin_MHz": margin, "full_every": full_every, "track": track}
+         "options": {"model": model},
+         "margin": margin, "margin_unit": "MHz", "full_every": full_every,
+         "track": track}
     w.update(extra)
     return Recipe(axes=[{"type": "linear", "param": "field", "start": start,
                          "stop": stop, "num": num}],
@@ -170,10 +173,10 @@ def test_windows_are_bin_indices_and_full_sweeps_come_at_the_right_points():
             i0, i1 = w
             assert type(i0) is int and i1 - i0 + 1 >= 5
             # the window is centred on the prediction, in bins of the grid
-            f = s.fmr_freqs_MHz * 1e6
-            pred = ds["fmr_fres_pred_Hz"].values[k]
-            assert f[i0] >= pred - 300e6 - 25e6 and f[i1] <= pred + 300e6 + 25e6
-            assert ds["fmr_window_lo_Hz"].values[k] == f[i0]
+            f = s.fmr_freqs_MHz                          # the detector's axis unit
+            pred = ds["fmr_peak_pred"].values[k]
+            assert f[i0] >= pred - 300 - 25 and f[i1] <= pred + 300 + 25
+            assert ds["fmr_window_lo"].values[k] == f[i0]
     frac = ds["fmr_measured"].values.mean()
     assert 0.05 < frac < 0.2
 
@@ -185,22 +188,23 @@ def test_the_file_is_filled_with_the_baseline_and_says_what_was_measured():
     ds = run(_recipe(num=6, full_every=0), reg)
     y, m = ds["fmr"].values, ds["fmr_measured"].values
     assert m[0].all()                                    # the full sweep
-    first_fit = ds["fmr_fres_fit_Hz"].values[0]
-    f = s.fmr_freqs_MHz * 1e6
+    first_fit = ds["fmr_peak_fit"].values[0]
+    f = s.fmr_freqs_MHz
     for k in range(1, 6):
         assert np.isfinite(y[k]).all()                   # filled everywhere
         i0, i1 = s.fmr_windows[k]
         assert m[k, i0:i1 + 1].all() and m[k].sum() == i1 - i0 + 1
         # outside the window: the FIRST sweep, its own line bridged away
         out = ~m[k]
-        region = np.abs(f - first_fit) <= 300e6
+        region = np.abs(f - first_fit) <= 300
         keep = out & ~region
         assert np.allclose(y[k, keep], y[0, keep])
         bridged = y[k, out & region]
         assert bridged.min() > y[0].min() + 2.0          # no ghost of the old line
     # inside the window: the line of THIS point, found where the model says
-    assert np.all(np.abs(ds["fmr_fres_fit_Hz"].values[1:]
-                         - ds["fmr_fres_pred_Hz"].values[1:]) < 50e6)
+    assert np.all(np.abs(ds["fmr_peak_fit"].values[1:]
+                         - ds["fmr_peak_pred"].values[1:]) < 50)
+    assert ds["fmr_peak_fit"].attrs["units"] == "MHz"
     assert ds["fmr"].attrs["window_mask"] == "fmr_measured"
     assert json.loads(ds.attrs["window_json"])["detector"] == "fmr"
 
@@ -209,10 +213,13 @@ def test_meff_converges_from_a_wrong_start():
     reg = build_sim_registry()
     on = []
     ds = run(_recipe(num=25, meff=1750.0), reg, on_window=on.append)
-    meff = ds["fmr_meff_mT"].values
+    meff = ds["fmr_tracked"].values
+    assert ds["fmr_tracked"].attrs["tracked_param"] == "meff_mT"
+    assert ds["fmr_tracked"].attrs["units"] == "mT"
     assert meff[0] == 1750.0                             # the assumption, used once
     assert abs(meff[-1] - 1650.0) < 5.0                  # the truth
-    assert len(on) == 25 and abs(on[-1]["meff_mT"] - 1650.0) < 5.0
+    assert len(on) == 25 and abs(on[-1]["tracked"] - 1650.0) < 5.0
+    assert on[-1]["tracked_label"] == "μ0Meff [mT]"
     assert on[-1]["points"] == 25 and 0 < on[-1]["fraction_measured"] < 0.3
 
 
@@ -235,9 +242,9 @@ def test_a_line_outside_the_window_widens_it_and_measures_the_point_again():
     assert len(s.fmr_windows) == 3
     assert (w2[1] - w2[0]) > 1.8 * (w1[1] - w1[0])
     assert any("widening" in m for m in logs)
-    fit = ds["fmr_fres_fit_Hz"].values[1]
+    fit = ds["fmr_peak_fit"].values[1] * 1e6             # MHz -> Hz
     assert abs(fit - R.kittel_hz("inplane", B, 0, p_true)) < 30e6
-    lo, hi = ds["fmr_window_lo_Hz"].values[1], ds["fmr_window_hi_Hz"].values[1]
+    lo, hi = ds["fmr_window_lo"].values[1] * 1e6, ds["fmr_window_hi"].values[1] * 1e6
     assert lo <= fit <= hi and ds["fmr_measured"].values[1].sum() == w2[1] - w2[0] + 1
 
 
@@ -249,18 +256,20 @@ def test_below_saturation_out_of_plane_sweeps_the_full_band():
     r = Recipe(axes=[{"type": "array", "param": "field",
                       "values": [1600, 1700, 1800, 1850, 1900]}],
                detectors=["fmr"],
-               window={"detector": "fmr", "field": "field", "model": "outofplane",
-                       "params": {"g": 2.0, "meff_mT": 1650.0}, "full_every": 0})
+               window={"detector": "fmr", "predictor": "kittel",
+                       "inputs": {"field": "field"}, "options": {"model": "outofplane"},
+                       "params": {"g": 2.0, "meff_mT": 1650.0}, "margin": 300,
+                       "margin_unit": "MHz", "full_every": 0})
     reg.get("field").limits = (-2000, 2000)
     ds = run(r, reg)
     full = ds["fmr_full_sweep"].values
     # 1600: below saturation, no line at all -> full; 1700: the line is at
     # 1.4 GHz, below the 2 GHz band -> a minimal window at the bottom edge
     assert list(full) == [True, False, False, False, False]
-    assert math.isnan(ds["fmr_fres_pred_Hz"].values[0])
+    assert math.isnan(ds["fmr_peak_pred"].values[0])
     assert s.fmr_windows[1] == (0, 4)
     k = R.gamma_hz_per_mT(2.0)
-    assert ds["fmr_fres_fit_Hz"].values[-1] == pytest.approx(k * 250, abs=20e6)
+    assert ds["fmr_peak_fit"].values[-1] * 1e6 == pytest.approx(k * 250, abs=20e6)
 
 
 def test_a_line_the_model_puts_outside_the_band_is_not_chased():
@@ -269,15 +278,16 @@ def test_a_line_the_model_puts_outside_the_band_is_not_chased():
     s.fmr_freqs_MHz = np.linspace(2000.0, 8000.0, 241)
     r = Recipe(axes=[{"type": "array", "param": "field", "values": [30, 40, 190, 195]}],
                detectors=["fmr"],
-               window={"detector": "fmr", "field": "field",
+               window={"detector": "fmr", "predictor": "kittel",
+                       "inputs": {"field": "field"},
                        "params": {"g": 2.0, "meff_mT": 1650.0, "hk_mT": 5.0},
-                       "full_every": 0})
+                       "margin": 0.3, "margin_unit": "GHz", "full_every": 0})
     ds = run(r, reg)
     # 190 mT puts the line at ~17 GHz, far above an 8 GHz band: a minimal
     # window at the top edge, no widening, no forced full sweep next time
     assert s.fmr_windows[2] == (236, 240) and s.fmr_windows[3] == (236, 240)
     assert not ds["fmr_full_sweep"].values[2:].any()
-    assert np.isnan(ds["fmr_fres_fit_Hz"].values[2:]).all()
+    assert np.isnan(ds["fmr_peak_fit"].values[2:]).all()
 
 
 def test_group_mates_are_windowed_and_filled_with_their_own_baseline():
@@ -340,8 +350,9 @@ def test_netcdf_round_trip(tmp_path):
     assert np.array_equal(back["fmr_measured"].values, ds["fmr_measured"].values)
     assert np.array_equal(back["fmr_full_sweep"].values, ds["fmr_full_sweep"].values)
     np.testing.assert_allclose(back["fmr"].values, ds["fmr"].values)
-    np.testing.assert_allclose(back["fmr_meff_mT"].values, ds["fmr_meff_mT"].values)
-    assert back["fmr_fres_fit_Hz"].attrs["units"] == "Hz"
+    np.testing.assert_allclose(back["fmr_tracked"].values, ds["fmr_tracked"].values)
+    assert back["fmr_peak_fit"].attrs["units"] == "MHz"
+    assert back["fmr_peak_pred"].attrs["predictor"] == "kittel"
     assert Recipe.from_dict(json.loads(back.attrs["recipe_json"])).window["detector"] == "fmr"
 
 
@@ -358,7 +369,7 @@ def test_a_complex_windowed_detector_is_split_and_filled():
     ds = run(r, reg)
     assert "fmr_c_real" in ds and ds["fmr_c_real"].attrs["window_mask"] == "fmr_c_measured"
     assert np.isfinite(ds["fmr_c_real"].values).all()
-    assert np.isfinite(ds["fmr_c_fres_fit_Hz"].values).all()
+    assert np.isfinite(ds["fmr_c_peak_fit"].values).all()
 
 
 # ───────────────────────────── recipe + wire ─────────────────────────────────
@@ -369,16 +380,21 @@ def test_validation():
     bad = [
         ({"detector": "s21"}, "window support"),
         ({"detector": "lockin_r"}, "not a 1-D array"),
-        ({"field": "nope"}, "unknown field"),
-        ({"field": None}, "`field`"),
-        ({"model": "tilted"}, "model must be"),
+        ({"inputs": {"field": "nope"}}, "unknown field parameter"),
+        ({"inputs": {}}, "input `field`"),
+        ({"inputs": {"field": "field", "temperature": "field"}}, "no input 'temperature'"),
+        ({"inputs": {"field": "pos_x"}}, "not a field unit"),
+        ({"options": {"model": "tilted"}}, "model must be"),
+        ({"options": {"colour": "red"}}, "no option 'colour'"),
         ({"params": {"meff": 1}}, "unknown parameter"),
         ({"params": {"g": 0}}, "g-factor"),
-        ({"margin_MHz": -1}, "margin_MHz"),
+        ({"margin": -1}, "margin must"),
+        ({"margin_unit": "nm"}, "margin_unit"),
+        ({"predictor": "astrology"}, "unknown predictor"),
         ({"dip": "up"}, "dip must"),
         ({"full_every": -1}, "full_every"),
         ({"track": "yes"}, "track"),
-        ({"angle": "nope"}, "unknown angle"),
+        ({"inputs": {"field": "field", "angle": "nope"}}, "unknown angle"),
         ({"typo": 1}, "unknown key"),
     ]
     for change, text in bad:
@@ -396,7 +412,7 @@ def test_validation():
                "speed": 5}]
     assert any("fly" in e for e in r.validate(reg))
     r = _recipe()
-    r.window["angle"] = 30.0                              # a fixed number is fine
+    r.window["inputs"]["angle"] = 30.0                    # a fixed number is fine
     assert r.validate(reg) == []
 
 

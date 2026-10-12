@@ -55,12 +55,15 @@ def main(argv=None) -> dict:
     axes = [{"type": "linear", "param": "field", "start": args.start,
              "stop": args.stop, "num": args.points}]
     fixed = {"field_angle": args.angle}
-    window = {"detector": "fmr", "field": "field", "angle": "field_angle",
-              "model": "inplane",
+    # the FMR physics is the `kittel` predictor (scan_core/predictors.py);
+    # `linear`, `expression` or a lab's own plug in the same way
+    window = {"detector": "fmr", "predictor": "kittel",
+              "inputs": {"field": "field", "angle": "field_angle"},
               "params": {"g": 2.0, "meff_mT": args.assumed_meff, "hk_mT": 5.0,
                          "easy_axis_deg": 0.0},
-              "margin_MHz": args.margin, "dip": "min", "track": True,
-              "full_every": args.full_every}
+              "options": {"model": "inplane"},
+              "margin": args.margin, "margin_unit": "MHz", "dip": "min",
+              "track": True, "full_every": args.full_every}
 
     results = {}
     for label, win in (("full", None), ("windowed", window)):
@@ -100,8 +103,8 @@ def main(argv=None) -> dict:
         if (sel & ~mask[k]).any():
             d_fill.append(float(np.max(d[sel & ~mask[k]])))
     frac = float(ds_win["fmr_measured"].values.mean())
-    meff = float(ds_win["fmr_meff_mT"].values[-1])
-    fit = ds_win["fmr_fres_fit_Hz"].values
+    meff = float(ds_win["fmr_tracked"].values[-1])       # the tracked meff_mT
+    fit = ds_win["fmr_peak_fit"].values * 1e6            # the axis is in MHz
     pred_true = np.array([resonance.kittel_hz("inplane", b, args.angle, true) for b in B])
     fit_err = np.nanmax(np.abs(fit - pred_true)) / 1e6
     n_full = int(ds_win["fmr_full_sweep"].values.sum())
@@ -143,7 +146,7 @@ def _figure(ds_full, ds_win, B, f):
         a.set_title(title)
         a.set_xlabel("frequency (GHz)")
     ax[0].set_ylabel("field (mT)")
-    ax[1].plot(ds_win["fmr_fres_fit_Hz"].values / 1e9, B, "w.", ms=3)
+    ax[1].plot(ds_win["fmr_peak_fit"].values / 1e3, B, "w.", ms=3)
     fig.tight_layout()
     fig.savefig(OUT / "window_demo.png", dpi=110)
     print(f"  wrote {OUT / 'window_demo.png'}")

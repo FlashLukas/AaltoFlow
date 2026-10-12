@@ -156,7 +156,7 @@ def validate(recipe, registry) -> list[str]:
     # rows again and the pixels are POOLED, see collapse())
     if averages and getattr(recipe, "window", None):
         errs.append("a repeat in mode 'average' cannot be combined with the "
-                    "resonance window (its mask and record are per measurement): "
+                    "window (its mask and record are per measurement): "
                     "use mode 'keep'")
     if averages:
         for det in getattr(recipe, "detectors", None) or []:

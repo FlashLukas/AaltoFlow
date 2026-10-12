@@ -18,8 +18,9 @@ axes:      [Axis, ...]      # OUTER→INNER. axes[0] is the slowest (outermost) 
 detectors: [param_id, ...]  # gettables recorded at every point
 hooks:     [Hook, ...]       # optional actions bound to a level/cadence
 diagonal:  bool              # at a row change send all setpoints, then wait
-window:    {...}             # optional RESONANCE WINDOW (window.py): sweep a slow
-                             # array detector only around the predicted FMR line
+window:    {...}             # optional WINDOW (window.py): sweep a slow array
+                             # detector only around the peak a predictor
+                             # (predictors.py) expects from the point's inputs
 scout:     {...}             # optional SCOUT PASS (scout.py): a quick look at
                              # every k-th point of the ticked axes first, then
                              # measure only where something is happening
@@ -212,10 +213,12 @@ class Recipe:
     #: together is not verified). Knobs that cannot split send/wait are set
     #: one after the other as before.
     diagonal: bool = False
-    #: RESONANCE WINDOW (window.py, 2026-09-28), or None = off. A slow array
-    #: detector sweeps only a band around the predicted FMR line; the rest of
-    #: each trace is filled from the last full sweep's baseline and marked in a
-    #: `<det>_measured` mask. Opt-in: a recipe without it runs exactly as before.
+    #: WINDOW (window.py, 2026-09-28; any physics since 2026-10-12), or None
+    #: = off. A slow array detector sweeps only a band around the peak a
+    #: PREDICTOR (predictors.py: kittel / linear / expression / a lab's own)
+    #: expects; the rest of each trace is filled from the last full sweep's
+    #: baseline and marked in a `<det>_measured` mask. Opt-in: a recipe
+    #: without it runs exactly as before.
     window: dict | None = None
     #: SCOUT PASS (scout.py, 2026-10-08), or None = off. A quick look -- one
     #: scalar detector at every k-th point of the scouted axes -- first; the
@@ -232,6 +235,10 @@ class Recipe:
     def __post_init__(self):
         # `raster` -> `grid` (2026-10-12), before anything reads the axes
         self.axes = upgrade_axes(self.axes)
+        # the FMR-only window block (until 2026-10-12) -> a `kittel`
+        # predictor, so a definition saved again says `predictor:`
+        from .window import upgrade as upgrade_window
+        self.window = upgrade_window(self.window)
         if self.mask and not self.scout:
             from .scout import from_mask
             self.scout = from_mask(self.mask, self.axes)
