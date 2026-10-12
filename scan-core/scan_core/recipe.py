@@ -52,7 +52,10 @@ nothing (nothing outside it advances) -- except on a grid, whose inner
 per-axis flags when it is read (upgrade_scan_wide_zigzag) and is never
 written that way again.
 
-linear : {type, param, start, stop, num, [name]}          -> 1 dim
+linear : {type, param, start, stop, num, [spacing, name]} -> 1 dim
+          `spacing: log` (2026-10-12) puts the points at equal RATIOS
+          (np.geomspace) instead of equal steps; from and to must then have
+          the same sign and neither be 0. Absent = linear, as always.
 array  : {type, param, values:[...], [name]}              -> 1 dim
 file   : {type, param, path, [name]}                      -> 1 dim (values from CSV/txt)
 zip    : {type, name, members:[{param, ...spec}], }       -> 1 dim, several params in lockstep
@@ -179,6 +182,19 @@ def _values_from_spec(spec: dict) -> np.ndarray:
             with open(spec["path"], encoding="utf-8") as fh:
                 return native_values([ln.strip() for ln in fh if ln.strip()])
     start, stop = float(spec["start"]), float(spec["stop"])
+    if spec.get("spacing", "linear") == "log":
+        # LOG spacing (2026-10-12): the same ratio between neighbours, e.g. a
+        # time constant 1 ms .. 1 s or a power 1 uW .. 10 mW in 7 points --
+        # 1, 10, 100 ... instead of 1, 167, 334 ... Defined only between two
+        # numbers of the same sign (a ratio cannot cross zero).
+        if start == 0 or stop == 0 or (start < 0) != (stop < 0):
+            raise ValueError(f"log spacing needs from and to of the same sign and "
+                             f"neither 0 (got {start:g} .. {stop:g})")
+        if spec.get("num") is None:
+            raise ValueError("log spacing needs a number of points (num)")
+        return np.geomspace(start, stop, int(spec["num"]))
+    if spec.get("spacing", "linear") != "linear":
+        raise ValueError(f"unknown spacing {spec['spacing']!r} (linear or log)")
     if "num" in spec and spec["num"] is not None:
         return np.linspace(start, stop, int(spec["num"]))
     step = float(spec["step"])
@@ -401,6 +417,11 @@ class Recipe:
             for dim in self.compile(registry).dims:
                 for pid, vals in dim.params:
                     p = registry.get(pid)
+                    if len(vals) == 0:
+                        # an empty list (nothing picked, an empty file): a
+                        # scan of no points would "finish" at once, saving nothing
+                        errs.append(f"axis '{dim.name}' has no values")
+                        continue
                     text_vals = is_text_values(vals)
                     if p is not None and (text_vals or not _numeric(p)):
                         errs += _check_text_axis(p, vals, text_vals)

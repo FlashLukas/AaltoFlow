@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .recipe import _compile_axis
+from .recipe import _compile_axis, is_text_values
+from .registry import is_numeric_param
 
 
 @dataclass
@@ -56,6 +57,26 @@ class DimPreview:
 
 def _member(pid: str, values: np.ndarray, registry) -> MemberPreview:
     p = registry.get(pid) if registry is not None else None
+    if is_text_values(values) or (p is not None and not is_numeric_param(p)):
+        # an enum's options / text (2026-10-12): sent as they are -- no clamp,
+        # no rounding, and never float()ed. The registry's spelling of an
+        # option is what goes out ("ac" typed, "AC" sent), so that is shown.
+        req = np.asarray(values, dtype=object)
+        sent = req.copy()
+        notes = [""] * len(req)
+        for i, v in enumerate(req):
+            try:
+                canon = p.option(v) if p is not None else v
+            except (ValueError, AttributeError):
+                notes[i] = "not one of its options"
+                continue
+            if canon != v:
+                sent[i] = canon
+                notes[i] = f"sent as {canon!s}"
+        return MemberPreview(pid=pid,
+                             label=getattr(p, "label", pid) if p is not None else pid,
+                             unit=getattr(p, "unit", "") if p is not None else "",
+                             requested=req, sent=sent, notes=notes)
     req = np.asarray(values, dtype=float)
     sent = req.copy()
     notes = [""] * len(req)
@@ -97,9 +118,27 @@ def step_summary(values: np.ndarray) -> str:
     """'step 1.5' for an even grid, 'step 0.9 .. 1.2 (uneven)' otherwise."""
     if len(values) < 2:
         return "single point"
-    d = np.diff(np.asarray(values, dtype=float))
+    if is_text_values(np.asarray(values)):
+        return f"{len(values)} values"          # options / text: no step
+    v = np.asarray(values, dtype=float)
+    d = np.diff(v)
     lo, hi = float(d.min()), float(d.max())
     scale = max(abs(lo), abs(hi), 1e-300)
     if math.isclose(lo, hi, rel_tol=1e-9, abs_tol=1e-12 * scale):
         return f"step {lo:g}"
+    if np.all(v != 0) and np.all(np.sign(v) == np.sign(v[0])):
+        # equal RATIOS: a log-spaced axis (recipe `spacing: log`)
+        r = v[1:] / v[:-1]
+        if math.isclose(float(r.min()), float(r.max()), rel_tol=1e-9):
+            return f"log, x{float(r[0]):.4g} per step"
     return f"step {lo:g} .. {hi:g} (uneven)"
+
+
+def format_value(v) -> str:
+    """One setpoint as text: a number as `:g`, anything else (an enum's
+    option, text) as it is -- a GUI must never float() or :g an option."""
+    if isinstance(v, (bool, np.bool_)):
+        return str(bool(v))
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return f"{float(v):g}"
+    return str(v)

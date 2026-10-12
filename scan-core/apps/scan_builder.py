@@ -36,8 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # find scan_cor
 from scan_core import Recipe, build_sim_registry, run
 from scan_core.recipe import zigzag_dim_names
 from scan_core.errors import RoutineError, ScanAborted, ScanFault
-from scan_core.preview import preview_axis, step_summary
-from scan_core.flyscan import find_speed_param, fly_axis, row_seconds
+from scan_core.preview import format_value, preview_axis, step_summary
+from scan_core.flyscan import find_speed_param, fly_axis, row_seconds, speed_factor
+from scan_core.registry import is_numeric_param
 from scan_core import autosave, scan_queue
 from suite_common import title as suite_title
 from suite_common.fileio import replace_retry
@@ -140,6 +141,171 @@ def demo_badge(text: str = DEMO_TEXT) -> QtWidgets.QLabel:
                    "Connect modules on the Settings tab of the suite.")
     lbl.setVisible(False)
     return lbl
+
+
+def _is_num(v) -> bool:
+    """A number (not a bool, not an option / text)?"""
+    return (isinstance(v, (int, float, np.integer, np.floating))
+            and not isinstance(v, (bool, np.bool_)))
+
+
+def _raw_axis_text(ax) -> str:
+    """One line for a loaded axis the row shows but does not edit: a 2-D
+    grid (two knobs) or a zip (several in lockstep)."""
+    if not isinstance(ax, dict):
+        return ""
+
+    def span(m):
+        if "values" in m:
+            return f"{len(m['values'])} values"
+        if "path" in m:
+            return f"from {m['path']}"
+        out = f"{format_value(m.get('start'))} .. {format_value(m.get('stop'))}"
+        if m.get("num") is not None:
+            out += f" ({m['num']} pts{', log' if m.get('spacing') == 'log' else ''})"
+        return out
+    t = ax.get("type")
+    if t in ("grid", "raster"):
+        x, y = ax.get("x") or {}, ax.get("y") or {}
+        return (f"2-D grid: {x.get('param')} {span(x)} x {y.get('param')} {span(y)}"
+                f", fast: {ax.get('fast', 'x')}")
+    if t == "zip":
+        ms = ax.get("members") or []
+        return "in lockstep: " + " + ".join(f"{m.get('param')} {span(m)}" for m in ms)
+    return f"{t} axis"
+
+
+class OptionPicker(QtWidgets.QToolButton):
+    """Pick SEVERAL of an enum knob's options (a filter wheel's filters, a
+    lock-in's inputs) for a list axis: a button showing what is picked, and
+    a drop-down with "all options" and one tick per option. The values are
+    the options THEMSELVES, in their declared order -- never float()ed."""
+
+    changed = QtCore.Signal()
+
+    def __init__(self, options):
+        super().__init__()
+        self.options = list(options)
+        self.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        menu = QtWidgets.QMenu(self)
+        box = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(box); v.setContentsMargins(8, 6, 8, 6); v.setSpacing(4)
+        self.all_box = QtWidgets.QCheckBox("all options")
+        self.all_box.setToolTip("Every option the module declares, in its order.")
+        v.addWidget(self.all_box)
+        self.list = QtWidgets.QListWidget()
+        for o in self.options:
+            it = QtWidgets.QListWidgetItem(str(o))
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Checked)
+            self.list.addItem(it)
+        self.list.setMinimumWidth(180)
+        self.list.setMaximumHeight(22 * min(10, max(1, len(self.options))) + 6)
+        v.addWidget(self.list)
+        # the panel lives IN the menu (a QWidgetAction): ticking an option does
+        # not close the drop-down, so several are picked in one go
+        act = QtWidgets.QWidgetAction(menu)
+        act.setDefaultWidget(box)
+        menu.addAction(act)
+        self.setMenu(menu)
+        self.all_box.setChecked(True)
+        self.all_box.toggled.connect(self._all_toggled)
+        self.list.itemChanged.connect(lambda *_: self._ticked())
+        self._sync()
+
+    def _all_toggled(self, on: bool) -> None:
+        if on:
+            self.list.blockSignals(True)
+            for i in range(self.list.count()):
+                self.list.item(i).setCheckState(QtCore.Qt.Checked)
+            self.list.blockSignals(False)
+        self._sync()
+        self.changed.emit()
+
+    def _ticked(self) -> None:
+        self.all_box.blockSignals(True)
+        self.all_box.setChecked(len(self.values()) == len(self.options))
+        self.all_box.blockSignals(False)
+        self._sync()
+        self.changed.emit()
+
+    def _sync(self) -> None:
+        picked = self.values()
+        if len(picked) == len(self.options):
+            text = f"all {len(self.options)} options"
+        elif not picked:
+            text = "(none picked)"
+        else:
+            text = ", ".join(map(str, picked)) + f"  ({len(picked)} of {len(self.options)})"
+        self.setText(text)
+        self.setToolTip("Values of this axis, in order:\n" + "\n".join(map(str, picked))
+                        if picked else "Pick at least one option.")
+
+    def values(self) -> list:
+        return [o for i, o in enumerate(self.options)
+                if self.list.item(i).checkState() == QtCore.Qt.Checked]
+
+    def set_values(self, values) -> None:
+        from scan_core.registry import same_value
+        self.list.blockSignals(True)
+        for i, o in enumerate(self.options):
+            on = any(same_value(o, v) for v in values)
+            self.list.item(i).setCheckState(QtCore.Qt.Checked if on else QtCore.Qt.Unchecked)
+        self.list.blockSignals(False)
+        self._ticked()
+
+
+class OptionBox(QtWidgets.QComboBox):
+    """ONE value of a non-numeric knob (an enum's option, or text), with the
+    number box's interface (setValue / value / valueChanged / setRange ...)
+    so a condition, a routine's set step or a scout setting can hold it the
+    way it holds a number. An enum offers its options; a string knob (no
+    options) is an editable box. The value is the option itself -- never
+    float()ed, never formatted with :g."""
+
+    valueChanged = QtCore.Signal(object)
+
+    def __init__(self, param):
+        super().__init__()
+        self.param = param
+        opts = list(getattr(param, "options", None) or [])
+        self.setEditable(not opts)
+        for o in opts:
+            self.addItem(str(o), o)
+        self.currentIndexChanged.connect(lambda *_: self.valueChanged.emit(self.value()))
+        if not opts:
+            self.lineEdit().editingFinished.connect(
+                lambda: self.valueChanged.emit(self.value()))
+
+    def setValue(self, v) -> None:                  # noqa: N802 (Qt names)
+        if self.isEditable():
+            self.setEditText("" if v is None else str(v))
+            return
+        from scan_core.registry import same_value
+        for i in range(self.count()):
+            if same_value(self.itemData(i), v):
+                self.setCurrentIndex(i)
+                return
+
+    def value(self):
+        if self.isEditable():
+            return self.currentText()
+        return self.currentData()
+
+    def default_value(self):
+        """What a new condition / step starts at: the first option ("" for text)."""
+        return self.itemData(0) if self.count() and not self.isEditable() else ""
+
+    # the number box's knobs, meaningless for an option
+    def setRange(self, *_):                         # noqa: N802
+        pass
+
+    def setDecimals(self, *_):                      # noqa: N802
+        pass
+
+    def setSuffix(self, *_):                        # noqa: N802
+        pass
 
 
 def _muted(text: str, small: bool = False) -> QtWidgets.QLabel:
@@ -404,6 +570,7 @@ class AxisRow(_StackRow):
     #: the keys of a linear / fly axis the row models; anything else a loaded
     #: axis carries is kept in `extra` and written back unchanged
     MODELLED = {"type", "param", "start", "stop", "num", "step", "speed",
+                "spacing", "values", "path",
                 "row_time_s", "speed_param", "move", "readback", "lag_correction", "timeout_s",
                 "collapse", "collapse_keep_pixels", "name", "zigzag"}
 
@@ -450,12 +617,47 @@ class AxisRow(_StackRow):
         self.num.setValue(int(round(stop - start)) + 1 if self.integer else 21)
         self._sync_int_points()           # and cap it at one point per value
         self.num.valueChanged.connect(lambda *_: self.changed.emit())
+        # SPACING (2026-10-12): how the points are given. linear / log =
+        # from / to / pts (log: equal ratios, recipe `spacing: log`); list =
+        # the values typed one by one (an `array` axis); file = one value per
+        # line of a text file (a `file` axis). A knob that is not a number
+        # (an enum's options, text) can only be given as a list.
+        self.numeric = is_numeric_param(param)
+        self.spacing_box = QtWidgets.QComboBox()
+        self.spacing_box.setFixedWidth(72)
+        for text, key in ((("linear", "linear"), ("log", "log"), ("list", "list"),
+                           ("file", "file")) if self.numeric else (("list", "list"),)):
+            self.spacing_box.addItem(text, key)
+        self.spacing_box.setToolTip(
+            "How the points are given:\n"
+            "linear: from / to / pts, equal steps\n"
+            "log: from / to / pts, equal RATIOS (1, 10, 100 ...); from and to\n"
+            "     of the same sign, neither 0\n"
+            "list: the values, typed one by one\n"
+            "file: one value per line of a text file"
+            if self.numeric else
+            f"{param.label} is not a number: its values are picked from a list.")
+        self.spacing_box.setEnabled(self.numeric)
+        self.spacing_w = QtWidgets.QWidget()
+        sbox = QtWidgets.QVBoxLayout(self.spacing_w)
+        sbox.setContentsMargins(0, 0, 0, 0); sbox.setSpacing(0)
+        sl = QtWidgets.QLabel("spacing"); sl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+        sbox.addWidget(sl); sbox.addWidget(self.spacing_box); lay.addWidget(self.spacing_w)
+        # from / to / pts in one widget, so a list or a file can take its place
+        self.range_w = QtWidgets.QWidget()
+        rlay = QtWidgets.QHBoxLayout(self.range_w)
+        rlay.setContentsMargins(0, 0, 0, 0); rlay.setSpacing(8)
         for w, t in ((self.start, "from"), (self.stop, "to"), (self.num, "pts")):
             box = QtWidgets.QVBoxLayout(); box.setSpacing(0)
             tl = QtWidgets.QLabel(t); tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
-            box.addWidget(tl); box.addWidget(w); lay.addLayout(box)
+            box.addWidget(tl); box.addWidget(w); rlay.addLayout(box)
             if w is self.num:
                 self.num_lbl = tl
+        lay.addWidget(self.range_w)
+        self._build_values()
+        lay.addWidget(self.list_w)
+        lay.addWidget(self.file_w)
+        self.spacing_box.currentIndexChanged.connect(lambda *_: self._spacing_changed())
 
         # A spin box that silently refuses to go above 160 is baffling unless
         # you can see that 160 is the closed-loop ceiling -- and these limits
@@ -473,27 +675,171 @@ class AxisRow(_StackRow):
         self.changed.connect(self.refresh_tags)
         self._fly_toggled(False)
         self._scout_toggled(False)
+        if not self.numeric:
+            # an option cannot be flown (nothing continuous to bin by) nor
+            # scouted (the scout interpolates between its coarse points)
+            self.fly_group.setVisible(False)
+            self.scout_group.setVisible(False)
+        self._spacing_changed()
 
-    # ---- raw (raster / zip / array) rows ------------------------------------
+    # ---- raw (grid / zip) rows -----------------------------------------------
     @property
     def raw(self):
         return self._raw
 
     @raw.setter
     def raw(self, value):
-        """A loaded raster / zip / array axis is passed through as it was:
-        it cannot fly and has no top-level name to edit here (a raster names
-        its x and y inside), so those parts of Advanced are hidden."""
+        """A loaded grid / zip axis is passed through as it was: it cannot
+        fly and has no top-level name to edit here (a grid names its x and y
+        inside), so those parts of Advanced are hidden -- and in place of
+        from / to / pts the row says what the axis is (its members are not
+        this row's boxes)."""
         self._raw = value
         plain = value is None
-        self.fly_group.setVisible(plain)
+        self.fly_group.setVisible(plain and self.numeric)
         self.name_lbl.setVisible(plain)
         self.name_edit.setVisible(plain)
+        self.spacing_w.setVisible(plain)
+        if not plain:
+            self.range_w.hide(); self.list_w.hide(); self.file_w.hide()
+            if not hasattr(self, "raw_lbl"):
+                self.raw_lbl = _muted("", small=True)
+                self.raw_lbl.setFixedWidth(self.VALUES_W)
+                self.raw_lbl.setWordWrap(True)
+                self.line.insertWidget(self.line.indexOf(self.range_w), self.raw_lbl)
+            self.raw_lbl.setText(_raw_axis_text(value))
+            self.raw_lbl.show()
+        else:
+            if hasattr(self, "raw_lbl"):
+                self.raw_lbl.hide()
+            self._spacing_changed()
         if isinstance(value, dict):
-            # a raster / zip / array row zig-zags too: its direction box
-            # shows the loaded axis's own flag
+            # a grid / zip row zig-zags too: its direction box shows the
+            # loaded axis's own flag
             self.set_zigzag(value.get("zigzag") is True)
         self.refresh_tags()
+
+    # ---- SPACING: linear / log / list / file (2026-10-12) -------------------
+    #: width of the from / to / pts block, which a list or a file replaces
+    #: in place (the row does not jump when the spacing changes)
+    VALUES_W = 268
+
+    def _build_values(self) -> None:
+        """The two alternatives to from / to / pts: a LIST of values and a
+        FILE of them. An enum knob gets a multi-select of its declared
+        options (with "all options"); a string knob or a number a text box
+        (numbers separated by commas or spaces, text by ';')."""
+        def boxed(label, inner):
+            w = QtWidgets.QWidget()
+            v = QtWidgets.QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
+            tl = QtWidgets.QLabel(label)
+            tl.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
+            v.addWidget(tl); v.addLayout(inner) if isinstance(inner, QtWidgets.QLayout) \
+                else v.addWidget(inner)
+            w.setFixedWidth(self.VALUES_W)
+            w.hide()
+            return w, tl
+
+        self.options = list(getattr(self.param, "options", None) or [])
+        if not self.numeric and self.options:
+            self.option_picker = OptionPicker(self.options)
+            self.option_picker.changed.connect(self.changed.emit)
+            self.list_edit = None
+            self.list_w, self.list_lbl = boxed("values", self.option_picker)
+        else:
+            self.option_picker = None
+            self.list_edit = QtWidgets.QLineEdit()
+            if self.numeric:
+                self.list_edit.setPlaceholderText("e.g. 1, 2, 5, 10")
+                self.list_edit.setToolTip(
+                    "The values, in the order they are visited: numbers separated\n"
+                    "by commas or spaces. Each must be within the limits.")
+            else:
+                self.list_edit.setPlaceholderText("first; second; third")
+                self.list_edit.setToolTip(
+                    f"{self.param.label} takes text: the values in the order they\n"
+                    f"are visited, separated by ';'.")
+            self.list_edit.editingFinished.connect(self.changed.emit)
+            self.list_w, self.list_lbl = boxed("values", self.list_edit)
+        fl = QtWidgets.QHBoxLayout(); fl.setSpacing(4)
+        self.file_edit = QtWidgets.QLineEdit()
+        self.file_edit.setPlaceholderText("a .txt / .csv file")
+        self.file_edit.setToolTip("A text file with one value per line (numbers, or\n"
+                                  "an option per line); read when the scan is checked.")
+        self.file_edit.editingFinished.connect(self.changed.emit)
+        browse = QtWidgets.QPushButton("...")
+        browse.setFixedWidth(30)
+        browse.clicked.connect(self._browse_values)
+        fl.addWidget(self.file_edit, 1); fl.addWidget(browse)
+        self.file_w, _ = boxed("file", fl)
+
+    def _browse_values(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, f"Values of {self.param.label}", self.file_edit.text(),
+            "Text (*.txt *.csv *.dat);;All files (*)")
+        if path:
+            self.file_edit.setText(path)
+            self.changed.emit()
+
+    def spacing(self) -> str:
+        """How the points are given: "linear", "log", "list" or "file"."""
+        return self.spacing_box.currentData() or "list"
+
+    def set_spacing(self, mode: str) -> None:
+        i = self.spacing_box.findData(mode)
+        if i >= 0:
+            self.spacing_box.setCurrentIndex(i)
+        self._spacing_changed()
+
+    def _spacing_changed(self) -> None:
+        """Show the boxes of the chosen spacing. Fly needs from / to / pts with
+        equal steps (it bins a continuous move), so it is offered with linear
+        spacing only."""
+        mode = self.spacing()
+        self.range_w.setVisible(mode in ("linear", "log"))
+        self.list_w.setVisible(mode == "list")
+        self.file_w.setVisible(mode == "file")
+        if hasattr(self, "fly"):
+            if mode != "linear" and self.fly.isChecked():
+                self.fly.setChecked(False)
+            self.fly.setEnabled(self.streams and mode == "linear")
+        self.changed.emit()
+
+    def list_values(self) -> list:
+        """The values of a list axis, as the recipe holds them: numbers for a
+        numeric knob, the options / text as they are otherwise. A token that
+        is not a number is kept AS TEXT for a numeric knob, so validate()
+        names it ("takes numbers; 'abc' is not one") instead of it vanishing."""
+        if self.option_picker is not None:
+            return self.option_picker.values()
+        text = self.list_edit.text()
+        if not self.numeric:
+            return [t.strip() for t in text.split(";") if t.strip()]
+        out = []
+        for tok in text.replace(";", " ").replace(",", " ").split():
+            try:
+                v = float(tok)
+                out.append(int(round(v)) if self.integer and v == round(v) else v)
+            except ValueError:
+                out.append(tok)
+        return out
+
+    def set_list_values(self, values) -> None:
+        values = list(values or [])
+        if self.option_picker is not None:
+            self.option_picker.set_values(values)
+        elif self.numeric:
+            self.list_edit.setText(", ".join(format_value(v) for v in values))
+        else:
+            self.list_edit.setText("; ".join(str(v) for v in values))
+        self.changed.emit()
+
+    def file_path(self) -> str:
+        return self.file_edit.text().strip()
+
+    def set_file_path(self, path: str) -> None:
+        self.file_edit.setText(str(path or ""))
+        self.changed.emit()
 
     # ---- FLY ---------------------------------------------------------------------
     def _build_fly(self, speed_param, move_choices=(), speed_lookup=None):
@@ -1196,9 +1542,11 @@ class AxisRow(_StackRow):
         # FLY
         if self._raw is None:
             if src.is_fly():
-                if not self.streams:
+                if not self.streams or not self.numeric:
                     skipped.append("fly (this axis can neither stream nor sweep)")
                 else:
+                    # a flown row has equal steps: from / to / pts, linear
+                    self.set_spacing("linear")
                     self.fly.setChecked(True)
                     copied.append("fly")
                     # The PACE. A speed is a number in a unit -- um/s means
@@ -1393,8 +1741,15 @@ class AxisRow(_StackRow):
         # alone does not say whose stage it is.
         module = split_id(self.param.id)[0]
         owner = f"{module} · " if module else ""
+        opts = getattr(self.param, "options", None)
         if is_bool_param(self.param):
             self.limits_lbl.setText(f"{owner}on / off")
+        elif not is_numeric_param(self.param):
+            # an enum / string knob: what it takes, not a meaningless +-inf
+            self.limits_lbl.setText(f"{owner}one of {len(opts)} options" if opts
+                                    else f"{owner}text")
+            if opts:
+                self.limits_lbl.setToolTip(", ".join(map(str, opts)))
         elif math.isfinite(lo) and math.isfinite(hi):
             self.limits_lbl.setText(f"{owner}{lo:g} to {hi:g}{unit}")
         else:
@@ -1510,10 +1865,16 @@ class AxisRow(_StackRow):
                     ax["collapse_keep_pixels"] = False
             if not self.timeout_auto.isChecked():
                 ax["timeout_s"] = float(self.timeout_spin.value())
+        elif self.spacing() == "list":
+            ax = {"type": "array", "param": self.param.id, "values": self.list_values()}
+        elif self.spacing() == "file":
+            ax = {"type": "file", "param": self.param.id, "path": self.file_path()}
         else:
             ax = {"type": "linear", "param": self.param.id,
                   "start": self.start.value(), "stop": self.stop.value(),
                   "num": self.num.value()}
+            if self.spacing() == "log":
+                ax["spacing"] = "log"
         if self.dim_name() and self.dim_name() != self.param.id:
             ax["name"] = self.dim_name()
         if self.is_zigzag():
@@ -1525,13 +1886,24 @@ class AxisRow(_StackRow):
         return ax
 
     def load_axis(self, ax: dict) -> list[str]:
-        """Fill the row from a loaded linear / fly axis. Returns ids this
-        registry does not have (a speed knob, a 'move with' stage, a
-        readback)."""
+        """Fill the row from a loaded linear / array / file / fly axis.
+        Returns ids this registry does not have (a speed knob, a 'move with'
+        positioner, a readback)."""
         missing = []
-        if "start" in ax: self.start.setValue(float(ax["start"]))
-        if "stop" in ax: self.stop.setValue(float(ax["stop"]))
-        if ax.get("num"): self.num.setValue(int(ax["num"]))
+        t = ax.get("type")
+        if t == "array":
+            self.set_spacing("list")
+            self.set_list_values(ax.get("values") or [])
+        elif t == "file":
+            self.set_spacing("file")
+            self.set_file_path(ax.get("path") or "")
+        elif self.numeric:
+            # never float() a value given to a non-numeric knob: validate()
+            # reports a linear sweep over one, the row stays a list
+            if "start" in ax: self.start.setValue(float(ax["start"]))
+            if "stop" in ax: self.stop.setValue(float(ax["stop"]))
+            if ax.get("num"): self.num.setValue(int(ax["num"]))
+            self.set_spacing("log" if ax.get("spacing") == "log" else "linear")
         self.extra = {k: v for k, v in ax.items() if k not in self.MODELLED}
         if ax.get("name") and ax["name"] != self.param.id:
             self.name_edit.setText(str(ax["name"]))
@@ -1806,7 +2178,23 @@ class BoolBox(QtWidgets.QCheckBox):
 
 
 def _value_box(param):
-    return BoolBox() if is_bool_param(param) else QtWidgets.QDoubleSpinBox()
+    """The box that holds ONE value of `param`: on / off for a switch, a
+    combo of its options (or a text box) for a knob that is not a number,
+    a number box otherwise."""
+    if is_bool_param(param):
+        return BoolBox()
+    if not is_numeric_param(param):
+        return OptionBox(param)
+    return QtWidgets.QDoubleSpinBox()
+
+
+def _set_box(box, value) -> None:
+    """Put `value` into a value box: an option / text as it is, a number
+    as a float (the number box needs one)."""
+    if isinstance(box, OptionBox):
+        box.setValue(value)
+    else:
+        box.setValue(float(value))
 
 
 class FixedRow(QtWidgets.QFrame):
@@ -1858,8 +2246,10 @@ class FixedRow(QtWidgets.QFrame):
         self.value_box.setRange(lo, hi)
         self.value_box.setDecimals(0 if self.integer else 3)
         self.value_box.setFixedWidth(104)
-        start = value if value is not None else self._default_value(lo, hi)
-        self.value_box.setValue(float(start))
+        start = value if value is not None else (
+            self.value_box.default_value() if isinstance(self.value_box, OptionBox)
+            else self._default_value(lo, hi))
+        _set_box(self.value_box, start)
         self.value_box.valueChanged.connect(lambda *_: self.changed.emit())
         lay.addWidget(self.value_box)
 
@@ -1887,8 +2277,10 @@ class FixedRow(QtWidgets.QFrame):
         self.value_box.blockSignals(False)
         self._sync_limits_label()
 
-    def value(self) -> float:
+    def value(self):
         v = self.value_box.value()
+        if isinstance(self.value_box, OptionBox):
+            return v                       # an option / text: as it is
         if is_bool_param(self.param):
             return int(v)                  # 0 / 1, as the definition has always held it
         return int(round(v)) if self.integer else v
@@ -1983,8 +2375,10 @@ class SetStepRow(FixedRow):
         if param.unit:
             self.value_box.setSuffix(f" {param.unit}")
         self.value_box.setFixedWidth(104)
-        start = value if value is not None else self._default_value(lo, hi)
-        self.value_box.setValue(float(start))
+        start = value if value is not None else (
+            self.value_box.default_value() if isinstance(self.value_box, OptionBox)
+            else self._default_value(lo, hi))
+        _set_box(self.value_box, start)
         self.value_box.valueChanged.connect(lambda *_: self.changed.emit())
         lay.addWidget(self.value_box)
         _step_buttons(self, lay)
@@ -2005,7 +2399,7 @@ class SetStepRow(FixedRow):
         if is_bool_param(self.param):
             return f"{self.param.label} {'on' if self.value() else 'off'}"
         unit = f" {self.param.unit}" if self.param.unit else ""
-        return f"{self.param.label} = {self.value():g}{unit}"
+        return f"{self.param.label} = {format_value(self.value())}{unit}"
 
 
 class ActionArgsPanel(QtWidgets.QFrame):
@@ -2699,7 +3093,7 @@ class RoutineSection(QtWidgets.QFrame):
                     break
                 if row.param.id == param.id:
                     if value is not None:
-                        row.value_box.setValue(float(value))
+                        _set_box(row.value_box, value)
                     row.value_box.setFocus()
                     return row
         return self._insert(SetStepRow(param, value))
@@ -2905,7 +3299,8 @@ class RoutineSection(QtWidgets.QFrame):
             if p is None or getattr(p, "kind", "") != "settable":
                 missing.append(ident)
                 continue
-            self.add_set(p, float(value[0]), merge=False)
+            # an option / text goes in as it is (never float()ed)
+            self.add_set(p, value[0], merge=False)
         return missing
 
     def describe(self) -> str:
@@ -3279,8 +3674,11 @@ class AxisPreviewDialog(QtWidgets.QDialog):
         for d in self.dims:
             for m in d.members:
                 unit = f" {m.unit}" if m.unit else ""
-                lines.append(f"{m.label}: {d.size} points, {m.sent[0]:g} → "
-                             f"{m.sent[-1]:g}{unit}, {step_summary(m.sent)}")
+                if not len(m.sent):
+                    lines.append(f"{m.label}: no points")
+                    continue
+                lines.append(f"{m.label}: {d.size} points, {format_value(m.sent[0])} → "
+                             f"{format_value(m.sent[-1])}{unit}, {step_summary(m.sent)}")
         self.header.setText("\n".join(lines))
         warns = []
         for m in members:
@@ -3307,7 +3705,10 @@ class AxisPreviewDialog(QtWidgets.QDialog):
             notes = []
             for c, m in enumerate(members, start=1):
                 if i < len(m.sent):
-                    item = QtWidgets.QTableWidgetItem(f"{m.sent[i]:.6g}")
+                    v = m.sent[i]
+                    # an option / text as it is; a number to 6 digits
+                    item = QtWidgets.QTableWidgetItem(
+                        f"{float(v):.6g}" if _is_num(v) else str(v))
                     item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                     if m.notes[i]:
                         item.setForeground(QtGui.QColor(C["danger"]))
@@ -3324,7 +3725,9 @@ class AxisPreviewDialog(QtWidgets.QDialog):
         colours = [C["accent"], C["ok"], C["accent_hi"], C["muted"]]
         for k, m in enumerate(members):
             col = colours[k % len(colours)]
-            self.plot.plot(np.arange(len(m.sent)), m.sent,
+            if not all(_is_num(v) for v in m.sent):
+                continue                  # options / text: the table says it all
+            self.plot.plot(np.arange(len(m.sent)), np.asarray(m.sent, dtype=float),
                            pen=pg.mkPen(col, width=1), symbol="o", symbolSize=6,
                            symbolBrush=col, symbolPen=None)
         self.plot.setLabel("left", heads[1] if len(members) == 1 else "value")
@@ -3334,8 +3737,9 @@ class AxisPreviewDialog(QtWidgets.QDialog):
         n = max((len(m.sent) for m in members), default=0)
         out = ["\t".join(["#"] + [m.pid for m in members])]
         for i in range(n):
-            out.append("\t".join([str(i)] + [f"{m.sent[i]:.12g}" if i < len(m.sent)
-                                             else "" for m in members]))
+            out.append("\t".join([str(i)] + [
+                (f"{float(m.sent[i]):.12g}" if _is_num(m.sent[i]) else str(m.sent[i]))
+                if i < len(m.sent) else "" for m in members]))
         return "\n".join(out)
 
     def _copy(self):
@@ -4361,8 +4765,9 @@ class ScoutSettingChip(QtWidgets.QFrame):
         self.value_box.setFixedWidth(104)
         if param.unit:
             self.value_box.setSuffix(f" {param.unit}")
-        self.value_box.setValue(float(value) if value is not None
-                                else FixedRow._default_value(lo, hi))
+        _set_box(self.value_box, value if value is not None
+                 else (self.value_box.default_value() if isinstance(self.value_box, OptionBox)
+                       else FixedRow._default_value(lo, hi)))
         self.value_box.valueChanged.connect(lambda *_: self.changed.emit())
         lay.addWidget(self.value_box)
         rm = QtWidgets.QPushButton("✕"); rm.setObjectName("danger"); rm.setFixedWidth(22)
@@ -4370,8 +4775,10 @@ class ScoutSettingChip(QtWidgets.QFrame):
         rm.clicked.connect(lambda: self.remove.emit(self))
         lay.addWidget(rm)
 
-    def value(self) -> float:
+    def value(self):
         v = self.value_box.value()
+        if isinstance(self.value_box, OptionBox):
+            return v                       # an option / text: as it is
         return int(round(v)) if self.integer else v
 
 
@@ -4738,7 +5145,7 @@ class ScoutSection(QtWidgets.QFrame):
         for row in self.setting_rows:
             if row.param.id == pid:
                 if value is not None:
-                    row.value_box.setValue(float(value))
+                    _set_box(row.value_box, value)
                 return row
         if value is None:
             try:
@@ -6374,7 +6781,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         for row in self.fixed_rows:
             if row.param.id == pid:
                 if value is not None:
-                    row.value_box.setValue(float(value))
+                    _set_box(row.value_box, value)
                 row.value_box.setFocus()
                 return row
         row = FixedRow(p, value)
@@ -6603,6 +7010,15 @@ class ScanBuilder(QtWidgets.QMainWindow):
         show.
         """
         missing = []
+        # What an OLD definition said by NAME, in today's words BY ROLE: the
+        # built-in {action: autofocus} hook (until 2026-10-12) becomes a
+        # routine step running the connected module's autofocus action, so
+        # the ROUTINES card shows it as a step that can be edited. If no
+        # module declares that role the hook stays as it was (validate()
+        # then refuses the scan, never runs it without its focusing) and
+        # the problem is named like a missing parameter.
+        if hasattr(recipe, "migrate_roles"):
+            missing += recipe.migrate_roles(self.registry)
         self.diagonal_box.blockSignals(True)
         self.diagonal_box.setChecked(bool(getattr(recipe, "diagonal", False)))
         self.diagonal_box.blockSignals(False)
@@ -6637,14 +7053,16 @@ class ScanBuilder(QtWidgets.QMainWindow):
             if not pid or self.registry.get(pid) is None:
                 missing.append(pid or f"<{ax.get('type', 'axis')}>")
                 continue
-            if ax.get("type") in ("linear", "fly"):
+            if ax.get("type") in ("linear", "fly", "array", "file"):
                 self.add_axis(pid)
                 # every fly option has its box in Advanced now (the speed
                 # knob, readback, lag correction, row timeout ...), so a fly
-                # axis is no longer passed through as raw to keep them
+                # axis is no longer passed through as raw to keep them; a
+                # list (array) or file axis is the row's SPACING since
+                # 2026-10-12
                 missing += self.rows[-1].load_axis(ax)
             else:
-                # raster/zip/array: keep as a pass-through row on the first member
+                # grid / zip: keep as a pass-through row on the first member
                 self.add_axis(pid, raw=ax)
                 self.rows[-1].hint = ax["type"]
         want = set(recipe.detectors)
@@ -6738,7 +7156,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         from scan_core.flyscan import fly_warnings
         warnings += fly_warnings(recipe, self.registry)
         conditions = ("   ·   " + ", ".join(
-            f"{r.param.label} = {r.value():g}{(' ' + r.param.unit) if r.param.unit else ''}"
+            f"{r.param.label} = {format_value(r.value())}"
+            f"{(' ' + r.param.unit) if r.param.unit else ''}"
             for r in self.fixed_rows)) if self.fixed_rows else ""
         # The routines, one short clause each. Not in the ETA: a routine's time
         # is a magnet ramp or a reference sweep, which nothing here can predict.
@@ -7952,7 +8371,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
             if a.get("value") is None:
                 continue                    # a fly axis: the whole row at once
             unit = f" {a['unit']}" if a.get("unit") else ""
-            bits.append(f"{a['name']} {a['value']:g}{unit} ({a['i'] + 1}/{a['n']})")
+            bits.append(f"{a['name']} {format_value(a['value'])}{unit} "
+                        f"({a['i'] + 1}/{a['n']})")
         if prog and prog[0] < prog[1]:
             bits.append(f"~{_fmt_duration(prog[2])} left")
         if self.run_now:

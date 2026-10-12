@@ -63,6 +63,8 @@
             "param": {"type": "string"},
             "start": {"type": "number"}, "stop": {"type": "number"},
             "num": {"type": "integer"}, "step": {"type": "number"},
+            "spacing": {"enum": ["linear", "log"],
+                        "description": "log: points at equal ratios (np.geomspace); start and stop of the same sign, neither 0, and num given. Absent = linear"},
             "name": {"type": "string"},
             "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },
