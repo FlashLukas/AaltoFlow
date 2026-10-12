@@ -239,28 +239,17 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
         dtype = d.get("type")
 
         if kind == "control" and d.get("set"):
-            # scan-core's Settable is numeric by design: it clamps with
-            # max/min and the engine builds coordinate arrays from it. bool
-            # maps on cleanly (a two-point sweep of "RF on" is a real scan);
-            # enum and string do not, so they are registered read-only rather
-            # than silently crashing on float() at the first setpoint. The
-            # control screen reads the manifest directly and can still drive
-            # them.
-            if dtype in ("enum", "string"):
-                if on_warn:
-                    on_warn(f"{pid}: {dtype} controls are not scannable; "
-                            f"registered as an indicator")
-                # Recordable since 2026-10-04 (storage.py): an enum as its
-                # option's code, a string as text. Not an AXIS: it is a
-                # Gettable, and recipe.validate wants a settable there.
-                reg.add(Gettable(pid, label, unit, getter, dtype=dtype,
-                                 storage=Storage.from_descriptor(d, use_bounds=False)))
-                added.append(pid)
-                continue
-
+            # ENUM and STRING controls are settables too (2026-10-12): a
+            # filter wheel, a grating, a lock-in's input mode can be an AXIS.
+            # Their values are kept as they are (no clamp, no float, no
+            # scale): an enum's are its declared `options`, checked before
+            # the run and before every send; the settle compares exactly.
+            text = dtype in ("enum", "string")
             spec = d["set"]
             lo, hi = d.get("min"), d.get("max")
-            if dtype == "bool":
+            if text:
+                lo, hi = float("-inf"), float("inf")   # no numeric envelope
+            elif dtype == "bool":
                 lo, hi = 0, 1           # not [-inf, inf]: a bool has two states
             else:
                 # No advertised bound. Settable clamps to its limits, so an
@@ -290,7 +279,8 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
 
             def sender(value, _s=spec, _inst=inst, _settle=settle, _t=timeout,
                        _id=pid, _u=unit, _bool=(dtype == "bool"), _scale=scale,
-                       _int=(dtype == "int"), timeout_s=None, _gen=gen, _d=d, _res=res):
+                       _int=(dtype == "int"), timeout_s=None, _gen=gen, _d=d, _res=res,
+                       _text=text):
                 """SEND the command now; return the function that WAITS for
                 it to settle. setter() below is the two in a row; the engine's
                 `diagonal` row change sends two knobs before waiting for
@@ -307,8 +297,13 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 # stores 1, and a settle policy comparing to 1e-6 then waits out
                 # its whole timeout on a point that actually arrived -- with
                 # Abort ignored meanwhile. (Found on the rig, 2026-09-16.)
-                wire = bool(value) if _bool else value * scale
-                if _int and not _bool:
+                if _text:
+                    wire = value         # the option / text itself, never scaled
+                else:
+                    wire = bool(value) if _bool else value * scale
+                if _text:
+                    pass
+                elif _int and not _bool:
                     wire = int(round(wire))
                 elif _res and not _bool:
                     # ... and settle on the ROUNDED value, as for an int: the
@@ -318,12 +313,13 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                     _gen[0] += 1
                     mine = _gen[0]
                 _inst.command(_s["verb"], **{_s["arg"]: wire}, **extra)
-                shown = wire if _bool else f"{value:g} {_u}".strip()
+                shown = wire if (_bool or _text) else f"{value:g} {_u}".strip()
 
                 def wait():
                     # timeout_s: a fly scan's row is ONE long move, far slower
                     # than the ordinary step this timeout was declared for
-                    _inst.wait_until(_clamp_guard(_settle(wire), _inst, _d, wire, _id, _bool),
+                    _inst.wait_until(_clamp_guard(_settle(wire), _inst, _d, wire, _id,
+                                                  _bool or _text),
                                      timeout_s=_t if timeout_s is None else timeout_s,
                                      what=f"{_id} = {shown}",
                                      cancel=lambda: _gen[0] != mine)
@@ -333,7 +329,9 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                 _send(value, timeout_s=timeout_s)()
 
             param = reg.add(Settable(pid, label, unit, (lo, hi),
-                                     set_fn=setter, get_fn=getter, send_fn=sender))
+                                     set_fn=setter, get_fn=getter, send_fn=sender,
+                                     dtype=dtype or "float",
+                                     options=d.get("options") if dtype == "enum" else None))
             _attach_stream(param, d, inst, module, streams, on_warn)
             # A knob the module can SWEEP CONTINUOUSLY (its `ramp` block):
             # a fly scan can fly it (ramp.py). Its readback stream shares

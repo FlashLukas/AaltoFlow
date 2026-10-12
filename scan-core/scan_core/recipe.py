@@ -133,16 +133,45 @@ class CompiledScan:
 
 # ─────────────────────────── sweep-spec → values[] ────────────────────────────
 
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float, np.integer, np.floating, bool, np.bool_))
+
+
+def native_values(vals) -> np.ndarray:
+    """A list of setpoints as an array: float when every one is a number
+    (bools count as 0/1, as they always have), else an OBJECT array of the
+    values as they are -- the options of an enum knob ("AC", "DC"), text."""
+    vals = list(vals)
+    if all(_is_number(v) for v in vals):
+        return np.asarray(vals, dtype=float)
+    out = np.empty(len(vals), dtype=object)
+    out[:] = vals
+    return out
+
+
+def is_text_values(vals) -> bool:
+    """True for an object array of non-numeric setpoints (native_values)."""
+    return getattr(vals, "dtype", None) is not None and vals.dtype == object
+
+
 def _values_from_spec(spec: dict) -> np.ndarray:
     """Turn a per-axis/per-member spec into an explicit value vector.
 
     Accepts either {start, stop, num} (linear), {start, stop, step}, or
     {values:[...]} / {path:...}. One place so every axis type shares it.
+    `values` and a file may hold NON-numeric setpoints (2026-10-12: an enum
+    knob's options, text); they come back as an object array (native_values).
+    Linear spacing is for numbers only.
     """
     if "values" in spec:
-        return np.asarray(spec["values"], dtype=float)
+        return native_values(spec["values"])
     if "path" in spec:
-        return np.loadtxt(spec["path"]).ravel().astype(float)
+        try:
+            return np.loadtxt(spec["path"]).ravel().astype(float)
+        except ValueError:
+            # not numbers: one setpoint per non-empty line (an enum's options)
+            with open(spec["path"], encoding="utf-8") as fh:
+                return native_values([ln.strip() for ln in fh if ln.strip()])
     start, stop = float(spec["start"]), float(spec["stop"])
     if "num" in spec and spec["num"] is not None:
         return np.linspace(start, stop, int(spec["num"]))
@@ -162,6 +191,11 @@ class Recipe:
     detectors: list[str] = field(default_factory=list)
     hooks: list[dict] = field(default_factory=list)
     output: dict = field(default_factory=lambda: {"dir": ".", "basename": "scan", "format": "netcdf"})
+    #: Written into every definition, but NOT read by the engine (checked
+    #: 2026-10-12): a knob's settle wait is its module's describe `timeout_s`,
+    #: or 60 s when the module declares none (manifest.py). See the README
+    #: ("Settle timeout") before wiring this in -- it would shorten every
+    #: undeclared wait to 20 s in all saved definitions.
     settle: dict = field(default_factory=lambda: {"default_timeout_s": 20.0})
     #: At a point where SEVERAL axes change (the start of a new row), send
     #: every new setpoint first and only then wait for them all, instead of
@@ -296,6 +330,13 @@ class Recipe:
                 # measurement spent almost none of its time at.
                 errs.append(f"'{pid}' is both a condition and an axis; "
                             f"it cannot be held and swept at the same time")
+            if not _numeric(p):
+                # an enum / string knob held at one value: one of its options
+                try:
+                    p.option(value)
+                except (ValueError, AttributeError) as exc:
+                    errs.append(f"condition {exc}")
+                continue
             try:
                 finite = np.isfinite(float(value))
             except (TypeError, ValueError):
@@ -344,6 +385,10 @@ class Recipe:
             for dim in self.compile(registry).dims:
                 for pid, vals in dim.params:
                     p = registry.get(pid)
+                    text_vals = is_text_values(vals)
+                    if p is not None and (text_vals or not _numeric(p)):
+                        errs += _check_text_axis(p, vals, text_vals)
+                        continue
                     # A non-finite setpoint passes every limit check (inf is not
                     # > inf) and then goes on the wire as the JSON token
                     # `Infinity`, which is not valid JSON. It gets here from an
@@ -510,6 +555,12 @@ class Recipe:
                 if p.kind != "settable":
                     errs.append(f"{where}: '{pid}' is not settable")
                     continue
+                if not _numeric(p):
+                    try:
+                        p.option(value)
+                    except (ValueError, AttributeError) as exc:
+                        errs.append(f"{where}: {exc}")
+                    continue
                 try:
                     v = float(value)
                 except (TypeError, ValueError):
@@ -531,6 +582,32 @@ class Recipe:
         from .repeat import name_dims
         name_dims(dims)                   # repeat / repeat_1, repeat_2, ...
         return CompiledScan(dims=dims, detectors=list(self.detectors), hooks=list(self.hooks))
+
+
+def _numeric(p) -> bool:
+    from .registry import is_numeric_param
+    return is_numeric_param(p)
+
+
+def _check_text_axis(p, vals, text_vals: bool) -> list[str]:
+    """An axis over a NON-numeric knob (an enum's options, text), or text
+    values given to a numeric knob ([] = fine)."""
+    pid = p.id
+    if _numeric(p):
+        bad = [v for v in vals if not _is_number(v)]
+        return [f"'{pid}' takes numbers; {bad[0]!r} is not one"] if bad else []
+    if not text_vals and len(vals) and not getattr(p, "options", None):
+        # a linear sweep over a string knob: numbers it cannot mean
+        return [f"'{pid}' is {getattr(p, 'dtype', 'text')}: give its values as a "
+                f"list (an array axis), not a numeric sweep"]
+    errs = []
+    for v in vals:
+        try:
+            p.option(v)
+        except (ValueError, AttributeError) as exc:
+            errs.append(str(exc))
+            break
+    return errs
 
 
 # ─────────────────────────── zig-zag, per axis (2026-10-11) ───────────────────

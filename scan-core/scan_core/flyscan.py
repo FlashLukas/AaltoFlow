@@ -1035,7 +1035,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                     run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
                     prev[k] = None            # fired; not again if this row is redone
                 for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[oidx[k]]))
+                    current[pid] = registry.get(pid).set(values[oidx[k]])
                 if changed:
                     run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
                 prev[k] = oidx[k]

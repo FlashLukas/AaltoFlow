@@ -1304,6 +1304,19 @@ looks an instrument up by its id.
   the per-bin count's file label is "samples per bin".
 - `scan_core/units.py` is the one place for unit facts: length detection
   (exact um factors), unit families, rate conversion (/s, /min, /h).
+- **Non-numeric axes.** `Settable.dtype` ("float"/"int"/"bool" numeric,
+  "enum"/"string" not -- `registry.NON_NUMERIC`) and `Settable.options`;
+  manifest.py registers enum/string CONTROLS as settables (until 2026-10-12
+  they were read-only Gettables, "Settable is numeric by design"). Their
+  limits are (-inf, inf); `Settable._clamped` returns `option(value)` instead
+  of clamping. `recipe.native_values` keeps text setpoints as an object
+  array; every `registry.get(pid).set(float(v))` in engine / flyscan / scout
+  is now `.set(v)` (Settable converts numbers itself). The settle
+  predicates compare with `instrument._matches` -> `registry.same_value`
+  (numbers within tol, anything else exactly, 3 == "3"). A text coordinate
+  is written as `str` objects (`engine._coord_values`, h5netcdf vlen
+  strings); a text condition as a scalar text coordinate. `registry_wire`
+  carries dtype + options. Bools stay numeric 0/1.
 
 ---
 

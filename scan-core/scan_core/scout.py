@@ -1155,7 +1155,7 @@ class ScoutRunner:
                 if k in self.ks or k in self.outer or not d.params:
                     continue
                 for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[0]))
+                    current[pid] = registry.get(pid).set(values[0])
                 moved.append(k)
             moved += self.ks
             last = [None] * len(self.ks)
@@ -1219,14 +1219,14 @@ class ScoutRunner:
             waits = []
             for j, d, n in todo:
                 for pid, values in d.params:
-                    current[pid], w = registry.get(pid).send(float(values[n]))
+                    current[pid], w = registry.get(pid).send(values[n])
                     waits.append(w)
             for w in waits:
                 w()
         else:
             for j, d, n in todo:
                 for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[n]))
+                    current[pid] = registry.get(pid).set(values[n])
         for j, _, n in todo:
             last[j] = n
 
@@ -1253,7 +1253,7 @@ class ScoutRunner:
         done = []
         try:
             for pid, value in settings.items():
-                self.registry.get(pid).set(float(value))
+                self.registry.get(pid).set(value)
                 done.append(pid)
                 log(f"scout: {pid} = {float(value):g} for the scout only")
         except BaseException:
@@ -1269,7 +1269,7 @@ class ScoutRunner:
         log = self.ctx["log_fn"]
         for pid, old in restore:
             try:
-                self.registry.get(pid).set(float(old))
+                self.registry.get(pid).set(old)
                 log(f"scout: {pid} back to {float(old):g}")
             except Exception as exc:
                 if ok:

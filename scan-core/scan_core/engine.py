@@ -281,9 +281,29 @@ def where_of(dims, idx, flat=None, registry=None, row=None) -> dict:
             unit = getattr(p, "unit", "") or ""
         axes.append({"name": d.name, "params": [q for q, _ in d.params],
                      "i": i, "n": int(d.size), "unit": unit,
-                     "value": None if i is None else float(d.coord[i])})
+                     "value": None if i is None else _plain_value(d.coord[i])})
     return {"index": tuple(int(i) for i in idx), "flat": flat, "row": row,
             "axes": axes}
+
+
+def _coord_values(vals):
+    """A dim's values as a coordinate array: unchanged when numeric; an
+    object array of setpoints (an enum's options) as TEXT, which xarray
+    writes as a netCDF-4 variable-length string and reads back as str."""
+    if getattr(vals, "dtype", None) is not None and vals.dtype == object:
+        return np.array([str(v) for v in vals], dtype=object)
+    return vals
+
+
+def _plain_value(v):
+    """A coordinate value for a progress report: a float for a number, the
+    option / text itself for an enum or string axis (2026-10-12)."""
+    if isinstance(v, str):
+        return v
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return str(v)
 
 
 def _progress_reporter(on_progress):
@@ -506,7 +526,7 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
     # establish the constant context before sweeping (rf power, unswept freq, …)
     try:
         for pid, val in recipe.fixed.items():
-            current[pid] = registry.get(pid).set(float(val))
+            current[pid] = registry.get(pid).set(val)
     except ScanAborted:
         after_abort()
         raise
@@ -1002,7 +1022,7 @@ def _set_dims(registry, compiled, dims, idx, prev, ctx, current, redo,
             run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
             prev[k] = None                    # fired; not again on a retry
         for pid, values in d.params:
-            current[pid] = registry.get(pid).set(float(values[idx[k]]))
+            current[pid] = registry.get(pid).set(values[idx[k]])
         resend.discard(k)
         if changed:
             run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
@@ -1046,7 +1066,7 @@ def _set_together(registry, compiled, dims, idx, prev, ctx, current, redo):
     waits = []
     for k, d, _ in changing:
         for pid, values in d.params:
-            value, wait = registry.get(pid).send(float(values[idx[k]]))
+            value, wait = registry.get(pid).send(values[idx[k]])
             current[pid] = value
             waits.append(wait)
     for wait in waits:
@@ -1383,8 +1403,11 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
     coords = {}
     for d in dims:
         if d.params:
-            coords[d.name] = (d.name, d.coord, {"units": _units(registry, d.params[0][0]),
-                                                "param": d.params[0][0]})
+            # an enum / string axis (2026-10-12): its coordinate is TEXT, a
+            # netCDF-4 variable-length string -- the option names as set
+            coords[d.name] = (d.name, _coord_values(d.coord),
+                              {"units": _units(registry, d.params[0][0]),
+                               "param": d.params[0][0]})
         else:
             coords[d.name] = (d.name, d.coord, {
                 "units": "", "long_name": "repeat number (0 = first)",
@@ -1401,10 +1424,10 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                 coords[name][2].update(extra_a)
     except Exception:
         pass
-    # zip / raster secondary members ride along as extra (non-index) coords
+    # zip / grid secondary members ride along as extra (non-index) coords
     for d in dims:
         for pid, vals in d.params[1:]:
-            coords[pid] = (d.name, vals, {"units": _units(registry, pid)})
+            coords[pid] = (d.name, _coord_values(vals), {"units": _units(registry, pid)})
 
     # a detector's inner axes become real dimensions, shared by name
     for name, vals in det_coords.items():
@@ -1498,6 +1521,10 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
             coords[pid] = ((), float(value),
                            {"units": _units(registry, pid), "fixed": "true"})
         except (TypeError, ValueError):
+            if isinstance(value, str):
+                # an enum / string condition: a text scalar coordinate
+                coords[pid] = ((), value, {"units": _units(registry, pid),
+                                           "fixed": "true"})
             continue
 
     # (the loop variable is NOT called `extra`: it used to be, and shadowed the

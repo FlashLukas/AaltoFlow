@@ -89,6 +89,8 @@ def _settable(p) -> dict:
     return {"id": p.id, "label": p.label, "unit": p.unit,
             "limits": [_num(lo), _num(hi)],
             "integer": bool(getattr(p, "integer", False)),
+            "dtype": getattr(p, "dtype", "float"),
+            "options": _plain(getattr(p, "options", None)),
             "resolution": _num(getattr(p, "resolution", None)),
             "can_send": bool(getattr(p, "can_send", False)),
             "storage": _storage(getattr(p, "storage", None)),
@@ -258,7 +260,9 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
         p = Settable(pid, d.get("label") or pid, d.get("unit") or "",
                      (_bound(lo, -math.inf), _bound(hi, math.inf)),
                      set_fn=_nope(f"setting {pid}"), get_fn=_reader(pid, read_from),
-                     send_fn=(lambda v, _s=send: _s(v)) if d.get("can_send") else None)
+                     send_fn=(lambda v, _s=send: _s(v)) if d.get("can_send") else None,
+                     dtype=d.get("dtype") or "float",
+                     options=d.get("options") if isinstance(d.get("options"), list) else None)
         p.integer = bool(d.get("integer"))
         p.resolution = d.get("resolution")
         p.storage = _storage_from(d.get("storage"))
@@ -308,7 +312,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
 _PARAM_ATTRS = ("label", "unit", "limits", "integer", "resolution", "storage", "ramp",
                 "stream", "stream_channel", "stream_scale", "stream_rate_hz", "axes",
                 "dtype", "acquire",
-                "window", "_send", "role", "focus_sensitive",
+                "window", "_send", "role", "focus_sensitive", "options",
                 "speed_param")
 _ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait",
                  "role")

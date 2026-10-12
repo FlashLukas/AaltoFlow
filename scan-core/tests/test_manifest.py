@@ -69,16 +69,19 @@ def test_bool_control_gets_two_state_limits_and_a_bool_on_the_wire(fake_service)
         lab.close()
 
 
-def test_enum_control_is_registered_read_only_with_a_warning(fake_service):
-    """scan-core's Settable is numeric; an enum axis would crash on float()."""
+def test_enum_control_is_a_settable_with_its_options(fake_service):
+    """Since 2026-10-12 an enum control is scannable (test_enum_axis.py):
+    a Settable that keeps its options and is not numeric."""
     svc = fake_service(15856, manifest=DEMO_MANIFEST)
     warnings = []
     reg, lab = build_lab_registry(host="127.0.0.1", include=("clMag",),
                                   ports={"clMag": svc.cmd_port},
                                   on_warn=warnings.append)
     try:
-        assert isinstance(reg.get("mode"), Gettable)
-        assert any("mode" in w and "not scannable" in w for w in warnings), warnings
+        mode = reg.get("mode")
+        assert isinstance(mode, Settable) and not mode.numeric
+        assert mode.options == ["hardware", "software", "off"]
+        assert not any("not scannable" in w for w in warnings), warnings
     finally:
         lab.close()
 

@@ -31,7 +31,7 @@
     },
     "settle": {
       "type": "object",
-      "properties": {"default_timeout_s": {"type": "number"}}
+      "properties": {"default_timeout_s": {"type": "number", "description": "written into every definition (default 20) but NOT read by the engine today: how long a knob may take to settle is the module's describe timeout_s, and 60 s when a module declares none (scan_core/manifest.py)"}}
     },
     "zigzag": {"type": "boolean",
                "description": "REMOVED scan-wide switch (before 2026-10-11): an old definition that has it is translated on load into `zigzag` on every axis inside the outermost one (and then runs in the per-axis order); never written"},
@@ -74,7 +74,8 @@
           "properties": {
             "type": {"const": "array"},
             "param": {"type": "string"},
-            "values": {"type": "array", "items": {"type": "number"}},
+            "values": {"type": "array", "items": {"type": ["number", "string", "boolean"]},
+                       "description": "the setpoints in order: numbers, or -- for an enum / string knob (a filter wheel, a lock-in input) -- its options as text, kept as they are and stored as a text coordinate"},
             "name": {"type": "string"},
             "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },

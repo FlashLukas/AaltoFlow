@@ -65,10 +65,52 @@ class Parameter:
         self.kind = kind          # "settable" | "gettable"
 
 
+#: Settable dtypes whose values are NOT numbers (2026-10-12): an enum (a
+#: filter wheel's position names, a lock-in's input mode) or free text. They
+#: are scanned over their values as they are -- no clamping, no float(), no
+#: linear spacing -- and stored as text coordinates in the data file.
+NON_NUMERIC = ("enum", "string")
+
+
+def is_numeric_param(p) -> bool:
+    """True unless `p` is a settable whose describe type is enum or string."""
+    return getattr(p, "dtype", "float") not in NON_NUMERIC
+
+
+def same_value(a, b, tol: float = 0.0) -> bool:
+    """Equal setpoints? Numbers within `tol`; anything else (an enum option,
+    text, a bool) EXACTLY -- 3 and "3" count as the same option (a JSON
+    round trip turns one into the other)."""
+    num = (int, float, np.integer, np.floating)
+    if (isinstance(a, num) and not isinstance(a, (bool, np.bool_))
+            and isinstance(b, num) and not isinstance(b, (bool, np.bool_))):
+        return abs(float(a) - float(b)) <= tol
+    if a == b:
+        return True
+    if str(a) == str(b):
+        return True
+    # a number published as text ("5" for 5.0): compare as numbers
+    if any(isinstance(x, num) and not isinstance(x, (bool, np.bool_)) for x in (a, b)):
+        try:
+            return abs(float(a) - float(b)) <= tol
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 class Settable(Parameter):
-    def __init__(self, id, label, unit, limits, set_fn, get_fn, send_fn=None):
+    #: "float" (default), "int", "bool" -- all numeric, swept as numbers --
+    #: or "enum" / "string" (NON_NUMERIC): values kept as they are.
+    dtype = "float"
+    #: an enum's options, in order (describe `options`); None otherwise
+    options = None
+
+    def __init__(self, id, label, unit, limits, set_fn, get_fn, send_fn=None,
+                 dtype: str = "float", options=None):
         super().__init__(id, label, unit, "settable")
-        self.limits = tuple(limits)     # (min, max) in `unit`
+        self.limits = tuple(limits)     # (min, max) in `unit`; (-inf, inf) for enum/string
+        self.dtype = dtype or "float"
+        self.options = list(options) if options is not None else None
         self._set, self._get = set_fn, get_fn
         #: optional SPLIT set (2026-10-08): send_fn(value) sends the command
         #: and returns a function that waits until it has settled. Lets the
@@ -97,7 +139,31 @@ class Settable(Parameter):
             self._set(value)                      # (real adapter blocks until settled)
         return value
 
-    def _clamped(self, value) -> float:
+    @property
+    def numeric(self) -> bool:
+        """False for an enum or string knob (scanned over its values as they
+        are); True for float / int / bool."""
+        return self.dtype not in NON_NUMERIC
+
+    def option(self, value):
+        """The enum OPTION `value` names (the option itself, so the wire
+        carries exactly what the module declared), or ValueError. A string
+        knob takes any text; a number becomes its text."""
+        if self.dtype == "string":
+            if isinstance(value, (bool, np.bool_)) or value is None:
+                raise ValueError(f"{self.id}: {value!r} is not text")
+            return str(value)
+        for opt in self.options or []:
+            if same_value(opt, value):
+                return opt
+        if not self.options:
+            return value                 # an enum that declared no options
+        raise ValueError(f"{self.id}: {value!r} is not one of its options "
+                         f"({', '.join(map(str, self.options))})")
+
+    def _clamped(self, value):
+        if not self.numeric:
+            return self.option(value)    # no clamp: an option is right or wrong
         lo, hi = self.limits
         value = float(value)
         if not np.isfinite(value):

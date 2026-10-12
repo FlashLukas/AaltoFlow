@@ -240,6 +240,8 @@ def _settle_extra(ctx, seconds: float = 0.5):
 
 def _fmt(p, value) -> str:
     unit = getattr(p, "unit", "") or ""
+    if isinstance(value, str):                 # an enum option, text
+        return f"{p.id} = {value}"
     return f"{p.id} = {float(value):g}{(' ' + unit) if unit else ''}"
 
 
@@ -754,7 +756,9 @@ def _call(ctx, **args):
     try:
         for kind, ident, *value in steps:
             if kind == "set":
-                p, v = params[ident], float(value[0])
+                p = params[ident]
+                # a number as a float; an enum option / text as it is
+                v = value[0] if not getattr(p, "numeric", True) else float(value[0])
                 step(f"set {_fmt(p, v)}", lambda p=p, v=v: p.set(v))
                 applied[ident] = v
             elif kind == "action":
@@ -805,10 +809,11 @@ def _call(ctx, **args):
             # Skip a restore that changes nothing: a condition the routine set
             # to its own value (angle 45 while the scan holds 45) costs a
             # settle wait for no reason.
-            if math.isclose(float(back), value, rel_tol=0.0, abs_tol=1e-12):
+            from .registry import same_value
+            if same_value(back, value, 1e-12):
                 continue
             p = params[pid]
-            step(f"restore {_fmt(p, back)}", lambda p=p, v=back: p.set(float(v)))
+            step(f"restore {_fmt(p, back)}", lambda p=p, v=back: p.set(v))
     if skipped is not None:
         raise skipped
 

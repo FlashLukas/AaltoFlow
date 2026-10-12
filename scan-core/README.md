@@ -273,6 +273,34 @@ run_demo.py
 run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + pm16 or hf2)
 ```
 
+## Axes that are not numbers: enum and string knobs (2026-10-12)
+
+A knob whose module declares it as an `enum` (with `options`) or a `string`
+control is a settable too -- a filter wheel, a grating, a lock-in's input:
+
+```yaml
+axes:
+  - {type: array, param: hf2.input1, values: [A, A-B]}        # its options, as text
+  - {type: linear, param: field, start: -50, stop: 50, num: 51}
+fixed: {cs260.grating: "G2"}                                 # a text condition
+```
+
+The values are kept as they are (`recipe.native_values`: an object array when
+not all are numbers; a `file` axis may list one option per line), the engine
+passes them to `Settable.set` unchanged (no `float()`; `Settable.option`
+checks an enum's options), the settle compares exactly, `validate()` refuses
+a value that is not an option (in an axis, a condition or a routine step),
+and the data file gets a TEXT coordinate (netCDF-4 variable-length string)
+that `scan_core.data.load` reads back. Linear / log spacing is for numbers
+only. Bool knobs stay numeric (0/1; `true`/`false` are accepted in a list).
+
+**Settle timeout.** How long a knob may take to settle is its module's
+`timeout_s` in `describe`; a module that declares none gets **60 s**
+(`scan_core/manifest.py`). The recipe's `settle: {default_timeout_s: 20}` is
+written into every definition but is NOT read by the engine today -- wiring it
+in as the fallback would shorten every undeclared wait from 60 s to 20 s in
+all saved definitions, so it is left as a recorded value until decided.
+
 ## Running against real instruments
 
 `build_lab_registry()` is the real counterpart of `build_sim_registry()`. Start
