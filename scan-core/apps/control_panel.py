@@ -20,8 +20,8 @@ Two things this leans on, both deliberate:
   A control panel wants exactly those things back, plus the `group`/`order`
   layout hints. Same single source of truth, a different view of it.
 
-* Limits move. piezo's ceiling drops 200 -> 160 um on closed loop, kim's armed
-  leash replaces the travel clamp, clMag's field range IS the calibration. Every
+* Limits move. A positioner's travel can shrink on closed loop, an armed leash
+  can replace the travel clamp, a controller's range can BE its calibration. Every
   status frame carries `describe_rev`, so the panel compares one integer per
   poll and re-reads the manifest only when it actually changed -- then re-clamps
   its spin boxes. A panel offering travel the stage no longer has is how an
@@ -660,8 +660,8 @@ class ControlPanel(QtWidgets.QWidget):
             btns.addWidget(b)
         v.addLayout(btns)
 
-        hint = QtWidgets.QLabel("Layouts are per setup: an alignment panel and "
-                                "an FMR panel want different knobs.")
+        hint = QtWidgets.QLabel("Layouts are per task: an alignment panel and "
+                                "a measurement panel want different knobs.")
         self.layout_hint = hint
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color:{C['muted']}; font-size:10px;")
@@ -850,8 +850,8 @@ class ControlPanel(QtWidgets.QWidget):
             b.setToolTip("" if own else f"These are the layouts saved on {where}; "
                          f"they are changed there.")
         self.layout_hint.setText(
-            "Layouts are per setup: an alignment panel and an FMR panel want "
-            "different knobs." if own else f"Layouts of {where} (read-only here).")
+            "Layouts are per task: an alignment panel and a measurement panel "
+            "want different knobs." if own else f"Layouts of {where} (read-only here).")
 
     def _sync_hidden(self):
         """Read the legend's on/off state off the curves into `self.hidden`.

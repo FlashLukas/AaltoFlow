@@ -76,8 +76,8 @@ class RoutineError(RuntimeError):
 #
 # Lukas's decisions of 2026-09-28: (A) a failed hardware read must be LOUD, and
 # a dead service must not be served from its last status frame forever; (B)
-# when the camera loses its pattern, the measurement must stop or pause for the
-# operator. Both come down to one question the engine asks at every point:
+# when a module reports a fault (a tracker lost its reference, an interlock
+# opened), the measurement must stop or pause for the operator. Both come down to one question the engine asks at every point:
 # "is every instrument this scan uses in a state whose readings I can trust?"
 # The answer is a list of Fault(name, message) -- empty when all is well.
 
@@ -112,5 +112,5 @@ class ScanFault(RuntimeError):
 
 
 def format_faults(faults) -> str:
-    """'camera: pattern lost; pm16: hardware read failed (...)' -- one line."""
+    """'tracker: reference lost; meter: hardware read failed (...)' -- one line."""
     return "; ".join(f"{f[0]}: {f[1]}" for f in faults)

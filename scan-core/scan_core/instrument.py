@@ -56,7 +56,8 @@ class InstrumentFault(InstrumentError):
 
     Raised by `wait_until` when the status keeps carrying a non-empty
     `hw_error` (the last hardware read failed) or `fault` (the module itself
-    says measuring now would give wrong data -- the camera lost its pattern).
+    says measuring now would give wrong data -- e.g. a tracker lost its
+    reference).
     A settle wait must not declare a knob "arrived" on such a frame: the flag
     it would believe was computed from a read that failed. The engine treats
     this like any other fault: it pauses (GUI) or stops (headless).
@@ -572,7 +573,7 @@ def _brief(st: dict, keys: int = 6) -> str:
 #
 # A `key` is either a top-level status field name, or a PATH (a list of keys
 # and indices) for per-axis / per-channel values that a service publishes as
-# lists: ["moving", 0] is axis X of kim, ["tc_set_s", 1] channel 2 of hf2.
+# lists: ["moving", 0] is axis X of a stage, ["tc_set_s", 1] channel 2 of a lock-in.
 
 def _lookup(st: dict, key):
     """Resolve a status key or key path; None if any step is missing."""

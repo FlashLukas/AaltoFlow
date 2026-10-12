@@ -488,6 +488,50 @@ def test_the_example_recipe_runs():
     assert reg.get("field").get() == 0.0
 
 
+def test_the_transport_example_recipe_runs_on_mocked_modules():
+    """The non-MOKE example (2026-10-12): a source-measure unit (k2450) and a
+    heater controller (tc200). Their parameters are mocked with the ids and
+    units the modules' describe gives them, and an ohmic sample whose
+    resistance rises with temperature answers -- so the file validates AND
+    runs, including its before/after routines."""
+    reg = Registry()
+    state = {"I": 0.0, "T": 25.0, "out": 0}
+
+    def setter(key):
+        def f(v):
+            state[key] = v
+        return f
+    reg.add(Settable("tc200.temperature", "Temperature setpoint", "C", (20.0, 200.0),
+                     setter("T"), lambda: state["T"]))
+    reg.add(Settable("k2450.source_current", "Source current", "uA", (-1.05e6, 1.05e6),
+                     setter("I"), lambda: state["I"]))
+    reg.add(Settable("k2450.output", "Output", "", (0, 1), setter("out"),
+                     lambda: state["out"]))
+    r_of_t = lambda: 1000.0 * (1 + 0.004 * (state["T"] - 25.0))      # ohm
+    reg.add(Gettable("k2450.voltage", "Voltage", "V",
+                     lambda: state["out"] * state["I"] * 1e-6 * r_of_t()))
+    reg.add(Gettable("k2450.resistance", "Resistance V/I", "ohm", r_of_t))
+    reg.add(Gettable("tc200.measured_temperature", "Temperature", "C",
+                     lambda: state["T"]))
+    recipe = Recipe.load(RECIPES / "transport_iv_temperature.yaml")
+    assert recipe.validate(reg) == []
+    ds = run(recipe, reg, created_iso="t")
+    assert dict(ds.sizes) == {"tc200.temperature": 7, "k2450.source_current": 21}
+    v = ds["k2450.voltage"].values
+    assert v[0, -1] == pytest.approx(0.1)          # 100 uA x 1 kohm, output on
+    assert v[-1, -1] > v[0, -1]                    # hotter = more resistive
+    assert state["out"] == 0 and state["I"] == 0  # after_scan
+
+
+def test_the_transport_example_matches_the_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    import json
+    schema = json.loads((RECIPES.parent / "schema" / "scan.schema.json")
+                        .read_text(encoding="utf-8"))
+    jsonschema.validate(Recipe.load(RECIPES / "transport_iv_temperature.yaml").to_dict(),
+                        schema)
+
+
 # ────────────────────────────────── the GUI ───────────────────────────────────
 
 @pytest.fixture

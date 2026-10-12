@@ -7,13 +7,16 @@ has been stable for ten minutes, focus, then map; repeat at 10, 20 and 50 K".
     from scan_core import api
 
     with api.connect() as lab:              # the services Mission Control runs
-        lab.set("clMag.field", 50)          # blocks until the field has settled
-        lab.wait_until("ppms.temperature_stable", hold_s=600, timeout_s=7200)
-        lab.run("camera.autofocus")         # waits until done; raises if it failed
+        lab.set("magnet.field", 50)         # blocks until the field has settled
+        lab.wait_until("cryostat.temperature_stable", hold_s=600, timeout_s=7200)
+        lab.run("microscope.autofocus")     # waits until done; raises if it failed
         for t in [5, 10, 20, 50]:
-            lab.set("ppms.temperature", t)
+            lab.set("cryostat.temperature", t)
             ds = lab.scan("recipes/field_map.yaml", name=f"map_{t}K")
-        v = lab.get("hf2.r1")               # one fresh reading
+        v = lab.get("lockin.r1")            # one fresh reading
+
+(The ids are "<module>.<parameter>" of whatever is connected:
+`lab.registry.settables()` lists them.)
 
 Nothing in here is a second copy of the suite. A script uses the SAME pieces
 the GUI uses: the registry built from every module's `describe` (lab.py), the

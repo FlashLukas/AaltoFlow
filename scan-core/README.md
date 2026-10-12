@@ -129,24 +129,28 @@ the Data tab.
 
 ![catalogue tab](../front-panels/suite-catalogue.png)
 
-- **Search bar**: free text over name, sample, structure, comment and tags.
-  Every word must match, case does not matter.
+- **Search bar**: free text over name, sample, comment, tags and every
+  run-info field. Every word must match, case does not matter.
 - **Filters**: sample, operator, project, series ("contains"), instrument (a
-  module key such as `ppms`), tags (`fmr, cryo`: the run must carry all of
-  them), a date range (`YYYY-MM-DD`; the "to" day is included).
-- **where**: conditions of the scan and instrument values from the snapshot
-  the suite stores in every file, joined by `and` or `,`:
+  module key such as `cryostat`), tags (`fmr, cryo`: the run must carry all of
+  them), a date range (`YYYY-MM-DD`; the "to" day is included). A run-info
+  field of this PC's own list (`run_info_fields`, see *Run info* below) gets a
+  column and a filter of its own, after *sample*.
+- **where**: conditions of the scan, run-info fields and instrument values
+  from the snapshot the suite stores in every file, joined by `and` or `,`:
 
   ```
-  ppms.temperature between 4 and 6
-  clMag.field == 50 and rf_power > 0
-  ppms.mode == persistent
+  cryostat.temperature between 4 and 6
+  magnet.field == 50 and rf_power > 0
+  cryostat.mode == persistent
+  substrate == GGG
   n_points >= 100
   ```
 
   Operators: `== != < <= > >=`, `between A and B` (inclusive), `contains`.
   A key is a fixed condition (`rf_power`), `n_points` / `duration` / `size`,
-  or `<module>.<value>`: `ppms.temperature` finds `ppms.status.temperature`
+  a run-info field (`substrate`, `thickness_nm`), or `<module>.<value>`:
+  `cryostat.temperature` finds `cryostat.status.temperature`
   too, so you do not need to know how the module nests its snapshot. `==`
   on numbers allows a relative 1e-6, so `field == 50` finds 49.9999999.
 - **Results**: newest first, sortable by any column; a file that could not be
@@ -158,12 +162,13 @@ the Data tab.
 
 **What is indexed**: only the HEADER of each `.nc` file -- its attributes, axis
 names, lengths, ranges and units, detector names, units and stored type, the
-fixed conditions, the run info (sample, structure, operator, comment, project,
-tags, series, setup name, AaltoFlow version) and the instrument snapshots,
+fixed conditions, the run info (sample, operator, comment, project, tags,
+series, setup name, AaltoFlow version, and every field of the lab's own --
+including the `structure` of older files) and the instrument snapshots,
 flattened into searchable values. The measured arrays are never loaded, so a
 large folder indexes quickly. Files from before the run info existed are
 indexed too (they just have no sample or operator); their instruments are
-guessed from the parameter ids (`clMag.field` -> `clMag`).
+guessed from the parameter ids (`magnet.field` -> `magnet`).
 
 **The index is disposable.** It is one file, `catalogue.sqlite`, in the data
 folder. Everything in it comes from the data files; nothing is written into
@@ -266,7 +271,8 @@ apps/
   run_bar.py       # the run pane's pieces: elided line, wrapping bar, pop-up panel
   viewer.py        # starts the data viewer (aaltoview)
   theme.py
-recipes/        # example YAML recipes (2-D, 3-D, XY-raster, repeat)
+recipes/        # example YAML recipes (2-D, 3-D, XY-raster, repeat; transport_iv_temperature
+                #   = a lab-ids example: k2450 current sweep x tc200 temperature)
 examples/       # scripts using scan_core.api (run on the simulator as delivered)
 schema/scan.schema.json
 run_demo.py
@@ -1212,11 +1218,22 @@ recipe against the server's instruments, ...). Details: docs/DEVELOPER_NOTES.md,
 ## Run info, instrument snapshots, and recalling settings
 
 **Run info.** The **Run info** pop-up (its button is in the Measurement
-tab's run bar) holds sample, structure, operator, project, series, tags
-(comma-separated keywords) and comment. They are remembered on this PC between
-scans and launches, and written into every data file as attributes with
-exactly those names (empty ones are left out; the comment is the scan
-definition's comment, one field). `setup_name`, `aaltoflow_version` (the git
+tab's run bar) holds sample, operator, project, series, tags
+(comma-separated keywords) and comment -- the standard fields. They are
+remembered on this PC between scans and launches, and written into every data
+file as attributes with exactly those names (empty ones are left out; the
+comment is the scan definition's comment, one field).
+
+A lab records more than that, and different things: **Fields...** sets the
+list this PC always shows (suite setting `run_info_fields` in
+`suite_local.json`, e.g. `sample, operator, substrate, thickness_nm, tags`),
+and **+ field** adds a field of one's own for the runs at hand (the `x`
+removes it again). A field that is not standard is written as the attribute
+`info_<name>` (`info_substrate = "GGG"`), so it can never overwrite an
+attribute the engine writes; the Catalogue indexes it under its plain name
+(`where substrate == GGG`). Names are lower case: letters, digits, `_`.
+Older files carry `structure` as a plain attribute (a standard field until
+2026-10-12); it is read and indexed like any other field. `setup_name`, `aaltoflow_version` (the git
 commit), `software_scan_core`, `software_python` and `created` are added by
 themselves.
 

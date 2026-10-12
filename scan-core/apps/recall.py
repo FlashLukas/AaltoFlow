@@ -38,9 +38,9 @@ from apps.theme import C
 #: Shown in the dialog: what a recall can and cannot promise.
 HELP_TEXT = (
     "Settings are sent back as plain values. Ones that depend on a calibration "
-    "or on the hardware's state -- a camera's spot calibration, kim's step "
-    "sizes, a stage's zero -- may not mean the same thing now: check the "
-    "instrument after recalling.")
+    "or on the hardware's state -- a calibration table, an open-loop "
+    "actuator's step size, a stage's zero -- may not mean the same thing now: "
+    "check the instrument after recalling.")
 
 ROLE_KEY = QtCore.Qt.UserRole          # (slug, path) on a setting row
 

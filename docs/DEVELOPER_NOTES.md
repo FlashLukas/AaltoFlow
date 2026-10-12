@@ -755,6 +755,11 @@ quantity from the module's descriptor -- there is no setting and no UI for it:
   `snapshot_<slug>` JSON flattened to dotted keys (`ppms.status.temperature`),
   lists of up to 32 scalars element by element, at most 2000 values per
   module; a value is numeric where it reads as one (bools as 1/0 + "true").
+  Since schema 2 (2026-10-12) also `run_info(file_id, key, num_value,
+  text_value)`: every run-info field (`run_info.from_attrs`: the standard
+  attrs, every `info_<name>`, an older file's plain `structure`) under its
+  plain name -- `where` terms, the free text (`files.info_text`), the
+  drop-downs (`distinct(dir, "<field>")`) and `search(info={...})` use it.
 - **`where` is parsed, never pasted.** A tokenizer + a tiny grammar (terms
   joined by `and`/`,`; `== != < <= > >=`, `between A and B`, `contains`/`~`)
   produce SQL from FIXED fragments; keys must match a name pattern and every
@@ -1258,6 +1263,36 @@ and as "WARNING: ..." in the summary detail; it is deliberately not in
 `validate()`, so it never blocks Run (Lukas chose "warn", not auto-insert).
 
 ---
+
+### 4i. A suite for any lab, not one rig (2026-10-12)
+
+An audit found places where the "universal" suite still assumed the TR-MOKE
+rig. What changed, and the rule behind each:
+
+- **Launcher profiles.** The only BUILT-IN chip is *Full suite*
+  (`DEFAULT_PROFILES = []` in `mission_control.py`). A setup's chips live in
+  `mission-control/profiles.json` (Edit..., Save as profile...; carried by
+  Export / Import settings, `suite_common/settings_bundle.py`). A chip none of
+  whose members is installed is HIDDEN; missing members are kept, skipped and
+  listed greyed in the editor.
+- **`build_lab_registry(include, ...)`**: `include` is required (no default
+  instrument) and `describe` is the ONLY source -- the hand-written
+  `_build_clMag` / `_build_smb` / `_BUILDERS`, the `aux_ai_channels` default
+  and `remote_settable` / `remote_gettable` are gone. A service that does not
+  answer `describe` raises InstrumentError pointing at
+  INSTRUMENT_MODULE_GUIDE.md section 6b.
+- **Run info** (`scan_core/run_info.py`): standard fields sample, operator,
+  project, series, tags, comment (attributes of those names, as before; the
+  old `structure` left the list). This PC's list = suite setting
+  `run_info_fields`; extra fields from the panel's "+ field". A non-standard
+  field is written as `info_<name>` so it can never collide with an attribute
+  the engine writes (`status`, `name`, `mask_*` ...); readers use
+  `run_info.from_attrs`. Old files stay readable (plain `structure` is read).
+- **Wording**: user-facing text and comments in the generic code use neutral
+  examples (`cryostat.temperature`, `magnet.field`, `stage`) -- the simulator
+  and the `run_*.py` demos stay MOKE-flavoured on purpose. A non-MOKE example
+  recipe, `scan-core/recipes/transport_iv_temperature.yaml` (k2450 x tc200),
+  is checked against mocked modules in `tests/test_routines.py`.
 
 ## 5. Shared code conventions
 

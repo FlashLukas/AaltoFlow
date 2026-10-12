@@ -114,7 +114,7 @@ class RunInfoCard(QtWidgets.QFrame):
             item = self.grid.takeAt(0)
             w = item.widget()
             if w is not None:
-                w.deleteLater()
+                _drop_widget(w)
             elif item.layout() is not None:
                 _drop_layout(item.layout())
         self.edits, self.boxes, self.tag_btn = {}, {}, None
@@ -402,7 +402,16 @@ def _drop_layout(lay) -> None:
     while lay.count():
         item = lay.takeAt(0)
         if item.widget() is not None:
-            item.widget().deleteLater()
+            _drop_widget(item.widget())
         elif item.layout() is not None:
             _drop_layout(item.layout())
     lay.deleteLater()
+
+
+def _drop_widget(w) -> None:
+    """Take a widget off the screen NOW and delete it later. deleteLater
+    alone leaves it painted where it was until the event loop gets round to
+    it -- the new field would be drawn on top of the old one meanwhile."""
+    w.hide()
+    w.setParent(None)
+    w.deleteLater()

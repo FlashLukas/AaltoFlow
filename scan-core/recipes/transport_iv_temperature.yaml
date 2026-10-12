@@ -1,0 +1,19 @@
+name: transport_iv_temperature
+comment: >
+  Transport measurement, lab ids (not the simulator): I-V curves of a sample
+  at several temperatures. A Keithley 2450 source-measure unit (module k2450,
+  current-source mode) sweeps the current; a Thorlabs TC200 heater controller
+  (module tc200) sets the temperature, and each temperature point waits until
+  the controller reports it reached. Every point records the voltage and V/I
+  from one k2450 acquisition and the measured temperature. Before the scan
+  the output is switched on; after it (also after an Abort or an error) the
+  current goes to 0 and the output off.
+axes:
+  - {type: linear, param: tc200.temperature, start: 25, stop: 85, num: 7}          # outer / slowest
+  - {type: linear, param: k2450.source_current, start: -100, stop: 100, num: 21}   # uA, inner
+detectors: [k2450.voltage, k2450.resistance, tc200.measured_temperature]
+hooks:
+  - {when: before_scan, action: call, args: {set: {k2450.source_current: 0, k2450.output: 1}}}
+  - {when: after_scan,  action: call, args: {set: {k2450.source_current: 0, k2450.output: 0}}}
+output: {dir: ., basename: transport_iv_temperature, format: netcdf}
+settle: {default_timeout_s: 600.0}
