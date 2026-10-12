@@ -353,6 +353,7 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # SETTING limits, not a promise about the readback, so they do not
             # narrow the storage (storage.py, from_descriptor).
             param.storage = Storage.from_descriptor(d, use_bounds=False)
+            param.role = _role(d)
             added.append(pid)
 
         elif kind == "indicator" or (kind == "control" and not d.get("set")):
@@ -376,9 +377,18 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                                      window=_window_from(d, axes, on_warn),
                                      storage=Storage.from_descriptor(d)))
             _attach_stream(param, d, inst, module, streams, on_warn)
+            param.role = _role(d)
             added.append(pid)
 
     return added
+
+
+def _role(d: dict) -> str | None:
+    """A descriptor's optional `role` (guide 6b): what the knob or action IS
+    for -- "autofocus", "stage_x", "stage_y" -- so scan-core can find it
+    without guessing from its id. A non-string is ignored."""
+    r = d.get("role")
+    return r.strip() if isinstance(r, str) and r.strip() else None
 
 
 def _resolution(d: dict) -> float | None:
@@ -821,6 +831,7 @@ def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:
     # kept for the scan server's get_registry (registry_wire.py): a watcher
     # shows how a routine step waits for this action
     act.wait = dict(d["wait"]) if isinstance(d.get("wait"), dict) else None
+    act.role = _role(d)
     return act
 
 

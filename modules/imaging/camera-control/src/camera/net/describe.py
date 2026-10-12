@@ -39,7 +39,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, help="", wait=None, stream=None):
+       settle=None, args=None, danger=False, help="", wait=None, stream=None,
+       role=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -51,7 +52,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("help", help), ("wait", wait), ("stream", stream)):
+                 ("help", help), ("wait", wait), ("stream", stream),
+                 ("role", role)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -494,8 +496,12 @@ def build_manifest(brain) -> dict:
         # is gotcha #17: a frame from before the request also says "not
         # running". Tracking + stabiliser pause during the run (see
         # Camera._do_autofocus).
+        # `role: autofocus` (guide 6b) is how scan-core finds THE autofocus
+        # of a setup without knowing the camera's name: an old recipe's
+        # built-in autofocus hook is translated into a routine step running
+        # this action, and the scout pass warns when none runs before it.
         _p("autofocus", "Find focus", "action", "action", group="Focus",
-           order=100,
+           order=100, role="autofocus",
            wait={"target_key": "af_id",
                  "ready": {"policy": "adopt_then_flag", "setpoint_key": "af_id",
                            "flag_key": "af_running", "invert": True},

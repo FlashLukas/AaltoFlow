@@ -198,7 +198,19 @@ class Recipe:
 
     # ---- (de)serialization ------------------------------------------------
     @classmethod
-    def from_dict(cls, d: dict) -> "Recipe":
+    def from_dict(cls, d: dict, registry=None) -> "Recipe":
+        """A recipe from its dict. With a `registry`, what an old recipe said
+        by name is translated by role at once (migrate_roles); a problem
+        there raises ValueError. Without one, validate() does it later."""
+        r = cls._from_dict(d)
+        if registry is not None:
+            errs = r.migrate_roles(registry)
+            if errs:
+                raise ValueError("; ".join(errs))
+        return r
+
+    @classmethod
+    def _from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
                                    "hooks", "output", "settle", "window",
                                    "scout", "mask", "diagonal")
@@ -223,12 +235,12 @@ class Recipe:
         return d
 
     @classmethod
-    def load(cls, path: str | Path) -> "Recipe":
+    def load(cls, path: str | Path, registry=None) -> "Recipe":
         # encoding="utf-8" explicitly: without it Windows reads with its code
         # page (cp1252), a "—" in a comment comes back as "â€”", and that
         # garbled text is then written into every measurement file made from it.
         with open(path, encoding="utf-8") as fh:
-            return cls.from_dict(yaml.safe_load(fh))
+            return cls.from_dict(yaml.safe_load(fh), registry=registry)
 
     def save(self, path: str | Path) -> None:
         with open(path, "w", encoding="utf-8") as fh:
@@ -238,9 +250,22 @@ class Recipe:
         return json.dumps(self.to_dict())
 
     # ---- validation + compilation ----------------------------------------
+    def migrate_roles(self, registry) -> list[str]:
+        """Translate what an OLD recipe said by NAME into what the connected
+        modules declare by ROLE. Today one thing: the built-in `autofocus`
+        hook (until 2026-10-12) becomes a `call` routine running the action
+        whose describe says `role: autofocus` (hooks.migrate_builtin_autofocus).
+        Changes the recipe IN PLACE (a definition saved again says `call`).
+        Returns the problems -- an old hook with no such action connected is
+        refused, never run without its focusing. validate() and the engine
+        call this first; Recipe.from_dict/load do when given a registry."""
+        from .hooks import migrate_builtin_autofocus
+        self.hooks, errs = migrate_builtin_autofocus(self.hooks, registry)
+        return errs
+
     def validate(self, registry) -> list[str]:
         """Return a list of human-readable problems ([] means valid)."""
-        errs: list[str] = []
+        errs: list[str] = self.migrate_roles(registry)
         for i, ax in enumerate(self.axes):
             if isinstance(ax, dict) and "zigzag" in ax:
                 if not isinstance(ax["zigzag"], bool):
@@ -389,7 +414,7 @@ class Recipe:
         refusing up front: the before-scan routine runs first, and a typo found
         only when it fires has already moved the magnet somewhere.
         """
-        from .hooks import ACTIONS, EDGES, MOMENTS, ON_ERROR, describe_trigger
+        from .hooks import ACTIONS, EDGES, LEGACY_AUTOFOCUS, MOMENTS, ON_ERROR, describe_trigger
         errs: list[str] = []
         try:
             dim_names = [d.name for d in self.compile(registry).dims]
@@ -431,15 +456,12 @@ class Recipe:
                     ok = False
                 if not ok:
                     errs.append(f"hook '{name}': every must be a whole number >= 1")
+            if name == LEGACY_AUTOFOCUS:
+                continue                     # reported by migrate_roles()
             if name not in ACTIONS:
                 errs.append(f"hook action {name!r} is not known "
                             f"(one of: {', '.join(sorted(ACTIONS))})")
                 continue
-            if name == "autofocus":
-                from .hooks import find_autofocus
-                if find_autofocus(registry) is None:
-                    errs.append(f"{describe_trigger(h)}: autofocus, but no module here "
-                                f"offers an autofocus action (is the camera connected?)")
             from .hooks import STEP_KINDS, routine_steps, step_problems
             if name in STEP_KINDS:
                 # a generic step written as a hook of its own: the same as a

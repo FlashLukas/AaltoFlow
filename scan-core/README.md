@@ -423,6 +423,14 @@ hooks:
 - In the Scan Builder: select a parameter, **+ Before** / **+ After**,
   and pick the action in the ROUTINES card. Other hooks in a loaded file are
   kept when it is saved again.
+- scan-core names no instrument. An action that plays a known part declares a
+  **`role`** in `describe` (the camera's Find focus says `role: autofocus`),
+  and `registry.actions_with_role("autofocus")` finds it. The OLD built-in
+  hook `{action: autofocus}` (until 2026-10-12) is no longer an action: a
+  recipe that still has it is translated into `{action: call, args: {action:
+  <the action with role autofocus>}}` when it is validated (or loaded with
+  `Recipe.load(path, registry=...)`), and refused with a clear message when no
+  connected module declares that role.
 
 **During the scan** (the THROUGHOUT column, **+ New**): autofocus at the start of
 every row, a reference every 100 points.

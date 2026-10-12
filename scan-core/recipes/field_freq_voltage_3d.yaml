@@ -6,6 +6,6 @@ axes:
   - {type: linear, param: rf_freq,  start: 800, stop: 2500, num: 61}
 detectors: [lockin_r]
 hooks:
-  - {when: every_n_points, n: 200, action: autofocus}   # demo: periodic action
+  - {when: every_n_points, n: 200, action: call, args: {action: sim_autofocus}}   # demo: periodic action
 output: {dir: ., basename: field_freq_voltage_cube, format: netcdf}
 settle: {default_timeout_s: 20.0}

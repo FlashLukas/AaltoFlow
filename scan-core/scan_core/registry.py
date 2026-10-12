@@ -44,6 +44,11 @@ class Parameter:
     #: the module's `ramp` block in describe): a fly scan can then fly it --
     #: field, frequency, power -- not only a stage. None = it can only be SET.
     ramp = None
+    #: What this parameter IS for, when the module says so (describe `role`,
+    #: 2026-10-12): "stage_x" / "stage_y" (the navigator's default pair),
+    #: ... -- a name the coordinator can look for instead of guessing from
+    #: the id. None = the module does not say.
+    role = None
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
@@ -419,6 +424,11 @@ class Action:
     """
 
     kind = "action"
+    #: What the action IS for (describe `role`, 2026-10-12): "autofocus" is
+    #: the one scan-core looks for (an old recipe's built-in autofocus hook
+    #: is translated to a routine step running the action with this role).
+    #: None = the module does not say.
+    role = None
     #: the module's describe `wait` block (how a routine waits for it), or
     #: None; informative -- run() already blocks. Sent by get_registry.
     wait = None
@@ -507,6 +517,16 @@ class Registry:
 
     def get_action(self, aid: str) -> Action | None:
         return self._actions.get(aid)
+
+    def actions_with_role(self, role: str) -> list[Action]:
+        """Every action whose module declared this describe `role`, in the
+        order they were added (e.g. "autofocus": the camera's Find focus)."""
+        return [a for a in self._actions.values() if getattr(a, "role", None) == role]
+
+    def params_with_role(self, role: str) -> list[Parameter]:
+        """Every parameter whose module declared this describe `role`
+        (e.g. "stage_x")."""
+        return [p for p in self._params.values() if getattr(p, "role", None) == role]
 
 
 # ───────────────────────────── simulated system ───────────────────────────────
@@ -960,7 +980,8 @@ def build_sim_registry() -> Registry:
 
     reg.add_action(Action("sim_autofocus", "Autofocus (simulated)", s.autofocus,
                           help="Stands in for camera.autofocus: waits 50 ms. For "
-                               "trying a THROUGHOUT routine without the rig."))
+                               "trying a THROUGHOUT routine without the rig.")
+                   ).role = "autofocus"     # what the camera declares in describe
 
     # An action WITH ARGUMENTS (2026-10-10), standing in for the camera's
     # "Find focus at AF position": a routine step's Advanced options can be

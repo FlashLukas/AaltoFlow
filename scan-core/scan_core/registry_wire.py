@@ -93,7 +93,8 @@ def _settable(p) -> dict:
             "can_send": bool(getattr(p, "can_send", False)),
             "storage": _storage(getattr(p, "storage", None)),
             "stream": _stream(p),
-            "ramp": _ramp(getattr(p, "ramp", None))}
+            "ramp": _ramp(getattr(p, "ramp", None)),
+            "role": getattr(p, "role", None)}
 
 
 def _gettable(p) -> dict:
@@ -109,7 +110,8 @@ def _gettable(p) -> dict:
                      for a in (getattr(p, "axes", None) or [])],
             "acquire": {"group": acq.group} if acq is not None else None,
             "window": _plain(getattr(p, "window", None)),
-            "stream": _stream(p)}
+            "stream": _stream(p),
+            "role": getattr(p, "role", None)}
 
 
 def _action(a) -> dict:
@@ -118,7 +120,8 @@ def _action(a) -> dict:
             "takes_args": bool(getattr(a, "takes_args", False)),
             "takes_context": bool(getattr(a, "_takes_context", False)),
             # the module's `wait` block (how a routine waits for it to finish)
-            "wait": _plain(getattr(a, "wait", None))}
+            "wait": _plain(getattr(a, "wait", None)),
+            "role": getattr(a, "role", None)}
 
 
 def _plain(obj):
@@ -258,6 +261,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
         p.resolution = d.get("resolution")
         p.storage = _storage_from(d.get("storage"))
         p.ramp = _ramp_from(d.get("ramp"))
+        p.role = d.get("role") if isinstance(d.get("role"), str) else None
         _attach_stream(p, d, streams)
         reg.add(p)
     for d in wire.get("gettables") or []:
@@ -274,6 +278,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
                      if isinstance(acq, dict) else None,
                      window=d.get("window") if isinstance(d.get("window"), dict) else None,
                      storage=_storage_from(d.get("storage")))
+        g.role = d.get("role") if isinstance(d.get("role"), str) else None
         _attach_stream(g, d, streams)
         reg.add(g)
     for d in wire.get("actions") or []:
@@ -290,6 +295,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
         a.takes_args = bool(d.get("takes_args"))
         a._takes_context = bool(d.get("takes_context"))
         a.wait = d.get("wait") if isinstance(d.get("wait"), dict) else None
+        a.role = d.get("role") if isinstance(d.get("role"), str) else None
         reg.add_action(a)
     return reg
 
@@ -298,8 +304,9 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
 _PARAM_ATTRS = ("label", "unit", "limits", "integer", "resolution", "storage", "ramp",
                 "stream", "stream_channel", "stream_scale", "stream_rate_hz", "axes",
                 "dtype", "acquire",
-                "window", "_send")
-_ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait")
+                "window", "_send", "role")
+_ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait",
+                 "role")
 
 
 def _shape(reg) -> list:

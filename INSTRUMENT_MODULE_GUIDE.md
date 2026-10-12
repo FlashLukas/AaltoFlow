@@ -497,6 +497,22 @@ constantly and mean nothing.
 `read_path` is a **list**, not a dotted string: AUX channel names contain `/` and
 ids may contain `.`, so a dotted path could not be split back apart.
 
+### Roles and links -- what a knob IS for (optional, 2026-10-12)
+
+scan-core is a generic coordinator: it must never look an instrument up by its
+name ("camera.autofocus", "position_x"). When the coordinator needs "the
+autofocus of this setup" or "the two stage axes", the module SAYS so with
+optional fields on the descriptor:
+
+| field | on | meaning |
+|---|---|---|
+| `"role": "autofocus"` | an action with a `wait` block | THE autofocus of the setup. An old recipe's built-in `autofocus` hook is translated into a routine step running it; the scout pass warns when none runs before it. Declare it on one action per module. |
+| `"role": "stage_x"` / `"stage_y"` | a length control | the navigator offers this pair first as its X / Y. |
+
+`role` is a plain string; scan-core reads it with
+`registry.actions_with_role(role)` / `registry.params_with_role(role)`. A
+module that declares none still works -- it just is not found by role.
+
 ### The type of a detector is how scan-core STORES it (2026-10-04)
 
 scan-core picks the storage of every recorded value from its descriptor

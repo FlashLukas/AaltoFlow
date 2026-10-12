@@ -1257,6 +1257,29 @@ routine running an action whose id contains "autofocus" (or the old
 and as "WARNING: ..." in the summary detail; it is deliberately not in
 `validate()`, so it never blocks Run (Lukas chose "warn", not auto-insert).
 
+### 4i. scan-core names no instrument: roles and links from describe (2026-10-12)
+
+An audit found places where the "universal" scan-core still assumed the
+TR-MOKE / XY rig (a camera called `camera`, stages called `position_x`).
+The rule now: when the coordinator needs to know what a knob IS for, the
+MODULE says so in `describe` (guide 6b, "Roles and links"); scan-core never
+looks an instrument up by its id.
+
+- **`role` on an action or a parameter.** `Parameter.role` / `Action.role`
+  (manifest.py `_role`, carried over the scan server's get_registry);
+  `Registry.actions_with_role(role)` / `params_with_role(role)`.
+  The camera's Find focus declares `role: autofocus`.
+- **The built-in `autofocus` hook action is gone.** It found
+  `camera.autofocus` by name. An old recipe's `{action: autofocus}` is
+  translated by `Recipe.migrate_roles(registry)` (hooks
+  `migrate_builtin_autofocus`) into `{action: call, args: {action: <id of the
+  action with role autofocus>}}` -- in place, so a definition saved again says
+  `call` -- and refused with a clear message when no connected module
+  declares the role. `validate()` and so `engine.run` call it first;
+  `Recipe.from_dict(d, registry=)` / `Recipe.load(path, registry=)` do it at
+  once (ValueError on a problem). Without a registry the old hook stays until
+  validate.
+
 ---
 
 ## 5. Shared code conventions

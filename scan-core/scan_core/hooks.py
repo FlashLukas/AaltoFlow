@@ -1,13 +1,16 @@
 """
 hooks.py — actions bound to a level/cadence of the scan.
 
-This is where the old "AF after inner loop", "AF every n iterations",
-"wait before measure", "phase-lock at f change" checkboxes go — but as a small
-open registry of named actions instead of hardcoded flags. A hook in a recipe:
+Things to do at a given moment of a scan ("every n points", "at the start of
+every sweep of an axis", "before the scan") -- a small open registry of named
+actions instead of hardcoded flags. What a module can DO (focus, take a
+reference, save a picture) is never named here: it comes from the module's
+describe as a registry action and is run by a `call` routine. A hook in a
+recipe:
 
-    {when: "every_n_points", n: 25, action: "autofocus"}
     {when: "before_point",           action: "wait_ms", args: {ms: 200}}
-    {when: "after_axis", axis: "field", action: "autofocus"}
+    {when: "every_n_points", n: 25, action: "call",
+     args: {action: vna.take_reference}}
 
 and a ROUTINE (the `call` action), which drives the registry itself:
 
@@ -20,14 +23,15 @@ or, when a routine does SEVERAL things in a given order (2026-09-25), the same
 action, and they run exactly in the order written:
 
     {when: before_scan, action: call, args: {steps: [
-        {action: camera.autofocus},
-        {action: camera.save_scan_pattern},
+        {set: {kepco.current: 0}},
+        {action: vna.take_reference},
         {action: camera.save_picture}]}}
 
-and a routine THROUGHOUT the scan (2026-09-24), e.g. autofocus once per row:
+and a routine THROUGHOUT the scan (2026-09-24), e.g. one action at the start
+of every sweep of an axis (a re-focus, a re-reference, a dark frame):
 
     {when: each_sweep, axis: x, edge: start, every: 1, on_error: continue,
-     action: call, args: {action: camera.autofocus}}
+     action: call, args: {action: <module>.<action>}}
     {when: every_n_points, n: 100, action: call, args: {action: vna.take_reference}}
 
 `when` values: before_scan, after_scan, before_point, after_point,
@@ -177,38 +181,56 @@ def _wait_ms(ctx, ms: float = 100.0):
     time.sleep(float(ms) / 1000.0)
 
 
-def find_autofocus(registry) -> str | None:
-    """The id of the registry's autofocus ACTION, or None.
+#: The hook action the OLD recipes used for "autofocus here" (until
+#: 2026-10-12). It looked the camera up BY NAME ("camera.autofocus", or any
+#: action whose id ended in autofocus), which tied a universal coordinator to
+#: one rig. It is no longer an action: migrate_builtin_autofocus() turns it
+#: into an ordinary routine step running the action whose module declared
+#: describe `role: autofocus`.
+LEGACY_AUTOFOCUS = "autofocus"
 
-    `camera.autofocus` first (the camera module, 2026-09-24: it waits for its
-    own numbered run and raises if the run failed), then any action named
-    autofocus under another prefix (a second camera, the simulator's
-    `sim_autofocus`)."""
-    get_action = getattr(registry, "get_action", None)
-    actions = getattr(registry, "actions", None)
-    if get_action is None or actions is None:
+
+def role_action(registry, role: str) -> str | None:
+    """The id of the registry's action with this describe `role`, or None.
+
+    Several (two cameras): the first one added; the builder lets the user
+    pick another explicitly in a routine step."""
+    find = getattr(registry, "actions_with_role", None)
+    if find is None:
         return None
-    if get_action("camera.autofocus") is not None:
-        return "camera.autofocus"
-    for a in actions():
-        if a.id == "autofocus" or a.id.endswith((".autofocus", "_autofocus")):
-            return a.id
-    return None
+    acts = find(role)
+    return acts[0].id if acts else None
 
 
-@action("autofocus")
-def _autofocus(ctx, **kw):
-    """{action: autofocus} = run the registry's autofocus action and WAIT for it.
+def migrate_builtin_autofocus(hooks, registry) -> tuple[list, list[str]]:
+    """Old `{action: autofocus}` hooks -> `{action: call, args: {action: <id>}}`.
 
-    This was a stub that only logged, so an older recipe asking for autofocus
-    every 200 points silently never focused. It is now the same thing as
-    {action: call, args: {action: camera.autofocus}}, which is what the Scan
-    Builder writes; validate() refuses it when nothing offers an autofocus.
-    """
-    aid = find_autofocus(ctx["registry"])
-    if aid is None:
-        raise KeyError("autofocus: no autofocus action here (is the camera connected?)")
-    _call(ctx, action=aid)
+    <id> = the action whose module declares `role: autofocus` (the camera's
+    Find focus). Returns (hooks, problems): the hooks with every old one
+    translated (other hooks untouched, the same objects), and one message
+    per hook that could NOT be translated because no connected module
+    declares that role -- the recipe is then refused rather than run without
+    the focusing it asked for. The hook's moment, cadence and on_error are
+    kept; old `args` (the stub took none) are dropped."""
+    out, errs = [], []
+    for h in hooks or []:
+        if not (isinstance(h, dict) and h.get("action") == LEGACY_AUTOFOCUS):
+            out.append(h)
+            continue
+        aid = role_action(registry, "autofocus")
+        if aid is None:
+            errs.append(f"{describe_trigger(h)}: the old built-in 'autofocus' hook needs "
+                        f"a module whose describe declares an action with role "
+                        f"'autofocus' (e.g. the camera's Find focus), and none is "
+                        f"connected; connect it, or replace the hook by a routine "
+                        f"step that runs an action")
+            out.append(h)
+            continue
+        new = {k: v for k, v in h.items() if k != "args"}
+        new["action"] = "call"
+        new["args"] = {"action": aid}
+        out.append(new)
+    return out, errs
 
 
 @action("settle_extra")

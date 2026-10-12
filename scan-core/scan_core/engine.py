@@ -24,7 +24,7 @@ import xarray as xr
 
 from .errors import (RoutineError, ScanAborted, ScanFault, ScanStopped, SkipPoint,
                      format_faults)
-from .hooks import STEP_KINDS, find_autofocus, routine_steps, run_hooks
+from .hooks import STEP_KINDS, routine_steps, run_hooks
 from .repeat import average_index, collapse, pace
 from .snapshot import (ATTR_END, MISSING, diff_config, path_text, provenance,
                        snapshot_attrs)
@@ -174,10 +174,6 @@ def _used_ids(recipe, compiled, registry) -> set:
                         ids.add(step[1])
             except ValueError:
                 pass
-        elif h.get("action") == "autofocus":
-            aid = find_autofocus(registry)
-            if aid:
-                ids.add(aid)
     w = getattr(recipe, "window", None)
     if isinstance(w, dict):
         # the resonance window READS the field (and angle) at every point: a

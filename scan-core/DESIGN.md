@@ -24,7 +24,7 @@ axes:                          # ordered OUTER → INNER, no length limit
   - {type: linear, param: rf_freq, start: 800, stop: 2500, num: 81}
 detectors: [lockin_r, lockin_phi]   # gettables recorded at every point
 hooks:                              # actions bound to a level/cadence
-  - {when: every_n_points, n: 200, action: autofocus}
+  - {when: every_n_points, n: 200, action: call, args: {action: sim_autofocus}}
 output: {dir: ., basename: field_freq_map, format: netcdf}
 ```
 
