@@ -606,6 +606,17 @@ def _scalar(value, key):
             f"not a single value; the manifest must name an `index` for it")
     return value
 
+def _matches(got, target, tol) -> bool:
+    """Has the service adopted `target`? Numbers within `tol`; an enum
+    option or text EXACTLY (2026-10-12: enum knobs are scannable) -- a
+    float() of "AC" would crash the wait instead of answering it."""
+    from .registry import same_value
+    try:
+        return same_value(got, target, float(tol))
+    except (TypeError, ValueError):
+        return False
+
+
 def adopt_then_flag(setpoint_key: str, flag_key: str, invert: bool = False,
                     tol: float = 1e-6):
     """Settle predicate: adopt our setpoint FIRST, then trust the done-flag.
@@ -632,7 +643,7 @@ def adopt_then_flag(setpoint_key: str, flag_key: str, invert: bool = False,
     def make(target: float):
         def settled(st: dict) -> bool:
             sp = _scalar(_lookup(st, setpoint_key), setpoint_key)
-            if sp is None or abs(float(sp) - float(target)) > tol:
+            if sp is None or not _matches(sp, target, tol):
                 return False              # not adopted yet -> status is stale
             flag = bool(_scalar(_lookup(st, flag_key), flag_key))
             return (not flag) if invert else flag
@@ -653,7 +664,7 @@ def echoes(status_key: str, tol: float = 1e-6):
     def make(target: float):
         def settled(st: dict) -> bool:
             v = _scalar(_lookup(st, status_key), status_key)
-            return v is not None and abs(float(v) - float(target)) <= tol
+            return v is not None and _matches(v, target, tol)
         return settled
     return make
 

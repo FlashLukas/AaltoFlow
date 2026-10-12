@@ -1255,12 +1255,84 @@ never writes the scan-wide key. The file gets `zigzag = 1` on each coordinate
 that really zig-zagged (`axis_attrs`), and `fly_zigzag` on a fly coordinate
 is the fly axis's own flag.
 
-Autofocus before a scout: `scout.autofocus_warning(recipe)` returns
-`scout.NO_AUTOFOCUS_WARNING` for a MEASURED scout pass with no before_scan
-routine running an action whose id contains "autofocus" (or the old
-`{action: autofocus}` hook). The builder shows it in the SCOUT PASS head line
+Autofocus before a scout: `scout.autofocus_warning(recipe, registry)` returns
+`scout.NO_AUTOFOCUS_WARNING` for a MEASURED scout pass when the registry has
+an action with describe `role: autofocus`, no before_scan routine runs one
+(or the old `{action: autofocus}` hook), and focus matters -- every scouted
+axis is a length-unit knob (`units.is_length_unit`) or the scout detector
+declares `focus_sensitive: true` (section 4i; until 2026-10-12 it matched
+"autofocus" in action ids). The builder shows it in the SCOUT PASS head line
 and as "WARNING: ..." in the summary detail; it is deliberately not in
 `validate()`, so it never blocks Run (Lukas chose "warn", not auto-insert).
+
+### 4i. scan-core names no instrument: roles and links from describe (2026-10-12)
+
+An audit found places where the "universal" scan-core still assumed the
+TR-MOKE / XY rig (a camera called `camera`, stages called `position_x`).
+The rule now: when the coordinator needs to know what a knob IS for, the
+MODULE says so in `describe` (guide 6b, "Roles and links"); scan-core never
+looks an instrument up by its id.
+
+- **`role` on an action or a parameter.** `Parameter.role` / `Action.role`
+  (manifest.py `_role`, carried over the scan server's get_registry);
+  `Registry.actions_with_role(role)` / `params_with_role(role)`.
+  The camera's Find focus declares `role: autofocus`.
+- **The built-in `autofocus` hook action is gone.** It found
+  `camera.autofocus` by name. An old recipe's `{action: autofocus}` is
+  translated by `Recipe.migrate_roles(registry)` (hooks
+  `migrate_builtin_autofocus`) into `{action: call, args: {action: <id of the
+  action with role autofocus>}}` -- in place, so a definition saved again says
+  `call` -- and refused with a clear message when no connected module
+  declares the role. `validate()` and so `engine.run` call it first;
+  `Recipe.from_dict(d, registry=)` / `Recipe.load(path, registry=)` do it at
+  once (ValueError on a problem). Without a registry the old hook stays until
+  validate.
+- **`focus_sensitive: true` on a detector** (`Parameter.focus_sensitive`):
+  its reading follows focus. The scout's autofocus warning (4h) uses it and
+  the units of the scouted axes -- never the word "autofocus" in an id.
+- **Navigator stages** (`scan_core/navigator.py`): `stage_pairs(registry)`
+  returns EVERY pair of length-unit settables (`units.is_length_unit`), ranked
+  `role` (describe `role: stage_x` / `stage_y`; kim, piezo, stage and the
+  simulator's pos_x/pos_y declare it) > `name` (same module, `..._x`/`..._y`)
+  > `other` (any two in the same unit factor, each unordered pair once).
+  `StagePair.rank` says which; `length_settables` lists the candidates and
+  `make_pair(x, y)` builds the user's own pick (ValueError on mixed units).
+- **Fly speed control** (`flyscan.find_speed_param`): describe
+  `speed_param` on the moving knob (`Parameter.speed_param`, prefixed by
+  manifest.py) wins; the old guess (same module, `<unit>/s`, same axis
+  letter) is only the fallback and now accepts any rate of the unit.
+  `flyscan.speed_factor(ax, registry)` converts the fly speed (knob unit per
+  second, as `speed` is always written) into the control's own unit
+  (`units.rate_factor`); `validate_fly` checks the CONVERTED value against
+  the control's limits and refuses a unit that is no rate of the knob's.
+  User-facing fly messages say "bins" and "positioner" (not pixels / stage);
+  the per-bin count's file label is "samples per bin".
+- `scan_core/units.py` is the one place for unit facts: length detection
+  (exact um factors), unit families, rate conversion (/s, /min, /h).
+- **Non-numeric axes.** `Settable.dtype` ("float"/"int"/"bool" numeric,
+  "enum"/"string" not -- `registry.NON_NUMERIC`) and `Settable.options`;
+  manifest.py registers enum/string CONTROLS as settables (until 2026-10-12
+  they were read-only Gettables, "Settable is numeric by design"). Their
+  limits are (-inf, inf); `Settable._clamped` returns `option(value)` instead
+  of clamping. `recipe.native_values` keeps text setpoints as an object
+  array; every `registry.get(pid).set(float(v))` in engine / flyscan / scout
+  is now `.set(v)` (Settable converts numbers itself). The settle
+  predicates compare with `instrument._matches` -> `registry.same_value`
+  (numbers within tol, anything else exactly, 3 == "3"). A text coordinate
+  is written as `str` objects (`engine._coord_values`, h5netcdf vlen
+  strings); a text condition as a scalar text coordinate. `registry_wire`
+  carries dtype + options. Bools stay numeric 0/1.
+- **`raster` -> `grid`.** The 2-D axis entry is a grid of ANY two knobs, not
+  "spatial XY": `type: grid`. `recipe.upgrade_axes` translates `raster` in
+  `Recipe.from_dict` and `__post_init__` (so it is never written again);
+  the axis helpers (`_axis_type`) also read a lone `raster` dict, because
+  the builder's rows and the axis preview pass dicts that never went through
+  a Recipe. Dim kinds are `grid_x` / `grid_y`.
+- **Settle timeout.** `settle.default_timeout_s` (20) is written into every
+  definition but read by nothing (checked 2026-10-12); a knob waits for its
+  module's describe `timeout_s`, 60 s when undeclared (manifest.py). Wiring
+  it in would cut every undeclared wait to 20 s in all saved definitions --
+  left for a decision.
 
 ---
 

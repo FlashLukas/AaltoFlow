@@ -137,3 +137,13 @@ def test_describe_offers_autofocus_as_a_waitable_scan_action(system):
     assert w["check"] == {"key": "af_error", "equals": "OK"}
     assert w["timeout_s"] == brain.cfg.autofocus.scan_timeout_s
     assert d["af_id"]["read_path"] == ["af_id"]
+
+
+def test_find_focus_declares_role_autofocus(system):
+    """scan-core finds THE autofocus by describe `role`, not by name
+    (2026-10-12): exactly one action says so, and it is the waitable one."""
+    brain, *_ = system
+    params = build_manifest(brain)["parameters"]
+    af = [p for p in params if p.get("role") == "autofocus"]
+    assert [p["id"] for p in af] == ["autofocus"]
+    assert af[0]["kind"] == "action" and af[0].get("wait")

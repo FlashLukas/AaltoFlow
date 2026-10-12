@@ -419,22 +419,32 @@ def _sum_by_pixel(idx, arr, npix):
 
 
 def find_speed_param(registry, pid: str) -> str | None:
-    """The settable that sets the speed of position `pid`, if one is obvious.
+    """The settable that sets the speed of positioner `pid`, or None.
 
-    Matched by the module and axis of the position and a unit of "<unit>/s":
-    kim.position_x (um) -> kim.velocity_x (um/s); the simulator's pos_x ->
-    stage_speed. Used by the Scan Builder to fill in `speed_param`; a recipe
-    always names it explicitly, so a guess never drives anything unseen.
+    1. The module SAYS so: describe `speed_param: <id of its speed control>`
+       on the position knob (guide 6b; Parameter.speed_param, prefixed like
+       every id). Used whenever that control is in the registry.
+    2. Fallback, for a module that does not declare it yet: a settable of
+       the SAME module whose unit is a rate of the position's unit
+       (units.rate_factor: um -> um/s, nm/min, mm/h ...), the one with the
+       same axis letter first (position_x -> velocity_x).
+
+    Used by the Scan Builder to fill in `speed_param`; a recipe always names
+    it explicitly, so a guess never drives anything unseen.
     """
     p = registry.get(pid)
     if p is None:
         return None
+    linked = getattr(p, "speed_param", None)
+    if linked and registry.get(linked) is not None:
+        return linked
+    from .units import rate_factor
     unit = getattr(p, "unit", "") or ""
     module = pid.rsplit(".", 1)[0] if "." in pid else ""
     tail = pid.rsplit("_", 1)[-1] if "_" in pid else ""
     best = None
     for q in registry.settables():
-        if q.id == pid or (getattr(q, "unit", "") or "") != f"{unit}/s":
+        if q.id == pid or rate_factor(unit, getattr(q, "unit", "") or "") is None:
             continue
         qmod = q.id.rsplit(".", 1)[0] if "." in q.id else ""
         if qmod != module:
@@ -447,18 +457,36 @@ def find_speed_param(registry, pid: str) -> str | None:
     return best
 
 
+def speed_factor(ax: dict, registry) -> float | None:
+    """The multiplier from the fly axis's pace (the MOVING knob's unit per
+    SECOND -- how `speed` is always written) to a value of its
+    `speed_param`, in that control's own unit: 1 for um -> um/s, 60000 for
+    um -> nm/min, 60 for mT -> mT/min (units.rate_factor). None when there is
+    no speed_param, or its unit is not a rate of the moving knob's unit
+    (validate_fly reports that)."""
+    sp = ax.get("speed_param")
+    if not sp or registry is None:
+        return None
+    q = registry.get(sp)
+    moving = registry.get(ax.get("move") or ax.get("param"))
+    if q is None or moving is None:
+        return None
+    from .units import rate_factor
+    return rate_factor(getattr(moving, "unit", "") or "", getattr(q, "unit", "") or "")
+
+
 def ramp_of(ax: dict, registry):
     """The RampSpec a fly axis flies with, or None for the STAGE path.
 
     Two ways to fly, chosen by what the axis names (2026-10-09):
-      * the STAGE path (unchanged since 2026-09-27): a position knob that
-        moves at a speed of its own -- `speed_param` sets that speed and the
-        ordinary set is the move; or `move` flies another stage in this
-        parameter's coordinates (the camera's);
+      * the POSITIONER path (since 2026-09-27): a knob that moves at a speed
+        of its own -- `speed_param` sets that speed and the ordinary set is
+        the move; or `move` flies another positioner in this parameter's
+        coordinates (a coordinate measured by something else);
       * the RAMP path: any knob whose module declares a `ramp` block (field,
         frequency, ...): the module sweeps it at the row's rate.
     A knob with a ramp block flown with `speed_param` or `move` still takes
-    the stage path: the recipe asked for that mechanism by name.
+    the positioner path: the recipe asked for that mechanism by name.
     """
     if ax.get("speed_param") or ax.get("move"):
         return None
@@ -538,7 +566,7 @@ def validate_fly(recipe, registry) -> list[str]:
     except (TypeError, ValueError):
         num = 0
     if num < 2:
-        errs.append(f"fly axis '{pid}' needs at least 2 pixels (num)")
+        errs.append(f"fly axis '{pid}' needs at least 2 bins (num)")
     if collapse_of(ax) not in COLLAPSE_MODES:
         errs.append(f"fly axis collapse must be 'none' or 'mean', not "
                     f"{ax.get('collapse')!r}")
@@ -567,10 +595,21 @@ def validate_fly(recipe, registry) -> list[str]:
         elif q.kind != "settable":
             errs.append(f"fly axis speed parameter '{sp}' is not settable")
         elif math.isfinite(speed):
-            lo, hi = q.limits
-            if not (lo <= speed <= hi) or speed <= 0:
-                errs.append(f"fly speed {speed:g} is outside the limits of "
-                            f"'{sp}' [{lo:g},{hi:g}]")
+            k = speed_factor(ax, registry)
+            moving = registry.get(ax.get("move") or pid)
+            mu = getattr(moving, "unit", "") or ""
+            if k is None:
+                errs.append(f"fly axis speed parameter '{sp}' is in "
+                            f"'{q.unit}', which is not a rate of '{mu}' "
+                            f"(per s, min or h)")
+            else:
+                lo, hi = q.limits
+                v = speed * k
+                if not (lo <= v <= hi) or v <= 0:
+                    shown = (f"{speed:g} {mu}/s = {v:g} {q.unit}" if k != 1.0
+                             else f"{speed:g}")
+                    errs.append(f"fly speed {shown} is outside the limits of "
+                                f"'{sp}' [{lo:g},{hi:g}]")
     mv = ax.get("move")
     if mv:
         q = registry.get(mv)
@@ -589,7 +628,7 @@ def validate_fly(recipe, registry) -> list[str]:
     elif getattr(q, "stream", None) is None:
         if rb == pid and getattr(registry.get(pid), "kind", "") == "settable":
             errs.append(f"'{rb}' cannot be recorded continuously and cannot "
-                        f"sweep: its module neither streams it (as a stage "
+                        f"sweep: its module neither streams it (as a positioner "
                         f"streams its position) nor declares a `ramp` block "
                         f"for it (a knob it can sweep at a set pace), so it "
                         f"cannot be flown -- step it with a linear axis")
@@ -619,7 +658,7 @@ def validate_fly(recipe, registry) -> list[str]:
             # a pixel of a fly row is the MEAN of the samples that fell in it,
             # and there is no mean of "IDLE" and "BUSY"
             errs.append(f"detector '{det}' is {kind}; a fly scan averages the "
-                        f"samples of each pixel, which needs numbers")
+                        f"samples of each bin, which needs numbers")
         elif getattr(q, "stream", None) is None:
             errs.append(f"detector '{det}' cannot be recorded continuously "
                         f"(its module does not stream it); a fly scan can only "
@@ -630,7 +669,7 @@ def validate_fly(recipe, registry) -> list[str]:
             continue
         when = h.get("when")
         if when in _PER_POINT:
-            errs.append(f"a {when} routine cannot run in a fly scan: the stage "
+            errs.append(f"a {when} routine cannot run in a fly scan: the positioner "
                         f"does not stop at points. Use 'start/end of each "
                         f"sweep' instead (a sweep of the fly axis is one row)")
         if when in ("before_axis", "after_axis") and h.get("axis") == fly_name:
@@ -714,9 +753,9 @@ def sampling_summary(est: dict) -> str:
             parts.append(f"{det} (rate not declared)")
         else:
             parts.append(f"{det} ~{d['per_pixel']:.3g}")
-    return (f"fly: a row takes ~{est['row_s']:.3g} s ({est['pixels']} pixels, "
+    return (f"fly: a row takes ~{est['row_s']:.3g} s ({est['pixels']} bins, "
             f"{est['pixel_s'] * 1e3:.3g} ms each at {est['speed']:g} {est['unit']}); "
-            f"expected samples per pixel: " + (", ".join(parts) or "no streamed detector"))
+            f"expected samples per bin: " + (", ".join(parts) or "no streamed detector"))
 
 
 def fly_warnings(recipe, registry) -> list[str]:
@@ -737,15 +776,15 @@ def fly_warnings(recipe, registry) -> list[str]:
             continue
         if d["rate_hz"] <= 0:
             out.append(f"{det} streams NOTHING at its module's current settings "
-                       f"(rate 0: stopped, or no records) -- every pixel will be empty")
+                       f"(rate 0: stopped, or no records) -- every bin will be empty")
             continue
         unit = est["unit"]
         out.append(
-            f"{det}: ~{per:.2g} samples per pixel expected ({d['rate_hz']:.3g}/s "
-            f"from its module, {est['pixel_s'] * 1e3:.3g} ms per pixel at "
-            f"{est['speed']:g} {unit}) -- pixels will be EMPTY. Fly at <= "
-            f"{d['speed_for_1']:.3g} {unit} for >= 1 per pixel, <= "
-            f"{d['speed_for_3']:.3g} {unit} for >= 3 (or use fewer pixels)")
+            f"{det}: ~{per:.2g} samples per bin expected ({d['rate_hz']:.3g}/s "
+            f"from its module, {est['pixel_s'] * 1e3:.3g} ms per bin at "
+            f"{est['speed']:g} {unit}) -- bins will be EMPTY. Fly at <= "
+            f"{d['speed_for_1']:.3g} {unit} for >= 1 per bin, <= "
+            f"{d['speed_for_3']:.3g} {unit} for >= 3 (or use fewer bins)")
     return out
 
 
@@ -887,13 +926,19 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             orig_speed = float("nan")
     state = {"fly_speed": False}
 
+    # the fly speed in the speed control's OWN unit (nm/min for a pace in
+    # um/s, units.rate_factor); validate_fly refused a unit that does not convert
+    k_speed = speed_factor(ax, registry) or 1.0
+    fly_value = speed * k_speed
+
     def use_speed(value):
-        # 0 is a legitimate speed to go BACK to (the simulator's "instant");
-        # only a speed that could not be read is skipped
+        # `value` is in the speed control's own unit (fly_value, or the speed
+        # it had before). 0 is a legitimate speed to go BACK to (the
+        # simulator's "instant"); only a speed that could not be read is skipped
         if speed_p is None or not math.isfinite(value):
             return
         speed_p.set(value)
-        state["fly_speed"] = (value == speed)
+        state["fly_speed"] = (value == fly_value)
 
     warned = {"lag": False}
 
@@ -990,7 +1035,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                     run_hooks(compiled.hooks, "after_axis", ctx, axis_name=d.name)
                     prev[k] = None            # fired; not again if this row is redone
                 for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[oidx[k]]))
+                    current[pid] = registry.get(pid).set(values[oidx[k]])
                 if changed:
                     run_hooks(compiled.hooks, "before_axis", ctx, axis_name=d.name)
                 prev[k] = oidx[k]
@@ -1008,7 +1053,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 use_speed(orig_speed)
             current[pos_p.id] = approach(a)
         if not state["fly_speed"]:
-            use_speed(speed)
+            use_speed(fly_value)
 
         if ramp is not None:
             # THE RAMP PATH: the module sweeps the knob over the row
@@ -1031,7 +1076,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 if state["fly_speed"]:
                     use_speed(orig_speed)
                 current[pos_p.id] = approach(a)
-                use_speed(speed)
+                use_speed(fly_value)
         current[pos_p.id] = b
         state["rb_end"] = _last_value(chunks, rb)   # where the stream saw it stop
         _bin_into(chunks, rb, params, edges, lag, data, oidx)
@@ -1129,7 +1174,7 @@ def fly_sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
             except ScanAborted:
                 pass                           # sent; not waited for (aborted)
             except Exception as exc:
-                log(f"fly: could not put the stage speed back ({exc})")
+                log(f"fly: could not put the positioner speed back ({exc})")
 
 
 def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
@@ -1223,7 +1268,7 @@ def _fly_one_row(pos_p, target, timeout, groups, should_abort, row, npix,
         if here is not None and abs(here - target) <= tol and resting >= SETTLED_S:
             return True
         if resting >= STALL_S:
-            log(f"fly: the stage stopped at {here if here is not None else '?'} "
+            log(f"fly: the positioner stopped at {here if here is not None else '?'} "
                 f"{getattr(pos_p, 'unit', '')}, short of {target:g}")
             return True
         if now >= t_deadline:
@@ -1357,7 +1402,7 @@ def _ramp_one_row(ramp, a, b, rate, timeout, groups, should_abort, row, npix,
                         or abs(here - b) <= tol or now - done_at >= ARRIVE_S):
                     if (ramp.measured and here is not None and abs(here - b) > tol):
                         log(f"fly: the sweep ended with the reading at {here:g}, "
-                            f"short of {b:g} (more than half a pixel)")
+                            f"short of {b:g} (more than half a bin)")
                     break
             if now >= t_deadline:
                 _stop_ramp(ramp, track, log, "row timed out")
@@ -1542,11 +1587,11 @@ def _stop_stage(pos_p, chunks, rb, log):
             return
     try:
         pos_p.set(here, timeout_s=10.0)
-        log(f"fly: aborted mid-row, stage stopped at {here:g} {pos_p.unit}")
+        log(f"fly: aborted mid-row, positioner stopped at {here:g} {pos_p.unit}")
     except ScanAborted:
         log(f"fly: aborted mid-row, stop sent at {here:g} {pos_p.unit}")
     except Exception as exc:
-        log(f"fly: aborted mid-row, could not stop the stage ({exc})")
+        log(f"fly: aborted mid-row, could not stop the positioner ({exc})")
 
 
 def _joined(chunks, p):
@@ -1632,10 +1677,10 @@ def _count_empty(data, oidx, row, empty, npix, log):
         first = k > 0 and not any(rows.values())
         rows[row] = k
         if first:
-            log(f"fly: WARNING: {det}: {k} of {npix} pixels EMPTY on row {row + 1} "
+            log(f"fly: WARNING: {det}: {k} of {npix} bins EMPTY on row {row + 1} "
                 f"(no sample fell in them; NaN in the data) -- its stream is too "
-                f"slow for this speed and pixel size: fly slower or use fewer "
-                f"pixels. (Further rows are counted and summed up at the end.)")
+                f"slow for this speed and bin size: fly slower or use fewer "
+                f"bins. (Further rows are counted and summed up at the end.)")
 
 
 def _count_missed(chunks, groups, missed, row, log):
@@ -1662,9 +1707,9 @@ def _empty_summary(empty, missed) -> list[str]:
         total = sum(rows.values())
         if total:
             bad = sum(1 for k in rows.values() if k)
-            out.append(f"fly: WARNING: {det}: {total} empty pixel(s) in {bad} of "
+            out.append(f"fly: WARNING: {det}: {total} empty bin(s) in {bad} of "
                        f"{len(rows)} rows -- slow down the fly speed (or use fewer "
-                       f"pixels)")
+                       f"bins)")
     for group, n in missed.items():
         out.append(f"fly: WARNING: {group}: ~{n} sample(s) went by unread during "
                    f"the scan")
@@ -1682,10 +1727,10 @@ def _var_attrs(params, fly, ax, rb_id, speed) -> dict:
         cplx = getattr(p, "dtype", "") == "complex"
         out[det] = {"fly_stat": "mean"}
         out[f"{det}_n"] = {"units": "",
-                           "label": f"{label}: {'traces' if trace else 'samples'} per pixel",
+                           "label": f"{label}: {'traces' if trace else 'samples'} per bin",
                            "fly_stat": "count"}
         out[f"{det}_std"] = {"units": getattr(p, "unit", ""),
-                             "label": f"{label}: spread within the pixel"
+                             "label": f"{label}: spread within the bin"
                                       + (" (rms |z - mean|)" if cplx else ""),
                              "fly_stat": "std"}
     out[fly.name] = {"fly": "true", "readback": rb_id,
@@ -1703,7 +1748,7 @@ def _warn_quality(chunks, rb, params, data, oidx, speed, width, log):
         if width > 0 and smear > width:
             log(f"fly: {det} lags {delay * 1e3:.3g} ms = {smear:.3g} "
                 f"{getattr(rb, 'unit', '')} at this speed ({smear / width:.1f} "
-                f"pixels). The shift is corrected, but detail finer than that "
+                f"bins). The shift is corrected, but detail finer than that "
                 f"is smeared: fly slower or use a shorter time constant.")
     span = _sample_span(chunks)
     if width > 0 and speed * span > width:
@@ -1711,13 +1756,13 @@ def _warn_quality(chunks, rb, params, data, oidx, speed, width, log):
         # measured half a sweep earlier, the last point half a sweep later
         log(f"fly: one sweep takes {span * 1e3:.3g} ms = {speed * span:.3g} "
             f"{getattr(rb, 'unit', '')} at this speed ({speed * span / width:.1f} "
-            f"pixels): each trace is filed at its sweep's middle, so its ends "
-            f"belong to neighbouring pixels. Fly slower, sweep fewer points, or "
+            f"bins): each trace is filed at its sweep's middle, so its ends "
+            f"belong to neighbouring bins. Fly slower, sweep fewer points, or "
             f"record single frequency points (each stamped at its own moment).")
     for det, p in params.items():
         n = data[f"{det}_n"][tuple(oidx)]
         med = float(np.nanmedian(n)) if np.size(n) else 0.0
         if med < 3:
-            log(f"fly: {det} has only ~{med:.0f} samples per pixel; the "
-                f"average is thin -- fly slower or use fewer pixels.")
+            log(f"fly: {det} has only ~{med:.0f} samples per bin; the "
+                f"average is thin -- fly slower or use fewer bins.")
         # (EMPTY pixels are counted on every row: _count_empty)

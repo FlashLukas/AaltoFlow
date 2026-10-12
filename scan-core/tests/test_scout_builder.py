@@ -236,30 +236,55 @@ SCOUT = {"axes": {"pos_x": 3, "pos_y": 3}, "detector": "reflectivity",
 
 
 def test_autofocus_warning_rules():
+    """2026-10-12: by ROLE, not by name -- and only when focus matters."""
+    from scan_core.registry import Action
     from scan_core.scout import NO_AUTOFOCUS_WARNING, autofocus_warning
+    reg = build_sim_registry()                 # sim_autofocus has role autofocus
     plain = Recipe(axes=[RASTER], detectors=["lockin_r"])
-    assert autofocus_warning(plain) == ""                       # no scout: nothing to say
+    assert autofocus_warning(plain, reg) == ""                  # no scout: nothing to say
     r = Recipe(axes=[RASTER], detectors=["lockin_r"], scout=dict(SCOUT))
-    assert autofocus_warning(r) == NO_AUTOFOCUS_WARNING
-    assert "add Find focus to BEFORE SCAN" in NO_AUTOFOCUS_WARNING
+    assert autofocus_warning(r, reg) == NO_AUTOFOCUS_WARNING
+    assert autofocus_warning(r) == ""                           # no registry: cannot know
+    assert "autofocus step to BEFORE SCAN" in NO_AUTOFOCUS_WARNING
     for hook in ({"when": "before_scan", "action": "call",
-                  "args": {"action": "camera.autofocus"}},
+                  "args": {"action": "sim_autofocus"}},
                  {"when": "before_scan", "action": "call",       # ordered form
                   "args": {"steps": [{"set": {"field": 40}},
                                      {"action": "sim_autofocus"}]}},
-                 {"when": "before_scan", "action": "call",       # at the AF position
-                  "args": {"action": "camera.autofocus_at_position"}},
                  {"when": "before_scan", "action": "autofocus"}):  # the old hook
         r.hooks = [hook]
-        assert autofocus_warning(r) == "", hook
+        assert autofocus_warning(r, reg) == "", hook
+    # an action merely NAMED like an autofocus does not count any more
+    r.hooks = [{"when": "before_scan", "action": "call",
+                "args": {"action": "sim_focus_at"}}]
+    assert autofocus_warning(r, reg) == NO_AUTOFOCUS_WARNING
     # an autofocus AFTER the scan, or during it, is not before the scout
     r.hooks = [{"when": "after_scan", "action": "call", "args": {"action": "sim_autofocus"}},
                {"when": "before_scan", "action": "call", "args": {"set": {"field": 0}}}]
-    assert autofocus_warning(r) == NO_AUTOFOCUS_WARNING
+    assert autofocus_warning(r, reg) == NO_AUTOFOCUS_WARNING
     # a scout read from a FILE measures nothing now: focus does not matter
     r.hooks = []
     r.scout = {"axes": {"pos_x": 3, "pos_y": 3}, "from": "mask.png"}
-    assert autofocus_warning(r) == ""
+    assert autofocus_warning(r, reg) == ""
+    # a setup with NO autofocus action has nothing to forget
+    bare = build_sim_registry()
+    bare._actions.pop("sim_autofocus")
+    r.scout = dict(SCOUT)
+    assert autofocus_warning(r, bare) == ""
+    # a scout over a FIELD x FREQUENCY grid (not positions) with a detector
+    # that does not care about focus: no warning
+    fmr = Recipe(axes=[{"type": "linear", "param": "field", "start": 0, "stop": 100, "num": 9},
+                       {"type": "linear", "param": "rf_freq", "start": 1000, "stop": 3000,
+                        "num": 9}],
+                 detectors=["lockin_r"],
+                 scout={"axes": {"field": 3, "rf_freq": 3}, "detector": "lockin_r",
+                        "keep": "above", "threshold": "auto", "margin": "auto"})
+    assert autofocus_warning(fmr, reg) == ""
+    # ... but a detector declaring focus_sensitive makes it matter anywhere
+    fmr.scout["detector"] = "reflectivity"
+    assert reg.get("reflectivity").focus_sensitive
+    assert autofocus_warning(fmr, reg) == NO_AUTOFOCUS_WARNING
+    del Action
 
 
 def test_the_builder_warns_without_blocking_the_run(builder):

@@ -6,7 +6,7 @@ comment: XY spatial image (raster, one UI axis = two data dims) at each field â€
 fixed: {rf_freq: 850, rf_power: 8, device_v: 0}
 axes:
   - {type: linear, param: field, start: 0, stop: 75, num: 6}          # outer
-  - {type: raster,                                                     # inner: 2 dims
+  - {type: grid,                                                     # inner: 2 dims
      x: {param: pos_x, start: -45, stop: 45, num: 61},
      y: {param: pos_y, start: -45, stop: 45, num: 61},
      fast: x}

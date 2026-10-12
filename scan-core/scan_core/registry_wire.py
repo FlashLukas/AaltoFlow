@@ -89,11 +89,15 @@ def _settable(p) -> dict:
     return {"id": p.id, "label": p.label, "unit": p.unit,
             "limits": [_num(lo), _num(hi)],
             "integer": bool(getattr(p, "integer", False)),
+            "dtype": getattr(p, "dtype", "float"),
+            "options": _plain(getattr(p, "options", None)),
             "resolution": _num(getattr(p, "resolution", None)),
             "can_send": bool(getattr(p, "can_send", False)),
             "storage": _storage(getattr(p, "storage", None)),
             "stream": _stream(p),
-            "ramp": _ramp(getattr(p, "ramp", None))}
+            "ramp": _ramp(getattr(p, "ramp", None)),
+            "role": getattr(p, "role", None),
+            "speed_param": getattr(p, "speed_param", None)}
 
 
 def _gettable(p) -> dict:
@@ -109,7 +113,9 @@ def _gettable(p) -> dict:
                      for a in (getattr(p, "axes", None) or [])],
             "acquire": {"group": acq.group} if acq is not None else None,
             "window": _plain(getattr(p, "window", None)),
-            "stream": _stream(p)}
+            "stream": _stream(p),
+            "role": getattr(p, "role", None),
+            "focus_sensitive": bool(getattr(p, "focus_sensitive", False))}
 
 
 def _action(a) -> dict:
@@ -118,7 +124,8 @@ def _action(a) -> dict:
             "takes_args": bool(getattr(a, "takes_args", False)),
             "takes_context": bool(getattr(a, "_takes_context", False)),
             # the module's `wait` block (how a routine waits for it to finish)
-            "wait": _plain(getattr(a, "wait", None))}
+            "wait": _plain(getattr(a, "wait", None)),
+            "role": getattr(a, "role", None)}
 
 
 def _plain(obj):
@@ -253,11 +260,15 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
         p = Settable(pid, d.get("label") or pid, d.get("unit") or "",
                      (_bound(lo, -math.inf), _bound(hi, math.inf)),
                      set_fn=_nope(f"setting {pid}"), get_fn=_reader(pid, read_from),
-                     send_fn=(lambda v, _s=send: _s(v)) if d.get("can_send") else None)
+                     send_fn=(lambda v, _s=send: _s(v)) if d.get("can_send") else None,
+                     dtype=d.get("dtype") or "float",
+                     options=d.get("options") if isinstance(d.get("options"), list) else None)
         p.integer = bool(d.get("integer"))
         p.resolution = d.get("resolution")
         p.storage = _storage_from(d.get("storage"))
         p.ramp = _ramp_from(d.get("ramp"))
+        p.role = d.get("role") if isinstance(d.get("role"), str) else None
+        p.speed_param = d.get("speed_param") if isinstance(d.get("speed_param"), str) else None
         _attach_stream(p, d, streams)
         reg.add(p)
     for d in wire.get("gettables") or []:
@@ -274,6 +285,8 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
                      if isinstance(acq, dict) else None,
                      window=d.get("window") if isinstance(d.get("window"), dict) else None,
                      storage=_storage_from(d.get("storage")))
+        g.role = d.get("role") if isinstance(d.get("role"), str) else None
+        g.focus_sensitive = d.get("focus_sensitive") is True
         _attach_stream(g, d, streams)
         reg.add(g)
     for d in wire.get("actions") or []:
@@ -290,6 +303,7 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
         a.takes_args = bool(d.get("takes_args"))
         a._takes_context = bool(d.get("takes_context"))
         a.wait = d.get("wait") if isinstance(d.get("wait"), dict) else None
+        a.role = d.get("role") if isinstance(d.get("role"), str) else None
         reg.add_action(a)
     return reg
 
@@ -298,8 +312,10 @@ def registry_from_wire(wire: dict, read_from=None) -> Registry:
 _PARAM_ATTRS = ("label", "unit", "limits", "integer", "resolution", "storage", "ramp",
                 "stream", "stream_channel", "stream_scale", "stream_rate_hz", "axes",
                 "dtype", "acquire",
-                "window", "_send")
-_ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait")
+                "window", "_send", "role", "focus_sensitive", "options",
+                "speed_param")
+_ACTION_ATTRS = ("label", "help", "arg_specs", "takes_args", "_takes_context", "wait",
+                 "role")
 
 
 def _shape(reg) -> list:

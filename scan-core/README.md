@@ -279,6 +279,43 @@ run_demo.py
 run_fly_demo.py # fly scan: sim (lag corrected vs not) or --lab (kim + pm16 or hf2)
 ```
 
+## The `grid` axis: two knobs in one entry (2026-10-12)
+
+`{type: grid, x: {param, start, stop, num}, y: {...}, fast: x}` is ONE axis
+entry that makes TWO dimensions: a 2-D grid of any two knobs -- an XY map,
+but just as well field x frequency. `x` / `y` only name its two members;
+`fast` is the inner one. It was called `raster` until 2026-10-12; a
+definition (or the recipe_json of an older .nc) that says `raster` is read as
+`grid` and saved as `grid`.
+
+## Axes that are not numbers: enum and string knobs (2026-10-12)
+
+A knob whose module declares it as an `enum` (with `options`) or a `string`
+control is a settable too -- a filter wheel, a grating, a lock-in's input:
+
+```yaml
+axes:
+  - {type: array, param: hf2.input1, values: [A, A-B]}        # its options, as text
+  - {type: linear, param: field, start: -50, stop: 50, num: 51}
+fixed: {cs260.grating: "G2"}                                 # a text condition
+```
+
+The values are kept as they are (`recipe.native_values`: an object array when
+not all are numbers; a `file` axis may list one option per line), the engine
+passes them to `Settable.set` unchanged (no `float()`; `Settable.option`
+checks an enum's options), the settle compares exactly, `validate()` refuses
+a value that is not an option (in an axis, a condition or a routine step),
+and the data file gets a TEXT coordinate (netCDF-4 variable-length string)
+that `scan_core.data.load` reads back. Linear / log spacing is for numbers
+only. Bool knobs stay numeric (0/1; `true`/`false` are accepted in a list).
+
+**Settle timeout.** How long a knob may take to settle is its module's
+`timeout_s` in `describe`; a module that declares none gets **60 s**
+(`scan_core/manifest.py`). The recipe's `settle: {default_timeout_s: 20}` is
+written into every definition but is NOT read by the engine today -- wiring it
+in as the fallback would shorten every undeclared wait from 60 s to 20 s in
+all saved definitions, so it is left as a recorded value until decided.
+
 ## Running against real instruments
 
 `build_lab_registry()` is the real counterpart of `build_sim_registry()`. Start
@@ -428,6 +465,14 @@ hooks:
 - In the Scan Builder: select a parameter, **+ Before** / **+ After**,
   and pick the action in the ROUTINES card. Other hooks in a loaded file are
   kept when it is saved again.
+- scan-core names no instrument. An action that plays a known part declares a
+  **`role`** in `describe` (the camera's Find focus says `role: autofocus`),
+  and `registry.actions_with_role("autofocus")` finds it. The OLD built-in
+  hook `{action: autofocus}` (until 2026-10-12) is no longer an action: a
+  recipe that still has it is translated into `{action: call, args: {action:
+  <the action with role autofocus>}}` when it is validated (or loaded with
+  `Recipe.load(path, registry=...)`), and refused with a clear message when no
+  connected module declares that role.
 
 **During the scan** (the THROUGHOUT column, **+ New**): autofocus at the start of
 every row, a reference every 100 points.
@@ -580,7 +625,8 @@ under the stage. Open a **GDS/OASIS** layout (drawn as vectors, exact
 micrometres; read with `gdstk`, no KLayout needed) or an **image** whose real
 width you type in. Then register it:
 
-1. Put a feature under the laser, click it on the design, **I am here**. With
+1. Put a feature at the setup's reference point (a probe beam's spot, a
+   cross-hair), click it on the design, **I am here**. With
    one point the rotation is the one you set by eye (+/-1, +/-90 buttons).
 2. A second point far from the first **fits** the rotation and the stage's
    scale (the design's scale is exact, so a fitted scale that is not 1.000 is
@@ -590,9 +636,12 @@ width you type in. Then register it:
 4. An open-loop stage drifts: click the feature you actually see and
    **correct offset only** -- rotation and scale are kept.
 
-It moves whichever stage is connected through the same parameters a scan uses
-(`position_x`/`position_y` from the module's `describe`): KIM in um, the BSC203
-in mm, or the simulator. **Final approach** makes every move end in +X/+Y over
+It moves whichever stage is connected through the same parameters a scan uses.
+Any two settables in a LENGTH unit (m, mm, um, nm ...) can be its X and Y
+(`navigator.stage_pairs(registry)`, best first): a pair whose module declares
+describe `role: stage_x` / `stage_y`, then the same module's `..._x` / `..._y`
+(position_x / position_y), then any other two in the same unit;
+`make_pair(x, y)` takes the user's own pick. **Final approach** makes every move end in +X/+Y over
 that distance, so an inertia stage arrives from the same side every time. A
 session (design path + reference points) saves next to the design as
 `.nav.json`.
@@ -633,6 +682,17 @@ detectors: [hf2.x1, hf2.y1]
 
 *A zig-zag fly scan over the simulated islands: Y stepped, X flown at 60 um/s,
 31 x 91 pixels in under a minute.*
+
+**The speed knob.** `speed` is always in the flown knob's unit per SECOND.
+The control it is set on (`speed_param`) is the one the module declares in
+`describe` (`speed_param: velocity_x` on its position knob -- kim, piezo,
+stage, smaract and ddr25 do); only for a module that does not say, the
+builder guesses a control of the same module whose unit is a rate of the
+position's (`flyscan.find_speed_param`). A control in another rate unit is
+converted (`flyscan.speed_factor`, `units.rate_factor`: 2 um/s is set as
+120000 on a `nm/min` control; /s, /min and /h, within one unit family).
+User-facing messages call the samples' cells "bins" and the moving
+instrument "the positioner".
 
 What it takes care of:
 
@@ -914,7 +974,7 @@ happening.* It works for any scan with something to measure:
 
 ```yaml
 axes:
-  - {type: raster, x: {param: pos_x, start: -45, stop: 45, num: 61},
+  - {type: grid, x: {param: pos_x, start: -45, stop: 45, num: 61},
                    y: {param: pos_y, start: -45, stop: 45, num: 61}}
 detectors: [lockin_r]
 scout: {axes: {pos_x: 3, pos_y: 3}, detector: reflectivity, keep: above}
@@ -1008,7 +1068,7 @@ applied to the whole scan). `zigzag: true` on an axis sweeps that axis
 BACKWARDS on every other sweep of it -- every other time the axes outside it
 advance -- so it does not go back to its start each time. On a fly axis every
 other row is flown back. It works on any axis but the outermost one, where
-nothing outside it advances (the box is greyed there; a raster row is the
+nothing outside it advances (the box is greyed there; a grid row is the
 exception, its fast dim zig-zags inside the row); a repeat axis cannot zig-zag.
 The data are the same either way, only the path between points changes. Tick
 it on several axes and the path is one continuous line: every step moves one
@@ -1035,14 +1095,17 @@ The data file carries these settings on each axis's coordinate as well as in
 coordinate that really zig-zagged), `scout_every`, `scout_margin` (`auto`) and
 `scout_margin_points`. Only what is set is written.
 
-**No autofocus before the scout pass** (a warning, 2026-10-11): a measured
-scout thresholds its reading with Otsu, and that threshold follows focus. When
-the scan has a scout pass and no BEFORE SCAN routine runs an autofocus (any
-action whose name contains "autofocus": Find focus, autofocus at the AF
-position, the simulator's), the SCOUT PASS line and the summary say "No
-autofocus before the scout pass: the threshold follows focus -- add Find focus
-to BEFORE SCAN". It never stops the run. A scout read from a file is not
-warned about.
+**No autofocus before the scout pass** (a warning, 2026-10-11; by role since
+2026-10-12): a measured scout thresholds its reading with Otsu, and that
+threshold follows focus. The SCOUT PASS line and the summary say "No autofocus
+before the scout pass: the threshold follows focus -- add an autofocus step to
+BEFORE SCAN" when ALL of these hold: a module offers an autofocus (an action
+whose describe declares `role: autofocus`), no BEFORE SCAN routine runs it,
+and focus matters for this scout -- every scouted axis is a position (a knob
+in a length unit: m, mm, um, nm ...) or the scout detector declares
+`focus_sensitive: true`. It never stops the run. A scout read from a file is
+not warned about; a scout over field x frequency with an ordinary detector
+is not either. `scout.autofocus_warning(recipe, registry)`.
 
 ![an axis row's Advanced panel](../front-panels/suite-axis-advanced.png)
 

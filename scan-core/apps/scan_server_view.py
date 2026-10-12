@@ -365,9 +365,9 @@ def _num(v) -> str:
 def _axis_text(ax: dict) -> str:
     """One axis of a recipe dict, the way the Scan tab would say it."""
     t = ax.get("type", "linear")
-    if t == "raster":
+    if t in ("grid", "raster"):
         x, y = ax.get("x") or {}, ax.get("y") or {}
-        return (f"raster  {x.get('param', '?')} {_num(x.get('start'))} -> "
+        return (f"grid  {x.get('param', '?')} {_num(x.get('start'))} -> "
                 f"{_num(x.get('stop'))} ({x.get('num', '?')})  x  {y.get('param', '?')} "
                 f"{_num(y.get('start'))} -> {_num(y.get('stop'))} ({y.get('num', '?')})") + _zz(ax)
     if t == "zip":

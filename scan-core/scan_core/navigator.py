@@ -1,9 +1,11 @@
 """Sample navigator: a design file (GDS / OASIS / image) registered to a stage.
 
-The problem it solves: a sample is millimetres across, the camera sees a few
-hundred micrometres of it, and the design file knows where everything is. Once
-we know how DESIGN coordinates map onto STAGE coordinates, a click on the
-design is a stage position.
+The problem it solves: a sample is millimetres across, the instrument sees a
+small part of it at a time, and the design file knows where everything is.
+Once we know how DESIGN coordinates map onto STAGE coordinates, a click on the
+design is a stage position. A reference point is "this design feature is at
+the reference point of the setup now" -- the spot of a probe beam, a
+microscope's cross-hair, a needle.
 
 Everything here is plain Python + numpy (no Qt), so it is unit-tested without
 a display. The Navigator tab (apps/navigator.py) is a thin view on top.
@@ -13,8 +15,9 @@ Coordinates
 * DESIGN frame: micrometres, y UP (the GDS convention). An image is placed
   with its centre at (0, 0) and its pixel size = real width / pixel width.
 * STAGE frame: micrometres too. The tab converts to and from the stage's own
-  unit (KIM reports um, the BSC203 mm) at the very edge, so no maths here ever
-  sees two units.
+  unit (one reports um, another mm) at the very edge, so no maths here ever
+  sees two units. Which two knobs are X and Y: any two length-unit settables
+  (stage_pairs), ranked by describe `role: stage_x / stage_y` first.
 
 The mapping is an affine transform  stage = M @ design + t  (+ a drift shift,
 below). How much of it is FITTED depends on how many reference points you gave:
@@ -24,16 +27,17 @@ below). How much of it is FITTED depends on how many reference points you gave:
             "rotate it by eye, click once" workflow.
   2 points  a similarity: rotation + one scale + offset, exact. The design's
             scale is exact (GDS), so a fitted scale that is not 1.000 is the
-            STAGE's scale error -- worth reading on an open-loop KIM.
+            STAGE's scale error -- worth reading on an open-loop stage.
   3 points  similarity by least squares; the residuals say how good it is.
             Mirror is detected here (whichever handedness fits better).
-  4+        full affine (separate X/Y scale, skew) by least squares. KIM's X
-            and Y step sizes are calibrated separately, so they can disagree.
+  4+        full affine (separate X/Y scale, skew) by least squares. An open-loop
+            stage's X and Y step sizes are calibrated separately, so they
+            can disagree.
 
 Drift correction ("I am here, offset only")
 -------------------------------------------
-An open-loop stage (KIM) loses its position: on the rig ~26 um over a long
-raster (2026-09-25). The fix is to look at a feature, click it, and say "I am
+An open-loop stage (a slip-stick one) loses its position: on one rig ~26 um
+over a long raster (2026-09-25). The fix is to look at a feature, click it, and say "I am
 here" -- which shifts the whole mapping by the error but keeps its rotation and
 scale. The shift is stored separately, and later reference points are stored
 with the shift taken OFF, so they stay consistent with the earlier ones: the
@@ -49,14 +53,13 @@ from pathlib import Path
 
 import numpy as np
 
-# The stage's unit -> micrometres. What a module reports in `describe`.
-UNIT_TO_UM = {"um": 1.0, "µm": 1.0, "μm": 1.0, "micron": 1.0, "mm": 1000.0,
-              "nm": 1e-3, "m": 1e6}
+from .units import length_factor_um
 
 
 def unit_factor(unit: str) -> float | None:
-    """Micrometres per one `unit`, or None if we do not know the unit."""
-    return UNIT_TO_UM.get((unit or "").strip())
+    """Micrometres per one `unit` (what a module reports in `describe`), or
+    None if it is not a length unit we know (units.py)."""
+    return length_factor_um(unit)
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +223,7 @@ class Registration:
 
     # ---- editing ------------------------------------------------------ #
     def add_point(self, design_xy, stage_xy) -> None:
-        """"This design point is under the laser now." Refits everything."""
+        """"This design point is at the reference point now." Refits everything."""
         sx, sy = self.shift
         self.points.append(RefPoint((float(design_xy[0]), float(design_xy[1])),
                                     (float(stage_xy[0]) - sx, float(stage_xy[1]) - sy)))
@@ -354,12 +357,16 @@ class Registration:
 class StagePair:
     """An X and a Y settable that move the sample, found in a registry."""
 
-    label: str               # "kim", "stage", "simulator"
-    prefix: str              # "kim." -- also what the Stop button looks for
+    label: str               # "kim", "stage", "simulator", or "a.x / b.y"
+    prefix: str              # "kim." -- also what the Stop button looks for ("" if mixed)
     x: object                # Settable
     y: object                # Settable
     um_per_unit: float       # 1000 for a stage in mm
     unit_known: bool = True
+    #: why it is offered, best first: "role" (describe role stage_x/stage_y),
+    #: "name" (the same module's position_x/position_y, pos_x/pos_y, ..._x/_y),
+    #: "other" (any two length-unit knobs)
+    rank: str = "other"
 
     def to_unit(self, um: float) -> float:
         return um / self.um_per_unit
@@ -375,29 +382,98 @@ class StagePair:
         return x0 <= x_um <= x1 and y0 <= y_um <= y1
 
 
-# Every stage module in the suite calls its axes position_x / position_y in
-# `describe` (kim in um, the BSC203 in mm); the simulator has pos_x / pos_y.
-# Matching on those names -- rather than listing modules -- means a new stage
-# module appears here the day it is written, as long as it follows the names.
-_XY_NAMES = (("position_x", "position_y"), ("pos_x", "pos_y"))
+#: the order StagePair.rank sorts in
+RANKS = ("role", "name", "other")
+
+
+def _module(pid: str) -> str:
+    """"kim." for "kim.position_x", "" for an unprefixed id."""
+    return pid.rsplit(".", 1)[0] + "." if "." in pid else ""
+
+
+def _stem_xy(pid: str):
+    """("<stem>", "x"|"y") when the id's last part ends in _x / _y (any
+    module: position_x, pos_x, laser_x, ...), else None."""
+    tail = pid.rsplit(".", 1)[-1]
+    if len(tail) > 2 and tail[-2] == "_" and tail[-1] in "xy":
+        return pid[:-1], tail[-1]
+    return None
+
+
+def length_settables(registry) -> list:
+    """Every settable in a LENGTH unit (m, mm, um, nm ...; units.py), in the
+    registry's order: what may be picked as a reference point's X or Y. A
+    stage need not be called anything in particular -- its unit says it is a
+    position."""
+    return [p for p in registry.settables() if unit_factor(getattr(p, "unit", "")) is not None]
+
+
+def make_pair(x, y, rank: str = "other") -> StagePair:
+    """A StagePair from two settables the user picked as X and Y. Both must
+    be lengths in the SAME unit factor (the navigator converts one um factor
+    for both axes); ValueError otherwise."""
+    if x is y or x.id == y.id:
+        raise ValueError("X and Y must be two different settables")
+    fx, fy = unit_factor(x.unit), unit_factor(y.unit)
+    if fx is None or fy is None:
+        raise ValueError(f"{x.id} [{x.unit}] / {y.id} [{y.unit}]: both must be "
+                         f"in a length unit (m, mm, um, nm ...)")
+    if fx != fy:
+        raise ValueError(f"{x.id} is in {x.unit} and {y.id} in {y.unit}: pick two "
+                         f"knobs in the same unit")
+    mx, my = _module(x.id), _module(y.id)
+    prefix = mx if mx == my else ""
+    if rank in ("role", "name") and mx == my:
+        label = prefix.rstrip(".") or "simulator"
+    else:
+        label = f"{x.id} / {y.id}"
+    return StagePair(label, prefix, x, y, fx, True, rank)
 
 
 def stage_pairs(registry) -> list[StagePair]:
-    """Every (X, Y) settable pair in `registry` that looks like a sample stage."""
-    by_id = {p.id: p for p in registry.settables()}
-    found = []
-    for pid, p in by_id.items():
-        for xname, yname in _XY_NAMES:
-            if not (pid == xname or pid.endswith("." + xname)):
-                continue
-            prefix = pid[: -len(xname)]
-            q = by_id.get(prefix + yname)
-            if q is None:
-                continue
-            f = unit_factor(p.unit)
-            found.append(StagePair(prefix.rstrip(".") or "simulator", prefix, p, q,
-                                   f if f is not None else 1.0, f is not None))
-    return sorted(found, key=lambda s: s.label)
+    """Every (X, Y) pair of LENGTH-unit settables, ranked best first -- the
+    candidates for the navigator's reference frame (any modules):
+
+      1. "role":  a knob declaring describe `role: stage_x` with one
+                  declaring `role: stage_y` (same module first);
+      2. "name":  the same module's ..._x / ..._y pair (position_x /
+                  position_y, pos_x / pos_y);
+      3. "other": any other two length knobs in the same unit, each
+                  unordered pair once (X = the one the registry lists first).
+
+    The first entry is the sensible default; the GUI lets the user pick any
+    X and Y (make_pair). A pair offered at a better rank is not repeated."""
+    lengths = length_settables(registry)
+    out: list[StagePair] = []
+    seen: set = set()
+
+    def offer(x, y, rank):
+        key = frozenset((x.id, y.id))
+        if key in seen:
+            return
+        try:
+            pair = make_pair(x, y, rank)
+        except ValueError:
+            return                       # e.g. different units
+        seen.add(key)
+        out.append(pair)
+
+    xs = [p for p in lengths if getattr(p, "role", None) == "stage_x"]
+    ys = [p for p in lengths if getattr(p, "role", None) == "stage_y"]
+    for x in xs:
+        for y in sorted(ys, key=lambda q: _module(q.id) != _module(x.id)):
+            offer(x, y, "role")
+    by_id = {p.id: p for p in lengths}
+    for p in lengths:
+        sx = _stem_xy(p.id)
+        if sx and sx[1] == "x" and (sx[0] + "y") in by_id:
+            offer(p, by_id[sx[0] + "y"], "name")
+    for i, p in enumerate(lengths):
+        for q in lengths[i + 1:]:
+            offer(p, q, "other")
+    # stable within a rank: role/name pairs by label, others in registry order
+    return sorted(out, key=lambda s: (RANKS.index(s.rank),
+                                      s.label if s.rank != "other" else ""))
 
 
 # --------------------------------------------------------------------------- #

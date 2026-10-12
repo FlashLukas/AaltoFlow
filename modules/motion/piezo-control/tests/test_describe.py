@@ -225,3 +225,24 @@ def test_ramp_mode_options_are_every_mode_the_brain_reports():
         assert brain.cfg.motion.ramp_mode in d["options"]
     finally:
         brain.shutdown()
+
+
+def test_position_names_its_speed_control():
+    """describe `speed_param` (2026-10-12): the knob a fly scan sets the
+    speed on is declared, not guessed -- it exists, is a writable control,
+    and its unit is the position's unit per second. X and Y declare role stage_x / stage_y."""
+    cfg, brain = _brain()
+    try:
+        p = _by_id(build_manifest(brain))
+        for pos, vel in [('position_x', 'velocity_x'), ('position_y', 'velocity_y')]:
+            d = p[pos]
+            assert d["speed_param"] == vel
+            v = p[vel]
+            assert v["kind"] == "control" and v.get("set")
+            assert v["unit"] == d["unit"] + "/s"
+        # an XY sample stage: the navigator offers this pair first
+        assert p["position_x"]["role"] == "stage_x"
+        assert p["position_y"]["role"] == "stage_y"
+        assert "role" not in p.get("position_z", {})
+    finally:
+        brain.shutdown()

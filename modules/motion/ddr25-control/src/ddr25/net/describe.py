@@ -38,7 +38,8 @@ SCHEMA_VERSION = 1
 def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
        min=None, max=None, step=None, decimals=None, options=None,
        writable=None, plottable=False, read_path=None, scale=None, set=None,
-       settle=None, args=None, danger=False, stream=None, wait=None, help=""):
+       settle=None, args=None, danger=False, stream=None, wait=None, help="",
+       role=None, speed_param=None):
     """One descriptor. See INSTRUMENT_MODULE_GUIDE.md for the field contract."""
     d = {
         "id": id, "label": label, "kind": kind, "type": type,
@@ -50,7 +51,8 @@ def _p(id, label, kind, type, *, unit="", group="", order=0, value=None,
     for k, v in (("value", value), ("min", min), ("max", max), ("step", step),
                  ("decimals", decimals), ("options", options), ("scale", scale),
                  ("set", set), ("settle", settle), ("args", args),
-                 ("stream", stream), ("wait", wait), ("help", help)):
+                 ("stream", stream), ("wait", wait), ("help", help), ("role", role),
+                 ("speed_param", speed_param)):
         if v is not None and v != "":
             d[k] = v
     if danger:
@@ -119,6 +121,9 @@ def build_manifest(brain) -> dict:
         # -- position ------------------------------------------------------ #
         _p("angle", "Angle", "control", "float", unit="deg", group="Position",
            order=10, min=lo, max=hi, step=cfg.motion.jog_step, decimals=4,
+           # `speed_param` (guide 6b): the control that sets how fast
+           # this knob moves -- a fly scan sets its speed there
+           speed_param="velocity",
            plottable=True, read_path=["angle_deg"],
            set={"verb": "move_to", "arg": "angle"},
            settle=move_settle,

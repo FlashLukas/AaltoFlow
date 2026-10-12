@@ -45,7 +45,7 @@ zag goes to the advanced settings of each axis"): that axis is swept
 BACKWARDS on every other sweep, i.e. every other time the axes outside it
 advance (dim_zigzag below; engine.visit_index). On a fly axis
 it means every other row is flown back. On the outermost axis it does
-nothing (nothing outside it advances) -- except on a raster, whose inner
+nothing (nothing outside it advances) -- except on a grid, whose inner
 (fast) dim then zig-zags. The OLD scan-wide `zigzag: true` (before
 2026-10-11) is gone: a definition that still has it is translated into
 per-axis flags when it is read (upgrade_scan_wide_zigzag) and is never
@@ -55,7 +55,12 @@ linear : {type, param, start, stop, num, [name]}          -> 1 dim
 array  : {type, param, values:[...], [name]}              -> 1 dim
 file   : {type, param, path, [name]}                      -> 1 dim (values from CSV/txt)
 zip    : {type, name, members:[{param, ...spec}], }       -> 1 dim, several params in lockstep
-raster : {type, x:{param,start,stop,num}, y:{...}, fast}  -> 2 dims (spatial XY, first-class)
+grid   : {type, x:{param,start,stop,num}, y:{...}, fast}  -> 2 dims: a 2-D grid of ANY
+          two knobs in one entry (an XY map, field x frequency, ...). `x` and
+          `y` are only the names of its two members; `fast` (x or y) is the
+          inner one. Until 2026-10-12 this was `raster`; a definition that
+          still says so is read as `grid` (upgrade_axes) and never written
+          that way again.
 fly    : {type, param, start, stop, num, speed, [speed_param, readback,
           lag_correction, name]}                          -> 1 dim, INNERMOST only:
           one continuous move per row, binned by the measured position
@@ -70,9 +75,9 @@ repeat : {type, num, [mode: keep|average, interval_s, name]} -> 1 dim that sets
           keeps every repeat as a dimension; `average` stores mean/_std/_n.
 
 `compile(registry)` turns the axis list into an ordered list of Dim objects
-(raster expands to two dims), which the engine iterates as an odometer. Keeping
+(a grid expands to two dims), which the engine iterates as an odometer. Keeping
 "how you describe a scan" (axes) separate from "how you run it" (dims) is what
-lets XY imaging be one entry in the UI yet a genuine 2 dimensions in the data.
+lets a 2-D grid be one entry in the UI yet a genuine 2 dimensions in the data.
 """
 
 from __future__ import annotations
@@ -133,16 +138,45 @@ class CompiledScan:
 
 # ─────────────────────────── sweep-spec → values[] ────────────────────────────
 
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float, np.integer, np.floating, bool, np.bool_))
+
+
+def native_values(vals) -> np.ndarray:
+    """A list of setpoints as an array: float when every one is a number
+    (bools count as 0/1, as they always have), else an OBJECT array of the
+    values as they are -- the options of an enum knob ("AC", "DC"), text."""
+    vals = list(vals)
+    if all(_is_number(v) for v in vals):
+        return np.asarray(vals, dtype=float)
+    out = np.empty(len(vals), dtype=object)
+    out[:] = vals
+    return out
+
+
+def is_text_values(vals) -> bool:
+    """True for an object array of non-numeric setpoints (native_values)."""
+    return getattr(vals, "dtype", None) is not None and vals.dtype == object
+
+
 def _values_from_spec(spec: dict) -> np.ndarray:
     """Turn a per-axis/per-member spec into an explicit value vector.
 
     Accepts either {start, stop, num} (linear), {start, stop, step}, or
     {values:[...]} / {path:...}. One place so every axis type shares it.
+    `values` and a file may hold NON-numeric setpoints (2026-10-12: an enum
+    knob's options, text); they come back as an object array (native_values).
+    Linear spacing is for numbers only.
     """
     if "values" in spec:
-        return np.asarray(spec["values"], dtype=float)
+        return native_values(spec["values"])
     if "path" in spec:
-        return np.loadtxt(spec["path"]).ravel().astype(float)
+        try:
+            return np.loadtxt(spec["path"]).ravel().astype(float)
+        except ValueError:
+            # not numbers: one setpoint per non-empty line (an enum's options)
+            with open(spec["path"], encoding="utf-8") as fh:
+                return native_values([ln.strip() for ln in fh if ln.strip()])
     start, stop = float(spec["start"]), float(spec["stop"])
     if "num" in spec and spec["num"] is not None:
         return np.linspace(start, stop, int(spec["num"]))
@@ -162,6 +196,11 @@ class Recipe:
     detectors: list[str] = field(default_factory=list)
     hooks: list[dict] = field(default_factory=list)
     output: dict = field(default_factory=lambda: {"dir": ".", "basename": "scan", "format": "netcdf"})
+    #: Written into every definition, but NOT read by the engine (checked
+    #: 2026-10-12): a knob's settle wait is its module's describe `timeout_s`,
+    #: or 60 s when the module declares none (manifest.py). See the README
+    #: ("Settle timeout") before wiring this in -- it would shorten every
+    #: undeclared wait to 20 s in all saved definitions.
     settle: dict = field(default_factory=lambda: {"default_timeout_s": 20.0})
     #: At a point where SEVERAL axes change (the start of a new row), send
     #: every new setpoint first and only then wait for them all, instead of
@@ -191,6 +230,8 @@ class Recipe:
     mask: dict | None = None
 
     def __post_init__(self):
+        # `raster` -> `grid` (2026-10-12), before anything reads the axes
+        self.axes = upgrade_axes(self.axes)
         if self.mask and not self.scout:
             from .scout import from_mask
             self.scout = from_mask(self.mask, self.axes)
@@ -198,11 +239,25 @@ class Recipe:
 
     # ---- (de)serialization ------------------------------------------------
     @classmethod
-    def from_dict(cls, d: dict) -> "Recipe":
+    def from_dict(cls, d: dict, registry=None) -> "Recipe":
+        """A recipe from its dict. With a `registry`, what an old recipe said
+        by name is translated by role at once (migrate_roles); a problem
+        there raises ValueError. Without one, validate() does it later."""
+        r = cls._from_dict(d)
+        if registry is not None:
+            errs = r.migrate_roles(registry)
+            if errs:
+                raise ValueError("; ".join(errs))
+        return r
+
+    @classmethod
+    def _from_dict(cls, d: dict) -> "Recipe":
         known = {f: d[f] for f in ("name", "comment", "fixed", "axes", "detectors",
                                    "hooks", "output", "settle", "window",
                                    "scout", "mask", "diagonal")
                  if f in d}
+        if "axes" in known:
+            known["axes"] = upgrade_axes(known["axes"])
         if d.get("zigzag") is True and "axes" in known:
             # an OLD definition (or the recipe_json of an older .nc) with the
             # scan-wide switch: translated ONCE, here, into the per-axis flags
@@ -223,12 +278,12 @@ class Recipe:
         return d
 
     @classmethod
-    def load(cls, path: str | Path) -> "Recipe":
+    def load(cls, path: str | Path, registry=None) -> "Recipe":
         # encoding="utf-8" explicitly: without it Windows reads with its code
         # page (cp1252), a "—" in a comment comes back as "â€”", and that
         # garbled text is then written into every measurement file made from it.
         with open(path, encoding="utf-8") as fh:
-            return cls.from_dict(yaml.safe_load(fh))
+            return cls.from_dict(yaml.safe_load(fh), registry=registry)
 
     def save(self, path: str | Path) -> None:
         with open(path, "w", encoding="utf-8") as fh:
@@ -238,9 +293,22 @@ class Recipe:
         return json.dumps(self.to_dict())
 
     # ---- validation + compilation ----------------------------------------
+    def migrate_roles(self, registry) -> list[str]:
+        """Translate what an OLD recipe said by NAME into what the connected
+        modules declare by ROLE. Today one thing: the built-in `autofocus`
+        hook (until 2026-10-12) becomes a `call` routine running the action
+        whose describe says `role: autofocus` (hooks.migrate_builtin_autofocus).
+        Changes the recipe IN PLACE (a definition saved again says `call`).
+        Returns the problems -- an old hook with no such action connected is
+        refused, never run without its focusing. validate() and the engine
+        call this first; Recipe.from_dict/load do when given a registry."""
+        from .hooks import migrate_builtin_autofocus
+        self.hooks, errs = migrate_builtin_autofocus(self.hooks, registry)
+        return errs
+
     def validate(self, registry) -> list[str]:
         """Return a list of human-readable problems ([] means valid)."""
-        errs: list[str] = []
+        errs: list[str] = self.migrate_roles(registry)
         for i, ax in enumerate(self.axes):
             if isinstance(ax, dict) and "zigzag" in ax:
                 if not isinstance(ax["zigzag"], bool):
@@ -271,6 +339,13 @@ class Recipe:
                 # measurement spent almost none of its time at.
                 errs.append(f"'{pid}' is both a condition and an axis; "
                             f"it cannot be held and swept at the same time")
+            if not _numeric(p):
+                # an enum / string knob held at one value: one of its options
+                try:
+                    p.option(value)
+                except (ValueError, AttributeError) as exc:
+                    errs.append(f"condition {exc}")
+                continue
             try:
                 finite = np.isfinite(float(value))
             except (TypeError, ValueError):
@@ -319,6 +394,10 @@ class Recipe:
             for dim in self.compile(registry).dims:
                 for pid, vals in dim.params:
                     p = registry.get(pid)
+                    text_vals = is_text_values(vals)
+                    if p is not None and (text_vals or not _numeric(p)):
+                        errs += _check_text_axis(p, vals, text_vals)
+                        continue
                     # A non-finite setpoint passes every limit check (inf is not
                     # > inf) and then goes on the wire as the JSON token
                     # `Infinity`, which is not valid JSON. It gets here from an
@@ -389,7 +468,7 @@ class Recipe:
         refusing up front: the before-scan routine runs first, and a typo found
         only when it fires has already moved the magnet somewhere.
         """
-        from .hooks import ACTIONS, EDGES, MOMENTS, ON_ERROR, describe_trigger
+        from .hooks import ACTIONS, EDGES, LEGACY_AUTOFOCUS, MOMENTS, ON_ERROR, describe_trigger
         errs: list[str] = []
         try:
             dim_names = [d.name for d in self.compile(registry).dims]
@@ -416,7 +495,7 @@ class Recipe:
                 if not ok:
                     errs.append(f"hook '{name}' every_n_points needs n >= 1")
             if when == "each_sweep":
-                # The axis is a DIM name, as in the data file: a raster gives
+                # The axis is a DIM name, as in the data file: a grid gives
                 # two of them. Checked here because a routine bound to an axis
                 # that was since removed from the stack would never fire.
                 if dim_names is not None and h.get("axis") not in dim_names:
@@ -431,15 +510,12 @@ class Recipe:
                     ok = False
                 if not ok:
                     errs.append(f"hook '{name}': every must be a whole number >= 1")
+            if name == LEGACY_AUTOFOCUS:
+                continue                     # reported by migrate_roles()
             if name not in ACTIONS:
                 errs.append(f"hook action {name!r} is not known "
                             f"(one of: {', '.join(sorted(ACTIONS))})")
                 continue
-            if name == "autofocus":
-                from .hooks import find_autofocus
-                if find_autofocus(registry) is None:
-                    errs.append(f"{describe_trigger(h)}: autofocus, but no module here "
-                                f"offers an autofocus action (is the camera connected?)")
             from .hooks import STEP_KINDS, routine_steps, step_problems
             if name in STEP_KINDS:
                 # a generic step written as a hook of its own: the same as a
@@ -488,6 +564,12 @@ class Recipe:
                 if p.kind != "settable":
                     errs.append(f"{where}: '{pid}' is not settable")
                     continue
+                if not _numeric(p):
+                    try:
+                        p.option(value)
+                    except (ValueError, AttributeError) as exc:
+                        errs.append(f"{where}: {exc}")
+                    continue
                 try:
                     v = float(value)
                 except (TypeError, ValueError):
@@ -511,18 +593,44 @@ class Recipe:
         return CompiledScan(dims=dims, detectors=list(self.detectors), hooks=list(self.hooks))
 
 
+def _numeric(p) -> bool:
+    from .registry import is_numeric_param
+    return is_numeric_param(p)
+
+
+def _check_text_axis(p, vals, text_vals: bool) -> list[str]:
+    """An axis over a NON-numeric knob (an enum's options, text), or text
+    values given to a numeric knob ([] = fine)."""
+    pid = p.id
+    if _numeric(p):
+        bad = [v for v in vals if not _is_number(v)]
+        return [f"'{pid}' takes numbers; {bad[0]!r} is not one"] if bad else []
+    if not text_vals and len(vals) and not getattr(p, "options", None):
+        # a linear sweep over a string knob: numbers it cannot mean
+        return [f"'{pid}' is {getattr(p, 'dtype', 'text')}: give its values as a "
+                f"list (an array axis), not a numeric sweep"]
+    errs = []
+    for v in vals:
+        try:
+            p.option(v)
+        except (ValueError, AttributeError) as exc:
+            errs.append(str(exc))
+            break
+    return errs
+
+
 # ─────────────────────────── zig-zag, per axis (2026-10-11) ───────────────────
 
 def _axis_n_dims(ax: dict) -> int:
-    """How many dims an axis compiles to (a raster: two), without compiling
+    """How many dims an axis compiles to (a grid: two), without compiling
     it (a `file` axis would read its file)."""
-    return 2 if isinstance(ax, dict) and ax.get("type") == "raster" else 1
+    return 2 if isinstance(ax, dict) and _axis_type(ax) == "grid" else 1
 
 
 def dim_zigzag(axes) -> list[bool]:
     """One flag per compiled dim: is this dim swept backwards on every other
     sweep? An axis's `zigzag` applies to every dim it makes (both dims of a
-    raster); a repeat never zig-zags (it moves nothing, and reversing it would
+    grid); a repeat never zig-zags (it moves nothing, and reversing it would
     only shuffle which repeat is which). The flag of dim 0 has no effect."""
     out: list[bool] = []
     for ax in axes or []:
@@ -532,10 +640,21 @@ def dim_zigzag(axes) -> list[bool]:
     return out
 
 
+def upgrade_axes(axes) -> list:
+    """An OLD axis list in today's words: a `raster` axis (until
+    2026-10-12: "spatial XY") is a `grid` -- the same 2-D grid of any two
+    knobs, renamed because nothing in it is spatial. Returns new dicts for
+    the axes it changed; the others are the same objects. Not a list: as is."""
+    if not isinstance(axes, list):
+        return axes
+    return [{**ax, "type": "grid"} if isinstance(ax, dict) and ax.get("type") == "raster"
+            else ax for ax in axes]
+
+
 def upgrade_scan_wide_zigzag(axes) -> list:
     """The OLD scan-wide `zigzag: true` (before 2026-10-11) as per-axis flags:
     `zigzag: true` on every axis that has a dim inside the outermost one --
-    every axis but the first, and also the first when it is a raster (its
+    every axis but the first, and also the first when it is a grid (its
     fast dim is inner). A repeat gets none (it moves nothing). The ORDER is
     the per-axis rule's: the same as the old one in 2-D; in 3-D and up it
     saves the extra fly-back per outer step the old rule made when a middle
@@ -565,8 +684,16 @@ def zigzag_dim_names(recipe) -> list[str]:
 
 # ─────────────────────────── axis → Dim(s) helpers ────────────────────────────
 
-def _axis_param_ids(ax: dict) -> list[str]:
+def _axis_type(ax: dict) -> str:
+    """An axis dict's type, with the OLD name `raster` read as `grid`: a
+    single axis dict can reach the helpers below without going through a
+    Recipe (the builder's rows, the axis preview)."""
     t = ax["type"]
+    return "grid" if t == "raster" else t
+
+
+def _axis_param_ids(ax: dict) -> list[str]:
+    t = _axis_type(ax)
     if t == "repeat":
         return []                         # sets nothing
     if t in ("linear", "array", "file"):
@@ -578,13 +705,13 @@ def _axis_param_ids(ax: dict) -> list[str]:
                 + ([ax["move"]] if ax.get("move") else []))
     if t == "zip":
         return [m["param"] for m in ax["members"]]
-    if t == "raster":
+    if t == "grid":
         return [ax["x"]["param"], ax["y"]["param"]]
     raise ValueError(f"unknown axis type {t!r}")
 
 
 def _compile_axis(ax: dict) -> list[Dim]:
-    t = ax["type"]
+    t = _axis_type(ax)
     if t == "repeat":
         from .repeat import interval_of, mode_of, num_of
         n = num_of(ax)
@@ -612,13 +739,13 @@ def _compile_axis(ax: dict) -> list[Dim]:
         name = ax.get("name") or "+".join(p for p, _ in vecs)
         return [Dim(name=name, params=vecs, size=n, kind="zip")]
 
-    if t == "raster":
+    if t == "grid":
         xv = _values_from_spec(ax["x"]);  xp = ax["x"]["param"]
         yv = _values_from_spec(ax["y"]);  yp = ax["y"]["param"]
         xname = ax["x"].get("name") or xp
         yname = ax["y"].get("name") or yp
-        xdim = Dim(name=xname, params=[(xp, xv)], size=len(xv), kind="raster_x")
-        ydim = Dim(name=yname, params=[(yp, yv)], size=len(yv), kind="raster_y")
+        xdim = Dim(name=xname, params=[(xp, xv)], size=len(xv), kind="grid_x")
+        ydim = Dim(name=yname, params=[(yp, yv)], size=len(yv), kind="grid_y")
         # `fast` axis becomes the INNER (last) dim so it varies quickest
         fast = ax.get("fast", "x")
         return [xdim, ydim] if fast == "y" else [ydim, xdim]

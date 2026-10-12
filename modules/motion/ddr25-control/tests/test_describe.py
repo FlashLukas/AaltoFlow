@@ -283,3 +283,20 @@ def test_wrap_options_are_every_policy_the_brain_reports():
         assert wrap_policy(bad) in d["options"]
     finally:
         brain.shutdown()
+
+
+def test_position_names_its_speed_control():
+    """describe `speed_param` (2026-10-12): the knob a fly scan sets the
+    speed on is declared, not guessed -- it exists, is a writable control,
+    and its unit is the position's unit per second."""
+    cfg, brain = _brain()
+    try:
+        p = _by_id(build_manifest(brain))
+        for pos, vel in [('angle', 'velocity')]:
+            d = p[pos]
+            assert d["speed_param"] == vel
+            v = p[vel]
+            assert v["kind"] == "control" and v.get("set")
+            assert v["unit"] == d["unit"] + "/s"
+    finally:
+        brain.shutdown()

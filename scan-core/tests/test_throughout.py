@@ -353,25 +353,66 @@ def test_swapping_the_registry_drops_them(builder):
     assert builder.throughout == []
 
 
-# ─────────────────── the old `autofocus` hook is real now ──────────────────────
+# ───────────── the old `autofocus` hook is migrated BY ROLE (2026-10-12) ───────
 
-def test_the_autofocus_hook_runs_the_registry_action():
-    """{action: autofocus} used to be a stub that only logged."""
+def _af_action(events, aid="cam.find_focus", role="autofocus"):
+    a = Action(aid, "AF", lambda: events.append(("action", aid)))
+    a.role = role
+    return a
+
+
+def test_the_old_autofocus_hook_runs_the_action_with_role_autofocus():
+    """{action: autofocus} becomes {action: call, args: {action: <id>}}, the
+    id found by describe `role`, NOT by the name 'camera.autofocus'."""
     reg, events = _registry(1)
-    reg.add_action(Action("camera.autofocus", "AF", lambda: events.append(("action", "cam"))))
-    run(Recipe(axes=_axes((4,)), detectors=["d"],
-               hooks=[{"when": "every_n_points", "n": 2, "action": "autofocus"}]),
-        reg, created_iso="t")
-    assert [e for e in events if e[0] == "action"] == [("action", "cam")] * 2
+    reg.add_action(Action("camera.autofocus", "named so, but no role",
+                          lambda: events.append(("action", "wrong"))))
+    reg.add_action(_af_action(events))
+    r = Recipe(axes=_axes((4,)), detectors=["d"],
+               hooks=[{"when": "every_n_points", "n": 2, "action": "autofocus",
+                       "on_error": "continue"}])
+    run(r, reg, created_iso="t")
+    assert [e for e in events if e[0] == "action"] == [("action", "cam.find_focus")] * 2
+    # migrated in place: saved again, it is an ordinary routine
+    assert r.hooks == [{"when": "every_n_points", "n": 2, "action": "call",
+                        "on_error": "continue", "args": {"action": "cam.find_focus"}}]
 
 
-def test_the_autofocus_hook_is_refused_without_a_camera():
+def test_the_old_autofocus_hook_is_migrated_on_load_with_a_registry():
+    reg, events = _registry(1)
+    reg.add_action(_af_action(events))
+    d = {"axes": _axes((2,)), "detectors": ["d"],
+         "hooks": [{"when": "before_scan", "action": "autofocus"}]}
+    r = Recipe.from_dict(d, registry=reg)
+    assert r.hooks[0]["action"] == "call" and r.hooks[0]["args"] == {"action": "cam.find_focus"}
+    # without a registry nothing can be resolved yet; validate() does it
+    assert Recipe.from_dict(d).hooks[0]["action"] == "autofocus"
+
+
+def test_the_old_autofocus_hook_is_refused_without_a_role():
     reg = Registry()
     reg.add(Settable("p0", "p0", "", (0, 9), lambda v: None, lambda: 0.0))
     reg.add(Gettable("d", "d", "", lambda: 0.0))
+    # an action merely NAMED autofocus is not enough any more
+    reg.add_action(Action("camera.autofocus", "AF", lambda: None))
     errs = Recipe(axes=_axes((2,)), detectors=["d"],
                   hooks=[{"when": "every_n_points", "n": 1, "action": "autofocus"}]).validate(reg)
-    assert any("no module here offers an autofocus" in e for e in errs)
+    assert len(errs) == 1 and "role 'autofocus'" in errs[0], errs
+    import pytest
+    with pytest.raises(ValueError, match="role 'autofocus'"):
+        Recipe.from_dict({"axes": _axes((2,)), "detectors": ["d"],
+                          "hooks": [{"when": "before_scan", "action": "autofocus"}]},
+                         registry=reg)
+
+
+def test_actions_with_role():
+    reg = Registry()
+    a = reg.add_action(_af_action([], "x.af"))
+    reg.add_action(Action("y.ref", "ref", lambda: None))
+    assert reg.actions_with_role("autofocus") == [a]
+    assert reg.actions_with_role("nothing") == []
+    from scan_core.registry import build_sim_registry
+    assert [x.id for x in build_sim_registry().actions_with_role("autofocus")] == ["sim_autofocus"]
 
 
 def test_a_failed_camera_check_is_carried_on_from():

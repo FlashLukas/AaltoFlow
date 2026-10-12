@@ -67,7 +67,7 @@ def test_too_fast_warns_with_the_speed_that_would_do_but_validates(reg):
     assert r.validate(reg) == []                     # never blocks
     w = fly_warnings(r, reg)
     assert len(w) == 1
-    assert "lockin_r" in w[0] and "0.25 samples per pixel" in w[0] and "EMPTY" in w[0]
+    assert "lockin_r" in w[0] and "0.25 samples per bin" in w[0] and "EMPTY" in w[0]
     assert "<= 100 um/s for >= 1" in w[0] and "<= 33.3 um/s for >= 3" in w[0]
 
 
@@ -110,15 +110,15 @@ def test_empty_pixels_are_warned_and_summed_up_but_the_scan_runs(reg):
     assert n.shape == (3, 21) and np.sum(n == 0) > 20
     text = "\n".join(log)
     # before: the estimate and the warning
-    assert "expected samples per pixel: lockin_r ~0.0" in text
-    assert "fly: WARNING: lockin_r: ~0.0" in text and "pixels will be EMPTY" in text
+    assert "expected samples per bin: lockin_r ~0.0" in text
+    assert "fly: WARNING: lockin_r: ~0.0" in text and "bins will be EMPTY" in text
     # during: the first row with empty pixels, ONCE
-    first = [m for m in log if "pixels EMPTY on row" in m]
+    first = [m for m in log if "bins EMPTY on row" in m]
     assert len(first) == 1 and "lockin_r" in first[0]
     # after: the count over the whole scan
-    end = [m for m in log if "empty pixel(s) in" in m]
+    end = [m for m in log if "empty bin(s) in" in m]
     assert len(end) == 1
-    assert f"{int(np.sum(n == 0))} empty pixel(s) in 3 of 3 rows" in end[0]
+    assert f"{int(np.sum(n == 0))} empty bin(s) in 3 of 3 rows" in end[0]
     assert "slow down the fly speed" in end[0]
 
 
@@ -126,7 +126,7 @@ def test_no_empty_pixel_no_warning(reg):
     log = []
     run(_recipe(axes=[_fly(start=-5, stop=5, num=11, speed=20)]), reg, on_log=log.append)
     assert not any("WARNING" in m for m in log), log
-    assert any("expected samples per pixel: lockin_r ~" in m for m in log)
+    assert any("expected samples per bin: lockin_r ~" in m for m in log)
 
 
 def test_a_module_saying_missed_samples_is_warned(reg):
@@ -208,7 +208,7 @@ def test_the_builder_warns_but_keeps_run_enabled():
         row.speed.setValue(400.0)
         win._rebuild_summary()
         text = win.detail.text()
-        assert "WARNING: lockin_r" in text and "pixels will be EMPTY" in text
+        assert "WARNING: lockin_r" in text and "bins will be EMPTY" in text
         assert win.summary.text() != "invalid"
         assert win.run_btn.isEnabled()
     finally:

@@ -199,7 +199,7 @@ def is_picture(path) -> bool:
 
 def _raster_xy(axes_list) -> list[str] | None:
     rasters = [ax for ax in axes_list or []
-               if isinstance(ax, dict) and ax.get("type") == "raster"]
+               if isinstance(ax, dict) and ax.get("type") in ("grid", "raster")]
     if len(rasters) != 1:
         return None
     r = rasters[0]
@@ -1155,7 +1155,7 @@ class ScoutRunner:
                 if k in self.ks or k in self.outer or not d.params:
                     continue
                 for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[0]))
+                    current[pid] = registry.get(pid).set(values[0])
                 moved.append(k)
             moved += self.ks
             last = [None] * len(self.ks)
@@ -1219,14 +1219,14 @@ class ScoutRunner:
             waits = []
             for j, d, n in todo:
                 for pid, values in d.params:
-                    current[pid], w = registry.get(pid).send(float(values[n]))
+                    current[pid], w = registry.get(pid).send(values[n])
                     waits.append(w)
             for w in waits:
                 w()
         else:
             for j, d, n in todo:
                 for pid, values in d.params:
-                    current[pid] = registry.get(pid).set(float(values[n]))
+                    current[pid] = registry.get(pid).set(values[n])
         for j, _, n in todo:
             last[j] = n
 
@@ -1253,7 +1253,7 @@ class ScoutRunner:
         done = []
         try:
             for pid, value in settings.items():
-                self.registry.get(pid).set(float(value))
+                self.registry.get(pid).set(value)
                 done.append(pid)
                 log(f"scout: {pid} = {float(value):g} for the scout only")
         except BaseException:
@@ -1269,7 +1269,7 @@ class ScoutRunner:
         log = self.ctx["log_fn"]
         for pid, old in restore:
             try:
-                self.registry.get(pid).set(float(old))
+                self.registry.get(pid).set(old)
                 log(f"scout: {pid} back to {float(old):g}")
             except Exception as exc:
                 if ok:
@@ -1295,28 +1295,32 @@ class ScoutRunner:
 # ───────────────────────────── for the builder ──────────────────────────────
 
 #: The warning the builder shows (Lukas chose "warn", not "insert one",
-#: 2026-10-11): the scout thresholds what it MEASURES, and a reflectivity or
-#: camera reading out of focus is lower and flatter -- Otsu's threshold then
-#: lands somewhere else and the mask keeps the wrong points.
+#: 2026-10-11): the scout thresholds what it MEASURES, and a reading taken
+#: out of focus (a reflectivity, a camera image) is lower and flatter --
+#: Otsu's threshold then lands somewhere else and the mask keeps the wrong
+#: points.
 NO_AUTOFOCUS_WARNING = ("No autofocus before the scout pass: the threshold "
-                        "follows focus -- add Find focus to BEFORE SCAN")
+                        "follows focus -- add an autofocus step to BEFORE SCAN")
 
 
-def _is_autofocus(action_id) -> bool:
-    """Is this action an autofocus? camera.autofocus, sim_autofocus,
-    camera.autofocus_at_position, ... -- any action whose name says so."""
-    return isinstance(action_id, str) and "autofocus" in action_id.lower()
+def _autofocus_ids(registry) -> set:
+    """The ids of the actions whose module declared describe `role:
+    autofocus` (never guessed from a name)."""
+    find = getattr(registry, "actions_with_role", None)
+    return {a.id for a in find("autofocus")} if find is not None else set()
 
 
-def has_autofocus_before_scan(recipe) -> bool:
-    """Does a before_scan routine run an autofocus? Either the hook action
-    `autofocus` itself, or a `call` routine with an autofocus step in it
-    (original {action: ...} or ordered {steps: [...]} form)."""
-    from .hooks import routine_steps
+def has_autofocus_before_scan(recipe, registry) -> bool:
+    """Does a before_scan routine run an action with role autofocus? Either
+    form of a `call` routine (original {action: ...} or ordered {steps:
+    [...]}), and the OLD built-in `autofocus` hook (which validate()
+    translates into exactly such a step)."""
+    from .hooks import LEGACY_AUTOFOCUS, routine_steps
+    af = _autofocus_ids(registry)
     for h in getattr(recipe, "hooks", None) or []:
         if not isinstance(h, dict) or h.get("when") != "before_scan":
             continue
-        if h.get("action") == "autofocus":
+        if h.get("action") == LEGACY_AUTOFOCUS:
             return True
         if h.get("action") != "call":
             continue
@@ -1324,17 +1328,54 @@ def has_autofocus_before_scan(recipe) -> bool:
             steps = routine_steps(h.get("args") or {})
         except Exception:
             continue                       # validate() reports a bad routine
-        if any(s and s[0] == "action" and _is_autofocus(s[1]) for s in steps):
+        if any(s and s[0] == "action" and s[1] in af for s in steps):
             return True
     return False
 
 
-def autofocus_warning(recipe) -> str:
-    """NO_AUTOFOCUS_WARNING when the recipe has a MEASURED scout pass and no
-    autofocus before the scan, else "". Only a warning: it never stops a run
-    (a sample that does not need focusing, or focus set by hand just before).
-    A scout from a FILE (a picture, an earlier scan) measures nothing now, so
-    focus does not matter for it."""
+def _focus_matters(recipe, registry, spec) -> bool:
+    """Would focus change what this scout pass sees? Yes when its detector
+    says so (describe `focus_sensitive: true`), or when it scouts POSITIONS
+    -- every scouted axis is a knob in a length unit (m, mm, um, nm ...):
+    moving across a sample is what takes it out of focus. A scout over a
+    field or a frequency does not care."""
+    det = registry.get(spec.get("detector")) if spec.get("detector") else None
+    if det is not None and getattr(det, "focus_sensitive", False):
+        return True
+    from .units import is_length_unit
+    try:
+        dims = {d.name: d for d in recipe.compile(registry).dims}
+    except Exception:
+        return False
+    names = list((spec.get("axes") or {}).keys())
+    if not names:
+        return False
+    for name in names:
+        d = dims.get(name)
+        if d is None or not d.params:
+            return False
+        p = registry.get(d.params[0][0])
+        if p is None or not is_length_unit(getattr(p, "unit", "")):
+            return False
+    return True
+
+
+def autofocus_warning(recipe, registry=None) -> str:
+    """NO_AUTOFOCUS_WARNING when ALL of these hold, else "":
+
+    * the recipe has a MEASURED scout pass (one read from a file -- a
+      picture, an earlier scan -- measures nothing now);
+    * the registry offers an autofocus (an action with describe `role:
+      autofocus`) -- a setup with nothing to focus has nothing to forget;
+    * none runs in a BEFORE SCAN routine;
+    * focus matters for this scout (_focus_matters: positions scouted, or a
+      detector declaring `focus_sensitive: true`).
+
+    Only a warning: it never stops a run (a sample that does not need
+    focusing, or focus set by hand just before). Without a registry nothing
+    can be known and nothing is said."""
+    if registry is None:
+        return ""
     block = getattr(recipe, "scout", None)
     if not isinstance(block, dict) or not block:
         return ""
@@ -1344,7 +1385,11 @@ def autofocus_warning(recipe) -> str:
         return ""
     if spec.get("from"):
         return ""
-    return "" if has_autofocus_before_scan(recipe) else NO_AUTOFOCUS_WARNING
+    if not _autofocus_ids(registry):
+        return ""
+    if has_autofocus_before_scan(recipe, registry):
+        return ""
+    return NO_AUTOFOCUS_WARNING if _focus_matters(recipe, registry, spec) else ""
 
 
 def estimate(recipe) -> dict | None:

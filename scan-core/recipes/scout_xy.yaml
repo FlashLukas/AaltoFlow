@@ -10,7 +10,7 @@ comment: XY map measured only on the elements -- a quick reflectivity scout firs
 # (exactly two scouted axes: the first is X = the picture's columns).
 fixed: {rf_freq: 850, rf_power: 8, field: 40}
 axes:
-  - {type: raster,
+  - {type: grid,
      x: {param: pos_x, start: -45, stop: 45, num: 61},
      y: {param: pos_y, start: -45, stop: 45, num: 61},
      fast: x}

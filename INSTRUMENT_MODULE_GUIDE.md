@@ -497,6 +497,36 @@ constantly and mean nothing.
 `read_path` is a **list**, not a dotted string: AUX channel names contain `/` and
 ids may contain `.`, so a dotted path could not be split back apart.
 
+### Roles and links -- what a knob IS for (optional, 2026-10-12)
+
+scan-core is a generic coordinator: it must never look an instrument up by its
+name ("camera.autofocus", "position_x"). When the coordinator needs "the
+autofocus of this setup" or "the two stage axes", the module SAYS so with
+optional fields on the descriptor:
+
+| field | on | meaning |
+|---|---|---|
+| `"role": "autofocus"` | an action with a `wait` block | THE autofocus of the setup. An old recipe's built-in `autofocus` hook is translated into a routine step running it; the scout pass warns when none runs before it. Declare it on one action per module. |
+| `"role": "stage_x"` / `"stage_y"` | a length control | the navigator offers this pair first as its X / Y. |
+| `"speed_param": "velocity_x"` | a control that MOVES (a position, an angle) | the id (within the module) of the control that sets how fast it moves. A fly scan sets its speed there; the speed is converted when that control's unit is another rate of the knob's unit (`nm/min` for a knob in `um`; /s, /min, /h). Declared by kim, piezo, stage, smaract, ddr25. |
+| `"focus_sensitive": true` | an indicator (detector) | its reading changes with focus (a reflectivity, a camera image): the scout pass warns when no autofocus runs before it, whatever axes it scouts. |
+
+`role` is a plain string; scan-core reads it with
+`registry.actions_with_role(role)` / `registry.params_with_role(role)`. A
+module that declares none still works -- it just is not found by role.
+
+### Enum and string CONTROLS are scan axes (2026-10-12)
+
+A control of type `enum` (with its `options`) or `string` that has a `set`
+block is a scan-core SETTABLE like any number: a filter wheel's positions, a
+grating, a lock-in's input mode can be an axis (`{type: array, param: ...,
+values: ["A", "A-B"]}`) or a condition. scan-core sends the option exactly as
+declared (no `scale`, no rounding), checks every value against `options`
+before the run, and settles by comparing the echo EXACTLY -- so declare a
+settle whose key reports the option itself (`echoes` on the status key, or
+`adopt_then_flag` with that key as the setpoint). The data file gets a text
+coordinate. Linear spacing is for numbers only.
+
 ### The type of a detector is how scan-core STORES it (2026-10-04)
 
 scan-core picks the storage of every recorded value from its descriptor

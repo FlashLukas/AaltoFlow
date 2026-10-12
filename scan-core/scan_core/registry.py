@@ -44,6 +44,19 @@ class Parameter:
     #: the module's `ramp` block in describe): a fly scan can then fly it --
     #: field, frequency, power -- not only a stage. None = it can only be SET.
     ramp = None
+    #: What this parameter IS for, when the module says so (describe `role`,
+    #: 2026-10-12): "stage_x" / "stage_y" (the navigator's default pair),
+    #: ... -- a name the coordinator can look for instead of guessing from
+    #: the id. None = the module does not say.
+    role = None
+    #: A detector whose reading changes with FOCUS (describe
+    #: `focus_sensitive: true`): a reflectivity, a camera image. The scout
+    #: pass warns when no autofocus runs before it (scout.autofocus_warning).
+    focus_sensitive = False
+    #: The id of the settable that sets how FAST this knob moves (describe
+    #: `speed_param`): a fly scan sets its speed there (flyscan.find_speed_param).
+    #: None = the module does not say (a same-module rate unit is guessed).
+    speed_param = None
 
     def __init__(self, id: str, label: str, unit: str, kind: str):
         self.id = id
@@ -52,10 +65,52 @@ class Parameter:
         self.kind = kind          # "settable" | "gettable"
 
 
+#: Settable dtypes whose values are NOT numbers (2026-10-12): an enum (a
+#: filter wheel's position names, a lock-in's input mode) or free text. They
+#: are scanned over their values as they are -- no clamping, no float(), no
+#: linear spacing -- and stored as text coordinates in the data file.
+NON_NUMERIC = ("enum", "string")
+
+
+def is_numeric_param(p) -> bool:
+    """True unless `p` is a settable whose describe type is enum or string."""
+    return getattr(p, "dtype", "float") not in NON_NUMERIC
+
+
+def same_value(a, b, tol: float = 0.0) -> bool:
+    """Equal setpoints? Numbers within `tol`; anything else (an enum option,
+    text, a bool) EXACTLY -- 3 and "3" count as the same option (a JSON
+    round trip turns one into the other)."""
+    num = (int, float, np.integer, np.floating)
+    if (isinstance(a, num) and not isinstance(a, (bool, np.bool_))
+            and isinstance(b, num) and not isinstance(b, (bool, np.bool_))):
+        return abs(float(a) - float(b)) <= tol
+    if a == b:
+        return True
+    if str(a) == str(b):
+        return True
+    # a number published as text ("5" for 5.0): compare as numbers
+    if any(isinstance(x, num) and not isinstance(x, (bool, np.bool_)) for x in (a, b)):
+        try:
+            return abs(float(a) - float(b)) <= tol
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 class Settable(Parameter):
-    def __init__(self, id, label, unit, limits, set_fn, get_fn, send_fn=None):
+    #: "float" (default), "int", "bool" -- all numeric, swept as numbers --
+    #: or "enum" / "string" (NON_NUMERIC): values kept as they are.
+    dtype = "float"
+    #: an enum's options, in order (describe `options`); None otherwise
+    options = None
+
+    def __init__(self, id, label, unit, limits, set_fn, get_fn, send_fn=None,
+                 dtype: str = "float", options=None):
         super().__init__(id, label, unit, "settable")
-        self.limits = tuple(limits)     # (min, max) in `unit`
+        self.limits = tuple(limits)     # (min, max) in `unit`; (-inf, inf) for enum/string
+        self.dtype = dtype or "float"
+        self.options = list(options) if options is not None else None
         self._set, self._get = set_fn, get_fn
         #: optional SPLIT set (2026-10-08): send_fn(value) sends the command
         #: and returns a function that waits until it has settled. Lets the
@@ -84,7 +139,31 @@ class Settable(Parameter):
             self._set(value)                      # (real adapter blocks until settled)
         return value
 
-    def _clamped(self, value) -> float:
+    @property
+    def numeric(self) -> bool:
+        """False for an enum or string knob (scanned over its values as they
+        are); True for float / int / bool."""
+        return self.dtype not in NON_NUMERIC
+
+    def option(self, value):
+        """The enum OPTION `value` names (the option itself, so the wire
+        carries exactly what the module declared), or ValueError. A string
+        knob takes any text; a number becomes its text."""
+        if self.dtype == "string":
+            if isinstance(value, (bool, np.bool_)) or value is None:
+                raise ValueError(f"{self.id}: {value!r} is not text")
+            return str(value)
+        for opt in self.options or []:
+            if same_value(opt, value):
+                return opt
+        if not self.options:
+            return value                 # an enum that declared no options
+        raise ValueError(f"{self.id}: {value!r} is not one of its options "
+                         f"({', '.join(map(str, self.options))})")
+
+    def _clamped(self, value):
+        if not self.numeric:
+            return self.option(value)    # no clamp: an option is right or wrong
         lo, hi = self.limits
         value = float(value)
         if not np.isfinite(value):
@@ -419,6 +498,11 @@ class Action:
     """
 
     kind = "action"
+    #: What the action IS for (describe `role`, 2026-10-12): "autofocus" is
+    #: the one scan-core looks for (an old recipe's built-in autofocus hook
+    #: is translated to a routine step running the action with this role).
+    #: None = the module does not say.
+    role = None
     #: the module's describe `wait` block (how a routine waits for it), or
     #: None; informative -- run() already blocks. Sent by get_registry.
     wait = None
@@ -507,6 +591,16 @@ class Registry:
 
     def get_action(self, aid: str) -> Action | None:
         return self._actions.get(aid)
+
+    def actions_with_role(self, role: str) -> list[Action]:
+        """Every action whose module declared this describe `role`, in the
+        order they were added (e.g. "autofocus": the camera's Find focus)."""
+        return [a for a in self._actions.values() if getattr(a, "role", None) == role]
+
+    def params_with_role(self, role: str) -> list[Parameter]:
+        """Every parameter whose module declared this describe `role`
+        (e.g. "stage_x")."""
+        return [p for p in self._params.values() if getattr(p, "role", None) == role]
 
 
 # ───────────────────────────── simulated system ───────────────────────────────
@@ -882,7 +976,10 @@ def build_sim_registry() -> Registry:
         reg.add(Settable(pid, label, "um", (-100, 100),
                          set_fn=lambda v, a=attr: s.move(a, v),
                          get_fn=lambda a=attr: getattr(s, a),
-                         send_fn=lambda v, a=attr: send_move(a, v)))
+                         send_fn=lambda v, a=attr: send_move(a, v))
+                )
+        reg.get(pid).role = "stage_" + pid[-1]   # the navigator's default pair
+        reg.get(pid).speed_param = "stage_speed"  # what a fly scan sets the speed on
     settable("pos_z",     "Position Z",     "um",  (-50, 50),   "z_um")
     settable("stage_speed", "Stage speed (0 = instant)", "um/s", (0, 500),
              "stage_speed_um_s")
@@ -894,7 +991,8 @@ def build_sim_registry() -> Registry:
     reg.add(Gettable("lockin_y",   "Lock-in Y",   "V",   lambda: s.lockin()["y"]))
     reg.add(Gettable("lockin_phi", "Lock-in phase", "deg", lambda: s.lockin()["phi"]))
     reg.add(Gettable("aux_in",     "Aux in",      "V",   lambda: s.lockin()["aux"]))
-    reg.add(Gettable("reflectivity", "Reflectivity", "", s.reflectivity))
+    reg.add(Gettable("reflectivity", "Reflectivity", "", s.reflectivity)
+            ).focus_sensitive = True        # it follows focus (scout warning)
 
     # Detectors that are NOT floats (2026-10-04), so a simulated scan -- and
     # the tests -- exercise the storage types a module's describe declares
@@ -960,7 +1058,8 @@ def build_sim_registry() -> Registry:
 
     reg.add_action(Action("sim_autofocus", "Autofocus (simulated)", s.autofocus,
                           help="Stands in for camera.autofocus: waits 50 ms. For "
-                               "trying a THROUGHOUT routine without the rig."))
+                               "trying a THROUGHOUT routine without the rig.")
+                   ).role = "autofocus"     # what the camera declares in describe
 
     # An action WITH ARGUMENTS (2026-10-10), standing in for the camera's
     # "Find focus at AF position": a routine step's Advanced options can be
