@@ -181,24 +181,47 @@ def test_load_gds_flattens_references_and_skips_klayout_context(tmp_path):
     assert d.bbox() == pytest.approx((-2300, -2300, 2300, 110))
 
 
-def test_stage_pairs_are_found_by_name_with_their_units():
-    from scan_core.navigator import stage_pairs
+def test_stage_pairs_are_every_length_pair_ranked():
+    """2026-10-12: any two LENGTH-unit settables are candidates (any module,
+    any name); describe role stage_x/stage_y first, then the same module's
+    ..._x/_y names, then the rest. Different units never pair."""
+    from scan_core.navigator import length_settables, make_pair, stage_pairs
     from scan_core.registry import Registry, Settable
 
     reg = Registry()
     for pid, unit in (("kim.position_x", "um"), ("kim.position_y", "um"),
                       ("kim.position_z", "um"), ("stage.position_x", "mm"),
-                      ("stage.position_y", "mm"), ("piezo.position_x", "um")):
+                      ("stage.position_y", "mm"), ("piezo.position_x", "um"),
+                      ("rot.angle", "deg"), ("xyz.a", "um"), ("xyz.b", "um")):
         reg.add(Settable(pid, pid, unit, (-10, 10), lambda v: None, lambda: 0.0))
-    pairs = {p.label: p for p in stage_pairs(reg)}
-    assert set(pairs) == {"kim", "stage"}          # piezo has no Y here
-    assert pairs["stage"].um_per_unit == 1000.0
-    assert pairs["stage"].limits_um() == (-10000, -10000, 10000, 10000)
-    assert pairs["stage"].inside(9999, -9999) and not pairs["stage"].inside(10001, 0)
+    reg.get("xyz.a").role, reg.get("xyz.b").role = "stage_x", "stage_y"
+    assert "rot.angle" not in [p.id for p in length_settables(reg)]
+    pairs = stage_pairs(reg)
+    assert [(p.rank, p.label) for p in pairs[:3]] == [
+        ("role", "xyz"), ("name", "kim"), ("name", "stage")]
+    assert pairs[0].x.id == "xyz.a" and pairs[0].y.id == "xyz.b"
+    by = {p.label: p for p in pairs}
+    assert by["stage"].um_per_unit == 1000.0
+    assert by["stage"].limits_um() == (-10000, -10000, 10000, 10000)
+    assert by["stage"].inside(9999, -9999) and not by["stage"].inside(10001, 0)
+    # the rest: any two in the same unit, once each, across modules too
+    others = {frozenset((p.x.id, p.y.id)) for p in pairs if p.rank == "other"}
+    assert frozenset(("kim.position_x", "piezo.position_x")) in others
+    assert frozenset(("kim.position_x", "kim.position_y")) not in others   # already "name"
+    assert not any("stage." in p.x.id + p.y.id and "kim." in p.x.id + p.y.id
+                   for p in pairs)                                         # mm vs um
+    # the user's own pick
+    mine = make_pair(reg.get("piezo.position_x"), reg.get("kim.position_z"))
+    assert mine.label == "piezo.position_x / kim.position_z" and mine.prefix == ""
+    with pytest.raises(ValueError):
+        make_pair(reg.get("stage.position_x"), reg.get("kim.position_y"))
+    with pytest.raises(ValueError):
+        make_pair(reg.get("rot.angle"), reg.get("kim.position_y"))
 
 
 def test_the_simulator_offers_a_stage():
     from scan_core import build_sim_registry
     from scan_core.navigator import stage_pairs
-    (p,) = stage_pairs(build_sim_registry())
-    assert p.label == "simulator" and p.um_per_unit == 1.0
+    p = stage_pairs(build_sim_registry())[0]
+    assert p.label == "simulator" and p.um_per_unit == 1.0 and p.rank == "role"
+    assert (p.x.id, p.y.id) == ("pos_x", "pos_y")

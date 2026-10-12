@@ -583,7 +583,8 @@ under the stage. Open a **GDS/OASIS** layout (drawn as vectors, exact
 micrometres; read with `gdstk`, no KLayout needed) or an **image** whose real
 width you type in. Then register it:
 
-1. Put a feature under the laser, click it on the design, **I am here**. With
+1. Put a feature at the setup's reference point (a probe beam's spot, a
+   cross-hair), click it on the design, **I am here**. With
    one point the rotation is the one you set by eye (+/-1, +/-90 buttons).
 2. A second point far from the first **fits** the rotation and the stage's
    scale (the design's scale is exact, so a fitted scale that is not 1.000 is
@@ -593,9 +594,12 @@ width you type in. Then register it:
 4. An open-loop stage drifts: click the feature you actually see and
    **correct offset only** -- rotation and scale are kept.
 
-It moves whichever stage is connected through the same parameters a scan uses
-(`position_x`/`position_y` from the module's `describe`): KIM in um, the BSC203
-in mm, or the simulator. **Final approach** makes every move end in +X/+Y over
+It moves whichever stage is connected through the same parameters a scan uses.
+Any two settables in a LENGTH unit (m, mm, um, nm ...) can be its X and Y
+(`navigator.stage_pairs(registry)`, best first): a pair whose module declares
+describe `role: stage_x` / `stage_y`, then the same module's `..._x` / `..._y`
+(position_x / position_y), then any other two in the same unit;
+`make_pair(x, y)` takes the user's own pick. **Final approach** makes every move end in +X/+Y over
 that distance, so an inertia stage arrives from the same side every time. A
 session (design path + reference points) saves next to the design as
 `.nav.json`.

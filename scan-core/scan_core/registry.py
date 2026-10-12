@@ -906,7 +906,8 @@ def build_sim_registry() -> Registry:
         reg.add(Settable(pid, label, "um", (-100, 100),
                          set_fn=lambda v, a=attr: s.move(a, v),
                          get_fn=lambda a=attr: getattr(s, a),
-                         send_fn=lambda v, a=attr: send_move(a, v)))
+                         send_fn=lambda v, a=attr: send_move(a, v))
+                ).role = "stage_" + pid[-1]   # the navigator's default pair
     settable("pos_z",     "Position Z",     "um",  (-50, 50),   "z_um")
     settable("stage_speed", "Stage speed (0 = instant)", "um/s", (0, 500),
              "stage_speed_um_s")

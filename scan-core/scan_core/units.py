@@ -20,8 +20,9 @@ from __future__ import annotations
 #: are what a speed control is plausibly declared in; a pair from different
 #: families never converts.
 _FAMILIES = {
-    "length": {"m": 1.0, "cm": 1e-2, "mm": 1e-3, "um": 1e-6, "µm": 1e-6,
-               "μm": 1e-6, "micron": 1e-6, "nm": 1e-9, "pm": 1e-12},
+    # length in MICROMETRES, so the factors are exact (1 mm = 1000.0 um)
+    "length": {"m": 1e6, "cm": 1e4, "mm": 1e3, "um": 1.0, "µm": 1.0,
+               "μm": 1.0, "micron": 1.0, "nm": 1e-3, "pm": 1e-6},
     "field": {"T": 1.0, "mT": 1e-3, "uT": 1e-6, "µT": 1e-6, "μT": 1e-6,
               "nT": 1e-9, "G": 1e-4, "mG": 1e-7, "kG": 1e-1},
     "frequency": {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9},
@@ -61,7 +62,7 @@ def length_factor_um(unit) -> float | None:
     f = family_of(unit)
     if f is None or f[0] != "length":
         return None
-    return f[1] / 1e-6
+    return f[1]
 
 
 def split_rate(unit) -> tuple[str, float] | None:
@@ -82,7 +83,7 @@ def rate_factor(value_unit, rate_unit) -> float | None:
     `rate_unit`, or None when they do not convert.
 
         rate_factor("um", "um/s")    == 1
-        rate_factor("um", "nm/min")  == 60000      (1 um/s = 60000 nm/min)
+        rate_factor("um", "nm/min")  ~= 60000      (1 um/s = 60000 nm/min)
         rate_factor("mT", "mT/min")  == 60
         rate_factor("K",  "K/min")   == 60
         rate_factor("mT", "um/s")    is None       (not a rate of a field)

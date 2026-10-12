@@ -1285,6 +1285,13 @@ looks an instrument up by its id.
 - **`focus_sensitive: true` on a detector** (`Parameter.focus_sensitive`):
   its reading follows focus. The scout's autofocus warning (4h) uses it and
   the units of the scouted axes -- never the word "autofocus" in an id.
+- **Navigator stages** (`scan_core/navigator.py`): `stage_pairs(registry)`
+  returns EVERY pair of length-unit settables (`units.is_length_unit`), ranked
+  `role` (describe `role: stage_x` / `stage_y`; kim, piezo, stage and the
+  simulator's pos_x/pos_y declare it) > `name` (same module, `..._x`/`..._y`)
+  > `other` (any two in the same unit factor, each unordered pair once).
+  `StagePair.rank` says which; `length_settables` lists the candidates and
+  `make_pair(x, y)` builds the user's own pick (ValueError on mixed units).
 
 ---
 
