@@ -294,6 +294,9 @@ def test_the_builder_warns_without_blocking_the_run(builder):
     sec = builder.scout_section
     assert sec.af_warn.isVisible()
     assert "No autofocus before the scout pass" in sec.af_warn.text()
+    # the tooltip names the CONNECTED autofocus action (by role), no rig's camera
+    assert "sim_autofocus" in sec.af_warn.toolTip()
+    assert "camera" not in sec.af_warn.toolTip().lower()
     assert "WARNING: No autofocus before the scout pass" in builder.detail.text()
     assert builder.summary.text() != "invalid"                 # a warning, not an error
     assert builder.build_recipe().validate(builder.registry) == []

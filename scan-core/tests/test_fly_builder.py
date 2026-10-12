@@ -56,7 +56,7 @@ def test_ticking_fly_makes_a_fly_axis_with_the_speed_knob(builder):
     row = _fly_row(builder)
     assert row.fly.isEnabled() and row.speed.isEnabled()
     assert row.advanced.isVisibleTo(row) and row.speed.isVisibleTo(row)
-    assert row.num_lbl.text() == "pixels"
+    assert row.num_lbl.text() == "bins"
     assert "fly 40 um/s" in row.tag_texts()
     ax = builder.build_recipe().axes[-1]
     assert ax == {"type": "fly", "param": "pos_x", "start": -10.0, "stop": 10.0,
@@ -184,3 +184,36 @@ def test_ticking_fly_greys_the_detectors_that_cannot_fly_and_gives_them_back(bui
     row.fly.setChecked(False)                                # back to stepping
     assert not items["fmr"].isDisabled()
     assert items["fmr"].checkState(0) == QtCore.Qt.Checked   # the selection came back
+
+
+def test_the_speed_knob_in_its_own_unit():
+    """A positioner whose module takes its speed in nm/min (2026-10-12): the
+    builder offers the DECLARED speed control first (flyscan.find_speed_param),
+    keeps the fly speed in um/s, converts the control's limits into it
+    (flyscan.speed_factor) and shows what the control will receive."""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from apps.scan_builder import ScanBuilder
+    from scan_core.registry import Settable
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    reg = build_sim_registry()
+    reg.add(Settable("speed_nm", "Speed", "nm/min", (0, 600000),
+                     lambda v: None, lambda: 60000.0))
+    reg.get("pos_x").speed_param = "speed_nm"
+    win = ScanBuilder(reg)
+    try:
+        win.add_axis("pos_x")
+        row = win.rows[-1]
+        ids = [row.knob_box.itemData(i) for i in range(row.knob_box.count())]
+        assert ids[0] == "speed_nm" and "stage_speed" in ids   # any rate of the module
+        row.fly.setChecked(True)
+        assert row.speed_param_id() == "speed_nm"
+        assert row.speed.maximum() == pytest.approx(10.0)       # 600000 nm/min in um/s
+        assert row.speed.value() == pytest.approx(1.0)          # its 60000 nm/min now
+        row.speed.setValue(2.0)
+        assert "um/s" in row.speed_lbl.text() and "120000 nm/min" in row.speed_lbl.text()
+        ax = row.to_axis()
+        assert ax["speed"] == 2.0 and ax["speed_param"] == "speed_nm"
+        assert win.build_recipe().validate(reg) == []
+    finally:
+        win.close()

@@ -853,7 +853,7 @@ class AxisRow(_StackRow):
         measured position is the whole idea, so without a recorded position
         there is nothing to bin by -- and only meaningful on the innermost
         axis (the summary says so if it is ticked anywhere else). With it
-        ticked, `pts` become pixels.
+        ticked, `pts` become bins.
 
         A MEASURED COORDINATE (camera.laser_x: where the laser is on the sample)
         streams but is not a stage: `move_choices` lists the stages that could
@@ -883,12 +883,12 @@ class AxisRow(_StackRow):
         self.fly.setToolTip(
             (f"FLY: the module sweeps {self.param.label} continuously from\n"
              "'from' to 'to' at the pace given, the detectors recording all\n"
-             "the way; the samples are then averaged per pixel. Innermost axis\n"
+             "the way; the samples are then averaged per bin. Innermost axis\n"
              "only; every detector must be one its module can stream.")
             if self.ramp is not None else
             "FLY: move continuously from 'from' to 'to' at the speed given,\n"
-            "recording the detectors and the MEASURED position all the way,\n"
-            "then average the samples per pixel. Innermost axis only; every\n"
+            "recording the detectors and the MEASURED value all the way,\n"
+            "then average the samples per bin. Innermost axis only; every\n"
             "detector must be one its module can stream."
             if self.streams else
             f"{self.param.label} cannot be flown: this knob can neither stream\n"
@@ -907,7 +907,7 @@ class AxisRow(_StackRow):
         self.row_time.setRange(0.1, 1e6); self.row_time.setDecimals(1)
         self.row_time.setSuffix(" s"); self.row_time.setValue(60.0)
         self.row_time.setFixedWidth(84)
-        self.row_time.setToolTip("How long ONE row (from 'from' to 'to', half a pixel\n"
+        self.row_time.setToolTip("How long ONE row (from 'from' to 'to', half a bin\n"
                                  "past each end) should take; the pace follows.")
         self.pace_box = QtWidgets.QComboBox()
         self.pace_box.setToolTip(
@@ -928,20 +928,23 @@ class AxisRow(_StackRow):
         for mid in self.move_choices:
             self.move_box.addItem(mid, mid)
         self.move_box.setToolTip(
-            "The stage that flies this row. The grid, the placement of each row\n"
-            "and the binning stay in THIS parameter's coordinates; which way the\n"
-            "stage has to go is learned on the first row. If the scan stops with\n"
-            "'does not move', pick the other axis (the camera may be mounted\n"
-            "rotated against the stage).")
+            "The positioner that flies this row (this value is MEASURED by\n"
+            "another module, it is not driven itself). The grid, the placement\n"
+            "of each row and the binning stay in THIS parameter's coordinates;\n"
+            "which way the positioner has to go is learned on the first row. If\n"
+            "the scan stops with 'does not move', pick another positioner (the\n"
+            "measuring module may be mounted rotated against it).")
         self.move_lbl = _muted("move with")
 
         self.knob_box = QtWidgets.QComboBox()
         self.knob_box.setMinimumWidth(110)
         self.knob_box.setToolTip(
-            "The setting that sets the stage's speed. It is set to the fly speed\n"
-            "for each row and put back for the approach and at the end.\n"
-            "(none): the stage moves at whatever speed it has; the number is\n"
-            "then only used for the time estimate.")
+            "The setting that sets the positioner's speed (its module's\n"
+            "speed_param, or a rate of the same module). It is set to the fly\n"
+            "speed, converted into its own unit, for each row and put back for\n"
+            "the approach and at the end. (none): the positioner moves at\n"
+            "whatever speed it has; the number is then only used for the time\n"
+            "estimate.")
 
         self.timeout_auto = QtWidgets.QCheckBox("auto")
         self.timeout_auto.setChecked(True)
@@ -958,10 +961,10 @@ class AxisRow(_StackRow):
         self.lag_box = QtWidgets.QCheckBox("lag correction")
         self.lag_box.setChecked(True)
         self.lag_box.setToolTip(
-            "A lock-in's output belongs to where the stage was a moment EARLIER\n"
-            "(its filter delay). On: each sample is moved back by the delay its\n"
-            "module declares before its position is looked up. Off only to see\n"
-            "the raw, shifted rows.")
+            "A filtered detector's output belongs to where the swept knob was a\n"
+            "moment EARLIER (its filter delay). On: each sample is moved back by\n"
+            "the delay its module declares before its place in the row is looked\n"
+            "up. Off only to see the raw, shifted rows.")
 
         self.readback_box = QtWidgets.QComboBox()
         self.readback_box.addItem("(this axis)", None)
@@ -972,11 +975,11 @@ class AxisRow(_StackRow):
                         and self.readback_box.findData(q.id) < 0):
                     self.readback_box.addItem(q.id, q.id)
         self.readback_box.setToolTip(
-            "The measured position the samples are binned by. Normally the axis\n"
-            "itself; another streamed position in the same unit if that is the\n"
+            "The measured value the samples are binned by. Normally the axis\n"
+            "itself; another streamed value in the same unit if that is the\n"
             "better measurement (a sensor rather than a step counter).")
 
-        # What the samples of a row are sorted into pixels by. "measurement":
+        # What the samples of a row are sorted into bins by. "measurement":
         # a value the instrument MEASURED while moving (a stage's position, a
         # Hall probe); "command": only what was SENT, with its time stamp (a
         # generator cannot report its frequency mid-sweep). A reader of the
@@ -994,18 +997,18 @@ class AxisRow(_StackRow):
         # pixel data" is unticked (only meaningful with the row mean on).
         self.collapse_box = QtWidgets.QCheckBox("collapse to one mean per row")
         self.collapse_box.setToolTip(
-            "Also store, for every row, the mean over ALL the pixels of the row\n"
+            "Also store, for every row, the mean over ALL the bins of the row\n"
             "(<detector>_rowmean, with _rowmean_n samples and _rowmean_std).\n"
             "Weighted by the samples: the mean of every sample the row recorded,\n"
-            "not the mean of the pixel means. Its spread includes the variation\n"
+            "not the mean of the bin means. Its spread includes the variation\n"
             "ALONG the row. A trace keeps its own axis (one mean trace per row).\n"
             "With a repeat set to average, the repeats are pooled first.")
-        self.keep_box = QtWidgets.QCheckBox("keep pixel data")
+        self.keep_box = QtWidgets.QCheckBox("keep bin data")
         self.keep_box.setChecked(True)
         self.keep_box.setToolTip(
-            "On (default): the file holds the pixels AND the row means.\n"
+            "On (default): the file holds the bins AND the row means.\n"
             "Off: only the row means are saved -- for a long scan where only\n"
-            "the mean matters. The live plot shows the pixels either way.")
+            "the mean matters. The live plot shows the bins either way.")
         self.fly_hint = _muted("", small=True)
         self.fly_hint.setWordWrap(True)
         self.knob_lbl = _muted("speed knob")
@@ -1060,6 +1063,8 @@ class AxisRow(_StackRow):
         self.knob_box.currentIndexChanged.connect(lambda *_: self._knob_changed())
         self.fly.toggled.connect(self._fly_toggled)
         self.speed.valueChanged.connect(lambda *_: self.changed.emit())
+        # the control's own unit follows the number ("= 600 nm/min")
+        self.speed.valueChanged.connect(lambda *_: self._update_pace_widgets())
         self.row_time.valueChanged.connect(lambda *_: self.changed.emit())
         self.pace_box.currentIndexChanged.connect(lambda *_: self._pace_changed())
         self.timeout_auto.toggled.connect(lambda *_: self._fly_toggled(self.is_fly()))
@@ -1086,7 +1091,7 @@ class AxisRow(_StackRow):
         return self.ramp is not None and not self.move_param()
 
     def binned_by(self) -> str:
-        """What the samples will be sorted into pixels by: "measurement" or
+        """What the samples will be sorted into bins by: "measurement" or
         "command" -- the engine's rule (flyscan.fly_sweep): a stage flies by
         its measured position; a ramp by its own readback, unless a readback
         override names another measured value."""
@@ -1137,7 +1142,7 @@ class AxisRow(_StackRow):
         elif mode == "row_time":
             self.speed_lbl.setText("per row")
         else:
-            self.speed_lbl.setText(self.speed_unit())
+            self.speed_lbl.setText(self.speed_unit() + self._own_unit_text())
 
     def _path_default_speed(self) -> float:
         """The speed box's starting value: the module's default sweep rate
@@ -1152,6 +1157,9 @@ class AxisRow(_StackRow):
                     v = float(self.speed_param.get())
                 except Exception:
                     v = None
+            f = self._knob_factor()
+            if v is not None and f:
+                v = v / f                 # the control's unit (nm/min) -> um/s
         v = float("nan") if v is None else float(v)
         return v if math.isfinite(v) and v > 0 else min(max(1.0, lo), hi)
 
@@ -1181,6 +1189,17 @@ class AxisRow(_StackRow):
         self._update_pace_widgets()
         self.binned_lbl.setText(f"binned by {self.binned_by()}")
 
+    def _own_unit_text(self) -> str:
+        """" = 600 nm/min": the fly speed as the speed CONTROL will receive
+        it, in its own unit, when that differs from the box's (a positioner
+        whose module takes its speed in nm/min). "" otherwise."""
+        if self.is_ramp() or not hasattr(self, "knob_box"):
+            return ""
+        sp, f = self.speed_param, self._knob_factor()
+        if sp is None or not f or f == 1.0:
+            return ""
+        return f"  (= {self.speed.value() * f:g} {sp.unit})"
+
     def speed_unit(self) -> str:
         """The fly speed's unit: the ramp's rate unit when the module sweeps
         the knob, else the MOVING stage's unit per second."""
@@ -1194,19 +1213,39 @@ class AxisRow(_StackRow):
         return f"{unit or ''}/s"
 
     def _knob_candidates(self, moving: str) -> list:
-        """Settables that could set the speed of `moving`: same module, unit
-        '<unit>/s' (find_speed_param's rule, without its axis-letter guess)."""
+        """Settables that could set the speed of `moving`, the best first:
+        the one flyscan.find_speed_param picks (the module's declared
+        `speed_param`, else a rate of the same module with the same axis
+        letter), then every other settable of that module whose unit is a
+        RATE of the moving knob's unit -- um/s, nm/min, mm/h ... (units.
+        rate_factor; the fly speed is converted into the control's own unit
+        when it is set, flyscan.speed_factor)."""
+        from scan_core.units import rate_factor
         reg = self._registry
         if reg is None:
             return []
         mp = reg.get(moving)
         if mp is None:
             return []
-        unit = f"{getattr(mp, 'unit', '') or ''}/s"
+        unit = getattr(mp, "unit", "") or ""
         module = moving.rsplit(".", 1)[0] if "." in moving else ""
-        return [q for q in reg.settables()
-                if q.id != moving and (getattr(q, "unit", "") or "") == unit
+        best = find_speed_param(reg, moving)
+        out = [reg.get(best)] if best and reg.get(best) is not None else []
+        out += [q for q in reg.settables()
+                if q.id not in (moving, best)
+                and rate_factor(unit, getattr(q, "unit", "") or "") is not None
                 and (q.id.rsplit(".", 1)[0] if "." in q.id else "") == module]
+        return out
+
+    def _knob_factor(self) -> float | None:
+        """fly speed (the moving knob's unit per second) -> a value of the
+        chosen speed control in ITS unit (flyscan.speed_factor): 1 for
+        um -> um/s, 60000 for um -> nm/min. None without a control."""
+        sp = self.speed_param_id()
+        if not sp:
+            return None
+        return speed_factor({"param": self.param.id, "move": self.move_param(),
+                             "speed_param": sp}, self._registry)
 
     def _fill_knobs(self, select: str | None) -> None:
         self.knob_box.blockSignals(True)
@@ -1258,16 +1297,21 @@ class AxisRow(_StackRow):
             return
         sp = self.speed_param
         lo, hi = 0.001, 1e4
+        f = self._knob_factor()
         if sp is not None:
+            # the control's limits are in ITS unit (nm/min, say); the box is
+            # in the moving knob's unit per second -- convert them
+            k = f if f else 1.0
             slo, shi = sp.limits
-            lo = max(lo, float(slo)) if math.isfinite(slo) else lo
-            hi = min(hi, float(shi)) if math.isfinite(shi) else hi
+            lo = max(lo, float(slo) / k) if math.isfinite(slo) else lo
+            hi = min(hi, float(shi) / k) if math.isfinite(shi) else hi
         self.speed.setRange(lo, max(lo, hi))
+        own = f" in its own unit, {sp.unit}," if (sp is not None and f and f != 1.0) else ""
         self.speed.setToolTip(
-            (f"Set on {sp.id} for the fly move; the old speed is put\n"
+            (f"Set on {sp.id}{own} for the fly move; the old speed is put\n"
              f"back for the approach to each row and at the end.")
             if sp is not None else
-            "No speed setting: the stage moves at whatever speed it has.\n"
+            "No speed setting: the positioner moves at whatever speed it has.\n"
             "This number is then only used for the time estimate.")
         self._update_pace_widgets()
         if emit:
@@ -1296,7 +1340,8 @@ class AxisRow(_StackRow):
         self.timeout_spin.setEnabled(on and self.streams and not self.timeout_auto.isChecked())
         self.keep_box.setEnabled(on and self.streams and self.collapse_box.isChecked())
         self._update_pace_widgets()               # speed / row time / default
-        self.num_lbl.setText("pixels" if on else "pts")
+        # a flown row is BINNED: `pts` are the bins the samples are sorted into
+        self.num_lbl.setText("bins" if on else "pts")
         self.changed.emit()
 
     def is_fly(self) -> bool:
@@ -4874,12 +4919,7 @@ class ScoutSection(QtWidgets.QFrame):
         self.af_warn.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                    QtWidgets.QSizePolicy.Preferred)
         self.af_warn.setStyleSheet(f"color:{C['danger']}; font-weight:700;")
-        self.af_warn.setToolTip(
-            "The scout thresholds what it measures (Otsu), and an out-of-focus\n"
-            "reading is lower and flatter, so the threshold -- and the mask --\n"
-            "follows focus. Add the camera's Find focus to ROUTINES > BEFORE\n"
-            "SCAN. Only a warning: the scan runs either way.")
-        self.af_warn.hide()
+        self.af_warn.hide()                # its tooltip: set_autofocus_warning
         head.addWidget(self.af_warn, 2)
         v.addLayout(head)
 
@@ -5085,12 +5125,21 @@ class ScoutSection(QtWidgets.QFrame):
     def expanded(self) -> bool:
         return self._expanded
 
-    def set_autofocus_warning(self, text: str) -> None:
-        """Show (text) or hide ("") the no-autofocus warning."""
+    def set_autofocus_warning(self, text: str, actions=()) -> None:
+        """Show (text) or hide ("") the no-autofocus warning. `actions`: the
+        connected actions with `role: autofocus` -- the tooltip names THEM
+        (whatever module focuses here), not one rig's camera."""
         shown = f"! {text}" if text else ""
         if self.af_warn.text() != shown:
             self.af_warn.setText(shown)
         self.af_warn.setVisible(bool(text))
+        names = ", ".join(f"{getattr(a, 'label', '') or a.id} ({a.id})" for a in actions)
+        self.af_warn.setToolTip(
+            "The scout thresholds what it measures (Otsu), and an out-of-focus\n"
+            "reading is lower and flatter, so the threshold -- and the mask --\n"
+            "follows focus. Add "
+            + (names if names else "the autofocus action")
+            + "\nto ROUTINES > BEFORE SCAN. Only a warning: the scan runs either way.")
 
     # ---- contents -------------------------------------------------------------
     def set_registry(self, registry) -> None:
@@ -7148,7 +7197,9 @@ class ScanBuilder(QtWidgets.QMainWindow):
         from scan_core.scout import autofocus_warning
         af = autofocus_warning(recipe, self.registry)
         if hasattr(self, "scout_section"):
-            self.scout_section.set_autofocus_warning(af)
+            find = getattr(self.registry, "actions_with_role", None)
+            self.scout_section.set_autofocus_warning(
+                af, find("autofocus") if (af and find is not None) else ())
         warnings = [af] if af else []
         # A FLY scan whose streams cannot fill its pixels (fewer than one
         # sample per pixel expected from a module's declared rate): said, the
@@ -7209,8 +7260,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
                     if d["per_pixel"] is not None]
             if pers:
                 per, det = min(pers)
-                how += f", ~{per:.2g} samples/pixel ({det})"
-            self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} px (fly)")
+                how += f", ~{per:.2g} samples/bin ({det})"
+            self.summary.setText(f"{len(comp.dims)}-D   {shape} = {n:,} bins (fly)")
         else:
             eta = n * self.per_pt.value()
             how = f"@ {self.per_pt.value():g}s/pt"

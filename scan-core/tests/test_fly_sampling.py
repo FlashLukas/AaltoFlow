@@ -204,7 +204,7 @@ def test_the_builder_warns_but_keeps_run_enabled():
         row.speed.setValue(20.0)
         win._rebuild_summary()
         text = win.detail.text()
-        assert "samples/pixel (lockin_r)" in text and "WARNING" not in text
+        assert "samples/bin (lockin_r)" in text and "WARNING" not in text
         row.speed.setValue(400.0)
         win._rebuild_summary()
         text = win.detail.text()
