@@ -292,10 +292,16 @@ def test_typed_text_detectors_are_recorded_but_not_scanned():
     assert list(ds["state"].values) == ["IDLE", "IDLE"]
     assert list(ds["mode"].values) == [0.0, 0.0]          # "fast" = option 0
     assert ds["mode"].attrs["flag_meanings"] == "fast slow"
-    for det in ("state", "mode"):
-        r = Recipe(name="t", axes=[{"type": "array", "param": det, "values": [0, 1]}],
-                   detectors=["lockin_r"])
-        assert any(det in e and "not settable" in e for e in r.validate(reg))
+    # an INDICATOR is still no axis; an enum CONTROL is one since 2026-10-12
+    # (test_enum_axis.py) -- over its options, not over numbers
+    r = Recipe(name="t", axes=[{"type": "array", "param": "state", "values": [0, 1]}],
+               detectors=["lockin_r"])
+    assert any("state" in e and "not settable" in e for e in r.validate(reg))
+    r = Recipe(name="t", axes=[{"type": "array", "param": "mode", "values": [0, 1]}],
+               detectors=["lockin_r"])
+    assert any("mode" in e and "not one of its options" in e for e in r.validate(reg))
+    r.axes[0]["values"] = ["slow", "fast"]
+    assert r.validate(reg) == []
 
 
 def test_an_untyped_text_detector_is_still_refused():
