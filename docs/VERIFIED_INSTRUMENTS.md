@@ -30,7 +30,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart, sweeps) | 2026-10-10 |
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) `--driver dwf` | Digilent Analog Discovery 2 (WaveForms 3.24.4) | **verified** (scope, W1/W2 generator incl. phase, sweeps, V+/V- supplies) | 2026-10-10 |
-| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass | 2026-10-09 |
+| scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
 ## pm16 -- Thorlabs PM16-121 power meter (first module on real hardware)
@@ -531,6 +531,14 @@ the scope; ramp_stop mid-sweep leaves both outputs on at the same frequency.
   focus: 0.0073 mW at the morning's focus, 0.0085 mW after the refocus.)
   Tests: [`test_scout.py`](../scan-core/tests/test_scout.py),
   [`test_scout_builder.py`](../scan-core/tests/test_scout_builder.py).
+- 2026-10-13: **smoke test after the "de-rig" changes**
+  ([7e2f273](https://github.com/FlashLukas/AaltoFlow/commit/7e2f273)): a `grid`
+  axis (the new name of `raster`) over kim.position_x / position_y, 3 x 3 at 2 um
+  pitch around the current position, pm16.power, submitted to the lab's scan
+  server (encrypted, enforce): 9 of 9 points in 7.5 s, coordinates exact, the
+  file saved; kim set back to the start lands on the same step count. The
+  registry gives kim X / Y the roles stage_x / stage_y with their speed_param
+  (what the Navigator offers); the Navigator tab itself was not opened.
 - Not yet on hardware: fly scans with hf2, the pause-on-fault of 2026-09-28, a mask
   loaded from a file (`from:`); the scout pass on axes other than XY, and its GUI
   (preview, live coarse map, ETA).
