@@ -304,7 +304,11 @@ class Pattern:
     angle_start: float = 0.0           # rotation search range, degrees
     angle_end: float = 0.0             # 0..0 = no rotation search (fastest)
     angle_step: float = 2.0            # step when a range is given
-    safety_area_px: int = 100          # size of the safe search box around match
+    # Search region around the last match, in px each side. 0 = search the
+    # WHOLE frame every frame (Lukas, 2026-10-12: on the Pattern tracking card,
+    # to catch a lost pattern back by hand -- a person's choice while
+    # watching, unlike the automatic whole-frame relock that was ruled out).
+    safety_area_px: int = 100
     full_image: bool = False           # search the whole frame (ignore box)
     # Backup patterns (Pattern card -> "Draw backup ROI"). The driving pattern
     # hands over when it comes closer than edge_margin_px to the frame edge (or

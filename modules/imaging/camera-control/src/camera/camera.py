@@ -1160,7 +1160,8 @@ class Camera:
             tpl, off = pats[k]
             th, tw = tpl.shape[:2]
             box = None
-            if anchor is not None and not pat.full_image:
+            # search region 0 = the whole frame, like full_image (Pattern tracking card)
+            if anchor is not None and not pat.full_image and pat.safety_area_px > 0:
                 ex, ey = anchor[0] + off[0], anchor[1] + off[1]
                 if not (tw / 2 <= ex <= W - tw / 2 and th / 2 <= ey <= H - th / 2):
                     continue                       # expected off the frame: not visible
@@ -3943,6 +3944,8 @@ class Camera:
         if self._driver_xy is None or self.reference is None:
             return None
         s = self.cfg.pattern.safety_area_px
+        if s <= 0:
+            return None                        # whole-frame search: no box to score in
         tx, ty = self._driver_xy               # the pattern in view, not an off-screen anchor
         return (int(tx - s), int(ty - s), int(2 * s), int(2 * s))
 

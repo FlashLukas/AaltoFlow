@@ -639,6 +639,25 @@ class MainWindow(QMainWindow):
         self.chk_roi.toggled.connect(lambda on: self._roi_mode(self.chk_roi, on))
         self.chk_backup.toggled.connect(lambda on: self._roi_mode(self.chk_backup, on))
         r.addWidget(self.chk_roi); r.addWidget(self.chk_backup); l.addLayout(r)
+        # SEARCH REGION (Lukas, 2026-10-12): a poor pattern can make the match
+        # jump around; after refocusing, enlarge the region (or 0 = whole frame)
+        # to catch it back, then make it small again so it cannot jump.
+        r = QHBoxLayout()
+        r.addWidget(QLabel("search region"))
+        self.sp_search = QSpinBox(); self.sp_search.setRange(0, 5000)
+        self.sp_search.setSuffix(" px"); self.sp_search.setSpecialValueText("whole frame")
+        self.sp_search.setSingleStep(20)
+        self.sp_search.setValue(int(self.cfg.pattern.safety_area_px))
+        self.sp_search.setToolTip(
+            "How far around its last place the pattern is looked for, in pixels.\n"
+            "Enlarge it to catch a lost pattern back; 0 = search the whole frame.\n"
+            "Keep it small in normal use: a large region lets the match jump to a\n"
+            "look-alike feature.")
+        self._search_timer = QTimer(self); self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._apply_search_region)
+        self.sp_search.valueChanged.connect(lambda _v: self._search_timer.start())
+        r.addWidget(self.sp_search, 1); l.addLayout(r)
         r = QHBoxLayout()
         self.lab_patterns = QLabel("no backups"); self.lab_patterns.setObjectName("muted")
         b_clr = QPushButton("Clear backups"); b_clr.clicked.connect(self._clear_backups)
@@ -1415,6 +1434,17 @@ class MainWindow(QMainWindow):
                                         f"({rep.get('path', '')})")
             except Exception as exc:
                 self._log_event("error", f"could not store {k} for {obj}: {exc}")
+
+    def _apply_search_region(self):
+        px = int(self.sp_search.value())
+        try:
+            self.ctrl.set_config({"pattern": {"safety_area_px": px}})
+            self.cfg.pattern.safety_area_px = px
+            self._sync_form("pattern")
+            self._log_event("info", "pattern search region: " +
+                            ("whole frame" if px == 0 else f"{px} px around the last match"))
+        except Exception as exc:
+            self._log_event("error", f"search region not applied: {exc}")
 
     def _apply_stabiliser(self):
         vals = {"gain": self.stab_gain.value() / 100.0,
