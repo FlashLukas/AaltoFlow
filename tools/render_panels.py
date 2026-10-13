@@ -295,6 +295,14 @@ def _camera(theme, tab: str | None = None, layout: str | None = None):
         fn = getattr(c, "set_tracking", None)
         if fn:
             fn(True)
+        if layout:
+            # one of the Camera tab's layouts (2026-10-13), switched live as
+            # the Layout box does
+            win.set_layout(layout, persist=False)
+            if layout == "workflow":
+                # step 4 (Lock): its light and controls are the interesting ones
+                c.set_stabilize(True)
+                win.layouts.stepper.stack.setCurrentIndex(3)
         if tab:
             # one tab by NAME (a settings tab: "Camera settings" holds the
             # Images for scans box, 2026-10-10)

@@ -103,6 +103,63 @@ under them says who drives it and where, e.g.
 marks the point being moved to and small pink dots the points already visited.
 Both zoom and these marks are display only, so they work in a viewer window.
 
+## Layouts of the Camera tab (2026-10-13)
+
+The Camera tab can arrange its controls in five ways. Pick one in the
+**Layout** box at the top right of the window (or on the Appearance tab); it
+switches at once, without a restart. Every layout holds the SAME controls --
+a switch moves the existing widgets into other containers, so a button does
+exactly what it did, a viewer window greys the same things, and nothing has a
+second copy that could disagree. The choice is the setting `ui.layout`
+(classic, cockpit, workflow, hud, split): it travels with the camera's config
+and **Save config** keeps it for the next start. A viewer window can switch
+too; it then changes in that window only. The window's log stays under every
+tab in every layout.
+
+- **Classic** (the default) -- the arrangement shown at the top of this page.
+- **Cockpit** -- the image in the middle; on the left a Focus (Z) column
+  (Z+ / where Z is / Z-, step, target, Datum Z, Find focus / Kill AF, the AF
+  state, the AF position, continuous focus); on the right the tabs **Lock**
+  (pattern tracking and the stabiliser on one page: tracking needs nothing,
+  stabilising needs tracking) and **Laser**, then the XY stage (jog pad,
+  position, go to / datum). A status line over the image: match, stable,
+  autofocus, Z, XY. Imaging and the scan pages below; drag the line between
+  them to give the image more room.
+
+  ![Cockpit layout](../../../front-panels/camera-cockpit.png)
+
+- **Workflow steps** -- a stepper on the left: 1 Focus, 2 Spot, 3 Pattern,
+  4 Lock, 5 Place / scan. Each step has a light from the live status (green
+  done, amber running, red failed, grey not yet) and a one-line state, and only
+  the chosen step's controls are shown under it. Step 2 says what the spot
+  calibration is and opens the Spot tab, where it is done (on a grabbed
+  frame). The jog pad, Z +/- and Kill AF stay on the right whatever the step.
+
+  ![Workflow layout](../../../front-panels/camera-workflow.png)
+
+- **Heads-up** -- the image fills the tab, with small translucent panels on it:
+  the status (top left), zoom / Snapshot / Overlays (top right; Overlays opens
+  the drawing switches), a Z rocker with Find focus and Kill AF (right), the
+  jog pad (bottom right) and Allow tracking / Stabilise / Click to go (bottom
+  left). A panel takes only the clicks on itself: click to go, the template ROI
+  and the scan rectangle work everywhere else on the image. The rest is in the
+  slim tab bar under it (Lock, Focus / AF, Stage, Laser, Scan, Alignment).
+
+  ![Heads-up layout](../../../front-panels/camera-hud.png)
+
+- **Split by axis** -- everything Z on the left (focus, autofocus, AF
+  position), the image in the middle, everything XY on the right (position,
+  go to / datum, jog, then the tabs Track | Stabilise | Laser), imaging and the
+  scan pages below.
+
+  ![Split-by-axis layout](../../../front-panels/camera-split.png)
+
+The side columns scroll on a short screen (1366 x 768) instead of cutting
+anything off. For developers: `apps/layouts.py` (one builder per layout,
+`PIECES` = the controls a layout places), tests in `tests/test_layouts.py`,
+renders `python tools/render_all.py camera-cockpit camera-workflow camera-hud
+camera-split`.
+
 ## External control (from another program / coordinator)
 
 Every action is a ZeroMQ command (see `scripts/camera_console.py` for the verbs):

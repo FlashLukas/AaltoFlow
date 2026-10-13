@@ -6,7 +6,8 @@
 
 Layout mirrors the LabVIEW front panel's tabs:
   * Camera        -- the live view + the primary live controls + bottom sub-tabs
-                     (Control XY stage / Define scanning).
+                     (Control XY stage / Define scanning), in one of five
+                     switchable LAYOUTS (layouts.py; the Layout box, ui.layout).
   * Spot          -- threshold the laser spot on a grabbed frame and CALIBRATE
                      its position (the one click-to-go and the stabiliser use).
   * AutoFocus     -- focus settings.
