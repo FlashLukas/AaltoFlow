@@ -1871,6 +1871,12 @@ def _top_window(app):
 
 
 def main() -> int:
+    # A render must never write (or restore) the camera's live-pattern
+    # autosave in the real module folder -- on the lab PC that is the rig's
+    # pattern. Point it at a throwaway folder for every target.
+    import tempfile
+    os.environ.setdefault("AALTOFLOW_CAMERA_AUTOSAVE_DIR",
+                          tempfile.mkdtemp(prefix="render-autosave-"))
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     # not restricted to TARGETS: any module key falls back to _generic()
