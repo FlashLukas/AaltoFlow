@@ -80,6 +80,8 @@ SIZES = {
     "camera-workflow": (1800, 1000),
     "camera-hud": (1800, 1000),
     "camera-split": (1800, 1000),
+    "camera-image-first": (1800, 1000),
+    "camera-image-first-folded": (1800, 1000),
     "kim": (1240, 1240),
     "hf2": (1400, 900),
     "hf2-ch2": (1400, 900),
@@ -263,7 +265,8 @@ def _kim(theme):
     return lambda: gui.run_app(ctrl, cfg), warm_up, 4.5
 
 
-def _camera(theme, tab: str | None = None, layout: str | None = None):
+def _camera(theme, tab: str | None = None, layout: str | None = None,
+            folded: bool = False):
     from camera.config import Config
     from camera.sim_system import build_sim_system
     from camera.apps import gui
@@ -303,6 +306,11 @@ def _camera(theme, tab: str | None = None, layout: str | None = None):
                 # step 4 (Lock): its light and controls are the interesting ones
                 c.set_stabilize(True)
                 win.layouts.stepper.stack.setCurrentIndex(3)
+            if layout == "image_first":
+                # the drawer on its Lock page (the busiest one), or folded
+                c.set_stabilize(True)
+                win.set_drawer_collapsed(folded, persist=False)
+                win.layouts.drawer.bar.setCurrentIndex(1)
         if tab:
             # one tab by NAME (a settings tab: "Camera settings" holds the
             # Images for scans box, 2026-10-10)
@@ -1701,6 +1709,9 @@ TARGETS = {
     "camera-workflow": lambda theme: _camera(theme, layout="workflow"),
     "camera-hud": lambda theme: _camera(theme, layout="hud"),
     "camera-split": lambda theme: _camera(theme, layout="split"),
+    "camera-image-first": lambda theme: _camera(theme, layout="image_first"),
+    "camera-image-first-folded": lambda theme: _camera(theme, layout="image_first",
+                                                       folded=True),
     "suite-routine-args": _suite("Scan", _routine_args, settle=2.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),

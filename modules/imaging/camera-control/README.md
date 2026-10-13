@@ -105,13 +105,13 @@ Both zoom and these marks are display only, so they work in a viewer window.
 
 ## Layouts of the Camera tab (2026-10-13)
 
-The Camera tab can arrange its controls in five ways. Pick one in the
+The Camera tab can arrange its controls in six ways. Pick one in the
 **Layout** box at the top right of the window (or on the Appearance tab); it
 switches at once, without a restart. Every layout holds the SAME controls --
 a switch moves the existing widgets into other containers, so a button does
 exactly what it did, a viewer window greys the same things, and nothing has a
 second copy that could disagree. The choice is the setting `ui.layout`
-(classic, cockpit, workflow, hud, split): it travels with the camera's config
+(classic, cockpit, workflow, hud, split, image_first): it travels with the camera's config
 and **Save config** keeps it for the next start. A viewer window can switch
 too; it then changes in that window only. The window's log stays under every
 tab in every layout.
@@ -154,11 +154,32 @@ tab in every layout.
 
   ![Split-by-axis layout](../../../front-panels/camera-split.png)
 
+- **Image first** (2026-10-14) -- the image fills the tab. Over it one
+  toolbar: the switches Allow tracking / Stabilise / Continuous focus / Click
+  to go as small chips, each with its light (match, stable, AF), then Find
+  focus, Kill AF, Snapshot, the zoom buttons and **Overlays** (opens the
+  drawing switches on the image). On the right a drawer with the tabs
+  **Focus** (Z target, step, Z + / Z -, Datum Z, the AF state and the AF
+  position), **Lock** (the rest of pattern tracking and of the stabiliser),
+  **Stage** (position, jog, go to / datum), **Laser** and **Scan** (Define
+  scanning, Alignment). The arrow at the top of the drawer folds it to a thin
+  strip of tab names -- the image then gets the full width; click a name to
+  open it again. Folded or open is kept like the layout (`ui.drawer_collapsed`).
+  Under the image one status line: match, stable / distance, autofocus, Z, XY
+  and the newest log line. A switch in the toolbar is not repeated in the
+  drawer. On a narrow screen the toolbar wraps onto a second row.
+
+  ![Image-first layout](../../../front-panels/camera-image-first.png)
+
+  Folded:
+
+  ![Image-first layout, drawer folded](../../../front-panels/camera-image-first-folded.png)
+
 The side columns scroll on a short screen (1366 x 768) instead of cutting
 anything off. For developers: `apps/layouts.py` (one builder per layout,
 `PIECES` = the controls a layout places), tests in `tests/test_layouts.py`,
 renders `python tools/render_all.py camera-cockpit camera-workflow camera-hud
-camera-split`.
+camera-split camera-image-first camera-image-first-folded`.
 
 ## External control (from another program / coordinator)
 

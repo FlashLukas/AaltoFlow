@@ -72,6 +72,8 @@ PROJECTS.update({
     "camera-workflow": ("modules/imaging/camera-control", True),
     "camera-hud": ("modules/imaging/camera-control", True),
     "camera-split": ("modules/imaging/camera-control", True),
+    "camera-image-first": ("modules/imaging/camera-control", True),
+    "camera-image-first-folded": ("modules/imaging/camera-control", True),
     # an axis row's Advanced panel opened in place (fly, and scout)
     "suite-axis-advanced": ("scan-core", True),
     "suite-axis-advanced-scout": ("scan-core", True),

@@ -1,7 +1,7 @@
 """Switchable layouts for the Camera tab (Lukas, 2026-10-13).
 
 The Camera tab has one set of controls -- built once by
-``MainWindow._build_camera_controls`` -- and five ways to arrange them:
+``MainWindow._build_camera_controls`` -- and six ways to arrange them:
 
 * **classic**  -- the arrangement the tab had before (image left, four cards
   right, Control XY stage / Define scanning / Check alignment accuracy below).
@@ -15,6 +15,10 @@ The Camera tab has one set of controls -- built once by
   tab bar below.
 * **split**    -- by axis: everything Z left, the image in the middle,
   everything XY right.
+* **image_first** -- (2026-10-14, "B") the image fills the tab; a toolbar
+  over it (the switches with their lights, Find focus, Kill AF, Snapshot,
+  zoom, an Overlays drop-down); a right drawer with the tabs Focus, Lock,
+  Stage, Laser, Scan that folds to a thin strip; a status line under it.
 
 HOW A SWITCH WORKS. A layout never builds a control. It builds its own
 CONTAINERS (cards, rows, tabs, splitters, the overlay panels) and RE-PARENTS
@@ -36,11 +40,12 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QPushButton, QScrollArea, QSizePolicy, QSplitter,
-                               QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
+                               QBoxLayout, QLayout, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+                               QStackedWidget, QTabBar, QTabWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from . import theme as T
 from .control_bar import mark_always
@@ -52,6 +57,7 @@ LAYOUT_TITLES = {
     "workflow": "Workflow steps",
     "hud": "Heads-up",
     "split": "Split by axis",
+    "image_first": "Image first",
 }
 
 #: Every control of the Camera tab a layout places (MainWindow attributes).
@@ -248,10 +254,54 @@ class StatusStrip(QLabel):
     def _render(self) -> None:
         bits = []
         for key, text in self._parts:
-            dot = (f'<span style="color:{T.COLORS[key]}">&#9679;</span> ' if key else "")
-            bits.append(dot + html.escape(text))
-        sep = "<br>" if self._multiline else "&nbsp;&nbsp;&nbsp;"
+            dot = (f'<span style="color:{T.COLORS[key]}">&#9679;</span>&nbsp;' if key else "")
+            # no break INSIDE a part ("stabilising 0.42 um" stays one piece):
+            # with word wrap on (Image first, a narrow window) the line breaks
+            # only between parts
+            bits.append(dot + html.escape(text).replace(" ", "&nbsp;"))
+        sep = "<br>" if self._multiline else "&nbsp;&nbsp; "
         self.setText(sep.join(bits))
+
+    def one_line_width(self) -> int:
+        """Pixels the parts need on ONE line (dots and gaps included)."""
+        fm = self.fontMetrics()
+        text = "   ".join(("● " if k else "") + t for k, t in self._parts)
+        return fm.horizontalAdvance(text) + 8
+
+
+class StatusLine(QWidget):
+    """Image first's line under the image: the status, then the newest log
+    line -- side by side when the width allows, else the log line under it
+    (a fixed single line needed ~950 px and widened a 1366 px window)."""
+
+    def __init__(self, strip: StatusStrip, last: QLabel):
+        super().__init__()
+        self.setObjectName("row")
+        self.strip, self.last = strip, last
+        self.sep = _vline()
+        self.lay = QBoxLayout(QBoxLayout.LeftToRight, self)
+        self.lay.setContentsMargins(0, 0, 0, 0); self.lay.setSpacing(10)
+        self.lay.addWidget(strip); self.lay.addWidget(self.sep); self.lay.addWidget(last, 1)
+        strip.setWordWrap(True)
+        strip.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+    def _arrange(self) -> None:
+        wide = self.width() >= self.strip.one_line_width() + 260
+        d = QBoxLayout.LeftToRight if wide else QBoxLayout.TopToBottom
+        if self.lay.direction() != d:
+            self.lay.setDirection(d)
+            self.sep.setVisible(wide)
+        if wide:                       # one line: exactly as wide as its text
+            self.strip.setFixedWidth(self.strip.one_line_width())
+        else:                          # wraps between parts as needed
+            self.strip.setMinimumWidth(0); self.strip.setMaximumWidth(16777215)
+
+    def resizeEvent(self, ev):                          # noqa: N802 (Qt name)
+        self._arrange()
+        super().resizeEvent(ev)
+
+    def minimumSizeHint(self):                          # noqa: N802
+        return QSize(120, super().minimumSizeHint().height())
 
 
 # --------------------------------------------------------------------------- #
@@ -489,7 +539,7 @@ class Built:
 
 
 # --------------------------------------------------------------------------- #
-# the five layouts
+# the layouts
 # --------------------------------------------------------------------------- #
 def build_classic(w) -> Built:
     """The Camera tab as it was before layouts existed (the default)."""
@@ -735,12 +785,266 @@ def build_split(w) -> Built:
     return Built(_vsplit(top, _bottom(w)))
 
 
+# --------------------------------------------------------------------------- #
+# Image first: a toolbar that wraps, a foldable drawer
+# --------------------------------------------------------------------------- #
+class FlowLayout(QLayout):
+    """Items left to right, wrapping onto a new line when the width runs out.
+
+    The Image-first toolbar holds about fifteen controls: in one row they need
+    more than a 1366 px screen, so a plain row would make the whole window
+    wider than the screen. This wraps instead (Qt's "flow layout" example)."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    # the QLayout interface (Qt calls these; takeAt also runs when a control
+    # is re-parented away by a layout switch)
+    def addItem(self, item):                            # noqa: N802 (Qt name)
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):                                # noqa: N802
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):                                # noqa: N802
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):                      # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):                        # noqa: N802
+        return True
+
+    def heightForWidth(self, width):                    # noqa: N802
+        return self._arrange(QRect(0, 0, width, 0), move=False)
+
+    def setGeometry(self, rect):                        # noqa: N802
+        super().setGeometry(rect)
+        self._arrange(rect, move=True)
+
+    def _shown(self):
+        return [it for it in self._items if not it.isEmpty()]
+
+    def sizeHint(self):                                 # noqa: N802
+        """Everything on one line."""
+        items = self._shown()
+        w = sum(it.sizeHint().width() for it in items)
+        w += self.spacing() * max(0, len(items) - 1)
+        h = max((it.sizeHint().height() for it in items), default=0)
+        return QSize(w, h)
+
+    def minimumSize(self):                              # noqa: N802
+        """As narrow as the widest single item."""
+        size = QSize()
+        for it in self._shown():
+            size = size.expandedTo(it.minimumSize())
+        return size
+
+    def _arrange(self, rect: QRect, move: bool) -> int:
+        x, y, line_h, gap = rect.x(), rect.y(), 0, self.spacing()
+        for it in self._shown():
+            hint = it.sizeHint()
+            if x > rect.x() and x + hint.width() > rect.right() + 1:
+                x, y, line_h = rect.x(), y + line_h + gap, 0      # next line
+            if move:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + gap
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
+
+
+def _chip(*items) -> QFrame:
+    """A switch and its light in one rounded frame (a 'toggle chip')."""
+    f = QFrame(); f.setObjectName("chip")
+    lay = QHBoxLayout(f); lay.setContentsMargins(8, 2, 8, 2); lay.setSpacing(6)
+    _fill(lay, items)
+    f.setStyleSheet(
+        f"QFrame#chip {{ background: {T.COLORS['panel_hi']};"
+        f" border: 1px solid {T.COLORS['border']}; border-radius: 11px; }}"
+        "QFrame#chip QLabel, QFrame#chip QCheckBox { background: transparent; }")
+    return f
+
+
+def _vline() -> QFrame:
+    f = QFrame(); f.setFrameShape(QFrame.VLine); f.setObjectName("sep")
+    f.setStyleSheet(f"color: {T.COLORS['border']};")
+    return f
+
+
+class Drawer(QWidget):
+    """The Image-first drawer: pages beside a vertical strip of tab names.
+
+    Folded, only the strip stays (about 30 px): the image gets the width.
+    Clicking a tab name while folded opens the drawer on that page. The
+    pages are the window's controls in the layout's own containers.
+    ``on_fold(folded)`` is told every change the USER makes (to keep it)."""
+
+    def __init__(self, pages, folded: bool, on_fold=None):
+        super().__init__()
+        self.setObjectName("drawer")
+        self._on_fold = on_fold
+        self.stack = QStackedWidget()
+        self.bar = QTabBar()
+        self.bar.setShape(QTabBar.RoundedEast)          # names read top to bottom
+        self.bar.setExpanding(False)
+        self.bar.setDrawBase(False)
+        compact = 0
+        for title, page, wide in pages:
+            if not wide:                                 # wide: scrolls on its own
+                page = SideColumn(col(page, None))
+                compact = max(compact, page.sizeHint().width())
+            self.stack.addWidget(page)
+            self.bar.addTab(title)
+        # the compact pages share one width (the image does not jump when the
+        # tab changes); a wide page (the scan form) may take more
+        self.stack.setMinimumWidth(compact + 12)    # (+ what polishing adds)
+        _pages_follow_current(self.stack)
+        self.bar.currentChanged.connect(self.stack.setCurrentIndex)
+        self.stack.currentChanged.connect(self._follow)
+        self.bar.tabBarClicked.connect(self._tab_clicked)
+        # the body is what folds away; reveal() opens it through _reveal
+        self.body = QWidget(); self.body.setObjectName("column")
+        bl = QVBoxLayout(self.body); bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(self.stack)
+        self.body._reveal = lambda: self.set_folded(False, user=True)
+        self.btn = QToolButton(); self.btn.setAutoRaise(True)
+        mark_always(self.btn)                            # display only: fine for a viewer
+        self.btn.clicked.connect(lambda: self.set_folded(not self.folded, user=True))
+        strip = QWidget(); strip.setObjectName("column")
+        sl = QVBoxLayout(strip); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(4)
+        sl.addWidget(self.btn, 0, Qt.AlignHCenter)
+        sl.addWidget(self.bar); sl.addStretch(1)
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
+        lay.addWidget(self.body); lay.addWidget(strip)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Expanding)
+        self.folded = None
+        self.set_folded(bool(folded))
+
+    def _follow(self, i: int) -> None:
+        if self.bar.currentIndex() != i:
+            self.bar.setCurrentIndex(i)
+
+    def _tab_clicked(self, i: int) -> None:
+        if self.folded and i >= 0:
+            self.set_folded(False, user=True)
+
+    def set_folded(self, folded: bool, user: bool = False) -> None:
+        folded = bool(folded)
+        if folded == self.folded:
+            return
+        self.folded = folded
+        self.body.setVisible(not folded)
+        # the arrow points where the drawer will go
+        self.btn.setText("«" if folded else "»")
+        self.btn.setToolTip("open the drawer" if folded
+                            else "fold the drawer: the image gets the full width")
+        self.updateGeometry()
+        if user and self._on_fold is not None:
+            self._on_fold(folded)
+
+
+def build_image_first(w, manager) -> Built:
+    """B, "Image first" (Lukas, 2026-10-14): the image is the tab.
+
+    Over it a toolbar: the four switches as chips WITH their lights (match,
+    stable, AF), Find focus, Kill AF, Snapshot, zoom and an Overlays
+    drop-down. Right a drawer (Focus | Lock | Stage | Laser | Scan) that
+    folds to a strip. Under it a status line and the latest log line. A
+    switch in the toolbar is NOT repeated in the drawer: one place each."""
+    view = w.view
+    # the overlay switches: a small panel ON the image, opened by "Overlays"
+    over = HudPanel(view, w.chk_thr, w.chk_spot_info, w.chk_pat_info, w.chk_points)
+    over.hide()
+    b_over = QPushButton("Overlays ▾"); b_over.setCheckable(True)
+    b_over.setToolTip("what is drawn on the image")
+    mark_always(b_over)                     # display only
+
+    def place():
+        over.adjustSize()
+        over.move(max(0, view.width() - over.width() - 8), 8)
+        over.raise_()
+
+    def show_over(on):
+        over.setVisible(on)
+        place()
+    b_over.toggled.connect(show_over)
+    over._reveal = lambda: b_over.setChecked(True)
+    placer = _HudPlacer(view, place)
+
+    tool = QWidget(); tool.setObjectName("row")
+    flow = FlowLayout(tool, spacing=6)
+    for it in (_chip(w.chk_track, w.led_match), _chip(w.chk_stab, w.led_stable),
+               _chip(w.chk_cont, w.led_af), _chip(w.chk_click),
+               _vline(), w.b_af, w.b_kill, w.b_snap, _vline(), w.box_zoom, b_over):
+        flow.addWidget(it)
+
+    # the line under the image: the working state, then the newest log line
+    # (the whole log stays where it is, under the tabs)
+    last = QLabel(""); last.setObjectName("muted")
+    last.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # never widens the tab
+
+    def newest_log():
+        text = w.log.document().lastBlock().text().strip()
+        last.setText(text)
+        last.setToolTip(text)
+    w.log.textChanged.connect(newest_log)
+    newest_log()
+    status = StatusLine(w.status_strip, last)
+
+    image = col(w.fault_bar, tool, (view, 1), status, spacing=4)
+
+    # the drawer: everything else, one page at a time; the switches and lights
+    # that sit in the toolbar are left out of it
+    focus = col(card("Focus (Z)",
+                     row("Z target", (w.z_spin, 1), w.b_setz), w.lab_z,
+                     row("step", (w.z_step, 1)),
+                     row(w.b_z_up, w.b_z_dn), w.b_datum_z),
+                card("Autofocus", row("state", w.lab_af, None, "best", w.lab_best)),
+                card("AF position", w.b_af_here, w.b_af_at, w.lab_afpos))
+    lock = col(card("Pattern tracking", row(w.chk_roi, w.chk_backup), w.box_search,
+                    row((w.lab_patterns, 1), w.b_clr_backups),
+                    row(w.b_load_pat, w.b_save_pat)),
+               card("Stabiliser", w.box_index, w.lab_drive, w.box_stab_tuning, w.lab_stab))
+    stage = col(w.stage_bar_top, w.card_position, w.card_jog, w.card_goto)
+    # the scan pages: both scroll (a narrow drawer must not cut the form off)
+    scan = tabs(("Define scanning", scroll(w.page_scanning)),
+                ("Alignment", scroll(w.page_accuracy)))
+    drawer = Drawer([("Focus", focus, False), ("Lock", lock, False),
+                     ("Stage", stage, False), ("Laser", w.card_laser, False),
+                     ("Scan", scan, True)],
+                    folded=bool(getattr(w.cfg.ui, "drawer_collapsed", False)),
+                    on_fold=lambda f: w.set_drawer_collapsed(f))
+    root = _hbox((image, 1), (drawer, 0), spacing=6)
+    manager.drawer = drawer
+
+    def teardown():
+        view.removeEventFilter(placer)
+        placer.deleteLater()
+        try:
+            w.log.textChanged.disconnect(newest_log)
+        except (RuntimeError, TypeError):
+            pass
+
+    place()
+    def update(_s):
+        status._arrange()            # the status text changed length
+
+    return Built(root, extras=(over,), update=update, teardown=teardown)
+
+
 BUILDERS = {
     "classic": lambda w, m: build_classic(w),
     "cockpit": lambda w, m: build_cockpit(w),
     "workflow": build_workflow,
     "hud": build_hud,
     "split": lambda w, m: build_split(w),
+    "image_first": build_image_first,
 }
 
 
@@ -767,6 +1071,7 @@ class LayoutManager:
         self.name: str | None = None
         self.built: Built | None = None
         self.stepper: Stepper | None = None
+        self.drawer: Drawer | None = None         # Image first's drawer
         self._hidden: dict = {}
 
     def pieces(self) -> dict:
@@ -811,9 +1116,13 @@ class LayoutManager:
                 c.setParent(None)              # out of the window now ...
                 c.deleteLater()                # ... and gone at the next event loop
         self.stepper = None
+        self.drawer = None
         # what a layout may have changed on a control's LOOK goes back to the
         # default first (the next layout sets its own)
-        self.win.status_strip.set_multiline(False)
+        st = self.win.status_strip
+        st.set_multiline(False)
+        st.setWordWrap(False)                  # (Image first wraps it)
+        st.setMinimumWidth(0); st.setMaximumWidth(16777215)
         self.win.lab_z.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         built = BUILDERS[name](self.win, self)
         self.host.addWidget(built.root)

@@ -54,8 +54,9 @@ SYMMETRIES = ("none", "horizontal", "vertical")
 THEMES = ("dark", "light")
 # How the Camera tab arranges its controls (apps/layouts.py, 2026-10-13). The
 # SAME widgets in every layout -- only where they sit changes -- so the choice
-# is a pure display preference, switched live from the GUI.
-LAYOUTS = ("classic", "cockpit", "workflow", "hud", "split")
+# is a pure display preference, switched live from the GUI. "image_first"
+# (2026-10-14): the image fills the tab, a toolbar over it, a drawer beside it.
+LAYOUTS = ("classic", "cockpit", "workflow", "hud", "split", "image_first")
 # Which rig drives the sample (Hardware.motion).
 MOTIONS = ("kim", "piezo")
 # Spot search region shape (Spot.search_shape).
@@ -612,9 +613,12 @@ class UI:
     """GUI appearance (applied at startup)."""
 
     theme: str = "dark"                # "dark" | "light" (see apps/theme.py)
-    # the Camera tab's layout: classic | cockpit | workflow | hud | split
-    # (apps/layouts.py). Unlike the theme it switches at once, no restart.
+    # the Camera tab's layout: classic | cockpit | workflow | hud | split |
+    # image_first (apps/layouts.py). Unlike the theme it switches at once.
     layout: str = "classic"
+    # Image first only: its right-hand drawer folded to a thin strip of tabs,
+    # so the image gets the whole width. Kept like the layout itself.
+    drawer_collapsed: bool = False
 
 
 @dataclass

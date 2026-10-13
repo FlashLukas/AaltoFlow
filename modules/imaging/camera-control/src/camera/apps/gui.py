@@ -512,6 +512,10 @@ class MainWindow(QMainWindow):
         mark_always(self.cmb_layout)
         cl.addWidget(self.cmb_layout)
         tabs.setCornerWidget(corner, Qt.TopRightCorner)
+        # the log pane exists BEFORE the first layout is built: Image first
+        # shows its newest line under the image (it is added below the tabs)
+        self.log = QPlainTextEdit(); self.log.setObjectName("log")
+        self.log.setReadOnly(True); self.log.setMaximumHeight(120)
         self.set_layout(self.cfg.ui.layout, persist=False)
         self.cmb_layout.currentIndexChanged.connect(
             lambda _i: self.set_layout(self.cmb_layout.currentData()))
@@ -524,8 +528,6 @@ class MainWindow(QMainWindow):
             self._control_bar = ControlBar(self.ctrl, self, log=self._log_event)
             root.addWidget(self._control_bar)
         root.addWidget(tabs, 1)
-        self.log = QPlainTextEdit(); self.log.setObjectName("log")
-        self.log.setReadOnly(True); self.log.setMaximumHeight(120)
         root.addWidget(self.log)
         self.setCentralWidget(central)
         self._label_z_fields(self._z_unit)
@@ -1832,7 +1834,7 @@ class MainWindow(QMainWindow):
     # -- the Camera tab's layout (layouts.py, 2026-10-13) ------------------- #
     def set_layout(self, name: str, persist: bool = True) -> str:
         """Show the Camera tab in layout ``name`` (classic, cockpit, workflow,
-        hud, split) -- live: the same widgets move, none is rebuilt.
+        hud, split, image_first) -- live: the same widgets move, none is rebuilt.
 
         ``persist``: also write it into the camera's config (ui.layout), so
         "Save config" keeps it over a restart. A viewer window cannot change
@@ -1846,12 +1848,30 @@ class MainWindow(QMainWindow):
             self.cmb_layout.setCurrentIndex(i)
             self.cmb_layout.blockSignals(False)
         if persist:
-            try:
-                self.ctrl.set_config({"ui": {"layout": name}})
-            except Exception as exc:
-                self._log_event("info", f"layout {name}: this window only ({exc})")
-            self._sync_form("ui")
+            self._persist_ui("layout", name)
         return name
+
+    def set_drawer_collapsed(self, collapsed: bool, persist: bool = True) -> None:
+        """Fold (or open) the Image-first layout's drawer; kept in
+        ui.drawer_collapsed the same way as the layout itself, so the next
+        start opens it the way it was left."""
+        collapsed = bool(collapsed)
+        self.cfg.ui.drawer_collapsed = collapsed
+        drawer = getattr(self.layouts, "drawer", None)
+        if drawer is not None:
+            drawer.set_folded(collapsed)        # (no echo: user=False)
+        if persist:
+            self._persist_ui("drawer_collapsed", collapsed)
+
+    def _persist_ui(self, key: str, value) -> None:
+        """Write one display preference into the camera's config (ui group).
+        A viewer window may not change the service's config: then it stays a
+        preference of this window only, and the log says so."""
+        try:
+            self.ctrl.set_config({"ui": {key: value}})
+        except Exception as exc:
+            self._log_event("info", f"{key} {value}: this window only ({exc})")
+        self._sync_form("ui")
 
     def _appearance_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
@@ -1914,6 +1934,8 @@ class MainWindow(QMainWindow):
             return
         if "layout" in payload.get("ui", {}):        # the Appearance tab: switch now
             self.set_layout(payload["ui"]["layout"], persist=False)
+        if "drawer_collapsed" in payload.get("ui", {}):
+            self.set_drawer_collapsed(payload["ui"]["drawer_collapsed"], persist=False)
         if payload.get("autofocus"):
             self._offer_store_for_objective(payload["autofocus"], before_af)
 

@@ -1,7 +1,8 @@
 """The Camera tab's switchable layouts (Lukas, 2026-10-13: "can you build A, C,
 D, E and allow switching between them").
 
-Five layouts -- Classic, Cockpit, Workflow, Heads-up, Split by axis -- of ONE
+Six layouts -- Classic, Cockpit, Workflow, Heads-up, Split by axis, Image
+first (2026-10-14, "build B as well") -- of ONE
 set of controls. A switch re-parents the same widget objects into new
 containers (apps/layouts.py). What is checked here:
 
@@ -14,6 +15,9 @@ containers (apps/layouts.py). What is checked here:
   selectable from the Layout box and the Appearance tab;
 * the Workflow lights follow the status;
 * the panels on the image (Heads-up) do not take a click-to-go click;
+* Image first: each control in ONE place (toolbar, Overlays panel or drawer),
+  the drawer folds and opens, keeps everything reachable and is restored at
+  start, the image width at full HD, a 1366 px screen;
 * a remote window, holder and viewer, in every layout (the viewer guard still
   covers the moved controls). Ports 15802/15803.
 """
@@ -40,7 +44,7 @@ from camera.config import LAYOUTS, Config, load_config, save_config  # noqa: E40
 from camera.net import protocol  # noqa: E402
 from camera.sim_system import build_sim_system  # noqa: E402
 
-ALL = ("classic", "cockpit", "workflow", "hud", "split")
+ALL = ("classic", "cockpit", "workflow", "hud", "split", "image_first")
 #: hidden by the code that owns them until there is something to show
 OWNER_HIDDEN = {"fault_bar", "lab_drive"}
 
@@ -343,6 +347,18 @@ def test_remote_windows_in_every_layout_keep_the_viewer_guard():
             assert bar.guarded_input(wb.b_kill) is None, name
             assert bar.guarded_input(wb.cmb_layout) is None, name
             assert bar.guarded_input(wa.b_af) is None, name     # another window
+        # Image first's drawer: the holder's fold is kept in the service, the
+        # viewer's in its own window only; the fold button works for a viewer
+        wa.set_layout("image_first"); wb.set_layout("image_first")
+        wa.layouts.drawer.btn.click()
+        assert wa.layouts.drawer.folded and brain.cfg.ui.drawer_collapsed is True
+        assert wb._control_bar.guarded_input(wb.layouts.drawer.btn) is None
+        before, was = brain.cfg.ui.drawer_collapsed, wb.layouts.drawer.folded
+        wb.layouts.drawer.btn.click()
+        assert wb.layouts.drawer.folded is (not was)          # this window: folds
+        assert brain.cfg.ui.drawer_collapsed is before       # the service: unchanged
+        assert wb._control_bar.guarded_input(wb.b_af) is wb.b_af
+        assert wb._control_bar.guarded_input(wb.chk_track) is wb.chk_track
         assert "this window only" in wb.log.toPlainText()
         wa.close(); wb.close()
     finally:
@@ -350,3 +366,148 @@ def test_remote_windows_in_every_layout_keep_the_viewer_guard():
             c.close()
         svc.stop()
         _flush(app)
+
+
+# --------------------------------------------------------------------------- #
+# Image first (B, 2026-10-14): toolbar, foldable drawer, status line
+# --------------------------------------------------------------------------- #
+TOOLBAR = ("chk_track", "led_match", "chk_stab", "led_stable", "chk_cont", "led_af",
+           "chk_click", "b_af", "b_kill", "b_snap", "box_zoom")
+OVERLAYS = ("chk_thr", "chk_spot_info", "chk_pat_info", "chk_points")
+
+
+def _inside(widget, container) -> bool:
+    p = widget
+    while p is not None:
+        if p is container:
+            return True
+        p = p.parentWidget()
+    return False
+
+
+def test_image_first_puts_each_control_in_one_place(win):
+    w, brain, cam, app = win
+    w.set_layout("image_first", persist=False)
+    _pump(app, 0.1)
+    drawer = w.layouts.drawer
+    assert drawer is not None
+    for n in TOOLBAR:                    # the toolbar's switches are NOT in the drawer
+        p = getattr(w, n)
+        assert not _inside(p, drawer), n
+        assert p.isVisibleTo(w), n       # the toolbar is always there
+    for n in OVERLAYS:                   # the drawing switches: the Overlays panel
+        p = getattr(w, n)
+        assert isinstance(p.parentWidget(), L.HudPanel), n
+        assert not _inside(p, drawer), n
+    in_drawer = set(L.PIECES) - set(TOOLBAR) - set(OVERLAYS) - {
+        "view", "status_strip", "fault_bar"}
+    for n in in_drawer:
+        assert _inside(getattr(w, n), drawer), n
+    # the status line under the image: the state, and the newest log line
+    w._timer.stop()
+    w.status_strip.update_status(_fake(tracking_on=True, match_found=True,
+                                       match_score=0.91, stabilize_on=True,
+                                       distance_um=0.3))
+    assert "match&nbsp;0.91" in w.status_strip.text()
+    w._log_event("info", "the newest line")
+    app.processEvents()
+    line = w.status_strip.parentWidget()
+    assert isinstance(line, L.StatusLine) and line.last.text().endswith("the newest line")
+
+
+def test_image_first_drawer_folds_keeps_everything_reachable_and_is_kept(win):
+    w, brain, cam, app = win
+    w.set_layout("image_first", persist=True)
+    drawer = w.layouts.drawer
+    assert not drawer.folded and brain.cfg.ui.drawer_collapsed is False
+    _pump(app, 0.1)
+    open_view = w.view.width()
+    drawer.btn.click()                                   # the user folds it
+    _pump(app, 0.1)
+    assert drawer.folded and not drawer.body.isVisibleTo(w)
+    assert brain.cfg.ui.drawer_collapsed is True         # kept in the camera's config
+    assert w.view.width() > open_view                    # the image got the room
+    assert drawer.width() < 60                           # a thin strip of tab names
+    # clicking a tab name while folded opens the drawer on that page
+    drawer.bar.tabBarClicked.emit(2)
+    drawer.bar.setCurrentIndex(2)
+    app.processEvents()
+    assert not drawer.folded and brain.cfg.ui.drawer_collapsed is False
+    assert w.card_jog.isVisibleTo(w)
+    # folded, every control can still be reached (reveal opens the drawer)
+    w.set_drawer_collapsed(True)
+    for n in L.PIECES:
+        p = getattr(w, n)
+        w.layouts.reveal(p)
+        app.processEvents()
+        assert p.parentWidget().isVisibleTo(w), n
+        if n not in OWNER_HIDDEN:
+            assert p.isVisibleTo(w), n
+        w.set_drawer_collapsed(True)
+    # a new window starts folded; a switch away and back keeps it folded
+    w2 = MainWindow(brain, brain.cfg, remote=False)
+    try:
+        assert w2.layouts.name == "image_first" and w2.layouts.drawer.folded
+    finally:
+        w2.close()
+    w.set_layout("hud", persist=False)
+    w.set_layout("image_first", persist=False)
+    assert w.layouts.drawer.folded
+    # the Appearance tab's field opens it again
+    form = w._form_widgets["ui"]["drawer_collapsed"]
+    form.setChecked(False)
+    w._apply_settings([("UI", brain.cfg.ui)])
+    assert not w.layouts.drawer.folded and brain.cfg.ui.drawer_collapsed is False
+
+
+def test_image_first_drawer_state_survives_the_ini(tmp_path):
+    cfg = Config()
+    assert cfg.ui.drawer_collapsed is False
+    cfg.ui.layout, cfg.ui.drawer_collapsed = "image_first", True
+    path = tmp_path / "camera.ini"
+    save_config(cfg, str(path))
+    back = load_config(str(path))
+    assert back.ui.layout == "image_first" and back.ui.drawer_collapsed is True
+    cfg.ui.drawer_collapsed = False                      # gotcha #3: "False" is not True
+    save_config(cfg, str(path))
+    assert load_config(str(path)).ui.drawer_collapsed is False
+    assert protocol.config_to_dict(cfg)["ui"]["drawer_collapsed"] is False
+
+
+def test_image_first_gives_the_image_the_width(win):
+    """Full HD with the drawer folded: the image >= 70 % of the tab's width."""
+    w, brain, cam, app = win
+    w.resize(1920, 1080)
+    w.set_layout("image_first", persist=False)
+    w.set_drawer_collapsed(True, persist=False)
+    _pump(app, 0.2)
+    assert w.view.width() >= 0.70 * w.camera_host.width()
+    w.set_drawer_collapsed(False, persist=False)
+    _pump(app, 0.2)
+    assert w.view.width() >= 0.55 * w.camera_host.width()     # open: still the most
+
+
+def test_image_first_fits_a_small_screen(win):
+    """1366 x 768: the toolbar wraps instead of widening the window, the
+    status line breaks between its parts, nothing is under its minimum."""
+    w, brain, cam, app = win
+    w.resize(1366, 740)
+    w.set_layout("image_first", persist=False)
+    tool = w.b_af.parentWidget()                 # the toolbar (a flow layout)
+    assert isinstance(tool.layout(), L.FlowLayout)
+    for folded in (False, True):
+        w.set_drawer_collapsed(folded, persist=False)
+        for page in range(w.layouts.drawer.stack.count()):
+            w.layouts.drawer.bar.setCurrentIndex(page)
+            _pump(app, 0.05)
+            assert w.width() <= 1366 and w.camera_host.width() <= 1366, (folded, page)
+            for n in TOOLBAR:                    # nothing of the toolbar cut off
+                p = getattr(w, n)
+                r = p.parentWidget().geometry() if n.startswith(("chk_", "led_")) \
+                    else p.geometry()
+                assert tool.rect().contains(r), (n, r, tool.rect())
+            for n in L.PIECES:
+                p = getattr(w, n)
+                if not p.isVisible() or n in ("card_position", "card_laser"):
+                    continue
+                assert p.width() >= p.minimumSizeHint().width() - 1, (folded, page, n)
