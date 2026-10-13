@@ -67,6 +67,11 @@ PROJECTS.update({
     "suite-image": ("scan-core", True),
     # the camera's Camera settings tab (Images for scans)
     "camera-settings": ("modules/imaging/camera-control", True),
+    # the Camera tab's switchable layouts (2026-10-13; "camera" = Classic)
+    "camera-cockpit": ("modules/imaging/camera-control", True),
+    "camera-workflow": ("modules/imaging/camera-control", True),
+    "camera-hud": ("modules/imaging/camera-control", True),
+    "camera-split": ("modules/imaging/camera-control", True),
     # an axis row's Advanced panel opened in place (fly, and scout)
     "suite-axis-advanced": ("scan-core", True),
     "suite-axis-advanced-scout": ("scan-core", True),

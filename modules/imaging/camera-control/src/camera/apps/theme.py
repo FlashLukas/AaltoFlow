@@ -125,6 +125,9 @@ QLabel#caption {{
     font-size: 11px;
 }}
 QLabel#muted {{ color: {c['muted']}; }}
+/* the containers the Camera tab's layouts put controls in (layouts.py): they
+   must not paint the window colour as a patch inside a card */
+QWidget#row, QWidget#block, QWidget#column {{ background: transparent; }}
 QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {{
     background: {c['panel_hi']};
     border: 1px solid {c['border']};

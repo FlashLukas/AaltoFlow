@@ -39,12 +39,13 @@ from PySide6.QtWidgets import (
 from . import theme as T
 from .camera_view import CameraView
 from .control_bar import ControlBar, mark_always
+from .layouts import LAYOUT_TITLES, LayoutManager, StatusStrip, block
 from .plots import MiniPlot
 from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
 from .. import vision as V
 from ..config import (AF_POSITIONS, AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
                       FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, RECORD_ROIS, SIM_SPOTS,
-                      SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
+                      LAYOUTS, SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
 
 # What a QSpinBox (a C++ int) can hold.
 _INT32_MIN, _INT32_MAX = -2**31, 2**31 - 1
@@ -57,6 +58,7 @@ _ENUMS = {
     "symmetry": SYMMETRIES,
     "overlay_style": ("fill", "open"),
     "theme": THEMES,
+    "layout": LAYOUTS,
     "xy_unit": XY_UNITS,
     "size_method": SIZE_METHODS,
     "clip_mode": CLIP_MODES,
@@ -494,6 +496,24 @@ class MainWindow(QMainWindow):
         # a tab shown again re-reads the config into its (unedited) form: the
         # AutoFocus tab shows Spot fields the Spot tab may have changed
         tabs.currentChanged.connect(self._on_tab_changed)
+        # The Camera tab's LAYOUT (layouts.py): a compact box in the tab bar's
+        # top-right corner, reachable from every tab, switching live. Display
+        # only, so a viewer window may use it too (mark_always).
+        corner = QWidget(); cl = QHBoxLayout(corner); cl.setContentsMargins(0, 0, 4, 2)
+        cl.addWidget(QLabel("Layout"))
+        self.cmb_layout = QComboBox()
+        for key, title in LAYOUT_TITLES.items():
+            self.cmb_layout.addItem(title, key)
+        self.cmb_layout.setToolTip(
+            "How the Camera tab arranges its controls. The same controls in every "
+            "layout; it switches at once and is kept in the camera's settings "
+            "(ui.layout; Save config keeps it over a restart).")
+        mark_always(self.cmb_layout)
+        cl.addWidget(self.cmb_layout)
+        tabs.setCornerWidget(corner, Qt.TopRightCorner)
+        self.set_layout(self.cfg.ui.layout, persist=False)
+        self.cmb_layout.currentIndexChanged.connect(
+            lambda _i: self.set_layout(self.cmb_layout.currentData()))
 
         central = QWidget(); root = QVBoxLayout(central)
         # Control or viewer (control_bar.py), only for a GUI on a service
@@ -510,18 +530,26 @@ class MainWindow(QMainWindow):
         self._label_z_fields(self._z_unit)
 
     def _camera_tab(self) -> QWidget:
-        w = QWidget(); lay = QHBoxLayout(w)
-        # The controls sit in TWO columns beside the image, not one. In one
-        # column they were ~800 px tall and pushed the bottom tabs ("Define
-        # scanning", ...) below the screen, so the tab had to be scrolled to
-        # reach them (Lukas, 2026-09-25). Two columns halve that height; the
-        # image gives up the width, and keeps its aspect as it shrinks.
-        # the view with, under it, the zoom toggle (Lukas 2026-09-29): the same
-        # zoom the autofocus uses, useful outside autofocus too
-        left = QWidget(); lv = QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(4)
-        lv.addWidget(self.view, 1)
-        zr = QHBoxLayout()
+        """The Camera tab: a HOST whose contents the chosen layout fills.
+
+        Switchable layouts (Lukas, 2026-10-13): the controls are built ONCE,
+        in _build_camera_controls, and each layout (layouts.py) only decides
+        WHERE they sit -- it re-parents the same widget objects into its own
+        containers. Nothing is copied, so every signal, every attribute name
+        the code and the tests use, and the viewer guard (control_bar.py
+        reads a property ON the widget) stay what they were.
+        """
+        self._build_camera_controls()
+        self.camera_host = QWidget()
+        hv = QVBoxLayout(self.camera_host)
+        hv.setContentsMargins(0, 0, 0, 0)
+        self.layouts = LayoutManager(self, hv)
+        return self.camera_host
+
+    def _build_camera_controls(self) -> None:
+        """Every control of the Camera tab, built once, placed by a layout."""
+        # the zoom toggle (Lukas 2026-09-29): the same zoom the autofocus
+        # uses, useful outside autofocus too
         self.b_zoom = QPushButton(ZOOM_IN_TEXT)
         self.b_zoom.setToolTip("Show only the spot search region around the calibrated "
                                "laser (Spot tab: search region), or the whole frame again. "
@@ -543,14 +571,12 @@ class MainWindow(QMainWindow):
         self.b_one.clicked.connect(self.view.one_to_one)
         for b in (self.b_fit, self.b_one):
             mark_always(b)
-        zr.addWidget(self.b_zoom); zr.addWidget(self.b_fit); zr.addWidget(self.b_one)
-        zr.addStretch(1)
-        lv.addLayout(zr)
-        lay.addWidget(left, 4)
-        cards: list[QWidget] = []         # Focus, Pattern, Stabiliser, Imaging
+        self.box_zoom = block(self.b_zoom, self.b_fit, self.b_one, None)
+        # one line of the state that matters while working (the Cockpit,
+        # Workflow, Heads-up and Split layouts show it with the image)
+        self.status_strip = StatusStrip()
 
-        # Focus / Z card
-        f, l = _card("Focus (Z)")
+        # -- Focus (Z) --
         # The spin box is the TARGET only; the live Z has its own label. It used
         # to be both: the refresh timer rewrote the box from status whenever it
         # lacked focus -- and pressing Set moves focus to the button, so the box
@@ -560,44 +586,32 @@ class MainWindow(QMainWindow):
         self._z_unit = "V"   # re-labelled from status once the Z backend reports
         self._z_target_synced = False   # fill the target from the live Z ONCE
         self.z_spin.setSuffix(" V")
-        row = QHBoxLayout(); row.addWidget(QLabel("Z target"))
-        row.addWidget(self.z_spin)
         self.b_setz = QPushButton("Set")
         self.b_setz.clicked.connect(lambda: self.ctrl.set_z(self.z_spin.value()))
-        row.addWidget(self.b_setz)
-        self.lab_z = QLabel("at 0.00 V"); row.addWidget(self.lab_z)
-        l.addLayout(row)
+        self.lab_z = QLabel("at 0.00 V")
         # Focus steps: up = +Z by the step, down = -Z. The brain steps from the
         # last commanded target, so quick repeated clicks add up even while an
         # open-loop Z is still walking to the previous one.
-        row = QHBoxLayout(); row.addWidget(QLabel("step"))
         self.z_step = QDoubleSpinBox(); self.z_step.setRange(0.001, 1000); self.z_step.setDecimals(3)
         self.z_step.setValue(1.0); self.z_step.setSuffix(" V")
-        row.addWidget(self.z_step)
         self.b_z_up = QPushButton("▲  Z +"); self.b_z_up.setToolTip("focus up: Z + step")
         self.b_z_up.clicked.connect(lambda: self._step_focus(+1))
         self.b_z_dn = QPushButton("▼  Z −"); self.b_z_dn.setToolTip("focus down: Z − step")
         self.b_z_dn.clicked.connect(lambda: self._step_focus(-1))
-        row.addWidget(self.b_z_up); row.addWidget(self.b_z_dn)
         # Datum Z (Lukas, 2026-09-29): he re-zeroes Z at every focus the image
         # confirmed. Next to the Z controls; danger style + a confirm, since it
         # redefines every Z noted before. Enabled only on a Z with a counter.
         self.b_datum_z = QPushButton("Datum Z"); self.b_datum_z.setObjectName("danger")
         self.b_datum_z.clicked.connect(self._datum_z)
-        row.addWidget(self.b_datum_z)
-        l.addLayout(row)
-        row2 = QHBoxLayout()
         self.b_af = QPushButton("Find focus"); self.b_af.setObjectName("primary")
         self.b_af.clicked.connect(lambda: self.ctrl.autofocus())
-        b_kill = QPushButton("Kill AF"); b_kill.setObjectName("danger")
-        b_kill.clicked.connect(lambda: self.ctrl.kill_af())
-        mark_always(b_kill)          # a viewer can always stop an autofocus
-        row2.addWidget(self.b_af); row2.addWidget(b_kill); l.addLayout(row2)
+        self.b_kill = QPushButton("Kill AF"); self.b_kill.setObjectName("danger")
+        self.b_kill.clicked.connect(lambda: self.ctrl.kill_af())
+        mark_always(self.b_kill)          # a viewer can always stop an autofocus
         # AUTOFOCUS AT THE AF POSITION (2026-10-10): find focus somewhere else
         # (a feature with contrast), then come back to the measuring point.
         # The position itself is edited in Scan pattern > Scanning (af_*);
         # "Set AF here" takes where the laser is now. Violet "AF" on the image.
-        row_afp = QHBoxLayout()
         self.b_af_here = QPushButton("Set AF position here")
         self.b_af_here.setToolTip("the AF position = where the laser is now: the array "
                                   "point the stabiliser holds, else the point of the "
@@ -608,42 +622,29 @@ class MainWindow(QMainWindow):
                                 "tab's settings), come back; Z stays at the new focus. "
                                 "Kill AF stops it where it is.")
         self.b_af_at.clicked.connect(self._af_at_position)
-        row_afp.addWidget(self.b_af_here); row_afp.addWidget(self.b_af_at)
-        l.addLayout(row_afp)
         self.lab_afpos = QLabel("AF position: none"); self.lab_afpos.setObjectName("muted")
-        l.addWidget(self.lab_afpos)
-        r3 = QHBoxLayout(); r3.addWidget(QLabel("AF")); self.led_af = _led(T.OK)
-        r3.addWidget(self.led_af); self.lab_af = QLabel("OK"); r3.addWidget(self.lab_af)
-        r3.addStretch(1); r3.addWidget(QLabel("Best")); self.lab_best = QLabel("0.00 V")
-        r3.addWidget(self.lab_best); l.addLayout(r3)
+        self.lab_afpos.setWordWrap(True)     # a narrow Z column (Cockpit, Split)
+        self.led_af = _led(T.OK)
+        self.lab_af = QLabel("OK")
+        self.lab_best = QLabel("0.00 V")
         self.chk_cont = QCheckBox("Continuous focus")
         self.chk_cont.toggled.connect(
             lambda v: self._switch(self.chk_cont, self.ctrl.set_continuous_focus, v))
-        l.addWidget(self.chk_cont)
-        cards.append(f)
 
-        # Pattern / tracking card
-        f, l = _card("Pattern tracking")
-        r = QHBoxLayout()
+        # -- Pattern tracking --
         self.chk_track = QCheckBox("Allow tracking")
         self.chk_track.toggled.connect(
             lambda v: self._switch(self.chk_track, self.ctrl.set_tracking, v))
-        r.addWidget(self.chk_track)
-        r.addStretch(1); r.addWidget(QLabel("Match")); self.led_match = _led(T.OK)
-        r.addWidget(self.led_match); l.addLayout(r)
-        r = QHBoxLayout()
+        self.led_match = _led(T.OK)
         self.chk_roi = QCheckBox("Draw template ROI")
         # Backup patterns: draw one while the main template (or a backup) is
         # matched; the offset between them is measured from that view.
         self.chk_backup = QCheckBox("Draw backup ROI")
         self.chk_roi.toggled.connect(lambda on: self._roi_mode(self.chk_roi, on))
         self.chk_backup.toggled.connect(lambda on: self._roi_mode(self.chk_backup, on))
-        r.addWidget(self.chk_roi); r.addWidget(self.chk_backup); l.addLayout(r)
         # SEARCH REGION (Lukas, 2026-10-12): a poor pattern can make the match
         # jump around; after refocusing, enlarge the region (or 0 = whole frame)
         # to catch it back, then make it small again so it cannot jump.
-        r = QHBoxLayout()
-        r.addWidget(QLabel("search region"))
         self.sp_search = QSpinBox(); self.sp_search.setRange(0, 5000)
         self.sp_search.setSuffix(" px"); self.sp_search.setSpecialValueText("whole frame")
         self.sp_search.setSingleStep(20)
@@ -657,31 +658,22 @@ class MainWindow(QMainWindow):
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self._apply_search_region)
         self.sp_search.valueChanged.connect(lambda _v: self._search_timer.start())
-        r.addWidget(self.sp_search, 1); l.addLayout(r)
-        r = QHBoxLayout()
+        self.box_search = block("search region", (self.sp_search, 1))
         self.lab_patterns = QLabel("no backups"); self.lab_patterns.setObjectName("muted")
-        b_clr = QPushButton("Clear backups"); b_clr.clicked.connect(self._clear_backups)
-        r.addWidget(self.lab_patterns, 1); r.addWidget(b_clr); l.addLayout(r)
-        r = QHBoxLayout()
-        b_load = QPushButton("Load pattern"); b_load.clicked.connect(self._load_pattern)
-        b_save = QPushButton("Save pattern"); b_save.clicked.connect(self._save_pattern)
-        r.addWidget(b_load); r.addWidget(b_save); l.addLayout(r)
-        cards.append(f)
+        self.b_clr_backups = QPushButton("Clear backups")
+        self.b_clr_backups.clicked.connect(self._clear_backups)
+        self.b_load_pat = QPushButton("Load pattern")
+        self.b_load_pat.clicked.connect(self._load_pattern)
+        self.b_save_pat = QPushButton("Save pattern")
+        self.b_save_pat.clicked.connect(self._save_pattern)
 
-        # Stabiliser card
-        f, l = _card("Stabiliser")
-        r = QHBoxLayout()
+        # -- Stabiliser --
         self.chk_stab = QCheckBox("Stabilise")
         self.chk_stab.toggled.connect(
             lambda v: self._switch(self.chk_stab, self.ctrl.set_stabilize, v))
-        r.addWidget(self.chk_stab)
-        r.addStretch(1); r.addWidget(QLabel("Stable")); self.led_stable = _led(T.OK)
-        r.addWidget(self.led_stable); l.addLayout(r)
-        r = QHBoxLayout()
-        r.addWidget(QLabel("Index X")); self.sp_ix = QSpinBox(); self.sp_ix.setRange(0, 999)
-        r.addWidget(self.sp_ix)
-        r.addWidget(QLabel("Y")); self.sp_iy = QSpinBox(); self.sp_iy.setRange(0, 999)
-        r.addWidget(self.sp_iy)
+        self.led_stable = _led(T.OK)
+        self.sp_ix = QSpinBox(); self.sp_ix.setRange(0, 999)
+        self.sp_iy = QSpinBox(); self.sp_iy.setRange(0, 999)
         # The boxes FOLLOW the service (a scan picks the point) unless the user
         # is editing them: a box with the keyboard focus, or one changed and not
         # sent with Select yet ("dirty", outlined), is left alone (_refresh_index).
@@ -689,7 +681,7 @@ class MainWindow(QMainWindow):
             box.valueChanged.connect(lambda _v, b=box: self._mark_idx_dirty(b))
         self._b_idx = QPushButton("Select")
         self._b_idx.clicked.connect(self._select_index)
-        r.addWidget(self._b_idx); l.addLayout(r)
+        self.box_index = block("Index X", self.sp_ix, "Y", self.sp_iy, self._b_idx)
         # who else drives the point, and where it is going (hidden when nobody)
         self.lab_drive = QLabel("")
         self.lab_drive.setWordWrap(True)
@@ -697,11 +689,9 @@ class MainWindow(QMainWindow):
                                   "is choosing the scan point; this window only shows it.")
         self.lab_drive.setStyleSheet(f"color: {T.COLORS['accent']};")
         self.lab_drive.hide()
-        l.addWidget(self.lab_drive)
         # How it behaves (Lukáš: "faster, more bold, and a distance that counts
         # as stable"). Edits go to the brain 300 ms after the last change, no
         # Apply button: you tune it while watching it work.
-        g = QGridLayout(); g.setHorizontalSpacing(6)
         stb = self.cfg.stabilizer
         self.stab_gain = QDoubleSpinBox(); self.stab_gain.setRange(5, 150)
         self.stab_gain.setDecimals(0); self.stab_gain.setSingleStep(10); self.stab_gain.setSuffix(" %")
@@ -719,65 +709,45 @@ class MainWindow(QMainWindow):
         self.stab_settle.setDecimals(2); self.stab_settle.setSingleStep(0.05)
         self.stab_settle.setSuffix(" s"); self.stab_settle.setValue(stb.settle_s)
         self.stab_settle.setToolTip("wait after each move before measuring again")
+        self.box_stab_tuning = QWidget(); self.box_stab_tuning.setObjectName("block")
+        g = QGridLayout(self.box_stab_tuning); g.setHorizontalSpacing(6)
+        g.setContentsMargins(0, 0, 0, 0)
         g.addWidget(QLabel("correct"), 0, 0); g.addWidget(self.stab_gain, 0, 1)
         g.addWidget(QLabel("average"), 0, 2); g.addWidget(self.stab_frames, 0, 3)
         g.addWidget(QLabel("stable within"), 1, 0); g.addWidget(self.stab_radius, 1, 1)
         g.addWidget(QLabel("settle"), 1, 2); g.addWidget(self.stab_settle, 1, 3)
-        l.addLayout(g)
         self.lab_stab = QLabel("distance -"); self.lab_stab.setObjectName("muted")
-        l.addWidget(self.lab_stab)
         self._stab_timer = QTimer(self); self._stab_timer.setSingleShot(True)
         self._stab_timer.setInterval(300)
         self._stab_timer.timeout.connect(self._apply_stabiliser)
         for w_ in (self.stab_gain, self.stab_frames, self.stab_radius, self.stab_settle):
             w_.valueChanged.connect(lambda _v: self._stab_timer.start())
-        cards.append(f)
 
-        # Imaging card
-        f, l = _card("Imaging")
-        r = QHBoxLayout()
-        b_snap = QPushButton("Snapshot"); b_snap.clicked.connect(lambda: self.ctrl.snapshot())
+        # -- Imaging --
+        self.b_snap = QPushButton("Snapshot")
+        self.b_snap.clicked.connect(lambda: self.ctrl.snapshot())
         self.chk_click = QCheckBox("Click to go")
-        r.addWidget(b_snap); r.addWidget(self.chk_click); l.addLayout(r)
         self.chk_thr = QCheckBox("Show threshold / spot area")
         self.chk_thr.toggled.connect(self.view.set_show_threshold)
-        l.addWidget(self.chk_thr)
-        r = QHBoxLayout()
         self.chk_spot_info = QCheckBox("Label spot area")
         self.chk_spot_info.toggled.connect(self.view.set_show_spot_info)
         self.chk_pat_info = QCheckBox("Label pattern (score, x/y, distance)")
         self.chk_pat_info.toggled.connect(self.view.set_show_pattern_info)
-        r.addWidget(self.chk_spot_info); r.addWidget(self.chk_pat_info); r.addStretch(1)
-        l.addLayout(r)
         self.chk_points = QCheckBox("Show scan points")
         self.chk_points.setChecked(True)
         self.chk_points.setToolTip("While stabilising, a pink x marks the point it aims at, "
                                    "shown or not")
         self.chk_points.toggled.connect(self.view.set_show_scan_points)
-        l.addWidget(self.chk_points)
-        cards.append(f)
-        right_w = QWidget(); grid = QGridLayout(right_w)
-        grid.setContentsMargins(0, 0, 0, 0)
-        # The FAULT banner goes first, above everything: a lost pattern stops
-        # the stabiliser and pauses a scan, so it must be the first thing seen.
-        grid.addWidget(self._fault_bar(), 0, 0, 1, 2)
-        grid.addWidget(self._stage_bar(), 1, 0, 1, 2)
-        # column 1: what you do to the SAMPLE's image (focus, pattern);
-        # column 2: what runs on it (stabiliser) and what is drawn (imaging).
-        for (r, c), card in zip(((2, 0), (3, 0), (2, 1), (3, 1)), cards):
-            grid.addWidget(card, r, c)
-        grid.setRowStretch(4, 1)
-        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
-        lay.addWidget(right_w, 5)
 
-        # bottom sub-tabs
-        sub = QTabWidget()
-        sub.addTab(self._xy_subtab(), "Control XY stage")
-        sub.addTab(self._scanning_subtab(), "Define scanning")
-        sub.addTab(self._accuracy_subtab(), "Check alignment accuracy")
-        outer = QWidget(); ov = QVBoxLayout(outer)
-        ov.addWidget(w, 3); ov.addWidget(sub, 2)
-        return outer
+        # The FAULT banner (a lost pattern stops the stabiliser and pauses a
+        # scan: every layout puts it above everything else) and the stage line.
+        self._fault_bar()
+        self.stage_bar_top = self._stage_bar()
+        # the XY stage (Position | Jog | Go to / datum | Laser on sample) and
+        # the two other bottom pages
+        self._xy_cards()
+        self.page_scanning = self._scanning_subtab()
+        self.page_accuracy = self._accuracy_subtab()
 
     def _laser_card(self) -> QWidget:
         """Where the laser is ON THE SAMPLE, and putting it somewhere.
@@ -1280,14 +1250,11 @@ class MainWindow(QMainWindow):
             for _lab, btn in getattr(self, "_stage_bars", []):
                 btn.setEnabled(True); btn.setText("Reconnect stage")
 
-    def _xy_subtab(self) -> QWidget:
-        # Three columns side by side, so the whole thing fits the short strip
-        # under the live view: where the stage IS | jog pad | go to + datum.
-        # Three compact cards side by side -- POSITION | JOG | GO TO -- each at
-        # its natural size and pinned top-left. Stretch factors spread the first
-        # version over the full 2000 px width with buttons floating in space.
-        w = QWidget(); lay = QHBoxLayout(w); lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(10)
+    def _xy_cards(self) -> None:
+        """The XY stage as four compact cards -- POSITION | JOG | GO TO |
+        LASER ON SAMPLE -- each at its natural size. Classic puts them side by
+        side in "Control XY stage" (they fit the short strip under the live
+        view); the other layouts stack or spread them (layouts.py)."""
         BTN_W, BOX_W = 84, 110
 
         # -- live position (read-only: never an input, see the Z target note) --
@@ -1308,7 +1275,7 @@ class MainWindow(QMainWindow):
         l.addWidget(self.lab_xy); l.addWidget(self.lab_pxsize); l.addWidget(self.lab_moving)
         l.addWidget(self._stage_bar())
         l.addStretch(1)
-        lay.addWidget(f, 0, Qt.AlignTop)
+        self.card_position = f
 
         # -- jog pad: stage axes, not image directions (the kim calibration owns
         #    the image mapping). The step unit follows the stage: steps on kim.
@@ -1330,7 +1297,7 @@ class MainWindow(QMainWindow):
         jog.addWidget(self.b_y_dn, 2, 1, Qt.AlignCenter)
         l.addLayout(jog)
         l.addStretch(1)
-        lay.addWidget(f, 0, Qt.AlignTop)
+        self.card_jog = f
 
         # -- absolute move + datum ------------------------------------------
         f, l = _card("Go to / datum")
@@ -1350,15 +1317,13 @@ class MainWindow(QMainWindow):
         self.b_datum.clicked.connect(self._datum_xy)
         l.addWidget(self.b_datum)
         l.addStretch(1)
-        lay.addWidget(f, 0, Qt.AlignTop)
+        self.card_goto = f
 
         # -- the laser on the SAMPLE (template coordinates) -- next to the stage
         #    controls it belongs with; on the Camera tab it pushed the bottom
         #    tabs down again (Lukas, 2026-09-28)
-        lay.addWidget(self._laser_card(), 0, Qt.AlignTop)
+        self.card_laser = self._laser_card()
 
-        lay.addStretch(1)                       # spare width stays on the right
-        return w
 
     # Autofocus fields whose value is in the Z device's unit. Their config names
     # still end in "_v" (the piezo rig drives Z in volts; renaming touches the
@@ -1863,10 +1828,36 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.deleteLater()
 
+    # -- the Camera tab's layout (layouts.py, 2026-10-13) ------------------- #
+    def set_layout(self, name: str, persist: bool = True) -> str:
+        """Show the Camera tab in layout ``name`` (classic, cockpit, workflow,
+        hud, split) -- live: the same widgets move, none is rebuilt.
+
+        ``persist``: also write it into the camera's config (ui.layout), so
+        "Save config" keeps it over a restart. A viewer window cannot change
+        the service's config; the layout then changes in this window only.
+        """
+        name = self.layouts.apply(name)
+        self.cfg.ui.layout = name
+        i = self.cmb_layout.findData(name)
+        if i >= 0 and i != self.cmb_layout.currentIndex():
+            self.cmb_layout.blockSignals(True)      # gotcha #13: no echo back
+            self.cmb_layout.setCurrentIndex(i)
+            self.cmb_layout.blockSignals(False)
+        if persist:
+            try:
+                self.ctrl.set_config({"ui": {"layout": name}})
+            except Exception as exc:
+                self._log_event("info", f"layout {name}: this window only ({exc})")
+            self._sync_form("ui")
+        return name
+
     def _appearance_tab(self) -> QWidget:
         w = QWidget(); v = QVBoxLayout(w)
         v.addWidget(QLabel("Theme is applied on the next launch (start-up setting). "
-                           "Pick a theme and click Apply settings."))
+                           "Pick a theme and click Apply settings.\n"
+                           "The Camera tab's layout switches at once -- here, or with "
+                           "the Layout box at the top right of the window."))
         v.addWidget(self._settings_tab([("UI", self.cfg.ui)]))
         v.addStretch(1)
         return w
@@ -1920,6 +1911,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._log_event("error", f"apply failed: {exc}")
             return
+        if "layout" in payload.get("ui", {}):        # the Appearance tab: switch now
+            self.set_layout(payload["ui"]["layout"], persist=False)
         if payload.get("autofocus"):
             self._offer_store_for_objective(payload["autofocus"], before_af)
 
@@ -2240,6 +2233,9 @@ class MainWindow(QMainWindow):
         self._sync_fault(s)
         self.lab_pxsize.setText(f"pixel: {s.pixel_size_x:.4f} um | obj: {s.objective_name}")
         self.lab_z.setText(f"at {s.z_voltage:.2f} {s.z_unit}")
+        # the layouts' own indicators: the status line, the Workflow lights
+        self.status_strip.update_status(s, af_text=af_txt)
+        self.layouts.update(s)
         if not self._z_target_synced and s.connected:
             self.z_spin.setValue(s.z_voltage)   # start from where Z is, once
             self._z_target_synced = True

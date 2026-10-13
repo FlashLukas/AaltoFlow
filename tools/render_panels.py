@@ -75,6 +75,11 @@ SIZES = {
     "piezo": (1240, 760),
     "camera": (1400, 940),
     "camera-settings": (1400, 940),
+    # the Camera tab's layouts at a full-HD window (what they are designed for)
+    "camera-cockpit": (1800, 1000),
+    "camera-workflow": (1800, 1000),
+    "camera-hud": (1800, 1000),
+    "camera-split": (1800, 1000),
     "kim": (1240, 1240),
     "hf2": (1400, 900),
     "hf2-ch2": (1400, 900),
@@ -258,7 +263,7 @@ def _kim(theme):
     return lambda: gui.run_app(ctrl, cfg), warm_up, 4.5
 
 
-def _camera(theme, tab: str | None = None):
+def _camera(theme, tab: str | None = None, layout: str | None = None):
     from camera.config import Config
     from camera.sim_system import build_sim_system
     from camera.apps import gui
@@ -1684,6 +1689,10 @@ TARGETS = {
     "suite-image-scan": _suite("Scan", _image_scan(run=False), settle=2.0),
     "suite-image": _suite("Measurement", _image_scan(run=True), settle=3.0),
     "camera-settings": lambda theme: _camera(theme, tab="Camera settings"),
+    "camera-cockpit": lambda theme: _camera(theme, layout="cockpit"),
+    "camera-workflow": lambda theme: _camera(theme, layout="workflow"),
+    "camera-hud": lambda theme: _camera(theme, layout="hud"),
+    "camera-split": lambda theme: _camera(theme, layout="split"),
     "suite-routine-args": _suite("Scan", _routine_args, settle=2.0),
     "viewer-map": _viewer("map"),
     "viewer-1d": _viewer("1d"),

@@ -52,6 +52,10 @@ AF_POSITIONS = ("index", "um")
 SYMMETRIES = ("none", "horizontal", "vertical")
 # GUI theme choices (UI.theme).
 THEMES = ("dark", "light")
+# How the Camera tab arranges its controls (apps/layouts.py, 2026-10-13). The
+# SAME widgets in every layout -- only where they sit changes -- so the choice
+# is a pure display preference, switched live from the GUI.
+LAYOUTS = ("classic", "cockpit", "workflow", "hud", "split")
 # Which rig drives the sample (Hardware.motion).
 MOTIONS = ("kim", "piezo")
 # Spot search region shape (Spot.search_shape).
@@ -608,6 +612,9 @@ class UI:
     """GUI appearance (applied at startup)."""
 
     theme: str = "dark"                # "dark" | "light" (see apps/theme.py)
+    # the Camera tab's layout: classic | cockpit | workflow | hud | split
+    # (apps/layouts.py). Unlike the theme it switches at once, no restart.
+    layout: str = "classic"
 
 
 @dataclass
@@ -718,6 +725,9 @@ def load_config(path: str) -> Config:
         cfg.image.symmetry = "none"
     if (cfg.ui.theme or "").lower() not in THEMES:
         cfg.ui.theme = "dark"
+    if (cfg.ui.layout or "").lower() not in LAYOUTS:
+        cfg.ui.layout = "classic"
+    cfg.ui.layout = cfg.ui.layout.lower()
     if cfg.hardware.motion not in MOTIONS:
         cfg.hardware.motion = "kim"
     if cfg.spot.search_shape not in SEARCH_SHAPES:
