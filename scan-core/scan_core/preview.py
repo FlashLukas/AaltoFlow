@@ -49,6 +49,10 @@ class DimPreview:
     name: str
     kind: str
     members: list[MemberPreview]
+    #: SEGMENTS (2026-10-14): the run each point belongs to (0, 1, ...) and
+    #: one info dict per run (recipe.segment_values), or None
+    segment: np.ndarray | None = None
+    segments: list | None = None
 
     @property
     def size(self) -> int:
@@ -110,7 +114,8 @@ def _member(pid: str, values: np.ndarray, registry) -> MemberPreview:
 def preview_axis(ax: dict, registry=None) -> list[DimPreview]:
     """The dims one recipe axis compiles to, with the values each point sends."""
     return [DimPreview(name=d.name, kind=d.kind,
-                       members=[_member(pid, vals, registry) for pid, vals in d.params])
+                       members=[_member(pid, vals, registry) for pid, vals in d.params],
+                       segment=d.segment, segments=d.segments)
             for d in _compile_axis(ax)]
 
 

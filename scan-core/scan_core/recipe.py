@@ -55,6 +55,14 @@ linear : {type, param, start, stop, num, [spacing, name]} -> 1 dim
           `spacing: log` (2026-10-12) puts the points at equal RATIOS
           (np.geomspace) instead of equal steps; from and to must then have
           the same sign and neither be 0. Absent = linear, as always.
+          SEGMENTS (2026-10-14, Lukas: "scan up and down ... stacking scanning
+          arrays"): instead of start/stop/num, `segments: [{start, stop, num,
+          [spacing]}, ...]` -- several linear (or log) runs visited in order,
+          e.g. 0 -> 100 -> -100 -> 100 mT for a hysteresis loop. Where a
+          segment starts on the value the previous one ended on, that joint is
+          NOT measured twice (the segment starts one step after it). Values may
+          repeat (that is the point: up AND down). Each point's segment is
+          recorded in the file (`<dim>_segment`, see segment_coords).
 array  : {type, param, values:[...], [name]}              -> 1 dim
 file   : {type, param, path, [name]}                      -> 1 dim (values from CSV/txt)
 zip    : {type, name, members:[{param, ...spec}], }       -> 1 dim, several params in lockstep
@@ -113,6 +121,13 @@ class Dim:
     values: np.ndarray | None = None
     mode: str = ""
     interval_s: float | None = None
+    #: SEGMENTS (2026-10-14): which run of the axis each point belongs to
+    #: (int, 0, 1, 2 ...) and one dict per run -- or None for an ordinary
+    #: monotonic axis. Set for a `segments` axis, and for a numeric list
+    #: whose values turn back (split at the reversals); see axis_segments.
+    segment: np.ndarray | None = None
+    segments: list | None = None
+    segment_source: str = ""
 
     @property
     def coord(self) -> np.ndarray:
@@ -170,7 +185,10 @@ def _values_from_spec(spec: dict) -> np.ndarray:
     `values` and a file may hold NON-numeric setpoints (2026-10-12: an enum
     knob's options, text); they come back as an object array (native_values).
     Linear spacing is for numbers only.
+    `segments` (2026-10-14): several runs concatenated (segment_values).
     """
+    if "segments" in spec:
+        return segment_values(spec["segments"])[0]
     if "values" in spec:
         return native_values(spec["values"])
     if "path" in spec:
@@ -199,6 +217,232 @@ def _values_from_spec(spec: dict) -> np.ndarray:
     step = float(spec["step"])
     n = int(round((stop - start) / step)) + 1
     return start + step * np.arange(max(1, n))
+
+
+# ─────────────────────────── SEGMENTS (2026-10-14) ────────────────────────────
+#
+# A hysteresis measurement sweeps the field UP and then DOWN (and up again):
+# the same values visited twice, in a given order. A `segments` axis is a
+# list of linear runs, concatenated; the data file says which run every point
+# belongs to, so a plot can draw the up and the down branch as two curves
+# instead of one folded zig-zag line. docs/DEVELOPER_NOTES.md section 4l is
+# the contract the plotting side (AaltoView, the live result) reads.
+
+def segment_problems(segments) -> list[str]:
+    """What is wrong with a `segments` list ([] = fine). Plain sentences:
+    they are shown to the operator as they are."""
+    if not isinstance(segments, list) or not segments:
+        return ["segments must be a non-empty list of {start, stop, num}"]
+    errs = []
+    for k, seg in enumerate(segments, start=1):
+        if not isinstance(seg, dict):
+            errs.append(f"segment {k} is not a mapping of start, stop, num")
+            continue
+        try:
+            a, b = float(seg.get("start")), float(seg.get("stop"))
+        except (TypeError, ValueError):
+            errs.append(f"segment {k}: start and stop must be numbers")
+            continue
+        if not (np.isfinite(a) and np.isfinite(b)):
+            errs.append(f"segment {k}: start and stop must be finite numbers")
+            continue
+        try:
+            n = int(seg.get("num"))
+            if n != float(seg.get("num")):
+                raise ValueError
+        except (TypeError, ValueError):
+            errs.append(f"segment {k}: the number of points must be a whole number")
+            continue
+        if n < 2:
+            errs.append(f"segment {k} has {n} point(s); a segment needs at least 2 "
+                        f"(from and to)")
+        elif a == b:
+            errs.append(f"segment {k} goes from {a:g} to {b:g}: from and to are "
+                        f"equal, so it has no direction -- use a repeat axis to "
+                        f"measure one value several times")
+        sp = seg.get("spacing", "linear")
+        if sp not in ("linear", "log"):
+            errs.append(f"segment {k}: unknown spacing {sp!r} (linear or log)")
+        elif sp == "log" and (a == 0 or b == 0 or (a < 0) != (b < 0)):
+            errs.append(f"segment {k}: log spacing needs from and to of the same "
+                        f"sign and neither 0 (got {a:g} .. {b:g})")
+    return errs
+
+
+def segment_values(segments) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """(values, segment index per point, one info dict per segment).
+
+    Each segment is a linear (or `spacing: log`) run of `num` points from
+    `start` to `stop`. When a segment STARTS on the value the previous one
+    ENDED on, its first point is dropped -- the joint is measured once, as
+    the last point of the earlier segment -- and its info says `joined: 1`.
+    Info per segment: start, stop, num (as given), [spacing], direction (+1
+    up / -1 down), joined (0/1), first (index of its first point in the
+    axis) and count (its points in the axis: num, or num - 1 when joined).
+    Raises ValueError with segment_problems' words on a bad list."""
+    errs = segment_problems(segments)
+    if errs:
+        raise ValueError("; ".join(errs))
+    vals: list[float] = []
+    seg_of: list[int] = []
+    info: list[dict] = []
+    prev_end = None
+    for k, seg in enumerate(segments):
+        a, b, n = float(seg["start"]), float(seg["stop"]), int(seg["num"])
+        sp = seg.get("spacing", "linear")
+        run = np.geomspace(a, b, n) if sp == "log" else np.linspace(a, b, n)
+        joined = prev_end is not None and a == prev_end
+        if joined:
+            run = run[1:]
+        d = {"start": a, "stop": b, "num": n}
+        if sp == "log":
+            d["spacing"] = "log"
+        d.update({"direction": 1 if b > a else -1, "joined": int(joined),
+                  "first": len(vals), "count": int(len(run))})
+        info.append(d)
+        vals.extend(run.tolist())
+        seg_of.extend([k] * len(run))
+        prev_end = b
+    return np.asarray(vals, dtype=float), np.asarray(seg_of, dtype=np.int32), info
+
+
+def reversal_segments(values) -> tuple[np.ndarray, list[dict]] | None:
+    """A hand-typed list that TURNS BACK (0, 50, 100, 50, 0, -50 ...) split
+    into monotonic runs, so it is recorded and plotted like a `segments`
+    axis. None for a list that never turns back (or is not numeric).
+
+    A point belongs to the run of the step that LEADS INTO it, so the turning
+    point (100 above) ends the up run and the down run starts after it --
+    the same rule as a joined segment (every run after the first is
+    `joined: 1`, its `start` the turning point). A step of zero (a value
+    typed twice) does not change the direction."""
+    v = np.asarray(values)
+    if v.dtype == object or v.ndim != 1 or v.size < 3:
+        return None
+    try:
+        v = v.astype(float)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(v)):
+        return None
+    seg = np.zeros(v.size, dtype=np.int32)
+    dirs: list[int] = []
+    k, cur = 0, 0
+    for i in range(1, v.size):
+        step = int(np.sign(v[i] - v[i - 1]))
+        if step != 0 and cur != 0 and step != cur:
+            k += 1
+            dirs.append(cur)
+        if step != 0:
+            cur = step
+        seg[i] = k
+    dirs.append(cur if cur != 0 else 1)
+    if k == 0:
+        return None                              # monotonic: nothing to split
+    info = []
+    for j in range(k + 1):
+        idx = np.flatnonzero(seg == j)
+        first, last = int(idx[0]), int(idx[-1])
+        start = float(v[first - 1]) if j > 0 else float(v[first])
+        info.append({"start": start, "stop": float(v[last]),
+                     "num": int(idx.size + (1 if j > 0 else 0)),
+                     "direction": int(dirs[j]), "joined": int(j > 0),
+                     "first": first, "count": int(idx.size)})
+    return seg, info
+
+
+def axis_segments(spec: dict, values) -> tuple[np.ndarray, list[dict], str] | None:
+    """(segment index per point, info per segment, source) of one axis or
+    zip / grid member, or None for an ordinary monotonic axis. source is
+    "recipe" for a `segments` axis, "reversals" for a numeric list that
+    turns back (reversal_segments)."""
+    if not isinstance(spec, dict):
+        return None
+    if "segments" in spec:
+        _, seg, info = segment_values(spec["segments"])
+        return seg, info, "recipe"
+    found = reversal_segments(values)
+    if found is None:
+        return None
+    return found[0], found[1], "reversals"
+
+
+def _with_segments(dim: "Dim", spec: dict) -> "Dim":
+    """Attach the segments of `spec` (the dim's primary member) to `dim`."""
+    if dim.params:
+        found = axis_segments(spec, dim.params[0][1])
+        if found is not None:
+            dim.segment, dim.segments, dim.segment_source = found
+    return dim
+
+
+def _segment_like(last: dict, start: float, stop: float, num: int) -> dict:
+    seg = {"start": start, "stop": stop, "num": int(num)}
+    if last.get("spacing") == "log":
+        seg["spacing"] = "log"
+    return seg
+
+
+def return_sweep(segments) -> list[dict]:
+    """`segments` plus the MIRROR of its last run (to -> from, as many
+    points): the builder's "+ return sweep". 0 -> 100 becomes 0 -> 100 -> 0."""
+    segments = [dict(s) for s in segments or []]
+    if not segments:
+        return segments
+    last = segments[-1]
+    segments.append(_segment_like(last, float(last["stop"]), float(last["start"]),
+                                  int(last["num"])))
+    return segments
+
+
+def hysteresis_loop(segments) -> list[dict]:
+    """`segments` plus the DOWN and back-UP legs of a full loop over the last
+    run's range: the builder's "+ loop", at the last run's step.
+
+    a -> b becomes a -> b -> a -> b. A virgin curve from 0 (0 -> 100) is
+    mirrored through zero, because that is what a hysteresis loop needs:
+    0 -> 100 -> -100 -> 100 (the 200 mT legs with the same step as the
+    first one)."""
+    segments = [dict(s) for s in segments or []]
+    if not segments:
+        return segments
+    last = segments[-1]
+    a, b, n = float(last["start"]), float(last["stop"]), int(last["num"])
+    far = -b if a == 0 else a                     # where the down leg turns
+    if last.get("spacing") == "log" and (far == 0 or (far < 0) != (b < 0)):
+        far = a                                   # a ratio cannot cross zero
+    step = abs(b - a) / max(1, n - 1)
+    m = int(round(abs(far - b) / step)) + 1 if step > 0 else n
+    segments.append(_segment_like(last, b, far, m))
+    segments.append(_segment_like(last, far, b, m))
+    return segments
+
+
+def segment_coords(dim: "Dim") -> dict:
+    """The coordinates a segmented dim adds to the data file (the CONTRACT,
+    docs/DEVELOPER_NOTES.md section 4l): {name: (dim, values, attrs)}, empty
+    for a dim without segments."""
+    if dim.segment is None or not dim.segments:
+        return {}
+    seg = np.asarray(dim.segment, dtype=np.int32)
+    direction = np.asarray([dim.segments[k]["direction"] for k in seg], dtype=np.int8)
+    return {
+        f"{dim.name}_segment": (dim.name, seg, {
+            "long_name": f"segment of {dim.name} (0 = first)",
+            "units": "", "segment_of": dim.name}),
+        f"{dim.name}_direction": (dim.name, direction, {
+            "long_name": f"direction of {dim.name} (+1 up, -1 down)",
+            "units": "", "segment_of": dim.name}),
+    }
+
+
+def segment_attrs(dim: "Dim") -> dict:
+    """The attributes a segmented dim's own coordinate gets (the contract)."""
+    if dim.segment is None or not dim.segments:
+        return {}
+    return {"segments_json": json.dumps(dim.segments),
+            "segment_source": dim.segment_source or "recipe",
+            "n_segments": int(len(dim.segments))}
 
 
 # ─────────────────────────────── the recipe ───────────────────────────────────
@@ -401,6 +645,8 @@ class Recipe:
                 # axes, because they are not settables.
                 errs.append(f"detector '{det}' is text, not a number; it cannot "
                             f"be recorded in the data")
+        seg_errs = self._validate_segments(registry)
+        errs += seg_errs
         errs += self._validate_names(registry)
         errs += self._validate_hooks(registry)
         from .flyscan import validate_fly
@@ -443,7 +689,50 @@ class Recipe:
                         errs.append(f"'{pid}' sweep [{vals.min():g},{vals.max():g}] "
                                     f"exceeds limits [{lo:g},{hi:g}]")
         except Exception as exc:                       # compile problems surface here
-            errs.append(f"compile error: {exc}")
+            # (a bad segments list is already reported by _validate_segments,
+            # in the axis's words: not twice)
+            if not seg_errs:
+                errs.append(f"compile error: {exc}")
+        return errs
+
+    def _validate_segments(self, registry) -> list[str]:
+        """A `segments` axis (2026-10-14): a list of {start, stop, num} runs
+        over a NUMBER knob, on a stepped linear axis (or a zip / grid member),
+        given instead of start / stop / num -- never next to them."""
+        errs: list[str] = []
+        for i, ax in enumerate(self.axes or []):
+            if not isinstance(ax, dict):
+                continue
+            t = ax.get("type")
+            specs = []
+            if t == "zip":
+                specs = [m for m in ax.get("members") or [] if isinstance(m, dict)]
+            elif t in ("grid", "raster"):
+                specs = [ax.get(k) for k in ("x", "y") if isinstance(ax.get(k), dict)]
+            else:
+                specs = [ax]
+            for spec in specs:
+                if "segments" not in spec:
+                    continue
+                where = f"axis '{spec.get('name') or spec.get('param') or i + 1}'"
+                if t not in ("linear", "zip", "grid", "raster"):
+                    errs.append(f"{where}: segments are given on a linear axis "
+                                f"(type: linear), not on a {t} axis"
+                                + (" -- a flown row is one continuous move"
+                                   if t == "fly" else ""))
+                    continue
+                both = [k for k in ("start", "stop", "num", "step", "values", "path",
+                                    "spacing") if k in spec]
+                if both:
+                    errs.append(f"{where}: give either segments or "
+                                f"{', '.join(both)}, not both")
+                p = registry.get(spec.get("param")) if registry is not None else None
+                if p is not None and not _numeric(p):
+                    errs.append(f"{where}: {p.id} is {getattr(p, 'dtype', 'text')}, not "
+                                f"a number; segments run from one number to another "
+                                f"-- give its values as a list")
+                    continue
+                errs += [f"{where}: {m}" for m in segment_problems(spec["segments"])]
         return errs
 
     def _validate_names(self, registry) -> list[str]:
@@ -763,7 +1052,8 @@ def _compile_axis(ax: dict) -> list[Dim]:
     if t in ("linear", "array", "file"):
         vals = _values_from_spec(ax)
         name = ax.get("name") or ax["param"]
-        return [Dim(name=name, params=[(ax["param"], vals)], size=len(vals), kind=t)]
+        return [_with_segments(Dim(name=name, params=[(ax["param"], vals)],
+                                   size=len(vals), kind=t), ax)]
 
     if t == "fly":
         vals = _values_from_spec({k: ax[k] for k in ("start", "stop", "num")
@@ -778,15 +1068,18 @@ def _compile_axis(ax: dict) -> list[Dim]:
         if any(len(v) != n for _, v in vecs):
             raise ValueError("zip members must have equal length")
         name = ax.get("name") or "+".join(p for p, _ in vecs)
-        return [Dim(name=name, params=vecs, size=n, kind="zip")]
+        return [_with_segments(Dim(name=name, params=vecs, size=n, kind="zip"),
+                               members[0])]
 
     if t == "grid":
         xv = _values_from_spec(ax["x"]);  xp = ax["x"]["param"]
         yv = _values_from_spec(ax["y"]);  yp = ax["y"]["param"]
         xname = ax["x"].get("name") or xp
         yname = ax["y"].get("name") or yp
-        xdim = Dim(name=xname, params=[(xp, xv)], size=len(xv), kind="grid_x")
-        ydim = Dim(name=yname, params=[(yp, yv)], size=len(yv), kind="grid_y")
+        xdim = _with_segments(Dim(name=xname, params=[(xp, xv)], size=len(xv),
+                                  kind="grid_x"), ax["x"])
+        ydim = _with_segments(Dim(name=yname, params=[(yp, yv)], size=len(yv),
+                                  kind="grid_y"), ax["y"])
         # `fast` axis becomes the INNER (last) dim so it varies quickest
         fast = ax.get("fast", "x")
         return [xdim, ydim] if fast == "y" else [ydim, xdim]

@@ -82,7 +82,7 @@ def test_each_spacing_round_trips(qapp, tmp_path):
     b.add_axis("field")
     row = b.rows[-1]
     assert [row.spacing_box.itemData(i) for i in range(row.spacing_box.count())] == \
-        ["linear", "log", "list", "file"]
+        ["linear", "log", "list", "file", "segments"]
     assert row.to_axis()["type"] == "linear" and "spacing" not in row.to_axis()
 
     row.start.setValue(1); row.stop.setValue(100); row.num.setValue(3)

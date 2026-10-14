@@ -760,6 +760,26 @@ class SimState:
         on = best_w >= 0.5
         return (best_w if on else 0.0), (best_df if on else 0.0)
 
+    #: the toy film's coercive field and switching width (mT), for `kerr`
+    KERR_HC_MT = 25.0
+    KERR_W_MT = 6.0
+
+    def kerr(self) -> float:
+        """A MOKE-like HYSTERESIS LOOP (2026-10-14, for `segments` axes): the
+        Kerr rotation of a film whose magnetisation switches at +Hc on the way
+        UP and at -Hc on the way DOWN. Which branch applies is the direction
+        the field last moved in, so sweeping 0 -> +100 -> -100 -> +100 mT
+        draws the familiar square-ish loop -- and a plot that folds the up and
+        down runs into one line shows the problem at once."""
+        b = float(self.field_mT)
+        prev = getattr(self, "_kerr_prev", None)
+        if prev is not None and b != prev:
+            self._kerr_dir = 1 if b > prev else -1
+        self._kerr_prev = b
+        hc = self.KERR_HC_MT * getattr(self, "_kerr_dir", 1)
+        m = float(np.tanh((b - hc) / self.KERR_W_MT))
+        return 2.0 * m + float(self._rng.normal(0.0, 0.03))      # mrad
+
     def reflectivity(self) -> float:
         """The fraction of the laser reflected HERE: the metal islands reflect
         more than the substrate between them, with the same soft-edged outline
@@ -998,6 +1018,8 @@ def build_sim_registry() -> Registry:
     reg.add(Gettable("aux_in",     "Aux in",      "V",   lambda: s.lockin()["aux"]))
     reg.add(Gettable("reflectivity", "Reflectivity", "", s.reflectivity)
             ).focus_sensitive = True        # it follows focus (scout warning)
+    # a hysteretic signal for up-and-down field sweeps (segments axes)
+    reg.add(Gettable("kerr", "Kerr rotation (hysteretic)", "mrad", s.kerr))
 
     # Detectors that are NOT floats (2026-10-04), so a simulated scan -- and
     # the tests -- exercise the storage types a module's describe declares

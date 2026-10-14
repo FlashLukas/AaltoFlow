@@ -1440,6 +1440,18 @@ def _to_dataset(recipe, compiled, registry, data, created_iso, seconds,
                 coords[name][2].update(extra_a)
     except Exception:
         pass
+    # SEGMENTS (2026-10-14): an axis swept up AND down (a `segments` axis, or
+    # a typed list that turns back) says, per point, which run it belongs to
+    # -- `<dim>_segment` and `<dim>_direction` along the dim, the runs as JSON
+    # on the dim's own coordinate. Without them a plot of a hysteresis loop
+    # is one line folded back on itself. The contract: DEVELOPER_NOTES 4l.
+    from .recipe import segment_attrs, segment_coords
+    for d in dims:
+        if d.name in coords:
+            coords[d.name][2].update(segment_attrs(d))
+        for cname, c in segment_coords(d).items():
+            if cname not in coords:
+                coords[cname] = c
     # zip / grid secondary members ride along as extra (non-index) coords
     for d in dims:
         for pid, vals in d.params[1:]:

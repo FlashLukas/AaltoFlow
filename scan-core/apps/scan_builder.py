@@ -563,6 +563,246 @@ class _StackRow(QtWidgets.QFrame):
                                       top, right, bottom)
 
 
+class SegmentsEditor(QtWidgets.QFrame):
+    """The runs of a SEGMENTS axis (2026-10-14, Lukas: "scan up and down ...
+    stacking scanning arrays ... type them manually"): one table row per run,
+    from / to / pts, visited top to bottom. Where a run starts on the value
+    the run above ended on, that joint is measured ONCE (recipe.segment_values);
+    the count line says how many points the axis really has.
+
+    "+ return sweep" adds the mirror of the last run (to -> from); "+ loop"
+    adds the down and back-up legs of a full hysteresis loop over the last
+    run's range (0 -> 100 becomes 0 -> 100 -> -100 -> 100). Numbers are parsed
+    with float(), not a locale-following validator (root gotcha #18)."""
+
+    changed = QtCore.Signal()
+    COLS = ("from", "to", "pts")
+
+    def __init__(self, unit: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.unit = unit
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(8, 8, 8, 8); v.setSpacing(6)
+        head = QtWidgets.QLabel("SEGMENTS  (visited top to bottom)")
+        head.setStyleSheet(f"color:{C['muted']}; font-size:10px; letter-spacing:1px;")
+        v.addWidget(head)
+        self.table = QtWidgets.QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(
+            [f"{c} [{unit}]" if unit and c != "pts" else c for c in self.COLS])
+        self.table.verticalHeader().setDefaultSectionSize(22)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        for c, w in enumerate((86, 86)):
+            self.table.setColumnWidth(c, w)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setMinimumWidth(290)
+        self.table.setMinimumHeight(140)
+        self.table.itemChanged.connect(self._edited)
+        v.addWidget(self.table, 1)
+
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(4)
+        for text, tip, fn in (
+                ("+", "add a run after the selected one (continuing from its end)",
+                 self.add_row),
+                ("-", "remove the selected run", self.remove_row),
+                ("up", "move the selected run up", lambda: self.move_row(-1)),
+                ("down", "move the selected run down", lambda: self.move_row(1))):
+            b = QtWidgets.QPushButton(text); b.setToolTip(tip)
+            b.setFixedWidth(28 if len(text) == 1 else 46)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        row2 = QtWidgets.QHBoxLayout(); row2.setSpacing(4)
+        self.return_btn = QtWidgets.QPushButton("+ return sweep")
+        self.return_btn.setToolTip("Add the mirror of the last run: to -> from,\n"
+                                   "as many points (0 -> 100 becomes 0 -> 100 -> 0).")
+        self.return_btn.clicked.connect(self.add_return)
+        self.loop_btn = QtWidgets.QPushButton("+ loop")
+        self.loop_btn.setToolTip(
+            "Add the down and back-up legs of a full hysteresis loop over the\n"
+            "last run's range, at its step: a -> b becomes a -> b -> a -> b;\n"
+            "a curve from 0 is mirrored through zero (0 -> 100 becomes\n"
+            "0 -> 100 -> -100 -> 100).")
+        self.loop_btn.clicked.connect(self.add_loop)
+        row2.addWidget(self.return_btn); row2.addWidget(self.loop_btn); row2.addStretch(1)
+        v.addLayout(row2)
+        self.count_lbl = QtWidgets.QLabel("")
+        self.count_lbl.setWordWrap(True)
+        self.count_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
+        v.addWidget(self.count_lbl)
+        self._sync()
+
+    # ---- data ------------------------------------------------------------------
+    def segments(self) -> list[dict]:
+        """The runs as the recipe holds them: [{start, stop, num}, ...]. A cell
+        that is not a number is kept as typed, so validate() names it."""
+        out = []
+        for r in range(self.table.rowCount()):
+            vals = []
+            for c in range(3):
+                it = self.table.item(r, c)
+                t = it.text().strip() if it is not None else ""
+                try:
+                    x = float(t)
+                    vals.append(int(round(x)) if c == 2 and x == round(x) else x)
+                except ValueError:
+                    vals.append(t)
+            out.append({"start": vals[0], "stop": vals[1], "num": vals[2]})
+        return out
+
+    def set_segments(self, segments) -> None:
+        self.table.blockSignals(True)
+        self.table.setRowCount(0)
+        for seg in segments or []:
+            self._append(seg.get("start"), seg.get("stop"), seg.get("num"))
+        self.table.blockSignals(False)
+        self._sync()
+        self.changed.emit()
+
+    def _append(self, start, stop, num, at: int | None = None) -> None:
+        r = self.table.rowCount() if at is None else at
+        self.table.insertRow(r)
+        for c, val in enumerate((start, stop, num)):
+            it = QtWidgets.QTableWidgetItem(format_value(val) if val is not None else "")
+            it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            self.table.setItem(r, c, it)
+
+    def _selected(self) -> int:
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        return rows[0].row() if rows else self.table.rowCount() - 1
+
+    # ---- the buttons -------------------------------------------------------------
+    def add_row(self) -> None:
+        """A new run after the selected one, starting where it ends, going
+        back the same way (the common next step of an up-and-down scan)."""
+        segs = self.segments()
+        r = self._selected()
+        if 0 <= r < len(segs):
+            last = segs[r]
+            new = (last["stop"], last["start"], last["num"])
+        else:
+            new = (0.0, 1.0, 11)
+        self.table.blockSignals(True)
+        self._append(*new, at=r + 1)
+        self.table.blockSignals(False)
+        self.table.selectRow(r + 1)
+        self._sync(); self.changed.emit()
+
+    def remove_row(self) -> None:
+        r = self._selected()
+        if self.table.rowCount() <= 1 or r < 0:
+            return                        # an axis keeps at least one run
+        self.table.removeRow(r)
+        self._sync(); self.changed.emit()
+
+    def move_row(self, d: int) -> None:
+        segs = self.segments()
+        r = self._selected()
+        t = r + d
+        if not (0 <= r < len(segs) and 0 <= t < len(segs)):
+            return
+        segs[r], segs[t] = segs[t], segs[r]
+        self.set_segments(segs)
+        self.table.selectRow(t)
+
+    def add_return(self) -> None:
+        from scan_core.recipe import return_sweep
+        segs = self.segments()
+        if self._numeric(segs):
+            self.set_segments(return_sweep(segs))
+
+    def add_loop(self) -> None:
+        from scan_core.recipe import hysteresis_loop
+        segs = self.segments()
+        if self._numeric(segs):
+            self.set_segments(hysteresis_loop(segs))
+
+    @staticmethod
+    def _numeric(segs) -> bool:
+        return bool(segs) and all(_is_num(s[k]) for s in segs[-1:]
+                                  for k in ("start", "stop", "num"))
+
+    # ---- the count line ----------------------------------------------------------
+    def _edited(self, *_):
+        self._sync()
+        self.changed.emit()
+
+    def summary(self) -> str:
+        """'0 -> 100 -> -100 -> 100 mT' for the row's button."""
+        segs = self.segments()
+        if not segs:
+            return "(no segments)"
+        path = [segs[0]["start"]]
+        for i, s in enumerate(segs):
+            if i and s["start"] != segs[i - 1]["stop"]:
+                path.append("|")             # a jump: not joined
+                path.append(s["start"])
+            path.append(s["stop"])
+        text = " -> ".join(format_value(p) if p != "|" else "|" for p in path)
+        return text.replace(" -> | -> ", " | ")
+
+    def n_points(self) -> int | None:
+        from scan_core.recipe import segment_values
+        try:
+            return len(segment_values(self.segments())[0])
+        except ValueError:
+            return None
+
+    def _sync(self) -> None:
+        from scan_core.recipe import segment_problems
+        problems = segment_problems(self.segments())
+        n = self.n_points()
+        if problems:
+            self.count_lbl.setStyleSheet(f"color:{C['danger']}; font-size:11px;")
+            self.count_lbl.setText(problems[0])
+        else:
+            self.count_lbl.setStyleSheet(f"color:{C['muted']}; font-size:11px;")
+            segs = self.segments()
+            joints = sum(1 for i in range(1, len(segs))
+                         if segs[i]["start"] == segs[i - 1]["stop"])
+            self.count_lbl.setText(
+                f"{n} points in {len(segs)} segment{'s' if len(segs) != 1 else ''}"
+                + (f" ({joints} joint{'s' if joints != 1 else ''} measured once)"
+                   if joints else ""))
+
+
+class SegmentsButton(QtWidgets.QToolButton):
+    """The axis row's face of a SEGMENTS axis: the path it takes ("0 -> 100
+    -> -100 -> 100") and its point count; a click opens the SegmentsEditor
+    under it. A Qt.Popup frame, not a QMenu: a menu takes the keys a table
+    cell needs while it is being typed in."""
+
+    changed = QtCore.Signal()
+
+    def __init__(self, unit: str = ""):
+        super().__init__()
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.popup = QtWidgets.QFrame(None, QtCore.Qt.Popup)
+        lay = QtWidgets.QVBoxLayout(self.popup); lay.setContentsMargins(0, 0, 0, 0)
+        self.editor = SegmentsEditor(unit)
+        lay.addWidget(self.editor)
+        self.editor.changed.connect(self._sync)
+        self.editor.changed.connect(self.changed.emit)
+        self.clicked.connect(self.open_editor)
+        self._sync()
+
+    def open_editor(self) -> None:
+        self.popup.adjustSize()
+        self.popup.move(self.mapToGlobal(QtCore.QPoint(0, self.height())))
+        self.popup.show()
+
+    def _sync(self) -> None:
+        n = self.editor.n_points()
+        self.setText(f"{self.editor.summary()}   ({n if n is not None else '?'} pts)")
+        self.setToolTip("The runs of this axis, visited in order -- click to edit.\n"
+                        + "\n".join(f"{i + 1}: {format_value(s['start'])} -> "
+                                    f"{format_value(s['stop'])}, {format_value(s['num'])} pts"
+                                    for i, s in enumerate(self.editor.segments())))
+
+
 class AxisRow(_StackRow):
     """One axis of the stack: parameter, from / to / pts -- and, behind
     "Advanced", how it is swept (fly, scout, its name in the file)."""
@@ -570,7 +810,7 @@ class AxisRow(_StackRow):
     #: the keys of a linear / fly axis the row models; anything else a loaded
     #: axis carries is kept in `extra` and written back unchanged
     MODELLED = {"type", "param", "start", "stop", "num", "step", "speed",
-                "spacing", "values", "path",
+                "spacing", "values", "path", "segments",
                 "row_time_s", "speed_param", "move", "readback", "lag_correction", "timeout_s",
                 "collapse", "collapse_keep_pixels", "name", "zigzag"}
 
@@ -626,7 +866,8 @@ class AxisRow(_StackRow):
         self.spacing_box = QtWidgets.QComboBox()
         self.spacing_box.setFixedWidth(72)
         for text, key in ((("linear", "linear"), ("log", "log"), ("list", "list"),
-                           ("file", "file")) if self.numeric else (("list", "list"),)):
+                           ("file", "file"), ("segments", "segments"))
+                          if self.numeric else (("list", "list"),)):
             self.spacing_box.addItem(text, key)
         self.spacing_box.setToolTip(
             "How the points are given:\n"
@@ -634,7 +875,10 @@ class AxisRow(_StackRow):
             "log: from / to / pts, equal RATIOS (1, 10, 100 ...); from and to\n"
             "     of the same sign, neither 0\n"
             "list: the values, typed one by one\n"
-            "file: one value per line of a text file"
+            "file: one value per line of a text file\n"
+            "segments: several from / to / pts runs one after the other --\n"
+            "     up AND down (a hysteresis loop); each point's run is\n"
+            "     recorded in the file"
             if self.numeric else
             f"{param.label} is not a number: its values are picked from a list.")
         self.spacing_box.setEnabled(self.numeric)
@@ -658,6 +902,7 @@ class AxisRow(_StackRow):
         self._build_values()
         lay.addWidget(self.list_w)
         lay.addWidget(self.file_w)
+        lay.addWidget(self.seg_w)
         self.spacing_box.currentIndexChanged.connect(lambda *_: self._spacing_changed())
 
         # A spin box that silently refuses to go above 160 is baffling unless
@@ -703,6 +948,7 @@ class AxisRow(_StackRow):
         self.spacing_w.setVisible(plain)
         if not plain:
             self.range_w.hide(); self.list_w.hide(); self.file_w.hide()
+            self.seg_w.hide()
             if not hasattr(self, "raw_lbl"):
                 self.raw_lbl = _muted("", small=True)
                 self.raw_lbl.setFixedWidth(self.VALUES_W)
@@ -773,6 +1019,11 @@ class AxisRow(_StackRow):
         browse.clicked.connect(self._browse_values)
         fl.addWidget(self.file_edit, 1); fl.addWidget(browse)
         self.file_w, _ = boxed("file", fl)
+        # SEGMENTS (2026-10-14): the path the axis takes, a click edits it
+        self.seg_btn = SegmentsButton(getattr(self.param, "unit", "") or "")
+        self.seg_btn.changed.connect(self.changed.emit)
+        self.seg_editor = self.seg_btn.editor
+        self.seg_w, _ = boxed("segments (click to edit)", self.seg_btn)
 
     def _browse_values(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -783,7 +1034,8 @@ class AxisRow(_StackRow):
             self.changed.emit()
 
     def spacing(self) -> str:
-        """How the points are given: "linear", "log", "list" or "file"."""
+        """How the points are given: "linear", "log", "list", "file" or
+        "segments"."""
         return self.spacing_box.currentData() or "list"
 
     def set_spacing(self, mode: str) -> None:
@@ -800,6 +1052,12 @@ class AxisRow(_StackRow):
         self.range_w.setVisible(mode in ("linear", "log"))
         self.list_w.setVisible(mode == "list")
         self.file_w.setVisible(mode == "file")
+        self.seg_w.setVisible(mode == "segments")
+        if mode == "segments" and not self.seg_editor.segments():
+            # the first run is what from / to / pts said: switching keeps it
+            self.seg_editor.set_segments([{"start": self.start.value(),
+                                           "stop": self.stop.value(),
+                                           "num": self.num.value()}])
         if hasattr(self, "fly"):
             if mode != "linear" and self.fly.isChecked():
                 self.fly.setChecked(False)
@@ -1923,6 +2181,9 @@ class AxisRow(_StackRow):
             ax = {"type": "array", "param": self.param.id, "values": self.list_values()}
         elif self.spacing() == "file":
             ax = {"type": "file", "param": self.param.id, "path": self.file_path()}
+        elif self.spacing() == "segments":
+            ax = {"type": "linear", "param": self.param.id,
+                  "segments": self.seg_editor.segments()}
         else:
             ax = {"type": "linear", "param": self.param.id,
                   "start": self.start.value(), "stop": self.stop.value(),
@@ -1951,6 +2212,9 @@ class AxisRow(_StackRow):
         elif t == "file":
             self.set_spacing("file")
             self.set_file_path(ax.get("path") or "")
+        elif "segments" in ax and self.numeric:
+            self.seg_editor.set_segments(ax.get("segments") or [])
+            self.set_spacing("segments")
         elif self.numeric:
             # never float() a value given to a non-numeric knob: validate()
             # reports a linear sweep over one, the row stays a list
@@ -3921,15 +4185,28 @@ class AxisPreviewDialog(QtWidgets.QDialog):
                 if not len(m.sent):
                     lines.append(f"{m.label}: no points")
                     continue
+                if d.segments:
+                    # up AND down: the path, then the runs
+                    runs = ", ".join(f"{'up' if g['direction'] > 0 else 'down'} {g['count']}"
+                                     for g in d.segments)
+                    lines.append(f"{m.label}: {d.size} points in {len(d.segments)} "
+                                 f"segments ({runs}): "
+                                 + " → ".join([format_value(d.segments[0]['start'])]
+                                              + [format_value(g['stop']) for g in d.segments])
+                                 + unit)
+                    continue
                 lines.append(f"{m.label}: {d.size} points, {format_value(m.sent[0])} → "
                              f"{format_value(m.sent[-1])}{unit}, {step_summary(m.sent)}")
         self.header.setText("\n".join(lines))
         warns = []
+        segmented = {m.pid for d in self.dims if d.segments for m in d.members}
         for m in members:
             if m.n_changed:
                 warns.append(f"{m.n_changed} point(s) of {m.label} are not sent as "
                              "typed (see the note column)")
-            if m.n_repeats:
+            if m.n_repeats and m.pid not in segmented:
+                # (on an axis that goes up AND down a value comes back on
+                # purpose: the other branch of the loop)
                 warns.append(f"{m.n_repeats} point(s) of {m.label} repeat a value "
                              "-- measured twice, not at a new place")
         self.warn.setText("\n".join(warns))
@@ -3938,6 +4215,11 @@ class AxisPreviewDialog(QtWidgets.QDialog):
         # table: one row per point; a raster's two dims are listed one after the other
         heads = ["#"] + [f"{m.label} [{m.unit}]" if m.unit else m.label for m in members]
         has_notes = any(m.n_changed for m in members)
+        # the run each point belongs to (a segments axis, or a list that
+        # turns back): "1 up", "2 down" ...
+        seg_dim = next((d for d in self.dims if d.segments), None)
+        if seg_dim is not None:
+            heads.append("segment")
         if has_notes:
             heads.append("note")
         n = max((d.size for d in self.dims), default=0)
@@ -3958,6 +4240,11 @@ class AxisPreviewDialog(QtWidgets.QDialog):
                         item.setForeground(QtGui.QColor(C["danger"]))
                         notes.append(m.notes[i])
                     self.table.setItem(i, c, item)
+            if seg_dim is not None and i < seg_dim.size:
+                k = int(seg_dim.segment[i])
+                up = seg_dim.segments[k]["direction"] > 0
+                self.table.setItem(i, len(members) + 1, QtWidgets.QTableWidgetItem(
+                    f"{k + 1} {'up' if up else 'down'}"))
             if has_notes:
                 self.table.setItem(i, len(heads) - 1,
                                    QtWidgets.QTableWidgetItem("; ".join(notes)))
@@ -3967,6 +4254,7 @@ class AxisPreviewDialog(QtWidgets.QDialog):
         # plot: value against point number -- spacing and direction at a glance
         self.plot.clear()
         colours = [C["accent"], C["ok"], C["accent_hi"], C["muted"]]
+        self.boundaries = []
         for k, m in enumerate(members):
             col = colours[k % len(colours)]
             if not all(_is_num(v) for v in m.sent):
@@ -3974,6 +4262,20 @@ class AxisPreviewDialog(QtWidgets.QDialog):
             self.plot.plot(np.arange(len(m.sent)), np.asarray(m.sent, dtype=float),
                            pen=pg.mkPen(col, width=1), symbol="o", symbolSize=6,
                            symbolBrush=col, symbolPen=None)
+        if seg_dim is not None:
+            # SEGMENT BOUNDARIES: a dashed line between the last point of one
+            # run and the first of the next, its direction written beside it
+            pen = pg.mkPen(C["muted"], width=1, style=QtCore.Qt.DashLine)
+            for g in seg_dim.segments:
+                x = g["first"] - 0.5
+                if g["first"] > 0:
+                    self.plot.addItem(pg.InfiniteLine(pos=x, angle=90, pen=pen))
+                    self.boundaries.append(g["first"])
+                lbl = pg.TextItem(("up" if g["direction"] > 0 else "down"),
+                                  color=C["muted"], anchor=(0, 0))
+                lbl.setPos(max(x, 0), float(np.nanmax(members[0].sent))
+                           if all(_is_num(v) for v in members[0].sent) else 0.0)
+                self.plot.addItem(lbl)
         self.plot.setLabel("left", heads[1] if len(members) == 1 else "value")
 
     def values_text(self) -> str:
