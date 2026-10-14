@@ -121,6 +121,9 @@ SIZES = {
     "suite-fly": (1500, 950),
     "suite-image": (1500, 950),
     "suite-scout-scan": (1500, 950),
+    "suite-segments-scan": (1500, 950),
+    "suite-segments": (1500, 950),
+    "suite-segments-map": (1500, 950),
     "suite-window-kittel": (1500, 950),
     "suite-window-expression": (1500, 950),
     "suite-scout": (1500, 950),
@@ -593,6 +596,71 @@ def _scan_then_show_run(win):
     b.rows[1].num.setValue(61)
     b.per_pt.setValue(0.0)
     b.run_scan(block=True)
+
+
+#: the hysteresis loop of the segments renders (2026-10-14)
+_LOOP = [{"start": 0, "stop": 100, "num": 21},
+         {"start": 100, "stop": -100, "num": 41},
+         {"start": -100, "stop": 100, "num": 41}]
+
+
+def _only_detectors(b, ids):
+    from PySide6 import QtCore
+    for it in b._det_items():
+        it.setCheckState(0, QtCore.Qt.Checked if it.data(0, QtCore.Qt.UserRole) in ids
+                         else QtCore.Qt.Unchecked)
+
+
+def _segments_scan(win):
+    """A SEGMENTS axis on the Scan tab (2026-10-14): the field 0 -> 100 ->
+    -100 -> 100 mT (a hysteresis loop, "+ loop") against the simulator's
+    hysteretic Kerr signal, with the run editor open under the row (the
+    editor is its own popup window: painted onto the shot, see render())."""
+    win.use_simulator()
+    b = win.builder
+    b.name_edit.setText("hysteresis loop")
+    b.add_axis("field")
+    row = b.rows[-1]
+    row.start.setValue(0); row.stop.setValue(100); row.num.setValue(21)
+    row.set_spacing("segments")
+    row.seg_editor.add_loop()
+    _only_detectors(b, {"kerr"})
+    b._rebuild_summary()
+    win._render_overlay = (row.seg_btn.popup, row.seg_btn)
+    row.seg_btn.open_editor()
+
+
+def _segments_run(map_: bool):
+    """A finished hysteresis scan on the Measurement tab: one line per run
+    (up / down / up) of the simulator's Kerr loop -- or, with `map_`, a field
+    loop x frequency map showing ONE run at a time (the "field runs" chooser)."""
+    def warm(win):
+        win.use_simulator()
+        b = win.builder
+        b.name_edit.setText("hysteresis loop" + (" x frequency" if map_ else ""))
+        b.add_axis("field")
+        row = b.rows[-1]
+        row.set_spacing("segments")
+        row.seg_editor.set_segments(_LOOP if not map_ else
+                                    [{"start": 0, "stop": 100, "num": 11},
+                                     {"start": 100, "stop": -100, "num": 21},
+                                     {"start": -100, "stop": 100, "num": 21}])
+        if map_:
+            b.registry.get("rf_power").set(8.0)
+            b.add_axis("rf_freq")
+            b.rows[-1].start.setValue(500.0); b.rows[-1].stop.setValue(4000.0)
+            b.rows[-1].num.setValue(41)
+            b.rows[-1].set_spacing("log")        # uneven cells, drawn where they are
+            _only_detectors(b, {"lockin_r"})
+        else:
+            _only_detectors(b, {"kerr"})
+        b.per_pt.setValue(0.0)
+        b.run_scan(block=True)
+        if map_:
+            v = b.view
+            v.x_combo.setCurrentText("rf_freq"); v.y_combo.setCurrentText("field")
+            v.set_segment_choice("field", 1)     # the DOWN run
+    return warm
 
 
 def _scout_scan(win):
@@ -1696,6 +1764,9 @@ TARGETS = {
     "suite-repeat-scan": _suite("Scan", _stack_with_repeats, settle=2.0),
     "suite-fly": _suite("Measurement", _fly(run=True), settle=3.0),
     "suite-scout-scan": _suite("Scan", _scout_scan, settle=2.0),
+    "suite-segments-scan": _suite("Scan", _segments_scan, settle=2.0),
+    "suite-segments": _suite("Measurement", _segments_run(map_=False), settle=3.0),
+    "suite-segments-map": _suite("Measurement", _segments_run(map_=True), settle=3.0),
     "suite-window-kittel": _suite("Scan", _window_scan("kittel"), settle=2.0),
     "suite-window-expression": _suite("Scan", _window_scan("expression"), settle=2.0),
     "suite-scout": _suite("Measurement", _scout_run, settle=3.0),
@@ -1823,6 +1894,16 @@ def render(name: str, out: Path, theme: str = "dark",
 
         out.parent.mkdir(parents=True, exist_ok=True)
         shot = win.grab()
+        # A POPUP the pose opened (a Qt.Popup frame is its own window, so
+        # grab() of the main window leaves it out): painted on at its place.
+        overlay = getattr(main_win, "_render_overlay", None)
+        if overlay is not None and win is main_win:
+            from PySide6 import QtCore, QtGui
+            popup, anchor = overlay        # placed under its anchor NOW (after resize)
+            pos = win.mapFromGlobal(anchor.mapToGlobal(QtCore.QPoint(0, anchor.height())))
+            painter = QtGui.QPainter(shot)
+            painter.drawPixmap(pos, popup.grab())
+            painter.end()
         crop_h = CROP_HEIGHT.get(name)
         if crop_h and shot.height() > crop_h:
             shot = shot.copy(0, 0, shot.width(), crop_h)

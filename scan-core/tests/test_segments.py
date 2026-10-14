@@ -150,6 +150,16 @@ def test_the_dataset_carries_the_segments_contract(tmp_path):
     assert again.axes[0]["segments"] == LOOP
 
 
+def test_the_schema_describes_a_segments_axis():
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads((Path(__file__).resolve().parent.parent / "schema" /
+                         "scan.schema.json").read_text(encoding="utf-8"))
+    jsonschema.validate(_recipe().to_dict(), schema)
+    bad = _recipe([{"start": 0, "stop": 1, "num": 1}]).to_dict()
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
 def test_recipe_round_trips_through_yaml(tmp_path):
     r = _recipe()
     r.save(tmp_path / "loop.yaml")

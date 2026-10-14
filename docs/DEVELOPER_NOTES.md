@@ -1519,6 +1519,84 @@ simulator off as instruments.
   `stage: {x: id, y: id}` (an older session's pair label is still matched).
   Wording: "reference point", "positioner", "field of view".
 
+### 4l. Segments: axes that go up AND down -- the file contract (2026-10-14)
+
+Hysteresis (Lukas: "scan up and down ... stacking scanning arrays"). An axis
+may visit the same values more than once, in a given order; the data file
+records WHICH RUN every point is on, so a plot draws the branches separately
+instead of one line folded back on itself. This section is the contract the
+plotting side (AaltoView, scan-core's live `apps/data_view.py`) reads.
+
+**Recipe.** A linear axis (or a zip member, or a grid's x / y) gives
+`segments: [{start, stop, num, [spacing: log]}, ...]` INSTEAD of
+start/stop/num (`recipe.segment_values`). Runs are concatenated in order.
+JOINT RULE: when run k starts exactly on the value run k-1 stopped at, run
+k's first point is dropped (`joined = 1`); otherwise all `num` points are
+kept (`joined = 0`). Refused by validate (plain words, never "compile
+error"): num < 2, start == stop, non-finite start/stop, log across zero, an
+empty list, segments next to start/stop/num/values/path/spacing, segments on
+a fly / array / file axis, segments on a non-numeric (enum / string) knob.
+Builder helpers: `recipe.return_sweep` (append stop -> start, same num) and
+`recipe.hysteresis_loop` (append b -> a' and a' -> b at the last run's step,
+a' = a, or -b when a == 0).
+
+**Which dims get segments** (`recipe.axis_segments`, on `Dim.segment /
+.segments / .segment_source`):
+- a `segments` axis: always (even a single run), source `"recipe"`;
+- a NUMERIC `array` / `file` axis (or zip primary / grid member) whose values
+  TURN BACK (`recipe.reversal_segments`): source `"reversals"`. Rule: point i
+  (i >= 1) belongs to the run of the step v[i-1] -> v[i]; a new run starts at
+  the first step whose sign is opposite to the current run's; a zero step
+  (a value repeated) changes nothing. So the turning point ends the earlier
+  run, and every later run has `joined = 1` and `start` = the turning value.
+  A monotonic list, text values, or fewer than 3 points: no segments;
+- everything else (linear, log, fly, repeat, monotonic lists): nothing --
+  files of ordinary scans are unchanged.
+
+**In the dataset / .nc file** (engine `_to_dataset`, `recipe.segment_coords`
+/ `segment_attrs`), for a segmented dimension `<dim>`:
+
+| name | where | dtype | meaning |
+|---|---|---|---|
+| `<dim>` | dimension coordinate | float64 | the values AS VISITED; NOT unique, NOT monotonic (an index with duplicates: use `isel`, never `sel`) |
+| `<dim>_segment` | non-dim coordinate along `<dim>` | int32 | run number, 0-based, non-decreasing along the dim |
+| `<dim>_direction` | non-dim coordinate along `<dim>` | int8 | +1 (the run goes up) / -1 (down), constant within a run |
+| `segments_json` | attribute of the `<dim>` coordinate | str (JSON list) | one object per run, in order: `start`, `stop` (float), `num` (int, as given, including a dropped joint), `spacing` ("log" only when log), `direction` (+1/-1), `joined` (0/1), `first` (index of the run's first point along the dim), `count` (points of the run in the file: `num - joined`) |
+| `segment_source` | attribute of `<dim>` | str | "recipe" (a segments axis) or "reversals" (a list split where it turns back) |
+| `n_segments` | attribute of `<dim>` | int | number of runs |
+
+Both non-dim coords carry `segment_of = "<dim>"` and a `long_name`. Grid
+index i of the dim is point i of the run `<dim>_segment[i]`; run k is
+`isel(<dim>=flatnonzero(<dim>_segment == k))`. Zig-zag does not change any
+of this (coordinates are always in nominal order). The recipe is in
+`recipe_json` as always.
+
+**How to plot it** (what the live view does; AaltoView should match):
+- a 1-D line over `<dim>`: one line per run (consecutive points, its own
+  colour); a run with `joined = 1` is drawn starting from the last point of
+  the previous run, so the loop is closed as measured. Legend "up" / "down"
+  for two runs, "seg k up/down" (1-based) for more. A cursor on a line picks,
+  among points sharing the nearest x, the one nearest in y;
+- a map with `<dim>` as an image axis: ONE run at a time (default: the first),
+  each run drawn ascending; or every point against its point number ("all,
+  by point #"). Never two runs into one cell;
+- `<dim>` held by a slider: by POINT INDEX; the label shows value and run
+  ("50 mT · seg 2 down");
+- the running scan's point is found by its grid index (`where.axes[k].i`),
+  not by value (`DataView.set_marker(coords, index=...)`);
+- a file without `<dim>_segment` whose numeric coordinate turns back (an
+  older typed loop) is split with `reversal_segments` -- the same result the
+  engine would write.
+
+**Uneven axes on a map** (log, a list): each cell reaches halfway to its
+neighbours (`DataView.cell_edges`: n + 1 edges, the outer cells mirrored).
+An ImageItem only stretches evenly, so an uneven axis is redrawn onto a fine
+even grid (`_even_index`: the narrowest cell gets ~4 columns, at most
+`MAX_RESAMPLE` = 4096), each column taking the value of the cell it falls
+in. The cursor and the marker use the same edges. An even axis is drawn as
+it is (`_even_index` -> None), so MapImage's max/min block reduction still
+applies to long spectra.
+
 ## 5. Shared code conventions
 
 The full blueprint is `INSTRUMENT_MODULE_GUIDE.md` in the root. **It dates from

@@ -946,7 +946,7 @@ class DataView(QtWidgets.QWidget):
             self._legend.clear()
             self._legend.setVisible(False)
 
-    SEG_COLOURS = ("accent", "ok", "accent_hi", "danger", "muted", "text")
+    SEG_COLOURS = ("accent", "ok", "text", "danger", "muted", "accent_hi")
 
     def _draw_seg_lines(self, xc, arr, seg, info) -> None:
         """One curve per run, consecutive points, its own colour; a run that

@@ -605,7 +605,7 @@ class SegmentsEditor(QtWidgets.QFrame):
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setMinimumWidth(290)
-        self.table.setMinimumHeight(140)
+        self.table.setMinimumHeight(120)
         self.table.itemChanged.connect(self._edited)
         v.addWidget(self.table, 1)
 
@@ -614,10 +614,10 @@ class SegmentsEditor(QtWidgets.QFrame):
                 ("+", "add a run after the selected one (continuing from its end)",
                  self.add_row),
                 ("-", "remove the selected run", self.remove_row),
-                ("up", "move the selected run up", lambda: self.move_row(-1)),
-                ("down", "move the selected run down", lambda: self.move_row(1))):
+                ("↑", "move the selected run up", lambda: self.move_row(-1)),
+                ("↓", "move the selected run down", lambda: self.move_row(1))):
             b = QtWidgets.QPushButton(text); b.setToolTip(tip)
-            b.setFixedWidth(28 if len(text) == 1 else 46)
+            b.setFixedWidth(28)
             b.clicked.connect(fn)
             row.addWidget(b)
         row.addStretch(1)
@@ -872,7 +872,7 @@ class AxisRow(_StackRow):
         # (an enum's options, text) can only be given as a list.
         self.numeric = is_numeric_param(param)
         self.spacing_box = QtWidgets.QComboBox()
-        self.spacing_box.setFixedWidth(72)
+        self.spacing_box.setFixedWidth(86)
         for text, key in ((("linear", "linear"), ("log", "log"), ("list", "list"),
                            ("file", "file"), ("segments", "segments"))
                           if self.numeric else (("list", "list"),)):

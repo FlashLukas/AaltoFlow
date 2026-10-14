@@ -331,6 +331,55 @@ steps). A definition with an `array` or `file` axis loads into an editable
 row; only a 2-D `grid` and a `zip` stay rows that are shown, not edited. An
 axis with no values (nothing picked, an empty file) is refused before the run.
 
+## Up and down: `segments` axes for hysteresis (2026-10-14)
+
+A hysteresis loop sweeps the field up AND back down, visiting every value
+twice. The spacing **segments** stacks several from / to / pts runs, visited
+top to bottom:
+
+```yaml
+axes:
+  - type: linear
+    param: field
+    segments:                      # instead of start / stop / num
+      - {start: 0,    stop: 100,  num: 11}     # virgin curve
+      - {start: 100,  stop: -100, num: 21}     # down
+      - {start: -100, stop: 100,  num: 21}     # back up
+detectors: [kerr]
+```
+
+- Where a run **starts on the value the previous run ended on**, that joint
+  is measured once (the run starts one step after it): the loop above has
+  11 + 20 + 20 = 51 points, not 53. A run that starts elsewhere keeps its
+  first point.
+- Each run is linear (or `spacing: log` per run). A run needs at least 2
+  points and from != to; non-finite values, segments beside start/stop/num,
+  segments on a fly axis and on a knob that is not a number (an enum) are
+  refused before anything moves.
+- In the Scan Builder the row's button shows the path ("0 -> 100 -> -100 ->
+  100 (51 pts)"); a click opens the table (from / to / pts, add / remove /
+  up / down), **+ return sweep** (adds to -> from) and **+ loop** (adds the
+  down and back-up legs over the last run's range at its step; a run from 0
+  is mirrored through zero). Double-click the row for the preview: value
+  against point number, the run boundaries dashed, a "segment" column.
+- A loop typed by hand as a **list** (`0, 50, 100, 50, 0, -50, -100, -50, 0`)
+  works too: it is split where it turns back and recorded the same way.
+- The **file** says, per point, which run it is on: `<dim>_segment` (0, 1,
+  2 ...), `<dim>_direction` (+1 / -1) and the runs as JSON on the dim
+  (`segments_json`) -- see docs/DEVELOPER_NOTES.md 4l for the exact contract.
+- The **live plot** draws one line per run (legend up / down, or seg n); a
+  map shows one run at a time ("field runs" chooser) or every point against
+  its point number, never two runs folded into one cell; a held slider on
+  such an axis works by point and says its run ("50 mT · seg 2 down").
+- Uneven axes (log, a list) are drawn on the live map with each cell reaching
+  halfway to its neighbours, not as if the steps were equal.
+- The simulator has a hysteretic detector for trying it: `kerr` (a square-ish
+  loop, coercive field 25 mT).
+
+![segments axis with its run editor](../front-panels/suite-segments-scan.png)
+![a hysteresis loop, one line per run](../front-panels/suite-segments.png)
+![one run of a field loop x log-spaced frequency map](../front-panels/suite-segments-map.png)
+
 ## The DEMO: the suite with nothing connected (2026-10-12)
 
 With no module connected the suite and the Scan Builder run on the toy

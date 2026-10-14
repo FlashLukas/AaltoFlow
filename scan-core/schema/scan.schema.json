@@ -46,7 +46,23 @@
       "type": "object",
       "properties": {
         "start": {"type": "number"}, "stop": {"type": "number"},
-        "num": {"type": "integer", "minimum": 1}, "step": {"type": "number"}
+        "num": {"type": "integer", "minimum": 1}, "step": {"type": "number"},
+        "segments": {"$ref": "#/$defs/segments"}
+      }
+    },
+    "segments": {
+      "type": "array", "minItems": 1,
+      "description": "SEGMENTS (2026-10-14): runs visited in order, given INSTEAD of start/stop/num -- e.g. 0 -> 100 -> -100 -> 100 for a hysteresis loop. A run that starts on the value the previous one ended on does not measure that joint again (it starts one step after it). Values may repeat (up AND down). Each point's run is recorded in the data file: <dim>_segment (int32), <dim>_direction (int8, +1/-1) and segments_json on the dim (docs/DEVELOPER_NOTES.md 4l). Numbers only; not on a fly axis",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start": {"type": "number"}, "stop": {"type": "number",
+            "description": "must differ from start (a run has a direction)"},
+          "num": {"type": "integer", "minimum": 2,
+                  "description": "points of this run INCLUDING its start (one fewer is measured when its start is the previous run's stop)"},
+          "spacing": {"enum": ["linear", "log"]}
+        },
+        "required": ["start", "stop", "num"]
       }
     },
     "axis": {
@@ -61,6 +77,7 @@
             "num": {"type": "integer"}, "step": {"type": "number"},
             "spacing": {"enum": ["linear", "log"],
                         "description": "log: points at equal ratios (np.geomspace); start and stop of the same sign, neither 0, and num given. Absent = linear"},
+            "segments": {"$ref": "#/$defs/segments"},
             "name": {"type": "string"},
             "zigzag": {"$ref": "#/$defs/axis_zigzag"}
           },
