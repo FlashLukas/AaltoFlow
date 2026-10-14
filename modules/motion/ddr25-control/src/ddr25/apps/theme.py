@@ -189,6 +189,16 @@ QTabBar::tab {{
     border-top-right-radius: 6px;
 }}
 QTabBar::tab:selected {{ background: {c['panel_hi']}; color: {c['accent_hi']}; }}
+/* checkboxes drawn by us: Qt's default box is nearly invisible on the dark panels (Lukas, 2026-10-14) */
+QCheckBox::indicator {{
+    width: 16px; height: 16px;
+    border: 2px solid {c['muted']}; border-radius: 4px;
+    background: {c['panel_hi']};
+}}
+QCheckBox::indicator:hover {{ border: 2px solid {c['accent_hi']}; }}
+QCheckBox::indicator:checked {{ background: {c['accent']}; border: 2px solid {c['accent']}; }}
+QCheckBox::indicator:checked:hover {{ background: {c['accent_hi']}; border: 2px solid {c['accent_hi']}; }}
+QCheckBox::indicator:disabled {{ border: 2px solid {c['border']}; background: {c['panel']}; }}
 """
 
 
