@@ -914,6 +914,8 @@ class Drawer(QWidget):
         bl.addWidget(self.stack)
         self.body._reveal = lambda: self.set_folded(False, user=True)
         self.btn = QToolButton(); self.btn.setAutoRaise(True)
+        # big enough to be found at a glance (a plain arrow was easy to miss)
+        self.btn.setStyleSheet("font-size: 16px; font-weight: 700; padding: 0 6px;")
         mark_always(self.btn)                            # display only: fine for a viewer
         self.btn.clicked.connect(lambda: self.set_folded(not self.folded, user=True))
         strip = QWidget(); strip.setObjectName("column")
