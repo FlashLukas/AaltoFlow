@@ -1597,6 +1597,23 @@ in. The cursor and the marker use the same edges. An even axis is drawn as
 it is (`_even_index` -> None), so MapImage's max/min block reduction still
 applies to long spectra.
 
+### 4m. Continuing a measurement from a point (2026-10-14)
+
+`scan_core/continuation.py`; engine `run(..., continue_from=Continuation)`.
+The earlier file's `recipe_json` is re-run; `Continuation.check` refuses it
+before anything moves unless it compiles to the SAME grid (shape and axis
+points) -- and `fill` refuses it when a detector axis differs (an instrument's
+sweep changed). Every earlier value is copied into the buffers, the odometer
+starts at `start` (0-based, in VISITING order: `visit_index`, zig-zag
+included), and overwrites from there; a point not reached keeps the earlier
+value. `each_sweep` start hooks also fire at `start` for every sweep under
+way there (`hooks._each_sweep_fires(..., first=)`); before_scan runs as usual.
+
+File attributes of the NEW file (the earlier one is never written):
+`continued_from` (file name), `continued_at_point` (1-based),
+`continued_kept_points` (measured points before it). Refused for now: fly
+axes, scout, window, averaged repeat, image detectors (`continuation.problems`).
+
 ## 5. Shared code conventions
 
 The full blueprint is `INSTRUMENT_MODULE_GUIDE.md` in the root. **It dates from

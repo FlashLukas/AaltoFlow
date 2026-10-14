@@ -60,7 +60,7 @@ pop-up panels (Esc closes them; they reopen where they were left):
   how many fields are filled in, and *Run info (empty)* in amber when none is.
 - **Options** -- the per-point time the pre-run ETA assumes, and *diagonal row
   change*.
-- **Files** -- Load scan..., Save scan..., Recall settings..., Save data
+- **Files** -- Load scan..., Save scan..., Recall settings..., Continue..., Save data
   (.nc)..., where the data goes, and (watching a server) Copy to this PC. When
   the data folder cannot be written the button turns red, *Files (!)*, so it
   is seen without opening it.
@@ -1370,6 +1370,29 @@ Each scan gets its own file. **Abort** ends the current scan and the next one
 starts; **Stop queue** ends all of it; an error stops the queue.
 
 ![a queue running](../front-panels/suite-queue.png)
+
+## Continue a measurement from a point (2026-10-14)
+
+After a crash, a lost camera pattern or a drift: **Files > Continue…** opens an
+earlier `.nc`, says how far it got (and the first point it is missing), and
+asks where to continue -- a point number, counted in the order the scan
+measures (zig-zag included), with the axis values there (and the run, on an
+up-and-down axis). The default is the first missing point; pick an earlier one
+to measure the last points again.
+
+The scan is the file's own definition (it is also put in the Scan tab). It must
+land on the same grid with the instruments as they are now -- the same axis
+points, the same detector axes (e.g. the VNA frequencies) -- or it is refused
+before anything moves. A **new** file is written; the earlier one is not
+touched. It holds the earlier values, and everything from the chosen point on
+is measured again (a point the new run has not reached keeps the earlier value,
+so stopping it early loses nothing). Its header says `continued_from`,
+`continued_at_point` (1 = first) and `continued_kept_points`.
+
+The before-scan routines run as usual; a routine at the start of a sweep (an
+autofocus per row) also runs at the chosen point. Not yet offered: fly axes, a
+scout pass, a resonance window, an averaged repeat, camera frames (the dialog
+says why). From a script: `lab.continue_scan(path, at_point=37)`.
 
 ## The scan server: start on the lab PC, watch -- and run -- from the office
 

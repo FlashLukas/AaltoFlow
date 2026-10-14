@@ -899,8 +899,15 @@ def sweep_block(shape, dim_names, axis) -> int | None:
     return int(math.prod(shape[list(dim_names).index(axis):]))
 
 
-def _each_sweep_fires(h, moment, flat, total, block, visit=None) -> bool:
+def _each_sweep_fires(h, moment, flat, total, block, visit=None,
+                      first=None) -> bool:
     every = max(1, int(h.get("every") or 1))
+    if (first is not None and flat == first and moment == "before_point"
+            and (h.get("edge") or "start") == "start"):
+        # a CONTINUED measurement (continuation.py) starts at `first`: every
+        # sweep already under way there gets its start routine now (an
+        # autofocus at the start of a row, for a scan continued mid-row)
+        return (flat // block) % every == 0
     if visit is not None:
         # With a SCOUT PASS (scout.py) the points left out are never visited, so
         # the edges of a sweep are its first and last MEASURED points: an
@@ -984,7 +991,8 @@ def run_hooks(hooks, moment, ctx, axis_name=None):
             (when == moment and not axis_bound)
             or (when == "every_n_points" and moment == "before_point"
                 and h.get("n") and nth % int(h["n"]) == 0)
-            or (block and _each_sweep_fires(h, moment, flat, total, block, visit))
+            or (block and _each_sweep_fires(h, moment, flat, total, block, visit,
+                                            ctx.get("continue_start")))
             or (axis_bound and moment == when and h.get("axis") == axis_name)
         )
         if not fire:

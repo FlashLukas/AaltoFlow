@@ -603,8 +603,22 @@ class Lab:
 
     # ---- scans -------------------------------------------------------------
 
+    def continue_scan(self, path, at_point: int | None = None, **kw):
+        """CONTINUE the measurement in `path` (continuation.py): a new file
+        with the earlier data, everything from `at_point` on measured again.
+        `at_point` counts the points in the order they are measured, 1 = the
+        first (default: the first point the file does not have). Other
+        keywords as for scan()."""
+        from .continuation import Continuation, read_progress
+        prog = read_progress(path)
+        start = prog.first_missing if at_point is None else int(at_point) - 1
+        if start >= prog.total:
+            raise RecipeInvalid(f"{Path(path).name} is complete -- give at_point "
+                                f"to measure part of it again")
+        return self.scan(prog.recipe, _continue_from=Continuation(prog, start), **kw)
+
     def scan(self, recipe, name: str | None = None, comment: str | None = None,
-             save: bool = True, data_dir=None, **meta):
+             save: bool = True, data_dir=None, _continue_from=None, **meta):
         """Run one scan, save it like the suite does, return the xarray Dataset.
 
         `recipe`: a Recipe, a path to a .yaml recipe (or to a measured .nc,
@@ -690,7 +704,7 @@ class Lab:
                              should_abort=lambda: self._aborting,
                              created_iso=datetime.now().isoformat(timespec="seconds"),
                              on_point=on_point, on_log=lambda m: self._log(f"  {m}"),
-                             data_path=path)
+                             data_path=path, continue_from=_continue_from)
         except ControlRefused:
             raise
         except RoutineError as exc:

@@ -334,7 +334,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         on_log=None, data_path=None, on_fault=None, fault_check=None,
         pause_poll_s: float = PAUSE_POLL_S, on_window=None,
         attrs=None, on_pause=None, should_pause=None,
-        on_scout=None) -> xr.Dataset:
+        on_scout=None, continue_from=None) -> xr.Dataset:
     """Execute `recipe` against `registry` -- ONE scan per instrument at a time.
 
     Before anything moves, every instrument the scan uses is claimed for it
@@ -350,7 +350,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
                     pause_poll_s, on_window, attrs, on_pause, should_pause,
-                    on_scout)
+                    on_scout, continue_from)
     errs = recipe.validate(registry)
     if errs:
         raise ValueError("invalid recipe:\n  - " + "\n  - ".join(errs))
@@ -360,7 +360,7 @@ def run(recipe, registry, on_progress=None, should_abort=None,
         return _run(recipe, registry, on_progress, should_abort, created_iso,
                     on_point, on_log, data_path, on_fault, fault_check,
                     pause_poll_s, on_window, attrs, on_pause, should_pause,
-                    on_scout)
+                    on_scout, continue_from)
     finally:
         release()
 
@@ -370,8 +370,13 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
          on_log=None, data_path=None, on_fault=None, fault_check=None,
          pause_poll_s: float = PAUSE_POLL_S, on_window=None,
          attrs=None, on_pause=None, should_pause=None,
-         on_scout=None) -> xr.Dataset:
+         on_scout=None, continue_from=None) -> xr.Dataset:
     """Execute `recipe` against `registry`. Returns an xarray.Dataset.
+
+    continue_from                   : a continuation.Continuation -- CONTINUE
+                                      an earlier measurement: its values are
+                                      copied in first and the odometer starts
+                                      at continue_from.start (continuation.py).
 
     on_pause(message, answer)       : for the `pause` routine step (hooks.py):
                                       show `message` to the operator; call
@@ -535,6 +540,15 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
         except Exception as exc:
             ctx["log_fn"](f"after_scan routine failed after the error: {exc}")
 
+    # CONTINUING an earlier file (continuation.py): checked HERE, before the
+    # conditions move anything -- a scan that would not land on the earlier
+    # file's grid is refused, not merged
+    if continue_from is not None:
+        errs = continue_from.check(recipe, compiled, registry)
+        if errs:
+            raise ValueError("cannot continue this measurement:\n  - "
+                             + "\n  - ".join(errs))
+
     # establish the constant context before sweeping (rf power, unswept freq, …)
     try:
         for pid, val in recipe.fixed.items():
@@ -618,6 +632,19 @@ def _run(recipe, registry, on_progress=None, should_abort=None,
         _setup_window(recipe, registry, dets, det_axes, det_coords, data,
                       shape, ctx)
         ctx["on_window"] = on_window
+
+    if continue_from is not None:
+        # the earlier file's values first; the odometer then overwrites from
+        # the chosen point on (a point not reached keeps the earlier value)
+        try:
+            kept = continue_from.fill(data, det_axes, det_coords, len(dims))
+        except Exception as exc:
+            after_error(exc)
+            raise
+        ds_attrs.update(continue_from.attrs(kept))
+        ctx["continue_start"] = int(continue_from.start)
+        ctx["log_fn"](f"continuing {continue_from.progress.path.name} at point "
+                      f"{continue_from.start + 1} of {total} ({kept} points kept)")
 
     prev = [None] * len(dims)
     ctx["shape"] = shape
@@ -820,7 +847,9 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
     # which dims zig-zag (the `zigzag` flag of each axis)
     from .recipe import dim_zigzag
     zz_flags = dim_zigzag(recipe.axes)
-    for flat in range(total):
+    # a CONTINUED measurement (continuation.py) starts at its chosen point
+    first = int(ctx.get("continue_start") or 0)
+    for flat in range(first, total):
         if should_abort and should_abort():
             return True
         # the operator's Pause: here, between points, where Abort is checked
@@ -945,7 +974,7 @@ def _sweep(recipe, registry, compiled, dims, shape, total, dets, det_axes,
                 m_done = int(visit.before[flat]) + 1
                 eta = max(0.0, elapsed) / m_done * (visit.n_measured - m_done)
             else:
-                eta = max(0.0, elapsed) / done * (total - done)
+                eta = max(0.0, elapsed) / max(1, done - first) * (total - done)
             # `idx` is the index just MEASURED, zig-zag already applied
             on_progress(done, total, eta,
                         where=where_of(dims, idx, flat, registry))

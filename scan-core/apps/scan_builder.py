@@ -4354,9 +4354,12 @@ class ScanWorker(QtCore.QThread):
     #: 20-point scan costs more than re-running it.
     CHECKPOINT_ABOVE = 100
 
-    def __init__(self, recipe, registry, save_path=None, attrs=None):
+    def __init__(self, recipe, registry, save_path=None, attrs=None,
+                 continue_from=None):
         super().__init__()
         self.recipe, self.registry = recipe, registry
+        #: a continuation.Continuation: CONTINUE an earlier file from a point
+        self.continue_from = continue_from
         #: extra file attributes: the run info (sample, operator, ...)
         self.attrs = dict(attrs or {})
         self.save_path = Path(save_path) if save_path else None
@@ -4465,7 +4468,8 @@ class ScanWorker(QtCore.QThread):
                      # a `pause` step: the banner asks, the scan waits
                      on_pause=lambda msg, answer: self.ask.emit(msg or "", answer),
                      # the operator's Pause button: held between points
-                     should_pause=lambda: self._pause)
+                     should_pause=lambda: self._pause,
+                     continue_from=self.continue_from)
             n = int(ds.sizes and np.prod([ds.sizes[d] for d in ds.sizes]) or 0)
             self._write(ds, n, n)          # the finished scan, saved for good
             # Abort pressed BETWEEN points ends the engine normally, with the
@@ -7091,9 +7095,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
         recall.setToolTip("Compare the instrument settings stored in a measured .nc\n"
                           "with the instruments' settings NOW, and set chosen ones\n"
                           "back. Nothing is sent before you confirm.")
+        cont = QtWidgets.QPushButton("Continue…")
+        cont.clicked.connect(self._continue_dialog)
+        cont.setToolTip("CONTINUE an earlier measurement (.nc) from a point of\n"
+                        "your choice -- after a crash, a lost pattern, a drift.\n"
+                        "The new file holds the earlier data, with everything\n"
+                        "from that point on measured again. The earlier file\n"
+                        "is not touched.")
         self.load_btn, self.save_btn, self.save_data_btn = load, save, savd
-        self.recall_btn = recall
+        self.recall_btn, self.continue_btn = recall, cont
         brow.addWidget(load); brow.addWidget(save); brow.addWidget(recall)
+        brow.addWidget(cont)
         brow.addStretch(1); brow.addWidget(savd)
         self.files_panel.body.addLayout(brow)
         self.files_panel.body.addWidget(self._tag("WHERE THE DATA GOES"))
@@ -8019,7 +8031,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
 
         self._start_worker(recipe)
 
-    def _start_worker(self, recipe) -> "ScanWorker":
+    def _start_worker(self, recipe, continue_from=None) -> "ScanWorker":
         """Start one scan in its thread; the run pane follows it."""
         self.run_btn.setEnabled(False); self.abort_btn.setEnabled(True)
         # every scan starts un-paused -- also the next one of a queue: Pause
@@ -8027,7 +8039,8 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self._show_pause_state(False, enabled=True)
         path = self.autosave_path(recipe)
         self.worker = ScanWorker(recipe, self.registry, save_path=path,
-                                 attrs=self.run_info.attrs())
+                                 attrs=self.run_info.attrs(),
+                                 continue_from=continue_from)
         self._run_started()
         self.worker.where.connect(self._on_where)
         self.worker.progress.connect(self._on_progress)
@@ -9239,6 +9252,70 @@ class ScanBuilder(QtWidgets.QMainWindow):
             self._load_single(fns[0])
         else:
             self.open_queue(fns)
+
+    # ---- continue an earlier measurement (continuation.py) ------------------
+    def _continue_dialog(self):
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Continue a measurement", str(self.autosave_dir or ""),
+            "Measurement (*.nc);;All files (*)")
+        if fn:
+            self.open_continue(fn)
+
+    def open_continue(self, path, start: int | None = None, ask: bool = True):
+        """Continue the measurement in `path`. With `ask` the dialog picks
+        the point (`start` = its default, 0-based); without, `start` (default:
+        the first point not measured) is used as is. Returns the dialog (or
+        None) -- tests drive it."""
+        from scan_core import continuation as CT
+        if self.server is not None:
+            QtWidgets.QMessageBox.information(
+                self, "Continue a measurement",
+                "Continuing runs here, on this PC's instruments -- not on a "
+                "scan server. Switch the run pane back to this PC first.")
+            return None
+        if self.worker is not None and self.worker.isRunning() or self.queue_running():
+            self.detail.setText("a scan is still running — press Abort and wait "
+                                "for it to stop")
+            return None
+        try:
+            prog = CT.read_progress(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Continue a measurement",
+                                          f"Could not read {Path(path).name}:\n{exc}")
+            return None
+        # the definition goes into the Scan tab as well, so what runs is in
+        # view -- and an id the instruments no longer offer is named, as
+        # Load scan does
+        missing = self.load_recipe(prog.recipe)
+        self.refresh_axis_limits()
+        recipe = prog.recipe
+        probs = [f"not available now: {m}" for m in missing]
+        if not probs:
+            probs = list(recipe.validate(self.registry))
+        if not probs:
+            try:
+                compiled = recipe.compile(self.registry)
+                probs = CT.Continuation(prog, 0).check(recipe, compiled, self.registry)
+            except Exception as exc:
+                probs = [str(exc)]
+        from apps.continue_dialog import ContinueDialog
+        dlg = ContinueDialog(prog, probs, self)
+        if start is not None:
+            dlg.point.setValue(int(start) + 1)
+        if ask and not dlg.exec():
+            return dlg
+        if probs:
+            return dlg
+        cont = CT.Continuation(prog, dlg.start)
+        ok, msg = self.check_save_target()
+        if not ok and not self._confirm_unsaved(msg):
+            return dlg
+        self.progress.setValue(0)
+        self.run_log = []
+        self._on_log(f"continuing {prog.path.name} at point {dlg.start + 1} "
+                     f"of {prog.total}")
+        self._start_worker(recipe, continue_from=cont)
+        return dlg
 
     def open_queue(self, paths) -> "QueueDialog | None":
         """Load several definitions (or a queue file) into the queue dialog;
