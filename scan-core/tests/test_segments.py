@@ -290,6 +290,16 @@ def test_builder_segments_round_trip(qapp, tmp_path):
     dlg.close()
 
 
+def test_the_axis_is_said_as_its_path(qapp):
+    from apps.scan_builder import _raw_axis_text
+    from apps.scan_server_view import _axis_text
+    ax = {"type": "linear", "param": "field", "segments": LOOP}
+    assert "0 -> 100 -> -100 -> 100  (3 segments)" in _axis_text(ax)
+    grid = {"type": "grid", "x": {"param": "field", "segments": LOOP},
+            "y": {"param": "pos_y", "start": 0, "stop": 1, "num": 2}}
+    assert "0 -> 100 -> -100 -> 100 (3 segments)" in _raw_axis_text(grid)
+
+
 def test_a_loop_typed_as_a_list_validates_and_runs(qapp):
     b = _builder()
     b.add_axis("field")

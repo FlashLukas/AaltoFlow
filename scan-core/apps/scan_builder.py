@@ -168,6 +168,11 @@ def _raw_axis_text(ax) -> str:
             return f"{len(m['values'])} values"
         if "path" in m:
             return f"from {m['path']}"
+        if isinstance(m.get("segments"), list) and m["segments"]:
+            segs = m["segments"]
+            return (" -> ".join([format_value(segs[0].get("start"))]
+                                + [format_value(s.get("stop")) for s in segs])
+                    + f" ({len(segs)} segments)")
         out = f"{format_value(m.get('start'))} .. {format_value(m.get('stop'))}"
         if m.get("num") is not None:
             out += f" ({m['num']} pts{', log' if m.get('spacing') == 'log' else ''})"

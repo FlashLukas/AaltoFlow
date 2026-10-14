@@ -386,6 +386,11 @@ def _axis_text(ax: dict) -> str:
         return (f"{ax.get('param', '?')}: {len(vals)} listed values{shown}") + _zz(ax)
     if t == "file":
         return f"{ax.get('param', '?')}: values from {ax.get('path') or ax.get('file', '?')}" + _zz(ax)
+    if isinstance(ax.get("segments"), list) and ax["segments"]:
+        # up and down (2026-10-14): the path the runs take
+        segs = [s for s in ax["segments"] if isinstance(s, dict)]
+        path = " -> ".join([_num(segs[0].get("start"))] + [_num(s.get("stop")) for s in segs])
+        return f"{ax.get('param', '?')}  {path}  ({len(segs)} segments)" + _zz(ax)
     text = (f"{ax.get('param', '?')}  {_num(ax.get('start'))} -> {_num(ax.get('stop'))}, "
             f"{ax.get('num', '?')} pts" + (", log" if ax.get("spacing") == "log" else ""))
     if t == "fly":
