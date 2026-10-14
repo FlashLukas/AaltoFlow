@@ -511,3 +511,61 @@ def test_image_first_fits_a_small_screen(win):
                 if not p.isVisible() or n in ("card_position", "card_laser"):
                     continue
                 assert p.width() >= p.minimumSizeHint().width() - 1, (folded, page, n)
+
+
+def test_appearance_greys_the_drawer_option_unless_image_first():
+    """Lukas 2026-10-14: the drawer option does nothing outside Image first,
+    so it is greyed there; one 'Appearance' box with plain labels."""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtWidgets
+    from camera.apps.gui import MainWindow
+    from camera.config import Config
+    from camera.sim_system import build_sim_system
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    cfg = Config()
+    cfg.pattern.autosave = False
+    built = build_sim_system(cfg)
+    brain = built[0] if isinstance(built, tuple) else built
+    win = MainWindow(brain, cfg, remote=False)
+    try:
+        lay = win._form_widgets["ui"]["layout"]
+        drawer = win._form_widgets["ui"]["drawer_collapsed"]
+        lay.setCurrentText("classic")
+        assert not drawer.isEnabled()
+        assert "Image first" in drawer.toolTip()
+        lay.setCurrentText("image_first")
+        assert drawer.isEnabled()
+        assert "drawer" in win._form_labels["ui"]["drawer_collapsed"].text()
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_the_scan_form_reflows_instead_of_scrolling_sideways():
+    """Lukas 2026-10-14: in a narrow drawer the Define scanning form must use
+    more rows, not a horizontal scroll bar."""
+    pytest.importorskip("PySide6")
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from camera.apps.gui import MainWindow, ReflowGrid
+    from camera.config import Config
+    from camera.sim_system import build_sim_system
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    cfg = Config()
+    cfg.pattern.autosave = False
+    built = build_sim_system(cfg)
+    brain = built[0] if isinstance(built, tuple) else built
+    win = MainWindow(brain, cfg, remote=False)
+    try:
+        grids = [g for g in win._reflow_grids] + [win.size_grid]
+        for g, narrow_cols in ((grids[0], 1), (win.size_grid, 2)):
+            # a hidden widget gets no resize event, so send the one a narrow
+            # (then a wide) pane would deliver
+            app.sendEvent(g, QtGui.QResizeEvent(QtCore.QSize(460, 400), g.size()))
+            assert g.cols() <= narrow_cols
+            assert g.minimumSizeHint().width() <= 260      # never forces a wide pane
+            app.sendEvent(g, QtGui.QResizeEvent(QtCore.QSize(1200, 400), g.size()))
+            assert g.cols() >= 3
+        assert isinstance(win.size_grid, ReflowGrid)
+    finally:
+        win.close()
+        app.processEvents()

@@ -247,6 +247,11 @@ PATTERN_LAYOUT = [
                              (_P, "recovery_min_interval_s")])],
 ]
 _H = "hardware"
+# The Appearance tab: one box, in this order (a group without a layout is
+# split over three columns, which showed "UI" and "UI (cont.)" -- one group).
+APPEARANCE_LAYOUT = [
+    [("Appearance", [("ui", "theme"), ("ui", "layout"), ("ui", "drawer_collapsed")])],
+]
 POSITIONER_LAYOUT = [
     [("Limits", [("limits", k) for k in ("motor_x_min", "motor_x_max", "motor_y_min",
                                         "motor_y_max", "z_min_v", "z_max_v", "enforce")])],
@@ -354,6 +359,57 @@ def _sized_widget_for_field(name: str, value):
 # main window
 # --------------------------------------------------------------------------- #
 COMPACT_COLS = 4          # label/field pairs per row in a compact settings form
+
+
+class ReflowGrid(QWidget):
+    """Label/field pairs in as many columns as FIT (at most ``max_cols``),
+    re-flowed when the widget is resized -- so a narrow pane (a layout's
+    drawer) gets more rows instead of a sideways scroll bar (Lukas,
+    2026-10-14). The SAME widgets are only moved between grid cells."""
+
+    def __init__(self, pairs, max_cols=COMPACT_COLS, pair_w=250, parent=None):
+        super().__init__(parent)
+        self._pairs = list(pairs)            # [(label or None, widget)]
+        self._max = max(1, int(max_cols))
+        self._pair_w = int(pair_w)
+        self._cols = None
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(10)
+        # the layout must not force the width of the widest arrangement on
+        # us, or a scroll area never lets us shrink and re-flow
+        self._grid.setSizeConstraint(QGridLayout.SetNoConstraint)
+        self._place(self._max)
+
+    def cols(self) -> int:
+        return self._cols or self._max
+
+    def minimumSizeHint(self):
+        h = super().minimumSizeHint()
+        return h.__class__(min(h.width(), self._pair_w), h.height())
+
+    def _place(self, cols: int) -> None:
+        if cols == self._cols:
+            return
+        self._cols = cols
+        while self._grid.count():
+            self._grid.takeAt(0)             # detaches the item, keeps the widget
+        for c in range(2 * self._max):
+            self._grid.setColumnStretch(c, 0)
+        for c in range(cols):
+            self._grid.setColumnStretch(2 * c + 1, 1)
+        for i, (lab, wdg) in enumerate(self._pairs):
+            r, c = divmod(i, cols)
+            if lab is not None:
+                self._grid.addWidget(lab, r, 2 * c)
+                self._grid.addWidget(wdg, r, 2 * c + 1)
+            else:
+                self._grid.addWidget(wdg, r, 2 * c, 1, 2)
+        self.updateGeometry()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._place(max(1, min(self._max, ev.size().width() // self._pair_w)))
 
 
 class _WheelToScroll(QObject):
@@ -905,18 +961,21 @@ class MainWindow(QMainWindow):
         row.addWidget(self.chk_scan); row.addWidget(b_recall)
         row.addWidget(b_clear); row.addStretch(1)
         v.addLayout(row)
-        v.addWidget(QLabel("Drag an empty area to draw a new rectangle; drag the "
-                           "body to move, a corner to resize, the top knob to tilt. "
-                           "'Recall ROI' rebuilds the rectangle from the stored array."))
+        hint = QLabel("Drag an empty area to draw a new rectangle; drag the "
+                      "body to move, a corner to resize, the top knob to tilt. "
+                      "'Recall ROI' rebuilds the rectangle from the stored array.")
+        hint.setWordWrap(True)        # a long unwrapped line widened the page (drawer)
+        v.addWidget(hint)
         # Alternative: set the array by total SIZE (um); pitch adapts to points.
         f, l = _card("Array size (um) -> pitch")
-        r = QHBoxLayout()
         self.sp_sizex = QDoubleSpinBox(); self.sp_sizex.setRange(0, 100000); self.sp_sizex.setDecimals(2)
         self.sp_sizey = QDoubleSpinBox(); self.sp_sizey.setRange(0, 100000); self.sp_sizey.setDecimals(2)
-        r.addWidget(QLabel("X size")); r.addWidget(self.sp_sizex)
-        r.addWidget(QLabel("Y size")); r.addWidget(self.sp_sizey)
         b_size = QPushButton("Apply size"); b_size.clicked.connect(self._apply_scan_size)
-        r.addWidget(b_size); l.addLayout(r)
+        # re-flows to more rows in a narrow pane (see ReflowGrid)
+        self.size_grid = ReflowGrid([(QLabel("X size"), self.sp_sizex),
+                                     (QLabel("Y size"), self.sp_sizey),
+                                     (None, b_size)], max_cols=3, pair_w=210)
+        l.addWidget(self.size_grid)
         v.addWidget(f)
         v.addWidget(self._settings_tab([("Scanning", self.cfg.scanning)], compact=True))
         return w
@@ -1550,16 +1609,14 @@ class MainWindow(QMainWindow):
         if compact:
             for gname, obj in groups:
                 f, l = _card(gname)
-                grid = QGridLayout()
-                grid.setHorizontalSpacing(10)
-                for c in range(COMPACT_COLS):
-                    grid.setColumnStretch(2 * c + 1, 1)
-                for i, fld in enumerate(fields(obj)):
+                pairs = []
+                for fld in fields(obj):
                     widget, lab = self._field_widget(gname.lower(), obj, fld.name)
-                    r, c = divmod(i, COMPACT_COLS)
-                    grid.addWidget(lab, r, 2 * c)
-                    grid.addWidget(widget, r, 2 * c + 1)
-                l.addLayout(grid)
+                    pairs.append((lab, widget))
+                # as many label/field columns as fit (more rows when narrow)
+                grid = ReflowGrid(pairs, max_cols=COMPACT_COLS)
+                self._reflow_grids = getattr(self, "_reflow_grids", []) + [grid]
+                l.addWidget(grid)
                 outer.addWidget(f)
         else:
             if columns is None:
@@ -1879,9 +1936,35 @@ class MainWindow(QMainWindow):
                            "Pick a theme and click Apply settings.\n"
                            "The Camera tab's layout switches at once -- here, or with "
                            "the Layout box at the top right of the window."))
-        v.addWidget(self._settings_tab([("UI", self.cfg.ui)]))
+        v.addWidget(self._settings_tab([("UI", self.cfg.ui)], columns=APPEARANCE_LAYOUT))
         v.addStretch(1)
+        # plain words instead of the config names (the INI keeps the names)
+        labs = self._form_labels.get("ui", {})
+        for name, text in (("theme", "Theme"), ("layout", "Camera tab layout"),
+                           ("drawer_collapsed", "Image first: start with the drawer folded")):
+            if labs.get(name) is not None:
+                _set_label(labs[name], text, 260)
+        lay = self._form_widgets.get("ui", {}).get("layout")
+        if lay is not None and hasattr(lay, "currentTextChanged"):
+            lay.currentTextChanged.connect(self._appearance_rules)
+        self._appearance_rules()
         return w
+
+    def _appearance_rules(self, *_):
+        """Grey the drawer option unless the Image first layout is chosen --
+        it does nothing in the other layouts (Lukas, 2026-10-14). Follows the
+        combo before Apply, like the AutoFocus tab's rules; the value is kept."""
+        w = self._form_widgets.get("ui", {})
+        lay, drawer = w.get("layout"), w.get("drawer_collapsed")
+        if lay is None or drawer is None:
+            return
+        text = lay.currentText() if hasattr(lay, "currentText") else str(self.cfg.ui.layout)
+        on = text == "image_first"
+        why = "" if on else "only used by the Image first layout"
+        for x in (drawer, self._form_labels.get("ui", {}).get("drawer_collapsed")):
+            if x is not None:
+                x.setEnabled(on)
+                x.setToolTip(why)
 
     def _readouts_tab(self) -> QWidget:
         w = QWidget(); g = QGridLayout(w)
