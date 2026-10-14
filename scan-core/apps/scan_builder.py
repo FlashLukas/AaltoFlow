@@ -149,6 +149,14 @@ def _is_num(v) -> bool:
             and not isinstance(v, (bool, np.bool_)))
 
 
+def _where_index(where) -> dict:
+    """{dim: grid index} of the engine's where_of(): the live plot finds the
+    marked point by its INDEX on an axis that goes up and down (segments),
+    where its value alone could be on either run."""
+    return {a["name"]: a["i"] for a in (where or {}).get("axes", ())
+            if a.get("i") is not None}
+
+
 def _raw_axis_text(ax) -> str:
     """One line for a loaded axis the row shows but does not edit: a 2-D
     grid (two knobs) or a zip (several in lockstep)."""
@@ -8545,7 +8553,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_where = where
         coords = {a["name"]: a["value"] for a in (where or {}).get("axes", ())
                   if a.get("value") is not None}
-        self.view.set_marker(coords or None)
+        self.view.set_marker(coords or None, index=_where_index(where))
         if self.on_status is not None:
             self.on_status(st.get("where") or "")
         self._fill_server_tree(st)
@@ -8930,7 +8938,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
         self.run_where = where
         coords = {a["name"]: a["value"] for a in (where or {}).get("axes", ())
                   if a.get("value") is not None}
-        self.view.set_marker(coords)
+        self.view.set_marker(coords, index=_where_index(where))
 
     def run_status_text(self) -> str:
         """One line: WHERE the running scan is ("" when idle). E.g.

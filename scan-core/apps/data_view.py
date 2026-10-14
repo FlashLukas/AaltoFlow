@@ -16,6 +16,14 @@ without a screen; this file is the cockpit for it, used as the RESULT pane
 of the Measurement tab (live, while the scan runs). Saved files are opened
 in the data viewer (the suite's Data tab).
 
+UP AND DOWN (2026-10-14): an axis swept up and back down (a `segments`
+axis, a typed list that turns back) visits values twice. Its runs are in the
+file (`<dim>_segment`, DEVELOPER_NOTES 4l); a line plot draws one line PER
+RUN, a map shows ONE run at a time (or all of them against the point number)
+-- never the runs folded onto one another. An axis whose points are not
+evenly spaced (log, a list) is drawn with each cell reaching halfway to its
+neighbours, not as if the steps were equal.
+
 Why the old pane was not enough: it always drew the innermost two dims and
 sliced everything else at index 0 -- so a frequency cube showed you the first
 frequency, and said nothing about it.
@@ -39,6 +47,69 @@ from scan_core import view as V
 from apps.theme import C
 
 NONE_TEXT = "— none —"
+
+#: the widest an uneven map axis is redrawn on an even grid (see _even_image)
+MAX_RESAMPLE = 4096
+
+
+def segments_of(ds, dim: str):
+    """(segment index per point, info per segment) of dimension `dim`, or None.
+
+    From the file's own coordinates when it has them (`<dim>_segment` and
+    the dim's `segments_json`, docs/DEVELOPER_NOTES.md 4l); else, for a
+    numeric coordinate that turns back (an older file of a typed loop), split
+    at its reversals exactly as the engine would have."""
+    if ds is None or dim not in ds.coords:
+        return None
+    import json
+    from scan_core.recipe import reversal_segments
+    name = f"{dim}_segment"
+    if name in ds.coords and ds[name].dims == (dim,):
+        seg = np.asarray(ds[name].values).astype(int)
+        try:
+            info = json.loads(ds[dim].attrs.get("segments_json") or "[]")
+        except ValueError:
+            info = []
+        n = int(seg.max()) + 1 if seg.size else 0
+        if len(info) != n:
+            # no (or a broken) JSON: the directions from the values themselves
+            vals = np.asarray(ds[dim].values, dtype=float)
+            info = []
+            for k in range(n):
+                idx = np.flatnonzero(seg == k)
+                d = np.sign(vals[idx[-1]] - vals[idx[0]]) if idx.size > 1 else 1
+                info.append({"direction": int(d or 1), "joined": int(k > 0),
+                             "first": int(idx[0]) if idx.size else 0,
+                             "count": int(idx.size)})
+        return seg, info
+    try:
+        found = reversal_segments(np.asarray(ds[dim].values))
+    except Exception:
+        found = None
+    return found
+
+
+def segment_name(info: list, k: int) -> str:
+    """'up' / 'down' for a two-run axis, 'seg 3 up' for more."""
+    way = "up" if info[k].get("direction", 1) > 0 else "down"
+    return way if len(info) <= 2 else f"seg {k + 1} {way}"
+
+
+class SegDimRow(DimRow):
+    """A leftover dimension that goes up AND down: held by POINT INDEX (as
+    every row is), and its label says which run that point is on -- "50 mT
+    · down" -- since the value alone would be ambiguous."""
+
+    def __init__(self, dim, coords, unit, segment, info):
+        self.segment, self.info = np.asarray(segment), list(info)
+        super().__init__(dim, coords, unit)
+
+    def _text(self, i: int) -> str:
+        base = super()._text(i)
+        try:
+            return f"{base} · {segment_name(self.info, int(self.segment[i]))}"
+        except Exception:
+            return base
 
 
 class DataView(QtWidgets.QWidget):
@@ -70,6 +141,22 @@ class DataView(QtWidgets.QWidget):
         self._held: tuple[float, float | None] | None = None
         #: manual colour range, or None for auto
         self._z_manual: tuple[float, float] | None = None
+        #: SEGMENTS: what is shown of an up-and-down axis, per dim: "lines"
+        #: (one line per run, a line plot only), "index" (every point against
+        #: its point number) or a run number (0, 1 ...)
+        self._seg_choice: dict = {}
+        self._seg_combos: dict = {}
+        self._seg_sig = None
+        #: original index of every shown column / row, per image axis, in
+        #: the order drawn -- so a point is found by its INDEX (a value of an
+        #: up-and-down axis is not unique)
+        self._shown_idx: dict = {}
+        #: cell edges of the map as drawn (ascending), for the cursor + marker
+        self._edges: tuple | None = None
+        self._seg_curves: list = []
+        self._seg_lines = None             # (segment, info) while drawn as runs
+        self._legend = None
+        self._marker_index: dict = {}
         self._setting_levels = False
 
         v = QtWidgets.QVBoxLayout(self)
@@ -152,6 +239,11 @@ class DataView(QtWidgets.QWidget):
         v.addLayout(top)
         for combo in (self.x_combo, self.y_combo, self.reduce_combo):
             combo.currentIndexChanged.connect(self._user_changed)
+
+        # the SEGMENT chooser(s): one per image axis that goes up and down
+        self.seg_bar = QtWidgets.QHBoxLayout()
+        self.seg_bar.setSpacing(6)
+        v.addLayout(self.seg_bar)
 
         self.rows_box = QtWidgets.QVBoxLayout()
         self.rows_box.setSpacing(3)
@@ -263,7 +355,8 @@ class DataView(QtWidgets.QWidget):
                 "y": self.y_combo.currentText(),
                 "rows": {r.dim: list(r.state()) for r in self._rows},
                 "z": list(self._z_manual) if self._z_manual else None,
-                "drawing": self.reduce_combo.currentData()}
+                "drawing": self.reduce_combo.currentData(),
+                "segments": dict(self._seg_choice)}
 
     def apply_view_state(self, st: dict) -> None:
         """Show `st` (from view_state(), possibly another PC's). What does not
@@ -295,6 +388,12 @@ class DataView(QtWidgets.QWidget):
                 s = rows.get(r.dim)
                 if isinstance(s, (list, tuple)) and len(s) == 4:
                     r.restore(tuple(s))
+            segs = st.get("segments")
+            if isinstance(segs, dict):
+                self._seg_choice.update({k: v for k, v in segs.items()
+                                         if isinstance(v, (int, str))})
+                self._seg_sig = None
+                self._rebuild_seg_bar()
             part = st.get("part")
             if part and self.part_combo.findText(part) >= 0:
                 self.part_combo.blockSignals(True)
@@ -388,7 +487,9 @@ class DataView(QtWidgets.QWidget):
         self._rows = []
         for d in want:
             coords, unit = self._coords(d, da)
-            row = DimRow(d, coords, unit)
+            seg = segments_of(self.ds, d)
+            row = (SegDimRow(d, coords, unit, *seg) if seg is not None
+                   else DimRow(d, coords, unit))
             if d in keep_rows:
                 row.restore(keep_rows[d])
             row.changed.connect(self.refresh)
@@ -433,6 +534,8 @@ class DataView(QtWidgets.QWidget):
         part = {"|z|": "abs", "arg z": "arg", "Re z": "real",
                 "Im z": "imag"}.get(self.part_combo.currentText(), "abs")
         slices = {r.dim: r.slice_() for r in self._rows}
+        self._rebuild_seg_bar()
+        da, self._seg_lines = self._select_segments(da, x, y)
         try:
             red = V.reduce_cube(da, x, y, slices, part)
         except Exception as exc:
@@ -448,10 +551,13 @@ class DataView(QtWidgets.QWidget):
     def _draw(self, red: V.Reduced):
         ds = self.ds
         arr = np.asarray(red.data.values, dtype=float)
+        self._clear_seg_lines()
         if red.y:
             self.curve.setData([], [])
-            xc = np.asarray(self._coord(red.x, arr.shape[1]), dtype=float)
-            yc = np.asarray(self._coord(red.y, arr.shape[0]), dtype=float)
+            xc = np.asarray(self._red_coord(red, red.x, arr.shape[1]), dtype=float)
+            yc = np.asarray(self._red_coord(red, red.y, arr.shape[0]), dtype=float)
+            xi = self._shown_idx.get(red.x, np.arange(xc.size))
+            yi = self._shown_idx.get(red.y, np.arange(yc.size))
             # The image is stretched over min..max of each coordinate, and an
             # ImageItem always draws column 0 at the LEFT. A scan that ran
             # downwards (field 100 -> 0 mT, the usual way to sweep a magnet) has
@@ -460,19 +566,33 @@ class DataView(QtWidgets.QWidget):
             # Nothing errors; the picture is simply wrong. Put both axes in
             # ascending order before drawing.
             if xc.size > 1 and xc[0] > xc[-1]:
-                arr, xc = arr[:, ::-1], xc[::-1]
+                arr, xc, xi = arr[:, ::-1], xc[::-1], xi[::-1]
             if yc.size > 1 and yc[0] > yc[-1]:
-                arr, yc = arr[::-1, :], yc[::-1]
+                arr, yc, yi = arr[::-1, :], yc[::-1], yi[::-1]
+            notes = []
+            # An axis that is not monotonic even so (an older file, a loop
+            # nobody split) cannot be drawn against its values without
+            # folding it: drawn against the point number, and said.
+            if not self._monotonic(xc):
+                xc = np.arange(xc.size, dtype=float); xi = np.arange(xc.size)
+                notes.append(f"{red.x} turns back: drawn by point #")
+            if not self._monotonic(yc):
+                yc = np.arange(yc.size, dtype=float); yi = np.arange(yc.size)
+                notes.append(f"{red.y} turns back: drawn by point #")
+            self._shown_idx = {red.x: np.asarray(xi), red.y: np.asarray(yi)}
             arr = np.ascontiguousarray(arr)        # a reversed view has negative strides
             lo, hi = self._z_manual or self._levels(arr)
-            self.img.setImage(arr, levels=(lo, hi))
-            # Each pixel CENTRED on its coordinate: half a step of margin at both
-            # ends. Stretching n pixels edge-to-edge over min..max instead put
-            # pixel k's centre off its coordinate (index 49 of 0..49 drew from
-            # 48.0 to 49.0), so pointing at "49" on the axis read another point.
-            x0, x1 = self._extent(xc)
-            y0, y1 = self._extent(yc)
-            self.img.setRect(QtCore.QRectF(x0, y0, x1 - x0, y1 - y0))
+            # Each cell reaches HALFWAY to its neighbours (cell_edges): on an
+            # even grid that is the old "centred on its coordinate"; on an
+            # uneven one (log, a list) a cell is as wide as its own gaps, not
+            # one average step -- which put the points of a log axis far from
+            # their pixels. An image item can only stretch evenly, so an
+            # uneven axis is redrawn on a fine even grid first (_even_image).
+            xe, ye = self.cell_edges(xc), self.cell_edges(yc)
+            self._edges = (xe, ye)
+            img, rx, ry = self._even_image(arr, xe, ye)
+            self.img.setImage(img, levels=(lo, hi))
+            self.img.setRect(QtCore.QRectF(rx[0], ry[0], rx[1] - rx[0], ry[1] - ry[0]))
             self.img.setVisible(True)
             self._setting_levels = True
             try:
@@ -490,13 +610,22 @@ class DataView(QtWidgets.QWidget):
             self.plot.setLabel("left", self._axis_label(red.y))
             self._shown = ("map", xc, yc, arr, red.data.attrs.get("units", ""))
         else:
+            notes = []
             self.img.setVisible(False)
-            xc = self._coord(red.x, arr.shape[0])
-            self.curve.setData(np.asarray(xc, dtype=float), arr)
+            self._edges = None
+            xc = np.asarray(self._red_coord(red, red.x, arr.shape[0]), dtype=float)
+            self._shown_idx = {red.x: self._shown_idx.get(red.x, np.arange(xc.size))}
+            if self._seg_lines is not None:
+                # ONE LINE PER RUN of an up-and-down axis: a hysteresis loop
+                # is two branches, not one line folded back on itself
+                self.curve.setData([], [])
+                self._draw_seg_lines(xc, arr, *self._seg_lines)
+            else:
+                self.curve.setData(xc, arr)
             self.plot.setLabel("bottom", self._axis_label(red.x))
             unit = red.data.attrs.get("units", "")
             self.plot.setLabel("left", f"{self.det_combo.currentText()} [{unit}]".strip())
-            self._shown = ("line", np.asarray(xc, dtype=float), None, arr, unit)
+            self._shown = ("line", xc, None, arr, unit)
         self._update_cursor()
         self._place_marker()
 
@@ -508,6 +637,7 @@ class DataView(QtWidgets.QWidget):
                         f"(missing points are skipped, not zero)")
         if red.note:
             bits.append(red.note)
+        bits += notes
         if self.path:
             bits.append(self.path.name)
         self.status.setText(" · ".join(bits))
@@ -528,13 +658,24 @@ class DataView(QtWidgets.QWidget):
         if kind == "line":
             if xc.size == 0:
                 return None
-            return int(np.nanargmin(np.abs(xc - p.x()))), None
-        r = self.img.mapRectToView(self.img.boundingRect())
-        if not r.contains(p):
+            dx = np.abs(xc - p.x())
+            near = np.flatnonzero(dx == np.nanmin(dx))
+            if near.size > 1:
+                # the same x twice (the up and the down run): the one whose
+                # value is nearer the mouse
+                dy = np.abs(np.asarray(arr, dtype=float)[near] - p.y())
+                if np.any(np.isfinite(dy)):
+                    return int(near[int(np.nanargmin(dy))]), None
+            return int(near[0]), None
+        if self._edges is None:
             return None
-        ny, nx = arr.shape
-        i = min(nx - 1, int((p.x() - r.left()) / r.width() * nx))
-        j = min(ny - 1, int((p.y() - r.top()) / r.height() * ny))
+        xe, ye = self._edges
+        if not (xe[0] <= p.x() <= xe[-1] and ye[0] <= p.y() <= ye[-1]):
+            return None
+        # the CELL under the mouse, by its edges (an uneven axis has cells
+        # of different widths)
+        i = int(np.clip(np.searchsorted(xe, p.x(), side="right") - 1, 0, xe.size - 2))
+        j = int(np.clip(np.searchsorted(ye, p.y(), side="right") - 1, 0, ye.size - 2))
         return i, j
 
     def _text(self, i: int, j: int | None) -> str:
@@ -565,6 +706,7 @@ class DataView(QtWidgets.QWidget):
         kind, xc, yc, _, _ = self._shown
         i, j = hit
         self._held = (float(xc[i]), None if j is None else float(yc[j]))
+        self._held_i = i
         self._update_cursor()
 
     def _update_cursor(self):
@@ -582,6 +724,9 @@ class DataView(QtWidgets.QWidget):
             self.readout.setText(self.HINT)
             return
         i = int(np.argmin(np.abs(xc - hold[0])))
+        hi_ = getattr(self, "_held_i", None)
+        if hi_ is not None and hi_ < xc.size and xc[hi_] == hold[0]:
+            i = hi_                    # the held point itself, not its twin
         if kind == "map":
             j = int(np.argmin(np.abs(yc - hold[1])))
             self.vline.setPos(float(xc[i])); self.hline.setPos(float(yc[j]))
@@ -596,7 +741,7 @@ class DataView(QtWidgets.QWidget):
         self.readout.setText(self._text(i, j) + "   (held -- click off the data to release)")
 
     # ---- the running scan's point -------------------------------------------
-    def set_marker(self, coords: dict | None) -> None:
+    def set_marker(self, coords: dict | None, index: dict | None = None) -> None:
         """Mark the point a running scan has just measured.
 
         `coords` = {dim name: coordinate value} (from the engine's `where`),
@@ -606,6 +751,10 @@ class DataView(QtWidgets.QWidget):
         screen (held by a slider, or averaged) is simply not used.
         """
         self._marker = dict(coords) if coords else None
+        #: {dim: grid index} of the same point (the engine's where["axes"][k]["i"]):
+        #: used for an axis whose values repeat (up and down), where a value
+        #: alone could be either run
+        self._marker_index = dict(index or {})
         self._place_marker()
 
     def _place_marker(self):
@@ -615,21 +764,42 @@ class DataView(QtWidgets.QWidget):
         if shown is None or not mark:
             return
         kind, xc, yc, _, _ = shown
-        x = mark.get(self.x_combo.currentText())
-        y = mark.get(self.y_combo.currentText()) if kind == "map" else None
-        if x is not None and y is not None:
-            # the whole cell, edges half a step either side of its centre --
-            # exactly where _draw put that pixel
-            i = int(np.argmin(np.abs(xc - x)))
-            j = int(np.argmin(np.abs(yc - y)))
-            hx, hy = self._half_step(xc, i), self._half_step(yc, j)
-            self.mark_rect.setRect(QtCore.QRectF(float(xc[i]) - hx, float(yc[j]) - hy,
-                                                 2 * hx, 2 * hy))
+        xd, yd = self.x_combo.currentText(), self.y_combo.currentText()
+        x = mark.get(xd)
+        y = mark.get(yd) if kind == "map" else None
+        if x is not None and y is not None and self._edges is not None:
+            # the whole cell, exactly where _draw put it
+            i, j = self._marker_pos(xd, x, xc), self._marker_pos(yd, y, yc)
+            if i is None or j is None:
+                return                     # on a run that is not shown
+            xe, ye = self._edges
+            self.mark_rect.setRect(QtCore.QRectF(float(xe[i]), float(ye[j]),
+                                                 float(xe[i + 1] - xe[i]),
+                                                 float(ye[j + 1] - ye[j])))
             self.mark_rect.setVisible(True)
         elif x is not None:
+            i = self._marker_pos(xd, x, xc)
+            if i is None:
+                return
+            x = float(xc[i])
             self.mark_vline.setPos(float(x)); self.mark_vline.setVisible(True)
         elif y is not None:
             self.mark_hline.setPos(float(y)); self.mark_hline.setVisible(True)
+
+    def _marker_pos(self, dim: str, value, c: np.ndarray):
+        """Where the marked point is among the shown coordinates `c`: by its
+        grid INDEX when known and the axis is drawn by index or one run of
+        it (a value of an up-and-down axis is not unique), else the nearest
+        value. None = the point is not on screen (another run)."""
+        i = self._marker_index.get(dim)
+        shown = self._shown_idx.get(dim)
+        if i is not None and shown is not None and segments_of(self.ds, dim) is not None:
+            hit = np.flatnonzero(np.asarray(shown) == int(i))
+            return int(hit[0]) if hit.size else None
+        try:
+            return int(np.argmin(np.abs(c - float(value))))
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _half_step(c: np.ndarray, i: int) -> float:
@@ -645,10 +815,208 @@ class DataView(QtWidgets.QWidget):
             return np.asarray(self.ds[dim].values)
         return np.arange(n)
 
+    @staticmethod
+    def _red_coord(red, dim: str, n: int) -> np.ndarray:
+        """The coordinate of `dim` as it is in the REDUCED data: one run of
+        an up-and-down axis, or the point numbers, when that was chosen."""
+        if dim in red.data.coords and red.data[dim].size == n:
+            return np.asarray(red.data[dim].values)
+        return np.arange(n)
+
     def _axis_label(self, dim: str) -> str:
+        if self._seg_choice_for(dim) == "index":
+            return f"point # of {dim}"
         unit = (self.ds[dim].attrs.get("units", "")
                 if self.ds is not None and dim in self.ds.coords else "")
         return f"{dim} [{unit}]" if unit else dim
+
+    # ---- SEGMENTS: an axis swept up and down (2026-10-14) ---------------------
+    def _is_map(self) -> bool:
+        return self.y_combo.currentText() not in ("", NONE_TEXT)
+
+    def _seg_options(self, dim: str) -> list[tuple[str, object]]:
+        """(text, choice) for the chooser of `dim`: one line per run (a line
+        plot), each run on its own, or everything against the point number."""
+        seg = segments_of(self.ds, dim)
+        if seg is None:
+            return []
+        info = seg[1]
+        opts = [] if self._is_map() else [("every run, one line each", "lines")]
+        opts += [(f"{segment_name(info, k)}  ({k + 1} of {len(info)})", k)
+                 for k in range(len(info))]
+        opts.append(("all, by point #", "index"))
+        return opts
+
+    def _seg_choice_for(self, dim: str):
+        """What is shown of `dim` now (None = it has no runs). A map never
+        shows the runs folded: its default is the FIRST run."""
+        opts = self._seg_options(dim) if self.ds is not None else []
+        if not opts:
+            return None
+        valid = [c for _, c in opts]
+        c = self._seg_choice.get(dim)
+        if c in valid:
+            return c
+        return valid[0]
+
+    def _rebuild_seg_bar(self) -> None:
+        """One chooser per image axis that goes up and down, rebuilt only
+        when what it offers changes (not on every live redraw)."""
+        if self.ds is None:
+            return
+        dims = [d for d in (self.x_combo.currentText(), self.y_combo.currentText())
+                if d and d != NONE_TEXT]
+        want = [(d, tuple(t for t, _ in self._seg_options(d))) for d in dims]
+        want = [w for w in want if w[1]]
+        if want == self._seg_sig:
+            return
+        self._seg_sig = want
+        while self.seg_bar.count():
+            w = self.seg_bar.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)             # (see the rows: not only the layout)
+                w.deleteLater()
+        self._seg_combos = {}
+        for d, _ in want:
+            lbl = QtWidgets.QLabel(f"{d} runs")
+            lbl.setStyleSheet(f"color:{C['muted']};")
+            combo = QtWidgets.QComboBox()
+            combo.setToolTip(
+                f"{d} goes up AND down: the same value is measured on more than\n"
+                f"one run (a hysteresis loop). A line plot can draw every run as\n"
+                f"its own line; a map shows ONE run at a time (it cannot draw two\n"
+                f"values in one cell), or every point against its point number.")
+            for text, c in self._seg_options(d):
+                combo.addItem(text, c)
+            i = combo.findData(self._seg_choice_for(d))
+            combo.setCurrentIndex(max(0, i))
+            combo.currentIndexChanged.connect(
+                lambda _i, d=d, cb=combo: self._seg_picked(d, cb))
+            self.seg_bar.addWidget(lbl)
+            self.seg_bar.addWidget(combo)
+            self._seg_combos[d] = combo
+        if want:
+            self.seg_bar.addStretch(1)
+
+    def _seg_picked(self, dim: str, combo) -> None:
+        self._seg_choice[dim] = combo.currentData()
+        self.refresh()
+        self._user_changed()
+
+    def set_segment_choice(self, dim: str, choice) -> None:
+        """Show `choice` ("lines", "index" or a run number) of `dim`."""
+        self._seg_choice[dim] = choice
+        combo = self._seg_combos.get(dim)
+        if combo is not None:
+            i = combo.findData(choice)
+            if i >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(i)
+                combo.blockSignals(False)
+        self.refresh()
+
+    def _select_segments(self, da, x: str, y: str | None):
+        """Apply the run choice of each image axis to `da` before it is
+        reduced. Returns (da, line runs): line runs = (segment, info) when the
+        line plot draws one line per run, else None."""
+        self._shown_idx = {}
+        lines = None
+        for dim in [d for d in (x, y) if d]:
+            seg = segments_of(self.ds, dim)
+            if seg is None or dim not in da.dims:
+                continue
+            choice = self._seg_choice_for(dim)
+            n = da.sizes[dim]
+            if isinstance(choice, (int, np.integer)):
+                idx = np.flatnonzero(seg[0] == int(choice))
+                da = da.isel({dim: idx})
+                self._shown_idx[dim] = idx
+            elif choice == "index":
+                da = da.assign_coords({dim: np.arange(n)})
+                self._shown_idx[dim] = np.arange(n)
+            elif choice == "lines" and dim == x and y is None:
+                lines = seg
+        return da, lines
+
+    def _clear_seg_lines(self) -> None:
+        for c in self._seg_curves:
+            c.setData([], [])
+            c.setVisible(False)
+        if self._legend is not None:
+            self._legend.clear()
+            self._legend.setVisible(False)
+
+    SEG_COLOURS = ("accent", "ok", "accent_hi", "danger", "muted", "text")
+
+    def _draw_seg_lines(self, xc, arr, seg, info) -> None:
+        """One curve per run, consecutive points, its own colour; a run that
+        starts one step after the previous run's end (`joined`) is drawn from
+        that end, so the loop is closed on screen as it was measured."""
+        if self._legend is None:
+            self._legend = self.plot.addLegend(offset=(10, 10))
+        self._legend.clear()
+        self._legend.setVisible(True)
+        n = int(seg.max()) + 1 if seg.size else 0
+        while len(self._seg_curves) < n:
+            self._seg_curves.append(self.plot.plot([], []))
+        y = np.asarray(arr, dtype=float)
+        for k in range(n):
+            idx = np.flatnonzero(seg == k)
+            if k > 0 and idx.size and info[k].get("joined") and idx[0] > 0:
+                idx = np.concatenate([[idx[0] - 1], idx])
+            col = C[self.SEG_COLOURS[k % len(self.SEG_COLOURS)]]
+            c = self._seg_curves[k]
+            c.setPen(pg.mkPen(col, width=2))
+            c.setData(xc[idx], y[idx])
+            c.setVisible(True)
+            self._legend.addItem(c, segment_name(info, k))
+
+    @staticmethod
+    def _monotonic(c: np.ndarray) -> bool:
+        return c.size < 2 or bool(np.all(np.diff(c) > 0))
+
+    @staticmethod
+    def cell_edges(c: np.ndarray) -> np.ndarray:
+        """n + 1 edges for n ascending coordinates: each cell reaches halfway
+        to its neighbours, the two outer cells as far out as in. One point
+        gets a small width of its own (it has no neighbour to share)."""
+        c = np.asarray(c, dtype=float)
+        if c.size == 0:
+            return np.array([0.0, 1.0])
+        if c.size == 1:
+            half = max(abs(float(c[0])) * 1e-3, 0.5)
+            return np.array([c[0] - half, c[0] + half])
+        mid = (c[:-1] + c[1:]) / 2
+        return np.concatenate([[c[0] - (c[1] - c[0]) / 2], mid,
+                               [c[-1] + (c[-1] - c[-2]) / 2]])
+
+    @staticmethod
+    def _even_index(edges: np.ndarray) -> np.ndarray | None:
+        """For an UNEVEN axis: which cell each column of a fine even grid
+        over the same span falls in; None when the cells are already even.
+
+        The grid is fine enough that the narrowest cell gets about four
+        columns (at most MAX_RESAMPLE columns): every cell is then drawn
+        within a quarter of its own width of where it really is."""
+        w = np.diff(edges)
+        if w.size < 2 or np.allclose(w, w.mean(), rtol=1e-6, atol=0):
+            return None
+        span = float(edges[-1] - edges[0])
+        m = int(min(MAX_RESAMPLE, max(w.size, np.ceil(4 * span / max(w.min(), 1e-300)))))
+        centres = edges[0] + (np.arange(m) + 0.5) * span / m
+        return np.clip(np.searchsorted(edges, centres, side="right") - 1, 0, w.size - 1)
+
+    def _even_image(self, arr, xe, ye):
+        """(image, (x0, x1), (y0, y1)): `arr` as an image an ImageItem can
+        stretch evenly over the outer cell edges."""
+        xi, yi = self._even_index(xe), self._even_index(ye)
+        img = arr
+        if xi is not None:
+            img = img[:, xi]
+        if yi is not None:
+            img = img[yi, :]
+        return (np.ascontiguousarray(img), (float(xe[0]), float(xe[-1])),
+                (float(ye[0]), float(ye[-1])))
 
     # ---- drawing (how a block of points becomes one pixel) ----------------------
     def _build_drawing_combo(self) -> QtWidgets.QComboBox:
