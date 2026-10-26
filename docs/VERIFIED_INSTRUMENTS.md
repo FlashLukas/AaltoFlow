@@ -30,7 +30,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart, sweeps) | 2026-10-10 |
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) `--driver dwf` | Digilent Analog Discovery 2 (WaveForms 3.24.4) | **verified** (scope, W1/W2 generator incl. phase, sweeps, V+/V- supplies) | 2026-10-10 |
-| [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **partly verified** (SCPI sequence, sweeps, reference + acquire through the service; not yet compared with the GUI's marker) | 2026-10-26 |
+| [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **verified** (SCPI sequence, sweeps, reference + acquire through the service; a calibrated measurement of an attenuation line checked by a person) | 2026-10-26 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
@@ -480,9 +480,11 @@ calibration filed with the sample.
   predicted, 0.12-0.32 s real), so the backend learns each sweep's length (the
   fly-scan stream stamps its points with it).
 
-**Not yet checked:** one point against LibreVNA-GUI's marker (the ports were
-open, |S21| at the -50 .. -95 dB isolation floor); S11/S12/S22; a sweep with a
-real device under test; the fly-scan stream's timing.
+**Checked by a person (same day):** after a calibration, an attenuation line
+was measured and the result looked right ("all was working well").
+
+**Not yet checked:** a point-by-point comparison with LibreVNA-GUI's marker;
+S11 / S12 / S22 on their own; the fly-scan stream's timing.
 
 ## scan-core -- scans with real instruments
 
