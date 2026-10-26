@@ -777,7 +777,7 @@ python tools/render_all.py clMag       # or just one
 | 6 | `kim-control` | `kim` | 5567/5568 | Thorlabs KIM101 + 3× PIA25 piezo-inertia stage |
 | 7 | `hf2-control` | `hf2` | 5569/5570 | Zurich Instruments HF2LI 50 MHz lock-in — 2 demodulator channels + aux inputs |
 | 8 | `pm16-control` | `pm16` | 5571/5572 | Thorlabs PM16 USB power meter (PM16-121) — **verified on hardware** |
-| 9 | `vna-control` | `vna` | 5573/5574 | Keysight PNA-X N5222A **or** Copper Mountain C1209 (both untested on the instrument) **or** a simulated YIG film: S-parameters, reference, permeability u and ln(S/S_ref) |
+| 9 | `vna-control` | `vna` | 5573/5574 | Keysight PNA-X N5222A, Copper Mountain C1209, LibreVNA **or** Harogic PNB-60 (all untested on the instrument) **or** a simulated YIG film: S-parameters, reference, permeability u and ln(S/S_ref) |
 | 10 | `mag2d-control` | `mag2d` | 5575/5576 | 2-axis vector electromagnet on an NI DAQ: field + angle, PI in mT, water-cooling interlock |
 | 11 | `mag2dcal-control` | `mag2dcal` | 5577/5578 | the same magnet, controlled the way the 1-axis one is: measured B(V) calibration, PI trim, freeze, long-term stabilizer |
 | 12 | `ppms-control` | `ppms` | 5579/5580 | Quantum Design DynaCool through MultiVu (MultiPyVu): field, temperature, chamber (untested on the instrument) |

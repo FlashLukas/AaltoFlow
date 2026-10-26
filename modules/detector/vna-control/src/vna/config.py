@@ -178,14 +178,20 @@ class Hardware:
 
     driver        -- WHICH real analyser: "pna" = Keysight PNA-X N5222A
                      (backends/pna.py), "cmt" = Copper Mountain C1209
-                     (backends/cmt.py). A PC's choice lives in its own vna.ini
-                     (loaded by run_service.py when present) or `--driver`.
+                     (backends/cmt.py), "librevna" = LibreVNA, "harogic" =
+                     Harogic PNB-60 (both backends/librevna.py). A PC's
+                     choice lives in its own vna.ini (loaded by run_service.py when present) or `--driver`.
     cmt_resource  -- the C1209's address: S2VNA's socket server. On the
                      DynaCool setup S2VNA runs on the same PC, hence 127.0.0.1;
                      5025 is S2VNA's default socket port.
+    librevna_resource -- the LibreVNA's address: LibreVNA-GUI's SCPI server
+                     (port 19542; Preferences > General). backends/librevna.py.
+    harogic_resource  -- the Harogic PNB-60's address: VNStudio's SCPI server
+                     (port 5025; System > SCPI > Enable). backends/librevna.py.
     visa_library  -- "" = the backend's default: the PNA uses the installed
-                     VISA library, the C1209 uses pyvisa-py ("@py", pure
-                     Python, no vendor VISA needed for a socket).
+                     VISA library, the C1209 / LibreVNA / PNB-60 use
+                     pyvisa-py ("@py", pure Python, no vendor VISA needed for
+                     a socket).
     visa_resource -- (PNA) VISA address or alias. "N5222A" is the alias the old
                      LabVIEW program used. # VERIFY in Keysight Connection
                      Expert / NI MAX that this alias exists on the lab PC;
@@ -203,6 +209,8 @@ class Hardware:
 
     driver: str = "pna"
     cmt_resource: str = "TCPIP0::127.0.0.1::5025::SOCKET"
+    librevna_resource: str = "TCPIP0::127.0.0.1::19542::SOCKET"
+    harogic_resource: str = "TCPIP0::127.0.0.1::5025::SOCKET"
     visa_library: str = ""
     visa_resource: str = "N5222A"
     cal_set: str = ""

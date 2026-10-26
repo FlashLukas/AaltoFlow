@@ -99,7 +99,7 @@ CLIENTS                              WIRE                      SERVICES (one pro
                                                            kim     KIM101 + 3x PIA25 inertia       5567/5568
                                                            hf2     Zurich HF2LI lock-in (detector) 5569/5570
                                                            pm16    Thorlabs PM16 power meter       5571/5572
-                                                           vna     PNA-X, C1209 or simulated VNA   5573/5574
+                                                           vna     PNA-X/C1209/LibreVNA/PNB-60/sim 5573/5574
                                                            mag2d   2-axis vector magnet on NI DAQ  5575/5576
                                                            mag2dcal the same magnet, calibrated seek 5577/5578
                                                            ppms    QD DynaCool: field, T, chamber  5579/5580
@@ -2242,6 +2242,15 @@ with `--real`, exercise it from the console first, then the GUI, and fix every
   sweep, `ABOR` acts while a `TRIG:SING` is pending, one point of
   `CALC1:TRAC1:DATA:SDAT?` against S2VNA's marker, power coupling for S12/S22,
   the model's real frequency range.
+- **vna (LibreVNA / Harogic PNB-60):** LibreVNA-GUI (SCPI server, port 19542) or
+  VNStudio (System > SCPI > Enable, port 5025) running with the analyser
+  connected; `[hardware] driver = librevna` or `harogic` in `vna-controlna.ini`.
+  Then the # VERIFY in `backends/librevna.py`: `VNA:ACQ:SINGLE TRUE` starts one
+  sweep and the done query (`VNA:ACQ:FIN?` / `VNA:ACQ:RUN?`) never reports a
+  stale "done" right after it; on VNStudio the S-parameter must be shown to be
+  measured; `VNA:TRAC:NEW` / `PARAM` on LibreVNA-GUI; `VNA:ACQ:SINGLE FALSE`
+  restarts continuous sweeping; one point against the program's marker; the
+  `DEV:INF:LIM:*` replies vs the envelope.
 - **ppms (DynaCool):** MultiVu running on the same PC; `uv sync --extra gui
   --extra real` (MultiPyVu + pywin32). First `run_service.py --real --scaffold`
   (MultiPyVu's own simulation), then `--real` with MultiVu. Check: the adopted

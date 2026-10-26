@@ -4,9 +4,9 @@
 [module]
 key = "vna"
 name = "VNA"
-description = "Keysight PNA-X or Copper Mountain C1209 (or simulated): S-parameters, reference, permeability"
+description = "Keysight PNA-X, Copper Mountain C1209, LibreVNA or Harogic PNB-60 (or simulated): S-parameters, reference, permeability"
 category = "detector"
-tags = ["VNA", "S-parameters", "FMR", "Keysight", "Copper Mountain"]
+tags = ["VNA", "S-parameters", "FMR", "Keysight", "Copper Mountain", "LibreVNA", "Harogic"]
 icon = "icon.svg"
 order = 100
 

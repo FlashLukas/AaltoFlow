@@ -62,7 +62,7 @@ _CHOICES = {
     ("sweep", "sparam"): list(SPARAMS),
     ("field", "source"): list(FIELD_SOURCES),
     ("sample", "geometry"): ["in_plane", "out_of_plane"],   # analyzer.GEOMETRIES
-    ("hardware", "driver"): ["pna", "cmt"],             # backends/__init__.py, --driver
+    ("hardware", "driver"): ["pna", "cmt", "librevna", "harogic"],             # backends/__init__.py, --driver
     ("hardware", "data_format"): ["REAL,64", "ASCII"],   # backends pna.py / cmt.py
 }
 

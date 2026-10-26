@@ -9,6 +9,8 @@ A real analyser, driven from this process (no service):
     uv sync --extra gui --extra real
     uv run scripts/run_gui.py --real                  # Keysight PNA-X
     uv run scripts/run_gui.py --real --driver cmt     # Copper Mountain C1209
+    uv run scripts/run_gui.py --real --driver librevna   # LibreVNA (LibreVNA-GUI)
+    uv run scripts/run_gui.py --real --driver harogic    # Harogic PNB-60 (VNStudio)
 
 Connect to a running service (same PC or across the lab network):
     uv run scripts/run_gui.py --connect localhost
@@ -24,6 +26,7 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if os.path.isdir(_SRC):
     sys.path.insert(0, os.path.abspath(_SRC))
 
+from vna.backends import ANALYSERS
 from vna.config import Config
 from vna.field import FIELD_SOURCES
 from vna.apps.gui import run_app
@@ -38,8 +41,9 @@ def main() -> int:
     ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
     ap.add_argument("--real", action="store_true",
                     help="without --connect: drive the real analyser from this process")
-    ap.add_argument("--driver", choices=["pna", "cmt"], default=None,
-                    help="with --real: pna = Keysight PNA-X (default), cmt = Copper Mountain C1209")
+    ap.add_argument("--driver", choices=list(ANALYSERS), default=None,
+                    help="with --real: pna = Keysight PNA-X (default), cmt = Copper Mountain "
+                         "C1209, librevna = LibreVNA, harogic = Harogic PNB-60")
     ap.add_argument("--visa", default=None, help="VISA resource/alias for --real")
     ap.add_argument("--field", choices=list(FIELD_SOURCES), default=None,
                     help="without --connect: where the field comes from")
@@ -68,14 +72,11 @@ def main() -> int:
         cfg.field.source = args.field
     if args.real:
         from vna.analyzer import Analyzer
-        from vna.backends import real_backend
+        from vna.backends import real_backend, resource_field
         if args.driver:
             cfg.hardware.driver = args.driver
         if args.visa:
-            if cfg.hardware.driver == "cmt":
-                cfg.hardware.cmt_resource = args.visa
-            else:
-                cfg.hardware.visa_resource = args.visa
+            setattr(cfg.hardware, resource_field(cfg), args.visa)
         return run_app(Analyzer(real_backend(cfg), cfg), cfg)
     from vna.sim_system import build_sim_system
     vna, _ = build_sim_system(cfg)

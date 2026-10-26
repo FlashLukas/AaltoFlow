@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 
 from fake_cmt import FakeCmt
+from fake_sweepserver import FakeSweepServer
 from fake_visa import FakePna
 from vna import hwlock
 from vna.backends.claim import lock_address
 from vna.backends.cmt import CmtVna
+from vna.backends.librevna import DIALECTS, SweepServerVna
 from vna.backends.pna import PnaVna
 from vna.config import Config
 from vna.sim_system import build_sim_system
@@ -45,7 +47,19 @@ def test_the_hwlock_copy_is_the_master_byte_for_byte():
     assert Path(mine.__file__).read_bytes() == master.read_bytes()
 
 
-@pytest.mark.parametrize("make", [_pna, _cmt])
+def _sweepserver(driver):
+    def make():
+        cfg = Config()
+        cfg.hardware.driver = driver
+        fake = FakeSweepServer(driver)
+        return SweepServerVna(cfg, DIALECTS[driver], resource=fake, sleep=lambda s: None), fake
+    return make
+
+
+_librevna, _harogic = _sweepserver("librevna"), _sweepserver("harogic")
+
+
+@pytest.mark.parametrize("make", [_pna, _cmt, _librevna, _harogic])
 def test_a_second_backend_on_the_same_analyser_is_refused(make):
     a, _ = make()
     a.open()

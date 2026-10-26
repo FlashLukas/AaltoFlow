@@ -8,9 +8,11 @@
     uv run --extra real scripts/run_service.py --real --driver cmt --field ppms
                                                            # Copper Mountain C1209 (S2VNA on
                                                            # this PC) + the DynaCool's field
+    uv run --extra real scripts/run_service.py --real --driver librevna   # LibreVNA-GUI, port 19542
+    uv run --extra real scripts/run_service.py --real --driver harogic    # VNStudio, port 5025
 
-Two real analysers: --driver pna (Keysight PNA-X, the default) or --driver cmt
-(Copper Mountain C1209). The launcher only passes --real, so a PC keeps its
+Four real analysers: --driver pna (Keysight PNA-X, the default), cmt (Copper
+Mountain C1209), librevna (LibreVNA) or harogic (Harogic PNB-60). The launcher only passes --real, so a PC keeps its
 choice in vna.ini next to this folder's pyproject.toml (not in git), e.g.
     [hardware]
     driver = cmt
@@ -46,6 +48,8 @@ if os.path.isdir(_SRC):
 
 from pathlib import Path
 
+from vna.backends import ANALYSERS, resource_field
+from vna.backends.librevna import DIALECTS
 from vna.config import Config
 from vna.field import FIELD_SOURCES
 from vna.hwlock import HardwareBusy
@@ -108,12 +112,14 @@ def main() -> int:
     ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
     ap.add_argument("--real", action="store_true",
                     help="drive the real analyser (--driver) instead of simulating")
-    ap.add_argument("--driver", choices=["pna", "cmt"], default=None,
+    ap.add_argument("--driver", choices=list(ANALYSERS), default=None,
                     help="which real analyser: pna = Keysight PNA-X, cmt = Copper Mountain "
-                         "C1209 (default: from config, pna)")
+                         "C1209, librevna = LibreVNA, harogic = Harogic PNB-60 "
+                         "(default: from config, pna)")
     ap.add_argument("--visa", default=None,
                     help="VISA resource/alias of the analyser (PNA default: N5222A; "
-                         "C1209 default: TCPIP0::127.0.0.1::5025::SOCKET)")
+                         "C1209 / PNB-60 default: TCPIP0::127.0.0.1::5025::SOCKET; "
+                         "LibreVNA: TCPIP0::127.0.0.1::19542::SOCKET)")
     ap.add_argument("--cal-set", default=None, help="calibration set to activate on connect")
     ap.add_argument("--field", choices=list(FIELD_SOURCES), default=None,
                     help="where the field comes from (default: from config, mag2d)")
@@ -166,10 +172,7 @@ def main() -> int:
     if args.driver:
         cfg.hardware.driver = args.driver
     if args.visa:
-        if cfg.hardware.driver == "cmt":
-            cfg.hardware.cmt_resource = args.visa
-        else:
-            cfg.hardware.visa_resource = args.visa
+        setattr(cfg.hardware, resource_field(cfg), args.visa)
     if args.cal_set is not None:
         cfg.hardware.cal_set = args.cal_set
 
@@ -183,6 +186,10 @@ def main() -> int:
     hw = cfg.hardware
     if args.real and hw.driver == "cmt":
         print(f"REAL VNA: Copper Mountain C1209 via S2VNA at '{hw.cmt_resource}' "
+              f"-- field from {where}")
+    elif args.real and hw.driver in DIALECTS:
+        d = DIALECTS[hw.driver]
+        print(f"REAL VNA: {d.name} via {d.program} at '{getattr(hw, d.resource_field)}' "
               f"-- field from {where}")
     elif args.real:
         print(f"REAL VNA: Keysight PNA-X at VISA '{hw.visa_resource}' -- field from {where}")
@@ -221,6 +228,11 @@ def main() -> int:
                   "is ON (System > Misc Setup > Network Setup > Socket Server, port 5025), "
                   f"the address '{hw.cmt_resource}' matches, and the real extra is "
                   "installed (uv sync --extra gui --extra real)")
+        elif args.real and hw.driver in DIALECTS:
+            d = DIALECTS[hw.driver]
+            print(f"  check: {d.help}, the address '{getattr(hw, d.resource_field)}' "
+                  "matches, and the real extra is installed "
+                  "(uv sync --extra gui --extra real)")
         elif args.real:
             print("  check: the PNA-X is on and reachable, the VISA alias/address "
                   f"'{cfg.hardware.visa_resource}' exists (Keysight Connection Expert), "
