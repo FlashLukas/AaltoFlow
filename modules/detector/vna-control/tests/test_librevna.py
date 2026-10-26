@@ -187,8 +187,51 @@ def test_close_hands_the_program_back_sweeping_continuously(driver):
     b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -20.0, "S21", F)
     b.abort_sweep()
     b.close()
-    assert fake.log[-1] == "VNA:ACQ:SINGLE FALSE" and not fake.single
+    assert "VNA:ACQ:SINGLE FALSE" in fake.log and not fake.single
     b.close()                                             # twice is fine
+
+
+def test_close_puts_librevna_gui_back_in_the_mode_it_was_in():
+    """The first real run found LibreVNA-GUI in spectrum-analyser mode: the
+    first sweep switches it to VNA, close switches it back."""
+    b, fake, _ = _backend("librevna")
+    b.open()
+    assert b.read_state()["mode"] == "SA" and fake.mode == "SA"
+    b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -20.0, "S21", F)
+    assert fake.mode == "VNA"
+    b.finish_sweep()
+    b.close()
+    assert fake.log[-2:] == ["VNA:ACQ:SINGLE FALSE", "DEV:MODE SA"] and fake.mode == "SA"
+
+
+def test_librevna_reports_its_calibration_with_every_sample():
+    b, fake, _ = _backend("librevna")
+    b.open()
+    st = b.read_state()
+    assert st["calibration"] == "SOLT_12" and st["correction_on"] is True
+    fake.cal = "NONE"
+    b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -20.0, "S21", F)
+    _, meta = b.finish_sweep()
+    assert meta["correction_on"] is False and meta["calibration"] == "NONE"
+
+
+def test_librevna_learns_its_sweep_time():
+    t = [0.0]
+
+    def clock():
+        t[0] += 0.05
+        return t[0]
+    cfg = Config()
+    cfg.hardware.driver = "librevna"
+    b = SweepServerVna(cfg, LIBREVNA, resource=FakeSweepServer("librevna"), clock=clock,
+                       sleep=lambda s: None)
+    b.open()
+    rule = b.sweep_time_s(11, 1e3)
+    b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -20.0, "S21", F)
+    _, meta = b.finish_sweep()
+    assert b.sweep_time_s(11, 1e3) == pytest.approx(meta["sweep_s"])
+    assert b.sweep_time_s(11, 1e3) != pytest.approx(rule)
+    assert b.sweep_time_s(21, 1e3) == pytest.approx(rule * 21 / 11)   # other settings: the rule
 
 
 def test_a_different_model_is_a_warning_not_a_failure():

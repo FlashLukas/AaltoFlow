@@ -98,9 +98,12 @@ program's "done?" poll (`VNA:ACQ:FIN?` / `VNA:ACQ:RUN?`), then `VNA:TRAC:DATA?`,
 which returns every point as `[frequency, re, im]` -- so the module checks each
 point's frequency against the grid it files the trace under, and refuses a
 mismatch. On the LibreVNA it reads its own trace `AALTOFLOW_S`, created on the
-first sweep. Errors come from `*ESR?` (neither program documents an error
-queue). The envelope follows the data sheets (LibreVNA: -42 .. -10 dBm, 10 Hz -
-50 kHz IFBW, 4501 points; PNB-60: -40 .. +5 dBm, 15 Hz - 75 kHz, 2048 points);
+first sweep, switches LibreVNA-GUI to VNA mode and back to the mode it found
+when it closes, files the active calibration (`VNA:CAL:ACTIVE?`) with every
+sample and learns how long a sweep takes. **The LibreVNA has run on the
+hardware** (2026-10-26, `docs/VERIFIED_INSTRUMENTS.md`); the PNB-60 not yet. Errors come from `*ESR?` (neither program documents an error
+queue). The envelope follows the analysers (LibreVNA, as its GUI reported it: -40 .. 0 dBm,
+6 Hz - 50 kHz IFBW, 4501 points; PNB-60: -40 .. +5 dBm, 15 Hz - 75 kHz, 2048 points);
 a tighter limit the program reports at connect is a warning naming it.
 
 The field comes from `ppms-control` (field source `ppms`: the DynaCool's signed

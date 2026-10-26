@@ -88,7 +88,8 @@ class Dialect:
     not_connected: tuple      # DEV:CONN? replies that mean "no box attached"
     done_query: str           # polled after the trigger ...
     done_reply: str           # ... until it answers this
-    sweep_time_query: str     # "" = none; the model rule of thumb is used
+    sweep_time_query: str     # "" = none: the duration of the last sweep is learned
+    cal_query: str            # "" = none; else the active calibration ("NONE" = off)
     own_trace: bool           # True = read our named trace, False = the S-parameter
     sweep_type: bool          # VNA:SWEEPTYPE LIN exists (Harogic) and must be set
     set_mode: bool            # DEV:MODE VNA exists (LibreVNA: VNA / GEN / SA)
@@ -101,13 +102,15 @@ LIBREVNA = Dialect(
     resource_field="librevna_resource", idn_vendor="LIBREVNA", model_hint="LibreVNA",
     not_connected=("NOT CONNECTED",),
     done_query="VNA:ACQ:FIN?", done_reply="TRUE",
-    sweep_time_query="", own_trace=True, sweep_type=False, set_mode=True,
-    # 100 kHz - 6 GHz (the unit's data sheet). Points / IFBW / power from the
-    # LibreVNA-GUI defaults -- the GUI reports the real ones (DEV:INF:LIM:*),
-    # which open() compares against these.  # VERIFY on the unit
+    sweep_time_query="", cal_query="VNA:CAL:ACTIVE?",
+    own_trace=True, sweep_type=False, set_mode=True,
+    # 100 kHz - 6 GHz (the data sheet). The rest is what LibreVNA-GUI 1.6.5
+    # reported for the group's unit on 2026-10-26 (DEV:INF:LIM:*): 4501 points,
+    # IFBW 6 Hz - 50 kHz, power -40 .. 0 dBm. (It reports MINF 0; the data
+    # sheet's 100 kHz is kept.)
     envelope={"freq_min_Hz": 100e3, "freq_max_Hz": 6e9, "points_max": 4501,
-              "ifbw_min_Hz": 10.0, "ifbw_max_Hz": 50e3,
-              "power_min_dBm": -42.0, "power_max_dBm": -10.0},
+              "ifbw_min_Hz": 6.0, "ifbw_max_Hz": 50e3,
+              "power_min_dBm": -40.0, "power_max_dBm": 0.0},
     help="LibreVNA-GUI is running with the LibreVNA connected (Device > Connect), its SCPI "
          "server is on (Window > Preferences > General, port 19542)",
 )
@@ -119,7 +122,8 @@ HAROGIC = Dialect(
     # VERIFY: RUN? is TRUE while the single sweep runs and FALSE once it ended
     # (the guide: "TRUE indicates that a sweep is running").
     done_query="VNA:ACQ:RUN?", done_reply="FALSE",
-    sweep_time_query="VNA:ACQ:SWE:TIME?", own_trace=False, sweep_type=True, set_mode=False,
+    sweep_time_query="VNA:ACQ:SWE:TIME?", cal_query="",
+    own_trace=False, sweep_type=True, set_mode=False,
     # 100 kHz - 6 GHz (PNB-60 product page); the rest are the replies printed in
     # the SCPI guide's examples (MINIFBW 15, MAXIFBW 75000, MAXP 2048, power
     # -40 .. 5 dBm).  # VERIFY with DEV:INF:LIM:* on the unit
@@ -234,6 +238,10 @@ class SweepServerVna:
         self._freqs = np.zeros(0)         # the grid of the sweep in flight
         self._started_at = math.nan
         self._sweep_time: dict = {}       # (points, ifbw) -> seconds (Harogic's query)
+        self._found_mode = ""             # LibreVNA-GUI's mode at connect (VNA / SA / GEN)
+        self._cal = None                  # the active calibration, e.g. "SOLT_12"
+        self._correction = None
+        self._ifbw_asked = math.nan
         self.device_limits: dict = {}
         self.warnings: list[str] = []
 
@@ -331,6 +339,18 @@ class SweepServerVna:
                 st[key] = self._query(q)
             except Exception as exc:
                 self.warnings.append(f"reading {key}: {exc}")
+        if self.d.set_mode:
+            # LibreVNA-GUI is also a spectrum analyser and a generator: note the
+            # mode it is in, so close() can put it back (it was "SA" on the
+            # first real run, 2026-10-26)
+            try:
+                self._found_mode = self._query("DEV:MODE?").upper()
+                st["mode"] = self._found_mode
+            except Exception as exc:
+                self.warnings.append(f"reading the mode: {exc}")
+        if self.d.cal_query:
+            st["calibration"] = self._calibration()
+            st["correction_on"] = self._correction
         st["serial"] = getattr(self, "_serial", "")
         self._read_device_limits()
         st["device_limits"] = dict(self.device_limits)
@@ -400,9 +420,12 @@ class SweepServerVna:
         try:
             if self._prepared:
                 # Hand the program back sweeping continuously, like we found a
-                # front panel -- only if we took it over.
-                # VERIFY (VNStudio): SINGLE FALSE alone restarts the sweeping.
+                # front panel -- only if we took it over. Seen working on
+                # LibreVNA-GUI 1.6.5.  # VERIFY (VNStudio): SINGLE FALSE alone
+                # restarts its sweeping.
                 r.write("VNA:ACQ:SINGLE FALSE")
+                if self.d.set_mode and self._found_mode not in ("", "VNA"):
+                    r.write(f"DEV:MODE {self._found_mode}")    # back to SA / GEN
         except Exception:
             pass                                           # closing must not raise
         finally:
@@ -426,9 +449,14 @@ class SweepServerVna:
     # ---- sweeping ----------------------------------------------------------------
 
     def sweep_time_s(self, points: int, ifbw_Hz: float) -> float:
-        """VNStudio's own figure (VNA:ACQ:SWE:TIME?, read when the settings were
-        written) if it is for these settings, else the rule of thumb. Never
-        queries: status() calls it ten times a second."""
+        """For these settings: VNStudio's own figure (VNA:ACQ:SWE:TIME?, read
+        when the settings were written), or on LibreVNA the measured length of
+        the last sweep; else the rule of thumb. Never queries: status() calls it
+        ten times a second.
+
+        Why learn it: on the LibreVNA the rule of thumb was 5-10x short (201
+        points at 10 kHz IFBW: 0.024 s predicted, 0.12-0.32 s real, 2026-10-26),
+        and the brain stamps the fly-scan stream's points with this number."""
         t = self._sweep_time.get((int(points), float(ifbw_Hz)))
         return t if t is not None else model.sweep_time_s(points, ifbw_Hz)
 
@@ -451,6 +479,8 @@ class SweepServerVna:
         if changed:
             self._check("applying the sweep settings")
             self._verify_settings(want)
+            if self.d.cal_query:
+                self._calibration()
             if self.d.sweep_time_query:
                 try:
                     t = float(self._query(self.d.sweep_time_query))
@@ -459,6 +489,7 @@ class SweepServerVna:
                 except Exception as exc:
                     self.warnings.append(f"reading the sweep time: {exc}")
         self._freqs = f
+        self._ifbw_asked = want["ifbw"]
         # ONE sweep: SINGLE TRUE selects single mode AND starts a new sweep
         # (both guides). A settings write above may already have restarted one;
         # this restarts it again, so the sweep we read began after every change.
@@ -487,6 +518,10 @@ class SweepServerVna:
                                    f"{ceiling:.0f} s ({self.d.done_query} -> {reply!r})")
             self._sleep(0.02)
         self._pending = False
+        took = self._clock() - self._started_at
+        if not self.d.sweep_time_query and took > 0:
+            # trigger -> "done" seen: an upper bound by one poll (20 ms)
+            self._sweep_time[(self._freqs.size, self._ifbw_asked)] = took
         name = TRACE if self.d.own_trace else self._sparam
         # VERIFY (VNStudio): the S-parameter's trace must be shown in VNStudio
         # to be measured ("all enabled traces in the current interface").
@@ -494,8 +529,9 @@ class SweepServerVna:
         self._check_grid(x)
         meta = {"ifbw_actual_Hz": self._readback.get("ifbw", math.nan),
                 "power_actual_dBm": self._readback.get("power", math.nan),
-                "correction_on": None,          # neither guide has a query for it
-                "sweep_s": self._clock() - self._started_at,
+                "correction_on": self._correction,   # None: VNStudio has no query
+                "calibration": self._cal,
+                "sweep_s": took,
                 "f_res_model_Hz": math.nan}
         return z, meta
 
@@ -518,6 +554,17 @@ class SweepServerVna:
                 and cmd != "DEV:CONN?":
             raise RuntimeError(f"{self.d.program}: {cmd} -> {reply}")
         return reply
+
+    def _calibration(self):
+        """The active calibration (LibreVNA: "SOLT_12", ... or "NONE"). A failed
+        query leaves both unknown (None) -- it must not stop a sweep."""
+        try:
+            self._cal = self._query(self.d.cal_query)
+            self._correction = self._cal.upper() not in ("", "NONE")
+        except Exception as exc:
+            self.warnings.append(f"reading the calibration: {exc}")
+            self._cal = self._correction = None
+        return self._cal
 
     def _trace_list(self) -> list[str]:
         return [t.strip() for t in self._query("VNA:TRAC:LIST?").split(",") if t.strip()]

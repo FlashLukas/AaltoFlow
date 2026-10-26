@@ -30,6 +30,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`afg`](../modules/source/afg-control) | Tektronix AFG1062 | **verified** (levels, phase, follow, clamps, keep-outputs restart, sweeps) | 2026-10-10 |
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) `--driver dwf` | Digilent Analog Discovery 2 (WaveForms 3.24.4) | **verified** (scope, W1/W2 generator incl. phase, sweeps, V+/V- supplies) | 2026-10-10 |
+| [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **partly verified** (SCPI sequence, sweeps, reference + acquire through the service; not yet compared with the GUI's marker) | 2026-10-26 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
@@ -453,6 +454,35 @@ Commits 4566d00 .. 27facf8.
 CH1 frequency 30 -> 40 Hz at 2 Hz/s with CH2 following: equal at every
 sample, tracked by the Siglent; amplitude 0.5 -> 2 Vpp ended at 2.027 Vpp on
 the scope; ramp_stop mid-sweep leaves both outputs on at the same frequency.
+
+## vna `--driver librevna` -- LibreVNA through LibreVNA-GUI (2026-10-26)
+
+Ran on the development PC with the LibreVNA on USB and LibreVNA-GUI 1.6.5's SCPI
+server on port 19542 (`backends/librevna.py`).
+
+**Checked:** connect = look (`*IDN?`, `DEV:CONN?`, the sweep, `DEV:INF:LIM:*`,
+`VNA:CAL:ACTIVE?`; nothing written); the first sweep's take-over (`DEV:MODE VNA`,
+`VNA:SWEEP FREQUENCY`, `VNA:ACQ:AVG 1`, `VNA:TRAC:NEW AALTOFLOW_S`,
+`VNA:TRAC:PARAM AALTOFLOW_S S21`); settings + read-back; `VNA:ACQ:SINGLE TRUE`
+starts one sweep and `VNA:ACQ:FIN?` reads FALSE straight after it (no stale
+"done"); `VNA:TRAC:DATA?` parsed and every point's frequency matched the grid;
+a bogus command sets the command-error bit (32) of `*ESR?`. Through the real
+service in its own process: a reference, then an acquisition of 2 averaged
+401-point sweeps (1-6 GHz, 10 kHz IFBW, ~1 s each), `u` computed, the active
+calibration filed with the sample.
+
+**Learnt from the hardware:**
+- The unit reports power -40 .. 0 dBm and IFBW 6 Hz - 50 kHz (the guessed
+  envelope was -42 .. -10 dBm); the envelope now uses those numbers.
+- LibreVNA-GUI was in **spectrum-analyser mode**; the first sweep switches it to
+  VNA, so `close()` now switches it back to the mode it found.
+- The rule-of-thumb sweep time is 5-10x short (201 points at 10 kHz: 0.024 s
+  predicted, 0.12-0.32 s real), so the backend learns each sweep's length (the
+  fly-scan stream stamps its points with it).
+
+**Not yet checked:** one point against LibreVNA-GUI's marker (the ports were
+open, |S21| at the -50 .. -95 dB isolation floor); S11/S12/S22; a sweep with a
+real device under test; the fly-scan stream's timing.
 
 ## scan-core -- scans with real instruments
 

@@ -35,6 +35,8 @@ class FakeSweepServer:
         self.single = False
         self.sweep_mode = "FREQUENCY"
         self.avg = 3
+        self.mode = "SA"
+        self.cal = "SOLT_12"
         self.traces = {"S11": "S11", "S12": "S12", "S21": "S21", "S22": "S22"}
         self.esr = 0
         self.unsolicited: list[str] = []      # lines waiting in the socket
@@ -85,10 +87,12 @@ class FakeSweepServer:
         if m:
             self.avg = int(m.group(1))
             return
-        if cmd in ("VNA:SWEEP FREQUENCY", "VNA:SWEEPTYPE LIN", "DEV:MODE VNA"):
+        m = re.fullmatch(r"DEV:MODE (VNA|SA|GEN)", cmd)
+        if m and self.dialect == "librevna":
+            self.mode = m.group(1)
+            return
+        if cmd in ("VNA:SWEEP FREQUENCY", "VNA:SWEEPTYPE LIN"):
             if cmd == "VNA:SWEEPTYPE LIN" and self.dialect != "harogic":
-                self.esr |= 0x20
-            if cmd == "DEV:MODE VNA" and self.dialect != "librevna":
                 self.esr |= 0x20
             return
         # anything else: a command error, as the real programs would flag it
@@ -135,6 +139,10 @@ class FakeSweepServer:
             return "TRUE" if self.single else "FALSE"
         if cmd == "VNA:ACQ:AVG?":
             return str(self.avg)
+        if cmd == "DEV:MODE?" and self.dialect == "librevna":
+            return self.mode
+        if cmd == "VNA:CAL:ACTIVE?" and self.dialect == "librevna":
+            return self.cal
         if cmd == "VNA:TRAC:LIST?" and self.dialect == "librevna":
             return ",".join(self.traces)
         m = re.fullmatch(r"VNA:TRAC:PARAM\? (\S+)", cmd)
