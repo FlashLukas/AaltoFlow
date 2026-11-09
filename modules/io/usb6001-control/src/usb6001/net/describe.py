@@ -30,7 +30,7 @@ import json
 import math
 import zlib
 
-from ..config import AI_CHANNELS, AO_CHANNELS, DIO_LINES, line_id
+from ..config import AI_CHANNELS, AO_CHANNELS, DIO_LINES, is_scaled, line_id
 
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
@@ -99,8 +99,10 @@ def read_path(status: dict, path):
 
 
 
-def _is_scaled(ch) -> bool:
-    return ch.unit.strip() not in ("", "V") or ch.slope != 1.0 or ch.offset != 0.0
+def _scale_help(ch, unit: str) -> str:
+    if ch.law == "log10":
+        return f" Scaled: 10^({ch.slope:g}/V x V + {ch.offset:g}) {unit}."
+    return f" Scaled: {ch.slope:g} {unit}/V x V + {ch.offset:g} {unit}."
 
 
 def build_manifest(daq) -> dict:
@@ -154,9 +156,8 @@ def build_manifest(daq) -> dict:
             read_path=["sample", "ai", i], acquire=acquire,
             help=f"{AI_CHANNELS[i]} ({ch.terminal}): mean of {cfg.ai.samples_per_read} "
                  f"samples taken AFTER the trigger -- safe to record in a scan."
-                 + (f" Scaled: {ch.slope:g} {unit}/V x V + {ch.offset:g} {unit}."
-                    if _is_scaled(ch) else "")))
-        if _is_scaled(ch):
+                 + (_scale_help(ch, unit) if is_scaled(ch) else "")))
+        if is_scaled(ch):
             params.append(_p(
                 f"{AI_CHANNELS[i]}_V", f"{label} (V)", "indicator", "float", unit="V",
                 group="Analog inputs", order=200 + i, decimals=5,
@@ -166,7 +167,16 @@ def build_manifest(daq) -> dict:
             f"{AI_CHANNELS[i]}_live", f"{label} (live)", "indicator", "float", unit=unit,
             group="Live", order=300 + i, decimals=4, plottable=True,
             read_path=["ai", i],
-            help="Latest poll-thread reading: for a panel, not for a scan point."))
+            help="Latest poll-thread reading: for a panel, not for a scan point."
+                 + (f" Running mean of the last {ch.smooth_reads} readings."
+                    if ch.smooth_reads > 1 else "")))
+        if math.isfinite(float(ch.lamp_above)):
+            lamp = ch.lamp_name.strip() or f"{label} high"
+            params.append(_p(
+                f"{AI_CHANNELS[i]}_lamp", lamp, "indicator", "bool",
+                group="Live", order=300 + i, read_path=["ai_lamp", i],
+                help=f"On while {label} (live) is at or above {ch.lamp_above:g} {unit}. "
+                     f"Information only: nothing is switched."))
 
     # -- digital inputs -------------------------------------------------------------------------
     for line in lay.di:

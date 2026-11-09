@@ -1,6 +1,8 @@
 """Config: .ini round trip (per-channel sections, bools, directions), the
 validation rules of sanitise(), and the wire dict round trip. No hardware."""
 
+import json
+
 from usb6001.config import (DIO_LINES, Config, _cast, line_index, line_id,
                             daqmx_line, sanitise)
 from usb6001.net.protocol import apply_config_dict, config_to_dict
@@ -38,7 +40,10 @@ def test_ini_round_trip_including_bools_and_directions(tmp_path):
     assert "[dio.p0.4]" in text and "[ai.ai2]" in text and "[ao.ao1]" in text
 
     back = Config.load(str(p))
-    assert config_to_dict(back) == config_to_dict(cfg)
+    # compared as JSON text: the "no lamp" threshold is NaN, and NaN != NaN
+    # would fail a plain dict compare although both sides say "no lamp"
+    assert json.dumps(config_to_dict(back), sort_keys=True) == \
+        json.dumps(config_to_dict(cfg), sort_keys=True)
     assert back.ai.channels[0].enabled is False
     assert back.hardware.sim_ai_loopback is False
 

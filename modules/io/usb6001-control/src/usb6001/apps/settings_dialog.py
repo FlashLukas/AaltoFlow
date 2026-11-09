@@ -5,8 +5,9 @@ Nothing here talks to the hardware: the widgets are copied into the shared
 running brain (local, or the service over the network) picks them up.
 
 Tabs:
-  AI         per channel: enabled, name, terminal, unit + linear scale;
-             samples per reading and the sample rate
+  AI         per channel: enabled, name, terminal, unit, scale law (linear or
+             log10), live running mean, lamp threshold; samples per reading
+             and the sample rate
   AO         per output: name and the safety limits
   DIO        per line: direction in/out/unused, name, initial and safe state
   Limits     the card's own envelope
@@ -22,8 +23,8 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtWidgets
 
-from ..config import (AI_CHANNELS, AO_CHANNELS, DIO_LINES, DIRECTIONS, LEVELS,
-                      TERMINALS, Config)
+from ..config import (AI_CHANNELS, AO_CHANNELS, DIO_LINES, DIRECTIONS, LAWS, LEVELS,
+                      SMOOTH_MAX, TERMINALS, Config)
 from ..net.protocol import apply_config_dict, config_to_dict
 
 
@@ -42,6 +43,26 @@ def _ispin(lo, hi, suffix=""):
     if suffix:
         w.setSuffix("  " + suffix)
     return w
+
+
+class _OptFloat(QtWidgets.QLineEdit):
+    """A number that may be ABSENT: empty text <-> NaN in the config (used for a
+    lamp threshold, where NaN means "no lamp"). A spin box cannot show 'none'."""
+
+    def __init__(self, placeholder="none"):
+        super().__init__()
+        self.setPlaceholderText(placeholder)
+        self.setMaximumWidth(90)
+
+    def set_value(self, v) -> None:
+        v = float(v)
+        self.setText("" if v != v else f"{v:g}")     # v != v: NaN
+
+    def value(self) -> float:
+        try:
+            return float(self.text().strip().replace(",", "."))
+        except ValueError:
+            return float("nan")                       # empty or not a number: none
 
 
 def _combo(options):
@@ -70,7 +91,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg = cfg
         self.on_applied = on_applied
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(1000)
 
         #: (group, index or None, field) -> widget
         self.w: dict = {}
@@ -108,12 +129,16 @@ class SettingsDialog(QtWidgets.QDialog):
     def _ai_tab(self):
         page, lay = self._page()
         grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(8)
-        _header(grid, ("", "On", "Name", "Terminal", "Unit", "Slope (unit/V)", "Offset (unit)"))
+        _header(grid, ("", "On", "Name", "Terminal", "Unit", "Law", "Slope", "Offset",
+                       "Smooth", "Lamp at", "Lamp name"))
         for i, ch in enumerate(AI_CHANNELS):
             grid.addWidget(QtWidgets.QLabel(ch), i + 1, 0)
             row = [("enabled", QtWidgets.QCheckBox()), ("name", QtWidgets.QLineEdit()),
                    ("terminal", _combo(TERMINALS)), ("unit", QtWidgets.QLineEdit()),
-                   ("slope", _dspin(-1e9, 1e9, 6, 0.1)), ("offset", _dspin(-1e9, 1e9, 6, 0.1))]
+                   ("law", _combo(LAWS)),
+                   ("slope", _dspin(-1e9, 1e9, 6, 0.1)), ("offset", _dspin(-1e9, 1e9, 6, 0.1)),
+                   ("smooth_reads", _ispin(1, SMOOTH_MAX, "reads")),
+                   ("lamp_above", _OptFloat()), ("lamp_name", QtWidgets.QLineEdit())]
             for c, (f, wdg) in enumerate(row):
                 self.w[("ai", i, f)] = wdg
                 grid.addWidget(wdg, i + 1, c + 1)
@@ -127,7 +152,13 @@ class SettingsDialog(QtWidgets.QDialog):
         lay.addWidget(_hint("DIFF uses two pins: ai0 with ai4, ai1 with ai5, ai2 with ai6, "
                             "ai3 with ai7 -- the partner is switched off. The card shares "
                             "20 kS/s between all enabled channels. 'On' and 'Terminal' apply "
-                            "after a SERVICE RESTART; names and scales at once."))
+                            "after a SERVICE RESTART; names and scales at once.\n"
+                            "Law linear: value = slope x V + offset. Law log10: value = "
+                            "10^(slope x V + offset) -- a vacuum gauge with p = 10^(U - 5) is "
+                            "slope 1, offset -5. Smooth: the live value is the running mean of "
+                            "that many readings (a scan's fresh sample is never smoothed). "
+                            "Lamp at: a lamp lights while the live value is at or above it "
+                            "(empty = no lamp)."))
         lay.addStretch(1)
         return page
 
@@ -226,7 +257,9 @@ class SettingsDialog(QtWidgets.QDialog):
     def _populate(self, cfg: Config) -> None:
         for (group, idx, f), wdg in self.w.items():
             val = getattr(self._target(cfg, group, idx), f)
-            if isinstance(wdg, QtWidgets.QCheckBox):
+            if isinstance(wdg, _OptFloat):       # before QLineEdit: it is one
+                wdg.set_value(val)
+            elif isinstance(wdg, QtWidgets.QCheckBox):
                 wdg.setChecked(bool(val))
             elif isinstance(wdg, QtWidgets.QComboBox):
                 wdg.setCurrentText(str(val))
@@ -239,7 +272,9 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _collect(self, cfg: Config) -> None:
         for (group, idx, f), wdg in self.w.items():
-            if isinstance(wdg, QtWidgets.QCheckBox):
+            if isinstance(wdg, _OptFloat):
+                val = wdg.value()
+            elif isinstance(wdg, QtWidgets.QCheckBox):
                 val = wdg.isChecked()
             elif isinstance(wdg, QtWidgets.QComboBox):
                 val = wdg.currentText()

@@ -12,7 +12,7 @@ up as an **input**, an **output** or **unused** in the config. Ports 5629 / 5630
 
 | | |
 |---|---|
-| **AI** ai0..ai7 | per channel: on/off, name, terminal RSE / NRSE / DIFF (DIFF pairs ai0/ai4 ... ai3/ai7), and an optional straight-line scale `value = slope x V + offset` so a channel reads mT, K, ... One reading = the mean of `samples_per_read` samples at `rate_Hz` (one converter: 20 kS/s shared by all enabled channels). |
+| **AI** ai0..ai7 | per channel: on/off, name, terminal RSE / NRSE / DIFF (DIFF pairs ai0/ai4 ... ai3/ai7), and an optional scale so a channel reads mT, K, mbar, ...: law **linear** `value = slope x V + offset` or **log10** `value = 10^(slope x V + offset)` (a logarithmic vacuum gauge). One reading = the mean of `samples_per_read` samples at `rate_Hz` (one converter: 20 kS/s shared by all enabled channels). Optional per channel: a live **running mean** over N readings (`smooth_reads`; a scan's fresh sample is never smoothed) and a **lamp** that lights at or above a threshold (`lamp_above`, e.g. "ATM" at 1100 mbar -- information only). |
 | **AO** ao0, ao1 | `set_ao` clamped to per-channel limits inside +-10 V. |
 | **DIO** p0.0..p0.7, p1.0..p1.3, p2.0 | direction `in` / `out` / `unused` per line. Outputs: `set_do`; inputs are read by the poll thread. |
 | scans | AO and output lines are **controls** (settle = the value was written); AI and input lines are **detectors** read FRESH after the scan point is set (`acquire`, numbered). |
@@ -33,6 +33,14 @@ The USB-6001 cannot read its analog outputs back, so **AO shows "unknown" until
 you set it** in this session. Output lines are read back where the card allows
 it. Two opt-in exceptions, per output line: `initial = low|high` (written once
 at start) and `safe_state = low|high` (written on a clean stop).
+
+## Example: a vacuum chamber with a magnet
+
+`examples/vacuum_magnet.ini` is a complete layout: ai0 a logarithmic vacuum
+gauge (p = 10^(U - 5) mbar, mean of 5 readings, "ATM" lamp at 1100 mbar), ai1
+a photodiode (differential), ai2 a Hall probe in mT, ai3 a second photodiode,
+and p0.0 the magnet's polarity relay as an output. Copy it to `usb6001.ini`
+next to `module.toml` and restart the service.
 
 ## Run
 

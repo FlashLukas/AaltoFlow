@@ -42,6 +42,8 @@ AO_CHANNELS = ("ao0", "ao1")
 DIO_LINES = tuple([f"p0.{i}" for i in range(8)] + [f"p1.{i}" for i in range(4)] + ["p2.0"])
 
 TERMINALS = ("RSE", "NRSE", "DIFF")
+LAWS = ("linear", "log10")
+SMOOTH_MAX = 1000                  # running-mean length cap (readings)
 DIRECTIONS = ("in", "out", "unused")
 LEVELS = ("leave", "low", "high")
 
@@ -50,17 +52,40 @@ LEVELS = ("leave", "low", "high")
 
 @dataclass
 class AIChannel:
-    """One analog input. The reading is shown in volts AND, through a straight
-    line `scaled = slope * volts + offset`, in the unit you give it -- so a
-    Hall probe channel can read mT, a thermometer K. With the defaults (V, 1, 0)
-    the scaled value is just the voltage."""
+    """One analog input. The reading is shown in volts AND in the unit you give
+    it, through a scale law:
+
+      law "linear" (default)  scaled = slope * volts + offset
+                              -- a Hall probe reads mT, a thermometer K.
+      law "log10"             scaled = 10 ** (slope * volts + offset)
+                              -- a logarithmic vacuum gauge: with slope 1 and
+                              offset -5, p [mbar] = 10^(U - 5).
+
+    With the defaults (V, linear, 1, 0) the scaled value is just the voltage.
+
+    smooth_reads  the LIVE value (front panel, status) is the running mean of
+                  the last N readings, in volts, BEFORE the scale law -- the
+                  same order as the old LabVIEW vacuum display. 1 = no
+                  smoothing. A scan's FRESH sample (acquire) is never smoothed:
+                  a running mean would mix in readings from before the scan
+                  point was set.
+    lamp_above    a threshold in the SCALED unit; NaN = no lamp. The live
+                  status then says per channel whether the value is at or
+                  above it -- e.g. an "ATM" lamp at 1100 mbar on the vacuum
+                  gauge. Information only: nothing is switched.
+    lamp_name     the lamp's label ("ATM").
+    """
 
     enabled: bool = False
     name: str = ""
     terminal: str = "RSE"          # RSE | NRSE | DIFF (DIFF only on ai0..ai3, see sanitise)
     unit: str = "V"
-    slope: float = 1.0             # unit per volt
-    offset: float = 0.0            # unit
+    law: str = "linear"            # linear | log10 (see above)
+    slope: float = 1.0             # unit per volt (linear); 1/V inside the exponent (log10)
+    offset: float = 0.0            # unit (linear); added inside the exponent (log10)
+    smooth_reads: int = 1          # live value = running mean of this many readings
+    lamp_above: float = float("nan")   # lamp threshold in the scaled unit, NaN = none
+    lamp_name: str = ""
 
 
 @dataclass
@@ -300,6 +325,24 @@ def sanitise(cfg: Config) -> list[str]:
                             f"{1.0 if attr == 'slope' else 0.0}")
                 v = 1.0 if attr == "slope" else 0.0
             setattr(ch, attr, v)
+        law = str(ch.law).strip().lower()
+        if law not in LAWS:
+            msgs.append(f"ai{i}: unknown scale law {ch.law!r}, using linear")
+            law = "linear"
+        ch.law = law
+        n = int(float(ch.smooth_reads))
+        if not 1 <= n <= SMOOTH_MAX:
+            msgs.append(f"ai{i}: smooth_reads {n} outside 1..{SMOOTH_MAX}, using "
+                        f"{min(max(n, 1), SMOOTH_MAX)}")
+            n = min(max(n, 1), SMOOTH_MAX)
+        ch.smooth_reads = n
+        # NaN is the deliberate "no lamp"; only an infinite threshold is nonsense
+        lamp = float(ch.lamp_above)
+        if math.isinf(lamp):
+            msgs.append(f"ai{i}: lamp threshold {lamp} is not usable, no lamp")
+            lamp = float("nan")
+        ch.lamp_above = lamp
+        ch.lamp_name = str(ch.lamp_name)
     for i in range(4):
         if chans[i].enabled and chans[i].terminal == "DIFF" and chans[i + 4].enabled:
             chans[i + 4].enabled = False
@@ -355,6 +398,39 @@ def sanitise(cfg: Config) -> list[str]:
 
 
 # ---- helpers used by brain, describe and GUI ------------------------------------
+
+def scale_value(ch: AIChannel, volts: float) -> float:
+    """Volts -> the channel's unit, by its scale law (see AIChannel).
+
+    NaN stays NaN (a channel with no reading). A log10 exponent too large for a
+    float gives inf rather than an exception: a gauge reading a broken cable at
+    +10 V must not take the poll thread down.
+    """
+    v = float(volts)
+    if not math.isfinite(v):
+        return float("nan")
+    x = ch.slope * v + ch.offset
+    if ch.law == "log10":
+        try:
+            return 10.0 ** x
+        except OverflowError:
+            return float("inf")
+    return x
+
+
+def is_scaled(ch: AIChannel) -> bool:
+    """True when the scaled value differs from plain volts (then both are shown)."""
+    return (ch.unit.strip() not in ("", "V") or ch.law != "linear"
+            or ch.slope != 1.0 or ch.offset != 0.0)
+
+
+def lamp_state(ch: AIChannel, scaled: float):
+    """The channel's lamp: True (at or above), False (below), None (no lamp
+    configured, or no reading to compare)."""
+    threshold, value = float(ch.lamp_above), float(scaled)
+    if math.isnan(threshold) or math.isnan(value):
+        return None
+    return bool(value >= threshold)      # +inf (gauge off scale) counts as above
 
 def line_index(line) -> int:
     """'p0.4', 'P0.4', 'port0/line4', 'Dev1/port0/line4' or 4 -> 4."""

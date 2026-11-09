@@ -351,7 +351,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # analog inputs
         aicard, ailay = _card("Analog inputs (live)")
         grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(14); grid.setVerticalSpacing(4)
-        for c, t in enumerate(("CH", "NAME", "VOLTS", "SCALED")):
+        for c, t in enumerate(("CH", "NAME", "VOLTS", "SCALED", "LAMP")):
             lbl = _muted(t, 10); lbl.setStyleSheet(lbl.styleSheet() + "font-weight:700;")
             grid.addWidget(lbl, 0, c)
         self.ai_rows = []
@@ -362,9 +362,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 lbl.setStyleSheet("font-family:Consolas, 'DejaVu Sans Mono', monospace; font-size:14px;")
                 lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 lbl.setMinimumWidth(110)
-            for c, wdg in enumerate((ch, name, volts, scaled)):
+            # the channel's threshold lamp (e.g. "ATM" on a vacuum gauge); empty
+            # when the channel has no lamp configured
+            lamp = QtWidgets.QLabel("")
+            lamp.setAlignment(QtCore.Qt.AlignCenter)
+            lamp.setMinimumWidth(56)
+            for c, wdg in enumerate((ch, name, volts, scaled, lamp)):
                 grid.addWidget(wdg, i + 1, c)
-            self.ai_rows.append((ch, name, volts, scaled))
+            self.ai_rows.append((ch, name, volts, scaled, lamp))
         grid.setColumnStretch(1, 1)
         ailay.addLayout(grid)
         ailay.addStretch(1)
@@ -502,13 +507,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_label.setVisible(bool(s.restart_pending))
 
         chans = self.cfg.ai.channels
-        for i, (ch, name, volts, scaled) in enumerate(self.ai_rows):
+        lamps = list(getattr(s, "ai_lamp", None) or [None] * 8)
+        for i, (ch, name, volts, scaled, lamp) in enumerate(self.ai_rows):
             on = bool(s.ai_enabled[i])
             name.setText(chans[i].name if on else f"{chans[i].name}  (off)")
             name.setStyleSheet("" if on else f"color:{COLORS['muted']};")
             volts.setText(f"{_fmt(s.ai_V[i])} V" if on else "--")
             unit = chans[i].unit.strip() or "V"
-            scaled.setText(f"{_fmt(s.ai[i], '{:+.4g}')} {unit}" if on else "--")
+            # a log-law channel (vacuum) spans decades: no "+", 4 significant digits
+            fmt = "{:.4g}" if chans[i].law == "log10" else "{:+.4g}"
+            scaled.setText(f"{_fmt(s.ai[i], fmt)} {unit}" if on else "--")
+            state = lamps[i] if on else None
+            has_lamp = math.isfinite(float(chans[i].lamp_above))
+            lamp.setText((chans[i].lamp_name.strip() or "HIGH") if has_lamp and on else "")
+            if state:
+                lamp.setStyleSheet(f"background:{COLORS['ok']}; color:{COLORS['bg']}; "
+                                   f"font-weight:800; border-radius:4px; padding:1px 6px;")
+            else:
+                lamp.setStyleSheet(f"color:{COLORS['muted']}; border:1px solid {COLORS['border']}; "
+                                   f"border-radius:4px; padding:1px 6px;" if has_lamp and on else "")
 
         for i in range(2):
             if s.ao_known[i]:

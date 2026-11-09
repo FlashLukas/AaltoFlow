@@ -46,8 +46,8 @@ import time
 from dataclasses import dataclass, field
 
 from .backends.base import DaqBackend, Layout
-from .config import (AI_CHANNELS, AO_CHANNELS, DIO_LINES, Config, line_index,
-                     sanitise)
+from .config import (AI_CHANNELS, AO_CHANNELS, DIO_LINES, Config, lamp_state,
+                     line_index, sanitise, scale_value)
 
 _NAN = float("nan")
 
@@ -61,9 +61,12 @@ class Status:
     idn: str = ""
     hw_error: str = ""                 # "" = the last hardware read worked
     fault: str = ""                    # never set by this module (nothing to latch)
-    # live analog inputs (NaN for a channel that is not enabled)
+    # live analog inputs (NaN for a channel that is not enabled). These are the
+    # running mean over each channel's smooth_reads readings (1 = the latest).
     ai_V: list = field(default_factory=lambda: [_NAN] * 8)
     ai: list = field(default_factory=lambda: [_NAN] * 8)       # scaled
+    # per channel: True/False = at/above or below its lamp threshold, None = no lamp
+    ai_lamp: list = field(default_factory=lambda: [None] * 8)
     ai_enabled: list = field(default_factory=lambda: [False] * 8)
     reads: int = 0                     # live readings since start
     read_ms: float = _NAN              # how long the last reading took
@@ -120,8 +123,11 @@ class Daq:
         self._connected = False
         self._idn = ""
         self._hw_error = ""
-        # values (under _lock)
+        # values (under _lock). _ai_V = the LATEST reading per channel (what a
+        # fresh sample latches); _ai_hist = the last readings for the live
+        # running mean (AIChannel.smooth_reads).
         self._ai_V = [_NAN] * 8
+        self._ai_hist: list[list[float]] = [[] for _ in range(8)]
         self._reads = 0
         self._read_ms = _NAN
         self._ao_V = [_NAN, _NAN]
@@ -363,11 +369,12 @@ class Daq:
         chans = self.cfg.ai.channels
         with self._lock:
             a = self._acq
-            ai_V = list(self._ai_V)
+            ai_V = [self._live_volts(i) for i in range(8)]
+            ai = [scale_value(chans[i], v) for i, v in enumerate(ai_V)]
             return Status(
                 connected=self._connected, idn=self._idn, hw_error=self._hw_error,
-                ai_V=ai_V,
-                ai=[v * chans[i].slope + chans[i].offset for i, v in enumerate(ai_V)],
+                ai_V=ai_V, ai=ai,
+                ai_lamp=[lamp_state(chans[i], v) for i, v in enumerate(ai)],
                 ai_enabled=[i in self.layout.ai for i in range(8)],
                 reads=self._reads, read_ms=self._read_ms,
                 ao_V=list(self._ao_V), ao_known=list(self._ao_known),
@@ -459,6 +466,11 @@ class Daq:
             self._hw_error = ""
             for i, v in zip(lay.ai, volts):
                 self._ai_V[i] = float(v)
+                hist = self._ai_hist[i]
+                hist.append(float(v))
+                # trim to the CURRENT length: a smaller smooth_reads applied
+                # from Settings takes effect on the next reading
+                del hist[:max(0, len(hist) - int(chans[i].smooth_reads))]
             for line, level in di.items():
                 self._dio[line] = bool(level)
             self._reads += 1
@@ -471,7 +483,9 @@ class Daq:
                 self._sample = {
                     "acq_id": acq["id"], "time": time.time(),
                     "ai_V": ai_V,
-                    "ai": [v * chans[i].slope + chans[i].offset for i, v in enumerate(ai_V)],
+                    # the latest reading, NOT the live running mean: a scan
+                    # point must not average in readings from before it was set
+                    "ai": [scale_value(chans[i], v) for i, v in enumerate(ai_V)],
                     "dio": list(self._dio),
                     "samples": int(a.samples_per_read), "rate_Hz": float(a.rate_Hz),
                 }
@@ -489,6 +503,15 @@ class Daq:
             self._emit("error", f"hardware read failed: {msg} (last good values kept)")
 
     # ---- internals --------------------------------------------------------------------------
+
+    def _live_volts(self, i: int) -> float:
+        """The live value of channel i in volts: the mean of the readings kept
+        for its running mean (call with _lock held). NaN before the first
+        reading and for a channel that is not enabled."""
+        if i not in self.layout.ai:
+            return _NAN
+        hist = self._ai_hist[i][-max(1, int(self.cfg.ai.channels[i].smooth_reads)):]
+        return sum(hist) / len(hist) if hist else _NAN
 
     def _line(self, line) -> int:
         try:
