@@ -1,0 +1,28 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "alr3203"
+name = "ELC ALR3203 supply"
+description = "ELC ALR3203 32 V / 6 A / 96 W supply: voltage or current mode, bipolar through a polarity relay on a DAQ line (USB serial)"
+category = "source"
+tags = ["power supply", "magnet", "ELC", "serial"]
+icon = "icon.svg"
+order = 410
+
+[ports]
+cmd = 5635
+pub = 5636
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+# the polarity relay lives on usb6001-control's DAQ line: start that first
+start_after = ["usb6001"]
+
+# Which instrument the service opens on real hardware: Mission Control's
+# "Instruments on this PC" offers a found serial port to this module and
+# passes it to the service as --com <port> (suite_local.json, this PC).
+[hardware]
+address_arg = "--com"
+bus = "serial"

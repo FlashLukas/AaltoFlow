@@ -1,0 +1,17 @@
+# virtual environments (kept OFF OneDrive on the lab PC -- see README)
+.venv/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# uv
+.uv/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# this PC's settings (lab data: COM port, relay line, limits)
+alr3203.ini

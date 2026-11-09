@@ -931,6 +931,29 @@
       },
       "gui": true,
       "start_after": []
+    },
+    {
+      "key": "alr3203",
+      "name": "ELC ALR3203 supply",
+      "description": "ELC ALR3203 32 V / 6 A / 96 W supply: voltage or current mode, bipolar through a polarity relay on a DAQ line (USB serial)",
+      "category": "source",
+      "category_label": "Signal sources",
+      "tags": [
+        "power supply",
+        "magnet",
+        "ELC",
+        "serial"
+      ],
+      "folder": "alr3203-control",
+      "version": "0.2.0",
+      "ports": {
+        "cmd": 5635,
+        "pub": 5636
+      },
+      "gui": true,
+      "start_after": [
+        "usb6001"
+      ]
     }
   ]
 }

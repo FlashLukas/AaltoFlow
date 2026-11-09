@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- ALR3203: a bench supply (metal box, two terminals) with the polarity
+       relay's crossed arrows. Theme colours: #ff9e2c accent, #ffb454
+       accent_hi, #e8eaed text, #5a626e metal (the launcher swaps the first three). -->
+  <rect x="4" y="9" width="32" height="22" rx="4" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <circle cx="11" cy="24" r="2.6" fill="#ff9e2c"/>
+  <circle cx="29" cy="24" r="2.6" fill="none" stroke="#e8eaed" stroke-width="1.8"/>
+  <path d="M13 15 H27 M24 12.5 L27 15 L24 17.5" fill="none" stroke="#ffb454" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M27 19.5 H13 M16 17 L13 19.5 L16 22" fill="none" stroke="#ff9e2c" stroke-width="1.8"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+</svg>
