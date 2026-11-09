@@ -1,4 +1,4 @@
-"""List the IDS cameras this PC can see, as ONE JSON line.
+"""List the IDS and Thorlabs cameras this PC can see, as ONE JSON line.
 
     uv run scripts/probe.py
 

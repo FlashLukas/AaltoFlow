@@ -155,3 +155,17 @@ def test_split_without_z():
     cfg.hardware.z_stage = "none"
     _xy, z = build_split_motion(cfg)
     assert type(z).__name__ == "SimZFocus"
+
+
+def test_the_blue_box_example_loads_as_a_thorlabs_split_rig():
+    """examples/bluebox_split_rig.ini (the vacuum microscope) must keep loading
+    when config keys change: Thorlabs camera, Agilis XY, KIM001 Z."""
+    from pathlib import Path
+
+    from camera.config import load_config
+    ini = Path(__file__).resolve().parents[1] / "examples" / "bluebox_split_rig.ini"
+    cfg = load_config(str(ini))
+    assert cfg.camera.driver == "thorlabs"
+    assert (cfg.hardware.motion, cfg.hardware.xy_stage, cfg.hardware.z_stage) == (
+        "split", "agilis", "kim001")
+    assert cfg.hardware.xy_map == "+X+Y"

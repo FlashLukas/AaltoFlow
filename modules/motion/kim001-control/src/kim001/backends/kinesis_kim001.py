@@ -20,9 +20,14 @@ all micrometre conversion, so this file never sees a micrometre.
 
 >>> NOTHING HERE HAS RUN ON A KIM001 YET <<<
 This is kim-control's KIM101 backend (VERIFIED on the lab KIM101, pylablib
-1.4.5, 2026-09-13) cut down to one channel. Whether pylablib's
-``Thorlabs.KinesisPiezoMotor`` drives a KIM001 the same way is NOT confirmed:
-pylablib documents the KIM101 / TIM101 family. Every vendor call below is
+1.4.5, 2026-09-13) cut down to one channel. pylablib 1.4.5's SOURCE does know
+the KIM001 (read 2026-11-09): ``KinesisPiezoMotor._autodetect_axes`` gives a
+device whose model_no is "KIM001" (or "TIM001") exactly ONE axis, channel 1,
+and the constructor only QUERIES (get_device_info) -- so items 1, 3 and 4 below
+are settled on paper; the behaviour on the controller is not.
+It talks to the K-Cube through FTDI's D2XX driver (pyft232): install Thorlabs
+Kinesis on the PC (brings that driver), and CLOSE the Kinesis app before the
+service starts. Every vendor call below is
 therefore marked ``# VERIFY``. What to check first on the instrument
 (``help(Thorlabs.KinesisPiezoMotor)``, then a console session):
 
@@ -87,6 +92,7 @@ class KinesisKim:
         # sends a byte.
         self._lock_hw: hwlock.HardwareLock | None = None
         self._serial = ""
+        self._must_be_kim001 = False
 
     # -- connection -------------------------------------------------------- #
     def open(self) -> None:
@@ -97,8 +103,12 @@ class KinesisKim:
         # the launcher) always wins. Without one, _find_kim001 only LISTS the
         # Kinesis devices on the USB bus (it opens none of them), so claiming
         # right after it still comes before the first byte to the controller.
-        serial = ((self.cfg.hardware.serial or "").strip()
-                  or self._find_kim001(Thorlabs, self.cfg.hardware.serial_prefix))
+        given = (self.cfg.hardware.serial or "").strip()
+        serial = given or self._find_kim001(Thorlabs, self.cfg.hardware.serial_prefix)
+        # Picked WITHOUT the serial and WITHOUT the prefix (the one Kinesis
+        # device on the PC, see _find_kim001): then it must PROVE it is a KIM001.
+        prefix = (self.cfg.hardware.serial_prefix or "").strip()
+        self._must_be_kim001 = not given and not (prefix and serial.startswith(prefix))
         # Claim the physical controller by its serial BEFORE opening it. Raises
         # hwlock.HardwareBusy (naming the holder) when another service -- any
         # module -- already drives this controller; we then never touch it.
@@ -130,19 +140,25 @@ class KinesisKim:
         """The serial of the one KIM001 on this PC, when none is configured.
 
         Thorlabs serials encode the product in their first digits; `prefix`
-        (hardware.serial_prefix) is our best guess for the KIM001 -- # VERIFY.
-        More than one match -> refuse and name them: moving the wrong actuator
-        is worse than asking for `hardware.serial`. (If the KIM001 shares the
-        KIM101's prefix, a rig with both plugged in lands here -- set the
-        serial.)
+        (hardware.serial_prefix) is our best guess for the KIM001 -- # VERIFY
+        (no public table lists it; pylablib's table has neither the KIM101's 97
+        nor the KIM001's). More than one match -> refuse and name them: moving
+        the wrong actuator is worse than asking for `hardware.serial`.
+        NO match but exactly ONE Kinesis device on the PC (the Blue Box: the
+        KIM001 is its only Kinesis device; the Agilis is Newport) -> that one,
+        and open() then REQUIRES it to report model_no KIM001 (a wrong guess
+        costs a query, never a move).
         """
         prefix = (prefix or "").strip()
         listed = [str(conn).strip() for conn, _desc in thorlabs.list_kinesis_devices()]  # VERIFY
         found = [s for s in listed if prefix and s.startswith(prefix)]
+        if not found and len(listed) == 1:
+            return listed[0]
         if not found:
-            raise RuntimeError(f"no KIM001 found (no Kinesis serial starting with "
-                               f"{prefix!r}). Is it connected, and is the Kinesis app "
-                               f"closed? Or set hardware.serial (or --serial).")
+            seen = f" (listed: {', '.join(listed)})" if listed else " (none listed)"
+            raise RuntimeError(f"no KIM001 found: no Kinesis serial starting with "
+                               f"{prefix!r}{seen}. Is it connected, and is the Kinesis "
+                               f"app closed? Or set hardware.serial (or --serial).")
         if len(found) > 1:
             raise RuntimeError(f"several Kinesis devices start with {prefix!r} "
                                f"({', '.join(found)}): set hardware.serial (or --serial) "
@@ -158,9 +174,18 @@ class KinesisKim:
         """
         try:
             info = self._call("get_device_info")  # VERIFY on the KIM001
-        except Exception:
+        except Exception as exc:
+            if self._must_be_kim001:
+                raise RuntimeError(f"Kinesis device {self._serial} was picked as the only "
+                                   f"one on this PC but did not say what it is "
+                                   f"({type(exc).__name__}: {exc}) -- set hardware.serial") from exc
             return
         text = " ".join(str(getattr(info, k, "") or "") for k in ("model_no", "notes"))
+        if self._must_be_kim001 and "KIM001" not in text.upper():
+            model = str(getattr(info, "model_no", "") or "?")
+            raise RuntimeError(f"Kinesis device {self._serial} (the only one on this PC) "
+                               f"reports itself as {model!r}, not a KIM001 -- refusing; "
+                               f"set hardware.serial to the KIM001's serial")
         for other in OTHER_MODELS:
             if other in text.upper():
                 raise RuntimeError(f"Kinesis device {self._serial} reports itself as "

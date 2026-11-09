@@ -102,8 +102,12 @@ class Camera:
 
     camera_name: str = "cam1"          # device serial / friendly name ("" = first)
     driver: str = "ids"                # real backend: "ids" | "genicam" | "thorlabs"
-    # driver "thorlabs" (Zelux CS165MU etc.): the folder with the TSI SDK's
-    # native DLLs; "" = ThorCam's default install folder (backends/thorlabs.py)
+    # driver "thorlabs" (Zelux CS165MU etc.), see backends/thorlabs.py:
+    # thorlabs_sdk_dir = the unpacked thorlabs_tsi_sdk-x.y.z folder; "" = the
+    # newest one scripts/setup_thorlabs_sdk.py put in %LOCALAPPDATA%\AaltoFlow\vendor
+    # (or an installed package). thorlabs_dll_dir = an EXTRA native-DLL folder;
+    # "" = the package's own DLLs (ThorImageCAM's folder only as a last resort).
+    thorlabs_sdk_dir: str = ""
     thorlabs_dll_dir: str = ""
     video_mode: str = "Mono8 640x480"  # free text; real driver validates
     frame_rate: float = 15.0           # frames/s the engine tries to hold

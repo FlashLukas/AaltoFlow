@@ -236,12 +236,39 @@ def test_no_serial_picks_the_one_device_with_the_prefix():
 
 
 def test_none_or_several_matching_is_refused_by_name():
-    with pytest.raises(RuntimeError, match="no KIM001 found"):
-        KinesisKim._find_kim001(_FakeThorlabs([("70123456", "BSC203")]), "97")
+    with pytest.raises(RuntimeError, match="no KIM001 found.*70123456, 70999999"):
+        KinesisKim._find_kim001(_FakeThorlabs([("70123456", "BSC203"),
+                                               ("70999999", "BSC203")]), "97")
     with pytest.raises(RuntimeError, match="97111111, 97222222"):
         KinesisKim._find_kim001(_FakeThorlabs([("97111111", ""), ("97222222", "")]), "97")
-    with pytest.raises(RuntimeError, match="no KIM001 found"):
-        KinesisKim._find_kim001(_FakeThorlabs([("97111111", "")]), "")   # no prefix: no guess
+    with pytest.raises(RuntimeError, match="none listed"):
+        KinesisKim._find_kim001(_FakeThorlabs([]), "97")
+
+
+def test_the_only_kinesis_device_is_taken_when_the_prefix_guess_misses():
+    """The KIM001's serial prefix is a guess (97). On the Blue Box it is the
+    only Kinesis device, so a wrong guess must not block it."""
+    assert KinesisKim._find_kim001(_FakeThorlabs([("74000001", "")]), "97") == "74000001"
+    assert KinesisKim._find_kim001(_FakeThorlabs([("74000001", "")]), "") == "74000001"
+
+
+def test_a_loosely_picked_device_must_say_it_is_a_kim001(backend):
+    backend._must_be_kim001 = True
+    backend._dev = FakeKim001(model="BSC203")
+    with pytest.raises(RuntimeError, match="BSC203.*not a KIM001"):
+        backend._check_model()
+    backend._dev = FakeKim001(model="KIM001")
+    backend._check_model()
+    # a device that does not answer the query is not trusted either
+    class Mute(FakeKim001):
+        def get_device_info(self):
+            raise OSError("no reply")
+    backend._dev = Mute(model="KIM001")
+    with pytest.raises(RuntimeError, match="did not say what it is"):
+        backend._check_model()
+    # picked by serial or prefix: a silent device is still accepted (as before)
+    backend._must_be_kim001 = False
+    backend._check_model()
 
 
 def test_a_kim101_is_refused_after_opening(backend):

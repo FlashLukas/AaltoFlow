@@ -1,5 +1,13 @@
-"""Which IDS cameras can this PC see? -- for Mission Control's "Instruments on
-this PC" (module.toml [hardware] probe = "scripts/probe.py").
+"""Which IDS and Thorlabs cameras can this PC see? -- for Mission Control's
+"Instruments on this PC" (module.toml [hardware] probe = "scripts/probe.py").
+
+THORLABS (2026-11-09, the Blue Box's Zelux CS165MU): the TSI SDK's
+discover_available_cameras() returns serial strings and opens nothing (checked
+in the SDK source, thorlabs_tsi_sdk 1.2.0). Tried only when the SDK is there
+(installed, or unpacked by scripts/setup_thorlabs_sdk.py); a PC without it says
+nothing about Thorlabs, so the IDS lab PC's list is unchanged. A row's address
+is the serial, as for IDS: the camera service picks it with --camera and
+config camera.driver = "thorlabs".
 
 THE RULE: a probe only LISTS. It never opens a camera, never starts a stream,
 never changes a setting. IDS peak's DeviceManager.Update() + Devices() is the
@@ -46,15 +54,48 @@ def _text(fn) -> str:
         return ""
 
 
+def _thorlabs() -> tuple[list, str]:
+    """(rows, note) of the Thorlabs cameras; ([], "") without the SDK."""
+    from .backends import thorlabs as T
+    if not T.sdk_available():
+        return [], ""
+    rows, sdk = [], None
+    try:
+        tl = T.import_tl_camera()
+        sdk = tl.TLCameraSDK()                                  # loads the DLL only
+        for serial in sdk.discover_available_cameras():         # VERIFY: lists, opens nothing
+            serial = str(serial).strip()
+            if serial:
+                rows.append({"address": serial, "identity": "Thorlabs camera",
+                             "detail": f"Thorlabs TSI SDK, serial {serial} "
+                                       "(camera.driver = thorlabs)",
+                             "lock": hwclaim.camera_address(serial)})
+        return rows, ""
+    except Exception as exc:
+        return rows, f"the Thorlabs SDK could not list cameras: {type(exc).__name__}: {exc}"
+    finally:
+        if sdk is not None:
+            try:
+                sdk.dispose()                                   # VERIFY
+            except Exception:
+                pass
+
+
 def probe() -> dict:
     """{"devices": [...], "note": "..."} -- never raises."""
     devices, notes = [], []
     try:
+        tl_rows, tl_note = _thorlabs()
+    except Exception as exc:                 # never let Thorlabs break the IDS list
+        tl_rows, tl_note = [], f"Thorlabs probe failed: {type(exc).__name__}: {exc}"
+    try:
         from ids_peak import ids_peak             # LAZY, as in backends/ids.py
     except ImportError:
         ids_peak = None
-        notes.append("ids_peak is not installed: install IDS peak, then run "
-                     "'uv sync --all-extras' in camera-control")
+        # on a Thorlabs-only PC (the Blue Box) a missing IDS runtime is normal
+        if not tl_rows:
+            notes.append("ids_peak is not installed: install IDS peak, then run "
+                         "'uv sync --all-extras' in camera-control")
     if ids_peak is not None:
         initialized = False
         try:
@@ -86,6 +127,9 @@ def probe() -> dict:
                     ids_peak.Library.Close()                   # VERIFY
                 except Exception:
                     pass
+    devices.extend(r for r in tl_rows if r["address"] not in {d["address"] for d in devices})
+    if tl_note:
+        notes.append(tl_note)
     seen = {d["address"] for d in devices}
     held = _held_serials()
     for d in devices:
@@ -95,7 +139,7 @@ def probe() -> dict:
             d["detail"] += "; held by the running camera service"
     for serial in held:
         if serial not in seen:
-            devices.append({"address": serial, "identity": "IDS camera", "detail": HELD,
+            devices.append({"address": serial, "identity": "camera", "detail": HELD,
                             "lock": hwclaim.camera_address(serial)})
     if ids_peak is not None and not devices and not notes:
         notes.append("no IDS camera listed (USB3 cable, IDS peak Cockpit closed?)")

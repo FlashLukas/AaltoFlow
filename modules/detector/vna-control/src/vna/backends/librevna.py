@@ -125,9 +125,13 @@ HAROGIC = Dialect(
     sweep_time_query="VNA:ACQ:SWE:TIME?", cal_query="",
     own_trace=False, sweep_type=True, set_mode=False,
     # 100 kHz - 6 GHz (PNB-60 product page); the rest are the replies printed in
-    # the SCPI guide's examples (MINIFBW 15, MAXIFBW 75000, MAXP 2048, power
-    # -40 .. 5 dBm).  # VERIFY with DEV:INF:LIM:* on the unit
-    envelope={"freq_min_Hz": 100e3, "freq_max_Hz": 6e9, "points_max": 2048,
+    # the SCPI guide's examples (MINIFBW 15, MAXIFBW 75000, power -40 .. 5 dBm).
+    # Points: the guide's example says MAXP 2048, but VNStudio 1.0.6
+    # (2026-11-02 release note) sweeps up to 10001 points -- and the envelope is
+    # a CEILING on what the unit reports (min of the two), so 2048 here would
+    # cap a unit that can do more. The unit's DEV:INF:LIM:MAXP? decides.
+    # VERIFY with DEV:INF:LIM:* on the unit
+    envelope={"freq_min_Hz": 100e3, "freq_max_Hz": 6e9, "points_max": 10001,
               "ifbw_min_Hz": 15.0, "ifbw_max_Hz": 75e3,
               "power_min_dBm": -40.0, "power_max_dBm": 5.0},
     help="VNStudio is running with the PNB-60 connected and SCPI enabled "

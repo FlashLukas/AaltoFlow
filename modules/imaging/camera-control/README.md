@@ -355,14 +355,22 @@ For a microscope with a **Thorlabs Zelux CS165MU** camera, the sample on an
 **Agilis AG-UC2** XY stage and the **objective** focused by a **KIM001 + PIA13**:
 
 - `camera.driver = "thorlabs"` (`backends/thorlabs.py`, the Thorlabs Scientific
-  Camera SDK). The Python wrapper ships inside the ThorCam install (not on PyPI):
-  pip-install `thorlabs_tsi_camera_python_sdk_package.zip` from ThorCam's
-  "Scientific Camera Interfaces" into this environment, and point
-  `camera.thorlabs_dll_dir` at the SDK's native DLL folder (empty = ThorCam's
-  default folder). Close ThorCam first -- it holds the camera. The 10-bit frames
+  Camera SDK, checked against its source, thorlabs_tsi_sdk 1.2.0). Once per PC:
+  1. install **ThorImageCAM** (thorlabs.com, ThorCam page) -- it brings the
+     camera's USB driver -- and close it again: it holds the camera;
+  2. download "Windows SDK and Doc. for Scientific Cameras" (same page,
+     *Programming Interfaces* tab) and run
+     `python scripts/setup_thorlabs_sdk.py scientific_camera_interfaces-<ver>.zip`.
+  The SDK is not on PyPI, and a copy pip-installed into the venv is removed by
+  the next `uv sync`, so the script unpacks it to
+  `%LOCALAPPDATA%\AaltoFlow\vendor\thorlabs_tsi_sdk-<ver>` (with its own DLLs),
+  where the driver finds it (`camera.thorlabs_sdk_dir` to point elsewhere;
+  `camera.thorlabs_dll_dir` only for an extra DLL folder). The 10-bit frames
   feed the spot-size metrics (D4sigma, Z step calibration); exposure, gain,
   black level and binning appear in the live parameter panel. The camera's
-  settings are adopted at start, never reset.
+  settings are adopted at start, never reset. Mission Control's "Instruments
+  on this PC" lists Thorlabs cameras too once the SDK is unpacked.
+  `examples/bluebox_split_rig.ini` is a ready configuration for that rig.
 - `hardware.motion = "split"`, `xy_stage = "agilis"` (agilis-control),
   `z_stage = "kim001"` (kim001-control, which speaks kim's language for its
   one Z axis). Agilis has no camera calibration of its own, so set

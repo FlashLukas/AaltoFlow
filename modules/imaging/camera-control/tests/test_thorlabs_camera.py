@@ -48,8 +48,19 @@ class FakeTLCamera:
         self.pending = 0
         self._ready = True
 
+    #: the real SDK passes these through c_int / c_longlong: a float raises
+    #: TypeError there (checked in thorlabs_tsi_sdk 1.2.0's tl_camera.py)
+    INT_ATTRS = ("exposure_time_us", "gain", "black_level", "binx", "biny",
+                 "frames_per_trigger_zero_for_unlimited", "image_poll_timeout_ms")
+
+    @property
+    def is_armed(self):
+        return self.armed
+
     def __setattr__(self, name, value):
         if getattr(self, "_ready", False):
+            if name in self.INT_ATTRS and not isinstance(value, int):
+                raise TypeError(f"{name}: int expected instead of {type(value).__name__}")
             self.writes.append((name, value))
             if name in ("binx", "biny") and self.armed:
                 raise RuntimeError("cannot change binning while armed")
@@ -176,3 +187,230 @@ def test_no_camera_or_wrong_serial_says_so(sdk):
     with pytest.raises(RuntimeError, match="found: 111"):
         ThorlabsCamera(device="999").open()
     assert hwlock.held() == []
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-09, after reading the real SDK (thorlabs_tsi_sdk 1.2.0)
+# --------------------------------------------------------------------------- #
+def test_exposure_is_written_as_whole_microseconds(sdk):
+    """The SDK's setter is c_longlong: a float raised TypeError (the brain's
+    auto exposure and AF exposure send floats)."""
+    cam = ThorlabsCamera()
+    cam.open()
+    try:
+        cam.set_feature("ExposureTime", 63.59)
+        fake = sdk["cams"][0]
+        assert ("exposure_time_us", 64) in fake.writes
+        cam.set_feature("Gain", 12.0)
+        assert fake.gain == 12 and isinstance(fake.gain, int)
+    finally:
+        cam.close()
+
+
+def test_an_unsupported_gain_or_black_level_is_not_offered(sdk):
+    cam = ThorlabsCamera()
+    cam.open()
+    try:
+        fake = sdk["cams"][0]
+        object.__setattr__(fake, "gain_range", (0, 0))       # SDK: max 0 = not supported
+        object.__setattr__(fake, "black_level_range", (0, 0))
+        names = {f["name"] for f in cam.features()}
+        assert "Gain" not in names and "BlackLevel" not in names
+        assert "ExposureTime" in names
+    finally:
+        cam.close()
+
+
+def test_a_camera_left_armed_is_disarmed_before_the_set_up(sdk, monkeypatch):
+    class Armed(FakeTLCamera):
+        def __init__(self, serial):
+            super().__init__(serial)
+            object.__setattr__(self, "armed", True)
+
+    sdk_mod = sys.modules["thorlabs_tsi_sdk.tl_camera"]
+
+    def open_armed(self, serial):
+        c = Armed(serial)
+        sdk["cams"].append(c)
+        return c
+    monkeypatch.setattr(sdk_mod.TLCameraSDK, "open_camera", open_armed)
+    cam = ThorlabsCamera()
+    cam.open()
+    try:
+        w = [x[0] for x in sdk["cams"][0].writes]
+        assert w.index("disarm") < w.index("frames_per_trigger_zero_for_unlimited")
+    finally:
+        cam.close()
+
+
+def test_one_poll_blocks_only_a_short_slice(sdk):
+    """The lock is held during a poll: the SDK's poll timeout is set short
+    (POLL_SLICE_MS), grab() keeps its own deadline."""
+    from camera.backends.thorlabs import POLL_SLICE_MS
+    cam = ThorlabsCamera(poll_timeout_ms=2000)
+    cam.open()
+    try:
+        assert sdk["cams"][0].image_poll_timeout_ms == POLL_SLICE_MS <= 100
+    finally:
+        cam.close()
+
+
+def test_the_package_dlls_win_thorcams_folder_is_only_a_fallback(sdk, monkeypatch, tmp_path):
+    import camera.backends.thorlabs as T
+    added = []
+    monkeypatch.setattr(T, "_add_dll_dir", lambda d, keep: added.append(d) or True)
+    monkeypatch.setattr(T, "DEFAULT_DLL_DIRS", (str(tmp_path),))
+    cam = ThorlabsCamera()
+    cam.open()
+    cam.close()
+    assert added == []                       # nothing added when the SDK loads
+    # the package's own DLLs fail to load -> ThorImageCAM's folder, once
+    mod = sys.modules["thorlabs_tsi_sdk.tl_camera"]
+    good = mod.TLCameraSDK
+    tries = []
+
+    def flaky():
+        tries.append(1)
+        if len(tries) == 1:
+            raise RuntimeError("Unable to load library: thorlabs_tsi_camera_sdk.dll")
+        return good()
+    monkeypatch.setattr(mod, "TLCameraSDK", flaky)
+    cam = ThorlabsCamera()
+    cam.open()
+    cam.close()
+    assert added == [str(tmp_path)] and len(tries) == 2
+    # a configured DLL folder is the user's choice: no silent fallback
+    tries.clear()
+    added.clear()
+    with pytest.raises(RuntimeError, match="Unable to load"):
+        ThorlabsCamera(dll_dir=str(tmp_path)).open()
+    assert len(tries) == 1
+
+
+def _fake_sdk_folder(home, version):
+    d = home / f"thorlabs_tsi_sdk-{version}"
+    (d / "thorlabs_tsi_sdk").mkdir(parents=True)
+    (d / "thorlabs_tsi_sdk" / "__init__.py").write_text("", encoding="utf-8")
+    (d / "thorlabs_tsi_sdk" / "tl_camera.py").write_text(
+        f"VERSION = {version!r}\n", encoding="utf-8")
+    (d / "lib" / "windows-x86_64").mkdir(parents=True)
+    return d
+
+
+def _forget_sdk(monkeypatch):
+    for k in [k for k in sys.modules if k.startswith("thorlabs_tsi_sdk")]:
+        monkeypatch.delitem(sys.modules, k)
+
+
+def test_the_sdk_is_found_in_the_vendor_folder_newest_version_first(monkeypatch, tmp_path):
+    """Not installed (uv sync removes it) -> loaded from
+    %LOCALAPPDATA%/AaltoFlow/vendor/thorlabs_tsi_sdk-*, the newest version."""
+    import camera.backends.thorlabs as T
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    home = tmp_path / "AaltoFlow" / "vendor"
+    _fake_sdk_folder(home, "1.9.0")
+    newest = _fake_sdk_folder(home, "1.10.0")
+    assert T.find_sdk_dir() == str(newest)
+    _forget_sdk(monkeypatch)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    keep = []
+    monkeypatch.setattr(T, "_add_dll_dir", lambda d, k: keep.append(d) or True)
+    try:
+        tl = T.import_tl_camera()
+        assert tl.VERSION == "1.10.0"
+        assert keep == [str(newest / "lib" / "windows-x86_64")]
+    finally:
+        for k in [k for k in sys.modules if k.startswith("thorlabs_tsi_sdk")]:
+            del sys.modules[k]
+
+
+def test_no_sdk_anywhere_says_how_to_get_it(monkeypatch, tmp_path):
+    import builtins
+
+    import camera.backends.thorlabs as T
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    _forget_sdk(monkeypatch)
+    real_import = builtins.__import__
+
+    def no_sdk(name, *a, **kw):
+        if name.startswith("thorlabs_tsi_sdk"):
+            raise ImportError(name)
+        return real_import(name, *a, **kw)
+    monkeypatch.setattr(builtins, "__import__", no_sdk)
+    with pytest.raises(RuntimeError, match="setup_thorlabs_sdk.py"):
+        T.import_tl_camera()
+
+
+def _setup_script():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / "setup_thorlabs_sdk.py"
+    spec = importlib.util.spec_from_file_location("setup_thorlabs_sdk", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _package_zip_bytes(extra=()):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("thorlabs_tsi_sdk-1.2.0/thorlabs_tsi_sdk/__init__.py", "")
+        z.writestr("thorlabs_tsi_sdk-1.2.0/thorlabs_tsi_sdk/tl_camera.py", "X = 1\n")
+        z.writestr("thorlabs_tsi_sdk-1.2.0/lib/windows-x86_64/thorlabs_tsi_camera_sdk.dll", b"MZ")
+        for name, data in extra:
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_setup_script_unpacks_from_the_sdk_download_or_the_inner_zip(tmp_path, capsys):
+    import zipfile
+    S = _setup_script()
+    outer = tmp_path / "scientific_camera_interfaces-2.3.zip"
+    with zipfile.ZipFile(outer, "w") as z:
+        z.writestr("Scientific Camera Interfaces/Python_README.txt", "readme")
+        z.writestr("Scientific Camera Interfaces/SDK/Python Toolkit/"
+                   "thorlabs_tsi_camera_python_sdk_package.zip", _package_zip_bytes())
+    dest = tmp_path / "vendor"
+    assert S.main([str(outer), "--dest", str(dest)]) == 0
+    root = dest / "thorlabs_tsi_sdk-1.2.0"
+    assert (root / "thorlabs_tsi_sdk" / "tl_camera.py").is_file()
+    assert (root / "lib" / "windows-x86_64" / "thorlabs_tsi_camera_sdk.dll").is_file()
+    out = capsys.readouterr().out
+    assert out.isascii() and "present" in out          # gotcha #14: printed text is ASCII
+    inner = tmp_path / "thorlabs_tsi_camera_python_sdk_package.zip"
+    inner.write_bytes(_package_zip_bytes())
+    assert S.main([str(inner), "--dest", str(tmp_path / "v2")]) == 0
+    # and the driver finds what the script made
+    from camera.backends.thorlabs import find_sdk_dir
+    assert find_sdk_dir(str(root)) == str(root)
+
+
+def test_setup_script_refuses_an_entry_outside_its_folder(tmp_path):
+    S = _setup_script()
+    evil = tmp_path / "evil.zip"
+    evil.write_bytes(_package_zip_bytes(extra=[("thorlabs_tsi_sdk-1.2.0/../../x.txt", "x")]))
+    with pytest.raises(SystemExit, match="outside"):
+        S.main([str(evil), "--dest", str(tmp_path / "v")])
+    assert not (tmp_path / "x.txt").exists()
+
+
+def test_the_real_sdk_loads_when_it_is_unpacked_here(monkeypatch):
+    """Runs only where the REAL SDK is unpacked (setup_thorlabs_sdk.py, or
+    AALTOFLOW_THORLABS_SDK = its folder): loads Thorlabs' DLL, lists cameras
+    (an empty list without one), disposes. Opens no camera."""
+    import os
+
+    from camera.backends.thorlabs import find_sdk_dir, import_tl_camera
+    d = find_sdk_dir(os.environ.get("AALTOFLOW_THORLABS_SDK", ""))
+    if not d:
+        pytest.skip("the real Thorlabs SDK is not unpacked on this PC")
+    _forget_sdk(monkeypatch)                 # never a fake left by another test
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    tl = import_tl_camera(d)
+    sdk = tl.TLCameraSDK()
+    try:
+        assert isinstance(sdk.discover_available_cameras(), list)
+    finally:
+        sdk.dispose()

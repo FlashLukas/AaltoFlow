@@ -58,7 +58,8 @@ def build_real_system(cfg: Config | None = None):
         # device is its serial, "" or "0" = the first one found
         from .backends.thorlabs import ThorlabsCamera
         dev = h.cam_device if h.cam_device not in ("", "0") else ""
-        cam = ThorlabsCamera(device=dev, dll_dir=cfg.camera.thorlabs_dll_dir)
+        cam = ThorlabsCamera(device=dev, dll_dir=cfg.camera.thorlabs_dll_dir,
+                             sdk_dir=cfg.camera.thorlabs_sdk_dir)
     else:
         from .backends.ids import IDSCamera
         cam = IDSCamera(device=h.cam_device or cfg.camera.camera_name)

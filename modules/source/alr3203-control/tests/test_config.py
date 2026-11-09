@@ -79,3 +79,15 @@ def test_dio_line_names(spelling, index):
 def test_bad_dio_line_is_refused():
     with pytest.raises(ValueError):
         dio_index("p3.0")
+
+
+def test_the_blue_box_example_switches_the_relay_through_usb6001():
+    """examples/bluebox.ini must keep loading when config keys change."""
+    from pathlib import Path
+
+    from alr3203.config import Config
+    ini = Path(__file__).resolve().parents[1] / "examples" / "bluebox.ini"
+    cfg = Config.load(str(ini))
+    assert cfg.polarity.driver == "usb6001" and cfg.polarity.line == "p0.0"
+    assert cfg.polarity.cmd_port == 5629
+    assert cfg.limits.current_max_A == Config().limits.current_max_A   # cap stays commented

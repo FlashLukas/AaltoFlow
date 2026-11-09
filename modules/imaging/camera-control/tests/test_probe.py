@@ -103,3 +103,81 @@ def test_the_script_prints_one_ascii_json_line():
     line = [ln for ln in r.stdout.splitlines() if ln.strip()][-1]
     data = json.loads(line)
     assert isinstance(data["devices"], list) and line.isascii()
+
+
+# --------------------------------------------------------------------------- #
+# Thorlabs (2026-11-09, the Blue Box's Zelux): listed through a fake TSI SDK
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def no_real_thorlabs(monkeypatch):
+    """A PC with the real SDK unpacked (the Blue Box) must not leak a real
+    camera into these tests: Thorlabs is off unless a test fakes it."""
+    from camera.backends import thorlabs as T
+    monkeypatch.setattr(T, "sdk_available", lambda sdk_dir="": False)
+
+
+def _fake_thorlabs(monkeypatch, serials, fail=None):
+    from camera.backends import thorlabs as T
+    calls = []
+
+    class TLCameraSDK:
+        def __init__(self):
+            calls.append("sdk")
+
+        def discover_available_cameras(self):
+            calls.append("discover")
+            if fail:
+                raise RuntimeError(fail)
+            return list(serials)
+
+        def open_camera(self, serial):
+            raise AssertionError("the probe opened a Thorlabs camera")
+
+        def dispose(self):
+            calls.append("dispose")
+
+    monkeypatch.setattr(T, "sdk_available", lambda sdk_dir="": True)
+    monkeypatch.setattr(T, "import_tl_camera",
+                        lambda *a, **k: types.SimpleNamespace(TLCameraSDK=TLCameraSDK))
+    return calls
+
+
+def test_thorlabs_cameras_are_listed_without_opening_them(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ids_peak", None)          # a Thorlabs-only PC
+    calls = _fake_thorlabs(monkeypatch, ["00000001"])
+    out = P.probe()
+    assert [(d["address"], d["identity"], d["lock"]) for d in out["devices"]] == [
+        ("00000001", "Thorlabs camera", "CAMERA::00000001")]
+    assert "thorlabs" in out["devices"][0]["detail"]
+    # a missing IDS runtime is normal there: no IDS note
+    assert out["note"] == ""
+    assert calls == ["sdk", "discover", "dispose"]
+
+
+def test_ids_and_thorlabs_side_by_side_and_a_held_one(monkeypatch):
+    _fake_ids(monkeypatch, [_Descr("4100000001", "U3-0000XCP-M", "cam1")])
+    _fake_thorlabs(monkeypatch, ["00000002"])
+    lock = hwlock.claim("CAMERA::00000002", "camera", wait_s=0.0)
+    try:
+        out = P.probe()
+    finally:
+        lock.release()
+    rows = {d["address"]: d for d in out["devices"]}
+    assert set(rows) == {"4100000001", "00000002"}
+    assert "held by the running camera service" in rows["00000002"]["detail"]
+
+
+def test_a_thorlabs_failure_is_a_note_and_the_sdk_is_still_disposed(monkeypatch):
+    _fake_ids(monkeypatch, [_Descr("4100000001", "U3-0000XCP-M", "cam1")])
+    calls = _fake_thorlabs(monkeypatch, [], fail="boom")
+    out = P.probe()
+    assert [d["address"] for d in out["devices"]] == ["4100000001"]
+    assert "Thorlabs SDK could not list cameras" in out["note"] and "boom" in out["note"]
+    assert calls[-1] == "dispose"
+
+
+def test_without_the_thorlabs_sdk_the_ids_list_is_unchanged(monkeypatch):
+    calls = _fake_ids(monkeypatch, [_Descr("4100000001", "U3-0000XCP-M", "cam1")])
+    out = P.probe()
+    assert [d["address"] for d in out["devices"]] == ["4100000001"]
+    assert out["note"] == "" and calls == ["init", "update", "close"]

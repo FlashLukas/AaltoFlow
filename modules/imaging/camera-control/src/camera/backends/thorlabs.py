@@ -1,17 +1,29 @@
-"""Real camera backend -- Thorlabs scientific cameras (Zelux / Kiralux /
+r"""Real camera backend -- Thorlabs scientific cameras (Zelux / Kiralux /
 Quantalux) via the Thorlabs Scientific Camera SDK (thorlabs_tsi_sdk).
 
 The vacuum setup's camera (2026-11-09) is a CS165MU: Zelux, 1.6 MP monochrome,
 1440 x 1080, 10-bit, USB 3. It is NOT GenICam and NOT the old DCx/uc480 line --
-ThorCam talks to it through the "TSI" SDK, whose Python wrapper ships INSIDE the
-ThorCam install (not on PyPI):
-    C:\\Program Files\\Thorlabs\\Scientific Imaging\\Scientific Camera Support\\
-        Scientific Camera Interfaces.zip  ->  SDK\\Python Toolkit\\
-        thorlabs_tsi_camera_python_sdk_package.zip      (pip install that zip)
-and needs the native DLLs (thorlabs_tsi_camera_sdk.dll ...) on the DLL search
-path: the "SDK\\Native Toolkit\\dlls\\Native_64_lib" folder of the same zip, or
-ThorCam's own install folder. Point ``dll_dir`` (camera.thorlabs_dll_dir) at it;
-empty = try ThorCam's default folder.
+it speaks Thorlabs' "TSI" SDK. Checked against the real SDK on 2026-11-09:
+"Windows SDK and Doc. for Scientific Cameras" 2.3 from thorlabs.com (ThorCam
+page > Programming Interfaces), whose SDK\Python Toolkit\
+thorlabs_tsi_camera_python_sdk_package.zip holds thorlabs_tsi_sdk 1.2.0.
+
+WHERE THE SDK COMES FROM. It is not on PyPI, so it cannot be a dependency in
+pyproject.toml -- and a copy pip-installed into the venv is REMOVED by the next
+``uv sync`` (gotcha #29: sync removes what the lock does not list). So the
+driver also loads it from a FOLDER outside the venv: ``sdk_dir``
+(camera.thorlabs_sdk_dir), or by default the newest
+%LOCALAPPDATA%\AaltoFlow\vendor\thorlabs_tsi_sdk-* that
+``scripts/setup_thorlabs_sdk.py <the SDK zip>`` unpacks. An installed package
+wins when there is one.
+
+DLLs. Since 1.2.0 the Python package carries its own native DLLs
+(lib/windows-x86_64) and the driver puts that folder on the search path. It
+adds another folder only when told (``dll_dir`` = camera.thorlabs_dll_dir), or
+as a LAST resort when the package's own DLLs failed to load: two different
+versions of thorlabs_tsi_camera_sdk.dll in one process is how mysterious
+crashes start. The camera's USB DRIVER comes with ThorImageCAM / ThorCam:
+install that first.
 
 This is the ONLY camera file that imports the Thorlabs SDK, LAZILY inside
 :meth:`open`, so the package imports and the simulator runs without it.
@@ -33,7 +45,8 @@ offered through the generic feature model (features / get_feature /
 set_feature), named like GenICam ("ExposureTime" in us ...) so the brain's auto
 exposure and autofocus exposure work as on the IDS camera.
 
-Not yet run on the camera: every SDK call is marked # VERIFY.
+Not yet run on the camera: every SDK call is marked # VERIFY (names and
+types checked against the SDK source; the behaviour on the camera is not).
 """
 
 from __future__ import annotations
@@ -46,23 +59,118 @@ import numpy as np
 
 from . import claim as hwclaim
 
-#: Where ThorCam installs its DLLs by default (the TSI SDK DLLs are there too).
+#: Where ThorImageCAM / ThorCam install their DLLs -- tried only if the Python
+#: package's own DLLs could not be loaded (see the module docstring).
 DEFAULT_DLL_DIRS = (
-    r"C:\Program Files\Thorlabs\Scientific Imaging\ThorCam",
     r"C:\Program Files\Thorlabs\ThorImageCAM\Bin",
+    r"C:\Program Files\Thorlabs\Scientific Imaging\ThorCam",
 )
+
+#: How long ONE poll call may block in the SDK. Short on purpose: the
+#: backend's lock is held during the call, and a settings change from the GUI
+#: waits for it. grab() keeps polling until its own deadline.
+POLL_SLICE_MS = 50
+
+
+def default_sdk_home() -> str:
+    """Where scripts/setup_thorlabs_sdk.py unpacks the Python SDK."""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "AaltoFlow", "vendor")
+
+
+def find_sdk_dir(sdk_dir: str = "") -> str:
+    """The folder that HOLDS the thorlabs_tsi_sdk package (it has a
+    ``thorlabs_tsi_sdk`` subfolder): ``sdk_dir`` if given, else the newest
+    thorlabs_tsi_sdk-* in default_sdk_home(); "" if there is none."""
+    if sdk_dir:
+        return sdk_dir if os.path.isdir(os.path.join(sdk_dir, "thorlabs_tsi_sdk")) else ""
+    home = default_sdk_home()
+    try:
+        names = [n for n in os.listdir(home) if n.startswith("thorlabs_tsi_sdk-")]
+    except OSError:
+        return ""
+
+    def version(name):
+        out = []
+        for part in name.split("-", 1)[1].split("."):
+            out.append(int(part) if part.isdigit() else -1)
+        return out
+
+    for n in sorted(names, key=version, reverse=True):     # newest first
+        d = os.path.join(home, n)
+        if os.path.isdir(os.path.join(d, "thorlabs_tsi_sdk")):
+            return d
+    return ""
+
+
+def sdk_available(sdk_dir: str = "") -> bool:
+    """Is the Python SDK installed or unpacked? (no DLL is loaded)"""
+    import importlib.util
+    try:
+        if importlib.util.find_spec("thorlabs_tsi_sdk") is not None:
+            return True
+    except (ImportError, ValueError):
+        pass
+    return bool(find_sdk_dir(sdk_dir))
+
+
+def _add_dll_dir(d: str, keep: list) -> bool:
+    """Put one DLL folder on the search path (Windows, Python >= 3.8: PATH is
+    no longer searched for a DLL that a DLL loads, hence add_dll_directory)."""
+    if not d or not os.path.isdir(d):
+        return False
+    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+    add = getattr(os, "add_dll_directory", None)
+    if add is not None:
+        try:
+            keep.append(add(d))
+        except OSError:
+            pass
+    return True
+
+
+def import_tl_camera(sdk_dir: str = "", dll_dir: str = "", keep: list | None = None):
+    """thorlabs_tsi_sdk.tl_camera: the installed package, else the one in
+    find_sdk_dir(sdk_dir). An unpacked package's own DLL folder
+    (lib/windows-x86_64) goes on the search path; ``dll_dir`` too when given.
+    ``keep`` collects the add_dll_directory handles (close them on close)."""
+    import sys
+    keep = keep if keep is not None else []
+    if dll_dir:
+        _add_dll_dir(dll_dir, keep)
+    try:
+        from thorlabs_tsi_sdk import tl_camera
+        return tl_camera
+    except ImportError:
+        pass
+    found = find_sdk_dir(sdk_dir)
+    if not found:
+        where = sdk_dir or default_sdk_home()
+        raise RuntimeError(
+            "thorlabs_tsi_sdk not found (looked in " + where + "): run "
+            "'python scripts/setup_thorlabs_sdk.py <scientific_camera_interfaces-*.zip>' "
+            "once (thorlabs.com, ThorCam page > Programming Interfaces), or set "
+            "camera.thorlabs_sdk_dir")
+    bits = "x86_64" if sys.maxsize > 2 ** 32 else "x86"
+    _add_dll_dir(os.path.join(found, "lib", f"windows-{bits}"), keep)
+    if found not in sys.path:
+        sys.path.insert(0, found)
+    from thorlabs_tsi_sdk import tl_camera
+    return tl_camera
 
 
 class ThorlabsCamera:
-    def __init__(self, device: str = "", dll_dir: str = "", poll_timeout_ms: int = 2000):
+    def __init__(self, device: str = "", dll_dir: str = "", poll_timeout_ms: int = 2000,
+                 sdk_dir: str = ""):
         self.device = str(device or "").strip()   # serial; "" = the first one found
         self.dll_dir = str(dll_dir or "").strip()
+        self.sdk_dir = str(sdk_dir or "").strip()
         self.poll_timeout_ms = int(poll_timeout_ms)
         self.pixel_format = "Mono10"              # what the sensor delivers (read at open)
         self._sdk = None
         self._cam = None
         self._mod = None                          # the tl_camera module
-        self._dll_handle = None
+        self._dll_handles: list = []
         self._hwlock = None
         self._lock = threading.Lock()             # SDK calls vs. grab
         self._bits = 10
@@ -73,21 +181,15 @@ class ThorlabsCamera:
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
-        self._add_dll_dir()
-        try:
-            from thorlabs_tsi_sdk import tl_camera          # VERIFY: package name
-        except ImportError as exc:  # pragma: no cover - only on a real PC
-            raise RuntimeError(
-                "thorlabs_tsi_sdk not installed: pip install the "
-                "thorlabs_tsi_camera_python_sdk_package.zip from the ThorCam install "
-                "into this environment (see backends/thorlabs.py)") from exc
+        tl_camera = import_tl_camera(self.sdk_dir, self.dll_dir, self._dll_handles)
         self._mod = tl_camera
         try:
-            self._sdk = tl_camera.TLCameraSDK()             # VERIFY
-            found = list(self._sdk.discover_available_cameras())   # VERIFY: serials
+            self._sdk = self._new_sdk(tl_camera)
+            # serial strings; discovering opens nothing
+            found = list(self._sdk.discover_available_cameras())
             if not found:
-                raise RuntimeError("no Thorlabs camera found (USB 3 plugged in? ThorCam "
-                                   "closed? -- it holds the camera)")
+                raise RuntimeError("no Thorlabs camera found (USB 3 plugged in? ThorImageCAM / "
+                                   "ThorCam closed? -- they hold the camera)")
             serial = self.device if self.device in found else (
                 found[0] if not self.device else None)
             if serial is None:
@@ -103,29 +205,34 @@ class ThorlabsCamera:
             self._bits = int(getattr(cam, "bit_depth", 10) or 10)        # VERIFY
             self.pixel_format = f"Mono{self._bits}"
             self._model = str(getattr(cam, "model", "") or "")           # VERIFY
+            # A camera left ARMED (by a crashed process) refuses the set-up below.
+            try:
+                if getattr(cam, "is_armed", False):                       # VERIFY
+                    cam.disarm()
+            except Exception:
+                pass
             # The acquisition set-up (not a camera PARAMETER): stream frames
-            # continuously, started by one software trigger.
+            # continuously, started by one software trigger -- the SDK's own
+            # recipe for continuous video (TLCamera.arm docstring).
             cam.frames_per_trigger_zero_for_unlimited = 0                # VERIFY
-            cam.image_poll_timeout_ms = max(100, self.poll_timeout_ms)   # VERIFY
+            # host side: how long ONE poll call may block (see POLL_SLICE_MS)
+            cam.image_poll_timeout_ms = POLL_SLICE_MS                    # VERIFY
             self._arm()
         except BaseException:
             self.close()
             raise
 
-    def _add_dll_dir(self) -> None:
-        """Put the TSI native DLLs on the search path (Windows, Python >= 3.8:
-        PATH is no longer searched for a DLL that a DLL loads)."""
-        dirs = [self.dll_dir] if self.dll_dir else list(DEFAULT_DLL_DIRS)
-        for d in dirs:
-            if d and os.path.isdir(d):
-                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
-                add = getattr(os, "add_dll_directory", None)
-                if add is not None:
-                    try:
-                        self._dll_handle = add(d)
-                    except OSError:
-                        pass
-                return
+    def _new_sdk(self, tl_camera):
+        """TLCameraSDK(); if the package's own DLLs do not load and no DLL
+        folder was configured, try ThorImageCAM's / ThorCam's folder ONCE."""
+        try:
+            return tl_camera.TLCameraSDK()
+        except Exception as exc:
+            if self.dll_dir or "load" not in str(exc).lower():
+                raise
+            if not any([_add_dll_dir(d, self._dll_handles) for d in DEFAULT_DLL_DIRS]):
+                raise
+            return tl_camera.TLCameraSDK()                   # VERIFY: the fallback
 
     def _arm(self) -> None:
         cam = self._cam
@@ -155,12 +262,12 @@ class ThorlabsCamera:
         except Exception:
             pass
         self._cam = self._sdk = None
-        if self._dll_handle is not None:
+        for h in self._dll_handles:
             try:
-                self._dll_handle.close()
+                h.close()
             except Exception:
                 pass
-            self._dll_handle = None
+        self._dll_handles = []
         # release LAST: the camera is free for another service only now
         if self._hwlock is not None:
             self._hwlock.release()
@@ -177,19 +284,22 @@ class ThorlabsCamera:
         self._deep = None
         while True:
             with self._lock:
+                # blocks at most POLL_SLICE_MS; the buffer is valid only until
+                # the next poll (SDK docs), so it is copied while still ours
                 frame = self._cam.get_pending_frame_or_null()            # VERIFY
+                raw = None if frame is None else np.array(frame.image_buffer, copy=True)
             if frame is not None:
                 break
             if time.monotonic() > deadline:
                 raise TimeoutError(f"no frame from the Thorlabs camera in "
                                    f"{self.poll_timeout_ms} ms")
-            time.sleep(0.002)
-        raw = np.asarray(frame.image_buffer)                             # VERIFY: (h, w) uint16
+            time.sleep(0.001)       # the SDK already waited; this only spares a CPU
+        # raw: (h, w) uint16; the low `bits` bits are the pixel (SDK docs)
         if raw.ndim == 1:
             h = int(getattr(self._cam, "image_height_pixels", 0) or 0)   # VERIFY
             w = int(getattr(self._cam, "image_width_pixels", 0) or 0)
             raw = raw.reshape(h, w)
-        deep = raw.astype(np.uint16, copy=True)
+        deep = raw.astype(np.uint16, copy=False)
         bits = self._bits
         self._deep = (deep, bits) if bits > 8 else None
         self._deep_note = "" if bits > 8 else "the camera delivers 8-bit frames"
@@ -237,6 +347,10 @@ class ThorlabsCamera:
                     lo, hi = r[0], r[1]
                 except Exception:
                     pass
+                # the SDK's rule: a range whose maximum is 0 = not supported by
+                # this model (gain / black level on some cameras)
+                if hi == 0 and name in ("Gain", "BlackLevel"):
+                    continue
                 out.append({"name": name, "display": _pretty(name), "type": typ,
                             "value": val, "min": lo, "max": hi,
                             "inc": 1 if typ == "int" else None, "unit": unit,
@@ -266,7 +380,11 @@ class ThorlabsCamera:
         if name not in self._FEATURES:
             raise KeyError(f"camera feature {name!r} is not writable")
         attr, _rng, typ, _unit, needs_disarm = self._FEATURES[name]
-        v = float(value) if typ == "float" else int(round(float(value)))
+        # EVERY TSI setter takes an integer (exposure is a c_longlong of whole
+        # microseconds): a float raises TypeError inside the SDK. Exposure is
+        # still offered as "float" so the GUI and the brain's exposure logic
+        # treat it like the IDS one; it is rounded here.
+        v = int(round(float(value)))
         with self._lock:
             if needs_disarm:
                 # the SDK refuses ROI/binning changes while armed (VERIFY)
