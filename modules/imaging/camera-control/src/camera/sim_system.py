@@ -53,6 +53,12 @@ def build_real_system(cfg: Config | None = None):
     if cfg.camera.driver == "genicam":
         from .backends.genicam import GenICamCamera
         cam = GenICamCamera(device=h.cam_device, video_mode=cfg.camera.video_mode)
+    elif cfg.camera.driver == "thorlabs":
+        # Thorlabs scientific camera (Zelux CS165MU on the vacuum setup); the
+        # device is its serial, "" or "0" = the first one found
+        from .backends.thorlabs import ThorlabsCamera
+        dev = h.cam_device if h.cam_device not in ("", "0") else ""
+        cam = ThorlabsCamera(device=dev, dll_dir=cfg.camera.thorlabs_dll_dir)
     else:
         from .backends.ids import IDSCamera
         cam = IDSCamera(device=h.cam_device or cfg.camera.camera_name)
@@ -62,6 +68,10 @@ def build_real_system(cfg: Config | None = None):
         link = KimLink(h.kim_host, h.kim_cmd_port, h.kim_pub_port)
         xy = KimXYStage(link)
         z = KimZFocus(link) if h.use_z else SimZFocus()
+        return Camera(cam, xy, z, cfg), cam, xy, z
+
+    if h.motion == "split":
+        xy, z = build_split_motion(cfg)
         return Camera(cam, xy, z, cfg), cam, xy, z
 
     from .backends.remote_xy import RemoteXYStage
@@ -78,3 +88,49 @@ def build_real_system(cfg: Config | None = None):
         z = KCubeZFocus(h.kcube_serial, cfg.limits.z_min_v, cfg.limits.z_max_v)
     brain = Camera(cam, xy, z, cfg)
     return brain, cam, xy, z
+
+
+def build_split_motion(cfg: Config):
+    """motion = "split": XY and Z from two services (hardware.xy_stage /
+    z_stage). The vacuum setup: xy_stage "agilis" (AG-UC2) + z_stage "kim001"
+    (KIM001 moving the objective). When both name the SAME kim service, they
+    share one link, as on the kim rig. Returns (xy, z), not yet opened."""
+    from .backends.sim import SimZFocus
+
+    h = cfg.hardware
+    kim_link = None
+
+    def kim():
+        nonlocal kim_link
+        if kim_link is None:
+            from .backends.remote_kim import KimLink
+            kim_link = KimLink(h.kim_host, h.kim_cmd_port, h.kim_pub_port)
+        return kim_link
+
+    if h.xy_stage == "agilis":
+        from .backends.remote_agilis import AgilisXYStage, agilis_link
+        xy = AgilisXYStage(agilis_link(h.agilis_host, h.agilis_cmd_port, h.agilis_pub_port))
+    elif h.xy_stage == "kim":
+        from .backends.remote_kim import KimXYStage
+        xy = KimXYStage(kim())
+    else:
+        from .backends.remote_xy import RemoteXYStage
+        xy = RemoteXYStage(h.piezo_host, h.piezo_cmd_port)
+
+    if not h.use_z or h.z_stage == "none":
+        z = SimZFocus()
+    elif h.z_stage == "kim001":
+        # kim001-control speaks kim's language for its one axis, "Z"
+        from .backends.remote_kim import KimLink, KimZFocus
+        z = KimZFocus(KimLink(h.kim001_host, h.kim001_cmd_port, h.kim001_pub_port,
+                              module="kim001"))
+    elif h.z_stage == "kim":
+        from .backends.remote_kim import KimZFocus
+        z = KimZFocus(kim())
+    elif h.z_stage == "zpiezo":
+        from .backends.remote_z import RemoteZFocus
+        z = RemoteZFocus(h.z_host, h.z_cmd_port)
+    else:
+        from .backends.kcube import KCubeZFocus
+        z = KCubeZFocus(h.kcube_serial, cfg.limits.z_min_v, cfg.limits.z_max_v)
+    return xy, z

@@ -57,8 +57,13 @@ THEMES = ("dark", "light")
 # is a pure display preference, switched live from the GUI. "image_first"
 # (2026-10-14): the image fills the tab, a toolbar over it, a drawer beside it.
 LAYOUTS = ("classic", "cockpit", "workflow", "hud", "split", "image_first")
-# Which rig drives the sample (Hardware.motion).
-MOTIONS = ("kim", "piezo")
+# Which rig drives the sample (Hardware.motion). "split" = XY and Z come from
+# two different services (Hardware.xy_stage / z_stage), e.g. an Agilis XY
+# sample stage and a KIM001 moving the objective (the vacuum setup, 2026-11-09).
+MOTIONS = ("kim", "piezo", "split")
+# With motion = "split": what moves the sample in XY, and what focuses.
+XY_STAGES = ("agilis", "kim", "piezo")
+Z_STAGES = ("kim001", "kim", "zpiezo", "kcube", "none")
 # Spot search region shape (Spot.search_shape).
 SEARCH_SHAPES = ("rect", "circle")
 # Which size the LIVE readout and the Spot tab's trace show (Spot.size_method).
@@ -73,7 +78,7 @@ LOCATE_MODES = ("calibrated", "peak", "blob")
 # vision.find_spot_for_calibration.
 CALIB_MODES = ("saturated", "unsaturated")
 # The real camera backends (Camera.driver).
-DRIVERS = ("ids", "genicam")
+DRIVERS = ("ids", "genicam", "thorlabs")
 # Which pixels the second moment counts (Spot.clip_mode), see vision.spot_second_moment.
 CLIP_MODES = ("local", "pixel")
 # The simulator's laser spot (Camera.sim_spot_model).
@@ -96,7 +101,10 @@ class Camera:
     """Acquisition parameters (LabVIEW 'Camera settings')."""
 
     camera_name: str = "cam1"          # device serial / friendly name ("" = first)
-    driver: str = "ids"                # real backend: "ids" | "genicam"
+    driver: str = "ids"                # real backend: "ids" | "genicam" | "thorlabs"
+    # driver "thorlabs" (Zelux CS165MU etc.): the folder with the TSI SDK's
+    # native DLLs; "" = ThorCam's default install folder (backends/thorlabs.py)
+    thorlabs_dll_dir: str = ""
     video_mode: str = "Mono8 640x480"  # free text; real driver validates
     frame_rate: float = 15.0           # frames/s the engine tries to hold
     extra_delay_ms: float = 0.0        # optional extra pause per frame
@@ -583,9 +591,30 @@ class Hardware:
                    See backends/remote_kim.py. This is the lab rig (2026-09-13).
       * "piezo" -- XY through piezo-control (backends/remote_xy.py), Z through
                    zpiezo-control or an own KCube (the use_*_z flags below).
+      * "split" -- XY and Z from two services, chosen by ``xy_stage`` and
+                   ``z_stage`` (2026-11-09, the vacuum setup: an Agilis AG-UC2
+                   XY sample stage + a KIM001/PIA13 moving the OBJECTIVE).
+
+    ``xy_map`` -- how the stage axes sit in the IMAGE, for every XY stage that
+    does not do the image maths itself (piezo, agilis; kim does, with its own
+    camera calibration). Four characters: the stage axis (with sign) that moves
+    the image to the RIGHT (+x), then the one that moves it DOWN (+y).
+    "+X+Y" = aligned (the default, what the piezo rig always assumed); "+Y-X"
+    = stage +Y moves the image right, stage -X moves it down (a stage mounted
+    turned by 90 deg). Find it once on the rig: jog +X and watch which way the
+    image goes. A wrong map makes the stabiliser push the sample AWAY.
     """
 
-    motion: str = "kim"                # "kim" | "piezo"
+    motion: str = "kim"                # "kim" | "piezo" | "split"
+    xy_stage: str = "agilis"           # motion = split: "agilis" | "kim" | "piezo"
+    z_stage: str = "kim001"            # motion = split: "kim001" | "kim" | "zpiezo" | "kcube" | "none"
+    xy_map: str = "+X+Y"               # stage axis -> image direction (see above)
+    agilis_host: str = "127.0.0.1"     # agilis-control (AG-UC2 XY)
+    agilis_cmd_port: int = 5595
+    agilis_pub_port: int = 5596
+    kim001_host: str = "127.0.0.1"     # kim001-control (KIM001 focus)
+    kim001_cmd_port: int = 5637
+    kim001_pub_port: int = 5638
     # Show and jog XY in "steps" or "um". Steps are what an open-loop stage
     # really counts; its um are steps x kim's um_per_step. A stage without a
     # step counter (piezo) is always um.
@@ -606,6 +635,30 @@ class Hardware:
     z_step_v: float = 0.25             # GUI Z jog step, volts
     z_step_time_ms: float = 25.0       # settle time per Z step
     cam_device: str = "0"              # GenICam index / id for the real camera
+
+
+def parse_xy_map(text: str):
+    """"+Y-X" -> ((1, +1), (0, -1)): for image x and image y, the stage axis
+    index (0 = X, 1 = Y) and the sign. None if the text is not a valid map
+    (both image directions must use DIFFERENT stage axes)."""
+    s = "".join(str(text or "").split()).upper()
+    if len(s) != 4 or s[0] not in "+-" or s[2] not in "+-" \
+            or s[1] not in "XY" or s[3] not in "XY" or s[1] == s[3]:
+        return None
+    return ((0 if s[1] == "X" else 1, 1 if s[0] == "+" else -1),
+            (0 if s[3] == "X" else 1, 1 if s[2] == "+" else -1))
+
+
+def image_um_to_stage(dux: float, duy: float, xy_map: str) -> tuple:
+    """A move of the IMAGE content by (dux, duy) um (x right, y down) -> the
+    stage move (dX, dY) um that makes it, by the axis map. Identity for an
+    invalid map (sanitised at load, so it does not happen in practice)."""
+    m = parse_xy_map(xy_map) or ((0, 1), (1, 1))
+    d = [0.0, 0.0]
+    (ax, sx), (ay, sy) = m
+    d[ax] += sx * float(dux)
+    d[ay] += sy * float(duy)
+    return d[0], d[1]
 
 
 @dataclass
@@ -734,6 +787,12 @@ def load_config(path: str) -> Config:
     cfg.ui.layout = cfg.ui.layout.lower()
     if cfg.hardware.motion not in MOTIONS:
         cfg.hardware.motion = "kim"
+    if cfg.hardware.xy_stage not in XY_STAGES:
+        cfg.hardware.xy_stage = "agilis"
+    if cfg.hardware.z_stage not in Z_STAGES:
+        cfg.hardware.z_stage = "kim001"
+    if parse_xy_map(cfg.hardware.xy_map) is None:
+        cfg.hardware.xy_map = "+X+Y"
     if cfg.spot.search_shape not in SEARCH_SHAPES:
         cfg.spot.search_shape = "rect"
     if cfg.spot.size_method not in SIZE_METHODS:

@@ -35,7 +35,8 @@ EXIT_HARDWARE_BUSY = 4
 
 
 #: camera.ini field prefix for each module the camera talks to
-_PEERS = {"kim": "kim", "piezo": "piezo", "zpiezo": "z"}
+_PEERS = {"kim": "kim", "piezo": "piezo", "zpiezo": "z",
+          "agilis": "agilis", "kim001": "kim001"}
 
 
 def apply_launcher_endpoints(cfg) -> None:

@@ -1,0 +1,87 @@
+"""Launch the KIM001 focus front panel.
+
+Local (owns its own simulator brain in-process -- no service needed):
+    python scripts/run_gui.py
+    python scripts/run_gui.py --real            # drive the real KIM001 directly
+
+Remote (connect to a running service via ZeroMQ):
+    python scripts/run_gui.py --connect 127.0.0.1
+    python scripts/run_gui.py --connect 192.168.0.5
+
+In remote mode the GUI is a thin client: identical controls, but every command
+crosses the wire to the service that owns the hardware.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from kim001.apps.gui import run_app  # noqa: E402
+from kim001.config import Config, load_startup_config  # noqa: E402
+from kim001.net.protocol import (  # noqa: E402
+    DEFAULT_CMD_PORT,
+    DEFAULT_PUB_PORT,
+    apply_config_dict,
+)
+
+
+def main(theme: str | None = None) -> None:
+    ap = argparse.ArgumentParser(description="objective-focus inertia actuator GUI (KIM001/PIA13)")
+    ap.add_argument("--connect", metavar="HOST", help="connect to a remote service at HOST")
+    ap.add_argument("--real", action="store_true", help="local mode: use the real KIM001")
+    ap.add_argument("--config", help="INI config file to load (local mode)")
+    ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
+    ap.add_argument("--pub-port", type=int, default=DEFAULT_PUB_PORT)
+    ap.add_argument("--theme", choices=["dark", "light"],
+                    help="override the startup theme for this launch")
+    args = ap.parse_args()
+    # An explicit function arg wins, else the CLI flag (either may be None).
+    theme = theme or args.theme
+
+    if args.connect:
+        # Remote: build a client and mirror the service's config into a local
+        # Config just so the indicator/settings have sensible limits.
+        from kim001.net.client import Kim001Client
+
+        # kind "gui": the service counts this window as a viewer, and the first
+        # GUI to connect gets control (control.py / apps/control_bar.py)
+        client = Kim001Client(host=args.connect, cmd_port=args.cmd_port, pub_port=args.pub_port,
+                           kind="gui", name="kim001 GUI")
+        client.start()
+        cfg = Config()
+        try:
+            apply_config_dict(cfg, client.get_config())
+        except Exception:
+            pass
+        if theme:
+            cfg.ui.theme = theme
+        return sys.exit(run_app(client, cfg, remote=True))
+
+    # Local: own the brain in-process. Same start-up file as the service
+    # (--config, else kim001.ini if present), so a local GUI on the rig knows the
+    # saved step sizes too, and its Save buttons write the same file.
+    cfg, cfg_path, _loaded = load_startup_config(args.config)
+    if theme:
+        cfg.ui.theme = theme
+    if args.real:
+        from kim001.sim_system import build_real_system
+
+        brain, _ = build_real_system(cfg)
+    else:
+        from kim001.sim_system import build_sim_system
+
+        brain, _ = build_sim_system(cfg)
+    brain.config_path = cfg_path
+    brain.start()
+    try:
+        sys.exit(run_app(brain, cfg, remote=False))
+    finally:
+        brain.shutdown()
+
+
+if __name__ == "__main__":
+    main()

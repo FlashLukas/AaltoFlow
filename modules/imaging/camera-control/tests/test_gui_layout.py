@@ -109,8 +109,8 @@ def test_camera_settings_driver_combo_auto_exposure_and_simulator_fields(win):
     w, brain, app = win
     cam = w._form_widgets["camera"]
     assert isinstance(cam["driver"], QComboBox)
-    assert [cam["driver"].itemText(i) for i in range(cam["driver"].count())] == ["ids",
-                                                                                   "genicam"]
+    assert [cam["driver"].itemText(i) for i in range(cam["driver"].count())] == [
+        "ids", "genicam", "thorlabs"]           # thorlabs: the Zelux CS165MU (2026-11-09)
     # the button sits right next to the exposure it sets
     assert w.b_auto_expo.parent() is cam["exposure_us"].parent()
     assert not w._boxes["Simulator"].isHidden()                   # the sim IS the camera

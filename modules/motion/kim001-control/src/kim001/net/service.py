@@ -1,0 +1,449 @@
+"""Kim001Service -- owns the brain, serves commands, publishes status (§6).
+
+Two daemon threads, each owning exactly one socket (a ZeroMQ socket must not be
+shared across threads):
+
+  * publisher : PUB socket.  Sends a status frame every 1/status_hz seconds and
+                drains the event queue as events arrive.
+  * commander : REP socket.  poll(200ms) -> recv_json -> _dispatch -> send_json.
+                Wrapped so a bad command can never kill the loop.
+
+The brain's ``_on_event`` hook is redirected into a thread-safe queue so events
+raised on the command thread reach the publisher thread cleanly.
+
+The verbs are kim-control's, unchanged (the camera drives this service with its
+kim client). A command for axis X or Y is refused by the brain
+(config.check_fitted) and comes back as
+{"ok": false, "error": "NotFitted: axis X is not fitted on a KIM001 ..."}.
+"""
+
+from __future__ import annotations
+
+import json as _json_mod
+import queue
+import threading
+import time
+
+import zmq
+
+from ..kim001 import Kim
+from ..control import ControlLease
+from .. import secure
+from .describe import build_manifest
+from . import protocol as P
+from ..config import AXES, FITTED_AXES
+from ..config import _cast as _cast_cfg
+
+
+class PortInUse(RuntimeError):
+    """A command or status port is already taken (a second copy of this
+    service, or an orphan still holding it -- gotcha #7). Raised by start()
+    BEFORE the instrument is opened, so there is nothing to close; the
+    run_service script turns it into one line on stderr and exit code 2."""
+
+
+class Kim001Service:
+    def __init__(
+        self,
+        brain: Kim,
+        host: str = "0.0.0.0",
+        cmd_port: int = P.DEFAULT_CMD_PORT,
+        pub_port: int = P.DEFAULT_PUB_PORT,
+        status_hz: float = 8.0,
+    ):
+        self.brain = brain
+        self._rev = 0
+        self._rev_at = 0.0
+        self.host = host
+        self.cmd_port = cmd_port
+        self.pub_port = pub_port
+        self.status_hz = status_hz
+
+        self._ctx = zmq.Context.instance()
+        self._guard = None                   # secure.Guard while secured
+        self._events: "queue.Queue[dict]" = queue.Queue()
+        self._stop = threading.Event()
+        # Set by shutdown{keep_outputs: true}: a RESTART (code update). The
+        # service still closes and releases everything, but changes nothing
+        # the instrument holds; the next start ADOPTS that state.
+        self._keep_outputs = False
+        self._threads: list[threading.Thread] = []
+        # One controller, many viewers (control.py): the gate every command
+        # passes. The safety verbs stay open to everyone -- a viewer who sees
+        # the stage run away must be able to stop it.
+        self.control = ControlLease(
+            safety={"stop", "abort_px_calibration"},
+            read={"stream_read"},
+            on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
+
+    # ------------------------------------------------------------------ #
+    def start(self) -> None:
+        # Bind BOTH sockets here, in the caller's thread, and BEFORE the
+        # instrument is opened (gotcha #39). They used to be bound inside the
+        # two daemon threads: a port already in use then killed only that
+        # thread, with a traceback nobody reads, while the process lived on --
+        # deaf, but holding the instrument and its hwlock claim. Now a taken
+        # port raises PortInUse out of start(), before anything was opened or
+        # claimed. (Handing a socket to the thread that will use it is allowed
+        # in ZeroMQ; Thread.start() is the memory barrier it asks for.)
+        cmd_addr = f"tcp://{self.host}:{self.cmd_port}"
+        pub_addr = f"tcp://{self.host}:{self.pub_port}"
+        self._pub_sock = self._ctx.socket(zmq.PUB)
+        self._rep_sock = self._ctx.socket(zmq.REP)
+        # Encryption and who-is-who (secure.py, README "Encryption and
+        # keys"): when the lab's policy secures kim001, both sockets become
+        # CurveZMQ servers -- only PCs in the keyring can connect, and every
+        # request is checked against the key that sent it. Must happen before
+        # bind. With security off (the default) nothing changes.
+        try:
+            self._guard = secure.secure_server(
+                self._ctx, [self._rep_sock, self._pub_sock], "kim001",
+                on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
+        except secure.SecurityError:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            raise
+        try:
+            self._pub_sock.bind(pub_addr)
+            self._rep_sock.bind(cmd_addr)
+        except zmq.ZMQError as exc:
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            secure.release_server(self._guard)
+            raise PortInUse(
+                f"cannot listen on {cmd_addr} / {pub_addr} ({exc}); "
+                f"is another service already using these ports?") from exc
+        # Route brain events into our queue (they get PUBlished as b"event").
+        self.brain._on_event = lambda level, msg: self._events.put(
+            {"level": level, "msg": msg}
+        )
+        try:
+            self.brain.start()
+        except BaseException:
+            # the instrument did not start (busy, unplugged, ...):
+            # give the ports back before the exception leaves
+            self._pub_sock.close(0)
+            self._rep_sock.close(0)
+            secure.release_server(self._guard)
+            raise
+
+        self._stop.clear()
+        self._threads = [
+            threading.Thread(target=self._publisher, name="kim001-pub", daemon=True),
+            threading.Thread(target=self._commander, name="kim001-cmd", daemon=True),
+        ]
+        for t in self._threads:
+            t.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=2.0)
+        secure.release_server(self._guard)
+        self._guard = None
+        if self._keep_outputs:
+            print("shutdown: keep_outputs -- instrument state left as it is (restart)")
+        try:
+            self.brain.shutdown(keep_outputs=self._keep_outputs)
+        except Exception:
+            pass
+
+    def serve_forever(self) -> None:
+        """Convenience: start and block until Ctrl-C."""
+        self.start()
+        try:
+            while not self._stop.is_set():
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.stop()
+
+    # ------------------------------------------------------------------ #
+    # publisher thread
+    # ------------------------------------------------------------------ #
+    def status_payload(self) -> dict:
+        """The status dict, built in ONE place.
+
+        The publisher and the `status` command reply must not drift: a client
+        falls back to the REQ path whenever no PUB frame has arrived yet (ZeroMQ
+        SUB is a slow joiner), so a field present in only one of them is a field
+        that vanishes intermittently.
+        """
+        st = P.status_to_dict(self.brain.status())
+        st["describe_rev"] = self.describe_rev()
+        st["control"] = self.control.status()
+        return st
+
+    def describe_rev(self, max_age_s: float = 1.0) -> int:
+        """Current manifest revision, recomputed at most once per `max_age_s`.
+
+        Every status frame carries it so a client can tell, for the cost of one
+        integer compare, whether its cached manifest went stale. Rebuilding the
+        manifest at the status rate would be pure waste.
+        """
+        now = time.monotonic()
+        if now - self._rev_at >= max_age_s:
+            self._rev = build_manifest(self.brain)["revision"]
+            self._rev_at = now
+        return self._rev
+
+    def _publisher(self) -> None:
+        sock = self._pub_sock                # bound in start()
+        period = 1.0 / self.status_hz
+        next_status = time.monotonic()
+        try:
+            while not self._stop.is_set():
+                # 1) forward any pending events immediately
+                try:
+                    while True:
+                        evt = self._events.get_nowait()
+                        sock.send_multipart([P.TOPIC_EVENT, _json(evt)])
+                except queue.Empty:
+                    pass
+
+                # 2) publish status on schedule
+                now = time.monotonic()
+                if now >= next_status:
+                    next_status = now + period
+                    try:
+                        payload = self.status_payload()
+                        sock.send_multipart([P.TOPIC_STATUS, _json(payload)])
+                    except Exception:
+                        pass  # status must never take the publisher down
+
+                time.sleep(0.005)
+        finally:
+            sock.close(0)
+
+    # ------------------------------------------------------------------ #
+    # commander thread
+    # ------------------------------------------------------------------ #
+    def _commander(self) -> None:
+        sock = self._rep_sock                # bound in start()
+        poller = zmq.Poller()
+        poller.register(sock, zmq.POLLIN)
+        try:
+            while not self._stop.is_set():
+                if dict(poller.poll(200)):
+                    try:
+                        frame = sock.recv(copy=False)
+                        raw = frame.bytes
+                    except Exception:
+                        continue
+                    # A REP socket that has received MUST send before it can
+                    # receive again. A request that was not JSON used to be
+                    # skipped with `continue` and no reply: the socket then
+                    # refused every later recv, and this loop never answered
+                    # anyone again -- one bad message took the whole command
+                    # port down (gotcha #39). Now it gets an error reply like
+                    # any other failed command.
+                    try:
+                        req = _json_mod.loads(raw.decode("utf-8"))
+                        # security first: does the identity match the key
+                        # that sent it? (None = yes, or security is off)
+                        refused = None
+                        if self._guard is not None and isinstance(req, dict):
+                            refused = self._guard.check(req, secure.user_id(frame))
+                        reply = refused or (self._dispatch(req) if isinstance(req, dict) else
+                                            {"ok": False, "error": "request must be a JSON object"})
+                    except Exception as exc:  # never die on a bad command
+                        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                    # Serialise BEFORE sending, for the same reason: a reply
+                    # json cannot encode (a numpy number, say) must still be
+                    # answered, or the socket is stuck again.
+                    try:
+                        data = _json(reply)
+                    except Exception as exc:
+                        data = _json({"ok": False, "error": f"reply not JSON-encodable: {exc}"})
+                    try:
+                        sock.send(data)
+                    except Exception:
+                        pass
+        finally:
+            # linger, not 0: after `shutdown` the reply may still be queued, and
+            # close(0) would drop it -- the launcher would then kill us anyway.
+            sock.close(linger=500)
+
+    # ------------------------------------------------------------------ #
+    # command dispatch
+    # ------------------------------------------------------------------ #
+    def _dispatch(self, req: dict) -> dict:
+        # Who may change what (control.py): the gate answers the control verbs
+        # itself and refuses a change from a viewer; anything else goes on.
+        gate = self.control.handle(req)
+        if gate is not None:
+            return gate
+        cmd = (req or {}).get("cmd")
+        b = self.brain
+
+        # -- universal commands (every module implements these) ---------- #
+        if cmd == "status":
+            return {"ok": True, "status": self.status_payload()}
+        if cmd == "describe":
+            return {"ok": True, "describe": build_manifest(self.brain)}
+        if cmd == "shutdown":
+            # A CLEAN stop, asked for by the launcher before it would kill us: a
+            # hard kill gives the brain no chance to close its hardware (it wedged
+            # the PM16 until replugged, docs/DEVELOPER_NOTES.md gotcha #25). Setting _stop
+            # ends serve_forever, whose finally: stop() shuts the brain down.
+            # keep_outputs=true: a restart for a code update -- close and
+            # release everything, but leave the instrument as it is. Parsed
+            # with the config's bool cast: the text "false" is False (gotcha #3).
+            self._keep_outputs = _cast_cfg(
+                str((req or {}).get("keep_outputs", False)), "bool")
+            self._stop.set()
+            return {"ok": True, "stopping": True,
+                    "kept_outputs": self._keep_outputs}
+        if cmd == "info":
+            return {
+                "ok": True,
+                "info": {
+                    "idn": b.backend.idn(),
+                    "axes": list(("X", "Y", "Z")),
+                    # which of them exist on this controller (only Z)
+                    "fitted": [AXES[a] for a in FITTED_AXES],
+                    "limits": P.config_to_dict(b.cfg)["limits"],
+                    "calibration": P.config_to_dict(b.cfg)["calibration"],
+                    "n_slots": len(b.positions.slots),
+                },
+            }
+        if cmd == "get_config":
+            return {"ok": True, "config": P.config_to_dict(b.cfg)}
+        if cmd == "set_config":
+            P.apply_config_dict(b.cfg, req.get("config", {}))
+            b.apply_config()
+            return {"ok": True}
+        # Persist to the service's OWN .ini (kim001.ini, or the --config file).
+        # No path argument on the wire on purpose: the file belongs to the PC
+        # the service runs on, and a client elsewhere on the network should
+        # not choose where this process writes.
+        if cmd == "save_calibration":
+            return {"ok": True, "path": b.save_calibration()}
+        if cmd == "save_config":
+            return {"ok": True, "path": b.save_config()}
+
+        # -- motion: STEP language --------------------------------------- #
+        if cmd == "move_to_step":
+            target = b.move_to_step(P.parse_axis(req["axis"]), req["position"])
+            return {"ok": True, "target": target}
+        if cmd == "move_steps":
+            target = b.move_steps(P.parse_axis(req["axis"]), req["delta"])
+            return {"ok": True, "target": target}
+
+        # -- motion: MICROMETRE language --------------------------------- #
+        if cmd == "move_to_um":
+            target = b.move_to_um(P.parse_axis(req["axis"]), req["position"])
+            return {"ok": True, "target": target}
+        if cmd == "move_relative_um":
+            target = b.move_relative_um(P.parse_axis(req["axis"]), req["delta"])
+            return {"ok": True, "target": target}
+
+        if cmd == "stop":
+            if req.get("axis") is None:
+                b.stop_all()
+            else:
+                b.stop(P.parse_axis(req["axis"]))
+            return {"ok": True}
+
+        # -- datum + display origin -------------------------------------- #
+        if cmd == "zero_counter":
+            if req.get("axis") is None:
+                b.zero_counter_all()
+            else:
+                b.zero_counter(P.parse_axis(req["axis"]))
+            return {"ok": True}
+        if cmd == "set_zero":
+            if req.get("axis") is None:
+                origins = b.set_zero_all()
+            else:
+                origins = [b.set_zero(P.parse_axis(req["axis"]))]
+            return {"ok": True, "rel_origin": origins}
+        if cmd == "clear_zero":
+            if req.get("axis") is None:
+                b.clear_zero_all()
+            else:
+                b.clear_zero(P.parse_axis(req["axis"]))
+            return {"ok": True}
+
+        # -- parameters -------------------------------------------------- #
+        if cmd == "set_step_rate":
+            v = b.set_step_rate(P.parse_axis(req["axis"]), req["value"])
+            return {"ok": True, "value": v}
+        if cmd == "set_velocity_um":
+            v = b.set_velocity_um(P.parse_axis(req["axis"]), req["value"])
+            return {"ok": True, "value": v}
+        if cmd == "set_acceleration":
+            a = b.set_acceleration(P.parse_axis(req["axis"]), req["value"])
+            return {"ok": True, "value": a}
+        if cmd == "set_voltage":
+            v = b.set_voltage(P.parse_axis(req["axis"]), req["value"])
+            return {"ok": True, "value": v}
+        if cmd == "set_calibration":
+            # direction: 0/absent = both ways, +1 forward only, -1 backward only
+            v = b.set_calibration(P.parse_axis(req["axis"]), req["value"],
+                                  int(req.get("direction", 0)))
+            return {"ok": True, "value": v}
+        if cmd == "set_leash":
+            state = b.set_leash(
+                enabled=req.get("enabled"),
+                leash_xy=req.get("leash_xy"),
+                leash_z=req.get("leash_z"),
+            )
+            return {"ok": True, "leash": state}
+        if cmd == "set_speed":
+            return {"ok": True, "speed": b.set_speed(bool(req["fast"]))}
+        if cmd == "set_step_size":
+            return {"ok": True, "step": b.set_step_size(bool(req["large"]))}
+
+        # -- fly-scan stream: the position recorded continuously ----------- #
+        if cmd == "stream_start":
+            return {"ok": True, "stream_id": b.stream_start(req.get("rate_hz"))}
+        if cmd == "stream_read":
+            return {"ok": True, "stream": b.stream.read()}
+        if cmd == "stream_stop":
+            return {"ok": True, "stream": b.stream_stop()}
+
+        # -- kim's X/Y camera-frame calibration: refused here (no X / Y) ---- #
+        if cmd == "start_px_calibration":
+            opts = {k: req[k] for k in ("camera_host", "camera_port", "voltages", "repeats")
+                    if req.get(k) is not None}
+            return {"ok": True, "state": b.start_px_calibration(**opts)}
+        if cmd == "abort_px_calibration":
+            b.abort_px_calibration()
+            return {"ok": True}
+        if cmd == "get_px_calibration":
+            return {"ok": True, "calibration": b.get_px_calibration()}
+        if cmd == "move_image_px":
+            steps = b.move_image_px(req["dx"], req["dy"], context=req.get("context"))
+            return {"ok": True, "steps": steps}
+
+        # -- position list ----------------------------------------------- #
+        if cmd == "store_position":
+            p = b.store_position(int(req["slot"]), req.get("name", ""))
+            return {"ok": True, "position": p}
+        if cmd == "clear_position":
+            b.clear_position(int(req["slot"]))
+            return {"ok": True}
+        if cmd == "goto_position":
+            targets = b.goto_position(int(req["slot"]))
+            return {"ok": True, "targets": targets}
+        if cmd == "get_positions":
+            return {"ok": True, "positions": b.get_positions()}
+        if cmd == "save_positions":
+            b.save_positions(req["path"])
+            return {"ok": True}
+        if cmd == "load_positions":
+            b.load_positions(req["path"])
+            return {"ok": True, "positions": b.get_positions()}
+
+        return {"ok": False, "error": f"unknown command {cmd!r}"}
+
+
+# zmq's send_json is fine, but events go out on a raw multipart frame, so we
+# serialise those ourselves with the same encoder.
+import json as _json_mod
+
+
+def _json(obj) -> bytes:
+    return _json_mod.dumps(obj).encode("utf-8")

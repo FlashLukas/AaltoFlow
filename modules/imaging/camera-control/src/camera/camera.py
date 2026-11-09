@@ -45,7 +45,7 @@ from . import objectives as OBJ
 from . import vision as V
 from . import zcal as ZC
 from .config import (AF_POSITIONS, AF_ROUTINES, AF_SIDES, CALIB_MODES, FOCUS_MECHANISMS,
-                     LOCATE_MODES, Config)
+                     LOCATE_MODES, Config, image_um_to_stage)
 from .recording import ImageRecorder
 from .stream import StreamRecorder
 from .template_io import BackupPattern, Reference, load_template, save_template
@@ -1554,18 +1554,18 @@ class Camera:
             self._avg_buf.clear()
             return
 
-        # Piezo rig: stage axes assumed aligned with the image (+stage x -> +px x).
+        # Piezo / Agilis rig: the stage moves in um; hardware.xy_map says which
+        # stage axis (and sign) moves the image which way ("+X+Y" = aligned,
+        # what the piezo rig always assumed).
         try:
             cx, cy = self.xy.read_xy()
         except Exception:
             self._avg_buf.clear()
             return
-        new_x, new_y = cx, cy
-        if move_x:
-            new_x = cx - gain * dist_um[0]
-        if move_y:
-            new_y = cy - gain * dist_um[1]
-        new_x, new_y = self._clamp_xy(new_x, new_y)
+        dX, dY = image_um_to_stage(-gain * dist_um[0] if move_x else 0.0,
+                                   -gain * dist_um[1] if move_y else 0.0,
+                                   self.cfg.hardware.xy_map)
+        new_x, new_y = self._clamp_xy(cx + dX, cy + dY)
         try:
             self.xy.move_xy(new_x, new_y)
         except Exception as exc:
@@ -4461,8 +4461,9 @@ class Camera:
         dux, duy = V.pixels_to_um(dx_px, dy_px,
                                   self.cfg.image.pixel_size_x_um,
                                   self.cfg.image.pixel_size_y_um)
+        dX, dY = image_um_to_stage(dux, duy, self.cfg.hardware.xy_map)
         cx, cy = self.xy.read_xy()
-        return self.move_xy(cx + dux, cy + duy)
+        return self.move_xy(cx + dX, cy + dY)
 
     def click_to_go(self, px: float, py: float) -> list:
         """Move the sample so the clicked image point goes under the laser spot."""
@@ -4476,8 +4477,9 @@ class Camera:
         dux, duy = V.pixels_to_um(spot[0] - px, spot[1] - py,
                                   self.cfg.image.pixel_size_x_um,
                                   self.cfg.image.pixel_size_y_um)
+        dX, dY = image_um_to_stage(dux, duy, self.cfg.hardware.xy_map)
         cx, cy = self.xy.read_xy()
-        return self.move_xy(cx + dux, cy + duy)
+        return self.move_xy(cx + dX, cy + dY)
 
     def set_objective(self, name: str) -> dict:
         self._apply_objective(name)

@@ -46,7 +46,8 @@ from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
 from .. import vision as V
 from ..config import (AF_POSITIONS, AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
                       FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, RECORD_ROIS, SIM_SPOTS,
-                      LAYOUTS, SIZE_METHODS, SYMMETRIES, THEMES, XY_UNITS)
+                      LAYOUTS, SIZE_METHODS, SYMMETRIES, THEMES, XY_STAGES, XY_UNITS,
+                      Z_STAGES)
 
 # What a QSpinBox (a C++ int) can hold.
 _INT32_MIN, _INT32_MAX = -2**31, 2**31 - 1
@@ -69,6 +70,8 @@ _ENUMS = {
     "locate": LOCATE_MODES,
     "calib_mode": CALIB_MODES,
     "motion": MOTIONS,
+    "xy_stage": XY_STAGES,
+    "z_stage": Z_STAGES,
     "record_roi": RECORD_ROIS,
 }
 
@@ -261,7 +264,13 @@ POSITIONER_LAYOUT = [
     [("Piezo / Z services", [(_H, "use_remote_xy"), (_H, "piezo_host"),
                              (_H, "piezo_cmd_port"), (_H, "piezo_pub_port"),
                              (_H, "use_remote_z"), (_H, "z_host"), (_H, "z_cmd_port"),
-                             (_H, "z_pub_port"), (_H, "kcube_serial")])],
+                             (_H, "z_pub_port"), (_H, "kcube_serial")]),
+     # motion = split (the vacuum setup): XY and Z from two services, and the
+     # axis map for every XY stage without its own camera calibration
+     ("Split rig (XY + Z services)", [(_H, "xy_stage"), (_H, "z_stage"), (_H, "xy_map"),
+                                      (_H, "agilis_host"), (_H, "agilis_cmd_port"),
+                                      (_H, "agilis_pub_port"), (_H, "kim001_host"),
+                                      (_H, "kim001_cmd_port"), (_H, "kim001_pub_port")])],
 ]
 # field widths: numbers are short, paths and hosts are not (no 1900-px boxes)
 _NUM_W = 110

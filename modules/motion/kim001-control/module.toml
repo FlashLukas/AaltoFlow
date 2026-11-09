@@ -1,0 +1,29 @@
+# module.toml -- how the suite finds this module (INSTRUMENT_MODULE_GUIDE.md section 11).
+# Identity only; the variables come from the running service's `describe`.
+
+[module]
+key = "kim001"
+name = "Inertia focus (KIM001)"
+description = "Thorlabs KIM001 + PIA13 single-axis piezo-inertia actuator (objective focus Z)"
+category = "motion"
+tags = ["piezo inertia", "Thorlabs", "KIM001", "focus"]
+icon = "icon.svg"
+order = 65
+
+[ports]
+cmd = 5637
+pub = 5638
+
+[run]
+service = "scripts/run_service.py"
+gui = "scripts/run_gui.py"
+start_after = []
+
+# Which KIM001 the service opens on real hardware: Mission Control's
+# "Instruments on this PC" lists the Kinesis devices with scripts/probe.py
+# (pylablib, list only) and passes the chosen serial as --serial <serial>
+# (suite_local.json, this PC). bus "device" = an id the module takes verbatim.
+[hardware]
+address_arg = "--serial"
+bus = "device"
+probe = "scripts/probe.py"

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
+  <!-- a microscope objective over the sample plane, with a focus (up/down) arrow -->
+  <rect x="10" y="5" width="15" height="14" rx="1.5" fill="none" stroke="#5a626e" stroke-width="2.2"/>
+  <line x1="11.5" y1="10.5" x2="23.5" y2="10.5" stroke="#ff9e2c" stroke-width="2.2"/>
+  <polygon points="10,19 25,19 21,26 14,26" fill="#ff9e2c" stroke="#ff9e2c" stroke-width="1.2" stroke-linejoin="round"/>
+  <line x1="5" y1="33" x2="30" y2="33" stroke="#5a626e" stroke-width="2.2" stroke-dasharray="3 2"/>
+  <g stroke="#ffb454" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="33" y1="9" x2="33" y2="27"/>
+    <polyline points="30.2,12 33,9 35.8,12"/>
+    <polyline points="30.2,24 33,27 35.8,24"/>
+  </g>
+</svg>

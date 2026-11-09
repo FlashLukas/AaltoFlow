@@ -349,6 +349,28 @@ The simulator needs no hardware. To go live:
 3. **XY** — start the **piezo-control** service; set `hardware.use_remote_xy = true`
    and the piezo host/port in config. `backends/remote_xy.py` drives it over ZeroMQ.
 
+### A Thorlabs camera and a split rig (2026-11-09, simulation only)
+
+For a microscope with a **Thorlabs Zelux CS165MU** camera, the sample on an
+**Agilis AG-UC2** XY stage and the **objective** focused by a **KIM001 + PIA13**:
+
+- `camera.driver = "thorlabs"` (`backends/thorlabs.py`, the Thorlabs Scientific
+  Camera SDK). The Python wrapper ships inside the ThorCam install (not on PyPI):
+  pip-install `thorlabs_tsi_camera_python_sdk_package.zip` from ThorCam's
+  "Scientific Camera Interfaces" into this environment, and point
+  `camera.thorlabs_dll_dir` at the SDK's native DLL folder (empty = ThorCam's
+  default folder). Close ThorCam first -- it holds the camera. The 10-bit frames
+  feed the spot-size metrics (D4sigma, Z step calibration); exposure, gain,
+  black level and binning appear in the live parameter panel. The camera's
+  settings are adopted at start, never reset.
+- `hardware.motion = "split"`, `xy_stage = "agilis"` (agilis-control),
+  `z_stage = "kim001"` (kim001-control, which speaks kim's language for its
+  one Z axis). Agilis has no camera calibration of its own, so set
+  **`hardware.xy_map`**: the stage axis that moves the image right, then the one
+  that moves it down -- `+X+Y` when aligned, `+Y-X` for a stage turned 90 deg.
+  Jog +X once and watch the image. A wrong map makes the stabiliser push the
+  sample away.
+
 ## Troubleshooting
 
 **OneDrive `.venv` gotcha** (this project lives in OneDrive): OneDrive locks files

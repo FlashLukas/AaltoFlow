@@ -329,6 +329,7 @@ sends heartbeats while it is open.
 | agilis, ddr25, smaract | `stop` | `stream_read` |
 | elliptec, piezo, stage | `stop` | |
 | kim | `stop`, `abort_px_calibration` | `stream_read` |
+| kim001 | `stop` (`abort_px_calibration` accepted, does nothing: no XY) | `stream_read` |
 | chopper | `stop` (wheel to standby) | |
 | camera | `kill_af`, `cancel_laser_target` | `stream_read`, `camera_features` |
 | clMag | `ramp_to_zero` | `aux_read_ai` |
@@ -736,6 +737,7 @@ Each instrument has its own panel, shown in its own README:
 [ppms](modules/environment/ppms-control/README.md) ·
 [kepco](modules/source/kepco-control/README.md) ·
 [alr3203](modules/source/alr3203-control/README.md) ·
+[kim001](modules/motion/kim001-control/README.md) ·
 [windfreak](modules/source/windfreak-control/README.md) ·
 [gsp818](modules/detector/gsp818-control/README.md) ·
 [signalhound](modules/detector/signalhound-control/README.md) ·
@@ -807,6 +809,7 @@ python tools/render_all.py clMag       # or just one
 | 34 | `k2450-control` | `k2450` | 5623/5624 | Keithley 2450 SourceMeter (simulation; untested on the instrument) |
 | 38 | `afg-control` | `afg` | 5631/5632 | Tektronix AFG1062 two-channel function generator, CH2 can follow CH1 as a synchronous trigger (simulation; untested on the instrument) |
 | 39 | `scope-control` | `scope` | 5633/5634 | Two-channel oscilloscope (Siglent SDS1000CML+ / RS PRO RSDS1102CML+, on the instrument since 2026-10-07; or a Digilent Analog Discovery 2/3 with its W1/W2 generator and V+/V- supplies, simulation + fake-dwf tested): averaged triggered traces in physical units, zero-phase filter, XY view |
+| 41 | `kim001-control` | `kim001` | 5637/5638 | Thorlabs KIM001 + PIA13 single-axis piezo-inertia actuator (objective focus Z), speaking kim's language for its one axis (simulation; untested on the instrument) |
 | 40 | `alr3203-control` | `alr3203` | 5635/5636 | ELC ALR3203 32 V / 6 A / 96 W supply driving a magnet, bipolar through a polarity relay on a usb6001 line: voltage or current mode (bumpless switch), relay flipped only at zero current (simulation; untested on the instrument) |
 
 Each project folder lives in `modules/<category>/` (the links above go there).

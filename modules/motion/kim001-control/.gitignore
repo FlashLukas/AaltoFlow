@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Lab data: this PC's saved settings / step sizes (save_calibration, save_config)
+kim001.ini
+kim001.ini.*.tmp

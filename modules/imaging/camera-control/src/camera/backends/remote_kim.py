@@ -53,8 +53,13 @@ class KimLink:
 
     def __init__(self, host: str = "127.0.0.1", cmd_port: int = 5567,
                  pub_port: int = 5568, timeout_ms: int = 1500,
-                 stale_s: float = 1.0, retry_s: float = 10.0):
+                 stale_s: float = 1.0, retry_s: float = 10.0, module: str = "kim"):
         self.host = host
+        # Which SERVICE this links to: "kim" (KIM101), or one that speaks kim's
+        # language -- "kim001" (the KIM001 focus module) and "agilis" (the AG-UC2
+        # XY stage) use the same verbs and status keys. The key picks the lab
+        # keyring entry when the policy encrypts that module (secure.py).
+        self.module = str(module)
         self.cmd_port = cmd_port
         self.pub_port = pub_port
         self.timeout_ms = timeout_ms
@@ -117,7 +122,7 @@ class KimLink:
         # kim's key, from the lab keyring, when the policy secures kim
         # (secure.py): the camera then drives kim over an encrypted link,
         # and kim checks that this PC may act as a "machine"
-        secure.secure_client(self._req, self.host, "kim")
+        secure.secure_client(self._req, self.host, self.module)
         self._req.connect(f"tcp://{self.host}:{self.cmd_port}")
 
     def _sub_loop(self) -> None:
@@ -127,7 +132,7 @@ class KimLink:
             s = self._ctx.socket(zmq.SUB)
             s.setsockopt(zmq.RCVTIMEO, 200)
             s.setsockopt(zmq.LINGER, 0)
-            secure.secure_client(s, self.host, "kim")
+            secure.secure_client(s, self.host, self.module)
             s.connect(f"tcp://{self.host}:{self.pub_port}")
             s.setsockopt(zmq.SUBSCRIBE, b"status")
             return s, secure.flip_generation()
@@ -174,8 +179,8 @@ class KimLink:
             return True, ""
         where = f"{self.host}:{self.cmd_port}"
         if not have:
-            return False, f"stage (kim service at {where}) has not answered yet"
-        return False, f"stage (kim service at {where}) silent for {now - t:.0f} s"
+            return False, f"stage ({self.module} service at {where}) has not answered yet"
+        return False, f"stage ({self.module} service at {where}) silent for {now - t:.0f} s"
 
     def reconnect(self) -> tuple:
         """Rebuild both sockets and ask kim once. Returns available()-style (ok, why).
@@ -229,14 +234,14 @@ class KimLink:
                     # kim may speak the other mode than the policy now says
                     # (started before it changed): try that mode once. Safe
                     # to resend: a wrong-mode request never reaches kim.
-                    flipped = secure.no_answer(self.host, "kim")
+                    flipped = secure.no_answer(self.host, self.module)
                     self._make_req()
                     if not (flipped and attempt == 1):
                         self._down_until = time.monotonic() + self.retry_s
                         raise TimeoutError(
-                            f"kim service did not answer {req.get('cmd')!r}") from None
+                            f"{self.module} service did not answer {req.get('cmd')!r}") from None
         if not reply.get("ok", False):
-            raise RuntimeError(f"kim {req.get('cmd')}: {reply.get('error', 'failed')}")
+            raise RuntimeError(f"{self.module} {req.get('cmd')}: {reply.get('error', 'failed')}")
         return reply
 
     def fresh_status(self) -> dict:
@@ -284,8 +289,13 @@ def _axis_range_um(st: dict, axis: int) -> tuple:
     return (float(st["limit_lo"][axis]) * ups, float(st["limit_hi"][axis]) * ups)
 
 
-class KimXYStage:
-    """XYStage over kim axes X and Y."""
+class StepXYStage:
+    """XYStage over the X and Y axes of a STEPPING stage service that speaks
+    kim's language (kim, agilis): move_to_um / move_to_step / zero_counter and
+    status lists position_um / position_steps / moving / um_per_step(_fwd/_bwd)
+    / limit_lo / limit_hi, indexed 0 = X, 1 = Y. Without a camera calibration
+    of its own: the camera maps image pixels to stage um itself
+    (hardware.xy_map). KimXYStage adds kim's image-frame moves."""
 
     owns_limits = True    # clamp to kim's live range, not cfg.limits.motor_*
     open_loop = True      # slip-stick: don't average stabiliser frames mid-move
@@ -360,6 +370,12 @@ class KimXYStage:
         """((x_min, x_max), (y_min, y_max)) in um -- kim's effective limits."""
         st = self.link.status()
         return (_axis_range_um(st, 0), _axis_range_um(st, 1))
+
+
+class KimXYStage(StepXYStage):
+    """XYStage over kim axes X and Y, plus kim's IMAGE-FRAME moves: kim holds
+    the camera calibration (px per step, per direction, the 90 deg mounting),
+    so the camera hands it pixels and never needs an axis map."""
 
     def move_image_px(self, dx: float, dy: float, context: dict | None = None) -> list:
         """Shift the IMAGE by (dx, dy) px using kim's camera calibration.

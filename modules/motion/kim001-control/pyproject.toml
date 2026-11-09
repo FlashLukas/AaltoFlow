@@ -1,0 +1,42 @@
+[project]
+name = "kim001-control"
+version = "0.2.0"
+license = "MIT"
+description = "Control module for an objective-focus piezo-inertia actuator (Thorlabs KIM001 + PIA13)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyzmq>=25",
+    # Hardware driver (as in kim-control, where it is verified on a KIM101).
+    # Only backends/kinesis_kim001.py (and probe.py, list only) import it,
+    # lazily, so the simulator still runs without it. pylablib talks to the
+    # K-Cube over FTDI via pyft232, which needs ftd2xx.dll -- installed by
+    # Thorlabs Kinesis. KIM001 support in pylablib is UNCONFIRMED (# VERIFY).
+    "pylablib>=1.4.5",
+    "pyft232>=0.12",
+]
+
+[project.optional-dependencies]
+# <6.11.2: from PySide6 6.11.3 on (also 6.12.0) a QDoubleSpinBox with
+# NoButtons, styled by the suite stylesheet (border + padding), gets a
+# 1-pixel-wide edit field -- every number box on the panel rendered EMPTY.
+# Found 2026-11-09: this module resolved a fresh lock (6.12.0) while the rest
+# of the suite's locks hold 6.11.1, which is fine. Lift the cap once fixed.
+gui = ["PySide6>=6.7,<6.11.2"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# pylablib lists PyQt5 as a hard dependency for its own GUI widgets, which the
+# Thorlabs driver never imports. Our GUI is PySide6, and two Qt bindings in one
+# environment is asking for trouble (and bloats a PyInstaller build), so this
+# override makes uv drop PyQt5: the marker can never be true.
+override-dependencies = ["pyqt5; sys_platform == 'never'"]
+
+[build-system]
+requires = ["setuptools>=77"]  # 77+: `license = "MIT"` (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

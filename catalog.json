@@ -169,6 +169,27 @@
       "start_after": []
     },
     {
+      "key": "kim001",
+      "name": "Inertia focus (KIM001)",
+      "description": "Thorlabs KIM001 + PIA13 single-axis piezo-inertia actuator (objective focus Z)",
+      "category": "motion",
+      "category_label": "Motion & positioning",
+      "tags": [
+        "piezo inertia",
+        "Thorlabs",
+        "KIM001",
+        "focus"
+      ],
+      "folder": "kim001-control",
+      "version": "0.2.0",
+      "ports": {
+        "cmd": 5637,
+        "pub": 5638
+      },
+      "gui": true,
+      "start_after": []
+    },
+    {
       "key": "camera",
       "name": "Camera coordinator",
       "description": "IDS camera - laser spot - autofocus - stabiliser",
