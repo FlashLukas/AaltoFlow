@@ -41,7 +41,9 @@ AO_CHANNELS = ("ao0", "ao1")
 #: "p1.2" = port1/line2, the NI MAX spelling "Dev1/port1/line2".
 DIO_LINES = tuple([f"p0.{i}" for i in range(8)] + [f"p1.{i}" for i in range(4)] + ["p2.0"])
 
-TERMINALS = ("RSE", "NRSE", "DIFF")
+# NRSE is not offered: the USB-6001 refuses it ("Possible Values: DAQmx_Val_Diff,
+# DAQmx_Val_RSE"), checked on the real card 2026-11-09.
+TERMINALS = ("RSE", "DIFF")
 LAWS = ("linear", "log10")
 SMOOTH_MAX = 1000                  # running-mean length cap (readings)
 DIRECTIONS = ("in", "out", "unused")
@@ -78,7 +80,7 @@ class AIChannel:
 
     enabled: bool = False
     name: str = ""
-    terminal: str = "RSE"          # RSE | NRSE | DIFF (DIFF only on ai0..ai3, see sanitise)
+    terminal: str = "RSE"          # RSE | DIFF (DIFF only on ai0..ai3, see sanitise)
     unit: str = "V"
     law: str = "linear"            # linear | log10 (see above)
     slope: float = 1.0             # unit per volt (linear); 1/V inside the exponent (log10)
@@ -309,7 +311,9 @@ def sanitise(cfg: Config) -> list[str]:
         ch.enabled = _cast(ch.enabled, "bool")
         t = str(ch.terminal).strip().upper()
         if t not in TERMINALS:
-            msgs.append(f"ai{i}: unknown terminal {ch.terminal!r}, using RSE")
+            why = ("the USB-6001 has no NRSE mode" if t == "NRSE"
+                   else f"unknown terminal {ch.terminal!r}")
+            msgs.append(f"ai{i}: {why}, using RSE")
             t = "RSE"
         if t == "DIFF" and i >= 4:
             # In differential mode ai0..ai3 are the + inputs and ai4..ai7 the

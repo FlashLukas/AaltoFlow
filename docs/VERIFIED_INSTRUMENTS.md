@@ -31,6 +31,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) `--driver dwf` | Digilent Analog Discovery 2 (WaveForms 3.24.4) | **verified** (scope, W1/W2 generator incl. phase, sweeps, V+/V- supplies) | 2026-10-10 |
 | [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **verified** (SCPI sequence, sweeps, reference + acquire through the service; a calibrated measurement of an attenuation line checked by a person) | 2026-10-26 |
+| [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales, DO line + read-back; AO not yet) | 2026-11-09 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
@@ -486,6 +487,28 @@ was measured and the result looked right ("all was working well").
 **Not yet checked:** a point-by-point comparison with LibreVNA-GUI's marker;
 S11 / S12 / S22 on their own; the fly-scan stream's timing.
 
+## usb6001 -- NI USB-6001 multifunction DAQ (2026-11-09)
+
+**Checked** on a vacuum-chamber setup with the layout of
+`examples/vacuum_magnet.ini` (service `--real`, nidaqmx 1.6.0, NI-DAQmx 23.0):
+
+- Hall probe on ai2 (linear scale) read 0.49-0.52 mT while the old LabVIEW
+  program showed 0.5 mT.
+- Two photodiodes, one DIFF (ai1) and one RSE (ai3), read as expected.
+- The vacuum gauge on ai0 (log10 scale, `p = 10^(U - 5)` mbar) read 3.282 V ->
+  0.0191 mbar. Not yet compared with the gauge controller's own display.
+- A DO line (p0.0, a relay) switched both ways (heard), and the status read-back
+  followed. The status loop ran at ~137 ms per read with no hardware error, and
+  the service shut down cleanly.
+
+**Learnt:** the USB-6001 refuses NRSE ("Possible Values: DAQmx_Val_Diff,
+DAQmx_Val_RSE"), so the module no longer offers it. A finite read of several
+channels returns one list per channel, re-timing a stopped finite task works,
+and reading back a DO line gives the level it drives.
+
+**Not yet checked:** AO, several DO tasks on one port, DI, the power-up state of
+the lines, the GUI's "Read inputs now".
+
 ## scan-core -- scans with real instruments
 
 - 2026-09-15: wavelength scan with acquired pm16 detectors (see pm16).
@@ -588,6 +611,6 @@ S11 / S12 / S22 on their own; the fly-scan stream's timing.
 
 agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, elliptec,
 gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms,
-smaract, smb, sr7230, sr830, stage, superk, tc200, usb6001, vna,
+smaract, smb, sr7230, sr830, stage, superk, tc200, vna,
 windfreak, zpiezo. The per-module hardware checklists are in
 [`DEVELOPER_NOTES.md`](DEVELOPER_NOTES.md) section 11 and each module's README.

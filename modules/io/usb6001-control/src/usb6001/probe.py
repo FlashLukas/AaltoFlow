@@ -46,8 +46,8 @@ def probe() -> dict:
                 name = str(getattr(dev, "name", "") or "").strip()  # VERIFY
                 if not name:
                     continue
-                product = _attr(dev, "product_type")             # VERIFY
-                serial = _serial_text(_attr(dev, "serial_num", raw=True))  # VERIFY
+                product = _attr(dev, "product_type")             # 'USB-6001' on the real card
+                serial = _serial_text(_attr(dev, "serial_num", raw=True))  # reads fine on the real card
                 bits = [f"DAQmx name {name}"]
                 if serial:
                     bits.append(f"serial {serial}")

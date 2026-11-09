@@ -131,3 +131,13 @@ def test_line_helpers():
             pass
         else:
             raise AssertionError(bad)
+
+
+def test_nrse_is_refused_like_the_card_does():
+    # The real USB-6001 refuses NRSE (only RSE and DIFF); an old .ini that
+    # still says NRSE must start on RSE with a warning, not crash in open().
+    cfg = Config()
+    cfg.ai.channels[0].terminal = "nrse"
+    msgs = sanitise(cfg)
+    assert cfg.ai.channels[0].terminal == "RSE"
+    assert any("no NRSE" in m for m in msgs)

@@ -35,6 +35,24 @@ def test_normalize(a, b):
     assert hwlock.normalize(a) == b
 
 
+@pytest.mark.parametrize("address", ["COM1", "COM7", "COM9", "LPT1", "CON", "NUL", "AUX", "PRN"])
+def test_lock_file_never_has_a_windows_device_name(address):
+    # Found on a Windows 10 PC: "COM7.lock" opens the serial port COM7, not a
+    # file, and every claim of a COM port failed. Windows 11 does not show it,
+    # so the name itself is checked here, not only the claim.
+    stem = hwlock._filename(hwlock.normalize(address)).split(".")[0]
+    assert not hwlock._RESERVED.fullmatch(stem)
+    hwlock.claim(address, "test").release()
+
+
+def test_ordinary_names_are_unchanged():
+    # Existing lock names stay as they were, so services of an older version
+    # running at the same time still see the same file.
+    assert hwlock._filename("GPIB0::6") == "GPIB0_6.lock"
+    assert hwlock._filename("COM12") == "COM12.lock"
+    assert hwlock._filename("DEV1") == "DEV1.lock"
+
+
 def test_same_address_different_spelling_is_refused():
     lock = hwlock.claim("GPIB0::6::INSTR", "clMag")
     with pytest.raises(hwlock.HardwareBusy, match=r"GPIB0::6 is already in use by clMag"):

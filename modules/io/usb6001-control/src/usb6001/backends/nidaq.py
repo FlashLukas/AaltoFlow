@@ -90,11 +90,10 @@ class NidaqUsb6001:
                 # Not fatal (a 6002/6003 is a superset), but worth a line in the log.
                 self._idn += f" [expected USB-6001, found {product}]"
 
-            # 4. Tasks. VERIFY the enum names against the installed nidaqmx
-            #    (DEFAULT/RSE/NRSE/DIFF exist in nidaqmx >= 0.6).
+            # 4. Tasks. RSE and DIFF work on the real card (nidaqmx 1.6,
+            #    2026-11-09); NRSE is refused by the 6001, so config never offers it.
             term = {"RSE": TerminalConfiguration.RSE,
-                    "NRSE": TerminalConfiguration.NRSE,      # VERIFY: the 6001 spec lists
-                    "DIFF": TerminalConfiguration.DIFF}       # RSE and DIFF only
+                    "DIFF": TerminalConfiguration.DIFF}
             if layout.ai:
                 self._ai = nidaqmx.Task("usb6001_ai")
                 for ch, t in zip(layout.ai, layout.ai_terminal):
@@ -175,15 +174,17 @@ class NidaqUsb6001:
         from nidaqmx.constants import AcquisitionType
         n = max(2, int(samples))          # n >= 2 keeps read() two-dimensional
         if self._timing != (n, float(rate_Hz)):
-            # VERIFY: re-timing a stopped finite task between reads is allowed.
+            # Re-timing a stopped finite task between reads is allowed
+            # (checked on the real card 2026-11-09).
             self._ai.timing.cfg_samp_clk_timing(rate=float(rate_Hz),
                                                 sample_mode=AcquisitionType.FINITE,
                                                 samps_per_chan=n)
             self._timing = (n, float(rate_Hz))
-        # VERIFY: a finite task auto-starts on read(), returns
-        # [[ch0 samples], [ch1 samples], ...] for several channels (a flat list
-        # for ONE channel), and is stopped again afterwards so the next read
-        # starts a new acquisition.
+        # A finite task auto-starts on read() and returns
+        # [[ch0 samples], [ch1 samples], ...] for several channels (checked on
+        # the real card 2026-11-09). One channel gives a flat list (handled
+        # below). It is stopped afterwards so the next read starts a new
+        # acquisition.
         data = self._ai.read(number_of_samples_per_channel=n,
                              timeout=float(self.hw.timeout_s) + n / float(rate_Hz))
         try:
@@ -211,8 +212,8 @@ class NidaqUsb6001:
         self._do[line].write(bool(level))
 
     def read_do(self) -> dict:
-        # VERIFY: reading a static DO task returns the level the line is DRIVEN
-        # at (DAQmx supports it on many cards). Where the card refuses: None,
+        # Reading a static DO task returns the level the line is DRIVEN at
+        # (checked on the USB-6001 2026-11-09). Where a card refuses: None,
         # and the brain shows the line as "unknown" until the first write.
         out = {}
         for line, task in self._do.items():

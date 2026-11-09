@@ -85,8 +85,18 @@ def normalize(address: str) -> str:
     return u
 
 
+# Windows device names. Windows 10 still treats "COM7.lock" as the serial
+# port COM7, because the part before the first dot is what counts. Opening
+# that "file" fails with FileNotFoundError. Windows 11 dropped most of these
+# reservations, which is why a Windows 11 PC never shows the problem.
+_RESERVED = re.compile(r"(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM\d|LPT\d)", re.IGNORECASE)
+
+
 def _filename(norm: str) -> str:
-    return re.sub(r"[^A-Z0-9.]+", "_", norm).strip("_") + ".lock"
+    stem = re.sub(r"[^A-Z0-9.]+", "_", norm).strip("_")
+    if _RESERVED.fullmatch(stem.split(".")[0]):
+        stem += "_"  # COM7 -> COM7_.lock, an ordinary file name everywhere
+    return stem + ".lock"
 
 
 if sys.platform == "win32":

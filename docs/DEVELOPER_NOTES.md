@@ -2131,6 +2131,17 @@ zpiezo has no GUI.
     does not cover it. Every REQ socket now sets `SNDTIMEO` as well.
     Encrypted services leave a marker in the security folder while they run;
     `keys.py policy` lists the ones whose mode no longer matches.
+48. **On Windows 10, "COM7.lock" is not a file name** (2026-11-09, found on a
+    Windows 10 PC; a Windows 11 PC never shows it). CON, PRN, AUX, NUL,
+    COM0-9 and LPT0-9 are device names, and Windows 10 applies that to the part
+    of a name before the first dot -- so `open("...\COM7.lock")` opens the serial
+    port, fails with FileNotFoundError, and hwlock could not claim ANY COM port
+    1-9. 12 modules' tests failed there and every serial module would have
+    refused to start. `hwlock._filename` now appends "_" to such a stem
+    (`COM7_.lock`); every other name is unchanged, so a running service of an
+    older version still shares the same lock file. COM10 and up were never
+    affected. A file name built from instrument data must be checked against
+    this list whenever it is written on Windows.
 
 ---
 
