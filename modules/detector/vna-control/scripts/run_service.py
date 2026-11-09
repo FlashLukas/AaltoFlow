@@ -114,11 +114,12 @@ def main() -> int:
                     help="drive the real analyser (--driver) instead of simulating")
     ap.add_argument("--driver", choices=list(ANALYSERS), default=None,
                     help="which real analyser: pna = Keysight PNA-X, cmt = Copper Mountain "
-                         "C1209, librevna = LibreVNA, harogic = Harogic PNB-60 "
+                         "C1209, s5085 = Copper Mountain S5085, librevna = LibreVNA, "
+                         "harogic = Harogic PNB-60 "
                          "(default: from config, pna)")
     ap.add_argument("--visa", default=None,
                     help="VISA resource/alias of the analyser (PNA default: N5222A; "
-                         "C1209 / PNB-60 default: TCPIP0::127.0.0.1::5025::SOCKET; "
+                         "C1209 / S5085 / PNB-60 default: TCPIP0::127.0.0.1::5025::SOCKET; "
                          "LibreVNA: TCPIP0::127.0.0.1::19542::SOCKET)")
     ap.add_argument("--cal-set", default=None, help="calibration set to activate on connect")
     ap.add_argument("--field", choices=list(FIELD_SOURCES), default=None,
@@ -184,8 +185,8 @@ def main() -> int:
              "ppms": f"ppms at {f.ppms_host}:{f.ppms_pub_port}"}.get(
         f.source, f"manual {f.manual_mT:g} mT at {f.manual_angle_deg:g} deg")
     hw = cfg.hardware
-    if args.real and hw.driver == "cmt":
-        print(f"REAL VNA: Copper Mountain C1209 via S2VNA at '{hw.cmt_resource}' "
+    if args.real and hw.driver in ("cmt", "s5085"):
+        print(f"REAL VNA: {ANALYSERS[hw.driver]} via S2VNA at '{hw.cmt_resource}' "
               f"-- field from {where}")
     elif args.real and hw.driver in DIALECTS:
         d = DIALECTS[hw.driver]
@@ -223,8 +224,9 @@ def main() -> int:
         # what went wrong (VISA alias not found, pyvisa missing, instrument
         # off) rather than dying with a traceback in the launcher log.
         print(f"vna service: could not start: {type(exc).__name__}: {exc}")
-        if args.real and hw.driver == "cmt":
-            print("  check: S2VNA is running with the C1209 connected, its socket server "
+        if args.real and hw.driver in ("cmt", "s5085"):
+            print(f"  check: S2VNA is running with the {ANALYSERS[hw.driver]} "
+                  "connected, its socket server "
                   "is ON (System > Misc Setup > Network Setup > Socket Server, port 5025), "
                   f"the address '{hw.cmt_resource}' matches, and the real extra is "
                   "installed (uv sync --extra gui --extra real)")

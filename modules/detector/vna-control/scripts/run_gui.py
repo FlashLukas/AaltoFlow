@@ -43,7 +43,8 @@ def main() -> int:
                     help="without --connect: drive the real analyser from this process")
     ap.add_argument("--driver", choices=list(ANALYSERS), default=None,
                     help="with --real: pna = Keysight PNA-X (default), cmt = Copper Mountain "
-                         "C1209, librevna = LibreVNA, harogic = Harogic PNB-60")
+                         "C1209, s5085 = Copper Mountain S5085, librevna = LibreVNA, "
+                         "harogic = Harogic PNB-60")
     ap.add_argument("--visa", default=None, help="VISA resource/alias for --real")
     ap.add_argument("--field", choices=list(FIELD_SOURCES), default=None,
                     help="without --connect: where the field comes from")

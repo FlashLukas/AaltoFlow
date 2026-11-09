@@ -611,6 +611,8 @@ the lines, the GUI's "Read inputs now".
 
 agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, elliptec,
 gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms,
-smaract, smb, sr7230, sr830, stage, superk, tc200, vna,
+smaract, smb, sr7230, sr830, stage, superk, tc200,
+vna (drivers pna = Keysight PNA-X, cmt = Copper Mountain C1209, s5085 = Copper
+Mountain S5085, harogic = Harogic PNB-60; only librevna is verified),
 windfreak, zpiezo. The per-module hardware checklists are in
 [`DEVELOPER_NOTES.md`](DEVELOPER_NOTES.md) section 11 and each module's README.

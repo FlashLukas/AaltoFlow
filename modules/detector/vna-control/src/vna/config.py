@@ -177,11 +177,13 @@ class Hardware:
     """The real analyser (used only with --real).
 
     driver        -- WHICH real analyser: "pna" = Keysight PNA-X N5222A
-                     (backends/pna.py), "cmt" = Copper Mountain C1209
-                     (backends/cmt.py), "librevna" = LibreVNA, "harogic" =
+                     (backends/pna.py), "cmt" = Copper Mountain C1209,
+                     "s5085" = Copper Mountain S5085 (both backends/cmt.py,
+                     S2VNA's socket server at cmt_resource),
+                     "librevna" = LibreVNA, "harogic" =
                      Harogic PNB-60 (both backends/librevna.py). A PC's
                      choice lives in its own vna.ini (loaded by run_service.py when present) or `--driver`.
-    cmt_resource  -- the C1209's address: S2VNA's socket server. On the
+    cmt_resource  -- the C1209's / S5085's address: S2VNA's socket server. On the
                      DynaCool setup S2VNA runs on the same PC, hence 127.0.0.1;
                      5025 is S2VNA's default socket port.
     librevna_resource -- the LibreVNA's address: LibreVNA-GUI's SCPI server

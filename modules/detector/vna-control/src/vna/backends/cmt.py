@@ -1,4 +1,13 @@
-"""The real analyser, second make: a Copper Mountain C1209 (2 ports, 9 GHz).
+"""The real analyser, second make: Copper Mountain's USB analysers driven by
+their S2VNA program -- the C1209 (2 ports, 9 GHz; driver "cmt") and the S5085
+(2 ports, 8.5 GHz; driver "s5085").
+
+ONE BACKEND, SEVERAL MODELS (2026-11-09): the C1209 (Cobalt) and the S5085
+(Planar) are both run by S2VNA and speak the same SCPI (the "S2VNA and S4VNA
+SCPI Programming Manual"). What differs is only the data sheet -- frequency,
+power, IF bandwidth and point ranges -- the name the analyser gives in *IDN?,
+and its fastest point. That is a `CmtModel` below; the SCPI path is shared, so
+whatever is verified on one model holds for the other.
 
 This is the ONLY file that talks to the Copper Mountain, and it imports pyvisa
 inside `open()`, so the package (and every test) works on a PC without it.
@@ -54,6 +63,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -71,6 +81,51 @@ CH, TR = 1, 1
 C1209_MIN_HZ = 100e3
 C1209_MAX_HZ = 9e9
 
+
+@dataclass(frozen=True)
+class CmtModel:
+    """What differs between Copper Mountain models behind S2VNA."""
+
+    driver: str              # hardware.driver
+    name: str                # for labels and messages
+    idn_token: str           # what *IDN? names ("CMT,<token>,<serial>,...")
+    #: data-sheet limits -> cfg.limits keys (librevna.limit_envelope's rule:
+    #: a limit at the generic default is REPLACED, one set in vna.ini narrowed)
+    envelope: dict
+    #: the analyser's fastest point (data sheet), a floor under the rule-of-thumb
+    #: sweep time -- at a wide IFBW 1.2/IFBW per point is faster than the box
+    min_point_s: float = 0.0
+
+
+C1209 = CmtModel(
+    driver="cmt", name="Copper Mountain C1209", idn_token="C1209",
+    # only the frequency range is taken from the data sheet so far
+    envelope={"freq_min_Hz": C1209_MIN_HZ, "freq_max_Hz": C1209_MAX_HZ},
+)
+
+S5085 = CmtModel(
+    driver="s5085", name="Copper Mountain S5085", idn_token="S5085",
+    # "S5085 Extended Specification Sheet" (CMT21, coppermountaintech.com):
+    # 9 kHz - 8.5 GHz; power -55 .. +5 dBm up to 8 GHz (+3 dBm from 8.0 to
+    # 8.5 GHz -- S2VNA moves a setting it cannot make to its limit and the
+    # read-back after every write reports where it went); IF bandwidths 1 Hz
+    # - 100 kHz; 2 - 200 001 points; 70 us per point typ. (End of sale 2024,
+    # serviced; same S2VNA as the C1209.)  # VERIFY on the unit
+    envelope={"freq_min_Hz": 9e3, "freq_max_Hz": 8.5e9,
+              "power_min_dBm": -55.0, "power_max_dBm": 5.0,
+              "ifbw_min_Hz": 1.0, "ifbw_max_Hz": 100e3,
+              "points_max": 200001},
+    min_point_s=70e-6,
+)
+
+#: hardware.driver -> model
+MODELS = {m.driver: m for m in (C1209, S5085)}
+
+
+def model_for(cfg: Config) -> CmtModel:
+    """The model `hardware.driver` names ("cmt" = the C1209, as before)."""
+    return MODELS.get(cfg.hardware.driver, C1209)
+
 _SETTERS = {
     # key: (write template, read-back query). Hz, points, Hz, dBm.
     "start": (":SENS{ch}:FREQ:STAR {v:.12g}", ":SENS{ch}:FREQ:STAR?"),
@@ -84,16 +139,18 @@ _SETTERS = {
 }
 
 
-def limit_envelope(cfg: Config) -> None:
-    """Pull the config's frequency envelope inside what a C1209 can do, so a
-    setpoint the analyser cannot reach is clamped (and announced) by the brain
-    instead of being silently moved by S2VNA."""
-    lim = cfg.limits
-    lim.freq_min_Hz = max(float(lim.freq_min_Hz), C1209_MIN_HZ)
-    lim.freq_max_Hz = min(float(lim.freq_max_Hz), C1209_MAX_HZ)
-    sw = cfg.sweep
-    sw.stop_Hz = min(float(sw.stop_Hz), lim.freq_max_Hz)
-    sw.start_Hz = max(min(float(sw.start_Hz), sw.stop_Hz - lim.min_span_Hz), lim.freq_min_Hz)
+def limit_envelope(cfg: Config, cmt_model: CmtModel | None = None) -> None:
+    """Make the config's envelope what this model can do, so a setpoint the
+    analyser cannot reach is clamped (and announced) by the brain instead of
+    being silently moved by S2VNA.
+
+    The rule is LibreVNA's (librevna.limit_envelope): a limit still at the
+    generic default (a PNA-shaped 10 MHz - 20 GHz) is REPLACED by the data
+    sheet, one set in vna.ini is only narrowed. (Before 2026-11-09 the C1209's
+    envelope was only ever narrowed, which kept its 100 kHz end behind the
+    default's 10 MHz; an S5085 would have lost everything below 10 MHz.)"""
+    from .librevna import limit_envelope as _envelope   # pure Python, no pyvisa
+    _envelope(cfg, cmt_model or model_for(cfg))
 
 
 class CmtVna:
@@ -113,11 +170,14 @@ class CmtVna:
     # VERIFY: that the points are evenly spaced in time across the sweep.
     trigger_latency_s = 0.0
 
-    def __init__(self, cfg: Config, resource=None, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, cfg: Config, resource=None, clock=time.monotonic, sleep=time.sleep,
+                 cmt_model: CmtModel | None = None):
         """`resource` = an already-open VISA resource. Tests pass a FAKE one
         (anything with write / query / query_ascii_values / query_binary_values
-        / close); normally it is None and `open()` opens `hardware.cmt_resource`."""
+        / close); normally it is None and `open()` opens `hardware.cmt_resource`.
+        `cmt_model` = which analyser (default: from hardware.driver)."""
         self.cfg = cfg
+        self.model = cmt_model or model_for(cfg)
         self._res = resource
         self._rm = None
         self._hwlock = None               # our claim on the analyser (see open)
@@ -186,8 +246,11 @@ class CmtVna:
         # nothing). Queries and *CLS only; S2VNA keeps sweeping as it was
         # until somebody asks THIS module for a trace (`_take_over`).
         self._idn = r.query("*IDN?").strip()               # "CMT,C1209,<serial>,<sw>/<hw>"
-        if "C1209" not in self._idn.upper():
-            self.warnings.append(f"expected a C1209, the analyser says {self._idn!r}")
+        if self.model.idn_token.upper() not in self._idn.upper():
+            # a warning, not a refusal: S2VNA is the same program for every
+            # model, only the envelope (hardware.driver) would be wrong
+            self.warnings.append(f"expected a {self.model.idn_token} (hardware.driver = "
+                                 f"{self.model.driver!r}), the analyser says {self._idn!r}")
         self._write("*CLS")                                # start with an empty error queue
 
     def read_state(self) -> dict:
@@ -306,15 +369,16 @@ class CmtVna:
     # ---- sweeping ----------------------------------------------------------------
 
     def sweep_time_s(self, points: int, ifbw_Hz: float) -> float:
-        """The rule of thumb (~1.2 / IFBW per point). S2VNA has no sweep-time
-        query in the manual, so this is only the brain's first wait; the real
-        end of the sweep is `*OPC?`. Never queries (status() calls it)."""
-        return model.sweep_time_s(points, ifbw_Hz)
+        """The rule of thumb (~1.2 / IFBW per point), never faster than the
+        model's data-sheet time per point. S2VNA has no sweep-time query in the
+        manual, so this is only the brain's first wait; the real end of the
+        sweep is `*OPC?`. Never queries (status() calls it)."""
+        return max(model.sweep_time_s(points, ifbw_Hz), int(points) * self.model.min_point_s)
 
     def start_sweep(self, freqs_Hz, ifbw_Hz: float, power_dBm: float,
                     sparam: str = "S21", field: FieldReading | None = None) -> None:
         if self._res is None:
-            raise RuntimeError("C1209 is not connected")
+            raise RuntimeError(f"{self.model.idn_token} is not connected")
         first = not self._prepared
         if first:
             self._take_over()                  # the first sweep asked of this module
@@ -355,12 +419,12 @@ class CmtVna:
             done = r.query("*OPC?").strip()               # VERIFY: "1" at sweep end
         except Exception as exc:
             self._pending = False
-            raise TimeoutError(f"C1209 sweep did not finish within {ceiling:.0f} s ({exc})")
+            raise TimeoutError(f"{self.model.idn_token} sweep did not finish within {ceiling:.0f} s ({exc})")
         finally:
             r.timeout = old
         self._pending = False
         if not done.endswith("1"):
-            raise RuntimeError(f"C1209: unexpected *OPC? reply {done!r}")
+            raise RuntimeError(f"{self.model.idn_token}: unexpected *OPC? reply {done!r}")
 
         query = f":CALC{CH}:TRAC{TR}:DATA:SDAT?"
         if self._binary():
@@ -431,7 +495,7 @@ class CmtVna:
                 bad.append(f"{k} {rb.get(k)} Hz (asked {want[k]:.12g})")
         if bad:
             self._applied = {}                     # force a re-write next time
-            raise RuntimeError("C1209 did not take the sweep: " + "; ".join(bad))
+            raise RuntimeError(f"{self.model.idn_token} did not take the sweep: " + "; ".join(bad))
 
     def _ensure_sparam(self, sparam: str) -> None:
         if sparam not in model.SPARAMS:
@@ -458,4 +522,4 @@ class CmtVna:
     def _check_errors(self, doing: str) -> None:
         errs = self._errors()
         if errs:
-            raise RuntimeError(f"C1209 reported errors while {doing}: " + " | ".join(errs))
+            raise RuntimeError(f"{self.model.idn_token} reported errors while {doing}: " + " | ".join(errs))

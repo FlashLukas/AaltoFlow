@@ -219,3 +219,92 @@ def test_the_brain_acquires_averages_and_files_the_field_on_the_c1209():
         assert fake.sweeps == 2
     finally:
         vna.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# The S5085 (2026-11-09): the same S2VNA, another model profile
+# --------------------------------------------------------------------------- #
+S5085_IDN = "CMT,S5085,00000001,21.3.2/1.0"          # made-up serial
+
+
+def _s5085(cfg=None, **fake_kw):
+    cfg = cfg or Config()
+    cfg.hardware.driver = "s5085"
+    fake = FakeCmt(idn=S5085_IDN, **fake_kw)
+    return CmtVna(cfg, resource=fake, sleep=lambda s: None), fake, cfg
+
+
+def test_the_s5085_runs_the_same_s2vna_sequence():
+    """Same SCPI as the C1209 (one manual for both): open looks, the first sweep
+    takes over, one triggered sweep, SDAT parsed. Only the profile differs."""
+    from vna.backends.cmt import S5085
+    b, fake, _ = _s5085()
+    assert b.model is S5085
+    b.open()
+    st = b.read_state()
+    assert b.warnings == [] and b.idn().startswith("CMT,S5085")
+    assert _writes(fake.log) == ["*CLS"] and st["points"] == 201
+    f = np.linspace(9e3, 8.5e9, 21)
+    b.start_sweep(f, 100e3, -55.0, "S21", F)
+    assert fake.trig_source == "BUS" and fake.sweeps == 1 and fake.sparam == "S21"
+    assert fake.state["start"] == 9e3 and fake.state["stop"] == 8.5e9
+    z, meta = b.finish_sweep()
+    assert z.shape == (21,) and np.iscomplexobj(z)
+    b.close()
+    assert fake.trig_source == "INT"
+
+
+def test_the_s5085_envelope_is_its_data_sheet():
+    from vna.backends.cmt import limit_envelope as env
+    cfg = Config()
+    cfg.hardware.driver = "s5085"
+    env(cfg)
+    lim = cfg.limits
+    assert (lim.freq_min_Hz, lim.freq_max_Hz) == (9e3, 8.5e9)
+    assert (lim.power_min_dBm, lim.power_max_dBm) == (-55.0, 5.0)
+    assert (lim.ifbw_min_Hz, lim.ifbw_max_Hz) == (1.0, 100e3)
+    assert lim.points_max == 200001
+    # a limit somebody set in vna.ini is only narrowed, never widened
+    cfg = Config()
+    cfg.hardware.driver = "s5085"
+    cfg.limits.freq_max_Hz = 6e9
+    cfg.limits.power_max_dBm = 0.0
+    env(cfg)
+    assert cfg.limits.freq_max_Hz == 6e9 and cfg.limits.power_max_dBm == 0.0
+    assert cfg.limits.freq_min_Hz == 9e3
+
+
+def test_the_c1209_now_reaches_100_khz():
+    """The old envelope only NARROWED, so the generic 10 MHz default hid the
+    C1209's 100 kHz end. The data sheet now replaces a default limit."""
+    cfg = Config()
+    cfg.hardware.driver = "cmt"
+    limit_envelope(cfg)
+    assert cfg.limits.freq_min_Hz == 100e3 and cfg.limits.freq_max_Hz == C1209_MAX_HZ
+
+
+def test_the_wrong_model_for_the_driver_is_named_in_the_warning():
+    b, _, _ = _s5085(cfg=None)
+    b._res.idn = "CMT,C1209,21000000,21.3.2/1.0"
+    b.open()
+    assert b.warnings and "S5085" in b.warnings[0] and "s5085" in b.warnings[0]
+
+
+def test_the_s5085_is_never_faster_than_70_us_a_point():
+    b, _, _ = _s5085()
+    # 1.2 / 100 kHz = 12 us a point by the rule of thumb -- the box needs 70
+    assert b.sweep_time_s(1001, 100e3) == pytest.approx(1001 * 70e-6)
+    # at a narrow IFBW the rule of thumb is the slower one and wins
+    assert b.sweep_time_s(101, 100.0) == pytest.approx(1.2 * 101 / 100.0)
+
+
+def test_real_backend_builds_the_s5085_with_its_envelope():
+    from vna.backends import analyser_name, real_backend, resource_field
+    from vna.backends.cmt import S5085
+    cfg = Config()
+    cfg.hardware.driver = "s5085"
+    be = real_backend(cfg)
+    assert isinstance(be, CmtVna) and be.model is S5085
+    assert cfg.limits.freq_min_Hz == 9e3                 # applied before the brain clamps
+    assert analyser_name(cfg) == "Copper Mountain S5085"
+    assert resource_field(cfg) == "cmt_resource"

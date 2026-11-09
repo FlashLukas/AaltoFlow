@@ -1,4 +1,4 @@
-# vna-control -- Keysight PNA-X, Copper Mountain C1209, LibreVNA or Harogic PNB-60 (or a simulator)
+# vna-control -- Keysight PNA-X, Copper Mountain C1209 / S5085, LibreVNA or Harogic PNB-60 (or a simulator)
 
 A two-port vector network analyser for **VNA-FMR**: complex S-parameter traces
 against the field of a magnet service, and the permeability-like quantity
@@ -7,9 +7,9 @@ against the field of a magnet service, and the permeability-like quantity
 
 relative to a **reference** trace taken where the sample does not resonate in
 the band. It drives a real **Keysight PNA-X N5222A** over VISA, a **Copper
-Mountain C1209** through its S2VNA software, a **LibreVNA** through
-LibreVNA-GUI or a **Harogic PNB-60** through VNStudio (`--real`,
-`--driver pna|cmt|librevna|harogic`), or
+Mountain C1209** or **S5085** through their S2VNA software, a **LibreVNA**
+through LibreVNA-GUI or a **Harogic PNB-60** through VNStudio (`--real`,
+`--driver pna|cmt|s5085|librevna|harogic`), or
 simulates one: S-parameters through a coplanar waveguide with a YIG film whose
 FMR follows the field the magnet service measures.
 
@@ -20,9 +20,10 @@ line, Im u the dispersion.)*
 
 Ports **5573 / 5574**.
 
-> **No real backend has run on its instrument yet.** Every SCPI line that
-> still needs checking is marked `# VERIFY` in `src/vna/backends/pna.py`
-> (N5222A), `src/vna/backends/cmt.py` (C1209) and `src/vna/backends/librevna.py`
+> **Only the LibreVNA has run on its instrument** (2026-10-26, see
+> `docs/VERIFIED_INSTRUMENTS.md`). Every SCPI line that still needs checking is
+> marked `# VERIFY` in `src/vna/backends/pna.py` (N5222A),
+> `src/vna/backends/cmt.py` (C1209, S5085) and `src/vna/backends/librevna.py`
 > (LibreVNA and PNB-60).
 
 ## Run
@@ -35,6 +36,7 @@ uv run scripts/run_service.py                    # simulator, field from mag2d o
 uv run scripts/run_service.py --real             # the PNA-X at VISA alias "N5222A"
 uv run scripts/run_service.py --real --driver cmt --field ppms
                                                  # the C1209 (S2VNA on this PC) in the DynaCool
+uv run scripts/run_service.py --real --driver s5085      # Copper Mountain S5085 (S2VNA on this PC)
 uv run scripts/run_service.py --real --driver librevna   # LibreVNA (LibreVNA-GUI on this PC)
 uv run scripts/run_service.py --real --driver harogic    # Harogic PNB-60 (VNStudio on this PC)
 uv run scripts/run_gui.py --connect localhost
@@ -49,10 +51,12 @@ sync with `--extra gui --extra real`; otherwise `--real` stops with "pyvisa is
 not installed". pyvisa also needs a VISA library (Keysight IO Libraries or
 NI-VISA) -- `--visa "TCPIP0::<ip>::hislip0::INSTR"` if the alias is not set up.
 
-### The Copper Mountain C1209 (the DynaCool setup)
+### The Copper Mountain C1209 (the DynaCool setup) and S5085
 
-The C1209 is a USB box driven by Copper Mountain's **S2VNA** program; SCPI goes
-to S2VNA over a TCP socket, so:
+The C1209 (Cobalt) and the S5085 (Planar) are USB boxes driven by Copper
+Mountain's **S2VNA** program -- the same program and SCPI for both, so one
+backend (`cmt.py`) with a profile per model: `driver = cmt` for the C1209,
+`driver = s5085` for the S5085. SCPI goes to S2VNA over a TCP socket, so:
 
 1. In S2VNA: *System > Misc Setup > Network Setup > Socket Server* ON, port
    5025 (or start it as `S2VNA.exe /SocketServer:on /SocketPort:5025`).
@@ -63,7 +67,7 @@ to S2VNA over a TCP socket, so:
 
    ```ini
    [hardware]
-   driver = cmt
+   driver = cmt          ; or s5085
    [field]
    source = ppms
    ```
@@ -74,7 +78,12 @@ Mountain sends binary over HiSLIP only). The old LabVIEW program read two
 formatted traces (amplitude, phase in degrees) and rebuilt the complex number;
 reading it directly loses nothing to formatting or phase wrapping. No
 calibration is handled (the setup runs uncorrected; u and ln(S/S_ref) divide the
-cables out). The frequency envelope is pulled inside 100 kHz - 9 GHz.
+cables out). The envelope is each model's data sheet (a limit set in vna.ini
+is only narrowed): C1209 100 kHz - 9 GHz; S5085 9 kHz - 8.5 GHz, -55..+5 dBm
+(+3 dBm above 8 GHz -- S2VNA moves a level it cannot make and the read-back
+reports it), IF bandwidth 1 Hz - 100 kHz, up to 200 001 points, and a sweep is
+never estimated faster than its 70 us per point. `*IDN?` naming another model
+than the driver is a warning, not a refusal.
 
 ### The LibreVNA and the Harogic PNB-60
 
