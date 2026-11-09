@@ -168,7 +168,11 @@ def test_the_voltage_limit_stops_a_sweep():
         supply.ramp_current(3.0, 1.0)
         assert _wait(lambda: not supply.status().sweeping, 6.0)
         assert supply.status().current_set_A < 1.5
-        assert any("voltage limit" in m for lvl, m in events if lvl == "warn")
+        # The worker stops the sweep FIRST (sweeping goes False) and emits the
+        # warning right after, so wait for it rather than look at once: checking
+        # in between failed 1 run in 6 on the Blue Box PC.
+        assert _wait(lambda: any("voltage limit" in m for lvl, m in events
+                                 if lvl == "warn"), 2.0)
     finally:
         supply.shutdown()
 
