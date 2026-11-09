@@ -715,23 +715,30 @@ def test_a_long_description_wraps_to_two_lines_and_ends_with_dots(env):
     the window. The description wraps to at most TWO lines, then '...'; the full
     text stays in the tooltip, and the label never asks for its full width."""
     mc, win, root, app = env
-    card = win.cards["magnet"]
     long = ("Signal Hound SA44B / SA124B spectrum analyser; owner of the USB-TG44A "
             "tracking generator, which the shsg (CW) and shsna (TG sweeps) modules "
             "use through it -- and a lot more text so it can never fit in two lines "
             "of a narrow card whatever the font is on this computer, really")
-    card.desc.setText(long)
-    card.desc.resize(300, 80)
+    # The wrapping is checked on a label of its own with a FIXED width. Resizing
+    # the card's label did not hold: it sits in the card's layout, which sets its
+    # width back from the window's size when events run, and on a wide enough
+    # window the whole text fit in two lines (seen once on the lab PC).
+    label = mc.ClampLabel(2)
+    label.setFixedWidth(300)
+    label.setText(long)
     app.processEvents()
-    shown = card.desc.shown_text()
+    shown = label.shown_text()
     lines = shown.split("\n")
-    assert len(lines) <= 2 and lines[-1].endswith("…"), shown
-    assert card.desc.toolTip() == long
-    assert card.desc.minimumSizeHint().width() < 200       # never demands the full line
-    card.desc.setText("short")
-    card.desc.resize(300, 80)
+    assert len(lines) == 2 and lines[-1].endswith("…"), shown
+    assert label.toolTip() == long
+    label.setText("short")
     app.processEvents()
-    assert card.desc.shown_text() == "short" and card.desc.toolTip() == ""
+    assert label.shown_text() == "short" and label.toolTip() == ""
+    # The card really uses this label, and it never demands the full line.
+    card = win.cards["magnet"]
+    assert isinstance(card.desc, mc.ClampLabel)
+    card.desc.setText(long)
+    assert card.desc.minimumSizeHint().width() < 200
 
 
 def test_instruments_dialog_lists_and_assigns_an_address(env, monkeypatch):
