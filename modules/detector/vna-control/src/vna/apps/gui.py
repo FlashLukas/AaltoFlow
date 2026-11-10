@@ -223,6 +223,9 @@ def _make_plot(name, unit):
     w.setLabel("bottom", "frequency", units="GHz")
     w.showGrid(x=True, y=True, alpha=0.15)
     curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
+    # No auto-downsampling / clip-to-view: they size themselves from the
+    # widget, and a tab that was never shown has none -- its trace would be
+    # cut to a point. A few thousand points draw fast without them.
     return w, curve
 
 
@@ -235,6 +238,13 @@ class _PlotTab(QtWidgets.QWidget):
         import pyqtgraph as pg
         self.sparam = sparam
         self.plot_mode = None
+        # what is drawn here: the trace, its caption, and the trace_id it was
+        # fetched for -- so showing this tab again needs no fetch (Blue Box,
+        # 2026-11-10: switching tabs felt slow while only the visible tab was
+        # kept current)
+        self.trace = None
+        self.label = ""
+        self.drawn_id = None
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 6, 0, 0); lay.setSpacing(6)
         self.mag_plot, self.mag_curve = _make_plot(f"|{sparam}|", "dB")
@@ -267,7 +277,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_fetch = 0.0
         self._last_acq = 0
         self._ref_id = None              # reference acq_id the trace was fetched against
-        self._u_error = ""               # why u could not be shown, if it could not
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
         outer = QtWidgets.QHBoxLayout(root)
@@ -534,7 +543,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # traces seven times a second), so switching tabs fetches at once.
         self.plot_tabs = QtWidgets.QTabWidget()
         self.plot_tabs.setDocumentMode(True)
-        self.plot_tabs.currentChanged.connect(lambda _i: self._force_fetch())
+        self.plot_tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs: dict = {}
         self._ensure_tabs([self.cfg.sweep.sparam])
         tlay.addWidget(self.plot_tabs, 1)
@@ -883,62 +892,85 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.view_combo.currentIndex() != 0:
                 self._force_fetch()
 
-        # trace: fetch only when there is a new one, and not more than ~7 per second
+        # trace: fetch only when there is a new one, and not more than ~7 per
+        # second. EVERY tab is fetched and drawn (the visible one first): the
+        # S-parameters come from the same sweep, so each is fetched once per
+        # trace (~10 ms and ~70 kB per 2048 points), and switching tabs then
+        # only SHOWS plots that are already drawn.
         which = "last" if self.which_combo.currentIndex() == 0 else "sample"
         new = s.trace_id != self._trace_id if which == "last" else self._trace_id == -1
         if new and now - self._last_fetch > 0.14:
             self._last_fetch = now
-            try:
-                self._trace = self._fetch(which)
+            current = self._tab()
+            tabs = [current] + [t for t in self._tabs.values() if t is not current]
+            got = False
+            for tab in tabs:
+                try:
+                    trace, why = self._fetch(which, tab.sparam if len(self._tabs) > 1 else None)
+                except Exception as exc:
+                    # nothing measured yet, or not this S-parameter (it was
+                    # just ticked: the next sweep brings it); keep what is drawn
+                    if tab.trace is None:
+                        tab.label = str(exc)
+                        if tab is current:
+                            self.trace_label.setText(tab.label)
+                    continue
+                self._draw(tab, trace, why)
+                tab.drawn_id = s.trace_id
+                got = True
+            if got:
                 self._trace_id = s.trace_id
-                self._redraw()
-            except Exception:
-                pass                     # nothing measured yet
+                self._trace = current.trace
 
-    def _fetch(self, which: str) -> dict:
-        """The trace for the current view: `s` for raw, `u` from the BRAIN for
-        the other two. If u is refused (no reference, or it does not match),
-        show the raw trace and say why instead of an empty plot."""
-        self._u_error = ""
-        # the visible tab's S-parameter (with one tab: the primary)
-        sp = self._current_sp() if len(self._tabs) > 1 else None
+    def _on_tab_changed(self, _i):
+        """Show the tab that is already drawn; fetch only if it never was."""
+        tab = self._tab()
+        if tab is None:
+            return
+        self._trace = tab.trace
+        self.trace_label.setText(tab.label)
+        self.trace_label.setToolTip(tab.label)
+        if tab.trace is None:
+            self._force_fetch()
+
+    def _fetch(self, which: str, sp=None):
+        """(trace, why-not-u) for the current view and S-parameter `sp` (None =
+        the primary): `s` for raw, `u` / `ln` from the BRAIN for the others.
+        If u is refused (no reference, or it does not match), the raw trace
+        comes back with the reason, instead of an empty plot."""
         if self.view_combo.currentIndex() == 0:
-            return self.ctrl.get_trace(which, "s", sp)
+            return self.ctrl.get_trace(which, "s", sp), ""
         # The last view wants the logarithm; the middle two are built from u.
         quantity = "ln" if self.view_combo.currentIndex() == 3 else "u"
         try:
-            return self.ctrl.get_trace(which, quantity, sp)
+            return self.ctrl.get_trace(which, quantity, sp), ""
         except Exception as exc:
-            self._u_error = str(exc)
-            return self.ctrl.get_trace(which, "s", sp)
+            return self.ctrl.get_trace(which, "s", sp), str(exc)
 
-    def _set_plot_mode(self, mode: str, sparam: str):
-        tab = self._tab()
+    @staticmethod
+    def _set_plot_mode(tab, mode: str, sparam: str):
         if (mode, sparam) == tab.plot_mode:
             return
         tab.plot_mode = (mode, sparam)
         if mode == "u":
-            self.mag_plot.setLabel("left", "Re u", units="")
-            self.phase_plot.setLabel("left", "Im u", units="")
+            tab.mag_plot.setLabel("left", "Re u", units="")
+            tab.phase_plot.setLabel("left", "Im u", units="")
         elif mode == "ln":
-            self.mag_plot.setLabel("left", f"Re ln({sparam}/{sparam}_ref)", units="")
-            self.phase_plot.setLabel("left", f"Im ln({sparam}/{sparam}_ref)", units="")
+            tab.mag_plot.setLabel("left", f"Re ln({sparam}/{sparam}_ref)", units="")
+            tab.phase_plot.setLabel("left", f"Im ln({sparam}/{sparam}_ref)", units="")
         elif mode == "divided":
-            self.mag_plot.setLabel("left", f"|{sparam} / {sparam}_ref|", units="dB")
-            self.phase_plot.setLabel("left", "phase", units="deg")
+            tab.mag_plot.setLabel("left", f"|{sparam} / {sparam}_ref|", units="dB")
+            tab.phase_plot.setLabel("left", "phase", units="deg")
         else:
-            self.mag_plot.setLabel("left", f"|{sparam}|", units="dB")
-            self.phase_plot.setLabel("left", "phase", units="deg")
+            tab.mag_plot.setLabel("left", f"|{sparam}|", units="dB")
+            tab.phase_plot.setLabel("left", "phase", units="deg")
 
-    def _redraw(self):
-        t = self._trace
-        if t is None:
-            return
+    def _draw(self, tab, t: dict, u_error: str = ""):
+        """Draw trace `t` into `tab` (visible or not) and keep it there."""
+        tab.trace = t
         f = t["freqs_Hz"]
         fx = f / 1e9
         sp = t.get("sparam", "S21")
-        if len(self._tabs) > 1 and self._tabs.get(sp) is not self._tab():
-            return                       # fetched for a tab no longer shown
         view = self.view_combo.currentIndex()
         label = f"{sp}, {t['points']} pts, IFBW {t['ifbw_Hz'] / 1e3:g} kHz, {t['power_dBm']:g} dBm"
         if "ln" in t:
@@ -946,9 +978,9 @@ class MainWindow(QtWidgets.QMainWindow):
             # are proportional to the susceptibility (up to the geometry factor
             # this module deliberately does not invent).
             ln = t["ln"]
-            self._set_plot_mode("ln", sp)
-            self.mag_curve.setData(fx, ln.real)
-            self.phase_curve.setData(fx, ln.imag)
+            self._set_plot_mode(tab, "ln", sp)
+            tab.mag_curve.setData(fx, ln.real)
+            tab.phase_curve.setData(fx, ln.imag)
             label += (f"  -  ln against reference #{t.get('reference_acq_id')} at "
                       f"{_fmt(t.get('reference_field_mT'), '.1f')} mT, "
                       f"{_fmt(t.get('reference_angle_deg'), '.1f')} deg")
@@ -958,36 +990,38 @@ class MainWindow(QtWidgets.QMainWindow):
                    f"{_fmt(t.get('reference_field_mT'), '.1f')} mT, "
                    f"{_fmt(t.get('reference_angle_deg'), '.1f')} deg")
             if view == 2:
-                self._set_plot_mode("u", sp)
-                self.mag_curve.setData(fx, u.real)
-                self.phase_curve.setData(fx, u.imag)
+                self._set_plot_mode(tab, "u", sp)
+                tab.mag_curve.setData(fx, u.real)
+                tab.phase_curve.setData(fx, u.imag)
                 label += f"  -  u against {ref}"
             else:
                 z = 1 + u                              # S / S_ref
-                self._set_plot_mode("divided", sp)
-                self.mag_curve.setData(fx, 20 * np.log10(np.clip(np.abs(z), 1e-15, None)))
-                self.phase_curve.setData(fx, np.degrees(np.angle(z)))
+                self._set_plot_mode(tab, "divided", sp)
+                tab.mag_curve.setData(fx, 20 * np.log10(np.clip(np.abs(z), 1e-15, None)))
+                tab.phase_curve.setData(fx, np.degrees(np.angle(z)))
                 label += f"  -  divided by {ref}"
         else:
             z = t["s"]
-            self._set_plot_mode("raw", sp)
-            self.mag_curve.setData(fx, 20 * np.log10(np.clip(np.abs(z), 1e-15, None)))
-            self.phase_curve.setData(fx, np.degrees(np.angle(z)))
+            self._set_plot_mode(tab, "raw", sp)
+            tab.mag_curve.setData(fx, 20 * np.log10(np.clip(np.abs(z), 1e-15, None)))
+            tab.phase_curve.setData(fx, np.degrees(np.angle(z)))
             if view != 0:
-                label += "  -  RAW: " + (self._u_error or "no reference")
-        self.trace_label.setText(label)
-        self.trace_label.setToolTip(label)
+                label += "  -  RAW: " + (u_error or "no reference")
+        tab.label = label
+        if tab is self._tab():
+            self.trace_label.setText(label)
+            self.trace_label.setToolTip(label)
         dip = t.get("dip_Hz", math.nan)
-        self.dip_line.setVisible(math.isfinite(dip) and bool(self._simulated))
+        tab.dip_line.setVisible(math.isfinite(dip) and bool(self._simulated))
         if math.isfinite(dip):
-            self.dip_line.setPos(dip / 1e9)
+            tab.dip_line.setPos(dip / 1e9)
             self.big["dip"].setText(f"{dip / 1e9:.4f}")
             self.big["depth"].setText(_fmt(t.get("dip_dB"), ".2f"))
         fr = t.get("f_res_model_Hz", math.nan)
         fr = fr if isinstance(fr, (int, float)) else math.nan
-        self.model_line.setVisible(math.isfinite(fr))
+        tab.model_line.setVisible(math.isfinite(fr))
         if math.isfinite(fr):
-            self.model_line.setPos(fr / 1e9)
+            tab.model_line.setPos(fr / 1e9)
 
     def closeEvent(self, ev: QtGui.QCloseEvent):
         self.timer.stop()

@@ -243,11 +243,24 @@ def test_ticking_s_parameters_measures_them_together_one_tab_each(app):
         assert tabs.tabBar().isVisibleTo(win)
 
         vna.step()
-        tabs.setCurrentIndex(1)                         # the S11 tab
-        _fresh(win)
-        assert win._trace["sparam"] == "S11"
-        np.testing.assert_array_equal(win.mag_curve.getData()[1], 20 * np.log10(
+        _fresh(win)                                     # S21 visible: BOTH tabs drawn
+        # switching tabs only shows what is drawn: no fetch (Blue Box,
+        # 2026-11-10: it felt slow while only the visible tab was kept)
+        calls = []
+        real_get = vna.get_trace
+        vna.get_trace = lambda *a, **k: calls.append(a) or real_get(*a, **k)
+        try:
+            tabs.setCurrentIndex(1)                     # the S11 tab
+            win._refresh()
+            assert calls == [], "a tab switch must not fetch"
+        finally:
+            del vna.get_trace
+        assert win._trace["sparam"] == "S11" and "S11" in win.trace_label.text()
+        np.testing.assert_array_equal(win.mag_curve.yData, 20 * np.log10(
             np.abs(vna.get_trace("last", "s", "S11")["s"])))
+        tabs.setCurrentIndex(0)
+        assert win._trace["sparam"] == "S21" and win.trace_label.text().startswith("S21")
+        tabs.setCurrentIndex(1)
 
         win.sp_checks["S21"].click()                    # untick the primary
         st = vna.status()
