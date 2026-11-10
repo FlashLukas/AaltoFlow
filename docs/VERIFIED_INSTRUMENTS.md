@@ -33,7 +33,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **verified** (SCPI sequence, sweeps, reference + acquire through the service; a calibrated measurement of an attenuation line checked by a person) | 2026-10-26 |
 | [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales -- the vacuum gauge matches its controller --, DO line + read-back, the ALR3203's polarity relay; AO not yet) | 2026-11-10 |
 | [`alr3203`](../modules/source/alr3203-control) | ELC ALR3203 supply + polarity relay (usb6001 p0.0) | **verified** (protocol bytes, voltage and current mode into a coil, relay flips at zero current both ways, field sign follows the setpoint) | 2026-11-10 |
-| [`vna`](../modules/detector/vna-control) `--driver s5085` | Copper Mountain S5085 (S2VNA 24.3.4) | **verified** (connect = look, the analyser's limits and state adopted, sweeps read, S11 and the switch to S21 equal point for point to S2VNA's own markers; no transmission path on the rig yet) | 2026-11-10 |
+| [`vna`](../modules/detector/vna-control) `--driver s5085` | Copper Mountain S5085 (S2VNA 24.3.4) | **verified** (connect = look, the analyser's limits and state adopted, sweeps read, S11 and the switch to S21 equal point for point to S2VNA's own markers; S11 + S21 from ONE sweep, both equal to S2VNA's Tr1 / Tr2 markers; no transmission path on the rig yet) | 2026-11-10 |
 | [`kim001`](../modules/motion/kim001-control) | Thorlabs KIM001 + PIA13 (objective focus) | **partly verified** (opens by serial, adopts without writing, step moves both ways and seen to move; client status fix and the 74 prefix not yet re-run) | 2026-11-10 |
 | [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **partly verified** (start / adopt, step moves both axes with status polled during them, stop at rest -- after the rewrite to Newport's one-command-per-write rule; limit switch, step size, jog not yet) | 2026-11-10 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
@@ -575,6 +575,21 @@ rig, so this verifies the switch and the readout, not a transmission
 measurement. **Not yet:** a real S21 path, the stream timing. (status `instrument` is
 what was found at CONNECT, by design -- the take-over to BUS trigger happens
 at the first acquire, which completes only because of it.)
+
+**Two S-parameters from ONE sweep (4064b12, same afternoon).** S11 primary and
+S21 ticked in the GUI's checklist (`sweep.extra_sparams = S21`), 9 kHz - 3 GHz,
+2048 points, 1 kHz: S2VNA showed two traces, Tr1 "S11 Log Mag" and Tr2 "S21 Log
+Mag" -- the module defined them itself (`:CALC1:PAR:COUN 2`, `PAR<i>:DEF`). ONE
+sweep per acquisition (acq_id 7 = sweeps 7), sweep time 2.458 s, the same as
+one parameter. Markers on both traces against the latched sample of acquisition
+7 at the same points: S11 at 1.000983 GHz -3.4335 dB / service -3.4335 dB, at
+2.000492 GHz -5.0978 / -5.0978 dB; S21 at 1.000983 GHz -105.59 / -105.587 dB,
+at 2.000492 GHz -112.87 / -112.866 dB -- identical to the precision S2VNA
+shows. Phases not compared (S2VNA showed log-mag only); S21 is again the noise
+floor, so this verifies the trace routing and readout, not a transmission. No
+hw_error. Switching between the GUI's S11 / S21 plot tabs: 60-90 ms (was ~2.3 s
+with a 1.6 px antialiased pen). **Not yet:** unticking back to one parameter
+(S2VNA back to one trace) and S11 + S22 (forward + reverse sweep).
 
 ## kim001 -- Thorlabs KIM001 + PIA13 objective focus (2026-11-10)
 
