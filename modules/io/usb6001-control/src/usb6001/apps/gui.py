@@ -334,6 +334,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_label.setWordWrap(True)
         rlay.addWidget(self.sample_label)
         col.addWidget(rcard)
+
+        # resistance (config group `resistance`; shown only when it is on)
+        self.res_card, reslay = _card("Resistance")
+        self.res_value = QtWidgets.QLabel("--")
+        self.res_value.setObjectName("bigValue")
+        reslay.addWidget(self.res_value)
+        self.res_detail = _muted("", 10, wrap=True)
+        reslay.addWidget(self.res_detail)
+        brow = QtWidgets.QHBoxLayout()
+        self.res_btn = QtWidgets.QPushButton("Measure")
+        self.res_btn.setObjectName("primary")
+        self.res_btn.clicked.connect(lambda: self._measure_resistance(False))
+        zero = QtWidgets.QPushButton("Zero leads...")
+        zero.setObjectName("danger")
+        zero.setToolTip("With the far end of the cable SHORTED (where the antenna "
+                        "connects): stores the bias tee + cable resistance, which "
+                        "later readings subtract.")
+        zero.clicked.connect(lambda: self._measure_resistance(True))
+        brow.addWidget(self.res_btn); brow.addWidget(zero); brow.addStretch(1)
+        reslay.addLayout(brow)
+        self.res_wiring = _muted("", 10, wrap=True)
+        reslay.addWidget(self.res_wiring)
+        col.addWidget(self.res_card)
         col.addStretch(1)
         return panel
 
@@ -470,6 +493,55 @@ class MainWindow(QtWidgets.QMainWindow):
                  for k, v in r.get("values", {}).items()]
         self.sample_label.setText(f"#{r.get('acq_id')}: " + ("   ".join(parts) or "no inputs enabled"))
 
+    def _measure_resistance(self, zero_leads: bool):
+        if zero_leads:
+            ok = QtWidgets.QMessageBox.question(
+                self, "Zero leads",
+                "Is the far end of the cable SHORTED (antenna removed, a short in "
+                "its place)?\n\nThe resistance measured now is stored as the leads "
+                "and subtracted from every later reading.")
+            if ok != QtWidgets.QMessageBox.Yes:
+                return
+        try:
+            self.ctrl.measure_resistance(zero_leads)
+        except Exception as exc:
+            self._on_event("error", f"resistance: {exc}")
+
+    def _refresh_resistance(self, s):
+        rc = self.cfg.resistance
+        self.res_card.setVisible(bool(rc.enabled))
+        if not rc.enabled:
+            return
+        r = dict(getattr(s, "resistance", None) or {})
+        running = bool(getattr(s, "res_running", False))
+        self.res_btn.setEnabled(not running)
+        self.res_wiring.setText(
+            f"{rc.ao.upper()} +-{float(rc.excitation_V):g} V via {float(rc.r_ref_ohm):g} ohm, "
+            f"sense {rc.ai.upper()}; leads {float(rc.r_leads_ohm):.4g} ohm subtracted")
+        if running:
+            self.res_detail.setText(f"measuring #{s.res_id} ...")
+            return
+        if not r:
+            self.res_value.setText("--")
+            self.res_detail.setText("not measured yet (current flows only while measuring)")
+            return
+        if r.get("error"):
+            self.res_value.setText("--")
+            self.res_detail.setText(f"#{r.get('res_id')}: {r['error']}")
+            return
+        if r.get("zero_leads"):
+            self.res_value.setText("--")
+            self.res_detail.setText(f"#{r.get('res_id')}: leads = {r['total_ohm']:.4g} ohm, "
+                                    "stored. Put the antenna back and press Measure.")
+            return
+        sig = r.get("sigma_ohm")
+        sig_txt = f" ± {sig:.2g}" if isinstance(sig, (int, float)) and math.isfinite(sig) else ""
+        self.res_value.setText(f"{r['ohm']:.3f}{sig_txt} Ω")
+        self.res_detail.setText(
+            f"#{r.get('res_id')} at {r['current_mA']:.3g} mA · total {r['total_ohm']:.4g} Ω "
+            f"· offset {r['offset_V'] * 1e3:+.2f} mV · "
+            + time.strftime("%H:%M:%S", time.localtime(r.get("time", 0))))
+
     def _open_settings(self):
         self.ctrl.get_config()          # fetch over the socket if remote
         dlg = SettingsDialog(self.ctrl, self.cfg, self._on_settings_applied, self)
@@ -548,6 +620,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 col = COLORS["ok"] if lvl else COLORS["border"]
                 w.setStyleSheet(f"color:{col}; font-size:16px;")
 
+        self._refresh_resistance(s)
         self.indicator.set_state(s)
 
     def closeEvent(self, ev: QtGui.QCloseEvent):

@@ -191,6 +191,47 @@ def build_manifest(daq) -> dict:
             f"di_{line_id(line)}_live", f"{label} (live)", "indicator", "bool",
             group="Live", order=500 + line, read_path=["dio", line]))
 
+    # -- resistance (AO + R_ref + sense AI; config group `resistance`) -------------------------
+    rc = cfg.resistance
+    if rc.enabled and AI_CHANNELS.index(rc.ai) in lay.ai:
+        r_ready = {"policy": "adopt_then_flag", "setpoint_key": "res_id",
+                   "flag_key": "res_running", "invert": True}
+        r_timeout = round(daq.resistance_timeout_s(), 3)
+        r_acquire = {"group": "resistance", "trigger_verb": "measure_resistance",
+                     "target_key": "res_id", "ready": r_ready, "timeout_s": r_timeout}
+        name = rc.name or "Resistance"
+        how = (f"{rc.ao.upper()} drives +-{rc.excitation_V:g} V through "
+               f"{rc.r_ref_ohm:g} ohm; {rc.ai.upper()} reads the node.")
+        params += [
+            _p("resistance", name, "indicator", "float", unit="ohm",
+               group="Resistance", order=600, decimals=4, plottable=True,
+               read_path=["resistance", "ohm"], acquire=r_acquire,
+               help=f"Two-wire DC resistance, leads subtracted. {how} Current flows "
+                    f"only during the reading (both polarities, then 0 V)."),
+            _p("resistance_sigma", f"{name} uncertainty", "indicator", "float",
+               unit="ohm", group="Resistance", order=601, decimals=4,
+               read_path=["resistance", "sigma_ohm"], acquire=r_acquire,
+               help="Standard error from the scatter of the readings."),
+            _p("resistance_current", f"{name} current", "indicator", "float",
+               unit="mA", group="Resistance", order=602, decimals=3,
+               read_path=["resistance", "current_mA"], acquire=r_acquire),
+            _p("resistance_leads", "Leads (subtracted)", "indicator", "float",
+               unit="ohm", group="Resistance", order=603, decimals=4,
+               read_path=["resistance", "r_leads_ohm"]),
+            _p("measure_resistance", f"Measure {name.lower()}", "action", "action",
+               group="Resistance", order=604,
+               wait={"target_key": "res_id", "ready": r_ready, "timeout_s": r_timeout},
+               help=how),
+            _p("zero_leads", "Zero leads (antenna end SHORTED)", "action", "action",
+               group="Resistance", order=605, danger=True,
+               wait={"target_key": "res_id", "ready": r_ready, "timeout_s": r_timeout},
+               help="Short the far end of the cable (where the antenna connects), "
+                    "then run this: the measured bias tee + cable resistance is "
+                    "stored and subtracted from every later reading."),
+            _p("res_running", "Measuring resistance", "indicator", "bool",
+               group="Resistance", order=606, read_path=["res_running"]),
+        ]
+
     # -- actions ---------------------------------------------------------------------------------
     params += [
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",

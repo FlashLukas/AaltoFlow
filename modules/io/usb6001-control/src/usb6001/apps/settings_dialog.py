@@ -101,6 +101,7 @@ class SettingsDialog(QtWidgets.QDialog):
         tabs.addTab(self._ao_tab(), "AO")
         tabs.addTab(self._dio_tab(), "DIO")
         tabs.addTab(self._limits_tab(), "Limits")
+        tabs.addTab(self._resistance_tab(), "Resistance")
         tabs.addTab(self._hardware_tab(), "Hardware")
         tabs.addTab(self._appearance_tab(), "Appearance")
         self._populate(cfg)
@@ -214,6 +215,33 @@ class SettingsDialog(QtWidgets.QDialog):
             form.addRow(label, wdg)
         lay.addLayout(form)
         lay.addWidget(_hint("The USB-6001's own envelope (NI spec sheet). Rarely changed."))
+        lay.addStretch(1)
+        return page
+
+    def _resistance_tab(self):
+        page, lay = self._page()
+        form = QtWidgets.QFormLayout()
+        for f, label, wdg in (
+                ("enabled", "Measure a resistance", QtWidgets.QCheckBox()),
+                ("name", "Name", QtWidgets.QLineEdit()),
+                ("ao", "Excitation output", _combo(AO_CHANNELS)),
+                ("ai", "Sense input", _combo(AI_CHANNELS)),
+                ("r_ref_ohm", "Reference resistor R_ref", _dspin(1, 1e6, 2, 10, "ohm")),
+                ("excitation_V", "Excitation +-", _dspin(0.01, 10, 3, 0.5, "V")),
+                ("r_leads_ohm", "Leads (subtracted)", _dspin(-1e3, 1e3, 4, 0.1, "ohm")),
+                ("settle_ms", "Settle after each step", _dspin(0, 2000, 0, 5, "ms")),
+                ("reads", "Readings per polarity", _ispin(1, 100))):
+            self.w[("resistance", None, f)] = wdg
+            form.addRow(label, wdg)
+        lay.addLayout(form)
+        lay.addWidget(_hint(
+            "Wiring: excitation output -- R_ref -- bias-tee DC port -- antenna -- ground; "
+            "the sense input (RSE) on the bias-tee DC port. The output drives +V, then -V, "
+            "then goes back to 0 V: current flows only while measuring. "
+            "R = R_ref x dV / (2V - dV) - leads. Measure R_ref with a meter and type its "
+            "real value. Keep V / R_ref under 5 mA (the 6001's output limit). "
+            "'Zero leads' on the front panel, with the antenna end SHORTED, measures the "
+            "leads. Enabling it switches the sense input on: restart the service once."))
         lay.addStretch(1)
         return page
 

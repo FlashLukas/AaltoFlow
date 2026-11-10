@@ -236,6 +236,13 @@ class Usb6001Service:
             elif cmd == "acquire":
                 # fire-and-forget: the number to wait for, at once (gotcha #17)
                 return {"ok": True, "acq_id": d.acquire()}
+            elif cmd == "measure_resistance":
+                # fire-and-forget like acquire: the number to wait for, at once
+                return {"ok": True, "res_id": d.measure_resistance(
+                    bool(msg.get("zero_leads", False)))}
+            elif cmd == "zero_leads":
+                # the same run with the antenna end SHORTED: stores r_leads_ohm
+                return {"ok": True, "res_id": d.measure_resistance(zero_leads=True)}
             elif cmd == "get_sample":
                 return {"ok": True, "sample": d.get_sample()}
             elif cmd == "save_config":

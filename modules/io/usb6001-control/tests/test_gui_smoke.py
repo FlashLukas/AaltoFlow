@@ -69,3 +69,28 @@ def test_settings_dialog_applies_in_place(app):
     assert applied == [True]
     assert daq.status().restart_pending is True
     daq.shutdown()
+
+
+def test_resistance_card_hidden_when_off_and_shows_a_result(app):
+    from usb6001.apps.gui import MainWindow
+    from usb6001.config import Config
+    cfg = Config()
+    daq, _ = build_sim_system(cfg)
+    win = MainWindow(daq, cfg)
+    win._refresh()
+    assert win.res_card.isHidden()
+    win.close()
+    cfg = Config()
+    cfg.resistance.enabled = True
+    daq, _ = build_sim_system(cfg, seed=2)
+    daq.start(poll=False)
+    try:
+        win = MainWindow(daq, cfg)
+        win._refresh()
+        assert not win.res_card.isHidden() and "not measured" in win.res_detail.text()
+        daq.read_resistance()
+        win._refresh()
+        assert win.res_value.text().endswith("Ω") and "mA" in win.res_detail.text()
+        win.close()
+    finally:
+        daq.shutdown()

@@ -6,8 +6,8 @@ run with nothing plugged in.
 
 from __future__ import annotations
 
-from .backends.sim import SimulatedUsb6001
-from .config import Config
+from .backends.sim import SimLoad, SimulatedUsb6001
+from .config import AI_CHANNELS, AO_CHANNELS, Config
 from .daq import Daq
 
 
@@ -17,7 +17,13 @@ def build_sim_system(cfg: Config | None = None, **sim_kwargs) -> tuple[Daq, Simu
     cfg = cfg or Config()
     backend = SimulatedUsb6001(loopback_ai=cfg.hardware.sim_ai_loopback,
                                loopback_di=cfg.hardware.sim_di_loopback, **sim_kwargs)
-    return Daq(backend, cfg), backend
+    daq = Daq(backend, cfg)            # sanitises cfg (resistance channel names)
+    rc = cfg.resistance
+    if rc.enabled:
+        # a pretend antenna on the configured pair: 15 ohm + 1.2 ohm of leads
+        backend.load = SimLoad(ao=AO_CHANNELS.index(rc.ao), ai=AI_CHANNELS.index(rc.ai),
+                               r_ref_ohm=float(rc.r_ref_ohm))
+    return daq, backend
 
 
 def demo_config() -> Config:

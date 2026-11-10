@@ -82,6 +82,11 @@ class Status:
     acq_id: int = 0
     acquiring: bool = False
     sample: dict = field(default_factory=dict)
+    # the resistance measurement (config group `resistance`): numbered like an
+    # acquisition; `resistance` holds the LAST result (see Daq.measure_resistance)
+    res_id: int = 0
+    res_running: bool = False
+    resistance: dict = field(default_factory=dict)
 
 
 def _finite(value, what: str) -> float:
@@ -91,6 +96,39 @@ def _finite(value, what: str) -> float:
     if not math.isfinite(v):
         raise ValueError(f"{what} must be a finite number, got {value!r}")
     return v
+
+
+def _resistance_from(v_plus: list, v_minus: list, v_exc: float, r_ref: float,
+                     r_leads: float) -> dict:
+    """R from the sense readings at +v_exc and -v_exc (see config.Resistance).
+
+    With dVs = mean(V+) - mean(V-) and the AO swinging 2 v_exc, the current
+    amplitude is I = (2 v_exc - dVs) / (2 R_ref) and R_total = dVs / (2 I)
+    = R_ref dVs / (2 v_exc - dVs). An offset common to both polarities (the
+    card's input offset, a thermocouple voltage) drops out of dVs.
+    sigma_ohm: from the scatter of the readings (NaN with one read each).
+    """
+    n_p, n_m = len(v_plus), len(v_minus)
+    mp, mm = sum(v_plus) / n_p, sum(v_minus) / n_m
+    dvs, swing = mp - mm, 2.0 * v_exc
+    out = {"v_plus": mp, "v_minus": mm, "offset_V": (mp + mm) / 2.0}
+    if dvs >= swing * 0.999:
+        # (almost) all of the swing across the load: no current flows
+        out.update(total_ohm=math.inf, ohm=math.inf, current_mA=0.0, sigma_ohm=_NAN,
+                   error="open circuit: no current through the load (check the wiring)")
+        return out
+    total = r_ref * dvs / (swing - dvs)
+    out["total_ohm"] = total
+    out["ohm"] = total - r_leads
+    out["current_mA"] = (swing - dvs) / (2.0 * r_ref) * 1e3
+    if n_p > 1 and n_m > 1:
+        var_p = sum((x - mp) ** 2 for x in v_plus) / (n_p - 1) / n_p
+        var_m = sum((x - mm) ** 2 for x in v_minus) / (n_m - 1) / n_m
+        # d(total)/d(dVs) = R_ref * swing / (swing - dVs)^2
+        out["sigma_ohm"] = r_ref * swing / (swing - dvs) ** 2 * math.sqrt(var_p + var_m)
+    else:
+        out["sigma_ohm"] = _NAN
+    return out
 
 
 def layout_from(cfg: Config) -> Layout:
@@ -137,6 +175,12 @@ class Daq:
         self._acq_id = 0
         self._acq: dict | None = None
         self._sample: dict = {}
+
+        # resistance measurement (under _lock): number, busy flag, last result
+        self._res_id = 0
+        self._res_running = False
+        self._res: dict = {}
+        self._res_thread: threading.Thread | None = None
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -206,9 +250,10 @@ class Daq:
         """Stop polling, write any configured safe states, disconnect.
         Safe to call more than once, and after a failed start()."""
         self._stop.set()
-        if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join(timeout=3.0)
-        self._thread = None
+        for th in (self._thread, self._res_thread):
+            if th is not None and th is not threading.current_thread():
+                th.join(timeout=10.0)     # a resistance run ends with its AO at 0 V
+        self._thread = self._res_thread = None
         was = self._connected
         try:
             if was:
@@ -351,6 +396,125 @@ class Daq:
         return {"acq_id": s["acq_id"],
                 "levels": {DIO_LINES[i]: s["dio"][i] for i in lines}}
 
+    # ---- resistance (two-wire, through a reference resistor) -----------------------------
+
+    def measure_resistance(self, zero_leads: bool = False) -> int:
+        """Start one resistance measurement; returns its number at once.
+
+        Fire-and-forget like `acquire`: status shows `res_running` until the
+        result with this `res_id` is in `resistance`. `zero_leads=True` is the
+        calibration with the antenna end SHORTED: the measured value is stored
+        as `resistance.r_leads_ohm` (and saved), and later results subtract it.
+        The excitation AO carries current ONLY during the run and is left at
+        0 V afterwards -- also when the run fails.
+        """
+        rc = self.cfg.resistance
+        if not rc.enabled:
+            raise ValueError("resistance measurement is off (Settings > Resistance)")
+        if not self._connected:
+            raise ValueError("not connected")
+        ai = self._ai_index(rc.ai)
+        if ai not in self.layout.ai:
+            raise ValueError(f"{AI_CHANNELS[ai]} (the sense input) is not running yet: "
+                             "restart the service once after enabling the measurement")
+        with self._lock:
+            if self._res_running:
+                raise ValueError(f"resistance measurement #{self._res_id} still running")
+            self._res_id += 1
+            self._res_running = True
+            rid = self._res_id
+        self._res_thread = threading.Thread(target=self._run_resistance,
+                                            args=(rid, bool(zero_leads)),
+                                            name="usb6001-resistance", daemon=True)
+        self._res_thread.start()
+        return rid
+
+    def read_resistance(self, zero_leads: bool = False, timeout_s: float | None = None) -> dict:
+        """measure_resistance() and wait for its result (scripts, console)."""
+        rid = self.measure_resistance(zero_leads)
+        deadline = self._clock() + (timeout_s or self.resistance_timeout_s())
+        while self._clock() < deadline:
+            with self._lock:
+                if not self._res_running and self._res.get("res_id") == rid:
+                    return copy.deepcopy(self._res)
+            time.sleep(0.01)
+        raise TimeoutError(f"resistance measurement #{rid} did not finish")
+
+    def resistance_timeout_s(self) -> float:
+        """Two polarities x (settle + reads x one reading), times a margin."""
+        rc, a = self.cfg.resistance, self.cfg.ai
+        one = a.samples_per_read / max(a.rate_Hz, 1e-9) + 0.15     # + USB overhead
+        return max(5.0, 3.0 * 2 * (rc.settle_ms / 1e3 + rc.reads * one)
+                   + float(self.cfg.hardware.timeout_s))
+
+    def _run_resistance(self, rid: int, zero_leads: bool) -> None:
+        rc, a = self.cfg.resistance, self.cfg.ai
+        ao, ai = self.ao_index(rc.ao), self._ai_index(rc.ai)
+        lo, hi = self.ao_limits(ao)
+        v = min(abs(float(rc.excitation_V)), hi, -lo)
+        result = {"res_id": rid, "time": time.time(), "zero_leads": zero_leads,
+                  "ohm": _NAN, "sigma_ohm": _NAN, "total_ohm": _NAN, "current_mA": _NAN,
+                  "v_plus": _NAN, "v_minus": _NAN, "offset_V": _NAN, "excitation_V": v,
+                  "r_ref_ohm": float(rc.r_ref_ohm), "r_leads_ohm": float(rc.r_leads_ohm),
+                  "error": ""}
+        reads: dict = {}
+        try:
+            if v <= 0:
+                raise ValueError(f"{AO_CHANNELS[ao]} limits {lo:g}..{hi:g} V allow no "
+                                 "+-excitation (the method needs both polarities)")
+            pos = self.layout.ai.index(ai)
+            # The WHOLE sequence under _hw: the poll waits, so no live reading
+            # (and no other AO write) lands between the two polarities.
+            with self._hw:
+                try:
+                    for sign in (+1, -1):
+                        self._write_ao_echo(ao, sign * v)
+                        time.sleep(float(rc.settle_ms) / 1e3)
+                        vals = []
+                        for _ in range(int(rc.reads)):
+                            if self._stop.is_set():
+                                raise RuntimeError("service stopping")
+                            vals.append(float(self.backend.read_ai(
+                                a.samples_per_read, a.rate_Hz)[pos]))
+                        reads[sign] = vals
+                finally:
+                    # back to 0 V whatever happened: no current outside a run
+                    try:
+                        self._write_ao_echo(ao, 0.0)
+                    except Exception as exc:
+                        result["error"] = f"could not return {AO_CHANNELS[ao]} to 0 V: {exc}"
+            result.update(_resistance_from(reads[+1], reads[-1], v, float(rc.r_ref_ohm),
+                                           0.0 if zero_leads else float(rc.r_leads_ohm)))
+            if zero_leads and math.isfinite(result["total_ohm"]):
+                rc.r_leads_ohm = result["total_ohm"]
+                result["r_leads_ohm"] = rc.r_leads_ohm
+                if self.config_path:
+                    try:
+                        self.cfg.save(self.config_path)
+                    except OSError as exc:
+                        self._emit("error", f"could not save {self.config_path}: {exc}")
+        except Exception as exc:
+            result["error"] = result["error"] or f"{type(exc).__name__}: {exc}"
+        with self._lock:                       # result and "done" in ONE section (#28)
+            self._res = result
+            self._res_running = False
+        name = rc.name or "resistance"
+        if result["error"]:
+            self._emit("error", f"{name} #{rid}: {result['error']}")
+        elif zero_leads:
+            self._emit("info", f"{name}: leads = {result['total_ohm']:.4g} ohm "
+                               "(stored; later readings subtract it)")
+        else:
+            self._emit("info", f"{name} #{rid}: {result['ohm']:.4g} +- "
+                               f"{result['sigma_ohm']:.2g} ohm at {result['current_mA']:.3g} mA")
+
+    def _write_ao_echo(self, ao: int, volts: float) -> None:
+        """write_ao + the echo AFTER the write (gotcha #40). Call under _hw."""
+        self.backend.write_ao(ao, volts)
+        with self._lock:
+            self._ao_V[ao] = volts
+            self._ao_known[ao] = True
+
     def get_sample(self) -> dict:
         with self._lock:
             return copy.deepcopy(self._sample)
@@ -383,6 +547,8 @@ class Daq:
                 restart_pending=self.restart_pending(),
                 acq_id=self._acq_id, acquiring=a is not None,
                 sample=copy.deepcopy(self._sample),
+                res_id=self._res_id, res_running=self._res_running,
+                resistance=copy.deepcopy(self._res),
             )
 
     def restart_pending(self) -> bool:

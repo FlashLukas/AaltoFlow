@@ -9,6 +9,10 @@ the real card. What it pretends:
     wire ran from each output to an input -- so a scan AO -> AI can be tested.
   * digital inputs: a slow square wave per line; with `loopback_di` on, the
     n-th input line reads the n-th output line instead.
+  * a RESISTOR NETWORK (`load`, see SimLoad): an AO drives a reference
+    resistor into a load to ground and one AI reads the node between them --
+    the antenna-through-a-bias-tee measurement, with an input offset that the
+    polarity reversal must cancel.
   * the state the box is ALREADY in when we connect (`ao_start`, `do_start`),
     exactly like a real card that kept its outputs from a previous session.
     As on the real USB-6001 the AO values cannot be read back (read_ao does
@@ -24,7 +28,21 @@ import math
 import random
 import time
 
+from dataclasses import dataclass
+
 from .base import Layout
+
+
+@dataclass
+class SimLoad:
+    """AO `ao` --- r_ref_ohm --- node --- load_ohm --- ground; AI `ai` reads the
+    node, plus `offset_V` (the card's input offset)."""
+
+    ao: int = 0
+    ai: int = 4
+    r_ref_ohm: float = 2200.0
+    load_ohm: float = 16.2          # 15-ohm antenna + 1.2 ohm of bias tee and cables
+    offset_V: float = 0.003
 
 
 class SimulatedUsb6001:
@@ -40,6 +58,7 @@ class SimulatedUsb6001:
         self.do_readable = True            # False: pretend the card cannot read DO back
         self.fail_reads = False            # True: every read raises (hw_error tests)
         self.read_ai_calls = 0
+        self.load: SimLoad | None = None   # a resistor network on one AO + AI
         self._rng = random.Random(seed)
         self._t0 = time.monotonic()
         self.is_open = False
@@ -68,7 +87,10 @@ class SimulatedUsb6001:
         noise = 0.002 / math.sqrt(max(1, samples))     # averaging shrinks the noise
         out = []
         for ch in self.layout.ai:
-            if self.loopback_ai and ch in (0, 1):
+            if self.load is not None and ch == self.load.ai:
+                ld = self.load
+                v = self._ao[ld.ao] * ld.load_ohm / (ld.r_ref_ohm + ld.load_ohm) + ld.offset_V
+            elif self.loopback_ai and ch in (0, 1):
                 v = self._ao[ch]
             else:
                 v = 0.8 * math.sin(2 * math.pi * t / (6.0 + 1.7 * ch)) + 0.25 * (ch - 3.5)

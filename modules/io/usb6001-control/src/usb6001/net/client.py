@@ -137,6 +137,22 @@ class Usb6001Client(ControlClient):
     def acquire(self) -> int:
         return int(self._checked({"cmd": "acquire"})["acq_id"])
 
+    def measure_resistance(self, zero_leads: bool = False) -> int:
+        return int(self._checked({"cmd": "measure_resistance",
+                                  "zero_leads": bool(zero_leads)})["res_id"])
+
+    def read_resistance(self, zero_leads: bool = False, timeout_s: float = 30.0) -> dict:
+        """Trigger a measurement and wait (on the status stream) for ITS result."""
+        import time
+        rid = self.measure_resistance(zero_leads)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout_s:
+            st = self.status()
+            if not st.res_running and (st.resistance or {}).get("res_id") == rid:
+                return dict(st.resistance)
+            time.sleep(0.05)
+        raise TimeoutError(f"resistance measurement #{rid} did not finish")
+
     def get_sample(self) -> dict:
         return self._checked({"cmd": "get_sample"}).get("sample", {})
 

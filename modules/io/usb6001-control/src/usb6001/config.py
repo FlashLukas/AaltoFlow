@@ -197,6 +197,37 @@ class Hardware:
 
 
 @dataclass
+class Resistance:
+    """A two-wire RESISTANCE measurement on one AO + one AI (Lukas, Blue Box,
+    2026-11-10: the antenna's DC resistance, ~15 ohm, through a bias tee).
+
+    Wiring: AO --- R_ref --- bias-tee DC port --- antenna --- ground,
+            with the sense AI on the bias-tee DC port (RSE, i.e. to AI GND).
+    The AO drives +V, then -V; R = R_ref * dVs / (2V - dVs) - r_leads, where
+    dVs is the sense-voltage difference between the two polarities. The
+    difference cancels the card's input offset (and a thermal EMF), the
+    ratio to R_ref makes the AO's exact level and the current unimportant.
+    Current flows ONLY while measuring: the AO goes back to 0 V afterwards.
+
+    r_leads_ohm  the bias tee's DC path + cables, measured once with the
+                 antenna end SHORTED ("Zero leads") and subtracted after.
+    The USB-6001 drives at most 5 mA per AO: excitation_V / r_ref_ohm is kept
+    below that (sanitise). At ~4 mA a 15-ohm antenna gives ~60 mV, about 50
+    steps of the 6001's 14-bit +-10 V input: average (reads x samples).
+    """
+
+    enabled: bool = False
+    name: str = "Antenna"
+    ao: str = "ao0"                 # the excitation output
+    ai: str = "ai4"                 # the sense input (enabled automatically)
+    r_ref_ohm: float = 2200.0       # the series reference resistor (measure it!)
+    excitation_V: float = 9.0       # +-this on the AO (9 V / 2.2 kohm = 4.1 mA)
+    r_leads_ohm: float = 0.0        # subtracted; set by "Zero leads"
+    settle_ms: float = 20.0         # after each AO step, before reading
+    reads: int = 5                  # readings per polarity (each = samples_per_read samples)
+
+
+@dataclass
 class UI:
     theme: str = "dark"            # "dark" or "light", applied at GUI start
 
@@ -212,10 +243,11 @@ _GROUPS = {
     "dio": ("lines", DIOLine, DIO_LINES),
     "limits": (None, None, None),
     "hardware": (None, None, None),
+    "resistance": (None, None, None),
     "ui": (None, None, None),
 }
 _CLASSES = {"ai": AI, "ao": AO, "dio": DIO, "limits": Limits,
-            "hardware": Hardware, "ui": UI}
+            "hardware": Hardware, "resistance": Resistance, "ui": UI}
 
 
 @dataclass
@@ -225,6 +257,7 @@ class Config:
     dio: DIO = None
     limits: Limits = None
     hardware: Hardware = None
+    resistance: Resistance = None
     ui: UI = None
 
     def __post_init__(self):
@@ -398,7 +431,59 @@ def sanitise(cfg: Config) -> list[str]:
                 msgs.append(f"{line}: unknown {attr} {getattr(d, attr)!r}, using 'leave'")
                 v = "leave"
             setattr(d, attr, v)
+
+    _sanitise_resistance(cfg, msgs)
     return msgs
+
+
+#: the USB-6001's AO drive limit (spec sheet: 5 mA)
+AO_MAX_CURRENT_A = 0.005
+
+
+def _sanitise_resistance(cfg: Config, msgs: list) -> None:
+    r = cfg.resistance
+    r.enabled = _cast(r.enabled, "bool")
+    ao, ai = str(r.ao).strip().lower(), str(r.ai).strip().lower()
+    if ao not in AO_CHANNELS:
+        msgs.append(f"resistance: unknown excitation output {r.ao!r}, using ao0")
+        ao = "ao0"
+    if ai not in AI_CHANNELS:
+        msgs.append(f"resistance: unknown sense input {r.ai!r}, using ai4")
+        ai = "ai4"
+    r.ao, r.ai = ao, ai
+    if not (math.isfinite(float(r.r_ref_ohm)) and r.r_ref_ohm > 0):
+        msgs.append(f"resistance: r_ref_ohm {r.r_ref_ohm!r} is not a resistance, using 2200")
+        r.r_ref_ohm = 2200.0
+    v = abs(float(r.excitation_V)) if math.isfinite(float(r.excitation_V)) else 0.0
+    if v == 0:
+        msgs.append("resistance: excitation_V 0 drives no current, using 1 V")
+        v = 1.0
+    v_max = min(10.0, AO_MAX_CURRENT_A * float(r.r_ref_ohm))
+    if v > v_max:
+        msgs.append(f"resistance: {v:g} V through {r.r_ref_ohm:g} ohm would exceed the "
+                    f"6001's 5 mA (or 10 V); using {v_max:.3g} V")
+        v = v_max
+    r.excitation_V = v
+    if not math.isfinite(float(r.r_leads_ohm)):
+        r.r_leads_ohm = 0.0
+    r.settle_ms = min(max(float(r.settle_ms), 0.0), 2000.0)
+    r.reads = min(max(int(r.reads), 1), 100)
+    if not r.enabled:
+        return
+    k = AI_CHANNELS.index(ai)
+    if k >= 4 and cfg.ai.channels[k - 4].enabled and cfg.ai.channels[k - 4].terminal == "DIFF":
+        msgs.append(f"resistance: {ai} is the minus input of ai{k - 4} (DIFF); "
+                    "pick another sense input -- resistance switched off")
+        r.enabled = False
+        return
+    ch = cfg.ai.channels[k]
+    if not ch.enabled or ch.terminal != "RSE":
+        # the sense node is measured against AI GND, the antenna's ground side
+        msgs.append(f"resistance: {ai} enabled as RSE for the sense voltage "
+                    "(a running service needs a restart for it)")
+        ch.enabled, ch.terminal = True, "RSE"
+        if not ch.name or ch.name.upper() == f"AI {k}":
+            ch.name = f"{r.name} sense"
 
 
 # ---- helpers used by brain, describe and GUI ------------------------------------
