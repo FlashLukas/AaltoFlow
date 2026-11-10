@@ -222,7 +222,11 @@ def _make_plot(name, unit):
     w.setLabel("left", name, units=unit)
     w.setLabel("bottom", "frequency", units="GHz")
     w.showGrid(x=True, y=True, alpha=0.15)
-    curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
+    # Pen width 1, not more: an ANTIALIASED pen wider than 1 px leaves Qt's
+    # fast cosmetic path, and a noisy trace (S21 with nothing between the
+    # ports, its phase jumping +-180 deg) took ~2.3 s per repaint on the Blue
+    # Box (100 ms per QPainter.drawPath); at width 1 it is 70-100 ms.
+    curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1))
     # No auto-downsampling / clip-to-view: they size themselves from the
     # widget, and a tab that was never shown has none -- its trace would be
     # cut to a point. A few thousand points draw fast without them.
