@@ -2095,7 +2095,20 @@ class Camera:
         with self._lock:
             self._af_expo_active = True
             self._status.af_exposure_active = True
-        self._emit("info", f"{what}: exposure {old:g} -> {want:g} us (autofocus.exposure_us)")
+        # Say what the camera ACTUALLY took, not what was asked: a camera clamps
+        # an exposure below its minimum (Blue Box Zelux, 2026-11-10: 10 us asked,
+        # 64 us is its minimum) and the log used to report the 10 anyway.
+        try:
+            got = float(self.backend.get_feature("ExposureTime"))
+        except Exception:
+            got = want
+        if abs(got - want) > max(1.0, 0.01 * want):
+            self._emit("warn", f"{what}: exposure {old:g} -> {got:g} us -- the camera took "
+                               f"{got:g} us, not the {want:g} us asked (autofocus.exposure_us; "
+                               f"outside its range or rounded). Set autofocus.exposure_us "
+                               f"to {got:g} or more.")
+        else:
+            self._emit("info", f"{what}: exposure {old:g} -> {got:g} us (autofocus.exposure_us)")
         try:
             if engine:
                 self._drop_frames(n_drop)

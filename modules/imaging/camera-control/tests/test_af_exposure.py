@@ -388,3 +388,29 @@ def test_auto_exposure_uses_the_cameras_own_once_when_it_has_it():
         assert any("5000 -> 1234" in m for _l, m in events)
     finally:
         brain.shutdown()
+
+
+def test_a_clamped_af_exposure_is_reported_as_the_camera_took_it():
+    """Blue Box 2026-11-10: autofocus.exposure_us 10 on a Zelux whose minimum is
+    64 us. The camera clamps; the log must say 64, and that the 10 was not
+    taken -- it used to report the value it ASKED for."""
+    brain, cam, z, events = _rig()
+    try:
+        floor = 64.0
+        orig_set = cam.set_feature
+
+        def clamped(name, value):
+            if name == "ExposureTime":
+                value = max(floor, float(value))
+            return orig_set(name, value)
+        cam.set_feature = clamped
+        brain.cfg.autofocus.exposure_us = 10.0
+        with brain._exposure_for("autofocus", engine=False) as on:
+            assert on
+            assert cam.get_feature("ExposureTime") == floor
+        msgs = [(lvl, m) for lvl, m in events if "autofocus: exposure" in m]
+        assert any(lvl == "warn" and "took 64 us, not the 10 us asked" in m
+                   for lvl, m in msgs), msgs
+        assert cam.get_feature("ExposureTime") == WORK          # restored as before
+    finally:
+        brain.shutdown()
