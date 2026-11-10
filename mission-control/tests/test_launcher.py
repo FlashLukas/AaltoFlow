@@ -1073,3 +1073,48 @@ def test_an_instance_is_never_a_type_to_add_remotely(env):
     finally:
         mc.remove_instance(iid, root)
         win.rescan(force=True)
+
+
+def test_open_all_guis_skips_a_scan_server_that_is_down(env, monkeypatch):
+    """Blue Box, 2026-11-10: "Open all GUIs" opened the Scan server card's GUI
+    (the measurement suite watching that server) while the server was down --
+    a second suite window watching nothing. An instrument's GUI still opens
+    (it runs its own simulator); the coordinator's only when its server is up."""
+    import dataclasses
+    mc, win, root, app = env
+    card = win.cards["magnet"]
+    real_spec = card.spec
+    opened = []
+    for c in win.cards.values():
+        monkeypatch.setattr(c, "open_gui", lambda c=c: opened.append(c.spec.key))
+    try:
+        card.spec = dataclasses.replace(real_spec, key="scanserver")
+        assert not card.spec.is_instrument
+        card.up = False
+        win.open_all_guis()
+        _pump(app, 1.2)
+        assert "scanserver" not in opened and "lockin" in opened
+        opened.clear()
+        card.up = True
+        win.open_all_guis()
+        _pump(app, 1.2)
+        assert "scanserver" in opened
+    finally:
+        card.spec = real_spec
+        card.up = False
+
+
+def test_the_log_is_also_written_to_a_daily_file(env):
+    """Blue Box, 2026-11-10: a service had stopped by itself and the reason was
+    lost with the window. The log pane is now also kept in .suite_cache/logs,
+    and a traceback's "<module>" is shown as text, not swallowed as a tag."""
+    mc, win, root, app = env
+    win.log('File "x.py", line 1, in <module>', "warn")
+    assert "in <module>" in win.logbox.toPlainText()
+    text = mc.log_path().read_text("utf-8")
+    assert "WARN " in text and 'in <module>' in text
+    assert mc.log_path().parent == root / ".suite_cache" / "logs"
+    old = mc.log_path("2000-01-01")
+    old.write_text("old\n", "utf-8")
+    mc.prune_logs()
+    assert not old.exists() and mc.log_path().exists()

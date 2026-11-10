@@ -37,7 +37,9 @@ Run it:
 
 from __future__ import annotations
 
+import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -88,6 +90,11 @@ ROOT = default_root()
 #: The last `describe` seen from each module, so the variables stay visible
 #: while a service is down. Local machine state, not committed.
 CACHE_DIR = ROOT / ".suite_cache"
+#: The log pane is also written here, one file per day (Blue Box, 2026-11-10: a
+#: service had stopped by itself and WHY was lost with the window -- its last
+#: lines and exit code only ever reached the log pane). Local, not committed.
+LOG_DIR = CACHE_DIR / "logs"
+LOG_KEEP_DAYS = 30
 # suite_local.json settings key: this PC's display order of the module cards
 CARD_ORDER_SETTING = "card_order"
 # Modules installed here but not used on this setup (Lukas, 2026-11-10: "hide
@@ -2368,9 +2375,38 @@ class ModuleCard(QtWidgets.QFrame):
 
 # ────────────────────────────── main window ───────────────────────────────
 
+def log_path(day: str | None = None) -> Path:
+    """Today's (or `day`'s, YYYY-MM-DD) log file of this launcher."""
+    return LOG_DIR / f"mission-control-{day or time.strftime('%Y-%m-%d')}.log"
+
+
+def write_log_line(msg, level: str = "info") -> None:
+    """Append one log line to today's file. Never raises: a full disk or a
+    read-only folder must not take the launcher down with it."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(log_path(), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {level.upper():5} {msg}\n")
+    except OSError:
+        pass
+
+
+def prune_logs(keep_days: int = LOG_KEEP_DAYS) -> None:
+    """Delete this launcher's log files older than `keep_days` (by name)."""
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - keep_days * 86400))
+    try:
+        for f in LOG_DIR.glob("mission-control-*.log"):
+            if f.stem[len("mission-control-"):] < cutoff:
+                f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
+        prune_logs()
+        write_log_line(f"Mission Control started (pid {os.getpid()})")
         # "<setup> · Mission Control" (e.g. "Cryostat 2 · ...") when the installer was told which setup
         # this PC drives, "AaltoFlow · Mission Control" otherwise
         self.setWindowTitle(suite_title("Mission Control"))
@@ -3039,9 +3075,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def log(self, msg: str, level: str = "info"):
         color = {"error": C["danger"], "warn": C["accent_hi"]}.get(level, C["muted"])
         stamp = time.strftime("%H:%M:%S")
+        # escaped: a traceback line "in <module>" is text, not an HTML tag (it
+        # used to vanish from the pane)
         self.logbox.appendHtml(
             f'<span style="color:{C["accent_dim"]}">{stamp}</span> '
-            f'<span style="color:{color}">{msg}</span>')
+            f'<span style="color:{color}">{html.escape(str(msg))}</span>')
+        write_log_line(msg, level)
 
     # ---- profiles ---------------------------------------------------------
 
@@ -3270,8 +3309,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_all_guis(self):
         self.log("opening all GUIs…")
         for i, card in enumerate([c for c in self.cards.values()
-                                  if c.spec.has_gui and self.in_use(c)]):
+                                  if c.spec.has_gui and self.in_use(c)
+                                  and self._gui_worth_opening_alone(c)]):
             QtCore.QTimer.singleShot(i * 400, card.open_gui)
+
+    @staticmethod
+    def _gui_worth_opening_alone(card) -> bool:
+        """Whether "Open all GUIs" should open this card's GUI right now.
+
+        An instrument's GUI is useful even with its service down (it runs its
+        own simulator). A coordinator's GUI is not: the Scan server's GUI
+        is the measurement suite watching that server, so with the server down
+        it is just a second suite window watching nothing (Blue Box,
+        2026-11-10: two suite windows after Open all GUIs). Its own GUI button
+        still opens it on request."""
+        if card.spec.is_instrument:
+            return True
+        return bool(card.up or card._service_starting())
 
     def open_suite(self, recall=None):
         """Open scan-core's measurement suite (one instance).
