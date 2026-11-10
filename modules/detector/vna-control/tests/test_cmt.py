@@ -164,14 +164,43 @@ def test_abort_leaves_the_channel_ready_for_the_next_trigger():
     assert fake.sweeps == 2 and all(e.startswith("-239") for e in fake.errors)
 
 
-def test_close_hands_s2vna_back_free_running():
+def test_close_hands_s2vna_back_as_found():
+    """Blue Box, 2026-11-10: after a stop S2VNA showed our two traces and had
+    averaging off. Traces, averaging, initiation and trigger go back as found;
+    the sweep (span, points, IFBW, power) stays as the measurement set it."""
     b, fake, _ = _backend()
+    fake.defs, fake.traces = {1: "S22", 2: "S12", 3: "S11"}, 3
+    fake.aver = True
+    b.open()
+    b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -10.0, "S21", F)
+    assert fake.traces == 1 and not fake.aver and fake.trig_source == "BUS"
+    b.close()
+    assert fake.log.index(":ABOR") < fake.log.index(":CALC1:PAR:COUN 3")
+    assert fake.traces == 3 and fake.defs == {1: "S22", 2: "S12", 3: "S11"}
+    assert fake.aver is True and fake.cont is True
+    assert fake.log[-1] == ":TRIG:SOUR INT" and fake.trig_source == "INT"
+    assert fake.state["start"] == 1e9                 # the measurement's own sweep
+    assert fake.closed
+    b.close()                                         # twice is fine
+
+
+def test_a_bus_trigger_found_is_a_leftover_and_goes_back_to_int():
+    b, fake, _ = _backend()
+    fake.trig_source = "BUS"                          # e.g. a crashed earlier session
     b.open()
     b.start_sweep(np.linspace(1e9, 2e9, 11), 1e3, -10.0, "S21", F)
     b.close()
-    assert fake.log[-2:] == [":ABOR", ":TRIG:SOUR INT"]
-    assert fake.closed
-    b.close()                                         # twice is fine
+    assert fake.trig_source == "INT"
+
+
+def test_close_after_only_looking_writes_nothing():
+    b, fake, _ = _backend()
+    fake.aver = True
+    b.open()
+    b.read_state()
+    n = len([c for c in fake.log if not c.endswith("?")])
+    b.close()
+    assert len([c for c in fake.log if not c.endswith("?")]) == n and fake.aver
 
 
 def test_a_different_model_is_a_warning_not_a_failure():

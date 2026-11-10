@@ -209,6 +209,7 @@ class CmtVna:
         # '-239,"TRIG:SING interrupted"' (see abort_sweep)
         self._aborts = 0
         self._prepared = False            # set up for single sweeps yet? (see _take_over)
+        self._found: dict = {}            # what _take_over changed, as found (see close)
         self._points = 0
         self._started_at = math.nan
         self.warnings: list[str] = []
@@ -318,7 +319,9 @@ class CmtVna:
     def _take_over(self) -> None:
         """Set S2VNA up for single sweeps on demand. Runs at the FIRST
         start_sweep, i.e. only when somebody asks this module to measure --
-        never on connect (see open)."""
+        never on connect (see open). What it changes is read first and
+        handed back on close (`_hand_back`)."""
+        self._found = self._read_found()
         # one trace on channel 1, active, showing what we measure (more,
         # one per S-parameter, if several are asked for: _ensure_sparams)
         self._write(f":CALC{CH}:PAR:COUN 1")
@@ -336,6 +339,58 @@ class CmtVna:
         self._write(f":INIT{CH}:CONT ON")
         self._check_errors("taking over the sweep")
         self._prepared = True
+
+    def _read_found(self) -> dict:
+        """The screen and trigger set-up _take_over is about to change, read
+        just before it does. A query that fails leaves its key out, and close()
+        then leaves that setting as we set it."""
+        r = self._res
+        found: dict = {}
+        try:
+            n = int(float(r.query(f":CALC{CH}:PAR:COUN?").strip()))       # VERIFY
+            defs = [r.query(f":CALC{CH}:PAR{i}:DEF?").strip().upper()     # VERIFY
+                    for i in range(1, n + 1)]
+            if n >= 1 and all(d in model.SPARAMS for d in defs):
+                found["count"], found["defs"] = n, defs
+        except Exception as exc:
+            self.warnings.append(f"reading the traces before taking over: {exc}")
+        found["aver"] = self._query_bool(f":SENS{CH}:AVER?")
+        found["cont"] = self._query_bool(f":INIT{CH}:CONT?")               # VERIFY: 0/1
+        try:
+            found["trig"] = r.query(":TRIG:SOUR?").strip().upper()
+        except Exception as exc:
+            self.warnings.append(f"reading the trigger source before taking over: {exc}")
+        return found
+
+    def _hand_back(self, r) -> None:
+        """Give S2VNA back the set-up we found (Blue Box, 2026-11-10: it was
+        left with averaging off and our two traces on its screen). Traces,
+        averaging and initiation as found; the trigger as found too, EXCEPT
+        BUS, which goes back to INT -- BUS is our own single-sweep mode, so a
+        BUS found here is a leftover (a crashed session) and would leave
+        S2VNA waiting forever. The sweep itself (span, points, IFBW, power)
+        stays as the last measurement set it: that is the user's measurement,
+        not a screen setting. Every write on its own: one refused setting must
+        not keep the trigger from going back."""
+        f = self._found or {}
+
+        def w(cmd: str) -> None:
+            try:
+                r.write(cmd)
+            except Exception:
+                pass                                   # closing must not raise
+
+        if f.get("count"):
+            w(f":CALC{CH}:PAR:COUN {f['count']}")
+            for i, sp in enumerate(f["defs"], 1):
+                w(f":CALC{CH}:PAR{i}:DEF {sp}")
+            w(f":CALC{CH}:PAR{TR}:SEL")
+        if f.get("aver") is not None:
+            w(f":SENS{CH}:AVER {'ON' if f['aver'] else 'OFF'}")
+        if f.get("cont") is not None:
+            w(f":INIT{CH}:CONT {'ON' if f['cont'] else 'OFF'}")
+        trig = f.get("trig") or "INT"
+        w(f":TRIG:SOUR {'INT' if trig.startswith('BUS') else trig}")
 
     def _abandon(self) -> None:
         """Undo a half-done open: drop the connection we made (an injected
@@ -369,9 +424,9 @@ class CmtVna:
             if self._pending:
                 r.write(":ABOR")
             if self._prepared:
-                # Hand S2VNA back sweeping on its own, like a front panel --
-                # only if we took it over; one we only looked at stays as it was.
-                r.write(":TRIG:SOUR INT")
+                # Hand S2VNA back as we found it -- only if we took it over;
+                # one we only looked at stays as it was.
+                self._hand_back(r)
         except Exception:
             pass                                           # closing must not raise on a dead link
         finally:

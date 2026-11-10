@@ -33,6 +33,7 @@ class FakeCmt:
         self.state = {"start": 100e3, "stop": 9e9, "points": 201, "ifbw": 10e3, "power": 0.0}
         self.trig_source = "INT"
         self.cont = True
+        self.aver = False
         self.fmt = "ASC"
         self.defs = {1: "S11", 2: "S21"}     # trace number -> what it shows
         self.traces = 2
@@ -84,6 +85,9 @@ class FakeCmt:
         m = re.fullmatch(r":INIT1:CONT (\w+)", cmd)
         if m:
             self.cont = m.group(1) in ("ON", "1")
+        m = re.fullmatch(r":SENS1:AVER (\w+)", cmd)
+        if m:
+            self.aver = m.group(1) in ("ON", "1")
         m = re.fullmatch(r":FORM:DATA (\w+)", cmd)
         if m:
             self.fmt = m.group(1)
@@ -119,14 +123,17 @@ class FakeCmt:
             return f"{self.state['points']}"
         if cmd == ":SENS1:CORR:STAT?":
             return "0"
-        if cmd == ":CALC1:PAR1:DEF?":
-            return self.sparam
+        m = re.fullmatch(r":CALC1:PAR(\d+):DEF\?", cmd)
+        if m:
+            return self.defs.get(int(m.group(1)), "S11")
         if cmd == ":CALC1:PAR:COUN?":
             return f"{self.traces}"
         if cmd == ":TRIG:SOUR?":
             return self.trig_source
         if cmd == ":SENS1:AVER?":
-            return "0"
+            return "1" if self.aver else "0"
+        if cmd == ":INIT1:CONT?":
+            return "1" if self.cont else "0"
         raise AssertionError(f"FakeCmt: unexpected query {cmd!r}")
 
     def _interleaved(self, cmd: str) -> np.ndarray:
