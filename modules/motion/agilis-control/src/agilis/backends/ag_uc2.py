@@ -33,23 +33,31 @@ What the manual says, and what it leaves open:
 * The AG-UC2 has no step-delay (``DL``) and no ``CC``; ``CC`` is sent only when
   ``hardware.channel`` > 0 (for an AG-UC8).
 
-REPLIES ARRIVE ONE COMMAND LATE (found on the Blue Box rig, 2026-11-10,
-AG-UC2 v2.2.1 on its Newport FTDI driver). After a move with queries during or
-right after it, the controller holds every complete reply line until the NEXT
-command arrives -- VE answered "TE0", 1TP answered the VE, and so on -- and
-stays like that until it is power-cycled; the moves themselves still run.
-(Whether the firmware or the USB driver holds the line is not known.) Reading
-"the next line" then pairs every question with the previous answer: a move
-timed out, and a stop failed on "error 1" -- which was really the "PH1" of the
-poll before. So every exchange here
-  1. empties the input, sends the command, then sends ``VE`` as a PUSHER (a
-     harmless query: it changes nothing and, being AFTER our command, also
-     does not disturb what TE reports),
-  2. accepts only a line that starts with what the question asks for ("1TP"
-     for 1TP, "TE" for TE, "PH", "1SU", "AG-UC" for VE) and drops the rest.
-In the normal state the answer comes at once and the pusher's reply is dropped
-by the next exchange; in the late state the pusher releases the answer. Both
-need no timeout and no power-cycle. `late_lines` counts the dropped lines.
+REPLIES CAN FALL ONE BEHIND -- HOW THIS DRIVER TALKS (Blue Box rig, 2026-11-10,
+AG-UC2 v2.2.1 on its Newport USB serial driver). Measured there:
+  * the controller lets out AT MOST ONE reply line per incoming USB write;
+  * a reply that is not ready when its command's write arrives (e.g. while an
+    axis steps), or two commands that reach it in one USB packet, leave a line
+    HELD; from then on every answer is one behind ("VE" answered "TE0", "1TP"
+    answered the VE) until a power-cycle -- the moves still run;
+  * two lines written back to back can be merged into one packet by the USB
+    driver: "2TS\r\nVE\r\n" in one write gives ONE reply and holds the other,
+    so a backlog GROWS; the same two 20 ms apart keep it constant.
+Newport's own library (CmdLibAgilis.dll, under the LabVIEW program that runs
+this rig fine) sends one command per write, waits for its answer with a read
+timeout, sleeps between commands, and opens the port with DTR and RTS on. So:
+  1. ONE command per write, and never two writes closer than MIN_GAP_S;
+  2. a query waits for ITS answer -- the line starting with what it asked
+     ("1TP" for 1TP, "TE" for TE, "AG-UC" for VE); any other line is a late
+     answer to something earlier and is dropped (`late_lines` counts them);
+  3. only if nothing has come for PUSH_AFTER_S does a VE go out, in its own
+     write, to let a held line out -- at most MAX_PUSHES times. In step that
+     never happens (answers take 2-17 ms); one behind, it costs one extra
+     write and keeps the backlog from growing;
+  4. a set command (no reply) is followed by SET_PAUSE_S, then TE;
+  5. the brain polls at 5 Hz (hardware.poll_hz), not 20.
+(First attempt the same morning: a VE after EVERY command, written right
+behind it. Merged into one packet, it grew the backlog on every exchange.)
 
 START-UP WRITES (AaltoFlow rule 2026-09-27: read the state, change nothing).
 :meth:`open` sends only ``VE`` (a query). The manual lets TP, SU?, PH and JA?
@@ -70,8 +78,19 @@ from ..config import Config
 
 _INT = re.compile(r"[-+]?\d+")
 
-#: The pusher sent after every exchange (see "REPLIES ARRIVE ONE COMMAND LATE").
+#: The query that lets a held reply line out (sent only after PUSH_AFTER_S
+#: of silence, in its own write -- see "REPLIES CAN FALL ONE BEHIND").
 PUSHER = "VE"
+#: Never two writes closer than this: two lines in one USB packet get one
+#: answer and the other is held (Blue Box: 20 ms apart kept them separate).
+MIN_GAP_S = 0.02
+#: Silence after a query before a pusher goes out. An answer in step takes
+#: 2-17 ms on the rig.
+PUSH_AFTER_S = 0.06
+#: At most this many pushers per question (one per line the controller is behind).
+MAX_PUSHES = 3
+#: After a set command (no reply), before asking TE about it.
+SET_PAUSE_S = 0.03
 #: How a VE reply starts ("AG-UC2 v2.2.1 " on the rig; an AG-UC8 says AG-UC8).
 VE_PREFIX = "AG-UC"
 _CODE = re.compile(r"^(\d?[A-Z]{2})")
@@ -108,6 +127,11 @@ def _last_int(reply: str, what: str) -> int:
     return int(nums[-1])
 
 
+class AgUC2OutOfStep(RuntimeError):
+    """The controller's answers fell behind and could not be brought back
+    (see "REPLIES CAN FALL ONE BEHIND"): it needs a power-cycle."""
+
+
 class AgUC2:
     """AG-UC2 controller, two Agilis actuators on axes 1 and 2."""
 
@@ -127,58 +151,84 @@ class AgUC2:
         # sends a single byte. None while not open.
         self._hwlock = None
         # Reply lines dropped because they did not answer the question asked
-        # (late replies, pusher replies). Diagnostics only.
+        # (late answers to earlier questions). Diagnostics only.
         self.late_lines = 0
+        self._last_write = 0.0                   # monotonic time of the last write
 
     # -- low level --------------------------------------------------------- #
     def _write(self, cmd: str) -> None:
+        """ONE command in its own USB write, never closer than MIN_GAP_S to
+        the previous one (see "REPLIES CAN FALL ONE BEHIND")."""
+        import time
+        wait = self._last_write + MIN_GAP_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
         self._ser.write((cmd + "\r\n").encode("ascii"))
+        try:
+            self._ser.flush()                    # out now, not merged with the next one
+        except Exception:
+            pass
+        self._last_write = time.monotonic()
 
-    def _readline(self) -> str:
-        raw = self._ser.readline()                       # up to LF or timeout
-        if not raw:
-            raise TimeoutError("AG-UC2 did not answer (timeout)")
-        return raw.decode("ascii", errors="replace").strip()
+    def _read_for(self, seconds: float) -> str:
+        """One line, waiting at most `seconds` ("" = nothing came)."""
+        self._ser.timeout = max(0.001, float(seconds))
+        raw = self._ser.readline()               # up to LF or timeout
+        return raw.decode("ascii", errors="replace").strip() if raw else ""
 
     def _expect(self, prefix: str, what: str) -> str:
-        """The first line that starts with `prefix`; other lines are dropped
-        (late answers to earlier questions, pusher replies). If none comes
-        within the timeout, ONE more pusher (in case the first was lost), then
-        TimeoutError."""
+        """The reply that starts with `prefix`. Other lines are late answers to
+        earlier questions and are dropped. After PUSH_AFTER_S of silence a VE
+        goes out in its own write to let a held line out (at most MAX_PUSHES);
+        the whole wait is bounded by hardware.timeout_s."""
+        import time
         want = prefix.upper()
-        nudged = False
-        while True:
-            raw = self._ser.readline()                   # up to LF or timeout
-            if not raw:
-                if nudged:
-                    raise TimeoutError(f"AG-UC2 did not answer {what} (timeout)")
-                nudged = True
-                self._write(PUSHER)
-                continue
-            line = raw.decode("ascii", errors="replace").strip()
-            if line.upper().startswith(want):
-                return line
-            if line:
-                self.late_lines += 1
+        deadline = time.monotonic() + float(self.cfg.hardware.timeout_s)
+        pushes, stale = 0, ""
+        old_timeout = self._ser.timeout
+        try:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                line = self._read_for(min(PUSH_AFTER_S, left) if pushes < MAX_PUSHES else left)
+                if line.upper().startswith(want):
+                    return line
+                if line:
+                    self.late_lines += 1          # an answer to something earlier
+                    stale = line
+                    continue
+                if pushes < MAX_PUSHES and deadline - time.monotonic() > 0:
+                    self._write(PUSHER)
+                    pushes += 1
+        finally:
+            self._ser.timeout = old_timeout
+        # Lines came, but none answered the question: out of step. Nothing at
+        # all, not even to a release query: the controller is not answering.
+        if stale:
+            raise AgUC2OutOfStep(
+                f"AG-UC2 out of step: no answer to {what}" +
+                (f" (last line {stale!r})" if stale else "") +
+                f" after {pushes} release attempt(s) -- power-cycle the controller")
+        raise TimeoutError(f"AG-UC2 did not answer {what} (timeout)")
 
     def query(self, cmd: str) -> str:
-        """Send a query and return ITS reply (see "REPLIES ARRIVE ONE COMMAND
-        LATE" above: a pusher follows, other lines are dropped)."""
+        """Send a query and return ITS reply."""
         with self._lock:
-            self._ser.reset_input_buffer()               # drop what is already here
+            self._ser.reset_input_buffer()               # lines already out: stale
             self._write(cmd)
-            self._write(PUSHER)                          # also after VE itself
             return self._expect(reply_prefix(cmd), cmd)
 
     def command(self, cmd: str) -> None:
         """Send a set command, then ask TE whether it was accepted (set
-        commands reply nothing). The pusher goes AFTER the TE, so TE still
-        reports on `cmd`."""
+        commands reply nothing, so only TE tells). A pause first, like
+        Newport's library -- and TE as its own write."""
+        import time
         with self._lock:
             self._ser.reset_input_buffer()
             self._write(cmd)
+            time.sleep(SET_PAUSE_S)
             self._write("TE")                            # reply "TE0" / "TE-6"
-            self._write(PUSHER)
             code = _last_int(self._expect("TE", f"TE after {cmd}"), "TE")
         if code != 0:
             raise RuntimeError(f"AG-UC2 refused {cmd!r}: error {code} "
@@ -207,7 +257,15 @@ class AgUC2:
                 port=hw.port, baudrate=int(hw.baud),             # VERIFY 921600 works
                 bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE, xonxoff=False, rtscts=False,
+                dsrdtr=False,
                 timeout=float(hw.timeout_s), write_timeout=float(hw.timeout_s))
+            # Newport's library (System.IO.Ports, under the LabVIEW program)
+            # sets DtrEnable and RtsEnable: do the same.  # VERIFY it matters
+            try:
+                self._ser.dtr = True
+                self._ser.rts = True
+            except Exception:
+                pass
         except Exception:
             self._release_claim()      # a failed open must not keep the address "busy"
             raise
@@ -321,19 +379,16 @@ class AgUC2:
         prefix = reply_prefix(cmd)
         with self._lock:
             self._ser.reset_input_buffer()
+            self._write(cmd)
+            # The link is down while MA / PA run: wait for THE answer (no
+            # pusher into a dead link), dropping any late line from before.
+            line = ""
             old = self._ser.timeout
-            self._ser.timeout = float(self.cfg.hardware.limit_op_timeout_s)
             try:
-                self._write(cmd)
-                # No pusher yet: the link is down while MA / PA run, and a line
-                # sent into that may be lost. Wait for the answer, dropping
-                # anything else (a late line from before).
-                line = ""
-                while True:
-                    raw = self._ser.readline()
-                    if not raw:
-                        break
-                    text = raw.decode("ascii", errors="replace").strip()
+                import time
+                deadline = time.monotonic() + float(self.cfg.hardware.limit_op_timeout_s)
+                while time.monotonic() < deadline:
+                    text = self._read_for(deadline - time.monotonic())
                     if text.upper().startswith(prefix):
                         line = text
                         break
@@ -342,16 +397,15 @@ class AgUC2:
             finally:
                 self._ser.timeout = old
             if not line:
-                # Silence: either refused (no reply at all), or the answer is
-                # held back (the late state) -- a pusher releases it.
-                self._write(PUSHER)
+                # Silence: refused (no reply at all) -- or the answer is held
+                # back; _expect lets a held line out, then TE says why.
                 try:
                     line = self._expect(prefix, cmd)
-                except TimeoutError:
+                except (TimeoutError, AgUC2OutOfStep):
                     line = ""
             if not line:
+                time.sleep(SET_PAUSE_S)
                 self._write("TE")
-                self._write(PUSHER)
                 code = _last_int(self._expect("TE", f"TE after {cmd}"), "TE")
                 raise RuntimeError(f"AG-UC2 gave no answer to {cmd!r} (error {code}: "
                                    f"{TE_CODES.get(code, 'no error reported - timed out')})")

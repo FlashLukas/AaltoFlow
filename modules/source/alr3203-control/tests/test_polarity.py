@@ -272,19 +272,7 @@ def test_resistance_is_nan_without_current(rig):
     assert math.isnan(supply.status().resistance_ohm)
 
 
-# ---- the sweep never crosses zero ----------------------------------------------------------
-
-def test_a_sweep_across_zero_is_refused():
-    supply, spy, clock, _, relay = make_rig()
-    _on_at(supply, clock, 1.0)
-    with pytest.raises(ValueError, match="cross zero"):
-        supply.ramp_current(-1.0, 0.5)
-    with pytest.raises(ValueError, match="other side"):
-        supply.set_current(0.0)
-        run_for(supply, clock, 2.0)
-        supply.ramp_current(-1.0, 0.5)                  # relay still normal
-    supply.shutdown()
-
+# (a sweep across zero: tests/test_sweep.py -- it needs the real clock)
 
 
 def test_a_voltage_limit_set_before_the_switch_is_the_one_used():

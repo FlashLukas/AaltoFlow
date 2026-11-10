@@ -120,3 +120,61 @@ def test_serial_number_err_is_an_empty_string(dev):
         assert b.serial_number() == ""
     finally:
         b.close(output_off=False)
+
+
+def test_one_usb_hiccup_at_close_is_ridden_out(dev):
+    """Blue Box, 2026-11-10: OUT WR 0 at shutdown failed once with "WriteFile
+    failed ... does not recognize the command"; the port worked again at once.
+    One failure: tried again, no error."""
+    alr, opened = dev
+    b = SerialALR3203("COM5")
+    b.open()
+    ser = opened[-1]
+    real_write, fails = ser.write, [1]
+
+    def flaky(data):
+        if b"OUT WR 0" in data and fails:
+            fails.pop()
+            raise OSError("WriteFile failed (PermissionError(13, 'The device does not "
+                          "recognize the command.', None, 22))")
+        return real_write(data)
+    ser.write = flaky
+    b.close()
+    assert alr.log[-1] == "0 OUT WR 0" and ser.closed
+
+
+def test_an_output_off_that_keeps_failing_is_reported_after_letting_go(dev):
+    alr, opened = dev
+    b = SerialALR3203("COM5")
+    b.open()
+    ser = opened[-1]
+    real_write = ser.write
+    ser.write = lambda data: (_ for _ in ()).throw(OSError("gone")) \
+        if b"OUT WR 0" in data else real_write(data)
+    with pytest.raises(ElcError, match="could not switch the output off"):
+        b.close()
+    assert ser.closed                          # the port is released anyway
+
+
+def test_the_console_says_when_the_envelope_is_one_sided(tmp_path, monkeypatch):
+    """The start event reaches clients only; a service started by hand shows
+    its console. run_service prints the same warning."""
+    import subprocess
+    from pathlib import Path
+    ini = tmp_path / "one_sided.ini"
+    ini.write_text("[limits]\ncurrent_max_A = 1.0\n", encoding="utf-8")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run_service.py"
+    # a port that is taken makes the service stop right after the banner
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    taken = s.getsockname()[1]
+    try:
+        r = subprocess.run([sys.executable, str(script), "--config", str(ini),
+                            "--cmd-port", str(taken), "--pub-port", str(taken + 1)],
+                           capture_output=True, text=True, timeout=60)
+    finally:
+        s.close()
+    assert "WARNING: the safety envelope is NOT the same on both signs" in r.stdout
+    assert "current -6 .. +1 A" in r.stdout

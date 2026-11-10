@@ -102,8 +102,8 @@ class Limits:
     rate_max_A_per_s: float = 10.0
     rate_max_V_per_s: float = 40.0
     # The current SWEEP (ramp_current, for fly scans) may be asked for between
-    # this and rate_max_A_per_s. A sweep never crosses zero (that needs the
-    # relay); sweep to 0, then start a new one on the other side.
+    # this and rate_max_A_per_s. A sweep across zero flips the polarity relay
+    # by itself at 0 (supply.ramp_current) and walks on at the same rate.
     sweep_rate_min_A_per_s: float = 1.0e-4
 
 

@@ -40,7 +40,12 @@ What it does, in the order a physicist would worry about it:
     waits `acquisition.settle_s` and averages `acquisition.readings` fresh
     measurements into `sample`.
   * SWEEPS the current for a fly scan (ramp_current): softramp.py walks the
-    setpoint; a sweep never crosses zero (that needs the relay).
+    setpoint. A sweep from -I to +I (or back) CROSSES ZERO BY ITSELF (Lukas,
+    2026-11-10: "I just want to send the sweep of - current to + current and
+    the software handles the relay"): it walks to 0, waits for the measured
+    current to stop and flips the relay -- the same rule as any sign change
+    (_try_flip) -- and walks on at the same rate. To a scan it is ONE sweep:
+    one number, `sweeping` until the far end.
 
 THREADS (docs gotcha #1). One worker thread owns every hardware call (the
 supply's serial link and the relay). Setters only change brain attributes
@@ -196,6 +201,18 @@ class BipolarSupply:
                                on_done=self._sweep_done, channel="commanded",
                                name="alr3203-sweep")
         self.recorder = StreamRecorder(["current", "voltage", "programmed"])
+        # A SWEEP PLAN = the legs of one sweep (to 0, flip, to the target when
+        # it crosses zero; else one leg), run by _run_sweep_plan on its own
+        # thread. Its number is the ramp_id a scan waits on.
+        self._plan_no = 0
+        self._plan_running = False
+        self._plan_target = _NAN
+        self._plan_rate = _NAN
+        self._plan_halt = threading.Event()
+        self._plan_thread: threading.Thread | None = None
+        # "is it halted? then start the next walk" and "halt + stop the walk"
+        # must not interleave, or a stop could miss a walk being started
+        self._plan_lock = threading.Lock()
 
         # initial setpoints from the config, clamped (quietly: nobody asked yet)
         self._i_set = self._clamp_i(o.current_A)[0]
@@ -331,7 +348,7 @@ class BipolarSupply:
         keep_outputs=True: disconnect without ramping (the service never asks
         for it -- a restart is a safe stop for a magnet, see net/service.py --
         but a test or script may)."""
-        self._sweep.stop()
+        self._halt_sweep()
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2.0)
@@ -558,12 +575,20 @@ class BipolarSupply:
 
     def ramp_current(self, amps: float, rate_A_per_s: float) -> int:
         """SWEEP the current to `amps` at `rate_A_per_s`; returns the sweep's
-        number. Current mode only; never switches the output on.
+        number (the ramp_id a scan waits on). Current mode only; never
+        switches the output on.
 
-        A sweep NEVER crosses zero: the relay has to switch there, with the
-        current stopped, which a continuous sweep cannot do. Sweep to 0, then
-        start a new sweep on the other side (its first step flips the relay
-        through the ordinary ramp -- set_current a small value first)."""
+        ACROSS ZERO it needs no help (Lukas, 2026-11-10): with the output on
+        and the target on the other side of the relay, the sweep walks to 0,
+        flips the relay once the measured current is below
+        polarity.zero_current_A (the rule of every sign change, _try_flip --
+        a relay never switches under current), and walks on from 0 at the same
+        rate. The flip takes a moment (the coil's current has to die away);
+        the stream records the MEASURED current, so a fly scan bins by what
+        really flowed. If the current does not stop within
+        polarity.zero_timeout_s, the sweep ends at 0 and says why.
+        With the output OFF only the setpoint walks (the relay is set when the
+        output goes on)."""
         amps = _finite(amps, "current")
         rate = abs(_finite(rate_A_per_s, "rate"))
         if not rate > 0:
@@ -574,35 +599,114 @@ class BipolarSupply:
         lo_r, hi_r = sorted((float(lim.sweep_rate_min_A_per_s), float(lim.rate_max_A_per_s)))
         r, rclamped = _clamp(rate, lo_r, hi_r)
         value, clamped = self._clamp_i(amps)
-        self._sweep.stop()
+        # end the sweep before (its walk AND its plan) and wait for its thread
+        self._halt_sweep()
+        old = self._plan_thread
+        if old is not None and old.is_alive() and old is not threading.current_thread():
+            old.join(timeout=float(self.cfg.polarity.zero_timeout_s) + 5.0)
         with self._hw:
             with self._lock:
                 live = self._out_req and self._out_hw and self._mode_hw == "current"
                 start = self._prog if live else self._i_set
-                side_now = self._relay_hw
                 want = _side(value)
-                if _side(start) is not None and want is not None and _side(start) != want:
-                    raise ValueError(f"a sweep cannot cross zero ({start:g} -> {value:g} A): "
-                                     f"sweep to 0 first; the polarity relay switches only "
-                                     f"with the current stopped")
-                if want is not None and side_now is not want:
-                    raise ValueError(f"the polarity relay is on the other side (or unknown): "
-                                     f"set_current to a small {'negative' if want else 'positive'} "
-                                     f"value first so it switches, then sweep")
-                self._sweep_last = start if live else _NAN
+                flip = live and want is not None and self._relay_hw is not want
+                if flip:
+                    legs = ([("walk", start, 0.0)] if start != 0.0 else []) + \
+                           [("flip", want), ("walk", 0.0, value)]
+                else:
+                    legs = [("walk", start, value)]
+                self._plan_no += 1
+                no = self._plan_no
+                self._plan_running = True
+                self._plan_target, self._plan_rate = value, r
+                self._plan_halt = threading.Event()
+                halt = self._plan_halt
                 self._wd_armed = True
-        rid = self._sweep.start(value, r, start=start)
+        t = threading.Thread(target=self._run_sweep_plan, args=(no, legs, r, live, halt),
+                             name=f"alr3203-sweep-plan-{no}", daemon=True)
         if clamped or rclamped:
             self._emit("warn", f"sweep clamped to {value:g} A at {r:g} A/s "
                                f"(limits {self.current_range()[0]:g}..{self.current_range()[1]:g} A, "
                                f"{lo_r:g}..{hi_r:g} A/s)")
-        self._emit("info", f"current sweep #{rid}: {start:g} -> {value:g} A at {r:g} A/s"
+        self._emit("info", f"current sweep #{no}: {start:g} -> {value:g} A at {r:g} A/s"
+                   + (" (through 0: the relay flips there)" if flip else "")
                    + ("" if live else " (output OFF: only the setpoint walks)"))
-        return rid
+        t.start()
+        self._plan_thread = t
+        return no
+
+    def _run_sweep_plan(self, no: int, legs: list, rate: float, live: bool, halt) -> None:
+        """The legs of one sweep, in order, on this thread (see ramp_current)."""
+        reason = "done"
+        try:
+            for leg in legs:
+                if halt.is_set():
+                    reason = "stopped"
+                    break
+                if leg[0] == "flip":
+                    ok, why = self._flip_for_sweep(leg[1], halt)
+                    if not ok:
+                        reason = why
+                        break
+                    continue
+                _, a, b = leg
+                with self._plan_lock:
+                    if halt.is_set():
+                        reason = "stopped"
+                        break
+                    with self._hw:
+                        with self._lock:
+                            # program only while the supply still holds what
+                            # this sweep programmed (nobody changed it since)
+                            self._sweep_last = self._prog if live else _NAN
+                    self._sweep.start(b, rate, start=a)
+                self._sweep.wait()
+                end = self._sweep.status()["ramp_end"]
+                if halt.is_set():
+                    reason = "stopped"
+                    break
+                if end != "done":
+                    reason = end or "stopped"
+                    break
+        except Exception as exc:                     # noqa: BLE001
+            reason = f"error: {type(exc).__name__}: {exc}"
+        with self._lock:
+            if self._plan_no == no:
+                self._plan_running = False
+        self.cfg.output.current_A = self._i_set
+        if reason == "done":
+            self._emit("info", f"current sweep #{no} done at {self._i_set:g} A")
+        elif reason != "stopped":
+            self._emit("error", f"current sweep #{no} ended at {self._i_set:g} A: {reason}")
+
+    def _flip_for_sweep(self, want: bool, halt) -> tuple[bool, str]:
+        """At 0 in the middle of a sweep: flip the relay with the SAME rule as
+        every sign change (_try_flip: only below zero_current_A, retried if the
+        relay does not answer, given up after zero_timeout_s)."""
+        give_up = time.monotonic() + float(self.cfg.polarity.zero_timeout_s) + 3.0
+        while not halt.is_set():
+            with self._hw:
+                if self._relay_hw is want:
+                    return True, ""
+                try:
+                    i = abs(float(self.backend.measure_current()))
+                except Exception as exc:              # noqa: BLE001
+                    return False, f"error: reading the current to flip: {exc}"
+                self._try_flip(want, i, self._clock())
+                if self._relay_hw is want:
+                    return True, ""
+                if self._flip_t0 is None:             # _try_flip gave up (and said why)
+                    return False, "the polarity relay did not switch (current did not stop)"
+            if time.monotonic() > give_up:
+                with self._hw:
+                    self._flip_t0 = None
+                return False, "the polarity relay did not switch in time"
+            time.sleep(0.02)
+        return False, "stopped"
 
     def ramp_stop(self) -> bool:
         """End a sweep WHERE IT IS (a scan's Abort; a safety verb)."""
-        was = self._sweep.stop()
+        was = self._halt_sweep()
         if was:
             self._emit("info", f"current sweep stopped at {self._i_set:g} A")
         return was
@@ -616,9 +720,21 @@ class BipolarSupply:
     def stream_stop(self) -> dict:
         return self.recorder.stop()
 
+    def _halt_sweep(self) -> bool:
+        """End the sweep plan AND the walk in progress. True if either ran.
+        Does not wait for the plan's thread (a caller may hold _hw, which the
+        plan's flip needs); the plan sees the halt at its next check."""
+        with self._plan_lock:
+            with self._lock:
+                plan = self._plan_running
+                self._plan_running = False       # a scan sees "not sweeping" at once
+            self._plan_halt.set()
+            walked = self._sweep.stop()
+        return bool(plan or walked)
+
     def _stop_sweep(self, why: str) -> None:
         """Called WITHOUT any lock held (stop() waits for the step in progress)."""
-        if self._sweep.stop():
+        if self._halt_sweep():
             self._emit("info", f"current sweep stopped by {why} at {self._i_set:g} A")
 
     def _sweep_step(self, amps: float) -> None:
@@ -643,11 +759,9 @@ class BipolarSupply:
                 self._snapshot = self._build_snapshot()
 
     def _sweep_done(self, rid: int, reason: str) -> None:
+        """One WALK ended (a leg of a sweep plan): book the setpoint. The plan
+        says "done" / why it ended, once per sweep."""
         self.cfg.output.current_A = self._i_set
-        if reason == "done":
-            self._emit("info", f"current sweep #{rid} done at {self._i_set:g} A")
-        elif reason.startswith("error"):
-            self._emit("error", f"current sweep #{rid} ended: {reason}")
 
     # ---- acquisition -----------------------------------------------------------
 
@@ -677,11 +791,17 @@ class BipolarSupply:
         with self._lock:
             s = self._snapshot
             st = Status(**{**s.__dict__, "sample": dict(s.sample)})
-        st.sweeping = bool(r["ramping"])
-        st.ramping = bool(st.ramping or r["ramping"])
-        st.ramp_id = int(r["ramp_id"])
-        st.sweep_target_A = _NAN if r["ramp_target"] is None else float(r["ramp_target"])
-        st.sweep_rate_A_per_s = _NAN if r["ramp_rate"] is None else float(r["ramp_rate"])
+        # the PLAN is the sweep a scan sees: one number, "sweeping" across a
+        # flip between its walks
+        with self._lock:
+            plan_on, plan_no = self._plan_running, self._plan_no
+            p_target, p_rate = self._plan_target, self._plan_rate
+        sweeping = bool(plan_on or r["ramping"])
+        st.sweeping = sweeping
+        st.ramping = bool(st.ramping or sweeping)
+        st.ramp_id = int(plan_no)
+        st.sweep_target_A = float(p_target)
+        st.sweep_rate_A_per_s = float(p_rate)
         return st
 
     def get_config(self) -> Config:
@@ -856,7 +976,7 @@ class BipolarSupply:
         if recovered:
             self._emit("info", "hardware reads recovered")
         if at_limit and self._sweep.running:
-            if self._sweep.stop():
+            if self._halt_sweep():
                 self._emit("warn", "current sweep stopped: the supply is on its voltage "
                                    "limit or its 96 W envelope and the current no longer follows")
 
@@ -1013,7 +1133,7 @@ class BipolarSupply:
         with self._lock:
             live = self._out_req and self._wd_armed
         if live and now - self._last_touch > wd:
-            self._sweep.stop()
+            self._halt_sweep()
             with self._lock:
                 self._out_req = False
             self._emit("warn", f"no client for {wd:g} s: ramping to zero, output off")

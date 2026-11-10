@@ -94,3 +94,67 @@ def test_lock_is_freed_when_the_holder_process_dies(lockdir):
         child.kill()
         child.wait(10)
     hwlock.claim("COM7", "chopper").release()
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-10: ONE lock folder per PC, in %PROGRAMDATA% (Blue Box: %LOCALAPPDATA%
+# is redirected for programs started from the Claude app, so services started
+# from Claude and from Mission Control looked in different folders).
+# --------------------------------------------------------------------------- #
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows folder layout")
+def test_the_lock_folder_is_programdata_not_localappdata(monkeypatch, tmp_path):
+    monkeypatch.delenv("AALTOFLOW_LOCK_DIR", raising=False)
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "pd"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "la"))
+    assert hwlock.lock_dir() == tmp_path / "pd" / "AaltoFlow" / "locks"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows permissions")
+def test_a_new_lock_folder_lets_every_user_modify_its_files(monkeypatch, tmp_path):
+    """Default %PROGRAMDATA% permissions make a file one user creates read-only
+    for the others; the lock folder grants 'Users' modify, inherited by the
+    lock files. Checked with the real icacls."""
+    monkeypatch.delenv("AALTOFLOW_LOCK_DIR", raising=False)
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "pd"))
+    lock = hwlock.claim("COM42", "test", wait_s=0.0)
+    try:
+        d = hwlock.lock_dir()
+        # the folder's security descriptor as SDDL: "BU" = BUILTIN\Users (any
+        # language), OICI = inherited by files and folders, 0x1301bf = Modify
+        r = subprocess.run(["icacls", str(d), "/save", str(tmp_path / "acl.txt")],
+                           capture_output=True, text=True)
+        sddl = (tmp_path / "acl.txt").read_bytes().decode("utf-16", errors="replace")
+        assert r.returncode == 0
+        assert "(A;OICI;0x1301bf;;;BU)" in sddl, sddl
+        assert [h["normalized"] for h in hwlock.held()] == ["COM42"]
+    finally:
+        lock.release()
+
+
+def test_the_grant_runs_once_and_a_failing_grant_does_not_stop_a_claim(monkeypatch, tmp_path):
+    monkeypatch.delenv("AALTOFLOW_LOCK_DIR", raising=False)
+    monkeypatch.setattr(hwlock, "lock_dir", lambda: tmp_path / "locks")
+    monkeypatch.setattr(hwlock.sys, "platform", "win32")
+    calls = []
+
+    def boom(cmd, **kw):
+        calls.append(cmd)
+        raise OSError("icacls not found")
+    monkeypatch.setattr(subprocess, "run", boom)
+    a = hwlock.claim("GPIB0::9", "test", wait_s=0.0)        # grant fails: still claimed
+    b_err = None
+    try:
+        hwlock.claim("GPIB0::9", "other", wait_s=0.0)
+    except hwlock.HardwareBusy as exc:
+        b_err = str(exc)
+    a.release()
+    c = hwlock.claim("GPIB0::10", "test", wait_s=0.0)        # folder exists: no new grant
+    c.release()
+    assert b_err and "test" in b_err
+    assert len(calls) == 1 and "S-1-5-32-545" in calls[0][3]
+
+
+def test_tests_never_touch_the_real_lock_folder(lockdir):
+    """With AALTOFLOW_LOCK_DIR set (every test) nothing is granted or created
+    outside it."""
+    assert hwlock.lock_dir() == lockdir

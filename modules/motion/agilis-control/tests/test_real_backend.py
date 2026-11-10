@@ -16,23 +16,31 @@ from agilis.config import Config
 
 
 class FakeSerial:
-    """Answers like the manual says an AG-UC2 does (formats are # VERIFY)."""
+    """Answers like an AG-UC2 -- including how it releases replies, as
+    MEASURED on the Blue Box (2026-11-10):
+      * at most ONE reply line goes out per incoming write; replies wait in
+        a queue (`held`) in order;
+      * two lines in one write are both executed, but only one line goes out;
+      * `delay_next` = the next reply is produced too late for its write's
+        release (as while an axis steps), so it stays held -> one behind;
+        `delay_after_move` sets it at every PR.
+    """
 
     def __init__(self, **kw):
         self.kw = kw
-        self.sent = []
-        self._out = []
+        self.sent = []                 # every command line, in order
+        self.writes = 0                # USB writes (a write can hold 2 lines)
+        self.held: list[str] = []      # replies waiting in the controller
+        self._out: list[str] = []      # released, readable
         self.te = 0
         self.tp = {1: 1234, 2: -56}
         self.closed = False
         self.timeout = kw.get("timeout")
         self.silent_ma = False
-        # THE LATE STATE seen on the Blue Box rig (2026-11-10): every reply is
-        # held until the NEXT command arrives. `late_after_move` enters it at
-        # the first PR, as the real controller did.
-        self.late = False
-        self.late_after_move = False
-        self._held: list[str] = []
+        self.delay_next = False
+        self.delay_after_move = False
+        self.dtr = self.rts = None
+        self.write_times: list[float] = []
 
     def _answer(self, cmd: str):
         if cmd == "VE":
@@ -55,27 +63,38 @@ class FakeSerial:
         if "PR" in cmd:
             ax = int(cmd[0])
             self.tp[ax] += int(cmd[3:])
-            if self.late_after_move:
-                self.late = True
+            if self.delay_after_move:
+                self.delay_next = True
         return None                                             # set commands: silent
 
     def write(self, data: bytes):
-        line = data.decode("ascii")
-        assert line.endswith("\r\n")
-        cmd = line[:-2]
-        self.sent.append(cmd)
-        if self.late:
-            self._out.extend(self._held)                        # released by THIS command
-            self._held = []
-        reply = self._answer(cmd)
-        if reply is not None:
-            (self._held if self.late else self._out).append(reply)
+        text = data.decode("ascii")
+        assert text.endswith("\r\n")
+        self.writes += 1
+        self.write_times.append(time.monotonic())
+        late = []
+        for cmd in text[:-2].split("\r\n"):
+            self.sent.append(cmd)
+            reply = self._answer(cmd)
+            if reply is None:
+                continue
+            if self.delay_next:                                 # ready too late
+                self.delay_next = False
+                late.append(reply)
+            else:
+                self.held.append(reply)
+        if self.held:                                           # ONE line out per write
+            self._out.append(self.held.pop(0))
+        self.held.extend(late)
+
+    def flush(self):
+        pass
 
     def readline(self):
         return (self._out.pop(0) + "\r\n").encode("ascii") if self._out else b""
 
     def reset_input_buffer(self):
-        pass
+        self._out.clear()
 
     def close(self):
         self.closed = True
@@ -99,6 +118,7 @@ def fake_serial(monkeypatch):
 def _open(fake_serial, **hw):
     cfg = Config()
     cfg.hardware.port = "COM9"
+    cfg.hardware.timeout_s = 0.3           # the fake answers at once; keep timeouts short
     for k, v in hw.items():
         setattr(cfg.hardware, k, v)
     dev = AgUC2(cfg)
@@ -111,9 +131,11 @@ def test_open_only_queries_and_remote_mode_is_separate(fake_serial):
     brain takes once the axes are at rest."""
     dev, ser = _open(fake_serial)
     assert ser.kw["baudrate"] == 921600 and ser.kw["port"] == "COM9"
-    assert ser.sent == ["VE", "VE"]                      # the query + its pusher
+    assert ser.sent == ["VE"]                            # in step: no release query
+    assert ser.dtr is True and ser.rts is True           # as Newport's library opens it
     dev.enable_remote()
-    assert ser.sent == ["VE", "VE", "MR", "TE", "VE"]
+    assert ser.sent == ["VE", "MR", "TE"]
+    assert ser.writes == len(ser.sent)                   # ONE command per write
     assert "CC" not in "".join(ser.sent)                 # AG-UC2 has no CC
     assert "AG-UC2" in dev.idn()
 
@@ -132,16 +154,17 @@ def test_empty_port_is_refused(fake_serial):
 def test_command_strings(fake_serial):
     dev, ser = _open(fake_serial)
     ser.sent.clear()
+    ser.writes = 0
     dev.move_by(1, -250)
     dev.jog(2, 3)
     dev.stop(2)
     dev.zero_counter(1)
     dev.set_amplitude(2, +1, 30)
     dev.set_amplitude(2, -1, 12)
-    sets = [c for c in ser.sent if c not in ("TE", "VE")]
+    sets = [c for c in ser.sent if c != "TE"]
     assert sets == ["1PR-250", "2JA3", "2ST", "1ZP", "2SU30", "2SU-12"]
     assert ser.sent.count("TE") == 6                     # every set is checked
-    assert ser.sent.count("VE") == 6                     # ...and pushed
+    assert ser.writes == len(ser.sent)                   # ONE command per write
 
 
 def test_queries_parse(fake_serial):
@@ -179,7 +202,7 @@ def test_close_stops_both_axes_and_returns_to_local(fake_serial):
     dev.enable_remote()
     ser.sent.clear()
     dev.close()
-    assert [c for c in ser.sent if c not in ("TE", "VE")] == ["1ST", "2ST", "ML"]
+    assert [c for c in ser.sent if c != "TE"] == ["1ST", "2ST", "ML"]
     assert ser.closed
 
 
@@ -204,7 +227,7 @@ def test_refused_remote_mode_frees_the_com_port(fake_serial, monkeypatch):
         brain.start()
     ser = fake_serial[-1]
     assert ser.closed and dev._ser is None
-    assert [c for c in ser.sent if c not in ("TE", "VE")] == ["1TS", "2TS", "MR"]
+    assert [c for c in ser.sent if c != "TE"] == ["VE", "1TS", "2TS", "MR"]
 
 
 #: Everything the start-up may send: queries, TE, and MR (needed to read at all).
@@ -242,11 +265,11 @@ def test_ma_pa_mv_strings_and_the_long_wait(fake_serial):
     dev.enable_remote()
     ser.sent.clear()
     dev.move_to_limit(1, -3)
-    assert ser.sent == ["1MV-3", "TE", "VE"]
+    assert ser.sent == ["1MV-3", "TE"]
     ser.sent.clear()
     assert dev.measure_position(2) == 523
     assert ser.sent == ["2MA"]                # no TE: the reply IS the answer
-    assert ser.timeout == 0.5                  # the long timeout was put back
+    assert ser.timeout == dev.cfg.hardware.timeout_s   # the long timeout was put back
     assert dev.move_absolute(1, 250) == 250
     assert ser.sent[-1] == "1PA250"
 
@@ -256,6 +279,7 @@ def test_silent_ma_asks_te_why(fake_serial):
     dev.enable_remote()
     ser.silent_ma = True
     ser.te = -6
+    dev.cfg.hardware.limit_op_timeout_s = 0.2     # a refused MA answers nothing: do not wait 150 s
     with pytest.raises(RuntimeError, match="not allowed in current state"):
         dev.measure_position(1)
 
@@ -270,76 +294,143 @@ def _init_te(code):
 
 
 # --------------------------------------------------------------------------- #
-# 2026-11-10, Blue Box rig: after a move the AG-UC2 answered ONE COMMAND LATE
-# (every reply held until the next command, until a power-cycle). Each test
-# below failed on the old driver.
+# 2026-11-10, Blue Box rig: the AG-UC2 lets out at most ONE reply line per
+# incoming write. A late reply (while stepping) or two lines in one write leave
+# a line held, and every answer is one behind. The fake above does exactly that.
 # --------------------------------------------------------------------------- #
-def test_late_replies_still_pair_each_question_with_its_answer(fake_serial):
+def _controller_one_behind(ser):
+    """Put the fake in the rig's broken state: one stale line held."""
+    ser.held.append("AG-UC2 v2.2.1 ")
+
+
+def test_one_command_per_write_and_no_release_query_in_step(fake_serial):
     dev, ser = _open(fake_serial)
     dev.enable_remote()
-    ser.late = True
+    ser.sent.clear()
+    ser.writes = 0
     assert dev.read_position(1) == 1234
-    assert dev.read_position(2) == -56
+    dev.move_by(2, 10)
     assert dev.axis_state(2) == 0
-    assert dev.limit_status() == 1
-    assert dev.read_amplitude(1, +1) == 23
-    assert dev.read_position(1) == 1234        # again: nothing drifts by one
+    assert ser.sent == ["1TP", "2PR10", "TE", "2TS"]       # no VE: nothing was held
+    assert ser.writes == 4 and ser.held == [] and dev.late_lines == 0
 
 
-def test_a_move_then_late_replies_no_timeout_and_no_false_error(fake_serial):
-    """The rig's failure: move_steps X 100 -> 'did not answer (timeout)', then
-    stop -> "refused '1ST': error 1" (the shifted PH1 read as TE)."""
+def test_one_behind_still_pairs_each_question_with_its_answer(fake_serial):
     dev, ser = _open(fake_serial)
     dev.enable_remote()
-    ser.late_after_move = True
-    dev.move_by(1, 100)                        # the move itself enters the late state
-    assert ser.late
+    _controller_one_behind(ser)
+    for _ in range(3):                                      # repeatedly: nothing drifts
+        assert dev.read_position(1) == 1234
+        assert dev.read_position(2) == -56
+        assert dev.axis_state(2) == 0
+        assert dev.limit_status() == 1
+        assert dev.read_amplitude(1, +1) == 23
+    assert len(ser.held) <= 1, "the backlog must never GROW"
+    assert dev.late_lines > 0
+
+
+def test_a_move_that_puts_it_one_behind_is_survived(fake_serial):
+    """The rig's failure: move_steps X 100 -> 'did not answer (timeout)', then
+    stop -> "refused '1ST': error 1" (the held PH1 read as TE)."""
+    dev, ser = _open(fake_serial)
+    dev.enable_remote()
+    ser.delay_after_move = True
+    dev.move_by(1, 100)                                     # its TE comes out late
     assert dev.read_position(1) == 1334
     assert dev.limit_status() == 1
-    dev.stop(1)                                # TE0 -- no error
+    dev.stop(1)                                             # TE0 -- no error
     dev.stop(2)
-    assert dev.read_position(2) == -56
-    assert dev.late_lines > 0                  # pusher / late lines were dropped
+    for _ in range(5):
+        dev.move_by(2, 10)
+        assert dev.axis_state(2) == 0
+    assert dev.read_position(2) == -6
+    assert len(ser.held) <= 2, "bounded, not growing with every exchange"
 
 
-def test_te_errors_are_still_seen_in_the_late_state(fake_serial):
+def test_te_errors_are_still_seen_when_one_behind(fake_serial):
     dev, ser = _open(fake_serial)
     dev.enable_remote()
-    ser.late = True
+    _controller_one_behind(ser)
     dev.read_position(1)
     ser.te = -6
     with pytest.raises(RuntimeError, match="not allowed in current state"):
         dev.move_by(1, 10)
 
 
-def test_ma_answer_held_back_is_released_by_a_pusher(fake_serial):
+def test_never_two_commands_in_one_write(fake_serial):
+    """Two lines in one write = one answer out, one held: the backlog grows.
+    The driver never writes two."""
     dev, ser = _open(fake_serial)
     dev.enable_remote()
-    ser.late = True
+    _controller_one_behind(ser)
+    for _ in range(10):
+        dev.read_position(1)
+        dev.move_by(1, 1)
+    assert ser.writes == len(ser.sent)
+
+
+def test_hopelessly_out_of_step_says_power_cycle(fake_serial):
+    """More lines held than the release attempts can get through: a clear
+    message, not a bare timeout."""
+    from agilis.backends.ag_uc2 import AgUC2OutOfStep
+    dev, ser = _open(fake_serial)
+    ser.held.extend(["X1"] * 10)
+    with pytest.raises(AgUC2OutOfStep, match="power-cycle"):
+        dev.read_position(1)
+
+
+def test_ma_answer_held_back_is_released(fake_serial):
+    dev, ser = _open(fake_serial)
+    dev.enable_remote()
+    ser.delay_next = True                                   # the MA answer comes late
+    dev.cfg.hardware.limit_op_timeout_s = 0.2
     assert dev.measure_position(2) == 523
 
 
-def test_brain_start_and_polls_work_on_a_late_controller(fake_serial):
-    """The whole brain on a controller that is ALREADY in the late state (the
-    rig after the failure, before its power-cycle)."""
+def test_brain_start_and_polls_work_when_one_behind(fake_serial):
+    """The whole brain on a controller ALREADY one behind (the rig after the
+    failure, before its power-cycle)."""
     from agilis.agilis import AgilisStage
     cfg = Config()
     cfg.hardware.port = "COM9"
+    cfg.hardware.timeout_s = 0.3
     dev = AgUC2(cfg)
     real_serial = sys.modules["serial"].Serial
 
-    def late_serial(**kw):
+    def behind(**kw):
         s = real_serial(**kw)
-        s.late = True
+        _controller_one_behind(s)
         return s
-    sys.modules["serial"].Serial = late_serial
+    sys.modules["serial"].Serial = behind
     brain = AgilisStage(dev, cfg)
     brain.start()
     try:
-        time.sleep(0.3)
+        time.sleep(0.5)
         st = brain.status()
         assert st.position_steps == [1234, -56]
         assert st.amplitude_fwd == [23, 23]
         assert not st.hw_error
     finally:
         brain.shutdown()
+
+
+def test_defaults_follow_newports_pace():
+    cfg = Config()
+    assert cfg.hardware.poll_hz == 5.0 and cfg.hardware.timeout_s >= 2.0
+
+
+def test_writes_are_never_closer_than_the_minimum_gap(fake_serial):
+    """What keeps two commands out of ONE USB packet on the real link (the
+    driver merged them otherwise, and the backlog grew): a gap between writes.
+    This morning's first fix wrote the release query right behind each
+    command -- it fails here."""
+    from agilis.backends.ag_uc2 import MIN_GAP_S
+    dev, ser = _open(fake_serial)
+    dev.enable_remote()
+    _controller_one_behind(ser)
+    ser.write_times.clear()
+    for _ in range(5):
+        dev.read_position(1)
+        dev.move_by(1, 1)
+    gaps = [b - a for a, b in zip(ser.write_times, ser.write_times[1:])]
+    assert min(gaps) >= MIN_GAP_S * 0.95, min(gaps)

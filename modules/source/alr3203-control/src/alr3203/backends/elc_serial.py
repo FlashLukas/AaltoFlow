@@ -48,6 +48,8 @@ and REM WR 0 on close gives the front panel back.
 
 from __future__ import annotations
 
+import time
+
 from ..hwlock import claim
 
 # The name this module signs its hardware claims with. Another service that
@@ -124,10 +126,25 @@ class SerialALR3203:
                 "regulation": self.read_regulation()}
 
     def close(self, output_off: bool = True) -> None:
+        failed = None
         try:
             if self._ser is not None:
                 if output_off:
-                    self._write("OUT WR 0")                           # VERIFY
+                    # Blue Box, 2026-11-10: one OUT WR 0 at shutdown failed with
+                    # "WriteFile failed ... The device does not recognize the
+                    # command" (a USB-CDC hiccup; the output was already off and
+                    # the port worked again at once). So: once more after a
+                    # moment -- and if that fails too, SAY so after letting go of
+                    # the port: an output that may still be on must not pass
+                    # silently.
+                    for attempt in (1, 2):
+                        try:
+                            self._write("OUT WR 0")                   # checked 2026-11-10
+                            failed = None
+                            break
+                        except Exception as exc:              # noqa: BLE001
+                            failed = exc
+                            time.sleep(0.1)
                 if self._remote:
                     # give the front panel back (ELC's library does the same)
                     try:
@@ -136,6 +153,10 @@ class SerialALR3203:
                         pass
         finally:
             self._disconnect()
+        if failed is not None:
+            raise ElcError(f"could not switch the output off at close (twice): "
+                           f"{type(failed).__name__}: {failed} -- check the supply's "
+                           f"front panel") from failed
 
     def disconnect(self) -> None:
         """Let go WITHOUT writing anything."""

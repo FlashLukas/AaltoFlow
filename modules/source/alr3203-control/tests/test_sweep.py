@@ -263,3 +263,93 @@ def test_sweep_over_the_wire():
     finally:
         s.close(0)
         svc.stop()
+
+
+
+# --------------------------------------------------------------------------- #
+# ACROSS ZERO (Lukas, 2026-11-10: "I just want to send the sweep of - current
+# to + current and the software handles the relay automatically")
+# --------------------------------------------------------------------------- #
+def _at(supply, amps):
+    supply.set_current(amps)
+    assert _wait(lambda: supply.status().current_set_A == amps
+                 and not supply.status().ramping, 10.0)
+
+
+def test_a_sweep_from_minus_to_plus_flips_the_relay_by_itself(live):
+    supply, spy, events = live
+    _output_on(supply)
+    _at(supply, -1.0)
+    relay = supply.relay
+    assert relay.inverted is True
+    flips_before = len(relay.flips)
+    assert supply.stream_start() >= 1
+    spy.calls.clear()
+    rid = supply.ramp_current(1.0, 4.0)                 # 2 A at 4 A/s, plus the flip
+    seen = []
+    t_end = time.monotonic() + 10.0
+    while time.monotonic() < t_end:
+        st = supply.status()
+        seen.append((st.ramp_id, st.sweeping))
+        if not st.sweeping:
+            break
+        time.sleep(0.01)
+    st = supply.status()
+    # ONE sweep to a scan: its number, "sweeping" all the way, then done
+    assert all(r == rid for r, _ in seen)
+    assert [sw for _, sw in seen[:-1]] == [True] * (len(seen) - 1)
+    assert st.ramp_id == rid and not st.sweeping
+    assert st.current_set_A == 1.0 and st.programmed == 1.0
+    assert relay.inverted is False
+    assert len(relay.flips) == flips_before + 1          # flipped ONCE
+    assert relay.hot_switches == 0                       # never under current
+    assert any("through 0" in m for _, m in events)
+    assert any(f"sweep #{rid} done" in m for _, m in events)
+    # the MEASURED current went from -1 to +1 through 0 (signed by the relay)
+    time.sleep(0.3)
+    c = supply.stream_stop()
+    cur = c["values"]["current"]
+    assert cur[0] < -0.8 and cur[-1] == pytest.approx(1.0, abs=0.05)
+    assert min(abs(x) for x in cur) < 0.05
+    # magnitudes programmed: down to 0, then up -- never a jump
+    mags = _mains(spy)
+    i0 = mags.index(0.0)
+    assert mags[:i0 + 1] == sorted(mags[:i0 + 1], reverse=True)
+    assert mags[i0:] == sorted(mags[i0:])
+
+
+def test_back_from_plus_to_minus_too(live):
+    supply, spy, events = live
+    _output_on(supply)
+    _at(supply, 0.5)
+    rid = supply.ramp_current(-0.5, 2.0)
+    assert _wait(lambda: not supply.status().sweeping, 10.0)
+    st = supply.status()
+    assert st.ramp_id == rid and st.current_set_A == -0.5
+    assert supply.relay.inverted is True and supply.relay.hot_switches == 0
+
+
+def test_a_stop_during_the_crossing_ends_it_at_zero_or_before(live):
+    supply, spy, events = live
+    _output_on(supply)
+    _at(supply, -1.0)
+    supply.ramp_current(1.0, 1.0)                        # 1 s to reach 0
+    time.sleep(0.6)
+    assert supply.ramp_stop() is True
+    assert _wait(lambda: not supply.status().sweeping, 5.0)
+    time.sleep(0.3)
+    st = supply.status()
+    assert -1.0 < st.current_set_A <= 0.0                # stopped where it was
+    assert supply.relay.inverted is True                 # never got to the flip
+    assert supply.relay.hot_switches == 0
+
+
+def test_with_the_output_off_only_the_setpoint_walks_across_zero(live):
+    supply, spy, events = live
+    supply.set_current(-0.5)
+    flips = len(supply.relay.flips)
+    rid = supply.ramp_current(0.5, 2.0)
+    assert _wait(lambda: not supply.status().sweeping, 5.0)
+    st = supply.status()
+    assert st.ramp_id == rid and st.current_set_A == 0.5 and not st.output
+    assert len(supply.relay.flips) == flips              # set when the output goes on

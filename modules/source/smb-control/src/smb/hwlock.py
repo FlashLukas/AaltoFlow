@@ -10,9 +10,22 @@ from any module -- is refused with a message naming the holder.
 
 HOW: the address is normalised (so "GPIB::6", "gpib0::6::INSTR" and "GPIB0::6"
 are the same instrument) and an operating-system file lock is taken on a file
-named after it in %LOCALAPPDATA%\\AaltoFlow\\locks. The OS releases the lock
-when the process ends, even on a crash or a hard kill, so a dead service can
-never leave an instrument "busy". A simulator claims nothing.
+named after it in the lock folder (lock_dir()). The OS releases the lock when
+the process ends, even on a crash or a hard kill, so a dead service can never
+leave an instrument "busy". A simulator claims nothing.
+
+WHERE (changed 2026-11-10): on Windows %PROGRAMDATA%\\AaltoFlow\\locks, ONE
+folder for the whole PC. It used to be %LOCALAPPDATA%\\AaltoFlow\\locks, and the
+Blue Box showed why that was wrong: for a program started from the Claude
+desktop app (an MSIX package) Windows REDIRECTS %LOCALAPPDATA% into the app's
+private storage, so a service started from Claude and one started from Mission
+Control looked in two different folders and could both drive one instrument.
+%PROGRAMDATA% is not redirected, and it is the same for every Windows user --
+right for hardware, which belongs to the PC, not to a user. Its default
+permissions let a user create files there but make them read-only for the
+other users, so the folder is created with "modify" for all users (icacls).
+After updating, restart every running service: an old one still holds its
+lock in the old folder, which the new code does not look at.
 
 The lock is per PC. That covers GPIB, USB and serial (they hang on one PC);
 a network instrument shared between PCs is not protected across PCs.
@@ -40,12 +53,37 @@ class HardwareBusy(RuntimeError):
     """The address is already claimed by another running service."""
 
 
+#: The local "Users" group, by its well-known SID (the NAME is translated on a
+#: non-English Windows; the SID is not).
+_USERS_SID = "*S-1-5-32-545"
+
+
 def lock_dir() -> Path:
+    """The ONE lock folder of this PC (see WHERE in the module docstring)."""
     base = os.environ.get("AALTOFLOW_LOCK_DIR")  # tests point this at a temp folder
     if base:
         return Path(base)
-    root = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "state")
-    return Path(root) / "AaltoFlow" / "locks"
+    if sys.platform == "win32" and os.environ.get("PROGRAMDATA"):
+        return Path(os.environ["PROGRAMDATA"]) / "AaltoFlow" / "locks"
+    return Path.home() / ".local" / "state" / "AaltoFlow" / "locks"
+
+
+def _make_lock_dir(d: Path) -> None:
+    """Create the lock folder; on Windows give every user "modify" on what is
+    in it (inherited by the lock files), so a lock file one user left behind
+    can be claimed by another. A failed grant is not fatal: one user -- the
+    usual lab PC -- never needs it."""
+    if d.is_dir():
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32" and not os.environ.get("AALTOFLOW_LOCK_DIR"):
+        import subprocess
+        try:
+            subprocess.run(["icacls", str(d), "/grant", f"{_USERS_SID}:(OI)(CI)M"],
+                           capture_output=True, timeout=15,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def normalize(address: str) -> str:
@@ -186,9 +224,17 @@ def claim(address: str, module: str, wait_s: float = 2.0) -> HardwareLock:
     """
     norm = normalize(address)
     d = lock_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    _make_lock_dir(d)
     path = d / _filename(norm)
-    fh = open(path, "a+b")  # never truncates: the holder's info must survive our failed try
+    try:
+        fh = open(path, "a+b")  # never truncates: the holder's info must survive our failed try
+    except PermissionError as exc:
+        # Another Windows user's lock file in a folder made without the grant
+        # (or the grant failed). Say what to do instead of a bare traceback.
+        raise PermissionError(
+            f"cannot open the lock file {path} for {norm} ({exc}); it belongs to another "
+            f"Windows user -- give 'Users' modify on {d} or delete the file when no "
+            f"service holds it") from exc
     deadline = time.monotonic() + wait_s
     while not (got := _try_lock(fh)) and time.monotonic() < deadline:
         time.sleep(0.1)

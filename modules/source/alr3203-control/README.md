@@ -25,7 +25,7 @@ photodiodes are read by `usb6001-control` (see its `examples/vacuum_magnet.ini`)
 | **Ramps** | Every change is walked at `ramp.rate_A_per_s` / `rate_V_per_s` (a coil: V = L dI/dt). Output off = ramp to 0, then off -- also when the service stops (a restart for a code update included). |
 | **Readback** | V and I (signed by the relay), power, R = V/I (display only), and a lamp when the supply sits on its 96 W envelope (`power_limited`). `acquire` gives scan-safe averaged readings. |
 | **Adopt on start** | Nothing is written at start: the setpoints, the output switch and the relay are read and taken over (a live output stays live). |
-| **Sweeps** | `ramp_current` for fly scans, never across zero (the relay needs the current stopped). |
+| **Sweeps** | `ramp_current` for fly scans, also from -I to +I: at 0 it waits for the current to stop, flips the polarity relay and walks on -- one sweep to the caller. |
 
 ## The relay
 

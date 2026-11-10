@@ -79,6 +79,12 @@ def main() -> int:
         print("SIMULATED backend (an ALR3203 driving a coil through a relay; "
               "no hardware needed)")
 
+    # Said on the console too (the start event goes only to clients): a cap
+    # set on one sign only is easy to miss (Blue Box, 2026-11-10).
+    note = supply.envelope_note()
+    if note:
+        print(f"WARNING: {note}")
+
     service = Alr3203Service(supply, host=args.host, cmd_port=args.cmd_port,
                              pub_port=args.pub_port)
     # The real backend claims its COM port before it sends anything (hwlock).

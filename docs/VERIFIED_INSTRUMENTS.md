@@ -34,7 +34,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales -- the vacuum gauge matches its controller --, DO line + read-back, the ALR3203's polarity relay; AO not yet) | 2026-11-10 |
 | [`alr3203`](../modules/source/alr3203-control) | ELC ALR3203 supply + polarity relay (usb6001 p0.0) | **verified** (protocol bytes, voltage and current mode into a coil, relay flips at zero current both ways, field sign follows the setpoint) | 2026-11-10 |
 | [`kim001`](../modules/motion/kim001-control) | Thorlabs KIM001 + PIA13 (objective focus) | **partly verified** (opens by serial, adopts without writing, step moves both ways and seen to move; client status fix and the 74 prefix not yet re-run) | 2026-11-10 |
-| [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **not yet** (the controller moves; the module failed on "one command late" replies -- fixed in code 2026-11-10, not yet re-run) | 2026-11-10 |
+| [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **not yet** (the controller moves; the module failed on "one command late" replies -- rewritten to Newport's one-command-per-write rule 2026-11-10, not yet re-run) | 2026-11-10 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
@@ -558,10 +558,15 @@ AG-UC2 v2.2.1 on its USB serial port: raw commands move both stages (+X moves
 the camera image right, +Y up; X steps more slowly than Y at amplitude 35).
 **The module failed:** after a move the controller answered ONE COMMAND LATE
 -- every reply line held until the next command arrived, until a power-cycle --
-so a move timed out and a stop failed on the previous poll's "PH1". The driver
-now sends a harmless `VE` after every exchange (it releases a held reply) and
-accepts only the reply that answers the question asked. Not yet re-run on the
-controller.
+so a move timed out and a stop failed on the previous poll's "PH1". A first
+fix (a release query `VE` written right behind every command) made it worse:
+the controller lets out one reply line per incoming write, and the USB driver
+merged the two lines into one packet, so the backlog grew. The driver now
+follows Newport's own library (under the LabVIEW program on that rig): one
+command per write, >= 20 ms apart, wait for the answer, accept only the line
+that answers the question, a release query only after a silence and in its own
+write, DTR/RTS on, polling at 5 Hz (developer notes, gotcha #50). Not yet
+re-run on the controller.
 
 ## scan-core -- scans with real instruments
 

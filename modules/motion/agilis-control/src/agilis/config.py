@@ -197,7 +197,9 @@ class Hardware:
     # Manual section 4.5: 921600 baud, 8 data bits, no parity, 1 stop bit, no
     # flow control, commands terminated by CR LF.
     baud: int = 921600
-    timeout_s: float = 0.5
+    # How long one question may wait for its answer (replies can be delayed
+    # while an axis steps; Newport's library waits seconds, too).
+    timeout_s: float = 2.0
     # AG-UC8 only: which channel (actuator pair 1..4) to select with CC. The
     # AG-UC2 does not know CC (it answers "unknown command"), so 0 = never send.
     channel: int = 0
@@ -207,7 +209,9 @@ class Hardware:
     # Convenience flag: swap X and Y without re-plugging the actuators.
     swap_xy: bool = False
     # Status poll rate: every cycle reads TP, TS for both axes and PH.
-    poll_hz: float = 20.0
+    # 5 Hz, not 20: every query during a move is a chance for the controller
+    # to fall a reply behind (ag_uc2.py, "REPLIES CAN FALL ONE BEHIND").
+    poll_hz: float = 5.0
     # Hand the push buttons back (ML, local mode) when the service stops, so
     # the controller is usable by hand again.
     local_on_close: bool = True

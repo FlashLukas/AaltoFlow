@@ -1952,7 +1952,8 @@ zpiezo has no GUI.
     section 3) and a second claim -- from any module -- raises `HardwareBusy`
     naming the holder; the name-based `excludes` is gone. What to know:
     - **Per PC.** It is an operating-system file lock in
-      `%LOCALAPPDATA%\AaltoFlow\locks` (tests set `AALTOFLOW_LOCK_DIR`). GPIB,
+      `%PROGRAMDATA%\AaltoFlow\locks` (since 2026-11-10, gotcha #49; it was
+      `%LOCALAPPDATA%`; tests set `AALTOFLOW_LOCK_DIR`). GPIB,
       USB and serial hang on one PC, so that covers them; a network instrument
       shared between two PCs is NOT protected across the PCs.
     - **A crash cannot leave an instrument "busy".** The OS drops the lock
@@ -2142,6 +2143,30 @@ zpiezo has no GUI.
     older version still shares the same lock file. COM10 and up were never
     affected. A file name built from instrument data must be checked against
     this list whenever it is written on Windows.
+49. **A program started from the Claude desktop app sees its own
+    %LOCALAPPDATA%** (2026-11-10, Blue Box). The desktop app is an MSIX
+    package, and Windows REDIRECTS writes to %LOCALAPPDATA% of every process it
+    starts (and their children) into the package's private storage
+    (`...\Packages\Claude_<id>\LocalCache\Local`); `Path.resolve()` shows it.
+    So a service started from a Claude session and one started from Mission
+    Control looked in two different lock folders and could both drive one
+    instrument, and a camera SDK unpacked there was invisible outside Claude.
+    The hardware locks now live in %PROGRAMDATA%\AaltoFlow\locks (one folder
+    per PC, not redirected, made writable for all users -- hwlock.py), and the
+    Thorlabs SDK in camera-control\vendor. Anything that must be shared
+    between programs on one PC: not %LOCALAPPDATA%. After updating, restart
+    every running service (an old one holds its lock in the old folder).
+50. **The Newport AG-UC2 lets out ONE reply line per incoming write**
+    (2026-11-10, Blue Box). A reply that is not ready when its command
+    arrives (while an axis steps), or two command lines in one USB packet,
+    leave a line held -- from then on every answer is one behind until a
+    power-cycle. A "release" query written right behind each command made it
+    worse: the USB driver merged the two into one packet and the backlog GREW.
+    What works is what Newport's own library does (it runs under the LabVIEW
+    program on that rig): ONE command per write, >= 20 ms between writes, wait
+    for the answer, accept only the line that answers the question, and only
+    after a silence send a release query in its own write. agilis-control's
+    ag_uc2.py; its test fake models the controller's release rule.
 
 ---
 
