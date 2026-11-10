@@ -33,6 +33,12 @@ remembered after the service stops, marked "last seen".
   *Move to bottom* and *Reset order*. The order is this PC's choice (saved in
   `suite_local.json`) and only changes what you see: services still start in
   the order they need (the camera after kim).
+- **Hide**: a module installed here but not used on this setup -- right-click
+  its card > *Hide this module*. It leaves the list, *Start all*, *Open all
+  GUIs*, *Real hardware: all* and the *Full suite* chip (and the measurement
+  suite's module list); it stays installed. *Show hidden* (next to the module
+  count) shows them dimmed, to bring one back. A hidden module whose service is
+  running is shown anyway. Saved per PC in `suite_local.json`.
 
 ## Two copies of one module (instances)
 
@@ -79,7 +85,7 @@ card has a GUI button but no Start/Stop, since the service belongs to that PC.
 
 ## Where the choices are saved
 
-Ports, real/sim flags, the card order, remote services and instances go in `../suite_local.json`, which is
+Ports, real/sim flags, the card order, hidden modules, remote services and instances go in `../suite_local.json`, which is
 this PC's file (not in git). The measurement suite in scan-core reads the same
 file, which is how it follows the launcher. Profiles are in `profiles.json`
 next to this script.

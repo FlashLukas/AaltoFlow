@@ -90,6 +90,10 @@ ROOT = default_root()
 CACHE_DIR = ROOT / ".suite_cache"
 # suite_local.json settings key: this PC's display order of the module cards
 CARD_ORDER_SETTING = "card_order"
+# Modules installed here but not used on this setup (Lukas, 2026-11-10: "hide
+# unused modules in case they are installed"): a list of card ids in
+# suite_local.json settings.hidden_modules -- per PC, like the card order.
+HIDDEN_SETTING = "hidden_modules"
 
 # How we launch each project:
 #   * SERVICES run with the project's OWN venv python (.venv\Scripts\python.exe)
@@ -1911,9 +1915,15 @@ class ModuleCard(QtWidgets.QFrame):
         menu.addSeparator()
         reset = menu.addAction("Reset order (the modules' own order)")
         reset.setEnabled(self.win.has_custom_order())
+        menu.addSeparator()
+        hidden = self.win.is_hidden(self.spec.id)
+        hide = menu.addAction("Show this module again" if hidden
+                              else "Hide this module (not used here)")
         chosen = menu.exec(event.globalPos())
         if chosen is not None and chosen is inst:
             self.add_instance()
+        elif chosen is hide:
+            self.win.set_hidden(self.spec.id, not hidden)
         elif chosen is top:
             self.win.move_card(self.spec.id, "top")
         elif chosen is bottom:
@@ -2473,6 +2483,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.found_lbl = QtWidgets.QLabel(); self.found_lbl.setObjectName("meta")
         mrow.addWidget(self.found_lbl)
         mrow.addStretch(1)
+        # Hidden modules (right-click a card > Hide): out of sight and out of
+        # Start all / Open all GUIs / Full suite, but still installed. This box
+        # shows them again (dimmed) to un-hide one; it only appears when some
+        # module is hidden.
+        self.show_hidden = QtWidgets.QCheckBox("Show hidden")
+        self.show_hidden.setToolTip("Show the modules hidden on this PC (dimmed); "
+                                    "right-click one > Show this module again")
+        self.show_hidden.toggled.connect(lambda *_: self.layout_cards())
+        self.show_hidden.hide()
+        mrow.addWidget(self.show_hidden, 0, QtCore.Qt.AlignVCenter)
         rescan = QtWidgets.QPushButton("Rescan")
         rescan.setToolTip(f"Look for module folders again (also happens by itself "
                           f"when a {MANIFEST} or {LOCAL_FILE} changes)")
@@ -2624,9 +2644,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prober.set_targets([(m.id, m.host, m.cmd) for m in self.found.modules])
         self.prober.probe_now()
 
-        n_local = sum(not m.remote for m in self.found.modules)
-        n_remote = len(self.found.modules) - n_local
-        self.found_lbl.setText(f"   {n_local} local" + (f" · {n_remote} remote" if n_remote else ""))
+        self._update_found_label()
         if self.found.problems:
             self.problems_lbl.setText("⚠  " + "\n⚠  ".join(self.found.problems))
             self.problems_lbl.show()
@@ -2653,6 +2671,55 @@ class MainWindow(QtWidgets.QMainWindow):
     def custom_order(self) -> list[str]:
         order = get_setting(CARD_ORDER_SETTING, [], ROOT)
         return [x for x in order if isinstance(x, str)] if isinstance(order, list) else []
+
+    # ---- hidden modules (Lukas, 2026-11-10) ---------------------------------
+    #
+    # A module installed but not used on this setup. Hiding changes nothing
+    # on disk but suite_local.json settings.hidden_modules: the module stays
+    # installed, its service can still run. A hidden card is left out of the
+    # list, of Start all, Open all GUIs, "Real hardware: all" and the Full
+    # suite chip -- but a hidden module whose service is UP is shown anyway
+    # (dimmed): something running must never vanish from the launcher.
+
+    def hidden_ids(self) -> set[str]:
+        ids = get_setting(HIDDEN_SETTING, [], ROOT)
+        return {x for x in ids if isinstance(x, str)} if isinstance(ids, list) else set()
+
+    def is_hidden(self, mid: str) -> bool:
+        return mid in self.hidden_ids()
+
+    def set_hidden(self, mid: str, hidden: bool):
+        ids = self.hidden_ids()
+        ids = (ids | {mid}) if hidden else (ids - {mid})
+        set_setting(HIDDEN_SETTING, sorted(ids) or None, ROOT)
+        card = self.cards.get(mid)
+        name = card.spec.name if card is not None else mid
+        self.log(f"{name}: hidden on this PC (Show hidden to bring it back)" if hidden
+                 else f"{name}: shown again")
+        self.layout_cards()
+        self.build_profile_bar()
+        self.sync_all_box()
+
+    def in_use(self, card) -> bool:
+        """False for a hidden module that is not running (out of sight)."""
+        return not self.is_hidden(card.spec.id) or card.up or card.owns_service
+
+    def _update_found_label(self):
+        n_local = sum(not m.remote for m in self.found.modules)
+        n_remote = len(self.found.modules) - n_local
+        n_hidden = len(self.hidden_ids() & {m.id for m in self.found.modules})
+        self.found_lbl.setText(f"   {n_local} local"
+                               + (f" · {n_remote} remote" if n_remote else "")
+                               + (f" · {n_hidden} hidden" if n_hidden else ""))
+        self.show_hidden.setVisible(bool(n_hidden))
+        if not n_hidden and self.show_hidden.isChecked():
+            self.show_hidden.setChecked(False)
+
+    def displayed_modules(self) -> list:
+        """The instrument cards on screen now, in display order."""
+        show_all = self.show_hidden.isChecked()
+        return [m for m in self.ordered_modules() if m.id in self.cards
+                and (show_all or self.in_use(self.cards[m.id]))]
 
     def has_custom_order(self) -> bool:
         return bool(self.custom_order())
@@ -2682,9 +2749,23 @@ class MainWindow(QtWidgets.QMainWindow):
         """Pinned cards, the INSTRUMENTS label, then the instrument cards in
         display order; grey out the arrow that would move a card past either end."""
         pinned = [m for m in self.pinned_modules() if m.id in self.cards]
-        shown = [m for m in self.ordered_modules() if m.id in self.cards]
+        shown = self.displayed_modules()
+        hidden = self.hidden_ids()
+        for spec in self.found.modules:
+            card = self.cards.get(spec.id)
+            if card is not None:
+                self.vlist.removeWidget(card)
+                card.setVisible(False)
         for spec in pinned + shown:
-            self.vlist.removeWidget(self.cards[spec.id])
+            card = self.cards[spec.id]
+            card.setVisible(True)
+            # a hidden module on screen (Show hidden, or running) is dimmed
+            dim = spec.id in hidden
+            if dim and card.graphicsEffect() is None:
+                eff = QtWidgets.QGraphicsOpacityEffect(card); eff.setOpacity(0.55)
+                card.setGraphicsEffect(eff)
+            elif not dim and card.graphicsEffect() is not None:
+                card.setGraphicsEffect(None)
         self.vlist.removeWidget(self.instr_tag)
         i = 0
         for spec in pinned:
@@ -2696,18 +2777,30 @@ class MainWindow(QtWidgets.QMainWindow):
             card = self.cards[spec.id]
             self.vlist.insertWidget(i + k, card)
             card.set_move_enabled(k > 0, k < len(shown) - 1)
+        if hasattr(self, "found_lbl"):
+            self._update_found_label()
 
     def move_card(self, mid: str, where: str):
         """where: 'up', 'down', 'top' or 'bottom'. Saves the whole resulting
         order, so the list means exactly what is on screen."""
         ids = [m.id for m in self.ordered_modules()]
-        if mid not in ids:
+        vis = [m.id for m in self.displayed_modules()]
+        if mid not in ids or mid not in vis:
             return
-        i = ids.index(mid)
-        ids.pop(i)
-        j = {"up": max(i - 1, 0), "down": min(i + 1, len(ids)),
-             "top": 0, "bottom": len(ids)}[where]
-        ids.insert(j, mid)
+        # past the next card ON SCREEN: a hidden one in between must not
+        # swallow the click
+        i = vis.index(mid)
+        ids.remove(mid)
+        if where == "up" and i > 0:
+            ids.insert(ids.index(vis[i - 1]), mid)
+        elif where == "down" and i < len(vis) - 1:
+            ids.insert(ids.index(vis[i + 1]) + 1, mid)
+        elif where == "top":
+            ids.insert(0, mid)
+        elif where == "bottom":
+            ids.append(mid)
+        else:
+            return                   # already first / last on screen: nothing to do
         set_setting(CARD_ORDER_SETTING, ids, ROOT)
         self.layout_cards()
 
@@ -2717,10 +2810,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log("card order reset to the modules' own order")
 
     def _on_probed(self, result: dict):
+        hidden = self.hidden_ids()
+        relayout = False
         for mid, up in result.items():
             card = self.cards.get(mid)
             if card is not None:
+                relayout |= mid in hidden and card.up != up
                 card.set_up(up)
+        if relayout:
+            self.layout_cards()      # a hidden module came up (shown) or went down
 
     def _on_held(self, entries: list):
         for card in self.cards.values():
@@ -2918,8 +3016,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---- helpers ----------------------------------------------------------
 
     def local_cards(self) -> list[ModuleCard]:
+        """Local cards in use here (a hidden, stopped module is left out)."""
         return [self.cards[m.id] for m in self.found.modules
-                if not m.remote and m.id in self.cards]
+                if not m.remote and m.id in self.cards and self.in_use(self.cards[m.id])]
 
     def _set_all_real(self, on: bool):
         for card in self.local_cards():
@@ -2951,7 +3050,9 @@ class MainWindow(QtWidgets.QMainWindow):
             w = self.profile_bar.takeAt(0).widget()
             if w is not None:
                 w.deleteLater()
-        full = dict(name=FULL_SUITE, members=[m.id for m in self.found.modules if not m.remote])
+        hidden = self.hidden_ids()
+        full = dict(name=FULL_SUITE, members=[m.id for m in self.found.modules
+                                              if not m.remote and m.id not in hidden])
         for prof in self.profiles + [full]:
             present = [self.cards[k].spec.name for k in prof["members"] if k in self.cards]
             missing = [k for k in prof["members"] if k not in self.cards]
@@ -3168,7 +3269,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def open_all_guis(self):
         self.log("opening all GUIs…")
-        for i, card in enumerate([c for c in self.cards.values() if c.spec.has_gui]):
+        for i, card in enumerate([c for c in self.cards.values()
+                                  if c.spec.has_gui and self.in_use(c)]):
             QtCore.QTimer.singleShot(i * 400, card.open_gui)
 
     def open_suite(self, recall=None):

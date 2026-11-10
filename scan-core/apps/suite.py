@@ -1355,10 +1355,19 @@ class Suite(QtWidgets.QMainWindow):
         self.mod_tree.clear()
         if self.found is None:
             return
+        # modules hidden in Mission Control (right-click a card > Hide: installed
+        # here but not used on this setup) are left out of the list too -- unless
+        # one is running or connected, which must never vanish
+        try:
+            hidden = set(get_setting("hidden_modules", [], root=self.root) or [])
+        except Exception:
+            hidden = set()
         for m in self.found.modules:
             if not m.is_instrument:
                 continue                   # the scan server: Watch list, below
             up = m.id in self.available
+            if m.id in hidden and not up and m.id not in self.connected_ids:
+                continue
             where = f"remote {m.host}" if m.remote else (m.dir.name if m.dir else "")
             item = QtWidgets.QTreeWidgetItem(
                 [m.name, "running" if up else "down", where, f"{m.cmd}/{m.pub}", m.slug])

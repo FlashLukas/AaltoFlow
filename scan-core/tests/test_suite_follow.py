@@ -155,3 +155,25 @@ def test_a_refused_module_does_not_keep_the_others_out(qapp, fake_service, tmp_p
         assert win.connected_ids == ["magnet"]
     finally:
         win.close()
+
+
+def test_modules_hidden_in_mission_control_are_left_out_unless_running(
+        qapp, fake_service, tmp_path, monkeypatch, fast):
+    """Lukas 2026-11-10: hide modules installed but not used here. A hidden
+    module that answers anyway stays in the list (it must never vanish)."""
+    import apps.control_panel as cp
+    from suite_common import set_setting
+    monkeypatch.setattr(cp, "LAYOUTS_PATH", tmp_path / "layouts.json")
+    svc = fake_service(15984, manifest=DEMO_MANIFEST)
+    _module(tmp_path, "magnet", svc.cmd_port)
+    _module(tmp_path, "rf", 15986, order=20)              # down
+    _module(tmp_path, "stage", 15988, order=30)           # down, not hidden
+    set_setting("hidden_modules", ["magnet", "rf"], root=tmp_path)
+    win = Suite(root=tmp_path, follow=True)
+    try:
+        assert _pump(qapp, lambda: win.lab is not None)
+        names = lambda: {win.mod_tree.topLevelItem(i).text(0)
+                         for i in range(win.mod_tree.topLevelItemCount())}
+        assert _pump(qapp, lambda: names() == {"magnet module", "stage module"})
+    finally:
+        win.close()

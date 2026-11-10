@@ -682,6 +682,47 @@ def test_a_stale_or_partial_order_never_breaks_the_list(env):
     win.reset_card_order()
 
 
+def test_an_unused_module_can_be_hidden_and_shown_again(env):
+    """Lukas 2026-11-10: "hide unused modules in case they are installed"."""
+    mc, win, root, app = env
+    win.reset_card_order()
+    own = [m.id for m in win.found.modules if m.is_instrument]
+    gone = own[1]
+    assert not win.show_hidden.isVisible() or win.show_hidden.isHidden()
+    win.set_hidden(gone, True)
+    assert gone not in _shown(mc, win)
+    assert win.show_hidden.isVisibleTo(win)
+    assert "1 hidden" in win.found_lbl.text()
+    # out of Start all and the Full suite chip, remembered on this PC
+    assert gone not in [c.spec.id for c in win.local_cards()]
+    full = [win.profile_bar.itemAt(i).widget() for i in range(win.profile_bar.count())][-1]
+    assert win.cards[gone].spec.name not in full.toolTip()
+    saved = json.loads((root / "suite_local.json").read_text("utf-8"))["settings"]
+    assert saved["hidden_modules"] == [gone]
+    win.rescan(force=True)
+    assert gone not in _shown(mc, win)
+    # moving past a hidden card is one click on screen
+    win.cards[own[2]].btn_up.click()
+    shown = _shown(mc, win)
+    assert shown.index(own[2]) < shown.index(own[0])
+    win.reset_card_order()
+    # "Show hidden" brings it back, dimmed, to un-hide it
+    win.show_hidden.setChecked(True)
+    assert gone in _shown(mc, win) and win.cards[gone].graphicsEffect() is not None
+    win.show_hidden.setChecked(False)
+    # a hidden module whose service is UP stays on screen
+    win.cards[gone].up = False
+    win._on_probed({gone: True})
+    assert gone in _shown(mc, win)
+    win._on_probed({gone: False})
+    assert gone not in _shown(mc, win)
+    win.set_hidden(gone, False)
+    assert gone in _shown(mc, win) and win.cards[gone].graphicsEffect() is None
+    assert not win.show_hidden.isVisibleTo(win)
+    assert "hidden_modules" not in json.loads(
+        (root / "suite_local.json").read_text("utf-8")).get("settings", {})
+
+
 def test_the_scan_server_is_pinned_above_the_instruments(env):
     """Lukas 2026-10-05: the scan server "always up there", slightly separated,
     without move arrows or a "real" box (it drives no hardware of its own)."""
