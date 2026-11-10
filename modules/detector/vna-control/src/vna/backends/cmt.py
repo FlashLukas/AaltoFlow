@@ -56,9 +56,10 @@ What is different from the Keysight PNA-X, and why this is a file of its own:
     S11 and S21 both come from the forward sweep: no extra time. Adding S12
     or S22 makes S2VNA sweep the reverse direction too (twice the time),
     which the brain accounts for.
-    # VERIFY on the S5085: both traces are complete after the one *OPC?, and
-    # TRAC2's numbers equal S2VNA's marker on trace 2 (as was checked for
-    # trace 1 on 2026-11-10).
+    VERIFIED on the S5085 (2026-11-10, S11 + S21, S2VNA 24.3.4): one sweep per
+    acquisition, and both traces equal S2VNA's Tr1 / Tr2 markers point for
+    point (docs/VERIFIED_INSTRUMENTS.md). Not yet run there: S11 + S22
+    (forward + reverse) and going back from several traces to one.
 
   * No calibration handling: the setup runs uncorrected for now (Lukas,
     2026-09-25), and u / ln(S/S_ref) divide the cables out anyway. Whether
@@ -556,8 +557,9 @@ class CmtVna:
         if len(set(sparams)) != len(sparams):
             raise ValueError(f"an S-parameter is listed twice: {sparams}")
         if len(sparams) != self._count:
-            # VERIFY: S2VNA keeps the existing traces' definitions when the
-            # count grows, and adds the new ones (each is re-defined below)
+            # Every trace is re-defined below, so what S2VNA puts in a new
+            # trace does not matter (2 -> worked on the S5085, 2026-11-10).
+            # VERIFY: shrinking (several -> 1) on the instrument
             self._write(f":CALC{CH}:PAR:COUN {len(sparams)}")
             self._count = len(sparams)
         for i, sp in enumerate(sparams, start=1):
