@@ -34,7 +34,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales -- the vacuum gauge matches its controller --, DO line + read-back, the ALR3203's polarity relay; AO not yet) | 2026-11-10 |
 | [`alr3203`](../modules/source/alr3203-control) | ELC ALR3203 supply + polarity relay (usb6001 p0.0) | **verified** (protocol bytes, voltage and current mode into a coil, relay flips at zero current both ways, field sign follows the setpoint) | 2026-11-10 |
 | [`kim001`](../modules/motion/kim001-control) | Thorlabs KIM001 + PIA13 (objective focus) | **partly verified** (opens by serial, adopts without writing, step moves both ways and seen to move; client status fix and the 74 prefix not yet re-run) | 2026-11-10 |
-| [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **not yet** (the controller moves; the module failed on "one command late" replies -- rewritten to Newport's one-command-per-write rule 2026-11-10, not yet re-run) | 2026-11-10 |
+| [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **partly verified** (start / adopt, step moves both axes with status polled during them, stop at rest -- after the rewrite to Newport's one-command-per-write rule; limit switch, step size, jog not yet) | 2026-11-10 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
@@ -574,8 +574,14 @@ merged the two lines into one packet, so the backlog grew. The driver now
 follows Newport's own library (under the LabVIEW program on that rig): one
 command per write, >= 20 ms apart, wait for the answer, accept only the line
 that answers the question, a release query only after a silence and in its own
-write, DTR/RTS on, polling at 5 Hz (developer notes, gotcha #50). Not yet
-re-run on the controller.
+write, DTR/RTS on, polling at 5 Hz (developer notes, gotcha #50).
+
+**Re-run (f5e4f61, after a power-cycle):** start adopted counters [0, 0] with
+only MR written; X and Y +100 / -100 steps, status after each and then polled
+every 0.2 s DURING the moves (e.g. [61, 0] moving, then [100, 0] done): every
+reply in step, no timeout, no "error 1", no out-of-step, counters back to 0; a
+stop on an axis at rest answered ok. 100 steps take 0.3-0.4 s at amplitude 35.
+Not yet: limit switch (MV / MA / PA), step-size measurement, jog.
 
 ## scan-core -- scans with real instruments
 
