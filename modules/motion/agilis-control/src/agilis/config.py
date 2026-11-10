@@ -49,6 +49,8 @@ numbers.
 # `_cast(raw, field.type)` using the type *name* -- see load_config().
 from __future__ import annotations
 
+from pathlib import Path
+
 import configparser
 from dataclasses import asdict, dataclass, fields
 
@@ -399,3 +401,30 @@ def load_config(path: str) -> Config:
             if fld.name in cp[section]:
                 setattr(obj, fld.name, _cast(cp[section][fld.name], fld.type))
     return cfg
+
+
+#: The per-PC settings file next to module.toml (gitignored).
+DEFAULT_INI_NAME = "agilis.ini"
+
+
+def default_config_path() -> Path:
+    """<agilis-control>/agilis.ini (this file is src/agilis/config.py -> parents[2]).
+    A function, so tests can point elsewhere."""
+    return Path(__file__).resolve().parents[2] / DEFAULT_INI_NAME
+
+
+def load_startup_config(config_arg: str | None = None,
+                        default_path: Path | None = None) -> tuple[Config, Path, bool]:
+    """The config a service starts with: (cfg, file, loaded). ``--config FILE``
+    wins; otherwise agilis.ini next to module.toml IF it exists; otherwise
+    the defaults -- the same rule as alr3203 / usb6001 / kim001 / camera / vna
+    (Blue Box, 2026-11-10: the Agilis was the one module whose COM port could
+    only come from the launcher). Loading only fills cfg: start() still READS
+    the controller's counters and amplitudes and adopts them."""
+    if config_arg:
+        path = Path(config_arg)
+        return load_config(str(path)), path, True
+    path = Path(default_path) if default_path is not None else default_config_path()
+    if path.is_file():
+        return load_config(str(path)), path, True
+    return Config(), path, False

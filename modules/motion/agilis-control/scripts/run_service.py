@@ -17,7 +17,7 @@ from pathlib import Path
 # Allow running straight from a checkout without installing (src layout).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agilis.config import Config, load_config  # noqa: E402
+from agilis.config import load_startup_config  # noqa: E402
 from agilis.hwlock import HardwareBusy  # noqa: E402
 from agilis.net.protocol import DEFAULT_CMD_PORT, DEFAULT_PUB_PORT  # noqa: E402
 from agilis.net.service import AgilisService, PortInUse  # noqa: E402
@@ -32,7 +32,8 @@ EXIT_HARDWARE_BUSY = 4
 def main() -> int:
     ap = argparse.ArgumentParser(description="Newport Agilis stage service (AG-UC2, 2 axes)")
     ap.add_argument("--real", action="store_true", help="use the real AG-UC2 (default: simulator)")
-    ap.add_argument("--config", help="INI config file to load")
+    ap.add_argument("--config", help="INI config file to load (default: agilis.ini next to "
+                                     "module.toml, when it exists)")
     ap.add_argument("--com", help="the AG-UC2 COM port, e.g. COM5 (overrides the config)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
@@ -40,7 +41,8 @@ def main() -> int:
     ap.add_argument("--status-hz", type=float, default=8.0)
     args = ap.parse_args()
 
-    cfg = load_config(args.config) if args.config else Config()
+    cfg, cfg_path, loaded = load_startup_config(args.config)
+    print(f"config: {cfg_path}" + ("" if loaded else " (not found -- defaults)"))
     if args.com:
         cfg.hardware.port = args.com
     brain, _backend = (build_real_system if args.real else build_sim_system)(cfg)

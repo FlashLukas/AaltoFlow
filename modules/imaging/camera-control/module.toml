@@ -4,7 +4,7 @@
 [module]
 key = "camera"
 name = "Camera coordinator"
-description = "IDS camera - laser spot - autofocus - stabiliser"
+description = "IDS or Thorlabs camera - laser spot - autofocus - stabiliser"
 category = "imaging"
 tags = ["camera", "IDS", "autofocus", "stabiliser", "tracking"]
 icon = "icon.svg"

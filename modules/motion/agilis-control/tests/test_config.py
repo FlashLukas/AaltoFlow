@@ -72,3 +72,20 @@ def test_swap_xy_maps_controller_axes():
     assert (hardware_axis(cfg, 0), hardware_axis(cfg, 1)) == (1, 2)
     cfg.hardware.swap_xy = True
     assert (hardware_axis(cfg, 0), hardware_axis(cfg, 1)) == (2, 1)
+
+
+def test_the_service_loads_agilis_ini_next_to_module_toml_when_present(tmp_path):
+    """Blue Box, 2026-11-10: every module but the Agilis loaded its own .ini
+    without --config; the Agilis's COM port could only come from the launcher."""
+    from agilis.config import Config, load_startup_config, save_config
+    cfg, path, loaded = load_startup_config(default_path=tmp_path / "agilis.ini")
+    assert not loaded and cfg.hardware.port == Config().hardware.port
+    c = Config()
+    c.hardware.port = "COM3"
+    save_config(c, str(tmp_path / "agilis.ini"))
+    cfg, path, loaded = load_startup_config(default_path=tmp_path / "agilis.ini")
+    assert loaded and cfg.hardware.port == "COM3" and path == tmp_path / "agilis.ini"
+    other = tmp_path / "other.ini"
+    save_config(Config(), str(other))
+    cfg, path, loaded = load_startup_config(str(other), default_path=tmp_path / "agilis.ini")
+    assert loaded and path == other and cfg.hardware.port == ""   # --config wins
