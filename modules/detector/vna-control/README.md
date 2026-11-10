@@ -156,6 +156,33 @@ routine can run before the scan, and the detectors are:
 
 All from ONE sweep per scan point (one acquire group).
 
+### Several S-parameters from one sweep (2026-11-10)
+
+`sweep.extra_sparams` (GUI: Settings > Sweep; verb
+`set_extra_sparams{sparams: "S11"}`; console `also S11`) adds S-parameters
+that the SAME trigger measures. With `sparam = S21` and `extra_sparams = S11`
+one acquisition returns both:
+
+| detector | what |
+|---|---|
+| `vna.s`, `vna.u`, `vna.ln_ratio` | the primary (`sparam`), as before |
+| `vna.s_s11`, `vna.u_s11`, `vna.ln_ratio_s11` | S11 from the same sweep (`get_trace{sparam: "S11"}`) |
+
+- S11 and S21 both come from the forward sweep, so the second one costs no
+  extra time; adding S12 or S22 makes the analyser sweep the reverse direction
+  too, and the module counts twice the sweep time.
+- The reference is kept **per parameter**: one `take_reference` stores every
+  measured trace, and `u_s11` divides by the reference's S11 (refused when the
+  reference has none).
+- Empty (the default) = one S-parameter, exactly as before.
+- Supported by the simulator and the Copper Mountain backend (one S2VNA trace
+  per parameter, `CALC1:TRAC<i>:DATA:SDAT?`); the PNA and LibreVNA / PNB-60
+  backends refuse it for now. Fly scans stream the primary only, and refuse a
+  list that needs both directions.
+- GUI: the TRACE card gets a selector for which parameter to plot. Console
+  `marker <GHz>` prints every measured parameter at one frequency in dB and
+  degrees, to compare with the analyser's own markers.
+
 A field map from two live services (start clMag and vna first):
 
 ```powershell

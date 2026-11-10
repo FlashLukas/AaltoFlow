@@ -27,7 +27,9 @@ _TABS = [("sweep", "Sweep"), ("acquisition", "Acquisition"), ("field", "Field"),
 
 _HINTS = {
     "sweep": "Applied at the next sweep. A change during an acquisition restarts it. "
-             "sparam: S11, S12, S21 or S22.",
+             "sparam: S11, S12, S21 or S22. extra_sparams: more from the SAME sweep, "
+             "comma separated (S11 with S21: one forward sweep; adding S12/S22 sweeps "
+             "the reverse direction too).",
     "acquisition": "An acquisition averages `averages` sweeps that all started after the "
                    "trigger. continuous = sweep on its own between acquisitions.",
     "field": "source: mag2d (the vector magnet: |B| and angle from its measured Bx, By), "

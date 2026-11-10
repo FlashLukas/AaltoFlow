@@ -470,6 +470,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.which_combo.addItems(["Latest sweep", "Last acquisition"])
         self.which_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
         bar.addWidget(self.which_combo)
+        # which S-parameter to plot when one sweep returns several
+        # (sweep.extra_sparams); hidden while there is only the one
+        self.sp_combo = QtWidgets.QComboBox()
+        self.sp_combo.setToolTip("Every S-parameter here comes from the SAME sweep "
+                                 "(Settings > sweep > extra_sparams)")
+        self.sp_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
+        self.sp_combo.setVisible(False)
+        bar.addWidget(self.sp_combo)
         bar.addStretch(1)
         self.trace_label = QtWidgets.QLabel(""); self.trace_label.setObjectName("hint")
         bar.addWidget(self.trace_label)
@@ -742,7 +750,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elif ref.get("present"):
             self.ref_label.setText(
                 f"#{ref.get('acq_id')}: {_fmt(ref.get('field_mT'), '.2f')} mT at "
-                f"{_fmt(ref.get('angle_deg'), '.1f')} deg, {ref.get('sparam')}, "
+                f"{_fmt(ref.get('angle_deg'), '.1f')} deg, "
+                f"{', '.join(ref.get('sparams') or [ref.get('sparam')])}, "
                 f"{_fmt(ref.get('start_Hz', math.nan) / 1e9, 'g')}-"
                 f"{_fmt(ref.get('stop_Hz', math.nan) / 1e9, 'g')} GHz, {ref.get('points')} pts, "
                 f"{_age(ref.get('age_s'))}")
@@ -753,6 +762,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ref_id = ref_id
             if self.view_combo.currentIndex() != 0:
                 self._force_fetch()
+
+        # the S-parameters each sweep returns: the plot's choice follows them
+        sps = [str(x) for x in (getattr(s, "sparams", None) or [s.sparam])]
+        if sps != [self.sp_combo.itemText(i) for i in range(self.sp_combo.count())]:
+            keep = self.sp_combo.currentText()
+            self.sp_combo.blockSignals(True)
+            self.sp_combo.clear()
+            self.sp_combo.addItems(sps)
+            if keep in sps:
+                self.sp_combo.setCurrentIndex(sps.index(keep))
+            self.sp_combo.blockSignals(False)
+            self.sp_combo.setVisible(len(sps) > 1)
+            self._force_fetch()
 
         # trace: fetch only when there is a new one, and not more than ~7 per second
         which = "last" if self.which_combo.currentIndex() == 0 else "sample"
@@ -771,15 +793,17 @@ class MainWindow(QtWidgets.QMainWindow):
         the other two. If u is refused (no reference, or it does not match),
         show the raw trace and say why instead of an empty plot."""
         self._u_error = ""
+        # None = the primary (also while the list has only the one)
+        sp = self.sp_combo.currentText() if self.sp_combo.count() > 1 else None
         if self.view_combo.currentIndex() == 0:
-            return self.ctrl.get_trace(which, "s")
+            return self.ctrl.get_trace(which, "s", sp)
         # The last view wants the logarithm; the middle two are built from u.
         quantity = "ln" if self.view_combo.currentIndex() == 3 else "u"
         try:
-            return self.ctrl.get_trace(which, quantity)
+            return self.ctrl.get_trace(which, quantity, sp)
         except Exception as exc:
             self._u_error = str(exc)
-            return self.ctrl.get_trace(which, "s")
+            return self.ctrl.get_trace(which, "s", sp)
 
     def _set_plot_mode(self, mode: str, sparam: str):
         if (mode, sparam) == self._plot_mode:

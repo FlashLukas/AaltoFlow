@@ -74,16 +74,29 @@ class SimulatedVna:
     #: the field of its own moment (see finish_sweep)
     FIELD_SEGMENTS = 64
 
+    #: several S-parameters from one sweep (base.py): like a real 2-port
+    #: analyser, all of them are computed for the same field and conditions,
+    #: each with its own noise
+    multi_sparams = True
+
     def sweep_time_s(self, points: int, ifbw_Hz: float) -> float:
         return (model.sweep_time_s(points, ifbw_Hz, self.cfg.line.point_dwell_ifbw)
                 * self.time_scale)
 
     def start_sweep(self, freqs_Hz, ifbw_Hz: float, power_dBm: float,
-                    sparam: str = "S21", field: FieldReading | None = None) -> None:
+                    sparam: str = "S21", field: FieldReading | None = None,
+                    sparams=None) -> None:
+        """`sparams` (optional) = every S-parameter this ONE sweep returns,
+        the primary `sparam` first; finish_sweep hands them back in
+        meta["traces"]."""
         if not self._open:
             raise RuntimeError("simulated VNA is not open")
-        if sparam not in model.SPARAMS:
-            raise ValueError(f"sparam must be one of {model.SPARAMS}, got {sparam!r}")
+        wanted = tuple(sparams) if sparams else (sparam,)
+        for sp in (sparam, *wanted):
+            if sp not in model.SPARAMS:
+                raise ValueError(f"sparam must be one of {model.SPARAMS}, got {sp!r}")
+        if wanted[0] != sparam:
+            raise ValueError(f"sparams must start with the primary {sparam}, got {wanted}")
         field = field or FieldReading(0.0, False, "none", float("nan"))
         # the pretend instrument now HOLDS these settings (what read_state reports)
         f = np.asarray(freqs_Hz, dtype=float)
@@ -94,6 +107,7 @@ class SimulatedVna:
         self._pending = {
             "freqs": np.asarray(freqs_Hz, dtype=float),
             "ifbw": float(ifbw_Hz), "power": float(power_dBm), "sparam": sparam,
+            "sparams": wanted if sparams else None,
             "sample": copy.copy(self.cfg.sample), "line": copy.copy(self.cfg.line),
             "field": field,
         }
@@ -113,30 +127,39 @@ class SimulatedVna:
         if p is None:
             raise RuntimeError("finish_sweep without start_sweep")
         fr = p["field"]
+        meta = {"f_res_model_Hz": model.kittel_Hz(fr.field_mT, p["sample"], fr.angle_deg)}
+        if p["sparams"] is None:
+            return self._trace(p, p["sparam"], field_end), meta
+        # several from ONE sweep: the same latched conditions for every one
+        traces = {sp: self._trace(p, sp, field_end) for sp in p["sparams"]}
+        return traces[p["sparam"]], {**meta, "traces": traces}
+
+    def _trace(self, p: dict, sparam: str, field_end) -> np.ndarray:
+        """One S-parameter of the latched sweep `p` (see finish_sweep)."""
+        fr = p["field"]
         f = p["freqs"]
         moving = (field_end is not None and np.isfinite(field_end.field_mT)
                   and np.isfinite(fr.field_mT) and field_end.field_mT != fr.field_mT)
         if not moving:
-            z = model.s21_measured(f, fr.field_mT, p["sample"], p["line"],
-                                   p["ifbw"], p["power"], self._rng,
-                                   angle_deg=fr.angle_deg, sparam=p["sparam"])
-        else:
-            z = np.empty(f.size, dtype=complex)
-            bounds = np.linspace(0, f.size, min(self.FIELD_SEGMENTS, f.size) + 1).astype(int)
-            # the short way round: 179 -> -179 deg is 2 deg, not 358
-            d_ang = (field_end.angle_deg - fr.angle_deg + 180.0) % 360.0 - 180.0
-            if not np.isfinite(d_ang):
-                d_ang = 0.0
-            for a, b in zip(bounds[:-1], bounds[1:]):
-                if b <= a:
-                    continue
-                frac = (0.5 * (a + b)) / f.size             # the segment's moment
-                b_mT = fr.field_mT + (field_end.field_mT - fr.field_mT) * frac
-                ang = fr.angle_deg + d_ang * frac
-                z[a:b] = model.s21_measured(f[a:b], b_mT, p["sample"], p["line"],
-                                            p["ifbw"], p["power"], self._rng,
-                                            angle_deg=ang, sparam=p["sparam"])
-        return z, {"f_res_model_Hz": model.kittel_Hz(fr.field_mT, p["sample"], fr.angle_deg)}
+            return model.s21_measured(f, fr.field_mT, p["sample"], p["line"],
+                                      p["ifbw"], p["power"], self._rng,
+                                      angle_deg=fr.angle_deg, sparam=sparam)
+        z = np.empty(f.size, dtype=complex)
+        bounds = np.linspace(0, f.size, min(self.FIELD_SEGMENTS, f.size) + 1).astype(int)
+        # the short way round: 179 -> -179 deg is 2 deg, not 358
+        d_ang = (field_end.angle_deg - fr.angle_deg + 180.0) % 360.0 - 180.0
+        if not np.isfinite(d_ang):
+            d_ang = 0.0
+        for a, b in zip(bounds[:-1], bounds[1:]):
+            if b <= a:
+                continue
+            frac = (0.5 * (a + b)) / f.size             # the segment's moment
+            b_mT = fr.field_mT + (field_end.field_mT - fr.field_mT) * frac
+            ang = fr.angle_deg + d_ang * frac
+            z[a:b] = model.s21_measured(f[a:b], b_mT, p["sample"], p["line"],
+                                        p["ifbw"], p["power"], self._rng,
+                                        angle_deg=ang, sparam=sparam)
+        return z
 
     def abort_sweep(self) -> None:
         self._pending = None

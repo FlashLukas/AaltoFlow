@@ -36,6 +36,20 @@ the reference, so every client (GUI, console, scan) sees the SAME one:
                    there is no reference or it was taken with another
                    S-parameter / start / stop / point count.
 
+SEVERAL S-PARAMETERS FROM ONE SWEEP (2026-11-10, Lukas: "S11 and S21 in a
+single go"). `sweep.sparam` is the PRIMARY: the trace behind `s`, `u`,
+`ln_ratio`, the dip and the stream, exactly as before. `sweep.extra_sparams`
+("S11") adds parameters measured by the SAME trigger -- on a 2-port analyser
+S11 and S21 both come out of the forward sweep, so the second one costs no
+second sweep. Every trace carries `traces` = {sparam: complex array}; an
+acquisition averages each one, the sample latches them all, and
+`get_trace(..., sparam="S11")` hands out one. The reference is PER PARAMETER:
+take_reference keeps every measured trace, and u / ln of S11 divide by the
+reference's S11 (refused when the reference has none). Only a backend that
+says `multi_sparams` takes extras (the simulator, Copper Mountain); the
+others refuse them. Parameters that need both source ports (S11 with S22)
+mean a forward AND a reverse sweep: the sweep time counts twice.
+
 THE FIELD. The brain -- not the simulator -- reads the magnet service (mag2d by
 default), so the field, its angle and whether it was live are latched into
 every sample in real mode too.
@@ -56,6 +70,9 @@ One sweep = one sample:
     each a scalar channel stamped at the moment THAT point was measured,
         t_i = t_start + (i + 0.5) * T / n      (the centre of its dwell),
     so it has neither lag nor smear: the sharp timing a fast fly needs.
+A stream carries the PRIMARY S-parameter only (extra ones are acquired, not
+streamed), and refuses a sweep that needs both source ports: its point
+stamps assume one pass across the band.
 A stream must not mix grids: a change of S-parameter, start, stop or points
 while it runs makes every later read FAIL (the scan stops, with the reason);
 IFBW and power may change (the timing is per sweep). u and ln are listed in
@@ -111,7 +128,40 @@ def _no_reference() -> dict:
     """The `reference` status block when there is none. Same keys as a present
     one (NaN -> null on the wire), so a client never has to test for a key."""
     return {"present": False, "acq_id": 0, "field_mT": _NAN, "angle_deg": _NAN,
-            "sparam": "", "start_Hz": _NAN, "stop_Hz": _NAN, "points": 0, "age_s": _NAN}
+            "sparam": "", "sparams": [], "start_Hz": _NAN, "stop_Hz": _NAN, "points": 0,
+            "age_s": _NAN}
+
+
+def parse_sparams(text) -> tuple:
+    """"S11, s22" (commas, semicolons or spaces; any case) or a list -> ("S11",
+    "S22"). Raises ValueError naming an entry that is not an S-parameter or
+    one listed twice."""
+    parts = text if isinstance(text, (list, tuple)) else \
+        str(text or "").replace(";", ",").replace(" ", ",").split(",")
+    out = []
+    for part in parts:
+        sp = str(part).strip().upper()
+        if not sp:
+            continue
+        if sp not in SPARAMS:
+            raise ValueError(f"{part!r} is not an S-parameter (one of {', '.join(SPARAMS)})")
+        if sp in out:
+            raise ValueError(f"{sp} is listed twice")
+        out.append(sp)
+    return tuple(out)
+
+
+def source_ports(sparams) -> int:
+    """How many directions a sweep of these S-parameters needs. Sij is
+    received at port i with the SOURCE at port j: S11 and S21 both come from
+    the forward sweep (source port 1), S12 and S22 from the reverse one."""
+    return max(1, len({sp[2] for sp in sparams}))
+
+
+def _traces(t: dict) -> dict:
+    """{sparam: complex trace} of a trace dict (one written before 2026-11-10,
+    or by a one-parameter sweep, has only its "s")."""
+    return t.get("traces") or {t.get("sparam"): t["s"]}
 
 
 @dataclass
@@ -131,6 +181,10 @@ class Status:
     power_dBm: float = _NAN
     averages: int = 1
     sparam: str = "S21"
+    # the extra S-parameters measured in the same sweep ("S11,S22", canonical
+    # form; "" = none) and ALL the parameters each sweep returns, primary first
+    extra_sparams: str = ""
+    sparams: list = field(default_factory=list)
     sweep_time_s: float = _NAN
     continuous: bool = True
     # what the sweep thread is doing
@@ -345,7 +399,50 @@ class Analyzer:
         if sparam not in SPARAMS:
             raise ValueError(f"sparam must be one of {SPARAMS}, got {sparam!r}")
         self.cfg.sweep.sparam = sparam
-        self._changed(f"measuring {sparam}", False)
+        extras = self.extra_sparams()
+        if sparam in extras:
+            # it is the primary now; measuring it twice would mean nothing
+            self.cfg.sweep.extra_sparams = ",".join(sp for sp in extras if sp != sparam)
+        self._changed(f"measuring {', '.join(self.measured_sparams())}", False)
+
+    def set_extra_sparams(self, sparams) -> None:
+        """More S-parameters from the SAME sweep as `sparam` ("S11", "S11,S22"
+        or a list; "" = none). Refused on a backend that reads only one trace
+        per sweep, and for anything that is not an S-parameter. The primary
+        itself is dropped from the list (it is measured anyway)."""
+        extras = parse_sparams(sparams)
+        extras = tuple(sp for sp in extras if sp != self.cfg.sweep.sparam)
+        if extras and not self.multi_sparams:
+            raise ValueError("this analyser backend reads one S-parameter per sweep; "
+                             "extra S-parameters need the simulator or a Copper Mountain")
+        self.cfg.sweep.extra_sparams = ",".join(extras)
+        self._changed(f"measuring {', '.join(self.measured_sparams())} in one sweep", False)
+
+    @property
+    def multi_sparams(self) -> bool:
+        """Can the backend return several S-parameters from one sweep?"""
+        return bool(getattr(self.backend, "multi_sparams", False))
+
+    def extra_sparams(self) -> tuple:
+        """The extra S-parameters as configured (already sanitised)."""
+        try:
+            return parse_sparams(self.cfg.sweep.extra_sparams)
+        except ValueError:
+            return ()
+
+    def measured_sparams(self) -> tuple:
+        """Every S-parameter one sweep returns, the primary first."""
+        primary = self.cfg.sweep.sparam
+        return (primary, *(sp for sp in self.extra_sparams() if sp != primary))
+
+    def sweep_time_s(self, points: int | None = None, ifbw_Hz: float | None = None) -> float:
+        """One sweep of every measured S-parameter: the backend's time for one
+        direction, twice when both source ports are needed (see source_ports)."""
+        sw = self.cfg.sweep
+        points = sw.points if points is None else points
+        ifbw_Hz = sw.ifbw_Hz if ifbw_Hz is None else ifbw_Hz
+        return (self.backend.sweep_time_s(points, ifbw_Hz)
+                * source_ports(self.measured_sparams()))
 
     def set_continuous(self, on: bool) -> None:
         self.cfg.acquisition.continuous = bool(on)
@@ -449,7 +546,8 @@ class Analyzer:
         with self._lock:
             return dict(self._sample)
 
-    def get_trace(self, which: str = "sample", quantity: str = "s") -> dict:
+    def get_trace(self, which: str = "sample", quantity: str = "s",
+                  sparam: str | None = None) -> dict:
         """A trace and what it was measured under.
 
         which    "sample" (the latched acquisition, what a scan records), "last"
@@ -457,6 +555,9 @@ class Analyzer:
         quantity "s"  the S-parameter as measured (key "s")
                  "u"  (S - S_ref)/S_ref against the brain's reference (key "u")
                  "ln" ln(S / S_ref), the complex logarithm (key "ln")
+        sparam   which of the S-parameters the sweep returned (None = the
+                 primary, i.e. the trace's own `sparam`). The reply's
+                 `sparam` names the one handed out; `sparams` lists them all.
 
         Why both u and ln: the old LabVIEW program plotted u, and for a shallow
         line the two agree, since u ~ ln(1 + u). But a transmission line with a
@@ -489,26 +590,34 @@ class Analyzer:
             t = dict(t)
             now = self._clock()
         t.pop("taken_at", None)
+        have = _traces(t)
+        t.pop("traces", None)
+        sp = t.get("sparam") if sparam is None else str(sparam).upper()
+        if sp not in have:
+            raise ValueError(f"this trace has no {sp}: it measured {', '.join(have)} "
+                             "(sweep.extra_sparams adds more to the same sweep)")
+        t["s"], t["sparam"] = have[sp], sp
         # The arrays are never modified in place after they are published, so
         # the division can run outside the lock.
         if quantity in ("u", "ln"):
             if ref is None:
                 raise ValueError(f"{quantity} needs a reference and there is none: "
                                  "take a reference first (take_reference)")
-            diffs = _reference_mismatch(t, ref)
+            diffs = _reference_mismatch(t, ref, sp)
             if diffs:
-                raise ValueError(f"{quantity} refused: the reference does not match this "
-                                 "trace (" + "; ".join(diffs) + "). Take a new reference.")
+                raise ValueError(f"{quantity} of {sp} refused: the reference does not match "
+                                 "this trace (" + "; ".join(diffs) + "). Take a new reference.")
+            ref_s = _traces(ref)[sp]
             with np.errstate(divide="ignore", invalid="ignore"):
                 s = t.pop("s")
                 if quantity == "u":
-                    t["u"] = (s - ref["s"]) / ref["s"]
+                    t["u"] = (s - ref_s) / ref_s
                 else:
                     # numpy's complex log is the PRINCIPAL branch, so the
                     # imaginary part is wrapped into (-pi, pi]. Fine here: S/S_ref
                     # is a small perturbation around 1, and unwrapping a trace
                     # that never approaches the cut would only invent structure.
-                    t["ln"] = np.log(s / ref["s"])
+                    t["ln"] = np.log(s / ref_s)
             t["reference_acq_id"] = ref["acq_id"]
             t["reference_field_mT"] = ref.get("field_mT", _NAN)
             t["reference_angle_deg"] = ref.get("angle_deg", _NAN)
@@ -576,6 +685,11 @@ class Analyzer:
         """Start recording every completed sweep (and sweeping back to back).
         Returns the stream id. Pins what the samples must keep meaning: the
         S-parameter, the grid and the point channels -- see stream_read."""
+        if source_ports(self.measured_sparams()) > 1:
+            # the point channels are stamped as if the band were swept ONCE;
+            # a forward + reverse sweep would put every stamp in the wrong place
+            raise ValueError("a fly scan streams a one-direction sweep: measure S11/S21 "
+                             "or S12/S22 together, not both (sweep.extra_sparams)")
         with self._lock:
             self._stream_id += 1
             ref = self._reference
@@ -634,7 +748,8 @@ class Analyzer:
     def _stream_settings(self) -> dict:
         """What the samples of one stream are only comparable under."""
         sw = self.cfg.sweep
-        return {"sparam": sw.sparam, "start_Hz": float(sw.start_Hz),
+        return {"sparam": sw.sparam, "sparams": ",".join(self.measured_sparams()),
+                "start_Hz": float(sw.start_Hz),
                 "stop_Hz": float(sw.stop_Hz), "points": int(sw.points),
                 "channels": {p["channel"]: p["index"] for p in self.stream_points()}}
 
@@ -662,16 +777,17 @@ class Analyzer:
             diffs = _reference_mismatch({"sparam": settings["sparam"],
                                          "start_Hz": settings["start_Hz"],
                                          "stop_Hz": settings["stop_Hz"],
-                                         "points": n}, ref)
+                                         "points": n}, ref, settings["sparam"])
             if diffs:
                 why = ("refused: the reference does not match this sweep ("
                        + "; ".join(diffs) + "). Take a new reference.")
         if why:
             errors["u"], errors["ln"] = f"u {why}", f"ln {why}"
         else:
+            ref_s = _traces(ref)[settings["sparam"]]
             with np.errstate(divide="ignore", invalid="ignore"):
-                values["u"] = (s - ref["s"]) / ref["s"]
-                values["ln"] = np.log(s / ref["s"])
+                values["u"] = (s - ref_s) / ref_s
+                values["ln"] = np.log(s / ref_s)
         # the single points, each at the moment it was measured
         t_ch = {}
         for ch, i in settings["channels"].items():
@@ -692,11 +808,12 @@ class Analyzer:
         if st is None or st["error"]:
             return
         pin = st["settings"]
-        now = {"sparam": trace["sparam"], "start_Hz": trace["start_Hz"],
-               "stop_Hz": trace["stop_Hz"], "points": trace["points"]}
+        now = {"sparam": trace["sparam"], "sparams": ",".join(trace["sparams"]),
+               "start_Hz": trace["start_Hz"], "stop_Hz": trace["stop_Hz"],
+               "points": trace["points"]}
         diff = [f"{k} {pin[k]!r} -> {now[k]!r}" for k in now
-                if (not math.isclose(float(pin[k]), float(now[k]), rel_tol=1e-12, abs_tol=1e-3)
-                    if k != "sparam" else pin[k] != now[k])]
+                if (pin[k] != now[k] if k in ("sparam", "sparams") else
+                    not math.isclose(float(pin[k]), float(now[k]), rel_tol=1e-12, abs_tol=1e-3))]
         if diff:
             st["error"] = ("the sweep changed while streaming (" + "; ".join(diff)
                            + "): a fly row cannot mix traces of two sweeps. "
@@ -729,8 +846,9 @@ class Analyzer:
                 simulated=self.simulated,
                 start_Hz=sw.start_Hz, stop_Hz=sw.stop_Hz, points=int(sw.points),
                 ifbw_Hz=sw.ifbw_Hz, power_dBm=sw.power_dBm, averages=int(sw.averages),
-                sparam=sw.sparam,
-                sweep_time_s=self.backend.sweep_time_s(sw.points, sw.ifbw_Hz),
+                sparam=sw.sparam, extra_sparams=sw.extra_sparams,
+                sparams=list(self.measured_sparams()),
+                sweep_time_s=self.sweep_time_s(sw.points, sw.ifbw_Hz),
                 continuous=c.acquisition.continuous,
                 sweeping=self._sweeping, sweep_progress=progress,
                 sweeps=self._sweeps, trace_id=self._trace_id,
@@ -762,6 +880,7 @@ class Analyzer:
             return _no_reference()
         return {"present": True, "acq_id": r["acq_id"], "field_mT": r.get("field_mT", _NAN),
                 "angle_deg": r.get("angle_deg", _NAN), "sparam": r["sparam"],
+                "sparams": list(_traces(r)),
                 "start_Hz": r["start_Hz"], "stop_Hz": r["stop_Hz"], "points": r["points"],
                 "age_s": self._clock() - r["taken_at"]}
 
@@ -819,7 +938,8 @@ class Analyzer:
     def _sweep_once(self) -> bool:
         sw = self.cfg.sweep
         freqs = np.linspace(sw.start_Hz, sw.stop_Hz, int(sw.points))
-        sparam = sw.sparam
+        sparams = self.measured_sparams()
+        sparam = sparams[0]
         with self._lock:
             rev0, acq0 = self._rev, self._acq_id
         # The field is read ONCE, as the sweep starts: in a scan the magnet has
@@ -827,8 +947,13 @@ class Analyzer:
         fr = self._read_field()
         t0 = self._clock()
         with self._hw:
-            self.backend.start_sweep(freqs, sw.ifbw_Hz, sw.power_dBm, sparam, fr)
-            dt = self.backend.sweep_time_s(freqs.size, sw.ifbw_Hz)
+            if len(sparams) > 1:
+                # several S-parameters, ONE trigger (backends/base.py)
+                self.backend.start_sweep(freqs, sw.ifbw_Hz, sw.power_dBm, sparam, fr,
+                                         sparams=sparams)
+            else:
+                self.backend.start_sweep(freqs, sw.ifbw_Hz, sw.power_dBm, sparam, fr)
+            dt = self.sweep_time_s(freqs.size, sw.ifbw_Hz)
             # The WALL-clock moment the sweep began, for the fly-scan stream
             # (time.time(): scan-core lines it up with the magnet's stream,
             # possibly on another PC). Taken once start_sweep has returned,
@@ -871,10 +996,17 @@ class Analyzer:
         else:
             with self._hw:
                 z, meta = self.backend.finish_sweep()
+        traces = meta.pop("traces", None) or {sparam: z}
+        missing = [sp for sp in sparams if sp not in traces]
+        if missing:
+            raise RuntimeError(f"the analyser returned no {', '.join(missing)} trace")
+        traces = {sp: traces[sp] for sp in sparams}          # the configured order
+        z = traces[sparam]
         dip_Hz, dip_dB = model.find_dip(freqs, z)
         trace = {"start_Hz": float(freqs[0]), "stop_Hz": float(freqs[-1]),
                  "points": int(freqs.size), "ifbw_Hz": float(sw.ifbw_Hz),
                  "power_dBm": float(sw.power_dBm), "sparam": sparam, "s": z,
+                 "sparams": list(sparams), "traces": traces,
                  "dip_Hz": dip_Hz, "dip_dB": dip_dB, "time": time.time(),
                  "field_mT": fr.field_mT, "angle_deg": fr.angle_deg, "field_ok": fr.ok,
                  "field_source": fr.source, **meta}
@@ -891,7 +1023,9 @@ class Analyzer:
             self._record_for_stream_locked(trace, t0_wall, dt)
             a = self._acq
             if a is not None and t0 >= a["t0"]:
-                a["sum"] = z.copy() if a["sum"] is None else a["sum"] + z
+                # every S-parameter averaged on its own (coherently, complex)
+                for sp, zz in traces.items():
+                    a["sum"][sp] = zz.copy() if sp not in a["sum"] else a["sum"][sp] + zz
                 a["n"] += 1
                 a["fields"].append(fr.field_mT)
                 a["angles"].append(fr.angle_deg)
@@ -920,7 +1054,8 @@ class Analyzer:
         """Average an acquisition's sweeps and publish them as THE sample (and
         as the reference, if that is what it was for). Called with _lock held
         (the dip fit is a few ms; see the caller for why)."""
-        mean = a["sum"] / a["n"]
+        means = {sp: total / a["n"] for sp, total in a["sum"].items()}
+        mean = means[last["sparam"]]
         dip_Hz, dip_dB = model.find_dip(
             np.linspace(last["start_Hz"], last["stop_Hz"], last["points"]), mean)
         fields = np.asarray(a["fields"], dtype=float)
@@ -934,7 +1069,7 @@ class Analyzer:
         self._sample = {
             "acq_id": a["id"], "time": time.time(), "averages": a["n"],
             "reference": bool(a["reference"]),
-            "sparam": last["sparam"],
+            "sparam": last["sparam"], "sparams": list(means),
             "start_Hz": last["start_Hz"], "stop_Hz": last["stop_Hz"],
             "points": last["points"], "ifbw_Hz": last["ifbw_Hz"],
             "power_dBm": last["power_dBm"],
@@ -943,7 +1078,7 @@ class Analyzer:
             "f_res_model_Hz": f_model,
             "dip_Hz": dip_Hz, "dip_dB": dip_dB, **extra,
         }
-        self._sample_trace = {**self._sample, "s": mean}
+        self._sample_trace = {**self._sample, "s": mean, "traces": means}
         if a["reference"]:
             self._reference = {**self._sample_trace, "taken_at": self._clock()}
 
@@ -971,7 +1106,7 @@ class Analyzer:
 
     def _new_acq(self, acq_id: int, reference: bool) -> dict:
         return {"id": acq_id, "t0": self._clock(), "want": max(1, int(self.cfg.sweep.averages)),
-                "n": 0, "sum": None, "fields": [], "angles": [], "field_ok": True,
+                "n": 0, "sum": {}, "fields": [], "angles": [], "field_ok": True,
                 "reference": bool(reference)}
 
     def _changed(self, msg: str, clamped: bool) -> None:
@@ -1093,7 +1228,8 @@ class Analyzer:
             self._instrument = dict(state)
         self._emit("info", f"adopted the analyser's sweep: {sw.start_Hz / 1e9:.6g}-"
                            f"{sw.stop_Hz / 1e9:.6g} GHz, {sw.points} points, IFBW "
-                           f"{sw.ifbw_Hz:g} Hz, {sw.power_dBm:g} dBm, {sw.sparam}")
+                           f"{sw.ifbw_Hz:g} Hz, {sw.power_dBm:g} dBm, "
+                           f"{', '.join(self.measured_sparams())}")
         if not self.cfg.acquisition.continuous and not self.simulated:
             self._emit("info", "hands off: the analyser keeps sweeping on its own until "
                                "this module is asked to measure (acquire, take reference "
@@ -1110,6 +1246,17 @@ class Analyzer:
         sw.sparam = str(sw.sparam).upper()
         if sw.sparam not in SPARAMS:
             sw.sparam = "S21"
+        try:
+            extras = tuple(sp for sp in parse_sparams(sw.extra_sparams) if sp != sw.sparam)
+        except ValueError as exc:
+            # a typo in the .ini / Settings: say so and measure the primary only
+            self._emit("warn", f"extra_sparams: {exc}; measuring {sw.sparam} only")
+            extras = ()
+        if extras and not self.multi_sparams:
+            self._emit("warn", f"extra_sparams {','.join(extras)} ignored: this analyser "
+                               f"backend reads one S-parameter per sweep")
+            extras = ()
+        sw.extra_sparams = ",".join(extras)            # canonical: "S11,S22"
         for name, (lo, hi) in SAMPLE_LIMITS.items():
             setattr(self.cfg.sample, name, _clamp(float(getattr(self.cfg.sample, name)), lo, hi)[0])
         if self.cfg.sample.geometry not in GEOMETRIES:
@@ -1159,15 +1306,19 @@ def parse_points(text) -> list[float]:
     return out
 
 
-def _reference_mismatch(trace: dict, ref: dict) -> list[str]:
-    """What makes `ref` unusable for `trace`, in words; [] if it matches.
+def _reference_mismatch(trace: dict, ref: dict, sparam: str | None = None) -> list[str]:
+    """What makes `ref` unusable for S-parameter `sparam` of `trace` (default:
+    its primary), in words; [] if it matches.
 
     Only what changes the MEANING of the division counts: another S-parameter
     divides two different quantities, another grid divides point i by a
-    different frequency. IFBW and power change the noise, not the meaning."""
+    different frequency. IFBW and power change the noise, not the meaning.
+    The reference is per parameter: one taken with S21 and S11 serves both."""
     out = []
-    if trace.get("sparam") != ref.get("sparam"):
-        out.append(f"S-parameter {trace.get('sparam')} vs reference {ref.get('sparam')}")
+    sp = trace.get("sparam") if sparam is None else sparam
+    ref_has = list(_traces(ref))
+    if sp not in ref_has:
+        out.append(f"S-parameter {sp} vs reference {', '.join(map(str, ref_has))}")
     for key, label, unit, scale in (("start_Hz", "start", "GHz", 1e9),
                                     ("stop_Hz", "stop", "GHz", 1e9)):
         a, b = float(trace.get(key, _NAN)), float(ref.get(key, _NAN))

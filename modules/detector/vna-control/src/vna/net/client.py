@@ -36,6 +36,7 @@ class RemoteStatus:
                  "field_source_set": "", "field_source": "", "field_ok": False,
                  "geometry": "in_plane", "acq_id": 0, "acquiring": False,
                  "acq_progress": 0.0, "simulated": True, "sparam": "S21",
+                 "extra_sparams": "", "sparams": ["S21"],
                  "acq_is_reference": False}
 
     def __init__(self, d: dict):
@@ -123,6 +124,11 @@ class VnaClient(ControlClient):
     def set_power(self, dbm):         return self._cmd({"cmd": "set_power", "power_dBm": float(dbm)})
     def set_averages(self, n):        return self._cmd({"cmd": "set_averages", "averages": int(n)})
     def set_sparam(self, sp):         return self._checked({"cmd": "set_sparam", "sparam": str(sp)})
+
+    def set_extra_sparams(self, sparams):
+        """More S-parameters from the same sweep: "S11", "S11,S22", a list, or "" for none."""
+        sp = list(sparams) if isinstance(sparams, (list, tuple)) else str(sparams or "")
+        return self._checked({"cmd": "set_extra_sparams", "sparams": sp})
     def set_manual_angle(self, deg):  return self._cmd({"cmd": "set_manual_angle", "angle_deg": float(deg)})
     def clear_reference(self):        return self._cmd({"cmd": "clear_reference"})
     def set_continuous(self, on):     return self._cmd({"cmd": "set_continuous", "on": bool(on)})
@@ -152,12 +158,17 @@ class VnaClient(ControlClient):
     def get_sample(self) -> dict:
         return self._cmd({"cmd": "get_sample"}).get("sample", {})
 
-    def get_trace(self, which: str = "sample", quantity: str = "s") -> dict:
+    def get_trace(self, which: str = "sample", quantity: str = "s",
+                  sparam: str | None = None) -> dict:
         """The trace as numpy: `s`, `u` or `ln` (complex), freqs_Hz, and its
-        conditions. Raises ValueError when the service has none (or it was
-        aborted, or u / ln has no matching reference -- the message says which)."""
-        return trace_from_wire(self._checked({"cmd": "get_trace", "which": which,
-                                              "quantity": quantity}))
+        conditions. `sparam` picks one of the S-parameters the sweep returned
+        (None = the primary). Raises ValueError when the service has none (or
+        it was aborted, or u / ln has no matching reference -- the message
+        says which)."""
+        msg = {"cmd": "get_trace", "which": which, "quantity": quantity}
+        if sparam:
+            msg["sparam"] = str(sparam)
+        return trace_from_wire(self._checked(msg))
 
     def frequencies(self) -> np.ndarray:
         return np.asarray(self._checked({"cmd": "get_frequencies"})["values"], dtype=float)

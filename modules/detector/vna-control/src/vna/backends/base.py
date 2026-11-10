@@ -19,12 +19,24 @@ physics; the real analyser ignores it -- the brain files it with the trace.
 Averaging is the brain's too: it asks for single sweeps and averages the
 complex traces itself, so "N averages" means the same thing on both backends.
 
-Two OPTIONAL attributes, read with getattr (2026-10-09, the fly-scan stream):
+OPTIONAL attributes, read with getattr (2026-10-09, the fly-scan stream; 2026-11-10, multi-trace):
   uses_field_end     True = finish_sweep accepts `field_end` (the field when
                      the sweep ended); the simulator uses it to compute a sweep
                      taken under a moving field. A real analyser leaves it out.
   trigger_latency_s  seconds between start_sweep returning and the first
                      point being measured; the stream's time stamps add it.
+  multi_sparams      True = SEVERAL S-parameters can come from ONE sweep
+                     (2026-11-10, Lukas: "S11 and S21 in a single go"). The
+                     brain then calls
+                         start_sweep(..., sparam, field, sparams=("S21", "S11"))
+                     (sparam = the first of them, the primary) and
+                     finish_sweep returns the primary's trace as always PLUS
+                     meta["traces"] = {"S21": z21, "S11": z11} -- every one
+                     from the same trigger. A backend without it is only ever
+                     called the old way, with one S-parameter. A sweep whose
+                     parameters need BOTH source ports (S11 with S22, say) is
+                     a forward and a reverse sweep on a 2-port analyser: the
+                     brain counts it as twice the sweep time.
 """
 
 from __future__ import annotations
@@ -77,7 +89,8 @@ class VnaBackend(Protocol):
 
     def finish_sweep(self) -> tuple[np.ndarray, dict]:
         """The complex trace of the sweep just started, and a dict of anything
-        the backend knows about it (the simulator: the model's resonance)."""
+        the backend knows about it (the simulator: the model's resonance;
+        with `sparams`, "traces": one complex trace per S-parameter)."""
 
     def abort_sweep(self) -> None:
         """Forget a started sweep without reading it. Safe with none pending."""

@@ -147,6 +147,8 @@ def _probe_value(p):
         return p["options"][-1]
     if p["type"] == "bool":
         return True
+    if p["type"] == "string":
+        return "S11"                     # the only string control: extra_sparams
     lo, hi = p.get("min", 0.0), p.get("max", 1.0)
     return ((lo + hi) / 2) * p.get("scale", 1.0)
 

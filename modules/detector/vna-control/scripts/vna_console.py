@@ -13,6 +13,10 @@ Commands
     clearref                forget the reference
     abort                   cancel a running acquisition
     sparam S11|S12|S21|S22  what is measured
+    also S11[,S22] | none   more S-parameters from the SAME sweep (extra_sparams)
+    marker <GHz>            every measured S-parameter of the last acquisition at
+                            the nearest grid point: dB and degrees, like a
+                            marker in the analyser's own program
     start <GHz>             sweep start
     stop <GHz>              sweep stop
     points <n>              points per sweep
@@ -44,6 +48,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import math
 import socket
 import threading
 import time
@@ -164,6 +169,9 @@ class Console:
             "cont": lambda: self.cmd(cmd="set_continuous", on=args[0].lower() == "on"),
             "sample": lambda: self.cmd(cmd="set_sample", name=args[0], value=num(1)),
             "sparam": lambda: self.cmd(cmd="set_sparam", sparam=args[0].upper()),
+            "also": lambda: self.cmd(cmd="set_extra_sparams",
+                                     sparams="" if args[0].lower() == "none" else args[0]),
+            "marker": lambda: self.marker(num()),
             "angle": lambda: self.cmd(cmd="set_manual_angle", angle_deg=num()),
             "clearref": lambda: self.cmd(cmd="clear_reference"),
         }
@@ -218,6 +226,29 @@ class Console:
                 return
             time.sleep(0.05)
         print(f"acquisition {n} did not finish")
+
+    def marker(self, ghz: float) -> str:
+        """Each measured S-parameter of the latched sample at the grid point
+        nearest `ghz`: what to compare with a marker in S2VNA."""
+        st = self.cmd(cmd="status").get("status") or {}
+        lines = []
+        for sp in st.get("sparams") or [st.get("sparam")]:
+            t = self.cmd(cmd="get_trace", which="sample", sparam=sp)
+            if not t.get("ok"):
+                lines.append(f"{sp}: {t.get('error')}")
+                continue
+            f = [t["start_Hz"] + i * (t["stop_Hz"] - t["start_Hz"]) / max(t["points"] - 1, 1)
+                 for i in range(t["points"])]
+            i = min(range(len(f)), key=lambda k: abs(f[k] - ghz * 1e9))
+            re, im = t["s"]["re"][i], t["s"]["im"][i]
+            if re is None or im is None:
+                lines.append(f"{sp}: no value at point {i}")
+                continue
+            mag = math.hypot(re, im)
+            db = 20 * math.log10(mag) if mag > 0 else float("-inf")
+            lines.append(f"#{t['acq_id']} {sp} at {f[i] / 1e9:.6f} GHz (point {i}): "
+                         f"{db:.3f} dB, {math.degrees(math.atan2(im, re)):.2f} deg")
+        return "\n".join(lines)
 
     def watch(self, seconds: float):
         sub = self.ctx.socket(zmq.SUB)

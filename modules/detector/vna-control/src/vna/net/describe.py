@@ -28,6 +28,14 @@ the same stream, each stamped at the moment its point was measured. The point
 detectors come and go with that list (and their labels with the grid), so the
 manifest revision moves when either changes.
 
+SEVERAL S-PARAMETERS FROM ONE SWEEP (2026-11-10). `s`, `u` and `ln_ratio`
+are the PRIMARY S-parameter (`sparam`) -- unchanged ids, so a saved recipe
+keeps recording what it always did. Each entry of `extra_sparams` ("S11")
+adds `s_s11`, `u_s11` and `ln_ratio_s11`: the same freq dim, the same acquire
+group (one trigger fills them all), read with get_trace's `sparam` argument.
+They are acquired, not streamed (a fly scan streams the primary). The
+`extra_sparams` control is only listed when the backend can do it.
+
 ACTIONS WITH A `wait` BLOCK. `take_reference` is safe to run from a scan routine
 ("go to 150 mT at 45 deg, take the reference, then sweep"), and the `wait` block
 is how the module says so AND how a caller knows it finished: take the id from
@@ -135,6 +143,33 @@ def _point_channels(vna, acquire, sparam) -> list[dict]:
     return out
 
 
+def _extra_channels(vna, acquire, freq_dim) -> list[dict]:
+    """s / u / ln_ratio of every EXTRA S-parameter (cfg.sweep.extra_sparams):
+    ids s_<sp>, u_<sp>, ln_ratio_<sp> in lower case, e.g. u_s11. They come from
+    the same sweep as the primary -- one acquire group, no extra trigger."""
+    out = []
+    for sp in vna.extra_sparams():
+        key = sp.lower()
+        for qid, quantity, label, order, help in (
+                ("s", "s", f"S-parameter ({sp})", 14,
+                 f"Complex {sp} as measured, from the SAME sweep as the primary "
+                 f"S-parameter. Stored as s_{key}_real / _imag."),
+                ("u", "u", f"Permeability u = ({sp} - {sp}_ref)/{sp}_ref", 15,
+                 f"{sp} relative to the reference's {sp} (the reference keeps every "
+                 f"S-parameter of its sweep). Refused when the reference has no {sp}."),
+                ("ln_ratio", "ln", f"ln({sp} / {sp}_ref)", 16,
+                 f"Complex logarithm of {sp} over the reference's {sp}; refused, "
+                 f"like u, with no matching reference.")):
+            out.append(_p(
+                f"{qid}_{key}", label, "indicator", "array", group="Measurement",
+                order=order, acquire=acquire, dtype="complex", shape=["freq"],
+                dims=freq_dim,
+                read={"verb": "get_trace", "key": quantity,
+                      "args": {"which": "sample", "quantity": quantity, "sparam": sp}},
+                help=help))
+    return out
+
+
 def build_manifest(vna) -> dict:
     cfg = vna.cfg
     lim = cfg.limits
@@ -193,8 +228,18 @@ def build_manifest(vna) -> dict:
            options=list(SPARAMS), read_path=["sparam"],
            set={"verb": "set_sparam", "arg": "sparam"},
            settle={"policy": "echoes", "key": "sparam"},
-           help="What is measured. A reference taken with another one no longer "
-                "matches (u is refused)."),
+           help="What is measured (the detectors s, u, ln_ratio). A reference "
+                "without it no longer matches (u is refused)."),
+        *([_p("extra_sparams", "Also measure", "control", "string", group="Sweep", order=66,
+              read_path=["extra_sparams"],
+              set={"verb": "set_extra_sparams", "arg": "sparams"},
+              settle={"policy": "echoes", "key": "extra_sparams"},
+              help="More S-parameters from the SAME sweep, comma separated, e.g. "
+                   "S11 (with S21 as the S-parameter). Each adds s_/u_/ln_ratio_<sp> "
+                   "detectors. S11 and S21 share the forward sweep; adding S12 or S22 "
+                   "sweeps the reverse direction too (twice the time). Empty = none. "
+                   "Write it in canonical form (S11,S22): the setting echoes that.")]
+          if vna.multi_sparams else []),
         _p("sweep_time", "Sweep time", "indicator", "float", unit="s", group="Sweep",
            order=70, decimals=3, read_path=["sweep_time_s"]),
         _p("continuous", "Continuous sweep", "control", "bool", group="Sweep", order=80,
@@ -236,6 +281,7 @@ def build_manifest(vna) -> dict:
                 "to the susceptibility at any line depth (u is its small-signal "
                 "limit). Principal branch, so the imaginary part wraps at +-pi. "
                 "Refused, like u, with no matching reference."),
+        *_extra_channels(vna, acquire, freq_dim),
         *_point_channels(vna, acquire, sparam),
         _p("streaming", "Streaming (fly scan)", "indicator", "bool", group="Measurement",
            order=19, read_path=["streaming"],

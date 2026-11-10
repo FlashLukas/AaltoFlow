@@ -48,6 +48,18 @@ What is different from the Keysight PNA-X, and why this is a file of its own:
     directly (`CALC1:TRAC1:DATA:SDAT?`, "the corrected data array ... S-parameter
     complex values"), so nothing is lost to formatting or phase wrapping.
 
+  * SEVERAL S-parameters from ONE sweep (2026-11-10, Lukas: "S11 and S21 in a
+    single go"; config sweep.extra_sparams). Every trace of a channel is
+    filled by the same sweep, so channel 1 gets one trace per parameter
+    (`CALC1:PAR:COUN n`, `CALC1:PAR<i>:DEF Sxx`, trace 1 = the primary), ONE
+    TRIG:SING + *OPC? as before, then `CALC1:TRAC<i>:DATA:SDAT?` for each.
+    S11 and S21 both come from the forward sweep: no extra time. Adding S12
+    or S22 makes S2VNA sweep the reverse direction too (twice the time),
+    which the brain accounts for.
+    # VERIFY on the S5085: both traces are complete after the one *OPC?, and
+    # TRAC2's numbers equal S2VNA's marker on trace 2 (as was checked for
+    # trace 1 on 2026-11-10).
+
   * No calibration handling: the setup runs uncorrected for now (Lukas,
     2026-09-25), and u / ln(S/S_ref) divide the cables out anyway. Whether
     S2VNA has a correction on is still reported with every sample.
@@ -155,6 +167,8 @@ def limit_envelope(cfg: Config, cmt_model: CmtModel | None = None) -> None:
 
 class CmtVna:
     simulated = False
+    #: several S-parameters from one sweep: one S2VNA trace each (base.py)
+    multi_sparams = True
 
     # FLY-SCAN TIMING (the brain's stream, analyzer.py, 2026-10-09). The brain
     # stamps a sweep as starting when start_sweep returns plus this, and gives
@@ -186,7 +200,8 @@ class CmtVna:
         self._idn = ""
         self._applied: dict = {}          # what the instrument is known to hold
         self._readback: dict = {}         # what it reported back for those
-        self._sparam = None
+        self._sparams = None              # the traces we defined, trace 1 first
+        self._count = None                # :CALC1:PAR:COUN as we last set it
         self._correction = None
         self._pending = False
         self._prepared = False            # set up for single sweeps yet? (see _take_over)
@@ -239,7 +254,7 @@ class CmtVna:
         # a newline, and so does every reply (manual section 2.7).
         r.read_termination = "\n"
         r.write_termination = "\n"
-        self._applied, self._readback, self._sparam = {}, {}, None
+        self._applied, self._readback, self._sparams, self._count = {}, {}, None, None
 
         self._prepared = False
         # CONNECT = LOOK (Lukas, 2026-09-27: read the state at start, change
@@ -278,6 +293,13 @@ class CmtVna:
             self.warnings.append(f"reading the measured S-parameter: {exc}")
             st["sparam"] = None
         try:
+            # informative only: how many traces S2VNA shows. What THIS module
+            # measures per sweep is its own config (sweep.extra_sparams) --
+            # the screen layout is a display choice, not a scan design.
+            st["trace_count"] = int(float(r.query(f":CALC{CH}:PAR:COUN?").strip()))  # VERIFY
+        except Exception as exc:
+            self.warnings.append(f"reading the trace count: {exc}")
+        try:
             st["trigger_source"] = r.query(":TRIG:SOUR?").strip().upper()   # VERIFY: INT|EXT|MAN|BUS
         except Exception as exc:
             self.warnings.append(f"reading the trigger source: {exc}")
@@ -293,8 +315,10 @@ class CmtVna:
         """Set S2VNA up for single sweeps on demand. Runs at the FIRST
         start_sweep, i.e. only when somebody asks this module to measure --
         never on connect (see open)."""
-        # one trace on channel 1, active, showing what we measure
+        # one trace on channel 1, active, showing what we measure (more,
+        # one per S-parameter, if several are asked for: _ensure_sparams)
         self._write(f":CALC{CH}:PAR:COUN 1")
+        self._count = 1
         self._write(f":CALC{CH}:PAR{TR}:SEL")
         self._write(f":SENS{CH}:AVER OFF")                 # the brain averages
         if self._binary():
@@ -376,7 +400,13 @@ class CmtVna:
         return max(model.sweep_time_s(points, ifbw_Hz), int(points) * self.model.min_point_s)
 
     def start_sweep(self, freqs_Hz, ifbw_Hz: float, power_dBm: float,
-                    sparam: str = "S21", field: FieldReading | None = None) -> None:
+                    sparam: str = "S21", field: FieldReading | None = None,
+                    sparams=None) -> None:
+        """`sparams` (optional) = every S-parameter this ONE sweep returns, the
+        primary `sparam` first: one S2VNA trace each, read by finish_sweep."""
+        wanted = tuple(sparams) if sparams else (sparam,)
+        if wanted[0] != sparam:
+            raise ValueError(f"sparams must start with the primary {sparam}, got {wanted}")
         if self._res is None:
             raise RuntimeError(f"{self.model.idn_token} is not connected")
         first = not self._prepared
@@ -388,8 +418,8 @@ class CmtVna:
         # `first`: even with nothing to write, check the grid and learn the
         # correction state once
         changed = self._apply(want) or first
-        if sparam != self._sparam:
-            self._ensure_sparam(sparam)
+        if wanted != self._sparams:
+            self._ensure_sparams(wanted)
             changed = True
         if changed:
             self._check_errors("applying the sweep settings")
@@ -426,19 +456,28 @@ class CmtVna:
         if not done.endswith("1"):
             raise RuntimeError(f"{self.model.idn_token}: unexpected *OPC? reply {done!r}")
 
-        query = f":CALC{CH}:TRAC{TR}:DATA:SDAT?"
-        if self._binary():
-            data = r.query_binary_values(query, datatype="d", is_big_endian=False,
-                                         container=np.array)
-        else:
-            data = r.query_ascii_values(query, container=np.array)
-        z = parse_sdata(data, self._points)
+        # every trace of channel 1 came from the sweep that just ended
+        traces = {sp: self._read_trace(i) for i, sp in enumerate(self._sparams, start=1)}
+        z = traces[self._sparams[0]]
         meta = {"ifbw_actual_Hz": self._readback.get("ifbw", math.nan),
                 "power_actual_dBm": self._readback.get("power", math.nan),
                 "correction_on": self._correction,
                 "sweep_s": self._clock() - self._started_at,
                 "f_res_model_Hz": math.nan}
+        if len(traces) > 1:
+            meta["traces"] = traces
         return z, meta
+
+    def _read_trace(self, i: int) -> np.ndarray:
+        """Trace i of channel 1 as complex numbers (SDAT = corrected re, im pairs)."""
+        r = self._res
+        query = f":CALC{CH}:TRAC{i}:DATA:SDAT?"
+        if self._binary():
+            data = r.query_binary_values(query, datatype="d", is_big_endian=False,
+                                         container=np.array)
+        else:
+            data = r.query_ascii_values(query, container=np.array)
+        return parse_sdata(data, self._points)
 
     def abort_sweep(self) -> None:
         if self._pending and self._res is not None:
@@ -497,13 +536,26 @@ class CmtVna:
             self._applied = {}                     # force a re-write next time
             raise RuntimeError(f"{self.model.idn_token} did not take the sweep: " + "; ".join(bad))
 
-    def _ensure_sparam(self, sparam: str) -> None:
-        if sparam not in model.SPARAMS:
-            raise ValueError(f"sparam must be one of {model.SPARAMS}, got {sparam!r}")
-        self._write(f":CALC{CH}:PAR{TR}:DEF {sparam}")
+    def _ensure_sparams(self, sparams: tuple) -> None:
+        """One trace per S-parameter on channel 1, trace 1 = the primary.
+
+        The trace count is written only when it changes, so a one-parameter
+        module sends exactly what it always did (DEF + SEL on trace 1)."""
+        for sp in sparams:
+            if sp not in model.SPARAMS:
+                raise ValueError(f"sparam must be one of {model.SPARAMS}, got {sp!r}")
+        if len(set(sparams)) != len(sparams):
+            raise ValueError(f"an S-parameter is listed twice: {sparams}")
+        if len(sparams) != self._count:
+            # VERIFY: S2VNA keeps the existing traces' definitions when the
+            # count grows, and adds the new ones (each is re-defined below)
+            self._write(f":CALC{CH}:PAR:COUN {len(sparams)}")
+            self._count = len(sparams)
+        for i, sp in enumerate(sparams, start=1):
+            self._write(f":CALC{CH}:PAR{i}:DEF {sp}")
         self._write(f":CALC{CH}:PAR{TR}:SEL")
-        self._check_errors(f"selecting {sparam}")
-        self._sparam = sparam
+        self._check_errors("selecting " + ", ".join(sparams))
+        self._sparams = tuple(sparams)
 
     def _errors(self) -> list[str]:
         """Drain the error queue ("0, No error" = empty; at most 100 entries)."""

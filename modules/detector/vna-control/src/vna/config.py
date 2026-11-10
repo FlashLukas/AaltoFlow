@@ -42,6 +42,14 @@ class Sweep:
     power_dBm: float = -10.0          # source power; higher = less noise (the sim stays linear)
     averages: int = 1                 # sweeps averaged per acquisition (complex, coherent)
     sparam: str = "S21"               # S11 | S12 | S21 | S22: what is measured
+    # More S-parameters measured in the SAME sweep as `sparam` (2026-11-10,
+    # Lukas: "S11 and S21 in a single go"), comma separated, e.g. "S11".
+    # One trigger then returns them all; each adds the detectors s_s11,
+    # u_s11 and ln_ratio_s11 next to s / u / ln_ratio (which stay `sparam`).
+    # Empty = only `sparam`, exactly as before. Only a backend that can read
+    # several traces from one sweep takes it (the simulator and the Copper
+    # Mountain ones so far); on the others it is refused.
+    extra_sparams: str = ""
 
 
 @dataclass

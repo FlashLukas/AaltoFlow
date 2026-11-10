@@ -209,3 +209,29 @@ def test_fly_points_box_sets_the_stream_points_in_ghz(app):
         assert len(vna.stream_points()) == 2
     finally:
         win.close()
+
+
+def test_the_trace_card_offers_every_parameter_of_the_sweep(app):
+    """sweep.extra_sparams (2026-11-10): the plot can show any S-parameter
+    the sweep returned; the choice is hidden while there is only one."""
+    from vna.apps.gui import MainWindow
+    cfg = Config()
+    cfg.field.source = "manual"
+    cfg.sweep.points = 201
+    vna, _ = build_sim_system(cfg, realtime=False, seed=3)
+    win = MainWindow(_NoThreadVna(vna), cfg)
+    try:
+        vna.step()
+        _fresh(win)
+        assert not win.sp_combo.isVisibleTo(win)
+        vna.set_extra_sparams("S11")
+        vna.step()
+        _fresh(win)
+        assert win.sp_combo.isVisibleTo(win)
+        assert [win.sp_combo.itemText(i) for i in range(win.sp_combo.count())] == ["S21", "S11"]
+        win.sp_combo.setCurrentIndex(1)
+        _fresh(win)
+        assert win._trace["sparam"] == "S11"
+        np.testing.assert_array_equal(win._trace["s"], vna.get_trace("last", "s", "S11")["s"])
+    finally:
+        win.close()

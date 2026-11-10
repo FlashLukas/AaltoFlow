@@ -230,6 +230,10 @@ class VnaService:
                 v.set_averages(int(round(float(msg["averages"]))))
             elif cmd == "set_sparam":
                 v.set_sparam(str(msg["sparam"]))
+            elif cmd == "set_extra_sparams":
+                # "S11", "S11,S22", a list, or "" for none
+                sp = msg.get("sparams", "")
+                v.set_extra_sparams(sp if isinstance(sp, (list, tuple)) else str(sp or ""))
             elif cmd == "set_continuous":
                 v.set_continuous(bool(msg["on"]))
             elif cmd == "set_field_source":
@@ -254,7 +258,9 @@ class VnaService:
                 v.abort()
             elif cmd == "get_trace":
                 try:
-                    t = v.get_trace(str(msg.get("which", "sample")), str(msg.get("quantity", "s")))
+                    sp = msg.get("sparam")       # None = the primary
+                    t = v.get_trace(str(msg.get("which", "sample")), str(msg.get("quantity", "s")),
+                                    None if sp in (None, "") else str(sp))
                 except ValueError as exc:
                     # "no reference", "aborted", "does not match": not a malformed
                     # request, so no "bad request" prefix -- the reason is the message
@@ -318,6 +324,8 @@ class VnaService:
         return {
             "idn": self.vna.status().idn, "simulated": self.vna.simulated,
             "sparams": ["S11", "S12", "S21", "S22"],
+            # several of them from ONE sweep (sweep.extra_sparams)?
+            "multi_sparams": self.vna.multi_sparams,
             "freq_min_Hz": lim.freq_min_Hz, "freq_max_Hz": lim.freq_max_Hz,
             "points_min": lim.points_min, "points_max": lim.points_max,
             "ifbw_min_Hz": lim.ifbw_min_Hz, "ifbw_max_Hz": lim.ifbw_max_Hz,
