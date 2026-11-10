@@ -2156,6 +2156,14 @@ zpiezo has no GUI.
     Thorlabs SDK in camera-control\vendor. Anything that must be shared
     between programs on one PC: not %LOCALAPPDATA%. After updating, restart
     every running service (an old one holds its lock in the old folder).
+    The same goes for TOOLS: a `pip install --user uv` run from a Claude
+    session landed in the app's private %APPDATA% (...\LocalCache\Roaming\
+    Python\...\Scripts) and the lab user's own PowerShell said "uv is not
+    recognized". Install uv with the standalone installer (it goes to
+    %USERPROFILE%\.local\bin, which is not redirected); tools/deploy_lab.ps1
+    warns about a uv found in AppData. Note: such a process does NOT report a
+    package identity (GetCurrentPackageFullName says "no package"), so the
+    only reliable test is where a path really resolves (`Path.resolve()`).
 50. **The Newport AG-UC2 lets out ONE reply line per incoming write**
     (2026-11-10, Blue Box). A reply that is not ready when its command
     arrives (while an axis steps), or two command lines in one USB packet,

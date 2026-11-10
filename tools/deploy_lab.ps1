@@ -153,6 +153,16 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 $uv = (Get-Command uv).Source
 Record "uv" $true ((& $uv --version) -join "")
+# A uv inside AppData (e.g. `pip install --user uv`) is fragile: when it was
+# installed from a program started by the Claude desktop app, Windows put it in
+# that app's private copy of AppData, and outside Claude it does not exist
+# (Blue Box, 2026-11-10; developer notes gotcha #49). The standalone installer
+# puts uv in %USERPROFILE%\.local\bin, which is never redirected.
+if ($uv -like "*\AppData\*") {
+    Say "   uv found in AppData ($uv)." "Yellow"
+    Say "   If it was installed from inside the Claude app, other programs will not find it." "Yellow"
+    Say "   Safer: powershell -ExecutionPolicy ByPass -c `"irm https://astral.sh/uv/install.ps1 | iex`"" "Yellow"
+}
 
 # A globally pinned UV_PROJECT_ENVIRONMENT makes every project share and
 # corrupt ONE environment (suite gotcha #8). It bit us once already.
