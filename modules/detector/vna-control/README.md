@@ -179,7 +179,10 @@ one acquisition returns both:
   per parameter, `CALC1:TRAC<i>:DATA:SDAT?`); the PNA and LibreVNA / PNB-60
   backends refuse it for now. Fly scans stream the primary only, and refuse a
   list that needs both directions.
-- GUI: the TRACE card gets a selector for which parameter to plot. Console
+- GUI: the SWEEP card has a tick box per S-parameter; every ticked one is
+  measured in the same sweep and gets its own tab of plots in the TRACE card.
+  The bold one is the primary (`s`, `u`, `ln_ratio`); unticking it makes the
+  first ticked one the primary. Console
   `marker <GHz>` prints every measured parameter at one frequency in dB and
   degrees, to compare with the analyser's own markers.
 

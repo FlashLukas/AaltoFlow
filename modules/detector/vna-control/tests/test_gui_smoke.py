@@ -92,10 +92,11 @@ def test_window_builds_sweeps_and_uses_the_brains_reference(app):
         assert vna.status().reference["present"] is False
         assert "RAW" in win.trace_label.text() and "reference" in win.trace_label.text()
 
-        # the S-parameter selector applies at once
-        win.sparam_combo.setCurrentIndex(win.sparam_combo.findText("S12"))
-        win.sparam_combo.activated.emit(win.sparam_combo.currentIndex())
-        assert vna.status().sparam == "S12"
+        # the S-parameter checklist applies at once: tick S12, untick S21 ->
+        # S12 is the only one, so it is the primary
+        win.sp_checks["S12"].click()
+        win.sp_checks["S21"].click()
+        assert vna.status().sparam == "S12" and vna.status().sparams == ["S12"]
 
         # the sweep form sends only what changed
         win.points_spin.setValue(201)
@@ -216,9 +217,11 @@ def test_fly_points_box_sets_the_stream_points_in_ghz(app):
         win.close()
 
 
-def test_the_trace_card_offers_every_parameter_of_the_sweep(app):
-    """sweep.extra_sparams (2026-11-10): the plot can show any S-parameter
-    the sweep returned; the choice is hidden while there is only one."""
+def test_ticking_s_parameters_measures_them_together_one_tab_each(app):
+    """The checklist (Lukas, 2026-11-10): tick several S-parameters and ONE
+    sweep measures them all; each gets its own tab of plots. The primary (the
+    scan detectors s, u, ln_ratio) stays while it is ticked; with one
+    parameter there is no tab bar."""
     from vna.apps.gui import MainWindow
     cfg = Config()
     cfg.field.source = "manual"
@@ -228,15 +231,34 @@ def test_the_trace_card_offers_every_parameter_of_the_sweep(app):
     try:
         vna.step()
         _fresh(win)
-        assert not win.sp_combo.isVisibleTo(win)
-        vna.set_extra_sparams("S11")
+        tabs = win.plot_tabs
+        assert [x for x, b in win.sp_checks.items() if b.isChecked()] == ["S21"]
+        assert win.sp_checks["S21"].font().bold()
+        assert tabs.count() == 1 and not tabs.tabBar().isVisibleTo(win)
+
+        win.sp_checks["S11"].click()                    # tick S11
+        st = vna.status()
+        assert st.sparam == "S21" and st.sparams == ["S21", "S11"]
+        assert [tabs.tabText(i) for i in range(tabs.count())] == ["S21", "S11"]
+        assert tabs.tabBar().isVisibleTo(win)
+
         vna.step()
-        _fresh(win)
-        assert win.sp_combo.isVisibleTo(win)
-        assert [win.sp_combo.itemText(i) for i in range(win.sp_combo.count())] == ["S21", "S11"]
-        win.sp_combo.setCurrentIndex(1)
+        tabs.setCurrentIndex(1)                         # the S11 tab
         _fresh(win)
         assert win._trace["sparam"] == "S11"
-        np.testing.assert_array_equal(win._trace["s"], vna.get_trace("last", "s", "S11")["s"])
+        np.testing.assert_array_equal(win.mag_curve.getData()[1], 20 * np.log10(
+            np.abs(vna.get_trace("last", "s", "S11")["s"])))
+
+        win.sp_checks["S21"].click()                    # untick the primary
+        st = vna.status()
+        assert st.sparam == "S11" and st.sparams == ["S11"]
+        assert tabs.count() == 1 and win.sp_checks["S11"].font().bold()
+
+        win.sp_checks["S11"].click()                    # the last one stays ticked
+        assert win.sp_checks["S11"].isChecked() and vna.status().sparams == ["S11"]
+
+        vna.set_extra_sparams("S22")                    # changed elsewhere (console)
+        _fresh(win)
+        assert win.sp_checks["S22"].isChecked() and tabs.count() == 2
     finally:
         win.close()

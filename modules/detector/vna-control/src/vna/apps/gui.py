@@ -208,6 +208,48 @@ class KittelIndicator(QtWidgets.QWidget):
         p.end()
 
 
+# ------------------------------------------------------------- plot tab
+
+def _make_plot(name, unit):
+    import pyqtgraph as pg
+    pg.setConfigOptions(antialias=True)
+    w = pg.PlotWidget(background=COLORS["code_bg"])
+    w.setMinimumHeight(120)
+    pen = pg.mkPen(COLORS["muted"])
+    for axis in ("left", "bottom"):
+        ax = w.getAxis(axis); ax.setPen(pen); ax.setTextPen(pen)
+        ax.enableAutoSIPrefix(False)
+    w.setLabel("left", name, units=unit)
+    w.setLabel("bottom", "frequency", units="GHz")
+    w.showGrid(x=True, y=True, alpha=0.15)
+    curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
+    return w, curve
+
+
+class _PlotTab(QtWidgets.QWidget):
+    """The plots of ONE S-parameter: magnitude (or Re) over phase (or Im),
+    x-linked, with the dip and the model resonance marked."""
+
+    def __init__(self, sparam: str):
+        super().__init__()
+        import pyqtgraph as pg
+        self.sparam = sparam
+        self.plot_mode = None
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 6, 0, 0); lay.setSpacing(6)
+        self.mag_plot, self.mag_curve = _make_plot(f"|{sparam}|", "dB")
+        self.phase_plot, self.phase_curve = _make_plot("phase", "deg")
+        self.phase_plot.setXLink(self.mag_plot)
+        self.dip_line = pg.InfiniteLine(angle=90, movable=False,
+                                        pen=pg.mkPen(COLORS["accent_hi"], width=1))
+        self.model_line = pg.InfiniteLine(angle=90, movable=False,
+                                          pen=pg.mkPen(COLORS["muted"], width=1,
+                                                       style=QtCore.Qt.DashLine))
+        self.mag_plot.addItem(self.model_line); self.mag_plot.addItem(self.dip_line)
+        lay.addWidget(self.mag_plot, 3)
+        lay.addWidget(self.phase_plot, 2)
+
+
 # ------------------------------------------------------------- main window
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -226,7 +268,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_acq = 0
         self._ref_id = None              # reference acq_id the trace was fetched against
         self._u_error = ""               # why u could not be shown, if it could not
-        self._plot_mode = None
 
         root = QtWidgets.QWidget(); root.setObjectName("root")
         outer = QtWidgets.QHBoxLayout(root)
@@ -322,17 +363,28 @@ class MainWindow(QtWidgets.QMainWindow):
         scard, slay = _card("Sweep")
         form = QtWidgets.QFormLayout(); form.setSpacing(6)
         lim = self.cfg.limits
-        self.sparam_combo = QtWidgets.QComboBox(); self.sparam_combo.addItems(list(model.SPARAMS))
-        # applies at once (like the source): it is a choice, not a number being typed
-        self.sparam_combo.activated.connect(lambda _i: self._call(
-            self.ctrl.set_sparam, self.sparam_combo.currentText()))
+        # The S-parameters as a CHECKLIST (Lukas, 2026-11-10): tick several and
+        # one sweep measures them all (sweep.extra_sparams), each getting its
+        # own tab of plots on the right. Applies at once, like the source: a
+        # choice, not a number being typed. `.clicked` = user clicks only, so a
+        # status update cannot echo back (gotcha #13).
+        sp_row = QtWidgets.QWidget()
+        sp_lay = QtWidgets.QHBoxLayout(sp_row)
+        sp_lay.setContentsMargins(0, 0, 0, 0); sp_lay.setSpacing(4)
+        self.sp_checks = {}
+        for sp in model.SPARAMS:
+            box = QtWidgets.QCheckBox(sp)
+            box.clicked.connect(lambda _on, sp=sp: self._on_sparam_clicked(sp))
+            sp_lay.addWidget(box)
+            self.sp_checks[sp] = box
+        sp_lay.addStretch(1)
         self.start_spin = self._dspin(lim.freq_min_Hz / 1e9, lim.freq_max_Hz / 1e9, 4, "  GHz", 0.1)
         self.stop_spin = self._dspin(lim.freq_min_Hz / 1e9, lim.freq_max_Hz / 1e9, 4, "  GHz", 0.1)
         self.points_spin = QtWidgets.QSpinBox(); self.points_spin.setRange(lim.points_min, lim.points_max)
         self.ifbw_spin = self._dspin(lim.ifbw_min_Hz / 1e3, lim.ifbw_max_Hz / 1e3, 3, "  kHz", 1.0)
         self.power_spin = self._dspin(lim.power_min_dBm, lim.power_max_dBm, 1, "  dBm", 1.0)
         self.avg_spin = QtWidgets.QSpinBox(); self.avg_spin.setRange(lim.averages_min, lim.averages_max)
-        for label, w in (("S-parameter", self.sparam_combo),
+        for label, w in (("S-parameters", sp_row),
                          ("Start", self.start_spin), ("Stop", self.stop_spin),
                          ("Points", self.points_spin), ("IF bandwidth", self.ifbw_spin),
                          ("Power", self.power_spin), ("Averages", self.avg_spin)):
@@ -472,30 +524,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.which_combo.addItems(["Latest sweep", "Last acquisition"])
         self.which_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
         bar.addWidget(self.which_combo)
-        # which S-parameter to plot when one sweep returns several
-        # (sweep.extra_sparams); hidden while there is only the one
-        self.sp_combo = QtWidgets.QComboBox()
-        self.sp_combo.setToolTip("Every S-parameter here comes from the SAME sweep "
-                                 "(Settings > sweep > extra_sparams)")
-        self.sp_combo.currentIndexChanged.connect(lambda _i: self._force_fetch())
-        self.sp_combo.setVisible(False)
-        bar.addWidget(self.sp_combo)
         bar.addStretch(1)
         self.trace_label = QtWidgets.QLabel(""); self.trace_label.setObjectName("hint")
         bar.addWidget(self.trace_label)
         tlay.addLayout(bar)
-        self.mag_plot, self.mag_curve = self._make_plot("|S21|", "dB")
-        self.phase_plot, self.phase_curve = self._make_plot("phase", "deg")
-        self.phase_plot.setXLink(self.mag_plot)
-        import pyqtgraph as pg
-        self.dip_line = pg.InfiniteLine(angle=90, movable=False,
-                                        pen=pg.mkPen(COLORS["accent_hi"], width=1))
-        self.model_line = pg.InfiniteLine(angle=90, movable=False,
-                                          pen=pg.mkPen(COLORS["muted"], width=1,
-                                                       style=QtCore.Qt.DashLine))
-        self.mag_plot.addItem(self.model_line); self.mag_plot.addItem(self.dip_line)
-        tlay.addWidget(self.mag_plot, 3)
-        tlay.addWidget(self.phase_plot, 2)
+        # One tab of plots per measured S-parameter, all from the same sweep.
+        # With one parameter the tab bar is hidden and it looks as it always
+        # did. Only the VISIBLE tab is fetched (a remote GUI must not pull four
+        # traces seven times a second), so switching tabs fetches at once.
+        self.plot_tabs = QtWidgets.QTabWidget()
+        self.plot_tabs.setDocumentMode(True)
+        self.plot_tabs.currentChanged.connect(lambda _i: self._force_fetch())
+        self._tabs: dict = {}
+        self._ensure_tabs([self.cfg.sweep.sparam])
+        tlay.addWidget(self.plot_tabs, 1)
         colw.addWidget(tcard, 1)
 
         lcard, llay = _card("Status log")
@@ -506,20 +548,43 @@ class MainWindow(QtWidgets.QMainWindow):
         colw.addWidget(lcard, 0)
         return panel
 
-    def _make_plot(self, name, unit):
-        import pyqtgraph as pg
-        pg.setConfigOptions(antialias=True)
-        w = pg.PlotWidget(background=COLORS["code_bg"])
-        w.setMinimumHeight(120)
-        pen = pg.mkPen(COLORS["muted"])
-        for axis in ("left", "bottom"):
-            ax = w.getAxis(axis); ax.setPen(pen); ax.setTextPen(pen)
-            ax.enableAutoSIPrefix(False)
-        w.setLabel("left", name, units=unit)
-        w.setLabel("bottom", "frequency", units="GHz")
-        w.showGrid(x=True, y=True, alpha=0.15)
-        curve = w.plot([], [], pen=pg.mkPen(COLORS["accent"], width=1.6))
-        return w, curve
+    def _ensure_tabs(self, sparams) -> None:
+        """One _PlotTab per S-parameter, in the order the sweep returns them
+        (the primary first). Tabs that stay are kept with their plots."""
+        sparams = list(sparams)
+        if sparams == list(self._tabs):
+            return
+        keep = self._current_sp()
+        self.plot_tabs.blockSignals(True)
+        while self.plot_tabs.count():
+            self.plot_tabs.removeTab(0)
+        tabs = {}
+        for sp in sparams:
+            tabs[sp] = self._tabs.pop(sp, None) or _PlotTab(sp)
+            self.plot_tabs.addTab(tabs[sp], sp)
+        for old in self._tabs.values():
+            old.deleteLater()
+        self._tabs = tabs
+        if keep in tabs:
+            self.plot_tabs.setCurrentWidget(tabs[keep])
+        self.plot_tabs.blockSignals(False)
+        self.plot_tabs.tabBar().setVisible(len(tabs) > 1)
+        self._force_fetch()
+
+    def _current_sp(self):
+        w = self.plot_tabs.currentWidget() if hasattr(self, "plot_tabs") else None
+        return getattr(w, "sparam", None)
+
+    def _tab(self) -> "_PlotTab":
+        return self.plot_tabs.currentWidget()
+
+    # the plots of the VISIBLE tab, under the names they always had
+    mag_plot = property(lambda self: self._tab().mag_plot)
+    phase_plot = property(lambda self: self._tab().phase_plot)
+    mag_curve = property(lambda self: self._tab().mag_curve)
+    phase_curve = property(lambda self: self._tab().phase_curve)
+    dip_line = property(lambda self: self._tab().dip_line)
+    model_line = property(lambda self: self._tab().model_line)
 
     # ---- actions ---------------------------------------------------------
 
@@ -534,6 +599,45 @@ class MainWindow(QtWidgets.QMainWindow):
             self._on_event("error", str(exc))
         except Exception as exc:
             self._on_event("warn", f"refused: {exc}")
+
+    def _on_sparam_clicked(self, sp: str):
+        """Tick / untick one S-parameter. The PRIMARY (the scan detectors s, u,
+        ln_ratio) stays what it is while it is ticked; unticking it promotes
+        the first ticked one. At least one stays ticked."""
+        s = self.ctrl.status()
+        primary = s.sparam
+        ticked = [x for x in model.SPARAMS if self.sp_checks[x].isChecked()]
+        if not ticked:
+            self.sp_checks[sp].setChecked(True)          # one is always measured
+            self._on_event("warn", "at least one S-parameter is measured")
+            return
+        if primary not in ticked:
+            primary = ticked[0]
+            self._call(self.ctrl.set_sparam, primary)
+        extras = ",".join(x for x in ticked if x != primary)
+        self._call(self.ctrl.set_extra_sparams, extras)
+        self._sync_sparams()
+
+    def _sync_sparams(self):
+        """The checklist and the plot tabs follow what the analyser measures
+        (also when a console or a scan changed it)."""
+        s = self.ctrl.status()
+        sps = [str(x) for x in (getattr(s, "sparams", None) or [s.sparam])]
+        for sp, box in self.sp_checks.items():
+            box.blockSignals(True)
+            box.setChecked(sp in sps)
+            box.blockSignals(False)
+            primary = sp == s.sparam
+            f = box.font()
+            if f.bold() != primary:
+                f.setBold(primary); box.setFont(f)
+            box.setToolTip(
+                f"{sp}: the PRIMARY S-parameter -- the scan detectors s, u, ln_ratio"
+                if primary else
+                f"{sp}: tick to measure it in the SAME sweep (detectors "
+                f"s_{sp.lower()}, u_{sp.lower()}, ln_ratio_{sp.lower()}); "
+                f"it gets its own tab on the right")
+        self._ensure_tabs(sps)
 
     def _apply_sweep(self):
         """Send only what changed: every sweep change restarts an acquisition
@@ -633,8 +737,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     spin.setValue(int(val))
         finally:
             self._syncing = False
-        for combo, text in ((self.source_combo, s.field_source_set),
-                            (self.sparam_combo, s.sparam)):
+        self._sync_sparams()
+        for combo, text in ((self.source_combo, s.field_source_set),):
             if force or not combo.view().isVisible():
                 i = combo.findText(text)
                 if i >= 0:
@@ -778,19 +882,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.view_combo.currentIndex() != 0:
                 self._force_fetch()
 
-        # the S-parameters each sweep returns: the plot's choice follows them
-        sps = [str(x) for x in (getattr(s, "sparams", None) or [s.sparam])]
-        if sps != [self.sp_combo.itemText(i) for i in range(self.sp_combo.count())]:
-            keep = self.sp_combo.currentText()
-            self.sp_combo.blockSignals(True)
-            self.sp_combo.clear()
-            self.sp_combo.addItems(sps)
-            if keep in sps:
-                self.sp_combo.setCurrentIndex(sps.index(keep))
-            self.sp_combo.blockSignals(False)
-            self.sp_combo.setVisible(len(sps) > 1)
-            self._force_fetch()
-
         # trace: fetch only when there is a new one, and not more than ~7 per second
         which = "last" if self.which_combo.currentIndex() == 0 else "sample"
         new = s.trace_id != self._trace_id if which == "last" else self._trace_id == -1
@@ -808,8 +899,8 @@ class MainWindow(QtWidgets.QMainWindow):
         the other two. If u is refused (no reference, or it does not match),
         show the raw trace and say why instead of an empty plot."""
         self._u_error = ""
-        # None = the primary (also while the list has only the one)
-        sp = self.sp_combo.currentText() if self.sp_combo.count() > 1 else None
+        # the visible tab's S-parameter (with one tab: the primary)
+        sp = self._current_sp() if len(self._tabs) > 1 else None
         if self.view_combo.currentIndex() == 0:
             return self.ctrl.get_trace(which, "s", sp)
         # The last view wants the logarithm; the middle two are built from u.
@@ -821,9 +912,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.ctrl.get_trace(which, "s", sp)
 
     def _set_plot_mode(self, mode: str, sparam: str):
-        if (mode, sparam) == self._plot_mode:
+        tab = self._tab()
+        if (mode, sparam) == tab.plot_mode:
             return
-        self._plot_mode = (mode, sparam)
+        tab.plot_mode = (mode, sparam)
         if mode == "u":
             self.mag_plot.setLabel("left", "Re u", units="")
             self.phase_plot.setLabel("left", "Im u", units="")
@@ -844,6 +936,8 @@ class MainWindow(QtWidgets.QMainWindow):
         f = t["freqs_Hz"]
         fx = f / 1e9
         sp = t.get("sparam", "S21")
+        if len(self._tabs) > 1 and self._tabs.get(sp) is not self._tab():
+            return                       # fetched for a tab no longer shown
         view = self.view_combo.currentIndex()
         label = f"{sp}, {t['points']} pts, IFBW {t['ifbw_Hz'] / 1e3:g} kHz, {t['power_dBm']:g} dBm"
         if "ln" in t:

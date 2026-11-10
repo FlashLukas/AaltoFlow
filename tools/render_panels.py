@@ -1516,6 +1516,8 @@ def _vna(theme):
     cfg.sweep.start_Hz, cfg.sweep.stop_Hz, cfg.sweep.points = 2.2e9, 3.4e9, 1201
     # two fly-scan stream points, so the "Fly points" box shows what it is for
     cfg.stream.points_Hz = "2.6e9, 2.8e9"
+    # S11 ticked too: one sweep, two parameters, a plot tab each
+    cfg.sweep.extra_sparams = "S11"
     vna, _ = build_sim_system(cfg, seed=5)
 
     def warm_up(win):
