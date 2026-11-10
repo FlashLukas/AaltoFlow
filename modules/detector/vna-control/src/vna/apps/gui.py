@@ -790,7 +790,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # detectors stay in describe for a scan that wants them.
         self.resonance_card.setVisible(simulated)
         if not simulated:
-            self.dip_line.setVisible(False)
+            for tab in self._tabs.values():     # every S-parameter's plots
+                tab.dip_line.setVisible(False)
 
     def _refresh(self):
         if self._control_bar is not None:
