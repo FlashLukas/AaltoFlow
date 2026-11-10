@@ -122,3 +122,57 @@ def test_an_echo_that_flaps_back_to_the_old_value_does_not_crash():
     for st in (old, new, old, old, new):
         assert guarded(st) is False
     assert guarded({"ch1_phase_deg": 2.0225, "ch1_settled": True}) is True
+
+
+def _vna(rev, extras):
+    """A VNA manifest: the primary trace `s` plus one per extra S-parameter."""
+    params = [{"id": "s", "label": "S-parameter (S11)", "kind": "indicator",
+               "type": "float", "read_path": ["s"]}]
+    params += [{"id": f"s_{sp.lower()}", "label": f"S-parameter ({sp})",
+                "kind": "indicator", "type": "float", "read_path": [f"s_{sp.lower()}"]}
+               for sp in extras]
+    return {"module": "vna", "revision": rev, "parameters": params}
+
+
+def test_a_new_detector_appears_and_a_dropped_one_goes():
+    """Blue Box, 2026-11-10: S21 ticked next to S11 in the VNA's GUI while the
+    suite was connected -- the Scan tab kept showing S11 only. A new revision
+    can ADD parameters; refresh_stale registers them (and says so), and drops
+    the detectors the module no longer offers."""
+    lab = Lab()
+    vna = _Inst("vna", _vna(1, []), status={"describe_rev": 2})
+    vna.limits_rev = 1
+    vna.fresh = _vna(2, ["S21"])
+    lab.instruments = {"vna": vna}
+    reg = Registry()
+    M.register_manifest(reg, vna, vna.manifest, prefix=True)
+    reg.owner = {"vna.s": "vna"}
+    seen = []
+    lab.refresh_stale(reg, prefix=True, on_params=lambda a, r: seen.append((a, r)))
+    assert reg.get("vna.s_s21") is not None and reg.owner["vna.s_s21"] == "vna"
+    assert seen == [(["vna.s_s21"], [])]
+    vna._status = {"describe_rev": 3}                 # S21 unticked again
+    vna.fresh = _vna(3, [])
+    lab.refresh_stale(reg, prefix=True, on_params=lambda a, r: seen.append((a, r)))
+    assert reg.get("vna.s_s21") is None and seen[-1] == ([], ["vna.s_s21"])
+    assert reg.get("vna.s") is not None
+
+
+def test_the_scan_tab_keeps_its_ticks_when_detectors_are_added():
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtCore, QtWidgets
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    from apps.scan_builder import ScanBuilder
+    vna = _Inst("vna", _vna(1, []))
+    reg = Registry()
+    M.register_manifest(reg, vna, vna.manifest, prefix=True)
+    b = ScanBuilder(registry=reg, embedded=True)
+    ids = [it.data(0, QtCore.Qt.UserRole) for it in b._det_items()]
+    assert ids == ["vna.s"]
+    M.register_manifest(reg, vna, _vna(2, ["S21"]), prefix=True)   # what refresh adds
+    b.reload_parameters()
+    ticked = {it.data(0, QtCore.Qt.UserRole): it.checkState(0) == QtCore.Qt.Checked
+              for it in b._det_items()}
+    assert set(ticked) == {"vna.s", "vna.s_s21"} and ticked["vna.s"] is True

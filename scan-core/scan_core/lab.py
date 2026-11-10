@@ -220,7 +220,8 @@ class Lab:
 
     # ---- keeping the inherited limits honest -----------------------------
 
-    def refresh_stale(self, registry, prefix: bool = False, on_warn=None) -> list:
+    def refresh_stale(self, registry, prefix: bool = False, on_warn=None,
+                      on_params=None) -> list:
         """Re-read `describe` from any service whose manifest went stale, and
         push the new LIMITS onto the matching registry parameters.
 
@@ -244,6 +245,14 @@ class Lab:
         about to show a range.
 
         Returns the ids whose limits actually changed, so a caller can say so.
+
+        A new revision can also ADD or DROP parameters, not only move limits
+        (Blue Box, 2026-11-10: ticking S21 next to S11 in the VNA's GUI adds
+        the detectors s_s21 / u_s21 / ln_ratio_s21; the suite showed them only
+        after a reconnect). New ones are registered, detectors the module no
+        longer offers are removed, and `on_params(added, removed)` is called
+        when either list is not empty -- a palette must then be reloaded.
+        Settables are never removed: an axis row may hold one.
         """
         changed = []
         warn = on_warn or (lambda m: None)
@@ -285,8 +294,57 @@ class Lab:
             changed += _apply_limits(registry, fresh, prefix, warn,
                                      module=module_prefix(inst, fresh))
             inst.limits_rev = fresh.get("revision")
+            added, removed = _sync_parameters(registry, inst, name, fresh, prefix, warn)
+            if (added or removed) and on_params is not None:
+                on_params(added, removed)
 
         return changed
+
+
+def _sync_parameters(registry, inst, name: str, manifest: dict, prefix: bool,
+                     warn) -> tuple[list, list]:
+    """Register what a fresh manifest offers that the registry lacks, and drop
+    the DETECTORS (and routine actions) of this instrument it no longer offers.
+
+    Built in a scratch registry with the same code as a first connection, so a
+    parameter added later is exactly what a reconnect would have made. Which
+    ids belong to this instrument comes from `registry.owner` (build_lab_
+    registry fills it); without it nothing is removed, only added.
+    """
+    from .registry import Registry
+    scratch = Registry()
+    register_manifest(scratch, inst, manifest, prefix=prefix, on_warn=warn,
+                      module_name=getattr(inst, "alias", None))
+    owner = getattr(registry, "owner", None)
+    added, removed = [], []
+    for p in [*scratch.settables(), *scratch.gettables()]:
+        if registry.get(p.id) is None:
+            registry.add(p)
+            added.append(p.id)
+            if owner is not None:
+                owner[p.id] = name
+    for a in scratch.actions():
+        if registry.get_action(a.id) is None:
+            registry.add_action(a)
+            added.append(a.id)
+            if owner is not None:
+                owner[a.id] = name
+    if owner is not None:
+        offered = {p.id for p in scratch.gettables()} | {p.id for p in scratch.settables()}
+        acts = {a.id for a in scratch.actions()}
+        for pid, who in list(owner.items()):
+            if who != name:
+                continue
+            p = registry.get(pid)
+            if p is not None and p.kind == "gettable" and pid not in offered:
+                registry._params.pop(pid, None)
+                owner.pop(pid, None)
+                removed.append(pid)
+            elif p is None and registry.get_action(pid) is not None and pid not in acts:
+                registry._actions.pop(pid, None)
+                owner.pop(pid, None)
+                removed.append(pid)
+    return added, removed
 
 
 def _apply_limits(registry, manifest: dict, prefix: bool, warn, module=None) -> list:

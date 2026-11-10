@@ -619,6 +619,28 @@ class Suite(QtWidgets.QMainWindow):
                 self.log("scan finished")
                 self._t0 = None
             self.run_state.setText("idle")
+            # Every 2 s: did a module's describe move (e.g. S21 ticked in the
+            # VNA's GUI)? Then the Scan tab refreshes at once, not only when it
+            # is next opened.
+            self._rev_ticks = getattr(self, "_rev_ticks", 0) + 1
+            if self._rev_ticks % 4 == 0 and self._describe_moved():
+                self.builder.refresh_axis_limits()
+
+    def _describe_moved(self) -> bool:
+        """Has any connected module published a describe revision the registry
+        does not hold yet? Reads only the CACHED status (Instrument.latest,
+        never the network): this runs on the GUI thread twice a second, and a
+        dead service must not freeze the window."""
+        if self.lab is None or self.registry is not getattr(self.builder, "registry", None):
+            return False
+        for inst in self.lab.instruments.values():
+            latest = getattr(inst, "latest", None)
+            st = latest() if callable(latest) else None
+            rev = (st or {}).get("describe_rev")
+            held = getattr(inst, "limits_rev", (getattr(inst, "manifest", None) or {}).get("revision"))
+            if rev is not None and rev != held:
+                return True
+        return False
 
     # ---- the SCAN SERVER (scan_core/scan_server.py) ------------------------
     #
@@ -1400,10 +1422,22 @@ class Suite(QtWidgets.QMainWindow):
         """
         if self.lab is None:
             return []
-        moved = self.lab.refresh_stale(self.registry, prefix=True, on_warn=self.log)
+        moved = self.lab.refresh_stale(self.registry, prefix=True, on_warn=self.log,
+                                       on_params=self._params_changed)
         if moved:
             self.log(f"limits refreshed: {', '.join(moved)}")
         return moved
+
+    def _params_changed(self, added, removed) -> None:
+        """A module now offers other parameters (e.g. the VNA measures S21 too):
+        say so and refill the Scan tab's lists, keeping the ticks."""
+        if added:
+            self.log("new from the modules: " + ", ".join(added))
+        if removed:
+            self.log("no longer offered: " + ", ".join(removed))
+        b = getattr(self, "builder", None)
+        if b is not None and b.registry is self.registry:
+            b.reload_parameters()
 
     def _group_names(self) -> dict[str, str]:
         """Parameter prefix -> the launcher's name for that module, so the Scan

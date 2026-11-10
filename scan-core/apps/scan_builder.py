@@ -6386,6 +6386,23 @@ class ScanBuilder(QtWidgets.QMainWindow):
         if self.routines:                    # not built yet on the first call
             self._refresh_routine_actions()
 
+    def reload_parameters(self) -> None:
+        """Refill the palette after a module added or dropped parameters
+        (Lab.refresh_stale's on_params), KEEPING what is ticked. Axis rows,
+        conditions and routines are untouched: they hold their own Parameter
+        objects, and settables are never removed."""
+        ticked = {it.data(0, QtCore.Qt.UserRole) for it in self._det_items()
+                  if it.checkState(0) == QtCore.Qt.Checked}
+        self._reload_palette()
+        if ticked:
+            self.det_tree.blockSignals(True)
+            for it in self._det_items():
+                it.setCheckState(0, QtCore.Qt.Checked
+                                 if it.data(0, QtCore.Qt.UserRole) in ticked
+                                 else QtCore.Qt.Unchecked)
+            self.det_tree.blockSignals(False)
+        self._rebuild_summary()
+
     def _sync_fly_detectors(self) -> int:
         """With a FLY axis in the stack, grey out the detectors that cannot fly.
 
