@@ -44,6 +44,8 @@ class FakePna:
             self.errors.clear()
         if cmd.startswith("SENS1:AVER "):
             self.averaging = cmd.endswith(("ON", "1"))
+        if cmd.startswith("OUTP "):
+            self.rf_on = cmd.endswith(("ON", "1"))
         m = re.fullmatch(r"SENS1:FREQ:STAR (\S+)", cmd)
         if m:
             self.state["start"] = float(m.group(1))
@@ -96,6 +98,8 @@ class FakePna:
             return f'"{self.selected}"'
         if cmd == "SENS1:AVER?":
             return "1" if self.averaging else "0"
+        if cmd == "OUTP?":
+            return "1" if getattr(self, "rf_on", True) else "0"
         if cmd == "DISP:WIND1:TRAC:NEXT?":
             return "+2"
         if cmd == "SENS1:SWE:MODE?":

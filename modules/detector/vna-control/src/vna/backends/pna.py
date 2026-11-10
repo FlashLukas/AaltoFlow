@@ -199,6 +199,7 @@ class PnaVna:
             self.warnings.append(f"reading the sweep mode: {exc}")
         st["averaging_on"] = self._query_bool(f"SENS{CH}:AVER?")      # VERIFY: 0/1 reply
         st["correction_on"] = self._query_bool(f"SENS{CH}:CORR:STAT?")
+        st["rf_output"] = self.rf_output()
         # A real analyser is never swept "for free": driving it means taking
         # over its trigger, a change. So the brain starts hands-off.
         st["continuous"] = False
@@ -402,6 +403,16 @@ class PnaVna:
 
     def _write(self, cmd: str) -> None:
         self._res.write(cmd)
+
+    def rf_output(self):
+        """Is the source output on? None if the PNA would not say."""
+        return self._query_bool("OUTP?")                     # VERIFY: 0/1 reply
+
+    def set_rf_output(self, on: bool) -> None:
+        """Switch the source output, on request only (never on connect, sweep
+        or close)."""
+        self._res.write(f"OUTP {'ON' if on else 'OFF'}")      # VERIFY
+        self._check_errors("switching the RF output " + ("on" if on else "off"))
 
     def _query_bool(self, cmd: str):
         try:

@@ -37,7 +37,9 @@ class RemoteStatus:
                  "geometry": "in_plane", "acq_id": 0, "acquiring": False,
                  "acq_progress": 0.0, "simulated": True, "sparam": "S21",
                  "extra_sparams": "", "sparams": ["S21"],
-                 "acq_is_reference": False}
+                 "acq_is_reference": False,
+                 # None = the analyser cannot say (kept None, not NaN: NaN is truthy)
+                 "rf_output": None}
 
     def __init__(self, d: dict):
         for k, default in self._DEFAULTS.items():
@@ -132,6 +134,7 @@ class VnaClient(ControlClient):
     def set_manual_angle(self, deg):  return self._cmd({"cmd": "set_manual_angle", "angle_deg": float(deg)})
     def clear_reference(self):        return self._cmd({"cmd": "clear_reference"})
     def set_continuous(self, on):     return self._cmd({"cmd": "set_continuous", "on": bool(on)})
+    def set_rf_output(self, on):      return self._cmd({"cmd": "set_rf_output", "on": bool(on)})
     def set_field_source(self, src):  return self._checked({"cmd": "set_field_source", "source": str(src)})
     def set_manual_field(self, mT, angle_deg=None):
         msg = {"cmd": "set_manual_field", "field_mT": float(mT)}

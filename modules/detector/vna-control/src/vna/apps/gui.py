@@ -428,6 +428,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # acquisition
         acard, alay = _card("Acquire (scan-safe trace)")
+        # the analyser's source output (2026-11-10). OFF -> acquisitions are
+        # refused by the brain; greyed when this analyser cannot switch it
+        self.rf_chk = QtWidgets.QCheckBox("RF output on")
+        self.rf_chk.clicked.connect(lambda on: self._call(self.ctrl.set_rf_output, on))  # user only
+        alay.addWidget(self.rf_chk)
         self.cont_chk = QtWidgets.QCheckBox("Continuous sweep")
         self.cont_chk.clicked.connect(lambda on: self._call(self.ctrl.set_continuous, on))  # user only
         alay.addWidget(self.cont_chk)
@@ -759,6 +764,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cont_chk.blockSignals(True)
         self.cont_chk.setChecked(bool(s.continuous))
         self.cont_chk.blockSignals(False)
+        rf = getattr(s, "rf_output", None)
+        self.rf_chk.blockSignals(True)
+        self.rf_chk.setChecked(bool(rf))
+        self.rf_chk.blockSignals(False)
+        self.rf_chk.setEnabled(rf is not None)
+        self.rf_chk.setText("RF output on" if rf is not False else "RF output OFF")
+        self.rf_chk.setToolTip("this analyser cannot report or switch its RF output"
+                               if rf is None else
+                               "Off: acquisitions are refused (a sweep would measure noise)")
         # the fly points as the ANALYSER uses them (snapped to its grid), unless
         # the box is being typed in
         pts = getattr(s, "stream_points", None) or []

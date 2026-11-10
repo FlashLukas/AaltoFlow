@@ -37,6 +37,15 @@ OPTIONAL attributes, read with getattr (2026-10-09, the fly-scan stream; 2026-11
                      parameters need BOTH source ports (S11 with S22, say) is
                      a forward and a reverse sweep on a 2-port analyser: the
                      brain counts it as twice the sweep time.
+  rf_output() / set_rf_output(on)
+                     (2026-11-10, Blue Box: the user wanted the source OFF
+                     and there was no way to say so.) Query / switch the RF
+                     source output. rf_output() returns True, False, or None
+                     when the analyser would not say. read_state() then also
+                     reports "rf_output". A backend without them (LibreVNA,
+                     Harogic: their SCPI documents no output switch) cannot be
+                     switched from here, and the brain treats the state as
+                     unknown -- it measures as before.
 """
 
 from __future__ import annotations

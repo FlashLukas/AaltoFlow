@@ -310,11 +310,24 @@ class CmtVna:
             self.warnings.append(f"reading the trigger source: {exc}")
         st["averaging_on"] = self._query_bool(f":SENS{CH}:AVER?")        # VERIFY: 0/1 reply
         st["correction_on"] = self._query_bool(f":SENS{CH}:CORR:STAT?")
+        st["rf_output"] = self.rf_output()
         # Driving S2VNA means taking over its trigger (a change), so the brain
         # starts hands-off.
         st["continuous"] = False
         self.warnings.extend(self._errors())               # reading the queue changes nothing
         return st
+
+    def rf_output(self):
+        """Is the source output on? True / False, None if S2VNA would not say.
+        `:OUTP:STAT?` answers 1/0 (checked on the S5085, Blue Box 2026-11-10)."""
+        return self._query_bool(":OUTP:STAT?")
+
+    def set_rf_output(self, on: bool) -> None:
+        """Switch the source output. Only ever on request (the rf_output
+        control): connecting, sweeping and closing never touch it, so the
+        analyser is handed back with the output as the user left it."""
+        self._write(f":OUTP:STAT {'ON' if on else 'OFF'}")
+        self._check_errors("switching the RF output " + ("on" if on else "off"))
 
     def _take_over(self) -> None:
         """Set S2VNA up for single sweeps on demand. Runs at the FIRST

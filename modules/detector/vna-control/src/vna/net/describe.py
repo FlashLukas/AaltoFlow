@@ -240,6 +240,15 @@ def build_manifest(vna) -> dict:
                    "sweeps the reverse direction too (twice the time). Empty = none. "
                    "Write it in canonical form (S11,S22): the setting echoes that.")]
           if vna.multi_sparams else []),
+        # RF source output (2026-11-10): a control where the backend can switch
+        # it, else an indicator (null = the analyser cannot say)
+        *([_p("rf_output", "RF output", "control", "bool", group="Sweep", order=55,
+              read_path=["rf_output"], set={"verb": "set_rf_output", "arg": "on"},
+              settle={"policy": "echoes", "key": "rf_output"},
+              help="The analyser's source output. OFF: acquisitions are refused "
+                   "(a sweep would measure noise). Connecting and stopping this "
+                   "module never change it.")]
+          if vna.can_switch_rf else []),
         _p("sweep_time", "Sweep time", "indicator", "float", unit="s", group="Sweep",
            order=70, decimals=3, read_path=["sweep_time_s"]),
         _p("continuous", "Continuous sweep", "control", "bool", group="Sweep", order=80,

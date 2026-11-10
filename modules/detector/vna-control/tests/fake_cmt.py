@@ -32,6 +32,7 @@ class FakeCmt:
         self.idn = idn
         self.state = {"start": 100e3, "stop": 9e9, "points": 201, "ifbw": 10e3, "power": 0.0}
         self.trig_source = "INT"
+        self.rf_on = True
         self.cont = True
         self.aver = False
         self.fmt = "ASC"
@@ -88,6 +89,9 @@ class FakeCmt:
         m = re.fullmatch(r":SENS1:AVER (\w+)", cmd)
         if m:
             self.aver = m.group(1) in ("ON", "1")
+        m = re.fullmatch(r":OUTP:STAT (\w+)", cmd)
+        if m:
+            self.rf_on = m.group(1) in ("ON", "1")
         m = re.fullmatch(r":FORM:DATA (\w+)", cmd)
         if m:
             self.fmt = m.group(1)
@@ -132,6 +136,8 @@ class FakeCmt:
             return self.trig_source
         if cmd == ":SENS1:AVER?":
             return "1" if self.aver else "0"
+        if cmd == ":OUTP:STAT?":
+            return "1" if self.rf_on else "0"
         if cmd == ":INIT1:CONT?":
             return "1" if self.cont else "0"
         raise AssertionError(f"FakeCmt: unexpected query {cmd!r}")

@@ -236,6 +236,8 @@ class VnaService:
                 v.set_extra_sparams(sp if isinstance(sp, (list, tuple)) else str(sp or ""))
             elif cmd == "set_continuous":
                 v.set_continuous(bool(msg["on"]))
+            elif cmd == "set_rf_output":
+                v.set_rf_output(bool(msg["on"]))
             elif cmd == "set_field_source":
                 v.set_field_source(str(msg["source"]))
             elif cmd == "set_manual_field":

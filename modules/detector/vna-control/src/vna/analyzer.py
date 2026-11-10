@@ -187,6 +187,11 @@ class Status:
     sparams: list = field(default_factory=list)
     sweep_time_s: float = _NAN
     continuous: bool = True
+    # the RF source output: True / False, None = this analyser cannot say
+    # (LibreVNA, Harogic). Off -> acquisitions are REFUSED (a sweep would
+    # measure noise and look like data). Read at start, at every trigger,
+    # and after every switch; never changed except by set_rf_output.
+    rf_output: bool | None = None
     # what the sweep thread is doing
     sweeping: bool = False
     sweep_progress: float = 0.0
@@ -285,6 +290,7 @@ class Analyzer:
         self._sample_trace: dict | None = None
         self._reference: dict | None = None  # a latched sample trace + "taken_at"
         self._instrument: dict = {}          # what the analyser held at start (read_state)
+        self._rf_on = None                   # RF output as last read (None = cannot say)
         self._stream: dict | None = None     # the fly-scan stream while it runs (stream_start)
         self._stream_id = 0
 
@@ -447,6 +453,48 @@ class Analyzer:
     def set_continuous(self, on: bool) -> None:
         self.cfg.acquisition.continuous = bool(on)
         self._emit("info", "continuous sweep on" if on else "sweep on trigger only")
+
+    # ---- the RF source output (2026-11-10, Blue Box) -------------------------------------
+
+    @property
+    def can_switch_rf(self) -> bool:
+        """Can this backend switch (and read) its RF output?"""
+        return callable(getattr(self.backend, "set_rf_output", None))
+
+    def set_rf_output(self, on: bool) -> None:
+        """Switch the analyser's source output on or off, then read it back.
+
+        Switching OFF also aborts a running acquisition (it would finish on
+        noise). Nothing else in this module ever touches the output: connect,
+        sweep, close and shutdown leave it as found."""
+        if not self.can_switch_rf:
+            raise ValueError("this analyser backend cannot switch its RF output; "
+                             "use the analyser's own program")
+        if not self._connected:
+            raise ValueError("not connected")
+        on = bool(on)
+        if not on:
+            self.abort()
+        with self._hw:
+            self.backend.set_rf_output(on)
+            got = self.backend.rf_output()
+        self._rf_on = got
+        if got is not None and got != on:
+            raise RuntimeError(f"asked for RF output {'on' if on else 'off'}, the analyser "
+                               f"reports it {'on' if got else 'off'}")
+        self._emit("info", "RF output on" if on else
+                   "RF output OFF: acquisitions are refused until it is on again")
+
+    def _check_rf(self) -> None:
+        """Refuse to measure with the source off. Re-reads it, so a switch made
+        on the analyser itself (S2VNA's own buttons) is noticed too."""
+        read = getattr(self.backend, "rf_output", None)
+        if callable(read):
+            with self._hw:
+                self._rf_on = read()
+        if self._rf_on is False:
+            raise ValueError("the analyser's RF output is OFF: a sweep would measure "
+                             "noise. Switch it on first (rf_output / set_rf_output).")
 
     # ---- the field ---------------------------------------------------------------------
 
@@ -685,6 +733,8 @@ class Analyzer:
         """Start recording every completed sweep (and sweeping back to back).
         Returns the stream id. Pins what the samples must keep meaning: the
         S-parameter, the grid and the point channels -- see stream_read."""
+        if self._connected:
+            self._check_rf()              # a fly row of noise is no data either
         if source_ports(self.measured_sparams()) > 1:
             # the point channels are stamped as if the band were swept ONCE;
             # a forward + reverse sweep would put every stamp in the wrong place
@@ -850,6 +900,7 @@ class Analyzer:
                 sparams=list(self.measured_sparams()),
                 sweep_time_s=self.sweep_time_s(sw.points, sw.ifbw_Hz),
                 continuous=c.acquisition.continuous,
+                rf_output=self._rf_on,
                 sweeping=self._sweeping, sweep_progress=progress,
                 sweeps=self._sweeps, trace_id=self._trace_id,
                 dip_Hz=last.get("dip_Hz", _NAN), dip_dB=last.get("dip_dB", _NAN),
@@ -921,6 +972,8 @@ class Analyzer:
             # `continuous` says: a fly row records every one of them
             wanted = (self._acq is not None or self.cfg.acquisition.continuous
                       or self._stream is not None)
+            if self._rf_on is False and self._acq is None:
+                wanted = False      # no live sweeps of noise with the source off
         if abandoned:
             self._emit("warn", f"stream stopped: not read for {STREAM_ABANDON_S:g} s")
         if not wanted:
@@ -1087,6 +1140,7 @@ class Analyzer:
     def _trigger(self, reference: bool) -> int:
         if not self._connected:
             raise ValueError("not connected")
+        self._check_rf()
         cleared = False
         with self._lock:
             # A new trigger abandons a running acquisition. If that one was a
@@ -1215,6 +1269,11 @@ class Analyzer:
                                f"this module will measure {sw.sparam} when it sweeps")
         if "continuous" in state:
             self.cfg.acquisition.continuous = bool(state["continuous"])
+        rf = state.get("rf_output")
+        self._rf_on = rf if isinstance(rf, bool) else None
+        if self._rf_on is False:
+            self._emit("warn", "the analyser's RF output is OFF; acquisitions are refused "
+                               "until it is switched on (rf_output)")
         self._sanitise_config()
         for attr, v in read.items():
             now = getattr(sw, attr)

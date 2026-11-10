@@ -42,6 +42,8 @@ class SimulatedVna:
         self._open = False
         self._pending = None
         self._state = dict(state) if state is not None else None
+        # the pretend source output; a `state` may say it is off
+        self._rf_on = bool((state or {}).get("rf_output", True))
 
     # ---- lifecycle ---------------------------------------------------------
     def open(self) -> None:
@@ -56,7 +58,13 @@ class SimulatedVna:
     def read_state(self) -> dict:
         """The pretend analyser's settings. `continuous` is the simulator's own
         free-running flag: showing live sweeps changes nothing real here."""
-        return dict(self._state or {})
+        return {**(self._state or {}), "rf_output": self._rf_on}
+
+    def rf_output(self) -> bool:
+        return self._rf_on
+
+    def set_rf_output(self, on: bool) -> None:
+        self._rf_on = bool(on)
 
     def close(self) -> None:
         self._open = False
