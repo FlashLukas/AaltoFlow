@@ -510,6 +510,8 @@ class Lab:
         dt = time.monotonic() - t0
         if dt > 1.0:
             self._log(f"  {pid} settled after {dt:.1f} s")
+        if getattr(p, "dtype", "float") == "bool":
+            return bool(value)          # an on/off control answers True/False, not 1.0
         return value
 
     def get(self, pid: str):

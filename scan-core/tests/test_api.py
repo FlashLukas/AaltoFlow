@@ -109,6 +109,11 @@ def test_set_takes_text_and_enum_controls_as_they_are(tmp_path):
         assert d["dtype"] == "enum" and d["options"] == ["S11", "S21", "S12", "S22"]
         assert "one of S11, S21" in lab.summary()
         assert lab.set("field", 20) == 20.0      # numbers unchanged
+        lab.registry.add(Settable("rf_output", "RF output", "", (0, 1),
+                                  set_fn=lambda v: sent.__setitem__("rf", v),
+                                  get_fn=lambda: sent.get("rf", 0.0), dtype="bool"))
+        on = lab.set("rf_output", True)
+        assert on is True and lab.set("rf_output", False) is False   # not 1.0 / 0.0
 
 
 def test_get_acquires_a_slow_detector_and_read_does_not(tmp_path):

@@ -105,7 +105,7 @@ class VnaService:
             raise PortInUse(
                 f"cannot listen on {self.cmd_addr} / {self.pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
-        self.vna._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
+        self.vna._on_event = self._event
         try:
             self.vna.start()
         except BaseException:
@@ -119,6 +119,18 @@ class VnaService:
         self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
         self._pub_t.start()
         self._cmd_t.start()
+
+    def _event(self, level: str, msg: str) -> None:
+        """An event from the brain: published to every subscriber, and a
+        warning or error is ALSO printed. Why (Blue Box, 2026-11-10): the
+        "RF output is OFF" warning is raised while the service starts,
+        before any GUI subscribes, so it reached nobody. Printed, it lands in
+        the launcher's log pane and its daily log file. ASCII only (gotcha
+        #14: the launcher reads stdout through a cp1252 pipe)."""
+        self._events.put({"level": level, "msg": msg})
+        if level in ("warn", "error"):
+            text = str(msg).encode("ascii", "replace").decode("ascii")
+            print(f"vna {level.upper()}: {text}", flush=True)
 
     def serve_forever(self) -> None:
         self.start()

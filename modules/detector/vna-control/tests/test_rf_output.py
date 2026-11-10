@@ -169,3 +169,25 @@ def test_cmt_through_the_brain_refuses_with_the_output_off():
         assert fake.sweeps >= 1
     finally:
         v.shutdown()
+
+
+def test_the_start_up_warning_is_printed_for_the_launcher_log(capsys):
+    """Blue Box 2026-11-10: "RF output is OFF" was emitted while the service
+    started, before any GUI subscribed, so nobody saw it. Warnings are now
+    printed too (the launcher's log pane and its daily file)."""
+    import time
+    from vna.net.service import VnaService
+    cfg = Config()
+    cfg.field.source = "manual"
+    cfg.acquisition.continuous = False
+    v, sim = build_sim_system(cfg, realtime=False, seed=2)
+    sim.set_rf_output(False)
+    svc = VnaService(v, host="127.0.0.1", cmd_port=15796, pub_port=15797)
+    svc.start()
+    try:
+        time.sleep(0.1)
+    finally:
+        svc.stop()
+    out = capsys.readouterr().out
+    assert "vna WARN: the analyser's RF output is OFF" in out
+    assert out.isascii()
