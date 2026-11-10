@@ -33,7 +33,7 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **verified** (SCPI sequence, sweeps, reference + acquire through the service; a calibrated measurement of an attenuation line checked by a person) | 2026-10-26 |
 | [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales -- the vacuum gauge matches its controller --, DO line + read-back, the ALR3203's polarity relay; AO not yet) | 2026-11-10 |
 | [`alr3203`](../modules/source/alr3203-control) | ELC ALR3203 supply + polarity relay (usb6001 p0.0) | **verified** (protocol bytes, voltage and current mode into a coil, relay flips at zero current both ways, field sign follows the setpoint) | 2026-11-10 |
-| [`vna`](../modules/detector/vna-control) `--driver s5085` | Copper Mountain S5085 (S2VNA 24.3.4) | **partly verified** (connect = look, the analyser's limits and state adopted, one sweep of 2048 points read; a point against S2VNA's marker not yet) | 2026-11-10 |
+| [`vna`](../modules/detector/vna-control) `--driver s5085` | Copper Mountain S5085 (S2VNA 24.3.4) | **verified for S11** (connect = look, the analyser's limits and state adopted, sweeps read; equal point for point to S2VNA's own markers; S21 not yet) | 2026-11-10 |
 | [`kim001`](../modules/motion/kim001-control) | Thorlabs KIM001 + PIA13 (objective focus) | **partly verified** (opens by serial, adopts without writing, step moves both ways and seen to move; client status fix and the 74 prefix not yet re-run) | 2026-11-10 |
 | [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **partly verified** (start / adopt, step moves both axes with status polled during them, stop at rest -- after the rewrite to Newport's one-command-per-write rule; limit switch, step size, jog not yet) | 2026-11-10 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
@@ -564,8 +564,13 @@ the module's envelope = the data sheet (9 kHz - 8.5 GHz, 1 Hz - 100 kHz,
 -55 .. +5 dBm, up to 200 001 points). Connecting only LOOKED: it adopted
 S2VNA's sweep (9 kHz - 3 GHz, 2048 points, 1 kHz, +5 dBm, S11, internal
 trigger, averaging and correction on). One `acquire`: 2.6 s (2.53 s measured
-sweep), 2048 complex points, no error. **Not yet:** a point compared with
-S2VNA's marker, S21, the stream timing.
+sweep), 2048 complex points, no error. **Against S2VNA's own markers** (same
+settings, markers on the log-mag trace): 1.000983 GHz -3.4382 dB and
+2.000492 GHz -5.1039 dB; the service read -3.438 dB and -5.104 dB at exactly
+those points (a marker sits on a sweep point, so this is an identity, not an
+interpolation). **Not yet:** S21, the stream timing. (status `instrument` is
+what was found at CONNECT, by design -- the take-over to BUS trigger happens
+at the first acquire, which completes only because of it.)
 
 ## kim001 -- Thorlabs KIM001 + PIA13 objective focus (2026-11-10)
 
