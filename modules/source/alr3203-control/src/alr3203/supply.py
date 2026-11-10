@@ -169,6 +169,11 @@ class BipolarSupply:
         self._relay_hw = None              # True/False/None: the relay as known
         self._trust_unknown = False        # see _adopt
         self._flip_t0: float | None = None  # when waiting for zero current began
+        # True while a SWEEP is flipping the relay at zero (_flip_for_sweep).
+        # The worker then sees its own setpoint at 0, "no flip needed", and
+        # must not clear the flip timer under the sweep (Blue Box, 2026-11-10:
+        # "waiting for the current to stop" said twice for one flip).
+        self._sweep_flip = False
         self._relay_retry_t = -1e9
         self._relay_error = ""
         self._flips = 0
@@ -684,25 +689,31 @@ class BipolarSupply:
         every sign change (_try_flip: only below zero_current_A, retried if the
         relay does not answer, given up after zero_timeout_s)."""
         give_up = time.monotonic() + float(self.cfg.polarity.zero_timeout_s) + 3.0
-        while not halt.is_set():
-            with self._hw:
-                if self._relay_hw is want:
-                    return True, ""
-                try:
-                    i = abs(float(self.backend.measure_current()))
-                except Exception as exc:              # noqa: BLE001
-                    return False, f"error: reading the current to flip: {exc}"
-                self._try_flip(want, i, self._clock())
-                if self._relay_hw is want:
-                    return True, ""
-                if self._flip_t0 is None:             # _try_flip gave up (and said why)
-                    return False, "the polarity relay did not switch (current did not stop)"
-            if time.monotonic() > give_up:
+        with self._hw:
+            self._sweep_flip = True              # the worker leaves the timer alone
+        try:
+            while not halt.is_set():
                 with self._hw:
-                    self._flip_t0 = None
-                return False, "the polarity relay did not switch in time"
-            time.sleep(0.02)
-        return False, "stopped"
+                    if self._relay_hw is want:
+                        return True, ""
+                    try:
+                        i = abs(float(self.backend.measure_current()))
+                    except Exception as exc:          # noqa: BLE001
+                        return False, f"error: reading the current to flip: {exc}"
+                    got = self._try_flip(want, i, self._clock())
+                    if got == "flipped" or self._relay_hw is want:
+                        return True, ""
+                    if got == "refused":              # gave up -- and said why
+                        return False, "the polarity relay did not switch (current did not stop)"
+                if time.monotonic() > give_up:
+                    return False, "the polarity relay did not switch in time"
+                time.sleep(0.02)
+            return False, "stopped"
+        finally:
+            with self._hw:
+                self._sweep_flip = False
+                if self._relay_hw is not want:
+                    self._flip_t0 = None          # not flipping any more
 
     def ramp_stop(self) -> bool:
         """End a sweep WHERE IT IS (a scan's Abort; a safety verb)."""
@@ -954,7 +965,8 @@ class BipolarSupply:
                 # -- flip the relay once the current is gone -----------------------
                 if needs_flip and self._prog == 0.0:
                     self._try_flip(want, i, now)
-                elif self._flip_t0 is not None and not needs_flip:
+                elif self._flip_t0 is not None and not needs_flip \
+                        and not self._sweep_flip:
                     self._flip_t0 = None      # the request went away meanwhile
         except Exception as exc:
             self._report_hw_error(exc)
@@ -993,34 +1005,36 @@ class BipolarSupply:
             return 0.0
         return goal
 
-    def _try_flip(self, want: bool, i_meas, now: float) -> None:
-        """Called by the worker (with _hw held) while the output sits at 0 and
-        the goal is on the other side. Flips when the measured current is below
-        the threshold; gives up after zero_timeout_s."""
+    def _try_flip(self, want: bool, i_meas, now: float) -> str:
+        """Called (with _hw held) while the output sits at 0 and the goal is on
+        the other side -- by the worker, or by a sweep crossing zero. Flips when
+        the measured current is below the threshold; gives up after
+        zero_timeout_s. Returns what happened: "flipped", "waiting" (also while
+        a relay that did not answer is retried) or "refused" (gave up)."""
         p = self.cfg.polarity
         if self._flip_t0 is None:
             self._flip_t0 = now
             self._emit("info", f"polarity change to {'INVERTED' if want else 'normal'}: "
                                f"at zero, waiting for the current to stop")
         if i_meas is None:
-            return
+            return "waiting"
         if abs(i_meas) < float(p.zero_current_A):
             if now < self._relay_retry_t:
-                return
+                return "waiting"
             try:
                 self.relay.set(want)
             except Exception as exc:
                 self._relay_error = f"{type(exc).__name__}: {exc}"
                 self._relay_retry_t = now + 1.0
                 self._report_relay_error()
-                return
+                return "waiting"
             self._relay_hw = want
             self._relay_error = ""
             self._flips += 1
             self._flip_t0 = None
             self._emit("info", f"polarity relay -> {'INVERTED' if want else 'normal'} "
                                f"(at {abs(i_meas) * 1e3:.1f} mA)")
-            return
+            return "flipped"
         if now - self._flip_t0 > float(p.zero_timeout_s):
             # refuse: the setpoint goes to 0 on the CURRENT side, the relay stays
             with self._lock:
@@ -1035,6 +1049,8 @@ class BipolarSupply:
                                 f"{abs(i_meas) * 1e3:.1f} mA (> {float(p.zero_current_A) * 1e3:g} mA) "
                                 f"for {float(p.zero_timeout_s):g} s -- the relay was NOT "
                                 f"switched; the setpoint is 0")
+            return "refused"
+        return "waiting"
 
     def _report_relay_error(self) -> None:
         now = self._clock()

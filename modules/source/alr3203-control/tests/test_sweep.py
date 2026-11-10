@@ -353,3 +353,30 @@ def test_with_the_output_off_only_the_setpoint_walks_across_zero(live):
     st = supply.status()
     assert st.ramp_id == rid and st.current_set_A == 0.5 and not st.output
     assert len(supply.relay.flips) == flips              # set when the output goes on
+
+
+def test_one_wait_and_one_flip_even_when_the_current_takes_its_time():
+    """Blue Box, 2026-11-10: "polarity change ... waiting for the current to
+    stop" was said TWICE before one flip. The worker, seeing its own setpoint
+    at 0 ("no flip needed"), cleared the flip timer under the sweep's flip --
+    and in an unlucky moment the sweep would have ended at 0 with "the relay
+    did not switch". A slow coil makes the wait long enough to catch it."""
+    cfg = Config()
+    cfg.sim.load_L_H = 0.6                              # tau = L/R ~ 0.3 s: a long zero wait
+    supply, spy, events = _make(cfg)
+    try:
+        _output_on(supply)
+        _at(supply, -0.3)
+        events.clear()
+        rid = supply.ramp_current(0.3, 1.0)
+        assert _wait(lambda: not supply.status().sweeping, 15.0)
+        st = supply.status()
+        assert st.ramp_id == rid and st.current_set_A == 0.3
+        assert supply.relay.inverted is False and supply.relay.hot_switches == 0
+        waits = [m for _, m in events if "waiting for the current to stop" in m]
+        flips = [m for _, m in events if "polarity relay ->" in m]
+        assert len(waits) == 1, waits
+        assert len(flips) == 1, flips
+        assert not [m for lvl, m in events if lvl == "error"]
+    finally:
+        supply.shutdown()
