@@ -155,25 +155,52 @@ def spot_mask(gray: np.ndarray, lo: int, hi: int, bright: bool) -> np.ndarray:
 
 
 def analyse(gray: np.ndarray, spot_cfg) -> dict:
-    """What the current threshold selects on this frame (whole-frame search, as
-    calibration does)."""
+    """What the current threshold selects on this frame, judged the way the
+    service does every frame: ONLY inside the search region around the
+    calibrated laser position (the frame centre before the first calibration).
+
+    It used to search the WHOLE frame and keep the largest blob, so a bright
+    illuminated patch elsewhere was reported as "spot found" and the zoom
+    centred on it, even right after the laser was calibrated (Lukas,
+    2026-11-10). Lukas's rule (2026-09-29): "Always look for the laser spot in
+    the safety area around the laser only!" The tint (``mask``) still shows
+    every selected pixel of the frame -- that is the threshold's feedback."""
     sp = spot_cfg
     mask = spot_mask(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot)
-    n, _labels, stats, _cent = cv2.connectedComponentsWithStats(mask, 8)
     h, w = gray.shape[:2]
+    calibrated = bool(getattr(sp, "ref_set", False))
+    where = (sp.ref_x, sp.ref_y) if calibrated else (w / 2.0, h / 2.0)
+    reg = V.search_region(where, sp.lookup_region_px, sp.lookup_region_y_px,
+                          sp.search_shape, (w, h))
+    max_area = int(V.max_area_limit(sp, reg))
+    # the blobs IN the region (a circle is cut out of its bounding box)
+    if reg is not None:
+        x0, y0, x1, y1 = reg["box"]
+        sub = mask[y0:y1, x0:x1].copy()
+        if reg["shape"] == "circle":
+            yy, xx = np.ogrid[y0:y1, x0:x1]
+            cx, cy = reg["center"]
+            sub[(xx - cx) ** 2 + (yy - cy) ** 2 > reg["half"][0] ** 2] = 0
+    else:                                   # region switched off: the whole frame
+        x0, y0, sub = 0, 0, mask
+    n, _labels, stats, _cent = cv2.connectedComponentsWithStats(sub, 8)
     if n > 1:
         areas = stats[1:, cv2.CC_STAT_AREA]
         big = (areas >= max(1, sp.min_area_px))
-        cand = V.spot_candidates(stats, (0, 0), (w, h), sp.min_area_px, sp.max_area_px,
+        cand = V.spot_candidates(stats, (x0, y0), (w, h), sp.min_area_px, max_area,
                                  sp.reject_border)
-        too_large = big & (areas > sp.max_area_px) if sp.max_area_px > 0 else big & False
+        too_large = big & (areas > max_area) if max_area > 0 else big & False
         at_edge = big & ~cand & ~too_large
     else:
         areas = np.array([], int)
         big = cand = too_large = at_edge = np.array([], bool)
-    rep = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot, 0, None, sp.min_area_px,
-                      sp.max_area_px, sp.reject_border)
+    rep = V.find_spot(gray, sp.thr_lower, sp.thr_upper, sp.bright_spot,
+                      sp.lookup_region_px, where, sp.min_area_px, max_area,
+                      sp.reject_border, sp.search_shape, sp.lookup_region_y_px,
+                      symmetric=bool(getattr(sp, "symmetric", False) and calibrated),
+                      max_area_is_auto=not (sp.max_area_px and sp.max_area_px > 0))
     out = {"mask": mask, "spot": rep, "selected_px": int(np.count_nonzero(mask)),
+           "region": reg, "where": where, "calibrated": calibrated,
            "blobs": int(np.count_nonzero(cand)),            # candidates for the spot
            "too_large": int(np.count_nonzero(too_large)),   # rejected: area > max
            "at_edge": int(np.count_nonzero(at_edge)),       # rejected: touches the frame edge
@@ -678,7 +705,10 @@ class SpotTab(QWidget):
         rep = a["spot"]
         calib = (sp.ref_x, sp.ref_y) if sp.ref_set else None
         live = (rep.cx, rep.cy) if rep.found else None
-        center = live or calib or (gray.shape[1] / 2, gray.shape[0] / 2)
+        # the zoom shows where the laser IS for the service: the calibrated
+        # position (what click-to-go and the stabiliser use); before a
+        # calibration, what the threshold found in the region
+        center = calib or live or (gray.shape[1] / 2, gray.shape[0] / 2)
         self.view.set_frame(gray)
         self.view.set_overlay(self._status, self.cfg)
         self.zoom.set_data(gray, a["mask"], center, live, calib)
@@ -700,7 +730,7 @@ class SpotTab(QWidget):
 
         if rep.found:
             x, y, w, h = rep.bbox
-            txt = (f"<b>spot found</b> at ({rep.cx:.2f}, {rep.cy:.2f}) px<br>"
+            txt = (f"<b>spot found</b> in the search region at ({rep.cx:.2f}, {rep.cy:.2f}) px<br>"
                    f"area {rep.area:.0f} px² · box {w}×{h} px · axes {rep.major:.1f}/{rep.minor:.1f} px"
                    f" · {rep.orientation_deg:+.0f}°<br>"
                    f"candidates: {a['blobs']} (largest used) · spot peak {a['peak']}")
@@ -708,8 +738,11 @@ class SpotTab(QWidget):
                 txt += (f"<br>vs calibrated position: "
                         f"{np.hypot(rep.cx - sp.ref_x, rep.cy - sp.ref_y):.2f} px")
         else:
-            txt = (f"<b>no spot</b>: {a['selected_px']} pixels selected in {a['blobs_any']} "
-                   f"blobs · frame max {a['frame_max']}")
+            where = "the calibrated position" if a["calibrated"] else "the frame centre"
+            txt = (f"<b>no spot</b> in the search region around {where}: "
+                   f"{a['blobs_any']} blobs there · frame max {a['frame_max']}")
+            if getattr(rep, "why", ""):
+                txt += f"<br>{html.escape(rep.why)}"
         if a["too_large"] or a["at_edge"]:
             txt += (f"<br>ignored: {a['too_large']} larger than max area, "
                     f"{a['at_edge']} touching the frame edge")
