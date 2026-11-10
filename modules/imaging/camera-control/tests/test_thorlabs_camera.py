@@ -402,16 +402,22 @@ def test_setup_script_refuses_an_entry_outside_its_folder(tmp_path):
 def test_the_real_sdk_loads_when_it_is_unpacked_here(monkeypatch):
     """Runs only where the REAL SDK is unpacked (setup_thorlabs_sdk.py, or
     AALTOFLOW_THORLABS_SDK = its folder): loads Thorlabs' DLL, lists cameras
-    (an empty list without one), disposes. Opens no camera."""
+    (an empty list without one), disposes. Opens no camera. It uses the SAME
+    DLLs as the service: camera.ini's thorlabs_sdk_dir / thorlabs_dll_dir
+    (AALTOFLOW_THORLABS_SDK / AALTOFLOW_THORLABS_DLL_DIR override them) -- on
+    the Blue Box the bundled 2.3 DLLs crash and camera.ini names ThorCam's."""
     import os
 
+    from camera import probe as P
     from camera.backends.thorlabs import find_sdk_dir, import_tl_camera
-    d = find_sdk_dir(os.environ.get("AALTOFLOW_THORLABS_SDK", ""))
+    ini_sdk, ini_dll = P._thorlabs_dirs()
+    d = find_sdk_dir(os.environ.get("AALTOFLOW_THORLABS_SDK", "") or ini_sdk)
     if not d:
         pytest.skip("the real Thorlabs SDK is not unpacked on this PC")
+    dll_dir = os.environ.get("AALTOFLOW_THORLABS_DLL_DIR", "") or ini_dll
     _forget_sdk(monkeypatch)                 # never a fake left by another test
     monkeypatch.setattr(sys, "path", list(sys.path))
-    tl = import_tl_camera(d)
+    tl = import_tl_camera(d, dll_dir)
     sdk = tl.TLCameraSDK()
     try:
         assert isinstance(sdk.discover_available_cameras(), list)
