@@ -456,6 +456,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rlay.addLayout(row)
         rlay.addWidget(self.model_label)
         colw.addWidget(rcard)
+        self.resonance_card = rcard      # hidden on a real analyser, see _set_simulated
 
         tcard, tlay = _card("Trace")
         bar = QtWidgets.QHBoxLayout()
@@ -678,6 +679,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # magnet module's own field anyway, so the card is clutter there (Lukas,
         # 2026-11-10). The source still lives in Settings > Field and on the wire.
         self.field_card.setVisible(simulated)
+        # The RESONANCE card (field, dip, depth) and the dip marker on the trace
+        # go too: find_dip looks for the simulated film's FMR line, and on a
+        # real device (a cable, an attenuator, an unknown sample) the deepest
+        # point of the trace is not a resonance. The dip_freq / dip_depth
+        # detectors stay in describe for a scan that wants them.
+        self.resonance_card.setVisible(simulated)
+        if not simulated:
+            self.dip_line.setVisible(False)
 
     def _refresh(self):
         if self._control_bar is not None:
@@ -874,7 +883,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trace_label.setText(label)
         self.trace_label.setToolTip(label)
         dip = t.get("dip_Hz", math.nan)
-        self.dip_line.setVisible(math.isfinite(dip))
+        self.dip_line.setVisible(math.isfinite(dip) and bool(self._simulated))
         if math.isfinite(dip):
             self.dip_line.setPos(dip / 1e9)
             self.big["dip"].setText(f"{dip / 1e9:.4f}")
