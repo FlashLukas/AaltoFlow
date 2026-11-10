@@ -92,7 +92,7 @@ def test_explicit_apply_config_still_writes():
 
 def _fake_pylablib(monkeypatch, dev: FakeKim001):
     thorlabs = types.SimpleNamespace(KinesisPiezoMotor=lambda serial: dev,
-                                     list_kinesis_devices=lambda: [("97000000", "")])
+                                     list_kinesis_devices=lambda: [("74000000", "")])
     devices = types.ModuleType("pylablib.devices")
     devices.Thorlabs = thorlabs
     pkg = types.ModuleType("pylablib")

@@ -104,3 +104,19 @@ def test_the_brain_on_the_fake_supply_starts_without_a_write_and_ramps(dev):
     assert alr.output is True
     supply.shutdown()
     assert alr.output is False
+
+
+
+def test_serial_number_err_is_an_empty_string(dev):
+    """The rig's firmware (VERSION 1.2) answers SERIAL RD with "0 ERR"
+    (2026-11-10): no serial, no exception."""
+    alr, _ = dev
+    b = SerialALR3203("COM5")
+    b.open()
+    try:
+        assert b.serial_number() == "12345"          # a firmware that has it
+        alr.answer = (lambda orig: (lambda line: "0 ERR" if "SERIAL" in line
+                                    else orig(line)))(alr.answer)
+        assert b.serial_number() == ""
+    finally:
+        b.close(output_off=False)

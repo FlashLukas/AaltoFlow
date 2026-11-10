@@ -33,6 +33,24 @@ What the manual says, and what it leaves open:
 * The AG-UC2 has no step-delay (``DL``) and no ``CC``; ``CC`` is sent only when
   ``hardware.channel`` > 0 (for an AG-UC8).
 
+REPLIES ARRIVE ONE COMMAND LATE (found on the Blue Box rig, 2026-11-10,
+AG-UC2 v2.2.1 on its Newport FTDI driver). After a move with queries during or
+right after it, the controller holds every complete reply line until the NEXT
+command arrives -- VE answered "TE0", 1TP answered the VE, and so on -- and
+stays like that until it is power-cycled; the moves themselves still run.
+(Whether the firmware or the USB driver holds the line is not known.) Reading
+"the next line" then pairs every question with the previous answer: a move
+timed out, and a stop failed on "error 1" -- which was really the "PH1" of the
+poll before. So every exchange here
+  1. empties the input, sends the command, then sends ``VE`` as a PUSHER (a
+     harmless query: it changes nothing and, being AFTER our command, also
+     does not disturb what TE reports),
+  2. accepts only a line that starts with what the question asks for ("1TP"
+     for 1TP, "TE" for TE, "PH", "1SU", "AG-UC" for VE) and drops the rest.
+In the normal state the answer comes at once and the pusher's reply is dropped
+by the next exchange; in the late state the pusher releases the answer. Both
+need no timeout and no power-cycle. `late_lines` counts the dropped lines.
+
 START-UP WRITES (AaltoFlow rule 2026-09-27: read the state, change nothing).
 :meth:`open` sends only ``VE`` (a query). The manual lets TP, SU?, PH and JA?
 run ONLY in remote mode (-5 otherwise; TS and VE are the exceptions), so the
@@ -51,6 +69,25 @@ from .. import hwlock
 from ..config import Config
 
 _INT = re.compile(r"[-+]?\d+")
+
+#: The pusher sent after every exchange (see "REPLIES ARRIVE ONE COMMAND LATE").
+PUSHER = "VE"
+#: How a VE reply starts ("AG-UC2 v2.2.1 " on the rig; an AG-UC8 says AG-UC8).
+VE_PREFIX = "AG-UC"
+_CODE = re.compile(r"^(\d?[A-Z]{2})")
+
+
+def reply_prefix(cmd: str) -> str:
+    """What the reply to `cmd` starts with: the axis + two letters
+    ("1TP" -> "1TP", "1SU+?" -> "1SU", "PH" -> "PH", "2MA" -> "2MA"),
+    or the version text for VE."""
+    cmd = cmd.strip().upper()
+    if cmd == "VE":
+        return VE_PREFIX
+    m = _CODE.match(cmd)
+    if not m:
+        raise ValueError(f"AG-UC2: cannot tell what {cmd!r} answers")
+    return m.group(1)
 
 #: TE error codes (manual, TE command).
 TE_CODES = {
@@ -89,6 +126,9 @@ class AgUC2:
         # so a second service pointed at the same AG-UC2 is refused before it
         # sends a single byte. None while not open.
         self._hwlock = None
+        # Reply lines dropped because they did not answer the question asked
+        # (late replies, pusher replies). Diagnostics only.
+        self.late_lines = 0
 
     # -- low level --------------------------------------------------------- #
     def _write(self, cmd: str) -> None:
@@ -100,20 +140,46 @@ class AgUC2:
             raise TimeoutError("AG-UC2 did not answer (timeout)")
         return raw.decode("ascii", errors="replace").strip()
 
+    def _expect(self, prefix: str, what: str) -> str:
+        """The first line that starts with `prefix`; other lines are dropped
+        (late answers to earlier questions, pusher replies). If none comes
+        within the timeout, ONE more pusher (in case the first was lost), then
+        TimeoutError."""
+        want = prefix.upper()
+        nudged = False
+        while True:
+            raw = self._ser.readline()                   # up to LF or timeout
+            if not raw:
+                if nudged:
+                    raise TimeoutError(f"AG-UC2 did not answer {what} (timeout)")
+                nudged = True
+                self._write(PUSHER)
+                continue
+            line = raw.decode("ascii", errors="replace").strip()
+            if line.upper().startswith(want):
+                return line
+            if line:
+                self.late_lines += 1
+
     def query(self, cmd: str) -> str:
-        """Send a query and return its one-line reply."""
+        """Send a query and return ITS reply (see "REPLIES ARRIVE ONE COMMAND
+        LATE" above: a pusher follows, other lines are dropped)."""
         with self._lock:
-            self._ser.reset_input_buffer()               # drop any stale line
+            self._ser.reset_input_buffer()               # drop what is already here
             self._write(cmd)
-            return self._readline()
+            self._write(PUSHER)                          # also after VE itself
+            return self._expect(reply_prefix(cmd), cmd)
 
     def command(self, cmd: str) -> None:
-        """Send a set command, then ask TE whether it was accepted."""
+        """Send a set command, then ask TE whether it was accepted (set
+        commands reply nothing). The pusher goes AFTER the TE, so TE still
+        reports on `cmd`."""
         with self._lock:
             self._ser.reset_input_buffer()
             self._write(cmd)
-            self._write("TE")                            # VERIFY: reply "TE0" / "TE-6"
-            code = _last_int(self._readline(), "TE")
+            self._write("TE")                            # reply "TE0" / "TE-6"
+            self._write(PUSHER)
+            code = _last_int(self._expect("TE", f"TE after {cmd}"), "TE")
         if code != 0:
             raise RuntimeError(f"AG-UC2 refused {cmd!r}: error {code} "
                                f"({TE_CODES.get(code, 'unknown error code')})")
@@ -252,21 +318,44 @@ class AgUC2:
         why. # VERIFY the reply text ("1MA523"? "1PA500"?) and that the
         controller really answers once the link is back.
         """
+        prefix = reply_prefix(cmd)
         with self._lock:
             self._ser.reset_input_buffer()
             old = self._ser.timeout
             self._ser.timeout = float(self.cfg.hardware.limit_op_timeout_s)
             try:
                 self._write(cmd)
-                raw = self._ser.readline()
+                # No pusher yet: the link is down while MA / PA run, and a line
+                # sent into that may be lost. Wait for the answer, dropping
+                # anything else (a late line from before).
+                line = ""
+                while True:
+                    raw = self._ser.readline()
+                    if not raw:
+                        break
+                    text = raw.decode("ascii", errors="replace").strip()
+                    if text.upper().startswith(prefix):
+                        line = text
+                        break
+                    if text:
+                        self.late_lines += 1
             finally:
                 self._ser.timeout = old
-            if not raw:
+            if not line:
+                # Silence: either refused (no reply at all), or the answer is
+                # held back (the late state) -- a pusher releases it.
+                self._write(PUSHER)
+                try:
+                    line = self._expect(prefix, cmd)
+                except TimeoutError:
+                    line = ""
+            if not line:
                 self._write("TE")
-                code = _last_int(self._readline(), "TE")
+                self._write(PUSHER)
+                code = _last_int(self._expect("TE", f"TE after {cmd}"), "TE")
                 raise RuntimeError(f"AG-UC2 gave no answer to {cmd!r} (error {code}: "
                                    f"{TE_CODES.get(code, 'no error reported - timed out')})")
-            return _last_int(raw.decode("ascii", errors="replace").strip(), what)
+            return _last_int(line, what)
 
     def measure_position(self, hw_axis: int) -> int:
         """MA: distance to the limit in 1/1000 of the travel (0..1000)."""

@@ -31,7 +31,10 @@ checked, the commit(s) and the caveats. No serial numbers, PC or user names here
 | [`scope`](../modules/detector/scope-control) | RS PRO RSDS1102CML+ (Siglent SDS1000CML+) | **verified** (records, timebases incl. slow, averaging, XY, units) | 2026-10-07 |
 | [`scope`](../modules/detector/scope-control) `--driver dwf` | Digilent Analog Discovery 2 (WaveForms 3.24.4) | **verified** (scope, W1/W2 generator incl. phase, sweeps, V+/V- supplies) | 2026-10-10 |
 | [`vna`](../modules/detector/vna-control) `--driver librevna` | LibreVNA (LibreVNA-GUI 1.6.5) | **verified** (SCPI sequence, sweeps, reference + acquire through the service; a calibrated measurement of an attenuation line checked by a person) | 2026-10-26 |
-| [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales, DO line + read-back; AO not yet) | 2026-11-09 |
+| [`usb6001`](../modules/io/usb6001-control) | NI USB-6001 multifunction DAQ | **partly verified** (AI RSE + DIFF with linear and log10 scales -- the vacuum gauge matches its controller --, DO line + read-back, the ALR3203's polarity relay; AO not yet) | 2026-11-10 |
+| [`alr3203`](../modules/source/alr3203-control) | ELC ALR3203 supply + polarity relay (usb6001 p0.0) | **verified** (protocol bytes, voltage and current mode into a coil, relay flips at zero current both ways, field sign follows the setpoint) | 2026-11-10 |
+| [`kim001`](../modules/motion/kim001-control) | Thorlabs KIM001 + PIA13 (objective focus) | **partly verified** (opens by serial, adopts without writing, step moves both ways and seen to move; client status fix and the 74 prefix not yet re-run) | 2026-11-10 |
+| [`agilis`](../modules/motion/agilis-control) | Newport AG-UC2 + 2 x AG-LS25 | **not yet** (the controller moves; the module failed on "one command late" replies -- fixed in code 2026-11-10, not yet re-run) | 2026-11-10 |
 | scan-core | -- | real scans with pm16, kim + pm16 raster, fly scans (kim / camera coordinates), XY mask, Scout pass, grid axis after the de-rig changes | 2026-10-13 |
 | all others | -- | simulation only | -- |
 
@@ -509,6 +512,57 @@ and reading back a DO line gives the level it drives.
 **Not yet checked:** AO, several DO tasks on one port, DI, the power-up state of
 the lines, the GUI's "Read inputs now".
 
+**2026-11-10, vacuum gauge against its controller:** the controller's display
+read 1.7e-2 mbar; ai0 averaged 3.2280 V over 5 reads, which the log law
+p = 10^(U - 5) mbar turns into 0.0169 mbar (the display corresponds to 3.230 V).
+The examples/vacuum_magnet.ini scale law is confirmed.
+
+## alr3203 -- ELC ALR3203 supply with a polarity relay (2026-11-10)
+
+On the vacuum-chamber setup: the supply on its USB serial port, the magnet's
+polarity relay on the NI USB-6001's line p0.0 through usb6001-control.
+
+**Protocol, byte for byte** (9600 7E1, replies end in CR, 3-20 ms each):
+`IDN RD` -> "0 OK ALR3203 VERSION 1.2 " (a blank before the CR); `MODE RD` /
+`OUT RD` -> "0 OK 0" with the output off; `VOLT RD` -> "0 OK 10000" (mV);
+`OVP RD` 32200, `OCP RD` 6100; `SERIAL RD` -> "0 ERR" on this firmware (the
+module now returns an empty serial instead of failing).
+
+**Magnet unplugged, voltage mode:** +1 V read 0.994 V, +3 V 2.992 V; -1 V
+flipped the relay at 0.0 mA and read -0.994 V; back to +1 V flipped it again;
+output off ramped to zero first. **Magnet connected, current mode (5 V
+compliance), Hall probe on the USB-6001:** 0 A +0.50 mT; +0.2 A (0.199 A,
+0.37 V, 1.86 ohm) +2.90 mT; -0.2 A (relay inverted at 0.0 mA) -2.39 mT; back to
+0 A -0.04 mT. The field follows the setpoint's sign, so `inverted_level = high`
+is right; about 13 mT/A.
+
+**Learnt:** `[limits] current_max_A` alone caps only the positive side (min and
+max are two settings); the service now warns at start when the envelope is not
+the same on both signs. A live voltage -> current switch sets the voltage to
+the limit the module holds -- set the voltage limit first, then switch.
+
+## kim001 -- Thorlabs KIM001 + PIA13 objective focus (2026-11-10)
+
+The KIM001's serial starts with **74** (the module guessed 97, the KIM101's);
+Kinesis lists it as "Piezo Motor Controller", the same text as a KIM101. Opened
+with `--serial`, it adopted Z 1104 steps, 990 steps/s, 112 V without a write.
+Step moves of 50 to 1000 were accepted and reported done in ~0.8 s; from 500
+steps the movement is visible. **+Z moves the objective AWAY from the sample**
+(the safe direction). Fixed afterwards, not yet re-run: the prefix is 74, and
+a client's `status()` asks the service until its first telemetry frame (a
+script saw position 0 for 10 s).
+
+## agilis -- Newport AG-UC2 (2026-11-10)
+
+AG-UC2 v2.2.1 on its USB serial port: raw commands move both stages (+X moves
+the camera image right, +Y up; X steps more slowly than Y at amplitude 35).
+**The module failed:** after a move the controller answered ONE COMMAND LATE
+-- every reply line held until the next command arrived, until a power-cycle --
+so a move timed out and a stop failed on the previous poll's "PH1". The driver
+now sends a harmless `VE` after every exchange (it releases a held reply) and
+accepts only the reply that answers the question asked. Not yet re-run on the
+controller.
+
 ## scan-core -- scans with real instruments
 
 - 2026-09-15: wavelength scan with acquired pm16 detectors (see pm16).
@@ -609,7 +663,7 @@ the lines, the GUI's "Read inputs now".
 
 ## Simulation only (no hardware pass yet)
 
-agilis, ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, elliptec,
+ccs200, chopper, clMag, cs260, ddr25, dsamp, dsphase, elliptec,
 gsp818, hf2, hp8648, k2450, kepco, ls455, mag2d, mag2dcal, piezo, pm400, ppms,
 smaract, smb, sr7230, sr830, stage, superk, tc200,
 vna (drivers pna = Keysight PNA-X, cmt = Copper Mountain C1209, s5085 = Copper

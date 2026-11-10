@@ -6,9 +6,12 @@
 <zip> is EITHER the download "Windows SDK and Doc. for Scientific Cameras"
 (scientific_camera_interfaces-*.zip, thorlabs.com > ThorCam page >
 Programming Interfaces) OR the thorlabs_tsi_camera_python_sdk_package.zip
-inside it (SDK\\Python Toolkit). The default FOLDER is
-%LOCALAPPDATA%\\AaltoFlow\\vendor; the result is FOLDER\\thorlabs_tsi_sdk-<version>
-with the package and its own DLLs (lib\\windows-x86_64).
+inside it (SDK\\Python Toolkit). The default FOLDER is camera-control\\vendor
+(gitignored); the result is FOLDER\\thorlabs_tsi_sdk-<version> with the package and
+its own DLLs (lib\\windows-x86_64). Not %LOCALAPPDATA%: for a program started from
+the Claude desktop app Windows redirects it into the app's private storage, so
+a service started from Mission Control would not find the copy (Blue Box,
+2026-11-10).
 
 WHY NOT pip: the SDK is not on PyPI, so it cannot be in pyproject.toml, and a
 copy pip-installed into the camera's venv disappears at the next `uv sync`
@@ -32,8 +35,8 @@ INNER = "thorlabs_tsi_camera_python_sdk_package.zip"
 
 
 def default_dest() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return Path(base) / "AaltoFlow" / "vendor"
+    """camera-control\\vendor: where backends/thorlabs.py looks first."""
+    return Path(__file__).resolve().parents[1] / "vendor"
 
 
 def python_package_zip(path: Path) -> zipfile.ZipFile:
@@ -77,7 +80,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("zip", type=Path, help="the SDK download or its Python package zip")
     ap.add_argument("--dest", type=Path, default=default_dest(),
-                    help="folder to unpack into (default: %%LOCALAPPDATA%%\\AaltoFlow\\vendor)")
+                    help="folder to unpack into (default: camera-control\\vendor)")
     a = ap.parse_args(argv)
     if not a.zip.is_file():
         print(f"no such file: {a.zip}", file=sys.stderr)
@@ -91,6 +94,8 @@ def main(argv=None) -> int:
         print(f"  not the default folder: set [camera] thorlabs_sdk_dir = {root} in camera.ini")
     print("Next: install ThorImageCAM (the camera's USB driver), close it, then start the")
     print("camera service with driver = thorlabs (camera.ini [camera] driver = thorlabs).")
+    print("If the SDK crashes on start (access violation): set [camera] thorlabs_dll_dir to")
+    print("ThorCam's folder (C:\\Program Files\\Thorlabs\\Scientific Imaging\\ThorCam).")
     return 0
 
 

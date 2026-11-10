@@ -66,11 +66,12 @@ FITTED_AXES = (2,)
 
 #: Kinesis serial-number prefix of a KIM001, used ONLY when no serial is
 #: configured and the backend has to pick "the one KIM001 on this PC".
-#: # VERIFY: a guess. Thorlabs serials start with a product code (the KIM101's
-#: is 97, verified 2026-10-03); the KIM001 is the same K-Cube inertial family
-#: and may share 97 -- or have its own. Read the serial off the unit's label
-#: (or Kinesis) and put it in hardware.serial, which always wins.
-KIM001_SERIAL_PREFIX = "97"
+#: Thorlabs serials start with a product code: the KIM101's is 97 (verified
+#: 2026-10-03), the KIM001's is 74 (verified on the Blue Box unit 2026-11-10;
+#: Kinesis lists it as "Piezo Motor Controller", the same text as a KIM101, so
+#: the prefix -- and the model_no check after opening -- tell them apart).
+#: hardware.serial, when set, always wins.
+KIM001_SERIAL_PREFIX = "74"
 
 
 class NotFitted(ValueError):

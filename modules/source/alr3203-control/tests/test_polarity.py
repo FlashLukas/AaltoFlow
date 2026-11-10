@@ -284,3 +284,50 @@ def test_a_sweep_across_zero_is_refused():
         run_for(supply, clock, 2.0)
         supply.ramp_current(-1.0, 0.5)                  # relay still normal
     supply.shutdown()
+
+
+
+def test_a_voltage_limit_set_before_the_switch_is_the_one_used():
+    """Blue Box, 2026-11-10: switching voltage -> current with the output live
+    set the voltage to the limit the module held (10 V, adopted from the
+    supply) before the client's own limit arrived. The order that avoids it:
+    set_voltage_limit FIRST -- in voltage mode it is only stored -- then
+    set_mode("current"); the switch programs that limit."""
+    supply, spy, clock, events, relay = make_rig()
+    supply.set_mode("voltage")
+    supply.set_voltage(1.0)
+    supply.set_output(True)
+    supply.step()
+    run_for(supply, clock, 2.0)
+    spy.calls.clear()
+    supply.set_voltage_limit(2.0)                       # stored only (voltage mode)
+    assert not [c for c in spy.calls if c[0].startswith("program_")]
+    supply.set_mode("current")
+    supply.step()
+    volts = [c[1] for c in spy.calls if c[0] == "program_voltage"]
+    assert volts and volts[0] == 2.0 and max(volts) == 2.0
+    assert any("voltage setpoint -> 2 V" in m for _, m in events)
+    supply.shutdown()
+
+
+def test_an_asymmetric_envelope_is_announced_at_start():
+    """Blue Box, 2026-11-10: [limits] current_max_A = 1.0 alone left -6 A on
+    the negative side (current_range() = (-6, 1)). Allowed -- min and max are
+    two settings -- but now said at start."""
+    cfg = Config()
+    cfg.limits.current_max_A = 1.0
+    supply, spy, clock, events, relay = make_rig(cfg)       # make_rig starts it
+    try:
+        assert supply.current_range() == (-6.0, 1.0)
+        warns = [m for lvl, m in events if lvl == "warn" and "NOT the same on both" in m]
+        assert warns and "current -6 .. +1 A" in warns[0]
+    finally:
+        supply.shutdown()
+    cfg = Config()
+    cfg.limits.current_min_A, cfg.limits.current_max_A = -1.0, 1.0
+    supply, spy, clock, events, relay = make_rig(cfg)       # make_rig starts it
+    try:
+        assert supply.current_range() == (-1.0, 1.0)
+        assert not [m for lvl, m in events if "NOT the same on both" in m]
+    finally:
+        supply.shutdown()

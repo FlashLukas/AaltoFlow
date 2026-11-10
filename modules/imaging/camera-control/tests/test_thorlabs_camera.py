@@ -116,7 +116,7 @@ def sdk(monkeypatch, tmp_path):
 
 
 def test_open_adopts_settings_and_only_sets_up_acquisition(sdk):
-    cam = ThorlabsCamera(dll_dir="Z:/nowhere")
+    cam = ThorlabsCamera()
     cam.open()
     try:
         fake = sdk["cams"][0]
@@ -282,6 +282,7 @@ def test_the_package_dlls_win_thorcams_folder_is_only_a_fallback(sdk, monkeypatc
     # a configured DLL folder is the user's choice: no silent fallback
     tries.clear()
     added.clear()
+    monkeypatch.setattr(T, "preload_sdk_dll", lambda d, keep: d)
     with pytest.raises(RuntimeError, match="Unable to load"):
         ThorlabsCamera(dll_dir=str(tmp_path)).open()
     assert len(tries) == 1
@@ -307,6 +308,7 @@ def test_the_sdk_is_found_in_the_vendor_folder_newest_version_first(monkeypatch,
     %LOCALAPPDATA%/AaltoFlow/vendor/thorlabs_tsi_sdk-*, the newest version."""
     import camera.backends.thorlabs as T
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(T, "default_sdk_home", lambda: str(tmp_path / "module-vendor"))
     home = tmp_path / "AaltoFlow" / "vendor"
     _fake_sdk_folder(home, "1.9.0")
     newest = _fake_sdk_folder(home, "1.10.0")
@@ -329,6 +331,7 @@ def test_no_sdk_anywhere_says_how_to_get_it(monkeypatch, tmp_path):
 
     import camera.backends.thorlabs as T
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(T, "default_sdk_home", lambda: str(tmp_path / "module-vendor"))
     _forget_sdk(monkeypatch)
     real_import = builtins.__import__
 
@@ -414,3 +417,103 @@ def test_the_real_sdk_loads_when_it_is_unpacked_here(monkeypatch):
         assert isinstance(sdk.discover_available_cameras(), list)
     finally:
         sdk.dispose()
+
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-10, Blue Box rig: the bundled SDK 2.3 DLLs crash in
+# tl_camera_open_sdk on that PC (access violation); ThorCam's 2.1 DLLs work.
+# An explicit dll_dir must WIN, and the SDK copy must not live in %LOCALAPPDATA%
+# (redirected for programs started from the Claude app).
+# --------------------------------------------------------------------------- #
+def test_the_module_vendor_folder_is_looked_in_first(monkeypatch, tmp_path):
+    import camera.backends.thorlabs as T
+    mod_home = tmp_path / "module-vendor"
+    monkeypatch.setattr(T, "default_sdk_home", lambda: str(mod_home))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    _fake_sdk_folder(tmp_path / "AaltoFlow" / "vendor", "1.9.9")    # the old place, newer
+    in_module = _fake_sdk_folder(mod_home, "1.2.0")
+    assert T.find_sdk_dir() == str(in_module)
+    assert T.sdk_homes()[0] == str(mod_home)
+
+
+def test_the_default_home_is_camera_control_vendor():
+    from pathlib import Path
+
+    import camera.backends.thorlabs as T
+    root = Path(__file__).resolve().parents[1]
+    assert Path(T.default_sdk_home()) == root / "vendor"
+    assert Path(_setup_script().default_dest()) == root / "vendor"
+
+
+def test_an_explicit_dll_dir_is_preloaded_and_the_bundled_dlls_stay_off(monkeypatch, tmp_path):
+    """The bundled lib/windows-x86_64 used to be put on the path AFTER dll_dir,
+    so the 2.3 DLL always won. Now dll_dir is preloaded by its full path and
+    the bundled folder is not added at all."""
+    import camera.backends.thorlabs as T
+    sdk_dir = _fake_sdk_folder(tmp_path / "v", "1.2.0")
+    dll_dir = tmp_path / "ThorCam"
+    dll_dir.mkdir()
+    order = []
+    monkeypatch.setattr(T, "preload_sdk_dll", lambda d, keep: order.append(("preload", d)))
+    monkeypatch.setattr(T, "_add_dll_dir", lambda d, keep: order.append(("add", d)) or True)
+    _forget_sdk(monkeypatch)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    try:
+        T.import_tl_camera(str(sdk_dir), str(dll_dir))
+    finally:
+        for k in [k for k in sys.modules if k.startswith("thorlabs_tsi_sdk")]:
+            del sys.modules[k]
+    assert order == [("preload", str(dll_dir))]          # nothing bundled added
+    # without dll_dir: the bundled folder, no preload
+    order.clear()
+    _forget_sdk(monkeypatch)
+    monkeypatch.setattr(sys, "path", [x for x in sys.path if x != str(sdk_dir)])
+    try:
+        T.import_tl_camera(str(sdk_dir), "")
+    finally:
+        for k in [k for k in sys.modules if k.startswith("thorlabs_tsi_sdk")]:
+            del sys.modules[k]
+    assert order == [("add", str(sdk_dir / "lib" / "windows-x86_64"))]
+
+
+def test_preload_needs_the_sdk_dll_in_that_folder(tmp_path):
+    import camera.backends.thorlabs as T
+    with pytest.raises(RuntimeError, match="thorlabs_tsi_camera_sdk.dll"):
+        T.preload_sdk_dll(str(tmp_path), [])
+
+
+def test_an_sdk_that_crashes_on_start_says_to_set_the_dll_folder(sdk, monkeypatch):
+    mod = sys.modules["thorlabs_tsi_sdk.tl_camera"]
+
+    def crash():
+        raise OSError("exception: access violation reading 0x0000000000000000")
+    monkeypatch.setattr(mod, "TLCameraSDK", crash)
+    with pytest.raises(RuntimeError, match="thorlabs_dll_dir.*ThorCam"):
+        ThorlabsCamera().open()
+    assert hwlock.held() == []
+
+
+def test_the_probe_uses_the_dll_folder_from_camera_ini(monkeypatch):
+    """The probe must load the SAME DLLs as the service, or it crashes where
+    the service works."""
+    from camera import probe as P
+    from camera.backends import thorlabs as T
+    seen = {}
+    monkeypatch.setattr(P, "_thorlabs_dirs", lambda: ("S", "D"))
+    monkeypatch.setattr(T, "sdk_available", lambda sdk_dir="": seen.setdefault("avail", sdk_dir) or True)
+
+    class SDK:
+        def discover_available_cameras(self):
+            return ["00000042"]
+
+        def dispose(self):
+            pass
+
+    def imp(sdk_dir="", dll_dir="", keep=None):
+        seen["import"] = (sdk_dir, dll_dir)
+        return types.SimpleNamespace(TLCameraSDK=SDK)
+    monkeypatch.setattr(T, "import_tl_camera", imp)
+    rows, note = P._thorlabs()
+    assert seen == {"avail": "S", "import": ("S", "D")}
+    assert [r["address"] for r in rows] == ["00000042"] and note == ""

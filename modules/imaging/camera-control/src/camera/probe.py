@@ -54,14 +54,31 @@ def _text(fn) -> str:
         return ""
 
 
+def _thorlabs_dirs() -> tuple[str, str]:
+    """camera.thorlabs_sdk_dir / thorlabs_dll_dir from camera.ini (next to
+    module.toml), so the probe loads the SAME DLLs as the service -- on the
+    Blue Box the bundled ones crash and camera.ini names ThorCam's."""
+    from pathlib import Path
+    ini = Path(__file__).resolve().parents[2] / "camera.ini"
+    if not ini.is_file():
+        return "", ""
+    try:
+        from .config import load_config
+        c = load_config(str(ini)).camera
+        return c.thorlabs_sdk_dir, c.thorlabs_dll_dir
+    except Exception:
+        return "", ""
+
+
 def _thorlabs() -> tuple[list, str]:
     """(rows, note) of the Thorlabs cameras; ([], "") without the SDK."""
     from .backends import thorlabs as T
-    if not T.sdk_available():
+    sdk_dir, dll_dir = _thorlabs_dirs()
+    if not T.sdk_available(sdk_dir):
         return [], ""
     rows, sdk = [], None
     try:
-        tl = T.import_tl_camera()
+        tl = T.import_tl_camera(sdk_dir, dll_dir)
         sdk = tl.TLCameraSDK()                                  # loads the DLL only
         for serial in sdk.discover_available_cameras():         # VERIFY: lists, opens nothing
             serial = str(serial).strip()

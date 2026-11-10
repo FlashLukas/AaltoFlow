@@ -12,18 +12,33 @@ WHERE THE SDK COMES FROM. It is not on PyPI, so it cannot be a dependency in
 pyproject.toml -- and a copy pip-installed into the venv is REMOVED by the next
 ``uv sync`` (gotcha #29: sync removes what the lock does not list). So the
 driver also loads it from a FOLDER outside the venv: ``sdk_dir``
-(camera.thorlabs_sdk_dir), or by default the newest
-%LOCALAPPDATA%\AaltoFlow\vendor\thorlabs_tsi_sdk-* that
-``scripts/setup_thorlabs_sdk.py <the SDK zip>`` unpacks. An installed package
+(camera.thorlabs_sdk_dir), or by default the newest thorlabs_tsi_sdk-* in
+camera-control\vendor (gitignored), which ``scripts/setup_thorlabs_sdk.py <the
+SDK zip>`` unpacks; %LOCALAPPDATA%\AaltoFlow\vendor is looked in second. NOT
+%LOCALAPPDATA% first: for a process started from the Claude desktop app
+(an MSIX package) Windows redirects %LOCALAPPDATA% into the app's private
+storage (found on the Blue Box, 2026-11-10), so a copy unpacked from there is
+invisible to a service started from Mission Control. An installed package
 wins when there is one.
 
-DLLs. Since 1.2.0 the Python package carries its own native DLLs
-(lib/windows-x86_64) and the driver puts that folder on the search path. It
-adds another folder only when told (``dll_dir`` = camera.thorlabs_dll_dir), or
-as a LAST resort when the package's own DLLs failed to load: two different
-versions of thorlabs_tsi_camera_sdk.dll in one process is how mysterious
-crashes start. The camera's USB DRIVER comes with ThorImageCAM / ThorCam:
-install that first.
+DLLs. Since 1.2.0 the Python package carries its own native DLLs (SDK 2.3,
+lib/windows-x86_64) and the driver uses them by default. ``dll_dir``
+(camera.thorlabs_dll_dir) REPLACES them: the driver then loads
+thorlabs_tsi_camera_sdk.dll from that folder by its FULL path before the SDK
+asks for it by name -- Windows hands a bare-name load the module already
+loaded -- and the bundled folder is not put on the search path at all, so the
+two versions never mix in one process. WHY it matters: on the Blue Box
+(Windows 10 19045, Python 3.14) the 2.3 DLLs -- bundled AND ThorImageCAM's --
+crash inside tl_camera_open_sdk ("access violation reading 0x0"), while
+ThorCam's 2.1 DLLs (C:\Program Files\Thorlabs\Scientific Imaging\ThorCam)
+open the CS165MU and deliver frames with the same Python package; on the
+office PC (Windows 11) 2.3 works. Without ``dll_dir`` ThorImageCAM's / ThorCam's
+folders are tried only when the bundled DLLs do not LOAD at all. The camera's
+USB DRIVER comes with ThorImageCAM / ThorCam: install that first.
+
+Not used (checked on the CS165MU): ``data_rate`` (TLCameraError 1004 "Neither
+fps nor readout frequency is supported", logged at ERROR by the SDK) and
+``is_frame_rate_control_supported`` (not in SDK 1.2.0).
 
 This is the ONLY camera file that imports the Thorlabs SDK, LAZILY inside
 :meth:`open`, so the package imports and the simulator runs without it.
@@ -72,23 +87,33 @@ DEFAULT_DLL_DIRS = (
 POLL_SLICE_MS = 50
 
 
+#: The DLL every other SDK DLL hangs off -- the one tl_camera loads by name.
+SDK_DLL = "thorlabs_tsi_camera_sdk.dll"
+
+
 def default_sdk_home() -> str:
-    """Where scripts/setup_thorlabs_sdk.py unpacks the Python SDK."""
+    """Where scripts/setup_thorlabs_sdk.py unpacks the Python SDK: the camera
+    module's own vendor folder (camera-control/vendor, gitignored) -- an
+    ordinary folder, not redirected for apps started from Claude (see the
+    module docstring) and not touched by `uv sync`."""
+    from pathlib import Path
+    return str(Path(__file__).resolve().parents[3] / "vendor")
+
+
+def sdk_homes() -> list:
+    """Where to look for an unpacked SDK, in order: the module's vendor
+    folder, then %LOCALAPPDATA%/AaltoFlow/vendor (where the first version
+    of setup_thorlabs_sdk.py put it)."""
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "AaltoFlow", "vendor")
+    return [default_sdk_home(), os.path.join(base, "AaltoFlow", "vendor")]
 
 
 def find_sdk_dir(sdk_dir: str = "") -> str:
     """The folder that HOLDS the thorlabs_tsi_sdk package (it has a
     ``thorlabs_tsi_sdk`` subfolder): ``sdk_dir`` if given, else the newest
-    thorlabs_tsi_sdk-* in default_sdk_home(); "" if there is none."""
+    thorlabs_tsi_sdk-* in the first of sdk_homes() that has one; "" if none."""
     if sdk_dir:
         return sdk_dir if os.path.isdir(os.path.join(sdk_dir, "thorlabs_tsi_sdk")) else ""
-    home = default_sdk_home()
-    try:
-        names = [n for n in os.listdir(home) if n.startswith("thorlabs_tsi_sdk-")]
-    except OSError:
-        return ""
 
     def version(name):
         out = []
@@ -96,10 +121,15 @@ def find_sdk_dir(sdk_dir: str = "") -> str:
             out.append(int(part) if part.isdigit() else -1)
         return out
 
-    for n in sorted(names, key=version, reverse=True):     # newest first
-        d = os.path.join(home, n)
-        if os.path.isdir(os.path.join(d, "thorlabs_tsi_sdk")):
-            return d
+    for home in sdk_homes():
+        try:
+            names = [n for n in os.listdir(home) if n.startswith("thorlabs_tsi_sdk-")]
+        except OSError:
+            continue
+        for n in sorted(names, key=version, reverse=True):     # newest first
+            d = os.path.join(home, n)
+            if os.path.isdir(os.path.join(d, "thorlabs_tsi_sdk")):
+                return d
     return ""
 
 
@@ -129,15 +159,30 @@ def _add_dll_dir(d: str, keep: list) -> bool:
     return True
 
 
+def preload_sdk_dll(dll_dir: str, keep: list) -> str:
+    """Load the SDK's main DLL from `dll_dir` by its FULL path, so the SDK's
+    later load by bare name gets THIS one (Windows returns a module with that
+    base name that is already loaded). Its own dependencies resolve from the
+    same folder (ctypes loads a full path with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR).
+    Returns the path loaded."""
+    import ctypes
+    path = os.path.join(dll_dir, SDK_DLL)
+    if not os.path.isfile(path):
+        raise RuntimeError(f"camera.thorlabs_dll_dir = {dll_dir!r} has no {SDK_DLL}")
+    _add_dll_dir(dll_dir, keep)              # for DLLs the SDK loads itself, by name
+    keep.append(ctypes.CDLL(path))           # held: unloading it under the SDK would crash
+    return path
+
+
 def import_tl_camera(sdk_dir: str = "", dll_dir: str = "", keep: list | None = None):
     """thorlabs_tsi_sdk.tl_camera: the installed package, else the one in
-    find_sdk_dir(sdk_dir). An unpacked package's own DLL folder
-    (lib/windows-x86_64) goes on the search path; ``dll_dir`` too when given.
-    ``keep`` collects the add_dll_directory handles (close them on close)."""
+    find_sdk_dir(sdk_dir). With ``dll_dir`` the SDK runs on THAT folder's DLLs
+    (preloaded, the bundled ones are not put on the path); without it on the
+    package's own (lib/windows-x86_64). ``keep`` collects the handles."""
     import sys
     keep = keep if keep is not None else []
     if dll_dir:
-        _add_dll_dir(dll_dir, keep)
+        preload_sdk_dll(dll_dir, keep)
     try:
         from thorlabs_tsi_sdk import tl_camera
         return tl_camera
@@ -145,14 +190,15 @@ def import_tl_camera(sdk_dir: str = "", dll_dir: str = "", keep: list | None = N
         pass
     found = find_sdk_dir(sdk_dir)
     if not found:
-        where = sdk_dir or default_sdk_home()
+        where = sdk_dir or " and ".join(sdk_homes())
         raise RuntimeError(
             "thorlabs_tsi_sdk not found (looked in " + where + "): run "
             "'python scripts/setup_thorlabs_sdk.py <scientific_camera_interfaces-*.zip>' "
             "once (thorlabs.com, ThorCam page > Programming Interfaces), or set "
             "camera.thorlabs_sdk_dir")
-    bits = "x86_64" if sys.maxsize > 2 ** 32 else "x86"
-    _add_dll_dir(os.path.join(found, "lib", f"windows-{bits}"), keep)
+    if not dll_dir:                          # an explicit dll_dir REPLACES the bundled DLLs
+        bits = "x86_64" if sys.maxsize > 2 ** 32 else "x86"
+        _add_dll_dir(os.path.join(found, "lib", f"windows-{bits}"), keep)
     if found not in sys.path:
         sys.path.insert(0, found)
     from thorlabs_tsi_sdk import tl_camera
@@ -228,6 +274,19 @@ class ThorlabsCamera:
         try:
             return tl_camera.TLCameraSDK()
         except Exception as exc:
+            if "access violation" in str(exc).lower():
+                # Seen on the Blue Box: SDK 2.3 crashes in tl_camera_open_sdk
+                # (an OSError from ctypes). The DLL is loaded now and cannot be
+                # swapped in this process, so say what to configure instead.
+                which = (f"DLLs in {self.dll_dir}" if self.dll_dir
+                         else "SDK 2.3 DLLs bundled with the Python package")
+                raise RuntimeError(
+                    f"the Thorlabs camera SDK crashed while starting ({exc}) -- the "
+                    f"{which} do not run on this PC. Set camera.thorlabs_dll_dir to "
+                    "ThorCam's folder (C:\\Program Files\\Thorlabs\\Scientific Imaging\\"
+                    "ThorCam, SDK 2.1) and restart the camera service") from exc
+            # the bundled DLLs did not even LOAD (TLCameraError "Unable to load
+            # library"): try the installed programs' folders, once
             if self.dll_dir or "load" not in str(exc).lower():
                 raise
             if not any([_add_dll_dir(d, self._dll_handles) for d in DEFAULT_DLL_DIRS]):
@@ -263,10 +322,12 @@ class ThorlabsCamera:
             pass
         self._cam = self._sdk = None
         for h in self._dll_handles:
-            try:
-                h.close()
-            except Exception:
-                pass
+            close = getattr(h, "close", None)    # add_dll_directory handles; a
+            if close is not None:                # preloaded CDLL stays loaded
+                try:
+                    close()
+                except Exception:
+                    pass
         self._dll_handles = []
         # release LAST: the camera is free for another service only now
         if self._hwlock is not None:

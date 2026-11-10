@@ -128,6 +128,9 @@ class Kim001Client(ControlClient):
 
         # Latest cached status + last event, updated by the SUB thread.
         self._status = _status_from_dict({})
+        # True once a status frame came over PUB. Until then status() ASKS the
+        # service (see status()).
+        self._pub_seen = False
         self._on_event = lambda level, msg: None
         self._stop = threading.Event()
         self._sub_thread = None
@@ -229,6 +232,7 @@ class Kim001Client(ControlClient):
                     payload = json.loads(raw.decode("utf-8"))
                     if topic == P.TOPIC_STATUS:
                         self._status = _status_from_dict(payload)
+                        self._pub_seen = True
                         self._control_from_status(payload)
                     elif topic == P.TOPIC_EVENT:
                         try:
@@ -252,6 +256,22 @@ class Kim001Client(ControlClient):
         return r.get("describe", {}) if r.get("ok") else {}
 
     def status(self) -> RemoteStatus:
+        """The latest status. Normally the PUB cache (no request per call, so
+        a GUI may poll it fast). Until the FIRST status frame has arrived --
+        start() not called, as in a short script, or called a moment ago --
+        the service is asked directly, so a caller never mistakes the blank
+        defaults (position 0) for the instrument's state. Found on the Blue
+        Box (2026-11-10): a script saw position 0 for 10 s while the console's
+        REQ status read the real counter."""
+        if not self._pub_seen:
+            try:
+                payload = self._rpc(cmd="status").get("status") or {}
+            except Exception:
+                return self._status          # nothing better to give
+            st = _status_from_dict(payload)
+            if not self._pub_seen:           # a PUB frame may have won meanwhile
+                self._status = st
+            return st
         return self._status
 
     def info(self) -> dict:

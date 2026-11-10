@@ -15,7 +15,19 @@ Sources of every command below:
 We do NOT use that library: its auto-connect opens EVERY COM port on the PC
 and writes an IDN request to each (other instruments included), and it keeps
 one global serial object. Here the port is the configured one, claimed first.
-Not yet run on the instrument: every call is marked # VERIFY until it has.
+RUN ON THE INSTRUMENT 2026-11-10 (Blue Box, firmware "VERSION 1.2"): 9600 7E1,
+answers end in CR, 3-20 ms each, nothing extra. Read exactly as sent / received:
+    0 IDN RD    -> 0 OK ALR3203 VERSION 1.2 \r    (a blank before the CR)
+    0 MODE RD   -> 0 OK 0          (output off)
+    0 OUT RD    -> 0 OK 0
+    0 VOLT RD   -> 0 OK 10000      (mV: 10 V stored)
+    0 CURR RD   -> 0 OK 0
+    0 VOLT MES  -> 0 OK 0          (output off: 0)
+    0 OVP RD    -> 0 OK 32200 ;  0 OCP RD -> 0 OK 6100
+    0 SERIAL RD -> 0 ERR           (not supported by this firmware)
+Then the service drove a coil in both modes and through the relay (see
+docs/VERIFIED_INSTRUMENTS.md). Calls still marked # VERIFY are the ones that
+did not show up in that test.
 
 THE PROTOCOL (manual, Appendix A):
     command  "0 <PARAM> <CMD> [value]\\r"     0 = the USB address
@@ -97,7 +109,7 @@ class SerialALR3203:
             self._ser.reset_input_buffer()                 # drop a stale half answer
         except Exception:
             pass
-        # VERIFY: "0 OK ALR3203 VERSION N"
+        # checked 2026-11-10: "0 OK ALR3203 VERSION 1.2 " (trailing blank)
         self._idn = self._query("IDN RD") or "ELC ALR3203"
         if "ALR" not in self._idn.upper():
             raise RuntimeError(f"{self._port} answered {self._idn!r}, not an ELC ALR "
@@ -105,9 +117,9 @@ class SerialALR3203:
 
     def read_state(self) -> dict:
         """What the supply is set to right now, from READS only."""
-        output = self._query("OUT RD").strip() == "1"                 # VERIFY
-        volts = self._num(self._query("VOLT RD")) / 1000.0           # VERIFY mV
-        amps = self._num(self._query("CURR RD")) / 1000.0            # VERIFY mA
+        output = self._query("OUT RD").strip() == "1"                 # checked: "0"/"1"
+        volts = self._num(self._query("VOLT RD")) / 1000.0           # checked: mV
+        amps = self._num(self._query("CURR RD")) / 1000.0            # checked: mA
         return {"output": output, "voltage_V": volts, "current_A": amps,
                 "regulation": self.read_regulation()}
 
@@ -164,14 +176,20 @@ class SerialALR3203:
         return self._num(self._query("CURR MES")) / 1000.0            # VERIFY mA
 
     def read_regulation(self) -> str:
-        code = self._query("MODE RD").strip()                         # VERIFY 0/1/2
+        code = self._query("MODE RD").strip()                         # checked: 0 = off
         return {"1": "voltage", "2": "current"}.get(code, "off")
 
     def idn(self) -> str:
         return self._idn
 
     def serial_number(self) -> str:
-        return self._query("SERIAL RD")                               # VERIFY
+        """The supply's serial number, or "" -- the rig's firmware (VERSION
+        1.2) answers SERIAL RD with "0 ERR" (checked 2026-11-10), and a
+        missing serial must not stop anything that only wants to show it."""
+        try:
+            return self._query("SERIAL RD").strip()
+        except ElcError:
+            return ""
 
     # ---- the wire ------------------------------------------------------------
 

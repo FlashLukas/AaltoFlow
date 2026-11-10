@@ -53,7 +53,7 @@ def fake_pylablib(monkeypatch, tmp_path):
     monkeypatch.setenv("AALTOFLOW_LOCK_DIR", str(tmp_path / "locks"))
     thorlabs = types.SimpleNamespace(
         KinesisPiezoMotor=_FakeMotor,
-        list_kinesis_devices=lambda: [("70123456", "BSC203"), ("97654321", "KIM101")],
+        list_kinesis_devices=lambda: [("70123456", "BSC203"), ("74654321", "KIM101")],
     )
     devices = types.ModuleType("pylablib.devices")
     devices.Thorlabs = thorlabs
@@ -77,23 +77,23 @@ def _backend(serial: str) -> KinesisKim:
 
 
 def test_second_backend_on_same_serial_is_refused_naming_kim():
-    a = _backend("97000001")
+    a = _backend("74000001")
     a.open()
-    b = _backend("97000001")
+    b = _backend("74000001")
     with pytest.raises(hwlock.HardwareBusy, match="kim001"):
         b.open()
     # The refused backend never opened the controller: one open, from `a`.
-    assert _FakeMotor.opened == ["97000001"]
+    assert _FakeMotor.opened == ["74000001"]
     assert b._dev is None
     a.close()
 
 
 def test_same_serial_written_differently_conflicts():
-    # A configured " 97654321 " (stray spaces from an .ini) and the serial the
+    # A configured " 74654321 " (stray spaces from an .ini) and the serial the
     # auto-discovery finds are the same physical controller.
-    a = _backend(" 97654321 ")
+    a = _backend(" 74654321 ")
     a.open()
-    b = _backend("")                    # no serial: discovers 97654321
+    b = _backend("")                    # no serial: discovers 74654321
     with pytest.raises(hwlock.HardwareBusy, match="kim001"):
         b.open()
     a.close()
@@ -103,30 +103,30 @@ def test_discovered_serial_is_claimed():
     a = _backend("")
     a.open()
     held = hwlock.held()
-    assert [h["normalized"] for h in held] == ["97654321"]
+    assert [h["normalized"] for h in held] == ["74654321"]
     assert held[0]["module"] == "kim001"
     a.close()
 
 
 def test_close_releases_the_claim():
-    a = _backend("97000002")
+    a = _backend("74000002")
     a.open()
     a.close()
     assert hwlock.held() == []
-    b = _backend("97000002")
+    b = _backend("74000002")
     b.open()                            # would raise HardwareBusy if not released
     b.close()
 
 
 def test_failing_open_releases_the_claim():
     _FakeMotor.fail_on_query = True
-    a = _backend("97000003")
+    a = _backend("74000003")
     with pytest.raises(RuntimeError):
         a.open()
     assert a._dev is None
     assert hwlock.held() == []
     _FakeMotor.fail_on_query = False
-    b = _backend("97000003")
+    b = _backend("74000003")
     b.open()
     b.close()
 
@@ -146,14 +146,14 @@ def test_brain_start_refused_sends_nothing_on_shutdown():
     then send stop() to a controller another service owns."""
     from kim001.kim001 import Kim
 
-    a = _backend("97000004")
+    a = _backend("74000004")
     a.open()
-    b = _backend("97000004")
+    b = _backend("74000004")
     brain = Kim(b, b.cfg)
     with pytest.raises(hwlock.HardwareBusy):
         brain.start()
     brain.shutdown()                    # idempotent no-op: not connected
-    assert _FakeMotor.opened == ["97000004"]
+    assert _FakeMotor.opened == ["74000004"]
     a.close()
 
 
@@ -162,11 +162,11 @@ def test_service_script_exits_with_one_clean_line(tmp_path):
     script = Path(__file__).resolve().parents[1] / "scripts" / "run_service.py"
     ini = tmp_path / "kim001.ini"
     cfg = Config()
-    cfg.hardware.serial = "97000005"
+    cfg.hardware.serial = "74000005"
     from kim001.config import save_config
     save_config(cfg, ini)
 
-    holder = hwlock.claim("97000005", "kim001-test-holder")
+    holder = hwlock.claim("74000005", "kim001-test-holder")
     try:
         # The child cannot import pylablib (fake is only in THIS process), so
         # give it a sitecustomize-free shim: a tiny fake package on PYTHONPATH.
@@ -192,7 +192,7 @@ def test_service_script_exits_with_one_clean_line(tmp_path):
     err = r.stderr.strip()
     assert "Traceback" not in err
     assert err.startswith("kim001: cannot start:")
-    assert "kim001-test-holder" in err and "97000005" in err
+    assert "kim001-test-holder" in err and "74000005" in err
     err.encode("ascii")                 # gotcha #14: printed text is ASCII
 
 
@@ -202,10 +202,10 @@ def test_a_controller_reporting_itself_as_a_kim101_is_refused_and_released(monke
     The model check (a query) refuses it, and the claim is given back."""
     import types as _t
     monkeypatch.setattr(_FakeMotor, "get_device_info",
-                        lambda self: _t.SimpleNamespace(serial_no="97654321",
+                        lambda self: _t.SimpleNamespace(serial_no="74654321",
                                                         model_no="KIM101", notes=""),
                         raising=False)
-    a = _backend("")                    # auto-pick: 97654321
+    a = _backend("")                    # auto-pick: 74654321
     with pytest.raises(RuntimeError, match="KIM101"):
         a.open()
     assert a._dev is None

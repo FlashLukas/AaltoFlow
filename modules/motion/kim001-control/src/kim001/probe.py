@@ -10,12 +10,11 @@ the real backend uses to find "the one KIM001" when no serial is set
 What a listing can and cannot tell (kim-control learned the first two on the
 lab PC, 2026-10-03, with a KIM101):
 
-* a Kinesis serial starts with a product code (the KIM101's is 97). Which
-  prefix a KIM001 has is NOT known yet: this probe uses
-  hardware.serial_prefix (config.KIM001_SERIAL_PREFIX, # VERIFY). If the
-  KIM001 shares the KIM101's 97, a listing cannot tell the two apart -- the
-  row then says so, and the backend's model check after opening is what
-  refuses a KIM101;
+* a Kinesis serial starts with a product code: the KIM101's is 97, the
+  KIM001's 74 (seen on the Blue Box unit, 2026-11-10). The DESCRIPTION is no
+  help: Kinesis lists both as "Piezo Motor Controller". So the prefix
+  (hardware.serial_prefix, default config.KIM001_SERIAL_PREFIX) decides the
+  row, and the backend's model check after opening is the second line;
 * a controller a service has OPEN is NOT listed (FTDI does not enumerate an
   open device). So the probe also reports what the kim001 service holds right
   now (hwlock): "held by the running kim001 service", not "nothing found".
@@ -36,8 +35,8 @@ OTHER_NAMES = {
 #: why a held controller is missing from the vendor list
 HELD = "held by the running kim001 service (a controller is not listed while it is open)"
 #: a matching row cannot be told from a KIM101 by its listing alone
-MAYBE = ("serial prefix matches the KIM001 setting -- a KIM101 may share it "
-         "(# VERIFY); the service checks the model after opening")
+MAYBE = ("serial prefix matches the KIM001 setting; the service checks the "
+         "model after opening")
 
 
 def _prefix() -> str:

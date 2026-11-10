@@ -168,4 +168,5 @@ def test_the_blue_box_example_loads_as_a_thorlabs_split_rig():
     assert cfg.camera.driver == "thorlabs"
     assert (cfg.hardware.motion, cfg.hardware.xy_stage, cfg.hardware.z_stage) == (
         "split", "agilis", "kim001")
-    assert cfg.hardware.xy_map == "+X+Y"
+    assert cfg.hardware.xy_map == "+X-Y"               # measured: +X right, +Y up
+    assert cfg.camera.thorlabs_dll_dir.endswith("ThorCam")  # 2.3 crashed there

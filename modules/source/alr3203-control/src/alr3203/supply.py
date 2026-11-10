@@ -256,6 +256,9 @@ class BipolarSupply:
                                + (f" ({self._relay_error})" if self._relay_error else "")
                                + ": the sign of the output is not known; the relay is "
                                  "set explicitly (at zero current) on the next nonzero setpoint")
+        note = self.envelope_note()
+        if note:
+            self._emit("warn", note)
         if poll:
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, name="alr3203-worker",
@@ -367,6 +370,26 @@ class BipolarSupply:
     @property
     def bipolar(self) -> bool:
         return self._bipolar
+
+    def envelope_note(self) -> str:
+        """A warning when the current or voltage envelope is not the same on
+        both signs, "" otherwise. Asymmetric limits are allowed (min and max
+        are two settings on purpose), but a safety cap is usually meant for
+        both signs: on the Blue Box (2026-11-10) [limits] current_max_A = 1.0
+        alone left -6 A allowed on the negative side, and only a test found it.
+        Said once at start, so it cannot pass unnoticed."""
+        if not self._bipolar:
+            return ""
+        lim, out = self.cfg.limits, []
+        for name, lo, hi, unit in (("current", lim.current_min_A, lim.current_max_A, "A"),
+                                   ("voltage", lim.voltage_min_V, lim.voltage_max_V, "V")):
+            if abs(abs(float(lo)) - abs(float(hi))) > 1e-9:
+                out.append(f"{name} {float(lo):g} .. +{float(hi):g} {unit}")
+        if not out:
+            return ""
+        return ("the safety envelope is NOT the same on both signs: " + "; ".join(out)
+                + " -- set [limits] current_min_A / voltage_min_V too if the cap is "
+                  "meant for both directions")
 
     def current_range(self) -> tuple[float, float]:
         lim = self.cfg.limits

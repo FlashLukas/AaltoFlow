@@ -72,3 +72,7 @@ CLAUDE.local.md
 # Slide decks: kept in OneDrive for now, not in git (Lukas, 2026-09-28).
 # Delete this line to start tracking them.
 /docs/presentations/
+
+# Vendor SDKs unpacked next to a module (camera-control: scripts/setup_thorlabs_sdk.py).
+# Not ours to publish (vendor licence), and different per PC.
+modules/*/*/vendor/

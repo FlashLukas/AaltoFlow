@@ -46,14 +46,14 @@ def lock_dir(monkeypatch, tmp_path):
 
 
 def test_lists_a_kim001_candidate_and_names_other_kinesis_devices(monkeypatch):
-    calls = _fake_pylablib(monkeypatch, [("97000001", "Piezo Motor Controller"),
+    calls = _fake_pylablib(monkeypatch, [("74000001", "Piezo Motor Controller"),
                                          ("70000001", "Brushless Motor Controller")])
     out = P.probe()
     assert calls == [1]
     kim001, other = out["devices"]
-    assert (kim001["address"], kim001["identity"]) == ("97000001", "Thorlabs KIM001")
+    assert (kim001["address"], kim001["identity"]) == ("74000001", "Thorlabs KIM001")
     assert "Piezo Motor Controller" in kim001["detail"]
-    assert "KIM101 may share" in kim001["detail"]          # the prefix is a guess
+    assert "prefix matches" in kim001["detail"]
     assert other["address"] == "70000001" and "not a KIM001" in other["detail"]
     assert other["other"] is True                 # never suggested for kim001
     assert out["note"] == ""
@@ -75,7 +75,7 @@ def test_the_prefix_comes_from_kim001_ini(monkeypatch):
 def test_a_non_kinesis_entry_is_information_only(monkeypatch):
     """kim-control, lab PC 2026-10-03: Kinesis' FTDI scan also lists the Signal
     Hound TG44A ("SignalHoundTG"). It must not be offered to kim001."""
-    _fake_pylablib(monkeypatch, [("97000001", "Piezo Motor Controller"),
+    _fake_pylablib(monkeypatch, [("74000001", "Piezo Motor Controller"),
                                  ("A0000001", "SignalHoundTG")])
     kim001, tg = P.probe()["devices"]
     assert not kim001.get("other")
@@ -118,3 +118,14 @@ def test_the_script_prints_one_ascii_json_line():
     data = json.loads(lines[-1])
     assert isinstance(data["devices"], list) and isinstance(data["note"], str)
     assert lines[-1].isascii()
+
+
+def test_the_kim001_prefix_is_74_and_a_kim101_is_not_offered(monkeypatch):
+    """Blue Box, 2026-11-10: the real KIM001's serial starts with 74, and
+    Kinesis calls both it and a KIM101 "Piezo Motor Controller". With the old
+    guess (97) the probe called the KIM001 "not a KIM001"."""
+    _fake_pylablib(monkeypatch, [("74000002", "Piezo Motor Controller"),
+                                 ("97000003", "Piezo Motor Controller")])
+    kim001, kim101 = P.probe()["devices"]
+    assert kim001["address"] == "74000002" and not kim001.get("other")
+    assert kim101.get("other") is True and "not a KIM001" in kim101["detail"]

@@ -170,3 +170,24 @@ def test_position_list_over_wire(service_and_client):
     positions = cli.get_positions()
     assert positions[0]["used"] and positions[0]["name"] == "wire"
     assert int(positions[0]["z"]) == 200
+
+
+def test_status_without_start_asks_the_service():
+    """Blue Box, 2026-11-10: a script that made a client and read status()
+    without start() saw position 0 (the blank defaults) for 10 s; the
+    console's REQ status was right. Before the first PUB frame, status() now
+    asks the service. Failed on the old client."""
+    cfg = Config()
+    cfg.calibration.um_per_step_z = 0.02
+    brain, _ = build_sim_system(cfg)
+    svc = Kim001Service(brain, host="127.0.0.1", cmd_port=CMD, pub_port=PUB, status_hz=20)
+    svc.start()
+    cli = Kim001Client(host="127.0.0.1", cmd_port=CMD, pub_port=PUB, timeout_ms=3000)
+    try:
+        brain.move_to_step(Z, 1104)
+        assert _wait(cli, lambda st: st.position_steps[Z] == 1104 and not st.moving[Z])
+        assert cli.status().connected
+    finally:
+        cli.close()
+        svc.stop()
+        time.sleep(0.1)
