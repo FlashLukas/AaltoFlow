@@ -57,6 +57,8 @@ class RemoteStatus:
     leash: bool = False
     leash_steps: int = 20000
     step_large: bool = False
+    step_rate: float = 0.0
+    paced: list = field(default_factory=lambda: [False, False])
     connected: bool = False
     hw_error: str = ""
     poll_hz: float = 0.0
@@ -292,6 +294,10 @@ class AgilisClient(ControlClient):
         """Step amplitude 1..50. direction 0 = both, +1 forward, -1 backward."""
         return self._rpc(cmd="set_amplitude", axis=axis, value=value,
                          direction=int(direction))["value"]
+
+    def set_step_rate(self, rate: float) -> float:
+        """Step-move rate in steps/s; 0 = the controller's full rate."""
+        return float(self._rpc(cmd="set_step_rate", rate=float(rate))["rate"])
 
     def set_step_size(self, large: bool) -> dict:
         return self._rpc(cmd="set_step_size", large=bool(large))["step"]

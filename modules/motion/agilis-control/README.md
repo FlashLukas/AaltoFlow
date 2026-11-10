@@ -131,6 +131,7 @@ JSON over REQ/REP on 5595; every reply is `{"ok": true, ...}` or
 | continuous jog (repeat to keep alive) | `{"cmd":"jog","axis":"Y","speed":-1}` (−4…4, 0 = stop) |
 | step amplitude | `{"cmd":"set_amplitude","axis":"X","value":30,"direction":-1}` (0 = both) |
 | amplitude preset | `{"cmd":"set_step_size","large":true}` |
+| step rate of step moves | `{"cmd":"set_step_rate","rate":50}` (steps/s; 0 = the controller's full rate; slower rates are paced in software, next move on) |
 | store a measured step size | `{"cmd":"set_calibration","axis":"X","value":0.048,"direction":1}` |
 | leash | `{"cmd":"set_leash","enabled":true,"leash_steps":20000}` |
 | datum / display zero | `{"cmd":"zero_counter","axis":"X"}` · `set_zero` · `clear_zero` |

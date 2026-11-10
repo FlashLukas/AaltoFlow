@@ -110,6 +110,13 @@ class Motion:
     # driving into its end stop. The GUI re-sends the jog while you hold the
     # button.
     jog_timeout_s: float = 1.5
+    # Step RATE of a step move (PR), steps/s; 0 = the controller's own full
+    # rate. The AG-UC2 has no rate setting for PR (no DL command on the UC2),
+    # so a slower rate is made in SOFTWARE: the service sends the move in small
+    # PR chunks, each when the previous one has finished and the schedule says
+    # more steps are due. Every step is still counted. A rate above what the
+    # controller can do just runs at its own rate. Jogs keep their 4 speeds.
+    step_rate: float = 0.0
 
 
 @dataclass

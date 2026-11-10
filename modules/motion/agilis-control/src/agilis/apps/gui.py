@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..agilis import STEP_RATE_MAX
 from ..config import AMPLITUDE_MAX, AMPLITUDE_MIN, Config
 from . import theme
 from .control_bar import ControlBar, mark_always
@@ -494,6 +495,21 @@ class MainWindow(QWidget):
         self._jog_step.valueChanged.connect(lambda _v: self._label_step_buttons())
         row.addWidget(self._jog_step)
         self._jog_shown_um = False
+        # Step RATE of these moves. The AG-UC2 has no rate setting for PR, so
+        # the service makes a slower rate in software (the move goes out in
+        # small chunks); 0 = the controller's own full rate.
+        row.addWidget(QLabel("rate"))
+        self._rate = _spin(float(self.cfg.motion.step_rate or 0.0), 0.0, STEP_RATE_MAX, 10, 0)
+        self._rate.setSuffix(" steps/s")
+        self._rate.setSpecialValueText("full speed")     # shown for 0
+        self._rate.setMinimumWidth(110)
+        self._rate.setToolTip("Rate of step moves (the buttons above, Go, slots, scans). "
+                              "0 = the controller's own full rate. Slower rates are made "
+                              "in software: the move goes out in small chunks, every "
+                              "step still counted. Jogs keep their four fixed speeds.")
+        self._rate.editingFinished.connect(self._send_rate)
+        self._rate_seen = float(self.cfg.motion.step_rate or 0.0)
+        row.addWidget(self._rate)
         row.addStretch(1)
         zero_all = QPushButton("Zero all")
         zero_all.clicked.connect(lambda: self._do(self.ctrl.set_zero_all))
@@ -885,6 +901,21 @@ class MainWindow(QWidget):
                         box.setValue(int(v))
                         box.blockSignals(False)
 
+    def _send_rate(self) -> None:
+        # editingFinished also fires when the box merely loses focus: send
+        # only a value that differs from what the service reports
+        v = float(self._rate.value())
+        if abs(v - self._rate_seen) > 1e-9:
+            self._do(lambda: self.ctrl.set_step_rate(v))
+
+    def _sync_rate(self, st) -> None:
+        rate = float(getattr(st, "step_rate", 0.0) or 0.0)
+        self._rate_seen = rate
+        if not self._rate.hasFocus() and abs(self._rate.value() - rate) > 1e-9:
+            self._rate.blockSignals(True)
+            self._rate.setValue(rate)
+            self._rate.blockSignals(False)
+
     def _toggle_steps(self, checked: bool) -> None:
         if self._suppress_presets:
             return
@@ -1012,6 +1043,7 @@ class MainWindow(QWidget):
                                  for a in range(2))
             + ". Low amplitudes may not move at all; forward and backward differ.")
         self._sync_amplitudes(st)
+        self._sync_rate(st)
         if st.step_large != self._preset_state:
             self._preset_state = st.step_large
             self._suppress_presets = True

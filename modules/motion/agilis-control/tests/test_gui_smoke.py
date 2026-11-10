@@ -174,3 +174,17 @@ def test_limit_switch_card_runs_ma_and_shows_it(window, qapp):
     assert "measure position X" in win._limit_hint.text()
     assert "OK" in win._limit_hint.text()
     assert "µm" in win._limit_hint.text()
+
+
+def test_rate_box_sets_and_follows_the_step_rate(window):
+    """The 'rate' box in the MOVE card: 0 shows 'full speed'; a typed value is
+    sent when editing ends; a rate set elsewhere (scan, console) shows up."""
+    win, brain, _ = window
+    assert win._rate.text() == "full speed"
+    win._rate.setValue(120)
+    win._rate.editingFinished.emit()
+    assert brain.cfg.motion.step_rate == 120.0
+    brain.set_step_rate(30)                      # from somewhere else
+    time.sleep(0.08)
+    win._refresh()
+    assert win._rate.value() == 30

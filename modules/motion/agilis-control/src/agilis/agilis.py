@@ -120,6 +120,9 @@ POLL_HZ_MAX = 100.0
 #: moment between "command accepted" and "TS reports stepping" (gotcha #2),
 #: which the manual does not specify. # VERIFY on the controller.
 PENDING_S = 0.3
+# Highest step rate that can be asked for (steps/s). Above the controller's own
+# PR rate the pacing never waits, so this is only a sanity bound.
+STEP_RATE_MAX = 2000.0
 
 STATE_NAMES = {READY: "ready", STEPPING: "stepping", JOGGING: "jogging",
                MOVING_TO_LIMIT: "to limit"}
@@ -163,6 +166,8 @@ class AgilisStatus:
     leash: bool
     leash_steps: int
     step_large: bool       # amplitude preset: True = all at large_amplitude
+    step_rate: float       # step-move rate, steps/s (0 = controller's full rate)
+    paced: list            # bool per axis: a software-paced move is running
     connected: bool
     hw_error: str = ""     # last failed hardware read ("" = fine)
     poll_hz: float = 0.0
@@ -205,6 +210,10 @@ class AgilisStage:
         self._pending_until = [0.0, 0.0]
         self._jog_mode = [0, 0]
         self._jog_deadline = [0.0, 0.0]
+        # Software-paced step move per axis (None = none): the poll thread sends
+        # it as PR chunks at motion.step_rate. Keys: start, target (counter),
+        # t0 (monotonic), rate, chunk_target, chunk_t.
+        self._pace = [None, None]
         # steps booked since the datum at an amplitude the step size was NOT
         # measured at (see the module docstring): the estimate is then approximate
         self._uncal = [0, 0]
@@ -493,6 +502,7 @@ class AgilisStage:
                 if states[a] != MOVING_TO_LIMIT:
                     self._limit_mode[a] = 0        # booked above at its amplitude
                 self._guard_jog(a, counts[a], states[a])
+                self._pace_tick(a, counts[a], states[a])
             self._last = (counts, states, limits)
             self._hw_error = ""
             snap = self._build_snapshot(counts, states, limits)
@@ -544,7 +554,7 @@ class AgilisStage:
         moving = []
         for a in range(2):
             pending = (now < self._pending_until[a] and counts[a] != self._target_steps[a])
-            moving.append(states[a] != READY or pending)
+            moving.append(states[a] != READY or pending or self._pace[a] is not None)
         bounds = [axis_effective_limits(self.cfg, a) for a in range(2)]
         amps_f = [axis_amplitude(self.cfg, a, +1) for a in range(2)]
         amps_b = [axis_amplitude(self.cfg, a, -1) for a in range(2)]
@@ -581,6 +591,8 @@ class AgilisStage:
             leash=bool(self.cfg.limits.leash_enabled),
             leash_steps=abs(int(self.cfg.limits.leash_steps)),
             step_large=all(v == large for v in amps_f + amps_b),
+            step_rate=float(self.cfg.motion.step_rate or 0.0),
+            paced=[p is not None for p in self._pace],
             connected=self._connected,
             hw_error=self._hw_error,
             poll_hz=1.0 / self._poll_period(),
@@ -638,12 +650,16 @@ class AgilisStage:
         self._account(axis, count)
         return count
 
-    def _issue(self, axis: int, target: int, target_um: float | None, what: str) -> int:
-        """Move ``axis`` to step ``target`` with one PR (call under the lock).
+    def _issue(self, axis: int, target: int, target_um: float | None, what: str,
+               paced: bool = True) -> int:
+        """Move ``axis`` to step ``target`` (call under the lock): one PR at the
+        controller's own rate, or -- with ``motion.step_rate`` > 0 -- a
+        software-paced move the poll thread sends in chunks (``_pace_tick``).
 
         A new move REPLACES one in progress (stop first: the controller refuses
         PR while an axis is not ready).
         """
+        self._pace[axis] = None                  # a new move replaces a paced one
         hw = self._hw(axis)
         state = int(self.backend.axis_state(hw))
         if state == MOVING_TO_LIMIT:
@@ -655,7 +671,13 @@ class AgilisStage:
         count = self._fresh_count(axis)
         self._jog_mode[axis] = 0
         delta = int(target) - count
-        if delta:
+        rate = float(self.cfg.motion.step_rate or 0.0)
+        if delta and paced and rate > 0:
+            self._pace[axis] = {"start": count, "target": int(target),
+                                "t0": time.monotonic(), "rate": rate,
+                                "chunk_target": count, "chunk_t": 0.0}
+            what += f" at {rate:g} steps/s"
+        elif delta:
             self.backend.move_by(hw, delta)
         k = self.um_per_step(axis, _sign(delta))
         self._target_steps[axis] = int(target)
@@ -664,7 +686,44 @@ class AgilisStage:
                                  else self._estimate_um(axis) + delta * k)
         self._pending_until[axis] = time.monotonic() + PENDING_S if delta else 0.0
         self._emit("info", f"move {AXES[axis]} {what} ({delta:+d} steps -> {target})")
+        if self._pace[axis] is not None:
+            self._pace_tick(axis, count, READY)  # the first step goes out at once
         return int(target)
+
+    def _pace_tick(self, axis: int, count: int, state: int) -> None:
+        """Send the next chunk of a software-paced move (call under the lock).
+
+        The schedule is ``1 + rate * elapsed`` steps (the first at once), never
+        more than the move. A chunk is sent only when the previous one has
+        finished: the axis reads READY AND the counter reached the chunk's end
+        (or PENDING_S passed, in case TS lags PR). So PR never meets a busy
+        axis, and an axis slower than the schedule simply runs flat out.
+        """
+        plan = self._pace[axis]
+        if plan is None or state != READY:
+            return
+        now = time.monotonic()
+        if count != plan["chunk_target"] and now - plan["chunk_t"] < PENDING_S:
+            return
+        way = 1 if plan["target"] > plan["start"] else -1
+        total = abs(plan["target"] - plan["start"])
+        done = (count - plan["start"]) * way
+        if done >= total:
+            self._pace[axis] = None              # arrived
+            return
+        due = min(total, 1 + int(plan["rate"] * (now - plan["t0"])))
+        n = due - done
+        if n <= 0:
+            return
+        try:
+            self.backend.move_by(self._hw(axis), way * n)
+        except Exception:
+            self._pace[axis] = None              # never retry a refused PR forever
+            self._emit("error", f"{AXES[axis]} paced move stopped: the controller "
+                                "refused the next chunk")
+            raise
+        plan["chunk_target"] = count + way * n
+        plan["chunk_t"] = now
 
     # -- STEP language ----------------------------------------------------- #
     def move_to_step(self, axis: int, position_steps: int) -> int:
@@ -728,6 +787,7 @@ class AgilisStage:
             self._emit("warn", f"{AXES[axis]} jog speed clamped to {mode}")
         hw = self._hw(axis)
         with self._io:
+            self._pace[axis] = None              # a jog replaces a paced move
             if mode == 0:
                 self.backend.stop(hw)
                 self._fresh_count(axis)          # book the jog's steps first
@@ -765,6 +825,7 @@ class AgilisStage:
             raise RuntimeError("the controller is running MA/PA and has cut the USB link "
                                "(up to 2 min); it cannot be stopped from here until it answers")
         with self._io:
+            self._pace[axis] = None              # no more chunks
             self.backend.stop(self._hw(axis))
             self._pending_until[axis] = 0.0
             count = self._fresh_count(axis)      # book a jog's/MV's steps before
@@ -791,7 +852,7 @@ class AgilisStage:
     def _datum_locked(self, axis: int) -> None:
         """ZP + the bookkeeping that goes with it (call under the lock)."""
         hw = self._hw(axis)
-        if int(self.backend.axis_state(hw)) != READY:
+        if int(self.backend.axis_state(hw)) != READY or self._pace[axis] is not None:
             raise RuntimeError(f"{AXES[axis]} is moving: stop it before setting the datum")
         self._fresh_count(axis)                    # book the last steps first
         self.backend.zero_counter(hw)
@@ -846,7 +907,8 @@ class AgilisStage:
         dirs = (+1, -1) if direction == 0 else ((+1,) if direction > 0 else (-1,))
         with self._io:
             hw = self._hw(axis)
-            if int(self.backend.axis_state(hw)) != READY:
+            # between two chunks of a paced move the axis reads READY: still moving
+            if int(self.backend.axis_state(hw)) != READY or self._pace[axis] is not None:
                 raise RuntimeError(f"{AXES[axis]} is moving: the amplitude can only change at rest")
             for d in dirs:
                 self.backend.set_amplitude(hw, d, v)
@@ -859,6 +921,22 @@ class AgilisStage:
                                f"{calibration_amplitude(self.cfg, axis, -1)} (fwd/bwd): um "
                                f"readings are approximate until you re-measure it")
         return v
+
+    def set_step_rate(self, rate: float) -> float:
+        """Rate of step moves in steps/s; 0 = the controller's full rate.
+
+        Applies to the NEXT move (a paced move running keeps its rate).
+        """
+        r = float(rate)
+        if not r == r or r < 0:                  # NaN or negative
+            r = 0.0
+        if r > STEP_RATE_MAX:
+            self._emit("warn", f"step rate {r:g} clamped to {STEP_RATE_MAX:g} steps/s")
+            r = STEP_RATE_MAX
+        self.cfg.motion.step_rate = r
+        self._emit("info", "step moves at the controller's full rate" if r == 0
+                   else f"step moves at {r:g} steps/s (software-paced)")
+        return r
 
     def set_step_size(self, large: bool) -> dict:
         """Amplitude preset: every axis and direction to the large or small value."""
@@ -1040,6 +1118,7 @@ class AgilisStage:
     def _start_mv(self, axis: int, mode: int) -> None:
         """Send MV (call under the lock)."""
         hw = self._hw(axis)
+        self._pace[axis] = None                    # MV replaces a paced move
         state = int(self.backend.axis_state(hw))
         if state not in (READY, MOVING_TO_LIMIT):
             self.backend.stop(hw)
@@ -1133,7 +1212,7 @@ class AgilisStage:
         """Run MA or PA: the lock is held and the USB link is down meanwhile."""
         with self._io:
             hw = self._hw(axis)
-            if int(self.backend.axis_state(hw)) != READY:
+            if int(self.backend.axis_state(hw)) != READY or self._pace[axis] is not None:
                 raise RuntimeError(f"{AXES[axis]} is moving")
             self._fresh_count(axis)
             self._usb_blocked = True
@@ -1217,7 +1296,7 @@ class AgilisStage:
         def off_switch(n: int) -> None:
             with self._io:
                 count = self._fresh_count(axis)
-                self._issue(axis, count + n, None, "off the limit switch")
+                self._issue(axis, count + n, None, "off the limit switch", paced=False)
             self._wait_rest(axis, 60.0)
 
         def run():

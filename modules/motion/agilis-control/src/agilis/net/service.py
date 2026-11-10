@@ -368,6 +368,9 @@ class AgilisService:
             v = b.set_amplitude(P.parse_axis(req["axis"]), req["value"],
                                 P.parse_direction(req.get("direction", 0)))
             return {"ok": True, "value": v}
+        if cmd == "set_step_rate":
+            # steps/s for step moves; 0 = the controller's full rate
+            return {"ok": True, "rate": b.set_step_rate(float(req["rate"]))}
         if cmd == "set_step_size":
             return {"ok": True, "step": b.set_step_size(bool(req["large"]))}
         if cmd == "set_calibration":

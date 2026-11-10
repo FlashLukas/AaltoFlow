@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import zlib
 
+from ..agilis import STEP_RATE_MAX
+
 #: Bumped only if the descriptor FORMAT changes in a way clients must notice.
 SCHEMA_VERSION = 1
 
@@ -226,6 +228,15 @@ def build_manifest(brain) -> dict:
             ]
 
     params += [
+        _p("step_rate", "Step rate", "control", "float", unit="steps/s",
+           group="Presets", order=205, min=0.0, max=STEP_RATE_MAX, step=1.0,
+           decimals=0, read_path=["step_rate"],
+           set={"verb": "set_step_rate", "arg": "rate"},
+           settle={"policy": "echoes", "key": "step_rate"},
+           help="Rate of step moves; 0 = the controller's own full rate. "
+                "The AG-UC2 has no rate setting, so a slower rate is made in "
+                "software (the move goes out in small chunks). Applies to the "
+                "next move; jogs keep their four fixed speeds."),
         _p("step_large", "Steps: large", "control", "bool", group="Presets",
            order=210, read_path=["step_large"],
            set={"verb": "set_step_size", "arg": "large"},
