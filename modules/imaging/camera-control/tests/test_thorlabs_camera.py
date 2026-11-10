@@ -299,8 +299,15 @@ def _fake_sdk_folder(home, version):
 
 
 def _forget_sdk(monkeypatch):
+    """No thorlabs_tsi_sdk in this test's world: not imported, and no folder
+    holding one on sys.path. On a rig PC (Blue Box, 2026-11-10) the REAL SDK
+    from camera-control/vendor was already imported and its folder on the
+    path, so a test that builds a fake SDK folder found the real one."""
     for k in [k for k in sys.modules if k.startswith("thorlabs_tsi_sdk")]:
         monkeypatch.delitem(sys.modules, k)
+    import os
+    monkeypatch.setattr(sys, "path", [x for x in sys.path if "site-packages" in x
+                                      or not os.path.isdir(os.path.join(x, "thorlabs_tsi_sdk"))])
 
 
 def test_the_sdk_is_found_in_the_vendor_folder_newest_version_first(monkeypatch, tmp_path):

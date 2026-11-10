@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 # the live pattern autosave (lab images, private)
 autosave/
+# this PC's own settings (Save config writes it); the examples/ folder holds
+# ready configurations to copy over it
+camera.ini

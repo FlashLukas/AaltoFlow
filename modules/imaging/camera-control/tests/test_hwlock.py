@@ -331,7 +331,7 @@ def test_sim_claims_nothing():
 # --------------------------------------------------------------------------- #
 # the service: a busy camera ends startup with ONE line and a non-zero exit
 # --------------------------------------------------------------------------- #
-def test_run_service_busy_camera_is_one_clean_line(fake_ids, monkeypatch, capsys):
+def test_run_service_busy_camera_is_one_clean_line(fake_ids, monkeypatch, capsys, tmp_path):
     import importlib.util
 
     calls, _ = fake_ids
@@ -343,7 +343,12 @@ def test_run_service_busy_camera_is_one_clean_line(fake_ids, monkeypatch, capsys
         spec.loader.exec_module(mod)
         monkeypatch.delenv("AALTOFLOW_ENDPOINTS", raising=False)
         monkeypatch.delenv("TRMOKE_ENDPOINTS", raising=False)
-        monkeypatch.setattr(sys, "argv", ["run_service.py", "--real",
+        # its OWN config: without --config run_service reads the module's
+        # camera.ini, which on a rig PC names the real camera (Blue Box,
+        # 2026-11-10: this test opened the real Zelux there)
+        ini = tmp_path / "ids_only.ini"
+        ini.write_text("[Camera]\ndriver = ids\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["run_service.py", "--real", "--config", str(ini),
                                           "--cmd-port", "15971", "--pub-port", "15972"])
         calls.clear()
         rc = mod.main()

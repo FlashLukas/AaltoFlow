@@ -536,6 +536,15 @@ compliance), Hall probe on the USB-6001:** 0 A +0.50 mT; +0.2 A (0.199 A,
 0 A -0.04 mT. The field follows the setpoint's sign, so `inverted_level = high`
 is right; about 13 mT/A.
 
+**A current sweep THROUGH ZERO** (214b63d, same day, magnet connected, current
+mode): `ramp_current(+0.2, 0.1)` from -0.2 A walked to zero, waited 0.67 s for
+the current to stop, flipped the relay ONCE at 3.0 mA and walked on to +0.2 A
+-- one sweep number and "sweeping" all the way, about 4.1 s for 0.4 A at
+0.1 A/s. The Hall probe went -2.9 -> +2.3 mT smoothly; the stream recorded the
+measured current -0.199 .. +0.199 A. The way back (-0.2 A) was the mirror image
+(flip at 3.0 mA). The measured current lags the setpoint by 20-35 mA at
+0.1 A/s (the coil's L/R); a fly scan bins by the measured value.
+
 **Learnt:** `[limits] current_max_A` alone caps only the positive side (min and
 max are two settings); the service now warns at start when the envelope is not
 the same on both signs. A live voltage -> current switch sets the voltage to
