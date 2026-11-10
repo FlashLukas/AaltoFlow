@@ -85,6 +85,32 @@ def test_set_refuses_instead_of_clamping(tmp_path):
             lab.set("field", float("nan"))
 
 
+def test_set_takes_text_and_enum_controls_as_they_are(tmp_path):
+    """Blue Box 2026-11-10: lab.set("vna.extra_sparams", "S21") raised "a
+    number is needed". A string control takes its text, an enum one of its
+    options (a typo refused before anything is sent)."""
+    from scan_core.registry import Settable
+    with _sim(tmp_path) as lab:
+        sent = {}
+        lab.registry.add(Settable("extra_sparams", "Extra S", "", (float("-inf"), float("inf")),
+                                  set_fn=lambda v: sent.__setitem__("extra", v),
+                                  get_fn=lambda: sent.get("extra", ""), dtype="string"))
+        lab.registry.add(Settable("sparam", "S-parameter", "", (float("-inf"), float("inf")),
+                                  set_fn=lambda v: sent.__setitem__("sparam", v),
+                                  get_fn=lambda: sent.get("sparam", "S11"), dtype="enum",
+                                  options=["S11", "S21", "S12", "S22"]))
+        assert lab.set("extra_sparams", "S21") == "S21"
+        assert sent["extra"] == "S21"
+        assert lab.set("sparam", "S21") == "S21" and sent["sparam"] == "S21"
+        with pytest.raises(ValueError, match="not one of its options"):
+            lab.set("sparam", "S33")
+        assert sent["sparam"] == "S21"           # nothing sent for the typo
+        d = lab.describe("sparam")
+        assert d["dtype"] == "enum" and d["options"] == ["S11", "S21", "S12", "S22"]
+        assert "one of S11, S21" in lab.summary()
+        assert lab.set("field", 20) == 20.0      # numbers unchanged
+
+
 def test_get_acquires_a_slow_detector_and_read_does_not(tmp_path):
     with _sim(tmp_path) as lab:
         s = lab.registry._state

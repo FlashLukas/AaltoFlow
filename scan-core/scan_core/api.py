@@ -424,7 +424,10 @@ class Lab:
         d = {"id": pid, "label": p.label, "unit": p.unit, "instrument": owner}
         if p.kind == "settable":
             d.update(kind="settable", limits=tuple(float(x) for x in p.limits),
-                     integer=bool(getattr(p, "integer", False)))
+                     integer=bool(getattr(p, "integer", False)),
+                     dtype=getattr(p, "dtype", "float"))
+            if getattr(p, "options", None):
+                d["options"] = list(p.options)
         else:
             d.update(kind="detector", dtype=getattr(p, "dtype", "float"),
                      slow=getattr(p, "acquire", None) is not None,
@@ -438,7 +441,12 @@ class Lab:
             d = self.describe(pid)
             if d["kind"] == "settable":
                 lo, hi = d["limits"]
-                extra = f"{lo:g} .. {hi:g} {d['unit']}".strip()
+                if d.get("options"):
+                    extra = "one of " + ", ".join(map(str, d["options"]))
+                elif d.get("dtype") == "string":
+                    extra = "text"
+                else:
+                    extra = f"{lo:g} .. {hi:g} {d['unit']}".strip()
             elif d["kind"] == "detector":
                 extra = (d["unit"] or "") + ("  (slow: acquires)" if d["slow"] else "")
                 if d["axes"]:
@@ -450,38 +458,52 @@ class Lab:
 
     # ---- set / get / read -------------------------------------------------
 
-    def set(self, pid: str, value, timeout_s: float | None = None) -> float:
+    def set(self, pid: str, value, timeout_s: float | None = None):
         """Set a parameter and BLOCK until it has settled. Returns the value.
 
         "Settled" is the module's own rule from its `describe` -- the magnet's
         field_stable, a stage's target echo -- exactly what a scan waits for.
         `timeout_s` overrides the module's settle timeout for this one call.
         Refuses a value outside the parameter's limits (nothing is sent).
+        An enum or text control takes its option / text as it is
+        (lab.set("vna.extra_sparams", "S21")); an enum refuses anything that
+        is not one of its options.
         """
         p = self._param(pid)
         if p.kind != "settable":
             raise TypeError(f"{pid} is a detector (read-only); it cannot be set. "
                             f"Settable: lab.parameters('settable')")
-        if isinstance(value, bool):
-            value = float(value)
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            raise TypeError(f"{pid}: a number is needed, not {value!r}") from None
-        if not math.isfinite(value):
-            raise ValueError(f"{pid}: refusing to set {value}")
-        self._refresh_limits()
-        lo, hi = p.limits
-        if not lo <= value <= hi:
-            raise ValueError(f"{pid} = {value:g} {p.unit} is outside its limits "
-                             f"{lo:g} .. {hi:g} {p.unit}; nothing was sent")
+        if not getattr(p, "numeric", True):
+            # An ENUM or STRING control (the VNA's extra_sparams "S21", a
+            # filter wheel position): the value goes on the wire as it is.
+            # An enum is checked against its declared options here, so a
+            # typo is refused before anything is sent. (Blue Box,
+            # 2026-11-10: lab.set("vna.extra_sparams", "S21") raised
+            # "a number is needed".)
+            value = p.option(value)
+            shown = repr(value)
+        else:
+            if isinstance(value, bool):
+                value = float(value)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise TypeError(f"{pid}: a number is needed, not {value!r}") from None
+            if not math.isfinite(value):
+                raise ValueError(f"{pid}: refusing to set {value}")
+            self._refresh_limits()
+            lo, hi = p.limits
+            if not lo <= value <= hi:
+                raise ValueError(f"{pid} = {value:g} {p.unit} is outside its limits "
+                                 f"{lo:g} .. {hi:g} {p.unit}; nothing was sent")
+            shown = f"{value:g}"
         self._claim([pid])
-        self._log(f"set {pid} = {value:g} {p.unit}".rstrip())
+        self._log(f"set {pid} = {shown} {p.unit}".rstrip())
         t0 = time.monotonic()
         try:
             p.set(value, timeout_s=timeout_s)
         except TimeoutError as exc:
-            raise SettleTimeout(f"{pid} did not settle at {value:g} {p.unit}: "
+            raise SettleTimeout(f"{pid} did not settle at {shown} {p.unit}: "
                                 f"{exc}") from exc
         except Exception as exc:
             raise self._refusal(exc, pid) or exc
