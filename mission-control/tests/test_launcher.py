@@ -1118,3 +1118,14 @@ def test_the_log_is_also_written_to_a_daily_file(env):
     old.write_text("old\n", "utf-8")
     mc.prune_logs()
     assert not old.exists() and mc.log_path().exists()
+
+
+def test_a_piped_warn_or_error_line_keeps_its_level():
+    """Blue Box 2026-11-11: "vna WARN: ..." was filed as INFO."""
+    import mission_control as mc
+    assert mc.line_level("vna WARN: the analyser's RF output is OFF") == "warn"
+    assert mc.line_level("kim WARNING: stalled") == "warn"
+    assert mc.line_level("ERROR: no device") == "error"
+    assert mc.line_level("vna ERROR: lost") == "error"
+    assert mc.line_level("vna service up (REAL)") == "info"
+    assert mc.line_level("a line with WARN: in the middle") == "info"

@@ -2041,7 +2041,7 @@ class ModuleCard(QtWidgets.QFrame):
             if label == "service" and BUSY_MARK in line:
                 self._address_busy(line.strip())
             else:
-                self.win.log(f"[{self.spec.id}·{label}] {line.rstrip()}")
+                self.win.log(f"[{self.spec.id}·{label}] {line.rstrip()}", line_level(line))
 
     def _address_busy(self, line: str):
         """The service's backend was refused its instrument: another service
@@ -2389,6 +2389,21 @@ def write_log_line(msg, level: str = "info") -> None:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {level.upper():5} {msg}\n")
     except OSError:
         pass
+
+
+#: a piped line that announces its own level: "vna WARN: ...", "ERROR: ...",
+#: "kim WARNING: ..." (the vna service prints its warnings like that since
+#: 2026-11-11, so they reach this log; Blue Box asked for them in colour and
+#: filed as WARN, not INFO)
+_LEVEL_RE = re.compile(r"^(?:[\w.-]+ )?(WARN|WARNING|ERROR):")
+
+
+def line_level(line: str) -> str:
+    """'warn' / 'error' for a piped line that says so, else 'info'."""
+    m = _LEVEL_RE.match(line.strip())
+    if not m:
+        return "info"
+    return "error" if m.group(1) == "ERROR" else "warn"
 
 
 def prune_logs(keep_days: int = LOG_KEEP_DAYS) -> None:
@@ -3393,7 +3408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         text = bytes(proc.readAllStandardOutput()).decode(errors="replace")
         for line in text.splitlines():
             if line.strip():
-                self.log(f"[{tag}] {line.rstrip()}")
+                self.log(f"[{tag}] {line.rstrip()}", line_level(line))
 
     def stop_all(self):
         self.log("stopping all launcher-owned services…")
