@@ -316,6 +316,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.field_label.setWordWrap(True)
         flay.addWidget(self.field_label)
         col.addWidget(fcard)
+        self.field_card = fcard          # hidden on a real analyser, see _set_simulated
 
         # sweep
         scard, slay = _card("Sweep")
@@ -672,6 +673,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # the model's Kittel curve describes the SIMULATED film only
         self.indicator.setVisible(simulated)
         self.model_label.setVisible(simulated)
+        # The field card is where you put the SIMULATED film into a field. On a
+        # real analyser the field only labels the data, and a scan records the
+        # magnet module's own field anyway, so the card is clutter there (Lukas,
+        # 2026-11-10). The source still lives in Settings > Field and on the wire.
+        self.field_card.setVisible(simulated)
 
     def _refresh(self):
         if self._control_bar is not None:

@@ -58,6 +58,7 @@ def test_window_builds_sweeps_and_uses_the_brains_reference(app):
         win._refresh()
         assert win._trace is not None and win.mag_curve.getData()[0].size == 401
         assert win.indicator.isVisibleTo(win) and win.kind_label.text() == "SIMULATED"
+        assert win.field_card.isVisibleTo(win)
         assert win.ref_label.text() == "none"
 
         # the REFERENCE card drives the brain
@@ -133,6 +134,8 @@ def test_on_a_real_analyser_the_model_is_hidden(app):
         vna.step()
         win._refresh()
         assert not win.indicator.isVisibleTo(win) and not win.model_label.isVisibleTo(win)
+        # the manual-field card is for the simulated film only (Lukas, 2026-11-10)
+        assert not win.field_card.isVisibleTo(win)
         assert "PNA-X" in win.windowTitle() and win._trace["s"].shape == (11,)
     finally:
         win.close()

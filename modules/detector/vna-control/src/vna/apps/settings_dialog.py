@@ -33,7 +33,9 @@ _HINTS = {
     "acquisition": "An acquisition averages `averages` sweeps that all started after the "
                    "trigger. continuous = sweep on its own between acquisitions.",
     "field": "source: mag2d (the vector magnet: |B| and angle from its measured Bx, By), "
-             "clMag (1-axis, angle 0) or manual. Filed with every sample, real or simulated. "
+             "mag2dcal (the same), clMag / ppms (1-axis, angle 0) or manual. Filed with every "
+             "sample, real or simulated. On a real analyser this is the only place to set it "
+             "(the front panel shows the field card in simulation only). "
              "stale_s: how long the magnet may be silent before field_ok goes False.",
     "sample": "SIMULATOR only. geometry: in_plane or out_of_plane. hk_mT / easy_axis_deg: "
               "in-plane uniaxial anisotropy. dip_dB is the coupling, the depth 50 mT above "
