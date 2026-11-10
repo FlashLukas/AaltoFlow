@@ -109,7 +109,6 @@ class Camera:
     # "" = the package's own DLLs (ThorImageCAM's folder only as a last resort).
     thorlabs_sdk_dir: str = ""
     thorlabs_dll_dir: str = ""
-    video_mode: str = "Mono8 640x480"  # free text; real driver validates
     frame_rate: float = 15.0           # frames/s the engine tries to hold
     extra_delay_ms: float = 0.0        # optional extra pause per frame
     running_avg_frames: int = 1        # rolling temporal average (1 = off)

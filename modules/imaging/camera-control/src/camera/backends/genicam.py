@@ -23,11 +23,9 @@ from . import claim as hwclaim
 
 
 class GenICamCamera:
-    def __init__(self, device: str = "0", cti_path: str = "",
-                 video_mode: str = ""):
+    def __init__(self, device: str = "0", cti_path: str = ""):
         self.device = device
         self.cti_path = cti_path
-        self.video_mode = video_mode
         self._h = None      # Harvester
         self._ia = None     # ImageAcquirer
         self._hwlock = None # our claim on this camera's serial (hwlock)

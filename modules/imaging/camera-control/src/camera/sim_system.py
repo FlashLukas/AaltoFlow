@@ -52,7 +52,7 @@ def build_real_system(cfg: Config | None = None):
     # camera driver: IDS peak by default (lab: U3-386xCP-M), or generic GenICam/Harvester
     if cfg.camera.driver == "genicam":
         from .backends.genicam import GenICamCamera
-        cam = GenICamCamera(device=h.cam_device, video_mode=cfg.camera.video_mode)
+        cam = GenICamCamera(device=h.cam_device)
     elif cfg.camera.driver == "thorlabs":
         # Thorlabs scientific camera (Zelux CS165MU on the vacuum setup); the
         # device is its serial, "" or "0" = the first one found

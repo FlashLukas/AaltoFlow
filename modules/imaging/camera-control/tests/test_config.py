@@ -63,3 +63,17 @@ def test_unknown_enum_sanitised(tmp_path):
     save_config(cfg, str(p))
     back = load_config(str(p))
     assert back.autofocus.mechanism == "spot_area"
+
+
+def test_an_old_ini_with_video_mode_still_loads(tmp_path):
+    """video_mode (2026-11-10) was a free-text field no driver ever read; it is
+    gone. A camera.ini written before still loads, and the key is dropped."""
+    from camera.config import load_config, save_config
+    p = tmp_path / "camera.ini"
+    p.write_text("[Camera]\ndriver = sim\nvideo_mode = Mono8 640x480\nframe_rate = 12.5\n",
+                 encoding="utf-8")
+    cfg = load_config(str(p))
+    assert cfg.camera.frame_rate == 12.5
+    assert not hasattr(cfg.camera, "video_mode")
+    save_config(cfg, str(p))
+    assert "video_mode" not in p.read_text(encoding="utf-8")

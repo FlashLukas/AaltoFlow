@@ -175,7 +175,7 @@ CAMERA_LAYOUT = [
                          ("image", "clip_bottom")])],
     [("Camera", [("camera", "driver"), ("camera", "exposure_us"),
                  ("camera", "frame_rate"), ("camera", "running_avg_frames"),
-                 ("camera", "extra_delay_ms"), ("camera", "video_mode"),
+                 ("camera", "extra_delay_ms"),
                  ("camera", "camera_name"), ("image", "save_path")]),
      ("Auto exposure (once)", [("camera", "auto_exposure_target"),
                                ("camera", "auto_exposure_percentile"),
