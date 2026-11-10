@@ -67,6 +67,7 @@ types checked against the SDK source; the behaviour on the camera is not).
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 
@@ -224,6 +225,7 @@ class ThorlabsCamera:
         self._model = ""
         self._deep = None
         self._deep_note = ""
+        self._open_note = ""                      # said once: e.g. a bit depth not read
 
     # ------------------------------------------------------------------ #
     def open(self) -> None:
@@ -248,9 +250,9 @@ class ThorlabsCamera:
             self._serial = str(serial)
             self._cam = self._sdk.open_camera(serial)       # VERIFY
             cam = self._cam
-            self._bits = int(getattr(cam, "bit_depth", 10) or 10)        # VERIFY
+            self._check_in_step(cam)
+            self._bits = self._read_bit_depth(cam)
             self.pixel_format = f"Mono{self._bits}"
-            self._model = str(getattr(cam, "model", "") or "")           # VERIFY
             # A camera left ARMED (by a crashed process) refuses the set-up below.
             try:
                 if getattr(cam, "is_armed", False):                       # VERIFY
@@ -267,6 +269,47 @@ class ThorlabsCamera:
         except BaseException:
             self.close()
             raise
+
+    def _check_in_step(self, cam) -> None:
+        """Refuse a camera whose answers are OUT OF STEP.
+
+        Blue Box, 2026-11-10: after a crash cut a request off, the Zelux
+        answered every question with the answer to the previous one -- `model`
+        returned its command list, `serial_number` "CS165MU", `bit_depth` 66
+        (from the firmware text) -- and the start died on an obscure SDK error
+        ("tl_camera_get_bit_depth ... invalid stoi argument"). It stayed so
+        until the USB cable was replugged. A model is one word ("CS165MU"),
+        a serial digits or hex (e.g. "12345"; SDK 2.3 lists longer hex ids)."""
+        def text(attr):
+            try:
+                return str(getattr(cam, attr, "") or "").strip()
+            except Exception as exc:                  # noqa: BLE001
+                return f"<{type(exc).__name__}>"
+        model, serial = text("model"), text("serial_number")
+        ok_model = bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,23}", model))
+        ok_serial = (not serial) or bool(re.fullmatch(r"[0-9A-Fa-f]{1,32}", serial))
+        if not (ok_model and ok_serial):
+            raise RuntimeError(
+                f"the Thorlabs camera's answers are out of step (model read {model[:40]!r}, "
+                f"serial read {serial[:40]!r}) -- unplug and replug its USB cable, then "
+                f"start the camera service again")
+        self._model = model
+
+    def _read_bit_depth(self, cam) -> int:
+        """The sensor's bit depth; 10 (the Zelux's) with a note if it cannot
+        be read, and out of step if it is no camera's (8..16)."""
+        self._open_note = ""
+        try:
+            bits = int(getattr(cam, "bit_depth"))                       # VERIFY
+        except Exception as exc:                      # noqa: BLE001
+            self._open_note = (f"the camera did not tell its bit depth "
+                               f"({type(exc).__name__}: {exc}); assuming 10 bits")
+            return 10
+        if not 8 <= bits <= 16:
+            raise RuntimeError(
+                f"the Thorlabs camera's answers are out of step (bit depth read {bits}) -- "
+                f"unplug and replug its USB cable, then start the camera service again")
+        return bits
 
     def _new_sdk(self, tl_camera):
         """TLCameraSDK(); if the package's own DLLs do not load and no DLL
@@ -363,7 +406,7 @@ class ThorlabsCamera:
         deep = raw.astype(np.uint16, copy=False)
         bits = self._bits
         self._deep = (deep, bits) if bits > 8 else None
-        self._deep_note = "" if bits > 8 else "the camera delivers 8-bit frames"
+        self._deep_note = self._open_note or ("" if bits > 8 else "the camera delivers 8-bit frames")
         shift = max(0, bits - 8)
         return (deep >> shift).astype(np.uint8)
 

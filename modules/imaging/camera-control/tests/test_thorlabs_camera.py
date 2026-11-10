@@ -530,3 +530,71 @@ def test_the_probe_uses_the_dll_folder_from_camera_ini(monkeypatch):
     rows, note = P._thorlabs()
     assert seen == {"avail": "S", "import": ("S", "D")}
     assert [r["address"] for r in rows] == ["00000042"] and note == ""
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-10, Blue Box: the Zelux answered ONE QUESTION BEHIND after a crash
+# (model -> its command list, serial -> "CS165MU", bit_depth -> 66) until its
+# USB cable was replugged; the start died on an obscure SDK error.
+# --------------------------------------------------------------------------- #
+def _camera_answering(sdk, monkeypatch, **answers):
+    sdk_mod = sys.modules["thorlabs_tsi_sdk.tl_camera"]
+
+    def open_camera(self, serial):
+        cam = FakeTLCamera(serial)
+        for k, v in answers.items():
+            object.__setattr__(cam, k, v)
+        sdk["cams"].append(cam)
+        return cam
+    monkeypatch.setattr(sdk_mod.TLCameraSDK, "open_camera", open_camera)
+
+
+def test_a_camera_answering_out_of_step_is_refused_with_replug(sdk, monkeypatch):
+    _camera_answering(sdk, monkeypatch,
+                      model="discover error echo id info ver ping model name sernum",
+                      serial_number="CS165MU", bit_depth=66)
+    with pytest.raises(RuntimeError, match="out of step.*replug"):
+        ThorlabsCamera().open()
+    assert sdk["cams"][0].disposed                 # closed again
+    assert hwlock.held() == []                     # and the claim released
+    assert ("arm", 2) not in sdk["cams"][0].writes # never set up
+
+
+def test_an_impossible_bit_depth_is_out_of_step_too(sdk, monkeypatch):
+    _camera_answering(sdk, monkeypatch, bit_depth=66)
+    with pytest.raises(RuntimeError, match="bit depth read 66"):
+        ThorlabsCamera().open()
+    assert hwlock.held() == []
+
+
+def test_an_unreadable_bit_depth_falls_back_to_10_and_says_so(sdk, monkeypatch):
+    class NoDepth(FakeTLCamera):
+        @property
+        def bit_depth(self):
+            raise RuntimeError("tl_camera_get_bit_depth() returned 1004")
+
+        @bit_depth.setter
+        def bit_depth(self, value):        # FakeTLCamera.__init__ sets it
+            pass
+    sdk_mod = sys.modules["thorlabs_tsi_sdk.tl_camera"]
+
+    def open_camera(self, serial):
+        cam = NoDepth(serial)
+        sdk["cams"].append(cam)
+        return cam
+    monkeypatch.setattr(sdk_mod.TLCameraSDK, "open_camera", open_camera)
+    cam = ThorlabsCamera()
+    cam.open()
+    try:
+        assert cam.pixel_format == "Mono10"
+        cam.grab()
+        assert "did not tell its bit depth" in cam.deep_note()
+    finally:
+        cam.close()
+
+
+def test_sdk_23_style_hex_ids_are_in_step(sdk, monkeypatch):
+    _camera_answering(sdk, monkeypatch, serial_number="000419210a000009082d")
+    cam = ThorlabsCamera()
+    cam.open()
+    cam.close()

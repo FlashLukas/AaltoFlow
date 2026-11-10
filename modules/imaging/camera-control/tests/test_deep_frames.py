@@ -347,3 +347,20 @@ def test_the_autofocus_tab_shows_why_the_frame_is_eight_bit():
     finally:
         win.close()
         app.processEvents()
+
+
+
+def test_the_bit_depth_is_reported_before_any_spot_is_calibrated():
+    """Blue Box, 2026-11-10: the 10-bit Zelux showed spot_bit_depth 8 until a
+    spot had been measured -- the status default, not the camera."""
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    cam, z = _cam(12)
+    brain = Camera(cam, cam.stage, z, cfg)
+    brain.start()
+    try:
+        assert _wait(lambda: brain.status().frame_number > 2)
+        assert not brain.cfg.spot.ref_set
+        assert brain.status().spot_bit_depth == 12
+    finally:
+        brain.shutdown()

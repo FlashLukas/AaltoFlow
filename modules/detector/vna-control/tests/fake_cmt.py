@@ -95,6 +95,10 @@ class FakeCmt:
                 self.sweeps += 1
                 self.pending = True
         if cmd == ":ABOR":
+            if self.pending:
+                # what the real S2VNA does (Blue Box, 2026-11-10): an aborted
+                # pending single trigger is logged as an error
+                self.errors.append('-239,"TRIG:SING interrupted"')
             self.pending = False
 
     def query(self, cmd: str) -> str:

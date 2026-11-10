@@ -41,6 +41,13 @@ def test_info_and_config_over_wire(wired):
     _brain, _cam, cli = wired
     info = cli.info()
     assert "idn" in info and "limits" in info
+    # what is IN FORCE next to the config group (Blue Box, 2026-11-10: the
+    # config's 0..130 um / 0..75 V read as if they applied to the split rig)
+    lim = info["limits"]
+    assert info["xy_limits"] == [[lim["motor_x_min"], lim["motor_x_max"]],
+                                 [lim["motor_y_min"], lim["motor_y_max"]]]
+    assert info["z_limits"] == [lim["z_min_v"], lim["z_max_v"]]
+    assert info["limits_from_stage"] is False and info["z_unit"] in ("V", "um")
     cfg = cli.get_config()
     assert "scanning" in cfg and "limits" in cfg
     # the UI/theme group round-trips over the wire

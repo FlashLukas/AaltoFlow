@@ -159,7 +159,9 @@ def test_abort_leaves_the_channel_ready_for_the_next_trigger():
     b.abort_sweep()
     assert fake.log[-1] == ":ABOR" and not fake.pending
     b.start_sweep(f, 1e3, -10.0, "S21", F)
-    assert fake.sweeps == 2 and not fake.errors      # TRIG:SING accepted again
+    # TRIG:SING accepted again: no "-211 Trigger ignored"; only the -239 S2VNA
+    # logs for the sweep we aborted (dropped at the next settings check)
+    assert fake.sweeps == 2 and all(e.startswith("-239") for e in fake.errors)
 
 
 def test_close_hands_s2vna_back_free_running():
@@ -308,3 +310,62 @@ def test_real_backend_builds_the_s5085_with_its_envelope():
     assert cfg.limits.freq_min_Hz == 9e3                 # applied before the brain clamps
     assert analyser_name(cfg) == "Copper Mountain S5085"
     assert resource_field(cfg) == "cmt_resource"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-10, Blue Box (S5085): a settings change while sweeping continuously
+# aborts the running sweep; S2VNA logs '-239,"TRIG:SING interrupted"' for it,
+# and the next settings check reported nine of them as a hardware failure.
+# --------------------------------------------------------------------------- #
+def test_our_own_aborted_sweep_is_not_a_hardware_error():
+    b, fake, _ = _s5085()
+    b.open()
+    f = np.linspace(1e9, 2e9, 11)
+    b.start_sweep(f, 1e3, -10.0, "S11", F)
+    b.abort_sweep()                                  # what a settings change does
+    assert fake.errors == ['-239,"TRIG:SING interrupted"']
+    b.start_sweep(f, 10e3, -10.0, "S11", F)          # must NOT raise
+    z, _ = b.finish_sweep()
+    assert z.shape == (11,)
+
+
+def test_an_interruption_we_did_not_cause_is_still_reported():
+    b, fake, _ = _s5085()
+    b.open()
+    f = np.linspace(1e9, 2e9, 11)
+    b.start_sweep(f, 1e3, -10.0, "S11", F)
+    b.abort_sweep()
+    fake.errors.append('-239,"TRIG:SING interrupted"')   # one more than ours
+    with pytest.raises(RuntimeError, match="-239"):
+        b.start_sweep(f, 10e3, -10.0, "S11", F)
+
+
+def test_continuous_sweeping_survives_a_settings_change():
+    """The Blue Box scan: continuous on, then the scan's conditions set the
+    IFBW -- the brain aborts the running sweep and must carry on cleanly."""
+    import time
+    cfg = Config()
+    cfg.hardware.driver = "s5085"
+    cfg.field.source = "manual"
+    fake = FakeCmt(idn=S5085_IDN)
+    vna = Analyzer(CmtVna(cfg, resource=fake), cfg)
+    vna.start()
+    try:
+        vna.set_points(201)
+        vna.set_ifbw(100.0)                            # slow sweeps: one is running
+        vna.set_continuous(True)
+        t_end = time.monotonic() + 5
+        while time.monotonic() < t_end and vna.status().sweeps < 1:
+            time.sleep(0.02)
+        for ifbw in (1e3, 10e3, 1e3):                  # settings changes mid-sweep
+            vna.set_ifbw(ifbw)
+            time.sleep(0.15)
+        t_end = time.monotonic() + 5
+        n0 = vna.status().sweeps
+        while time.monotonic() < t_end and vna.status().sweeps < n0 + 2:
+            time.sleep(0.02)
+        st = vna.status()
+        assert st.hw_error == "" and st.sweeps >= n0 + 2
+        assert any(c == ":ABOR" for c in fake.log)      # sweeps WERE aborted
+    finally:
+        vna.shutdown()

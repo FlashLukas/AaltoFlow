@@ -204,6 +204,9 @@ class CmtVna:
         self._count = None                # :CALC1:PAR:COUN as we last set it
         self._correction = None
         self._pending = False
+        # Sweeps WE aborted since the last error check: S2VNA logs each as
+        # '-239,"TRIG:SING interrupted"' (see abort_sweep)
+        self._aborts = 0
         self._prepared = False            # set up for single sweeps yet? (see _take_over)
         self._points = 0
         self._started_at = math.nan
@@ -484,8 +487,14 @@ class CmtVna:
             self._pending = False
             # With continuous initiation on, ABOR puts the channel back into
             # "waiting for trigger" (manual: ABOR), ready for the next TRIG:SING.
-            # VERIFY: ABOR is acted on while a TRIG:SING is still pending.
+            # Checked on the S5085 (2026-11-10): it is -- and S2VNA then logs
+            # '-239,"TRIG:SING interrupted"' for the trigger we interrupted.
+            # Ours, not a fault: _check_errors drops exactly that many -239s.
+            # (A settings change in continuous mode aborts the running sweep;
+            # the next settings check reported nine of them as a hardware
+            # failure and the scan stopped.)
             self._write(":ABOR")
+            self._aborts += 1
         self._pending = False
 
     # ---- internals ---------------------------------------------------------------
@@ -573,5 +582,15 @@ class CmtVna:
 
     def _check_errors(self, doing: str) -> None:
         errs = self._errors()
+        # drop one -239 "interrupted" per sweep WE aborted -- no more: an
+        # interruption we did not cause is still reported
+        ours, self._aborts = self._aborts, 0
+        kept = []
+        for e in errs:
+            if ours > 0 and e.split(",", 1)[0].strip() == "-239":
+                ours -= 1
+                continue
+            kept.append(e)
+        errs = kept
         if errs:
             raise RuntimeError(f"{self.model.idn_token} reported errors while {doing}: " + " | ".join(errs))

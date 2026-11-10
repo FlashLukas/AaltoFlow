@@ -289,9 +289,19 @@ class CameraService:
                     "kept_outputs": self._keep_outputs}
         if cmd == "info":
             lim = P.config_to_dict(b.cfg)["limits"]
+            # "limits" is the CONFIG group -- it applies only to a stage without
+            # limits of its own (the piezo rig). kim / KIM001 / Agilis report
+            # their own range; "xy_limits" / "z_limits" are what is in force
+            # (Blue Box, 2026-11-10: the 0..130 um / 0..75 V config read as if
+            # it applied to the split rig).
+            xy, z = b.xy_limits(), b.z_limits()
             return {"ok": True, "info": {
                 "idn": b.backend.idn(),
                 "limits": lim,
+                "xy_limits": None if xy is None else [list(xy[0]), list(xy[1])],
+                "z_limits": None if z is None else list(z),
+                "limits_from_stage": bool(getattr(b.xy, "owns_limits", False)),
+                "z_unit": b.status().z_unit,
                 "objective": b.cfg.image.objective_name,
                 "pixel_size_um": [b.cfg.image.pixel_size_x_um, b.cfg.image.pixel_size_y_um],
                 "objectives": b.list_objectives(),

@@ -1643,6 +1643,10 @@ class Camera:
         whole run (Lukas: "during the step calibration the spot measurement is
         not running")."""
         sp = self.cfg.spot
+        # the depth of the frame the sizes are measured on -- said on EVERY
+        # frame, not only once a spot is calibrated and measured (Blue Box,
+        # 2026-11-10: a 10-bit Zelux showed spot_bit_depth 8 before calibration)
+        st.spot_bit_depth = self._spot_source(gray)[2]
         center = (sp.ref_x, sp.ref_y) if (sp.ref_set and not self._measuring_spot) else None
         # never the whole frame (Lukas 2026-09-29): uncalibrated -> the region
         # around the frame centre, like every other spot search
