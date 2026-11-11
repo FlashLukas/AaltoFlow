@@ -123,7 +123,9 @@ def test_unchanged_settings_are_not_rewritten():
     b.start_sweep(f, 1e3, -10.0, "S21", F); b.finish_sweep()
     fake.log.clear()
     b.start_sweep(f, 1e3, -10.0, "S21", F)
-    assert fake.log == [":TRIG:SING"]
+    # only queries before the trigger: the re-check of the set-up (a user may
+    # have changed it in S2VNA, test_cmt_recheck.py) -- nothing is written
+    assert _writes(fake.log) == [":TRIG:SING"]
 
 
 def test_changing_sparam_redefines_the_trace():

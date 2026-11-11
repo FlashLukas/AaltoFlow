@@ -129,7 +129,10 @@ class FakeCmt:
             return "0"
         m = re.fullmatch(r":CALC1:PAR(\d+):DEF\?", cmd)
         if m:
-            return self.defs.get(int(m.group(1)), "S11")
+            i = int(m.group(1))
+            if i > self.traces:          # S2VNA does not answer: a VISA timeout
+                raise TimeoutError(f"VI_ERROR_TMO: PAR{i}:DEF? with {self.traces} traces")
+            return self.defs.get(i, "S11")
         if cmd == ":CALC1:PAR:COUN?":
             return f"{self.traces}"
         if cmd == ":TRIG:SOUR?":
@@ -146,7 +149,10 @@ class FakeCmt:
         m = re.fullmatch(r":CALC1:TRAC(\d+):DATA:SDAT\?", cmd)
         assert m, cmd
         i = int(m.group(1))
-        assert 1 <= i <= self.traces, f"trace {i} read, but only {self.traces} exist"
+        if not 1 <= i <= self.traces:
+            # the real S2VNA does not answer: the VISA read times out
+            # (Blue Box, 2026-11-11)
+            raise TimeoutError(f"VI_ERROR_TMO: trace {i} read, only {self.traces} exist")
         z = np.asarray(self.sp_fn(self.defs[i], self.state["points"], self.sweeps),
                        dtype=complex)
         out = np.empty(2 * z.size)

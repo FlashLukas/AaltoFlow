@@ -484,6 +484,8 @@ class CmtVna:
         first = not self._prepared
         if first:
             self._take_over()                  # the first sweep asked of this module
+        else:
+            self._recheck()                    # changed by hand in S2VNA since?
         f = np.asarray(freqs_Hz, dtype=float)
         want = {"start": float(f[0]), "stop": float(f[-1]), "points": int(f.size),
                 "ifbw": float(ifbw_Hz), "power": float(power_dBm)}
@@ -529,7 +531,20 @@ class CmtVna:
             raise RuntimeError(f"{self.model.idn_token}: unexpected *OPC? reply {done!r}")
 
         # every trace of channel 1 came from the sweep that just ended
-        traces = {sp: self._read_trace(i) for i, sp in enumerate(self._sparams, start=1)}
+        traces = {}
+        for i, sp in enumerate(self._sparams, start=1):
+            try:
+                traces[sp] = self._read_trace(i)
+            except Exception as exc:
+                # S2VNA does not answer a query about a trace it does not have:
+                # a raw VISA timeout. The usual cause is the trace set-up
+                # changed by hand in S2VNA (Blue Box, 2026-11-11). Forget what
+                # we believed S2VNA holds, so the next sweep sets it up again.
+                self._forget_setup()
+                raise RuntimeError(
+                    f"reading trace {i} ({sp}) from S2VNA failed ({type(exc).__name__}: "
+                    f"{exc}). Were the traces changed in S2VNA? They are set up again "
+                    f"at the next sweep.") from exc
         z = traces[self._sparams[0]]
         meta = {"ifbw_actual_Hz": self._readback.get("ifbw", math.nan),
                 "power_actual_dBm": self._readback.get("power", math.nan),
@@ -539,6 +554,54 @@ class CmtVna:
         if len(traces) > 1:
             meta["traces"] = traces
         return z, meta
+
+    def _forget_setup(self) -> None:
+        """Drop every cached belief about S2VNA's set-up: the next start_sweep
+        writes the traces and the sweep settings again (and checks them)."""
+        self._sparams, self._count, self._applied = None, None, {}
+
+    def _recheck(self) -> None:
+        """Before every sweep after the first: is S2VNA still set up as this
+        module left it? A user may change traces, trigger, averaging or the
+        sweep in S2VNA's own window while the service runs (Blue Box,
+        2026-11-11: traces changed by hand -> every later sweep timed out
+        reading a trace that no longer existed, until the set-up happened to
+        match again). Whatever differs is forgotten here, so this start_sweep
+        writes it again, and a warning says what was put back. A dozen
+        short queries on a local socket: milliseconds against a sweep."""
+        r = self._res
+        restored = []
+        src = r.query(":TRIG:SOUR?").strip().upper()                 # VERIFY: INT|EXT|MAN|BUS
+        if not src.startswith("BUS"):
+            self._write(":TRIG:SOUR BUS")
+            restored.append(f"trigger source {src}")
+        if self._query_bool(f":INIT{CH}:CONT?") is False:
+            self._write(f":INIT{CH}:CONT ON")
+            restored.append("continuous initiation off")
+        if self._query_bool(f":SENS{CH}:AVER?") is True:
+            self._write(f":SENS{CH}:AVER OFF")                     # the brain averages
+            restored.append("averaging on")
+        # The traces. Ask only for trace numbers that exist: S2VNA does not
+        # answer PAR<i>:DEF? beyond PAR:COUN (the query would time out).
+        n = int(float(r.query(f":CALC{CH}:PAR:COUN?").strip()))
+        want = list(self._sparams or ())
+        defs = [r.query(f":CALC{CH}:PAR{i}:DEF?").strip().upper()
+                for i in range(1, min(n, len(want)) + 1)]
+        if n != self._count or defs != want[:len(defs)]:
+            restored.append(f"traces {', '.join(defs) or 'none'} ({n} in all)")
+            self._sparams, self._count = None, None
+        # the sweep itself: what S2VNA holds now against what we last wrote
+        for k in ("start", "stop", "points", "ifbw", "power"):
+            if k not in self._applied:
+                continue
+            got = float(r.query(_SETTERS[k][1].format(ch=CH)).strip())
+            if not math.isclose(got, self._readback.get(k, math.nan),
+                                rel_tol=1e-9, abs_tol=1e-6):
+                restored.append(f"{k} {got:g}")
+                self._applied.pop(k)
+        if restored:
+            self.warnings.append("S2VNA was changed by hand (" + "; ".join(restored)
+                                 + "): set back for this module's sweeps")
 
     def _read_trace(self, i: int) -> np.ndarray:
         """Trace i of channel 1 as complex numbers (SDAT = corrected re, im pairs)."""

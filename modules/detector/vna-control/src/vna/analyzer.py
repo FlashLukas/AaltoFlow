@@ -1049,6 +1049,7 @@ class Analyzer:
         else:
             with self._hw:
                 z, meta = self.backend.finish_sweep()
+        self._report_new_backend_warnings()
         traces = meta.pop("traces", None) or {sparam: z}
         missing = [sp for sp in sparams if sp not in traces]
         if missing:
@@ -1283,6 +1284,7 @@ class Analyzer:
                                    f"will use {now:g}")
         for w in getattr(self.backend, "warnings", [])[:]:
             self._emit("warn", w)
+        self._warn_seen = len(getattr(self.backend, "warnings", None) or [])
         with self._lock:
             self._instrument = dict(state)
         self._emit("info", f"adopted the analyser's sweep: {sw.start_Hz / 1e9:.6g}-"
@@ -1333,6 +1335,18 @@ class Analyzer:
         if not (math.isfinite(float(self.cfg.line.point_dwell_ifbw))
                 and float(self.cfg.line.point_dwell_ifbw) > 0):
             self.cfg.line.point_dwell_ifbw = 1.2
+
+    def _report_new_backend_warnings(self) -> None:
+        """A backend notes things as it goes (`warnings`, e.g. "S2VNA was
+        changed by hand ..."). _adopt reports the ones from the connect; this
+        reports any added since, once each."""
+        w = getattr(self.backend, "warnings", None)
+        if not isinstance(w, list):
+            return
+        seen = getattr(self, "_warn_seen", 0)
+        for msg in w[seen:]:
+            self._emit("warn", msg)
+        self._warn_seen = len(w)
 
     def _report_hw_error(self, exc: Exception) -> None:
         msg = f"{type(exc).__name__}: {exc}"
