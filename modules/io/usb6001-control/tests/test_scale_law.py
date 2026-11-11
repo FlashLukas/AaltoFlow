@@ -181,7 +181,8 @@ def test_vacuum_magnet_example_loads_clean():
     cfg = Config.load(str(EXAMPLE))
     assert sanitise(cfg) == []
     a = cfg.ai.channels
-    assert [c.enabled for c in a] == [True] * 4 + [False] * 4
+    # ai0..ai3 + ai4 (antenna sense for the resistance measurement, 2026-11-10)
+    assert [c.enabled for c in a] == [True] * 5 + [False] * 3
     assert a[1].terminal == "DIFF"
     assert scale_value(a[0], 8.0) == pytest.approx(1000.0)
     assert a[0].lamp_name == "ATM" and a[0].lamp_above == 1100.0
