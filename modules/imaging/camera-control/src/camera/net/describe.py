@@ -212,14 +212,18 @@ def _image_params(brain) -> list:
     return [
         image,
         _p("image_id", "Image #", "indicator", "int", group="Imaging", order=105,
-           min=0, read_path=["image_id"]),
+           min=0, read_path=["image_id"],
+           help="Number of the latest recorded image; a scan waits for the number "
+                "its trigger returned, so every point gets its own fresh frame."),
         _p("image_acquiring", "Taking an image", "indicator", "bool", group="Imaging",
-           order=106, read_path=["image_acquiring"]),
+           order=106, read_path=["image_acquiring"],
+           help="True while a fresh frame for a scan point is being taken."),
         _p("image_exposure_us", "Image exposure", "indicator", "float", group="Imaging",
            order=107, unit="us", decimals=1, read_path=["image_exposure_us"],
            help="The ExposureTime the last image was taken with."),
         _p("image_gain", "Image gain", "indicator", "float", group="Imaging",
-           order=107, decimals=3, read_path=["image_gain"]),
+           order=107, decimals=3, read_path=["image_gain"],
+           help="The gain the last recorded image was taken with."),
         _p("image_auto_frozen", "Auto features held off", "indicator", "string",
            group="Imaging", order=107, read_path=["image_auto_frozen"],
            help="Empty when none. Auto exposure / gain the camera had on, switched "
@@ -310,11 +314,14 @@ def build_manifest(brain) -> dict:
 
         # ---- what it sees --------------------------------------------------
         _p("spot_found", "Spot found", "indicator", "bool", group="Spot",
-           order=60, read_path=["spot_found"]),
+           order=60, read_path=["spot_found"],
+           help="True when the laser spot is located in the live frame. Live status value, for panels."),
         _p("spot_x", "Spot X", "indicator", "float", unit="px", group="Spot",
-           order=61, decimals=2, plottable=True, read_path=["spot_x"]),
+           order=61, decimals=2, plottable=True, read_path=["spot_x"],
+           help="Laser spot centre, image x in pixels (right = +). Live status value, not a scan-point reading."),
         _p("spot_y", "Spot Y", "indicator", "float", unit="px", group="Spot",
-           order=62, decimals=2, plottable=True, read_path=["spot_y"]),
+           order=62, decimals=2, plottable=True, read_path=["spot_y"],
+           help="Laser spot centre, image y in pixels (DOWN = +). Live status value, not a scan-point reading."),
         _p("spot_area", "Spot area", "indicator", "float", unit="px2",
            group="Spot", order=63, decimals=1, plottable=True,
            read_path=["spot_area"],
@@ -343,9 +350,11 @@ def build_manifest(brain) -> dict:
                 "wrong (sigma^2 too big). Lower the exposure."),
 
         _p("match_found", "Template matched", "indicator", "bool",
-           group="Pattern", order=70, read_path=["match_found"]),
+           group="Pattern", order=70, read_path=["match_found"],
+           help="True when the template pattern is found in the live frame."),
         _p("match_score", "Match score", "indicator", "float", group="Pattern",
-           order=71, decimals=4, plottable=True, read_path=["match_score"]),
+           order=71, decimals=4, plottable=True, read_path=["match_score"],
+           help="How well the template matches the frame (template-matching score; higher is better)."),
         # A LOST pattern is a latched fault (2026-09-28): scan-core pauses on a
         # non-empty `fault`, and it stays until a human clears it.
         _p("fault", "Fault", "indicator", "string", group="Status", order=3,
@@ -368,9 +377,41 @@ def build_manifest(brain) -> dict:
         _p("distance_um", "Spot to point", "indicator", "float", unit="um",
            group="Loops", order=80, decimals=3, plottable=True,
            read_path=["distance_um"],
-           help="What the stabiliser is nulling."),
+           help="What the stabiliser is nulling, in um (live status value). NaN while "
+                "the stabiliser is on but not acting (see 'Stabiliser not acting')."),
+        _p("stab_why", "Stabiliser not acting", "indicator", "string", group="Loops",
+           order=79, read_path=["stab_why"],
+           help="Why the stabiliser, switched on, does nothing (laser spot not "
+                "calibrated, pattern not matched, paused for an autofocus ...); empty "
+                "while it acts or is off."),
+        _p("stop_motion", "STOP", "action", "action", group="Loops", order=1,
+           help="Stops everything the camera moves: stabiliser and laser placement "
+                "off, autofocus killed, and stop sent to the XY and Z stages. Always "
+                "allowed, for every client."),
+        _p("calibrate_xy_map", "Calibrate stage", "action", "action", group="Loops",
+           order=95,
+           wait={"target_key": "xycal_id",
+                 "ready": {"policy": "adopt_then_flag", "setpoint_key": "xycal_id",
+                           "flag_key": "xycal_running", "invert": True},
+                 "check": {"key": "xycal_state", "equals": "OK"},
+                 "timeout_s": 300.0},
+           args=[{"name": "distance_um", "label": "Move", "type": "float", "unit": "um",
+                  "default": float(brain.cfg.stabilizer.xycal_move_um), "min": 0.0}],
+           help="Moves the XY stage +-distance on each axis (and back) and watches the "
+                "pattern: measures xy_map (which stage direction moves the image which "
+                "way) and how far the image really moves per commanded um. Changes no "
+                "setting -- set hardware.xy_map to the result. Needs a tracked pattern "
+                "and the stabiliser off; not for kim (it calibrates itself)."),
+        _p("xycal_state", "Stage calibration state", "indicator", "string", group="Loops",
+           order=96, read_path=["xycal_state"],
+           help="Outcome of the latest Calibrate stage: 'OK', or why it failed."),
+        _p("xycal_map", "Measured xy_map", "indicator", "string", group="Loops",
+           order=97, read_path=["xycal_map"],
+           help="The xy_map the latest Calibrate stage measured ('' before one); "
+                "compare with hardware.xy_map."),
         _p("stable", "Stable", "indicator", "bool", group="Loops", order=81,
-           read_path=["stable"]),
+           read_path=["stable"],
+           help="True when the stabiliser's averaged spot-to-point distance is within its stable radius."),
 
         # ---- scanning the camera's array: a point per scan step --------------
         # Two independent axes so a scan can nest them. The bound is the array
@@ -400,7 +441,8 @@ def build_manifest(brain) -> dict:
            help="Where the selected array point is in the image."),
         _p("point_y_px", "Scan point Y", "indicator", "float", unit="px",
            group="Scan array", order=85, decimals=2, plottable=True,
-           read_path=["selected_point_y"]),
+           read_path=["selected_point_y"],
+           help="Image y of the selected array point, in pixels (DOWN = +)."),
         _p("point_settled", "Point settled", "indicator", "bool", group="Scan array",
            order=86, read_path=["point_settled"],
            help="A full averaged stabiliser window at THIS point was within the "
@@ -444,17 +486,21 @@ def build_manifest(brain) -> dict:
            help="As X; image +y is DOWN. As the outer axis of a fly scan it puts "
                 "each row on the sample, whatever the stage counter says."),
         _p("laser_settled", "Laser placed", "indicator", "bool",
-           group="Laser on sample", order=91, read_path=["laser_settled"]),
+           group="Laser on sample", order=91, read_path=["laser_settled"],
+           help="True when the laser has reached the requested position on the sample (re-evaluated every frame)."),
 
         # ---- position (read-only here; drive XY through piezo-control) -----
         _p("stage_x", "Stage X", "indicator", "float", unit="um",
            group="Position", order=90, decimals=3, plottable=True,
-           read_path=["stage_x"]),
+           read_path=["stage_x"],
+           help="Stage X position read back from the stage service (read-only here; drive it through the stage module)."),
         _p("stage_y", "Stage Y", "indicator", "float", unit="um",
            group="Position", order=91, decimals=3, plottable=True,
-           read_path=["stage_y"]),
+           read_path=["stage_y"],
+           help="Stage Y position read back from the stage service (read-only here; drive it through the stage module)."),
         _p("stage_moving", "Stage moving", "indicator", "bool",
-           group="Position", order=92, read_path=["stage_moving"]),
+           group="Position", order=92, read_path=["stage_moving"],
+           help="True while the stage service reports a move in progress."),
         _p("stage_ok", "Stage answering", "indicator", "bool",
            group="Position", order=93, read_path=["stage_ok"],
            help="False while the stage service (kim) does not answer: stage "
@@ -469,23 +515,29 @@ def build_manifest(brain) -> dict:
                 "you trust. Refused while an autofocus or Z step calibration is running "
                 "or queued, and on a Z without a step counter."),
         _p("z_has_datum", "Z has a datum", "indicator", "bool", group="Focus",
-           order=27, read_path=["z_has_datum"]),
+           order=27, read_path=["z_has_datum"],
+           help="True when the Z actuator has a step counter that 'Datum Z' can reset."),
         _p("reconnect_stage", "Reconnect stage", "action", "action",
            group="Position", order=94,
            help="Rebuild the connection to the stage service, e.g. after it was restarted."),
 
         # ---- housekeeping --------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the camera is open and delivering frames."),
         _p("fps", "Frame rate", "indicator", "float", unit="1/s",
            group="Status", order=2, decimals=1, plottable=True,
-           read_path=["fps"]),
+           read_path=["fps"],
+           help="Frames per second the service is grabbing."),
         _p("af_running", "Autofocus running", "indicator", "bool",
-           group="Focus", order=21, read_path=["af_running"]),
+           group="Focus", order=21, read_path=["af_running"],
+           help="True while an autofocus run is in progress."),
         _p("af_error", "Autofocus state", "indicator", "string", group="Focus",
-           order=22, read_path=["af_error"]),
+           order=22, read_path=["af_error"],
+           help="Outcome of the latest autofocus: 'OK' on success, otherwise the reason it failed."),
         _p("pixel_size_x", "Pixel size", "indicator", "float", unit="um",
-           group="Optics", order=51, decimals=4, read_path=["pixel_size_x"]),
+           group="Optics", order=51, decimals=4, read_path=["pixel_size_x"],
+           help="Size of one image pixel on the sample, from the selected objective's calibration."),
 
         # ---- actions -------------------------------------------------------
         # A `wait` block makes this a scan ROUTINE action (scan-core
@@ -537,7 +589,8 @@ def build_manifest(brain) -> dict:
         # a run counter: starts at 0 and only counts up (min 0 is a promise
         # the brain keeps; no max -- it is unbounded, int32 holds 2e9 runs)
         _p("af_id", "Autofocus #", "indicator", "int", group="Focus", order=23,
-           min=0, read_path=["af_id"]),
+           min=0, read_path=["af_id"],
+           help="Number of the latest autofocus run; a scan waits for the number its trigger returned."),
         _p("af_hint", "Autofocus warning", "indicator", "string", group="Focus", order=24,
            read_path=["af_hint"],
            help="Empty when fine. Set when spot_area is the metric and the spot is NOT "
@@ -566,7 +619,8 @@ def build_manifest(brain) -> dict:
            help="Result of the last Z step calibration: the median over the sigma^2 "
                 "levels of the width ratios (NaN before one / when refused)."),
         _p("zcal_state", "Z calibration state", "indicator", "string", group="Focus",
-           order=26, read_path=["zcal_state"]),
+           order=26, read_path=["zcal_state"],
+           help="Outcome of the latest Z step calibration: 'OK' on success, otherwise the reason it was refused or failed."),
         # 8, 10, 12, 14 or 16 and nothing else: backends/ids.bit_depth maps
         # every pixel format onto those, and camera._spot_source reports 8
         # when there is no deep frame. So [8, 16] is a promise (1 byte stored).
@@ -580,10 +634,12 @@ def build_manifest(brain) -> dict:
                 "the camera's PixelFormat is Mono8 (set Mono10/12 in IDS peak Cockpit; "
                 "this module never changes it)."),
         _p("kill_af", "Kill autofocus", "action", "action", group="Focus",
-           order=101, danger=True),
+           order=101, danger=True,
+           help="Stops a running autofocus where it is."),
         # a SAFETY verb (control.py): a viewer may always cancel a placement
         _p("cancel_laser_target", "Cancel laser placement", "action", "action",
-           group="Laser on sample", order=92),
+           group="Laser on sample", order=92,
+           help="Abandons a laser placement in progress; the sample stays where it is."),
         # 2026-09-29: where the size was measured, the new sizes, saturation as
         # information, and the autofocus exposure
         _p("spot_offset_px", "Spot offset from calibration", "indicator", "float",
@@ -605,7 +661,8 @@ def build_manifest(brain) -> dict:
            unit="counts", decimals=1, read_path=["spot_peak_avg"],
            help="3x3-averaged peak above background. Not usable while saturated."),
         _p("spot_sat_fraction", "Spot saturated fraction", "indicator", "float",
-           group="Spot", order=75, decimals=3, read_path=["spot_sat_fraction"]),
+           group="Spot", order=75, decimals=3, read_path=["spot_sat_fraction"],
+           help="Fraction of the spot's pixels at the camera's maximum. Information only."),
         _p("af_exposure_active", "Autofocus exposure on", "indicator", "bool",
            group="Focus", order=27, read_path=["af_exposure_active"],
            help="autofocus.exposure_us is on the camera now (an autofocus / Z "
@@ -640,7 +697,8 @@ def build_manifest(brain) -> dict:
         _p("snapshot", "Snapshot", "action", "action", group="Imaging",
            order=110,
            args=[{"name": "path", "label": "File path", "type": "string",
-                  "default": None}]),
+                  "default": None}],
+           help="Saves the current camera frame to an image file."),
         _p("move_xy", "Move XY", "action", "action", group="Position",
            order=120, danger=True,
            args=[{"name": "x", "label": "X", "type": "float", "unit": "um",

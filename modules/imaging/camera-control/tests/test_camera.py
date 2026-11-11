@@ -363,3 +363,76 @@ def test_loaded_pattern_restores_the_whole_scanning_array(system, tmp_path):
     brain.load_pattern(str(p))
     assert asdict(brain.cfg.scanning) == pytest.approx(want)
     assert brain.reference.array_center_offset_px == (-40.5, 12.25)
+
+
+def test_a_typed_pixel_size_survives_apply_until_the_objective_changes(system):
+    """Blue Box 2026-11-11: pixel size 0.2809 typed in Settings > Objective &
+    pixels, Apply -> the camera kept the objectives table's 0.413 (apply_config
+    re-applied the table after every set_config) and drew scan rectangles with
+    it. A typed value now stays; picking ANOTHER objective brings its table
+    value, and coming back brings the table value again."""
+    brain, *_ = system
+    brain.set_objective("63x")
+    table63 = brain.cfg.image.pixel_size_x_um
+    brain.set_config({"image": {"pixel_size_x_um": 0.2809, "pixel_size_y_um": 0.2809}})
+    assert brain.cfg.image.pixel_size_x_um == pytest.approx(0.2809)
+    assert brain.status().pixel_size_x == pytest.approx(0.2809)
+    # an unrelated Apply later does not put the table value back
+    brain.set_config({"stabilizer": {"images_to_average": 3}})
+    assert brain.cfg.image.pixel_size_y_um == pytest.approx(0.2809)
+    # another objective: its own table value
+    other = next(n for n in brain.list_objectives() if n != "63x")
+    brain.set_config({"image": {"objective_name": other}})
+    assert brain.cfg.image.pixel_size_x_um != pytest.approx(0.2809)
+    brain.set_objective("63x")                          # explicit pick: the table
+    assert brain.cfg.image.pixel_size_x_um == pytest.approx(table63)
+
+
+def test_the_stabiliser_says_why_it_is_not_acting():
+    """Blue Box 2026-11-11: Stabilise ticked, pattern matched, but no calibrated
+    spot -> the loop silently did nothing and the panel showed "distance
+    0.000 um". Status now says why (stab_why) and the distance is NaN."""
+    import math
+    cfg = Config()
+    cfg.camera.frame_rate = 200.0
+    brain, cam, xy, z = build_sim_system(cfg)
+    brain.start()
+    try:
+        assert _wait(lambda: brain.status().frame_number > 2)
+        brain.calibrate_spot(10)
+        _capture_and_track(brain, cam)
+        brain.clear_spot_position()                    # the calibration is lost
+        brain.set_stabilize(True)
+        assert _wait(lambda: "not calibrated" in brain.status().stab_why)
+        assert math.isnan(brain.status().distance_um)
+        brain.calibrate_spot(10)                       # fixed: it acts, no reason
+        assert _wait(lambda: brain.status().stab_why == ""
+                     and math.isfinite(brain.status().distance_um))
+        brain.set_stabilize(False)
+        assert _wait(lambda: brain.status().stab_why == "")
+    finally:
+        brain.shutdown()
+
+
+def test_the_spot_calibration_is_kept_in_the_services_ini(system, tmp_path):
+    """Blue Box 2026-11-11: a calibration never Saved was lost on a restart.
+    Calibrate / Set position / Clear now write the [spot] ref_* keys into the
+    .ini the service loads (only those keys; the rest of the file is kept)."""
+    import configparser
+    from camera.config import load_config
+    brain, *_ = system
+    ini = tmp_path / "camera.ini"
+    ini.write_text("[Spot]\nthr_lower = 123\n\n[UI]\ntheme = light\n", encoding="utf-8")
+    brain.spot_ini = str(ini)
+    res = brain.calibrate_spot(5)
+    assert load_config(str(ini)).spot.ref_x == pytest.approx(res["x"])
+    brain.set_spot_position(100.5, 50.25)
+    cfg = load_config(str(ini))
+    assert cfg.spot.ref_set and (cfg.spot.ref_x, cfg.spot.ref_y) == (100.5, 50.25)
+    assert cfg.spot.thr_lower == 123 and cfg.ui.theme == "light"   # kept
+    brain.clear_spot_position()
+    assert load_config(str(ini)).spot.ref_set is False
+    p = configparser.ConfigParser(interpolation=None)
+    p.read(ini, encoding="utf-8")
+    assert set(p["Spot"]) - {"thr_lower"} == {k for k in p["Spot"] if k.startswith("ref_")}
+    brain.spot_ini = None                                           # tests: nothing

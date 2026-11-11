@@ -303,6 +303,19 @@ class StepXYStage:
     def __init__(self, link: KimLink):
         self.link = link
 
+    def stop(self) -> None:
+        """STOP every axis of the stage service (its `stop` verb with no axis =
+        all; a safety verb there, allowed even while another client holds it)."""
+        self.link.rpc(cmd="stop")
+
+    def limit_switches(self):
+        """[X, Y] True where the stage reports its limit switch active (agilis
+        status `limit_switch`), or None when the service does not say."""
+        ls = self.link.status().get("limit_switch")
+        if not isinstance(ls, (list, tuple)) or len(ls) < 2:
+            return None
+        return [bool(ls[0]), bool(ls[1])]
+
     def open(self) -> None:
         self.link.open()
 
@@ -401,9 +414,14 @@ class KimZFocus:
                  poll_s: float = 0.03):
         self.link = link
         self.settle_timeout_s = settle_timeout_s
+        # (stop() below: the camera's STOP button)
         self.poll_s = poll_s
         self._target_steps: int | None = None
         self._dc = DirectionalCounter()
+
+    def stop(self) -> None:
+        """STOP the Z axis (the service's safety verb `stop`, axis Z)."""
+        self.link.rpc(cmd="stop", axis="Z")
 
     # -- per-direction step sizes (the camera's Z step calibration) ---------- #
     # WHY THE CAMERA CONVERTS HERE, NOT kim (2026-09-28): kim stores a forward

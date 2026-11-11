@@ -359,6 +359,16 @@ class CameraClient(ControlClient):
         return {k: rep.get(k) for k in ("objective", "key", "value", "path")}
 
     # live camera parameters
+    def stop_motion(self) -> dict:
+        r = self._rpc(cmd="stop_motion")
+        return {"stopped": r.get("stopped", []), "failed": r.get("failed", [])}
+
+    def calibrate_xy_map(self, distance_um: float | None = None) -> int:
+        return int(self._rpc(cmd="calibrate_xy_map", distance_um=distance_um)["xycal_id"])
+
+    def get_xycal(self) -> dict:
+        return self._rpc(cmd="get_xycal")["xycal"]
+
     def calibrate_spot(self, frames: int = 20) -> dict:
         return self._rpc(cmd="calibrate_spot", frames=frames)["spot"]
 

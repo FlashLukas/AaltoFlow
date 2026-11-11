@@ -554,9 +554,19 @@ class MainWindow(QMainWindow):
         tabs.addTab(_scrolled(self._settings_tab([("Pattern", self.cfg.pattern)],
                                                  columns=PATTERN_LAYOUT)), "Pattern")
         tabs.addTab(self._camera_settings_tab(), "Camera settings")   # scrolls already
+        # Calibrate stage, next to the xy_map it measures (Blue Box 2026-11-11)
+        self.b_xycal = QPushButton("Calibrate stage")
+        self.b_xycal.setToolTip(
+            "Moves the XY stage +-xycal_move_um on each axis (and back) and watches the "
+            "pattern: which way the image goes gives xy_map, how far gives the real move "
+            "per commanded um. Needs a tracked pattern, the stabiliser off. Not for kim "
+            "(it calibrates itself). Nothing is changed until you accept the map.")
+        self.b_xycal.clicked.connect(self._calibrate_stage)
         tabs.addTab(_scrolled(self._settings_tab([("Limits", self.cfg.limits),
                                                   ("Hardware", self.cfg.hardware)],
-                                                 columns=POSITIONER_LAYOUT)), "Positioner")
+                                                 columns=POSITIONER_LAYOUT,
+                                                 extras={"xy_map": self.b_xycal})),
+                    "Positioner")
         tabs.addTab(_scrolled(self._readouts_tab()), "Readouts")
         tabs.addTab(_scrolled(self._appearance_tab()), "Appearance")
         # a tab shown again re-reads the config into its (unedited) form: the
@@ -1233,9 +1243,30 @@ class MainWindow(QMainWindow):
         btn.setToolTip("Rebuild the connection to the stage service, e.g. after "
                        "starting or restarting it.")
         btn.clicked.connect(self._reconnect_stage)
-        row.addWidget(lab, 1); row.addWidget(btn)
+        # ONE stop for everything the camera moves (Blue Box, 2026-11-11: the
+        # only stop was the stage's own window or unticking Stabilise)
+        stop = QPushButton("STOP"); stop.setObjectName("danger")
+        stop.setToolTip("Stabiliser and laser placement off, autofocus killed, and "
+                        "stop sent to the XY and Z stages.")
+        stop.clicked.connect(self._stop_motion)
+        mark_always(stop)                  # a safety action: a viewer may press it
+        row.addWidget(lab, 1); row.addWidget(btn); row.addWidget(stop)
         self.__dict__.setdefault("_stage_bars", []).append((lab, btn))
         return bar
+
+    def _stop_motion(self) -> None:
+        try:
+            res = self.ctrl.stop_motion()
+        except Exception as exc:
+            self._log_event("error", f"STOP: {exc}")
+            return
+        self.chk_stab.blockSignals(True)
+        self.chk_stab.setChecked(False)
+        self.chk_stab.blockSignals(False)
+        failed = res.get("failed") or []
+        self._log_event("error" if failed else "warn",
+                        "STOP: " + ", ".join(res.get("stopped", []))
+                        + ("; could NOT stop " + "; ".join(failed) if failed else ""))
 
     def _fault_bar(self) -> QWidget:
         """Red banner: the latched FAULT (a lost pattern) and any hardware error.
@@ -1508,8 +1539,16 @@ class MainWindow(QMainWindow):
             self._log_event("error", f"XY unit: {exc}")
 
     def _refresh_xy(self, s):
-        self.lab_stab.setText(f"distance {s.distance_um:.3f} um   "
-                              f"(stable within {self.cfg.stabilizer.stable_radius_um:.3f} um)")
+        self._poll_xycal(s)
+        why = getattr(s, "stab_why", "") or ""
+        if s.stabilize_on and why:
+            # switched on but not acting: say why instead of a "distance 0.000"
+            self.lab_stab.setText(f"not acting: {why}")
+            self.lab_stab.setStyleSheet(f"color: {T.COLORS['danger']};")
+        else:
+            self.lab_stab.setText(f"distance {s.distance_um:.3f} um   "
+                                  f"(stable within {self.cfg.stabilizer.stable_radius_um:.3f} um)")
+            self.lab_stab.setStyleSheet("")
         self.lab_moving.setText("● moving" if s.stage_moving else " ")
         if s.xy_step_unit == "steps":
             self.lab_stage_x.setText(f"X  {s.stage_steps_x:+d} steps")
@@ -1791,6 +1830,54 @@ class MainWindow(QMainWindow):
                     w.setEnabled(on)
                     w.setToolTip("" if on else "clip_enabled is off: not used")
 
+    def _calibrate_stage(self):
+        """Start Calibrate stage, then (polled from _refresh) offer the result."""
+        try:
+            self._xycal_waiting = self.ctrl.calibrate_xy_map()
+        except Exception as exc:
+            self._log_event("error", f"Calibrate stage: {exc}")
+            return
+        self.b_xycal.setEnabled(False)
+        self.b_xycal.setText("Calibrating ...")
+        self._log_event("info", "Calibrate stage: moving each axis both ways ...")
+
+    def _poll_xycal(self, s) -> None:
+        n = getattr(self, "_xycal_waiting", None)
+        if n is None or getattr(s, "xycal_id", 0) != n or getattr(s, "xycal_running", True):
+            return
+        self._xycal_waiting = None
+        self.b_xycal.setEnabled(True)
+        self.b_xycal.setText("Calibrate stage")
+        try:
+            res = self.ctrl.get_xycal()
+        except Exception as exc:
+            self._log_event("error", f"Calibrate stage: {exc}")
+            return
+        if s.xycal_state != "OK":
+            self._log_event("error", f"Calibrate stage {s.xycal_state}")
+            return
+        from PySide6.QtWidgets import QMessageBox
+        new, old = res.get("xy_map", ""), self.cfg.hardware.xy_map
+        text = res.get("summary", "")
+        if new.upper() == (old or "").upper():
+            QMessageBox.information(self, "Calibrate stage",
+                                    f"xy_map {old} is right.\n\n{text}")
+            return
+        ans = QMessageBox.question(
+            self, "Calibrate stage",
+            f"The camera measured xy_map {new} (now {old}).\n\n{text}\n\n"
+            f"Use {new}? (Save config keeps it for the next start.)",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            self.ctrl.set_config({"hardware": {"xy_map": new}})
+            self.cfg.hardware.xy_map = new
+            self._sync_form("hardware")
+            self._log_event("info", f"xy_map set to {new} (Save config to keep it)")
+        except Exception as exc:
+            self._log_event("error", f"setting xy_map: {exc}")
+
     def _auto_exposure(self):
         try:
             res = self.ctrl.auto_exposure_once()
@@ -2017,6 +2104,7 @@ class MainWindow(QMainWindow):
                 self._form_shown.setdefault(key, {}).update(vals)
             # keep our local cfg mirror in step (used to draw overlays)
             self.ctrl_get_config_into_cfg()
+            self._show_what_was_kept(payload)
             self._sync_size_fields()          # pitch/points edits update size too
             if "scanning" in payload:
                 self._sync_form("scanning")   # show the pitch a points change produced
@@ -2030,6 +2118,29 @@ class MainWindow(QMainWindow):
             self.set_drawer_collapsed(payload["ui"]["drawer_collapsed"], persist=False)
         if payload.get("autofocus"):
             self._offer_store_for_objective(payload["autofocus"], before_af)
+
+    def _show_what_was_kept(self, payload: dict) -> None:
+        """After Apply: if the camera did not keep a value as sent (clamped,
+        replaced by the objectives table, refused), show what it REALLY holds
+        and say so -- otherwise the form keeps the typed number while the
+        camera works with another one, and nothing tells (Blue Box,
+        2026-11-11: pixel size 0.2809 typed, 0.413 kept)."""
+        for key, vals in payload.items():
+            obj = getattr(self.cfg, key, None)
+            if obj is None:
+                continue
+            differ = []
+            for n, sent in vals.items():
+                got = getattr(obj, n, sent)
+                if isinstance(sent, float) and isinstance(got, (int, float)):
+                    same = abs(float(got) - sent) <= 1e-9 * max(1.0, abs(sent))
+                else:
+                    same = got == sent
+                if not same:
+                    differ.append(f"{n} = {got} (sent {sent})")
+            if differ:
+                self._sync_form(key)
+                self._log_event("warn", f"the camera kept {key}: " + "; ".join(differ))
 
     def _keep_scan_size(self, new: dict) -> None:
         """Changing only the NUMBER OF POINTS keeps the array size: the pitch

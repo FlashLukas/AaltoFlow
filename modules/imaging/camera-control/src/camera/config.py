@@ -569,6 +569,9 @@ class Stabilizer:
     settle_s: float = 0.2              # wait after a move before measuring again
     move_with_x: bool = True
     move_with_y: bool = True
+    # Calibrate stage (Positioner tab): how far each axis is moved both ways to
+    # see which way the image goes (xy_map) and how far (in the stage's own um)
+    xycal_move_um: float = 3.0
 
 
 @dataclass
@@ -662,6 +665,18 @@ def image_um_to_stage(dux: float, duy: float, xy_map: str) -> tuple:
     d[ax] += sx * float(dux)
     d[ay] += sy * float(duy)
     return d[0], d[1]
+
+
+def xy_map_from_moves(v_x, v_y) -> str:
+    """The xy_map that the measured image shifts imply. `v_x` / `v_y` = the
+    image shift (dx right, dy down) per +1 of stage X / stage Y. Each stage
+    axis goes to the image axis it moves most; the sign says which stage
+    direction moves the image right (first token) and down (second)."""
+    tok = {}
+    for axis, v in (("X", v_x), ("Y", v_y)):
+        comp = 0 if abs(v[0]) >= abs(v[1]) else 1
+        tok[comp] = ("+" if v[comp] > 0 else "-") + axis
+    return tok.get(0, "") + tok.get(1, "")
 
 
 @dataclass

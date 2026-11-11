@@ -283,6 +283,17 @@ class CameraStatus:
     point_minus_spot_x: float = 0.0   # pixels (selected point - spot)
     point_minus_spot_y: float = 0.0
     distance_um: float = 0.0          # magnitude of the above, in um
+    # Stabilise is ON but the loop is not acting, and why ("" = acting, or
+    # off). Blue Box, 2026-11-11: with no calibrated spot the stabiliser did
+    # nothing and the panel showed "distance 0.000 um" with no reason.
+    # distance_um is NaN then (there is no measured distance).
+    stab_why: str = ""
+    # Calibrate stage: running, the run's number, its outcome ("OK",
+    # "failed: ..."), and the xy_map it measured ("" before a run)
+    xycal_running: bool = False
+    xycal_id: int = 0
+    xycal_state: str = ""
+    xycal_map: str = ""
     stable: bool = False
     # True only after a FULL averaged window AT THE CURRENTLY SELECTED POINT was
     # within stable_radius_um; cleared by selecting another point. `stable` is
@@ -466,6 +477,26 @@ class Camera:
         self._af_obj_name: str | None = None   # objective whose AF values are applied
         self._af_obj_applied: dict = {}        # {AF key: value put in by that objective}
         self._af_obj_base: dict = {}           # {AF key: the value it replaced}
+        # The objective (and its table pixel size) whose pixel size was last put
+        # into cfg: apply_config re-applies the table ONLY when one of them
+        # changes, so a pixel size typed in Settings survives the Apply that
+        # sent it (Blue Box, 2026-11-11).
+        self._px_obj: tuple | None = None
+        # Calibrate stage (calibrate_xy_map): numbered runs on their own thread
+        self._xycal_id = 0
+        self._xycal_busy = False
+        self._xycal_state = ""
+        self._xycal_result: dict = {}
+        # The wrong-way guard of the stabiliser (_correct): the distance at the
+        # previous correction and how many corrections in a row made it LARGER
+        self._stab_last_dist: float | None = None
+        self._stab_away = 0
+        # ... and the stall guard: the averaged (point - spot) px vector and the
+        # image shift the last correction asked for; corrections in a row that
+        # moved the image < 25 % of that
+        self._stab_last_avg = None
+        self._stab_asked_px = 0.0
+        self._stab_stalled = 0
         self._objectives = OBJ.load_objectives(self.cfg.image.objectives_file)
         self._apply_objective(self.cfg.image.objective_name, quiet=True)
         self._last_frame: np.ndarray | None = None    # processed grayscale
@@ -994,6 +1025,10 @@ class Camera:
             faulted = bool(self._fault)
         streaming = self.stream.running
         st.streaming = streaming
+        with self._lock:
+            st.xycal_running, st.xycal_id = self._xycal_busy, self._xycal_id
+            st.xycal_state = self._xycal_state
+            st.xycal_map = self._xycal_result.get("xy_map", "")
         anchor_now = self._last_template_xy if (self.reference is not None
                                                  and st.tracking_on and st.match_found) else None
         # While FAULTED neither loop moves the stage, even when the pattern is
@@ -1011,6 +1046,10 @@ class Camera:
         else:
             self._avg_buf.clear()
             self._settled_for = None          # a lost match or a stopped loop is not settled
+            if st.stabilize_on and not goto:
+                st.stab_why = self._stab_not_acting(geo, st, spot_position_ok, af_pending,
+                                                    streaming, faulted)
+                st.distance_um = float("nan")
         st.point_settled = (st.stabilize_on and not af_pending and not streaming
                             and not faulted
                             and not self._laser_goto and self._settled_for
@@ -1471,6 +1510,29 @@ class Camera:
     # ------------------------------------------------------------------ #
     # stabiliser  (ports Stabilization_StableAtPixelOrCorrectV2.vi)
     # ------------------------------------------------------------------ #
+    def _stab_not_acting(self, geo, st, spot_ok, af_pending, streaming, faulted) -> str:
+        """Why the stabiliser, switched on, does nothing this frame -- the first
+        reason a user can act on, in the order they would have to fix them."""
+        if faulted:
+            return "pattern fault -- look at the image, then Clear fault"
+        if not spot_ok:
+            return "laser spot not calibrated (Spot tab: Calibrate spot or Set position)"
+        if self.reference is None:
+            return "no pattern drawn (Pattern tab)"
+        if not st.tracking_on:
+            return "pattern tracking is off (Allow tracking)"
+        if not st.match_found:
+            return "pattern not matched in this frame"
+        if geo is None:
+            return "no scan array"
+        if af_pending:
+            return "paused for the autofocus"
+        if streaming:
+            return "a fly scan is recording"
+        if self._laser_goto:
+            return "placing the laser"
+        return "waiting"
+
     def _stabilise_step(self, geo, px_x, px_y, st) -> bool:
         """One stabiliser cycle: AVERAGE a full window of measurements, THEN
         correct once, then restart the window.
@@ -1557,6 +1619,9 @@ class Camera:
         # Piezo / Agilis rig: the stage moves in um; hardware.xy_map says which
         # stage axis (and sign) moves the image which way ("+X+Y" = aligned,
         # what the piezo rig always assumed).
+        if who == "stabiliser" and (self._moving_away(float(np.hypot(*dist_um)))
+                                    or self._stage_stuck(avg, gain, move_x, move_y)):
+            return
         try:
             cx, cy = self.xy.read_xy()
         except Exception:
@@ -1571,6 +1636,278 @@ class Camera:
         except Exception as exc:
             self._emit("warn", f"{who} move failed: {exc}")
         self._avg_buf.clear()                         # restart averaging post-move
+
+    def _moving_away(self, dist: float) -> bool:
+        """The wrong-way guard (Blue Box, 2026-11-11: with xy_map inverted the
+        stabiliser walked the sample AWAY from the laser). Two corrections in a
+        row that each found the distance >20 % LARGER than at the one before
+        (and outside the stable radius) -> the map is wrong: switch the
+        stabiliser OFF, say so, do not move. True = stopped."""
+        prev = self._stab_last_dist
+        radius = max(0.0, float(self.cfg.stabilizer.stable_radius_um))
+        if prev is not None and dist > 1.2 * prev and dist > radius:
+            self._stab_away += 1
+        else:
+            self._stab_away = 0
+        self._stab_last_dist = dist
+        if self._stab_away < 2:
+            return False
+        self._stop_stabiliser(f"it moved the sample away from the laser twice in a row "
+                              f"(now {dist:.2f} um, was {prev:.2f} um). hardware.xy_map "
+                              f"({self.cfg.hardware.xy_map}) looks wrong -- run Calibrate "
+                              f"stage (Positioner tab)")
+        return True
+
+    def _stop_stabiliser(self, why: str) -> None:
+        """Switch the stabiliser OFF and say why (one error event)."""
+        self._stabilize_on = False
+        self._stab_last_dist, self._stab_away = None, 0
+        self._stab_last_avg, self._stab_stalled = None, 0
+        self._avg_buf.clear()
+        self._emit("error", "stabiliser STOPPED: " + why)
+
+    def _stage_stuck(self, avg, gain, move_x, move_y) -> bool:
+        """Two more ways the stabiliser gives up instead of pushing on (Blue
+        Box, 2026-11-11, the Agilis rig):
+          * the stage reports a LIMIT SWITCH active on an axis this correction
+            needs -- its steps are counted but nothing moves;
+          * two corrections in a row moved the IMAGE less than a quarter of
+            what they asked for -- the counter moves, the sample does not
+            (a limit, a stalled actuator, a wrong pixel size).
+        True = stopped."""
+        from .config import image_um_to_stage
+        a = np.asarray(avg, dtype=float)
+        if not (move_x or move_y):
+            return False
+        # which stage axes this correction will drive
+        dX, dY = image_um_to_stage(-a[0] if move_x else 0.0, -a[1] if move_y else 0.0,
+                                   self.cfg.hardware.xy_map)
+        limits = getattr(self.xy, "limit_switches", None)
+        if limits is not None:
+            try:
+                ls = limits()
+            except Exception:
+                ls = None
+            if ls:
+                hit = [ax for ax, d, on in (("X", dX, ls[0]), ("Y", dY, ls[1]))
+                       if on and abs(d) > 0]
+                if hit:
+                    self._stop_stabiliser(
+                        f"the stage reports its limit switch active on {' and '.join(hit)} "
+                        f"-- it cannot move there. Move the stage off the limit (stage "
+                        f"window), then switch Stabilise on again")
+                    return True
+        prev, asked = self._stab_last_avg, self._stab_asked_px
+        self._stab_last_avg = a.copy()
+        self._stab_asked_px = float(np.hypot(*(gain * a)))
+        if prev is None or asked < 1.0:         # below a pixel: noise decides
+            self._stab_stalled = 0
+            return False
+        moved = float(np.hypot(*(a - prev)))
+        self._stab_stalled = self._stab_stalled + 1 if moved < 0.25 * asked else 0
+        if self._stab_stalled >= 2:
+            self._stop_stabiliser(
+                f"two corrections in a row moved the image only {moved:.1f} px of the "
+                f"{asked:.1f} px asked -- the stage counts steps but the sample does not "
+                f"move (limit switch? stalled actuator? wrong pixel size?)")
+            return True
+        return False
+
+    def stop_motion(self) -> dict:
+        """ONE stop for everything the camera moves (Blue Box, 2026-11-11):
+        the stabiliser and the laser placement off, an autofocus / Z or stage
+        calibration killed, and `stop` sent to the XY and the Z stage. A safety
+        verb: allowed for every client, always."""
+        self._stabilize_on = False
+        self._laser_goto = False
+        self._avg_buf.clear()
+        self.kill_af()
+        done, failed = ["stabiliser off", "laser placement off", "autofocus killed"], []
+        for name, dev in (("XY stage", self.xy), ("Z stage", getattr(self, "z", None))):
+            stop = getattr(dev, "stop", None)
+            if stop is None:
+                continue
+            try:
+                stop()
+                done.append(f"{name} stopped")
+            except Exception as exc:
+                failed.append(f"{name}: {failure_text(exc)}")
+        self._emit("warn", "STOP: " + ", ".join(done)
+                   + ("; could NOT stop " + "; ".join(failed) if failed else ""))
+        return {"stopped": done, "failed": failed}
+
+    # ---- Calibrate stage: measure xy_map with the camera ---------------------------
+
+    def calibrate_xy_map(self, distance_um: float | None = None) -> int:
+        """Measure how the XY stage moves the IMAGE, for stages without their
+        own image calibration (Agilis, piezo): xy_map, and how far the image
+        really moves per commanded um, per axis and direction (Blue Box,
+        2026-11-11: xy_map was inverted on both axes and the stabiliser walked
+        the sample away). Returns the run's number at once; status xycal_*
+        follows it and get_xycal() has the whole result. Moves each axis by
+        +-distance and back; changes NO setting (the GUI offers the measured
+        map; set hardware.xy_map to use it)."""
+        if getattr(self.xy, "move_image_px", None) is not None:
+            raise RuntimeError("this stage maps the image itself (kim): calibrate it in "
+                               "kim-control's camera calibration, not here")
+        d = float(distance_um if distance_um is not None
+                  else self.cfg.stabilizer.xycal_move_um)
+        if not np.isfinite(d) or d <= 0:
+            raise ValueError(f"the calibration move must be a positive distance, not {d}")
+        with self._lock:
+            if self._xycal_busy:
+                raise RuntimeError("a stage calibration is already running")
+            if self._stabilize_on or self._laser_goto:
+                raise RuntimeError("switch the stabiliser and the laser placement off first")
+            if self._fault:
+                raise RuntimeError(f"clear the pattern fault first ({self._fault})")
+            st = self._status
+            if not (st.tracking_on and st.match_found):
+                raise RuntimeError("needs a tracked, matched pattern (draw one, Allow tracking)")
+            self._xycal_id += 1
+            self._xycal_busy, self._xycal_state = True, "running"
+            n = self._xycal_id
+        threading.Thread(target=self._run_xycal, args=(n, d), name="camera-xycal",
+                         daemon=True).start()
+        return n
+
+    def get_xycal(self) -> dict:
+        """The last Calibrate stage result (moves, shifts, the measured map)."""
+        with self._lock:
+            return dict(self._xycal_result, id=self._xycal_id, state=self._xycal_state,
+                        running=self._xycal_busy)
+
+    def _run_xycal(self, n: int, d: float) -> None:
+        try:
+            res = self._xycal_measure(d)
+            state = "OK"
+        except Exception as exc:
+            res, state = {"error": failure_text(exc)}, "failed: " + failure_text(exc)
+        with self._lock:
+            self._xycal_result, self._xycal_state = res, state
+            self._xycal_busy = False
+        if state == "OK":
+            self._emit("info", res.get("summary", "stage calibrated"))
+        else:
+            self._emit("error", f"Calibrate stage {state}")
+
+    def _xycal_anchor(self, n_frames: int = 5, timeout_s: float = 5.0):
+        """The pattern position, averaged over the next `n_frames` processed
+        frames that MATCHED it."""
+        got = []
+        with self._lock:
+            last = self._status.frame_number
+        t_end = time.monotonic() + timeout_s
+        while len(got) < n_frames:
+            if time.monotonic() > t_end:
+                raise RuntimeError("the pattern was not matched while calibrating (did it "
+                                   "leave the frame? use a smaller xycal_move_um)")
+            time.sleep(0.01)
+            with self._lock:
+                st = self._status
+                if st.frame_number == last:
+                    continue
+                last = st.frame_number
+                if st.match_found and self._last_template_xy is not None:
+                    got.append(tuple(map(float, self._last_template_xy)))
+        return np.mean(np.asarray(got), axis=0)
+
+    def _xycal_go(self, x: float, y: float) -> None:
+        self.xy.move_xy(x, y)
+        t_end = time.monotonic() + 60.0
+        time.sleep(0.05)
+        while self.xy.moving():
+            if time.monotonic() > t_end:
+                raise RuntimeError("the stage did not stop within 60 s")
+            time.sleep(0.02)
+        time.sleep(max(0.2, float(self.cfg.stabilizer.settle_s)))
+
+    def _xycal_measure(self, d: float) -> dict:
+        from .config import xy_map_from_moves
+        px = (float(self.cfg.image.pixel_size_x_um), float(self.cfg.image.pixel_size_y_um))
+        with self._lock:
+            shape = None if self._last_frame is None else self._last_frame.shape
+        a_start = self._xycal_anchor()
+        if shape is not None:
+            # the stage may move up to 5x what it says (Agilis: 0.05-0.25 um per
+            # nominal step): refuse when that could carry the pattern out
+            reach = 5.0 * d / min(px)
+            h, w = shape[:2]
+            if not (reach < a_start[0] < w - reach and reach < a_start[1] < h - reach):
+                raise RuntimeError(f"the pattern is too near the frame edge for a {d:g} um "
+                                   f"move (up to {reach:.0f} px): move it towards the middle "
+                                   f"or lower xycal_move_um")
+        x0, y0 = self.xy.read_xy()
+        steps = getattr(self.xy, "read_steps", None)
+        moves = []
+        try:
+            for axis in (0, 1):
+                for sign in (1, -1):
+                    a0 = self._xycal_anchor()
+                    s0 = steps() if steps else None
+                    tx, ty = (x0 + sign * d, y0) if axis == 0 else (x0, y0 + sign * d)
+                    self._xycal_go(*self._clamp_xy(tx, ty))
+                    a1 = self._xycal_anchor()
+                    s1 = steps() if steps else None
+                    self._xycal_go(x0, y0)
+                    a2 = self._xycal_anchor()
+                    moves.append({"axis": "XY"[axis], "sign": sign, "um": sign * d,
+                                  "shift_px": [float(a1[0] - a0[0]), float(a1[1] - a0[1])],
+                                  "return_px": [float(a2[0] - a0[0]), float(a2[1] - a0[1])],
+                                  "steps": (int(s1[axis] - s0[axis])
+                                            if s0 is not None and s1 is not None else None)})
+        finally:
+            try:
+                self._xycal_go(x0, y0)
+            except Exception:
+                pass
+        # per stage axis: the image shift per +1 um, from the + move and the
+        # mirrored - move; they must agree in direction
+        v, notes = {}, []
+        for axis in "XY":
+            p = next(m for m in moves if m["axis"] == axis and m["sign"] > 0)
+            m = next(m for m in moves if m["axis"] == axis and m["sign"] < 0)
+            vp = np.asarray(p["shift_px"]) / d
+            vm = -np.asarray(m["shift_px"]) / d
+            comp = int(np.argmax(np.abs(vp + vm)))
+            for mv in (p, m):
+                if abs(mv["shift_px"][comp]) < 3.0:
+                    raise RuntimeError(f"the {mv['sign']:+d}{axis} move shifted the image only "
+                                       f"{abs(mv['shift_px'][comp]):.1f} px: the stage hardly "
+                                       f"moved -- raise xycal_move_um")
+            if np.sign(vp[comp]) != np.sign(vm[comp]):
+                raise RuntimeError(f"+{axis} and -{axis} moved the image the SAME way "
+                                   f"({p['shift_px']} and {m['shift_px']} px): the stage did "
+                                   f"not move as asked -- repeat, or raise xycal_move_um")
+            cross = abs((vp + vm)[1 - comp]) / max(1e-12, abs((vp + vm)[comp]))
+            if cross > 0.35:
+                notes.append(f"stage {axis} also moves the image {cross:.0%} sideways "
+                             f"(the camera is rotated against the stage)")
+            v[axis] = (vp + vm) / 2.0
+        new_map = xy_map_from_moves(v["X"], v["Y"])
+        if len(new_map) != 4:
+            raise RuntimeError("stage X and Y both move the image along the same direction: "
+                               f"X {v['X'].round(2).tolist()} px/um, Y "
+                               f"{v['Y'].round(2).tolist()} px/um -- check the pattern match")
+        # how far the IMAGE really moved per commanded um, per axis and direction
+        scale = {}
+        for mv in moves:
+            comp = 0 if abs(v[mv["axis"]][0]) >= abs(v[mv["axis"]][1]) else 1
+            real_um = abs(mv["shift_px"][comp]) * px[comp]
+            scale[f"{'+' if mv['sign'] > 0 else '-'}{mv['axis']}"] = real_um / d
+        ret = max(float(np.hypot(*mv["return_px"])) for mv in moves)
+        if ret > 5.0:
+            notes.append(f"returning to the start missed by up to {ret:.0f} px (backlash / "
+                         f"an irregular step size)")
+        old = self.cfg.hardware.xy_map
+        summary = (f"Calibrate stage: xy_map {new_map} (now {old}"
+                   + (", the SAME" if new_map.replace(" ", "") == old.replace(" ", "").upper()
+                      else ", DIFFERENT -- apply it") + "); the image moved "
+                   + ", ".join(f"{k} {s:.2f}x" for k, s in scale.items())
+                   + f" the commanded {d:g} um" + ("; " + "; ".join(notes) if notes else ""))
+        return {"xy_map": new_map, "current": old, "distance_um": d, "moves": moves,
+                "px_per_um": {k: vv.tolist() for k, vv in v.items()}, "scale": scale,
+                "notes": notes, "summary": summary}
 
     def _laser_step(self, anchor, px_x, px_y, st) -> None:
         """One cycle of PLACING THE LASER at the target (set_laser_target).
@@ -4173,6 +4510,8 @@ class Camera:
         self._stabilize_on = bool(on)
         self._avg_buf.clear()
         self._settled_for = None
+        self._stab_last_dist, self._stab_away = None, 0
+        self._stab_last_avg, self._stab_stalled = None, 0
         return bool(on)
 
     def set_continuous_focus(self, on: bool) -> bool:
@@ -4193,6 +4532,8 @@ class Camera:
             sc.selected_index_y = min(max(int(round(float(iy))), 0), max(0, sc.points_y - 1))
         self._avg_buf.clear()   # restart averaging on a new target
         self._settled_for = None
+        self._stab_last_dist, self._stab_away = None, 0    # a new target: new distance
+        self._stab_last_avg, self._stab_stalled = None, 0
         return (sc.selected_index_x, sc.selected_index_y)
 
     def set_laser_target(self, x: float | None = None, y: float | None = None) -> list:
@@ -4643,19 +4984,30 @@ class Camera:
         self._emit("info", f"camera {name} = {v}")
         return v
 
-    def _apply_objective(self, name: str, quiet: bool = False) -> None:
+    def _apply_objective(self, name: str, quiet: bool = False, force: bool = True) -> None:
+        """Make `name` the objective. Its table pixel size goes into cfg when
+        `force` (start, set_objective) or when the objective or its table entry
+        CHANGED since the last time. apply_config passes force=False: it runs
+        after every set_config, and a pixel size the user typed in Settings must
+        not be put back by the very Apply that sent it (Blue Box, 2026-11-11:
+        0.2809 typed, 0.413 from objectives.ini kept, scan rectangles sized
+        with it). To keep a typed value across restarts, store it in the
+        objectives file."""
         obj = OBJ.resolve(self._objectives, name)
         if obj is None:
             if not quiet:
                 self._emit("warn", f"unknown objective {name!r}; pixel size unchanged")
             return
         self.cfg.image.objective_name = name
-        self.cfg.image.pixel_size_x_um = obj.pixel_size_x_um
-        self.cfg.image.pixel_size_y_um = obj.pixel_size_y_um
+        key = (name, obj.pixel_size_x_um, obj.pixel_size_y_um)
+        if force or key != self._px_obj:
+            self.cfg.image.pixel_size_x_um = obj.pixel_size_x_um
+            self.cfg.image.pixel_size_y_um = obj.pixel_size_y_um
+            self._px_obj = key
         with self._lock:
             self._status.objective_name = name
-            self._status.pixel_size_x = obj.pixel_size_x_um
-            self._status.pixel_size_y = obj.pixel_size_y_um
+            self._status.pixel_size_x = float(self.cfg.image.pixel_size_x_um)
+            self._status.pixel_size_y = float(self.cfg.image.pixel_size_y_um)
         af_note = ""
         if name != self._af_obj_name:
             # only when the objective CHANGES (or at start): apply_config calls
@@ -4937,6 +5289,7 @@ class Camera:
         # calibrated IN FOCUS: an unsaturated spot here makes spot_area the
         # wrong focus metric (see _note_area_saturation)
         self._note_area_saturation(len(sats), sum(sats), "at the spot calibration")
+        self._persist_spot()
         self._emit("info", f"spot calibrated ({mode} spot"
                            + (", at the autofocus exposure" if at_af else "")
                            + f"): ({sp.ref_x:.2f}, {sp.ref_y:.2f}) px "
@@ -4999,6 +5352,7 @@ class Camera:
         sp.ref_d4sigma_px = sp.ref_rel_area = 0.0      # nothing measured
         sp.ref_d86_px = sp.ref_gauss_sigma2 = 0.0
         self._emit("info", f"spot position entered by hand: ({x:.2f}, {y:.2f}) px")
+        self._persist_spot()
         return {"x": x, "y": y, "area": 0.0, "d4sigma_px": 0.0, "rel_area": 0.0,
                 "jitter_px": 0.0, "frames": 0}
 
@@ -5006,6 +5360,43 @@ class Camera:
         """Forget the spot position: click-to-go and the stabiliser stop using one."""
         self.cfg.spot.ref_set = False
         self._emit("warn", "spot position cleared (not calibrated)")
+        self._persist_spot()
+
+    def _persist_spot(self) -> None:
+        """Write the spot calibration (the [Spot] ref_* keys ONLY) into the .ini
+        this service loads at start, so a restart keeps it (Blue Box,
+        2026-11-11: a calibration never Saved was lost on a camera restart and
+        the stabiliser then silently did nothing). Every other key and section
+        of the file is kept; nothing else of the live config is written (that
+        stays "Save config"). Only when `spot_ini` is set (run_service sets
+        it); tests and a GUI's private simulator write nothing. A failed write
+        is reported, never raised: the calibration itself took effect."""
+        path = getattr(self, "spot_ini", None)
+        if not path:
+            return
+        import configparser
+        import os
+        from dataclasses import fields as _fields
+        sp = self.cfg.spot
+        try:
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.optionxform = str           # keep the keys exactly as written
+            parser.read(path, encoding="utf-8")
+            # the section name config.save_config writes (case matters)
+            if "Spot" not in parser:
+                parser["Spot"] = {}
+            for f in _fields(sp):
+                if f.name.startswith("ref_"):
+                    parser["Spot"][f.name] = str(getattr(sp, f.name))
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                parser.write(fh)
+            os.replace(tmp, path)
+        except OSError as exc:
+            self._emit("warn", f"spot calibration NOT kept for the next start "
+                               f"({path}: {exc}) -- use Save config")
+            return
+        self._emit("info", f"spot calibration kept in {path} (loaded at the next start)")
 
     def config_file(self) -> str:
         """Where save_config() writes by default, and run_service.py loads from."""
@@ -5057,8 +5448,9 @@ class Camera:
     def apply_config(self) -> None:
         """Re-derive anything cached from cfg after an in-place edit."""
         self._objectives = OBJ.load_objectives(self.cfg.image.objectives_file)
-        # keep pixel size consistent with the (possibly changed) objective
-        self._apply_objective(self.cfg.image.objective_name, quiet=True)
+        # a NEW objective (or a changed table entry) brings its pixel size; a
+        # pixel size typed for the same objective is kept (_apply_objective)
+        self._apply_objective(self.cfg.image.objective_name, quiet=True, force=False)
         self._avg_buf = deque(maxlen=max(1, self.cfg.stabilizer.images_to_average))
         self._temporal = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))
         self._temporal_deep = deque(maxlen=max(1, self.cfg.camera.running_avg_frames))

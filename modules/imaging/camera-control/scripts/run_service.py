@@ -107,6 +107,11 @@ def main() -> int:
         brain, *_ = build_sim_system(cfg)
         print("camera service: SIMULATOR (synthetic closed-loop scene)")
 
+    # keep the spot calibration across restarts: written into the .ini this
+    # service loads (camera.ini by default) whenever it is calibrated / set /
+    # cleared -- only the [spot] ref_* keys (Blue Box, 2026-11-11)
+    brain.spot_ini = args.config or str(default_ini)
+
     svc = CameraService(brain, host=args.host, cmd_port=args.cmd,
                         pub_port=args.pub, status_hz=args.status_hz)
     print(f"  commands tcp://{args.host}:{args.cmd}   status tcp://{args.host}:{args.pub}")

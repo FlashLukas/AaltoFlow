@@ -67,7 +67,7 @@ class CameraService:
         # passes. Kill AF and cancelling a laser placement stay open to
         # everyone: a viewer who sees a run go wrong must be able to stop it.
         self.control = ControlLease(
-            safety={"kill_af", "cancel_laser_target"},
+            safety={"kill_af", "cancel_laser_target", "stop_motion"},
             read={"stream_read", "camera_features"},
             on_event=lambda level, msg: self._events.put({"level": level, "msg": msg}))
 
@@ -490,6 +490,14 @@ class CameraService:
             return {"ok": True, "accuracy": b.get_accuracy()}
 
         # -- spot position + config file ---------------------------------- #
+        if cmd == "stop_motion":
+            return {"ok": True, **b.stop_motion()}
+        if cmd == "calibrate_xy_map":
+            d = req.get("distance_um")
+            return {"ok": True, "xycal_id": b.calibrate_xy_map(
+                None if d is None else float(d))}
+        if cmd == "get_xycal":
+            return {"ok": True, "xycal": b.get_xycal()}
         if cmd == "calibrate_spot":
             return {"ok": True, "spot": b.calibrate_spot(int(req.get("frames", 20)))}
         if cmd == "auto_exposure_once":
