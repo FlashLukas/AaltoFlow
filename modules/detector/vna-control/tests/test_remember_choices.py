@@ -64,3 +64,27 @@ def test_without_a_choices_file_nothing_is_written(tmp_path):
     finally:
         v.shutdown()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_save_keeps_comments_other_keys_and_their_case(tmp_path):
+    """Blue Box 2026-11-11: the save rewrote vna.ini -- comments gone,
+    manual_mT came back as manual_mt. Only the three lines change now."""
+    from vna.config import save_choices, Sweep
+    ini = tmp_path / "vna.ini"
+    ini.write_text("# Blue Box: S5085 via S2VNA\n[hardware]\ndriver = s5085\n\n"
+                   "[field]\n# no magnet service here\nsource = manual\nmanual_mT = 0.0\n\n"
+                   "[sweep]\nsparam = S11\n# extras below\n\n[ui]\ntheme = light\n",
+                   encoding="utf-8")
+    sw = Sweep(sparam="S21", extra_sparams="S11", averages=4)
+    save_choices(str(ini), sw)
+    text = ini.read_text(encoding="utf-8")
+    for keep in ("# Blue Box: S5085 via S2VNA", "# no magnet service here", "manual_mT = 0.0",
+                 "# extras below", "[ui]\ntheme = light"):
+        assert keep in text, keep
+    assert "sparam = S21" in text and "extra_sparams = S11" in text and "averages = 4" in text
+    assert text.index("averages = 4") < text.index("[ui]")      # inside [sweep]
+    cfg = Config.load(str(ini))
+    assert (cfg.sweep.sparam, cfg.sweep.extra_sparams, cfg.sweep.averages) == ("S21", "S11", 4)
+    assert cfg.field.manual_mT == 0.0 and cfg.hardware.driver == "s5085"
+    save_choices(str(tmp_path / "new.ini"), sw)                   # no file yet
+    assert Config.load(str(tmp_path / "new.ini")).sweep.sparam == "S21"

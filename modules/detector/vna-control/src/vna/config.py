@@ -24,6 +24,7 @@ are:
 from __future__ import annotations
 
 import configparser
+from pathlib import Path
 import os
 from dataclasses import dataclass, asdict, fields
 
@@ -350,18 +351,46 @@ def saved_choices(path) -> set:
 
 
 def save_choices(path, sweep) -> None:
-    """Write CHOICES of `sweep` into [sweep] of the .ini at `path`, keeping every
-    other key and section of the file (created if it does not exist)."""
-    parser = configparser.ConfigParser()
-    parser.read(path, encoding="utf-8")
-    if "sweep" not in parser:
-        parser["sweep"] = {}
-    for k in CHOICES:
-        parser["sweep"][k] = str(getattr(sweep, k))
+    """Write CHOICES of `sweep` into [sweep] of the .ini at `path` by editing
+    ONLY those lines: every other line -- comments, other keys, their case
+    (manual_mT) -- stays exactly as written (Blue Box, 2026-11-11: a
+    configparser rewrite dropped the comments and lowercased the keys). A key
+    not there yet is added at the end of [sweep]; no [sweep] -> one is added;
+    no file -> one is made."""
+    import re
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = ["# vna-control configuration -- edit values, keep keys."]
+    want = {k: str(getattr(sweep, k)) for k in CHOICES}
+    head = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+    in_sweep, sweep_end, found = False, None, set()
+    for n, line in enumerate(lines):
+        m = head.match(line)
+        if m:
+            if in_sweep and sweep_end is None:
+                sweep_end = n
+            in_sweep = m.group(1).strip().lower() == "sweep"
+            continue
+        if in_sweep:
+            k = re.match(r"^\s*([A-Za-z0-9_]+)\s*[=:]", line)
+            if k and k.group(1).lower() in want:
+                key = k.group(1)
+                lines[n] = f"{key} = {want[key.lower()]}"
+                found.add(key.lower())
+    if in_sweep and sweep_end is None:
+        sweep_end = len(lines)
+    missing = [f"{k} = {v}" for k, v in want.items() if k not in found]
+    if sweep_end is None:                         # no [sweep] at all
+        lines += ["", "[sweep]", *missing]
+    else:
+        at = sweep_end
+        while at > 0 and not lines[at - 1].strip():   # before the blank lines
+            at -= 1
+        lines[at:at] = missing
     tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("# vna-control configuration -- edit values, keep keys.\n")
-        parser.write(fh)
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
     os.replace(tmp, path)               # never a half-written file
 
 
