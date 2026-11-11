@@ -171,7 +171,8 @@ def build_manifest(meter) -> dict:
            help="Standard deviation of the readings in that acquisition."),
         _p("live_power", "Power (live)", "indicator", "float", unit="mW",
            group="Live", order=20, decimals=6, scale=1e-3, plottable=True,
-           read_path=["power_W"]),
+           read_path=["power_W"],
+           help="Power of the latest single reading from the status stream. LIVE value, for panels, not for scan points; use 'Power' (fresh acquisition) in a scan."),
         # the backend's fixed flag vocabulary ("" = a good reading), so an enum
         _p("flag", "Reading flag", "indicator", "enum", group="Live", order=21,
            options=list(READING_FLAGS), read_path=["flag"],
@@ -180,10 +181,12 @@ def build_manifest(meter) -> dict:
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1, help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=2, read_path=["acquiring"]),
+           order=2, read_path=["acquiring"],
+           help="True while an acquisition is collecting readings. Scans wait for it to clear."),
         # a counter that starts at 0 and only counts up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, min=0, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; counts up. A scan waits for the number it triggered."),
 
         # -- zero ---------------------------------------------------------------------
         _p("zero", "Zero (dark adjust)", "action", "action", group="Zero", order=1,
@@ -194,19 +197,25 @@ def build_manifest(meter) -> dict:
            help="Stop a running zero adjustment; the previous zero stays. "
                 "Allowed for anyone, also a viewer."),
         _p("zeroing", "Zeroing", "indicator", "bool", group="Zero", order=3,
-           read_path=["zeroing"]),
+           read_path=["zeroing"],
+           help="True while a zero (dark) adjustment is running."),
         _p("dark_offset", "Dark offset", "indicator", "float", unit="A",
-           group="Zero", order=4, read_path=["dark_offset"]),
+           group="Zero", order=4, read_path=["dark_offset"],
+           help="Dark offset (photocurrent) the meter keeps from its last zero adjustment."),
 
         # -- status -------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the power meter (or its simulator) is connected."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string reported by the instrument."),
         _p("sensor", "Sensor", "indicator", "string", group="Status", order=3,
-           read_path=["sensor"]),
+           read_path=["sensor"],
+           help="Sensor head description as reported by the meter."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=4, read_path=["hw_error"]),
+           order=4, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     # Bounds that are not known (no device yet) must not appear as NaN.

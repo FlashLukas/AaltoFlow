@@ -166,7 +166,12 @@ still assumes piezo/zpiezo.
   Settables/Gettables via `scan_core/manifest.py`. Limits are DYNAMIC (clMag's
   field range is the calibration; piezo travel depends on CL/OL; kim's leash
   replaces the clamp), so every status frame carries `describe_rev` and a client
-  re-fetches only when that integer moves. **Implemented in ALL SEVEN
+  re-fetches only when that integer moves. **Every descriptor carries a `help`
+  text (required since 2026-11-11)**: what it physically is, its unit, and for a
+  detector fresh-per-point or live status value; scan-core keeps it on the
+  Parameter and the suite shows it in its tooltips; `check_modules.py --live`
+  fails a parameter without one (guide 6b, "Describe every variable").
+  **Implemented in ALL SEVEN
   modules (2026-09-10).** 109 parameters across the suite: clMag 20 · smb 6 ·
   stage 18 · piezo 14 · camera 25 · zpiezo 3 · kim 23. hf2 (2026-09-14) adds 38
   and is the first manifest whose SHAPE changes with a mode (freq is a control on

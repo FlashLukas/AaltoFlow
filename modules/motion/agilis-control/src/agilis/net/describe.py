@@ -155,14 +155,17 @@ def build_manifest(brain) -> dict:
                         if leashed else
                         "Bounds are the travel limits; arming the leash narrows them."))),
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
-               group="Status", order=20 + i, read_path=["moving", i]),
+               group="Status", order=20 + i, read_path=["moving", i],
+               help=f"True while axis {ax} is executing a move."),
             # NO min/max on purpose: the counter is the AG-UC2's own signed
             # step count (TP). The datum is arbitrary and the stage can be
             # moved beyond our limits by hand or by another program, so any
             # int32 may be read -- and int32 is what scan-core stores an int
             # without bounds as.
             _p(f"steps_{low}", f"Step counter {ax}", "indicator", "int",
-               group="Position", order=30 + i, read_path=["position_steps", i]),
+               group="Position", order=30 + i, read_path=["position_steps", i],
+               help=f"Signed step count of axis {ax} since the datum, as the controller "
+                    f"counts it. The um position is derived from it."),
             _p(f"amplitude_fwd_{low}", f"Step amplitude {ax} +", "control", "int",
                group="Drive", order=40 + 2 * i, min=1, max=50, step=1,
                read_path=["amplitude_fwd", i],
@@ -190,10 +193,12 @@ def build_manifest(brain) -> dict:
                     "datum again to trust the um."),
             _p(f"um_per_step_fwd_{low}", f"Step size {ax} +", "indicator", "float",
                unit="um", group="Calibration", order=64 + 2 * i, decimals=5,
-               read_path=["um_per_step_fwd", i]),
+               read_path=["um_per_step_fwd", i],
+               help="Calibrated length of one forward step, in um."),
             _p(f"um_per_step_bwd_{low}", f"Step size {ax} -", "indicator", "float",
                unit="um", group="Calibration", order=65 + 2 * i, decimals=5,
-               read_path=["um_per_step_bwd", i]),
+               read_path=["um_per_step_bwd", i],
+               help="Calibrated length of one backward step, in um."),
             _p(f"limit_switch_{low}", f"Limit switch {ax}", "indicator", "bool",
                group="Status", order=70 + i, read_path=["limit_switch", i],
                help="Only stages with a limit switch (e.g. AG-LS25) report it."),
@@ -248,11 +253,13 @@ def build_manifest(brain) -> dict:
            help="When armed, a symmetric box around the datum REPLACES the "
                 "travel limits -- so the position bounds above change."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has the controller open."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=2, read_path=["hw_error"]),
+           order=2, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
-           danger=True),
+           danger=True, help="Stops any move in progress on both axes."),
     ]
     # Actions are fired by their id (the control panel and scan routines send
     # the id as the verb). Datum and STOP finish when the reply comes back,

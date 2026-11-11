@@ -230,7 +230,9 @@ def build_manifest(synth) -> dict:
                settle={"policy": "echoes", "key": "phase_deg",
                        "tol": float(hw.phase_echo_tol_deg)},
                ramp=sweep_block(synth, "phase", wire_arg="phase_deg",
-                                rate_arg="rate_deg_per_s", rate_unit="deg/s")))
+                                rate_arg="rate_deg_per_s", rate_unit="deg/s"),
+               help="Output phase offset, as read back from the unit. Only "
+                    "present on units whose firmware has phase control."))
     params += [
         _p("reference", "10 MHz reference", "control", "enum", group="Reference",
            order=50, options=list(REFERENCES), read_path=["reference"],
@@ -244,7 +246,8 @@ def build_manifest(synth) -> dict:
            help="True when the unit's measured power calibration "
                 "(dssg_power_calibration.json) is loaded and in use."),
         _p("ext_ref_detected", "External reference present", "indicator",
-           "bool", group="Reference", order=51, read_path=["ext_ref_detected"]),
+           "bool", group="Reference", order=51, read_path=["ext_ref_detected"],
+           help="True when the unit sees a signal on its rear 10 MHz reference input."),
 
         _p("ramping", "Sweeping", "indicator", "bool", group="Signal", order=21,
            read_path=["ramping"],
@@ -255,11 +258,14 @@ def build_manifest(synth) -> dict:
            read_path=["usb_volts"],
            help="Below ~4.7 V the unit misbehaves: use a better port or cable."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the generator."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=4, read_path=["hw_error"]),
+           order=4, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("rf_off", "RF off", "action", "action", group="Output", order=90,

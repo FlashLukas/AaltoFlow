@@ -168,7 +168,8 @@ def build_manifest(lockin) -> dict:
            group="Reference", order=30, decimals=3, min=-180.0, max=180.0,
            read_path=["phase_deg"],
            set={"verb": "set_phase", "arg": "phase_deg"},
-           settle={"policy": "echoes", "key": "phase_deg", "tol": 1e-6}),
+           settle={"policy": "echoes", "key": "phase_deg", "tol": 1e-6},
+           help="Phase shift applied to the reference before detection; X and Y rotate with it. Auto phase sets it for you."),
         _p("harmonic", "Harmonic", "control", "int", group="Reference", order=40,
            min=1, max=lockin._harmonic_max(), step=1, read_path=["harmonic"],
            set={"verb": "set_harmonic", "arg": "harmonic"},
@@ -183,7 +184,8 @@ def build_manifest(lockin) -> dict:
                 "the B(I) connector -- then everything is measured in amps."),
         _p("coupling", "Coupling", "control", "enum", group="Signal", order=2,
            options=["AC", "DC"], read_path=["coupling"],
-           set={"verb": "set_coupling", "arg": "coupling"}),
+           set={"verb": "set_coupling", "arg": "coupling"},
+           help="Input coupling: AC blocks DC at the signal input, DC passes it."),
         _p("sensitivity", "Sensitivity (full scale)", "control", "enum",
            group="Signal", order=10,
            options=[tables.sensitivity_label(i, sig.input) for i in sorted(table)],
@@ -193,11 +195,14 @@ def build_manifest(lockin) -> dict:
                 "a range far above the signal adds noise. Auto-sensitivity picks "
                 "the range that puts R at 30-90 %."),
         _p("full_scale", "Full scale", "indicator", "float", unit=unit,
-           group="Signal", order=11, decimals=12, read_path=["full_scale"]),
+           group="Signal", order=11, decimals=12, read_path=["full_scale"],
+           help="Value (in the input unit) that the selected sensitivity reads as 100 %."),
         _p("overload_input", "Input overload", "indicator", "bool", group="Signal",
-           order=20, read_path=["overload", "input"]),
+           order=20, read_path=["overload", "input"],
+           help="True if the signal input is overloaded (too large for the sensitivity range)."),
         _p("overload_output", "Output overload", "indicator", "bool",
-           group="Signal", order=21, read_path=["overload", "output"]),
+           group="Signal", order=21, read_path=["overload", "output"],
+           help="True if the output stage is overloaded (reading beyond 300 % of full scale)."),
 
         # -- output filter --------------------------------------------------------------
         # Time constant: offered in ms (scale 1e-3), commanded in s. The
@@ -248,7 +253,9 @@ def build_manifest(lockin) -> dict:
         params.append(_p(
             f"live_{pid}", f"{label} (live, unsettled)", "indicator", "float",
             unit=u or unit, group="Live", order=200 + j, decimals=dec,
-            plottable=True, read_path=["live", key]))
+            plottable=True, read_path=["live", key],
+            help=f"LIVE value from the status stream: {label} as the lock-in shows it now, "
+                 "not waited for the filter to settle. For panels, not for scan points."))
     for k in range(2):
         params.append(_p(
             f"adc{k + 1}", f"ADC{k + 1} input", "indicator", "float", unit="V",
@@ -259,7 +266,8 @@ def build_manifest(lockin) -> dict:
         params.append(_p(
             f"live_adc{k + 1}", f"ADC{k + 1} input (live)", "indicator", "float",
             unit="V", group="Live", order=250 + k, decimals=4, plottable=True,
-            read_path=["live", "adc", k]))
+            read_path=["live", "adc", k],
+            help="LIVE value from the status stream of the rear-panel auxiliary input. For panels, not for scan points."))
     params += [
         _p("live_r_fs", "R / full scale (live)", "indicator", "float",
            group="Live", order=240, decimals=3, plottable=True,
@@ -272,14 +280,17 @@ def build_manifest(lockin) -> dict:
                 "record it next to the data so a bad point is recognisable."),
         _p("sample_locked", "Sample on a locked reference", "indicator", "bool",
            group="Measurement", order=161, read_path=["sample", "ref_locked"],
-           acquire=acquire),
+           acquire=acquire,
+           help="True if the reference was locked throughout the sample window; record it next to the data."),
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1, help="Wait the settle time, average, and latch one sample."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=2, read_path=["acquiring"]),
+           order=2, read_path=["acquiring"],
+           help="True while an acquisition (settle + averaging) is running."),
         # a counter that starts at 0 and only counts up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, min=0, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"],
+           help="Running number of the latest acquisition; a scan waits for the number it triggered."),
         _p("auto_phase", "Auto phase", "action", "action", group="Auto", order=1,
            wait=auto_wait,
            help="Rotate the reference phase so the signal lies on +X (AQN)."),
@@ -289,17 +300,20 @@ def build_manifest(lockin) -> dict:
         _p("auto_measure", "Auto measure", "action", "action", group="Auto", order=3,
            wait=auto_wait, help="Auto sensitivity, then auto phase (ASM)."),
         _p("auto_busy", "Auto operation running", "indicator", "bool", group="Auto",
-           order=10, read_path=["auto_busy"]),
+           order=10, read_path=["auto_busy"],
+           help="True while an auto phase / sensitivity / measure operation is running."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("output_off", "Oscillator off", "action", "action", group="Reference", order=90,
            help="OSC OUT amplitude to 0 V. Allowed for anyone, also a viewer."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True if the lock-in is open and answering."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"], help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     manifest = {"schema": SCHEMA_VERSION, "module": "sr7230",

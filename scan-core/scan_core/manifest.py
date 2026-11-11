@@ -351,6 +351,7 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             # narrow the storage (storage.py, from_descriptor).
             param.storage = Storage.from_descriptor(d, use_bounds=False)
             param.role = _role(d)
+            param.help = _help(d)
             # describe `speed_param: <id>` (guide 6b): the control that sets
             # how fast this knob moves -- what a fly scan sets the fly speed on
             # (flyscan.find_speed_param). Prefixed like every id of the module.
@@ -381,6 +382,10 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
                                      storage=Storage.from_descriptor(d)))
             _attach_stream(param, d, inst, module, streams, on_warn)
             param.role = _role(d)
+            param.help = _help(d)
+            # fresh per scan point, or the status stream's last value
+            param.reading = ("fresh" if (param.acquire is not None or d.get("read"))
+                             else "live")
             # describe `focus_sensitive: true` (guide 6b): this reading changes
             # with focus (a reflectivity, a camera image) -- the scout pass
             # warns when no autofocus runs before it
@@ -388,6 +393,13 @@ def register_manifest(reg: Registry, inst: Instrument, manifest: dict, *,
             added.append(pid)
 
     return added
+
+
+def _help(d: dict) -> str:
+    """A descriptor's `help` text (guide 6b, "Describe every variable"):
+    shown in the Scan tab's tooltip. "" when the module gives none."""
+    h = d.get("help") or d.get("description") or ""
+    return h.strip() if isinstance(h, str) else ""
 
 
 def _role(d: dict) -> str | None:

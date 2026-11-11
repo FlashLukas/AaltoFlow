@@ -170,7 +170,9 @@ def build_manifest(laser) -> dict:
            order=2,
            wait={"ready": {"policy": "flag_only", "key": "emission_on",
                            "invert": True},
-                 "timeout_s": 30}),
+                 "timeout_s": 30},
+           help="Switch the laser emission off. Finished when the laser reports "
+                "emission off."),
         _p("reset_interlock", "Reset interlock", "action", "action",
            group="Laser", order=3, wait={"ready": {"policy": "immediate"}},
            help="Acknowledge a closed interlock. Does not switch emission on."),
@@ -183,24 +185,30 @@ def build_manifest(laser) -> dict:
            help="EXTREME power level. The ceiling is limits.power_max_pct in the "
                 ".ini, deliberately below 100 %."),
         _p("emission", "Emission", "indicator", "bool", group="Laser", order=20,
-           read_path=["emission_on"]),
+           read_path=["emission_on"],
+           help="True while the laser is emitting light (as reported by the laser)."),
         # an enum, not a string: the brain produces only these values
         # (laser.EMISSION_STATES), so scan-core can store a 1-byte code
         _p("emission_state", "Emission state", "indicator", "enum",
            group="Laser", order=21, options=list(EMISSION_STATES),
-           read_path=["emission_state"]),
+           read_path=["emission_state"],
+           help="Emission state as the laser reports it: off, starting, on, "
+                "interlock or error."),
         _p("emission_guarded", "Lost-client guard", "indicator", "bool",
            group="Laser", order=22, read_path=["emission_guarded"],
            help="True while a remote GUI owns the emission: if it falls silent "
                 "for hardware.client_timeout_s the service switches emission "
                 "off. Emission switched on by a scan routine is not guarded."),
         _p("interlock_ok", "Interlock OK", "indicator", "bool", group="Laser",
-           order=22, read_path=["interlock_ok"]),
+           order=22, read_path=["interlock_ok"],
+           help="True when the interlock circuit is closed and emission is allowed."),
         _p("interlock", "Interlock", "indicator", "string", group="Laser",
-           order=23, read_path=["interlock"]),
+           order=23, read_path=["interlock"],
+           help="Interlock state as text, for the log and panels (see Interlock OK)."),
         _p("inlet_temp", "Inlet temperature", "indicator", "float", unit="C",
            group="Laser", order=24, decimals=1, plottable=True,
-           read_path=["inlet_temp_C"]),
+           read_path=["inlet_temp_C"],
+           help="Inlet temperature reported by the laser, in deg C. Live status value."),
 
         # ---- AOTF --------------------------------------------------------
         _p("rf", "AOTF RF", "control", "bool", group="Filter", order=1,
@@ -218,9 +226,11 @@ def build_manifest(laser) -> dict:
                 "wavelength limits of every line. A crystal in the other SELECT "
                 "housing needs the RF cable moved by hand (refused otherwise)."),
         _p("filter_min", "Crystal min", "indicator", "float", unit="nm",
-           group="Filter", order=3, decimals=1, read_path=["filter_min_nm"]),
+           group="Filter", order=3, decimals=1, read_path=["filter_min_nm"],
+           help="Shortest wavelength the active crystal can select."),
         _p("filter_max", "Crystal max", "indicator", "float", unit="nm",
-           group="Filter", order=4, decimals=1, read_path=["filter_max_nm"]),
+           group="Filter", order=4, decimals=1, read_path=["filter_max_nm"],
+           help="Longest wavelength the active crystal can select."),
         # bits 8: the driver's "connected crystal" register is ONE byte
         # (nktp.read_crystal reads it with _r8), so 0..255 is everything it
         # can report -- a promise the hardware keeps, not a guess at NKT's
@@ -241,17 +251,21 @@ def build_manifest(laser) -> dict:
            help="True while a wavelength sweep (ramp_wavelength) walks a line."),
         _p("crystal_temp", "Crystal temperature", "indicator", "float",
            unit="C", group="Filter", order=5, decimals=1, plottable=True,
-           read_path=["crystal_temp_C"]),
+           read_path=["crystal_temp_C"],
+           help="Temperature of the active AOTF crystal, in deg C. Live status value."),
     ]
     for n in range(1, N_LINES + 1):
         params += _line_params(laser, n)
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the laser."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "superk",
                 "label": "Supercontinuum laser", "parameters": params}

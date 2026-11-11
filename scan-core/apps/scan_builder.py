@@ -6341,6 +6341,43 @@ class ScanBuilder(QtWidgets.QMainWindow):
     def _param_text(p) -> str:
         return f"{p.label}   ({p.unit})" if p.unit else p.label
 
+    @staticmethod
+    def _param_tooltip(p, shape_tip: str = "") -> str:
+        """The palette tooltip: name, id, what kind of thing it is, and the
+        module's own description (describe `help`). Lukas, 2026-11-11: the id
+        alone did not tell "Vacuum (mbar)" from "Vacuum (V)" from "(live)"."""
+        import html as _h
+        e = _h.escape
+        lines = [f"<b>{e(p.label)}</b>",
+                 f"<span style='font-family:monospace'>{e(p.id)}</span>"]
+        unit = f", unit {e(p.unit)}" if p.unit else ""
+        if p.kind == "settable":
+            lo, hi = getattr(p, "limits", (None, None))
+            span = ""
+            finite = lo is not None and hi is not None and math.isfinite(lo) \
+                and math.isfinite(hi)
+            if getattr(p, "numeric", True) and finite:
+                span = f", {lo:g} .. {hi:g}"
+            opts = getattr(p, "options", None)
+            if opts:
+                span = ", one of " + e(", ".join(map(str, opts)))
+            lines.append(f"control{unit}{span}")
+        else:
+            lines.append(f"detector{unit}")
+            r = getattr(p, "reading", None)
+            if r == "fresh":
+                lines.append(f"<span style='color:{C['ok']}'>fresh: measured anew at "
+                             f"every scan point</span>")
+            elif r == "live":
+                lines.append(f"<span style='color:{C['accent_hi']}'>live: the module's last "
+                             f"status value -- for panels, not for scan points</span>")
+            if shape_tip:
+                lines.append(e(shape_tip))
+        text = getattr(p, "help", "") or ""
+        lines.append(f"<br>{e(text)}" if text else
+                     f"<br><i style='color:{C['muted']}'>the module gives no description</i>")
+        return "<qt>" + "<br>".join(lines) + "</qt>"
+
     def _reload_palette(self) -> None:
         """Refill the axis and detector trees from the current registry.
 
@@ -6353,7 +6390,7 @@ class ScanBuilder(QtWidgets.QMainWindow):
             for p in params:
                 it = QtWidgets.QTreeWidgetItem(group, [self._param_text(p)])
                 it.setData(0, QtCore.Qt.UserRole, p.id)
-                it.setToolTip(0, p.id)
+                it.setToolTip(0, self._param_tooltip(p))
             group.setExpanded(True)
 
         self.det_tree.blockSignals(True)     # refilling is not a user edit
@@ -6371,12 +6408,17 @@ class ScanBuilder(QtWidgets.QMainWindow):
             group = self._group_item(self.det_tree, module, len(params))
             for p in params:
                 tag, tip = detector_shape(p)
+                live = getattr(p, "reading", None) == "live"
+                if live and tag == "0D":
+                    # a status value, not a fresh reading: say so in the list
+                    tag = "live"
                 it = QtWidgets.QTreeWidgetItem(group, [self._param_text(p), tag])
                 it.setData(0, QtCore.Qt.UserRole, p.id)
-                it.setToolTip(0, p.id)
-                it.setToolTip(1, tip)
+                it.setToolTip(0, self._param_tooltip(p, tip))
+                it.setToolTip(1, (tip + "\nlive: the module's last status value -- for "
+                                  "panels, not for scan points") if live else tip)
                 it.setForeground(1, QtGui.QBrush(QtGui.QColor(
-                    C["accent"] if tag != "0D" else C["muted"])))
+                    C["accent_hi"] if live else C["accent"] if tag != "0D" else C["muted"])))
                 it.setTextAlignment(1, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
                 it.setCheckState(0, QtCore.Qt.Checked if p.id == default

@@ -145,7 +145,8 @@ def build_manifest(gen) -> dict:
            set={"verb": "set_frequency", "arg": "frequency_Hz"},
            settle={"policy": "echoes", "key": "frequency_Hz", "tol": 1.0},
            ramp=sweep_block(gen, "frequency", wire_arg="frequency_Hz",
-                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6)),
+                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6),
+           help="CW output frequency. Range = your configured limits."),
 
         _p("power", "Power", "control", "float", unit="dBm", group="Signal",
            order=30, decimals=2, plottable=True,
@@ -165,7 +166,8 @@ def build_manifest(gen) -> dict:
            set={"verb": "set_phase", "arg": "phase_deg"},
            settle={"policy": "echoes", "key": "phase_deg", "tol": 1e-3},
            ramp=sweep_block(gen, "phase", wire_arg="phase_deg",
-                            rate_arg="rate_deg_per_s", rate_unit="deg/s")),
+                            rate_arg="rate_deg_per_s", rate_unit="deg/s"),
+           help="Output phase offset relative to the reference, in degrees."),
 
         _p("ramping", "Sweeping", "indicator", "bool", group="Signal", order=45,
            read_path=["ramping"],
@@ -173,9 +175,11 @@ def build_manifest(gen) -> dict:
                 "walks a knob."),
 
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the generator."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("rf_off", "RF off", "action", "action", group="Output", order=90,

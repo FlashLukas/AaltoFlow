@@ -170,7 +170,9 @@ def build_manifest(smu) -> dict:
            wait={"ready": {"policy": "flag_only", "key": "output", "invert": True}},
            help="The safe state. Usable in a scan routine (e.g. after_scan)."),
         _p("settled", "Source settled", "indicator", "bool", group="Output",
-           order=3, read_path=["settled"]),
+           order=3, read_path=["settled"],
+           help="True once the source output has reached its set level (the "
+                "scan waits for this before reading)."),
         _p("tripped", "In compliance", "indicator", "bool", group="Output",
            order=4, read_path=["tripped"],
            help="The limit is reached: the SMU is now regulating the OTHER quantity."),
@@ -249,7 +251,9 @@ def build_manifest(smu) -> dict:
         "source_auto_range", "Source autorange", "control", "bool", group="Source",
         order=60, read_path=["source_auto_range"],
         set={"verb": "set_source_auto_range", "arg": "on"},
-        settle={"policy": "echoes", "key": "source_auto_range"}))
+        settle={"policy": "echoes", "key": "source_auto_range"},
+        help="On: the instrument picks the source range itself. Off: use the "
+             "Source range control."))
     if src.auto_range:
         params.append(_p("source_range", "Source range", "indicator", "float",
                          unit=u_src, group="Source", order=61, read_path=["source_range"],
@@ -268,7 +272,9 @@ def build_manifest(smu) -> dict:
         "measure_auto_range", "Measure autorange", "control", "bool", group="Measure",
         order=10, read_path=["measure_auto_range"],
         set={"verb": "set_measure_auto_range", "arg": "on"},
-        settle={"policy": "echoes", "key": "measure_auto_range"}))
+        settle={"policy": "echoes", "key": "measure_auto_range"},
+        help="On: the instrument picks the measure range itself. Off: use the "
+             "Measure range control."))
     if m.auto_range:
         params.append(_p("measure_range", "Measure range", "indicator", "float",
                          unit=u_meas, group="Measure", order=11,
@@ -297,7 +303,9 @@ def build_manifest(smu) -> dict:
            group="Measure", order=40, step=1,
            min=lim.readings_min, max=lim.readings_max, read_path=["acq_readings"],
            set={"verb": "set_acquisition", "arg": "readings"},
-           settle={"policy": "echoes", "key": "acq_readings", "tol": 0.5}),
+           settle={"policy": "echoes", "key": "acq_readings", "tol": 0.5},
+           help="How many fresh readings one Acquire averages (the std. dev. "
+                "channels are taken over the same readings)."),
 
         # -- the scan detectors: latched by `acquire` ----------------------------------
         _p("voltage", "Voltage", "indicator", "float", unit="V", group="Sample",
@@ -306,40 +314,53 @@ def build_manifest(smu) -> dict:
                 "this is the READBACK: below the setpoint when in compliance."),
         _p("voltage_std", "Voltage std. dev.", "indicator", "float", unit="V",
            group="Sample", order=11, decimals=7,
-           read_path=["sample", "voltage_std_V"], acquire=acquire),
+           read_path=["sample", "voltage_std_V"], acquire=acquire,
+           help="Standard deviation of the readings behind the Voltage value "
+                "(fresh, from the same acquisition)."),
         _p("current", "Current", "indicator", "float", unit="A", group="Sample",
-           order=20, decimals=10, read_path=["sample", "current_A"], acquire=acquire),
+           order=20, decimals=10, read_path=["sample", "current_A"], acquire=acquire,
+           help="Mean of fresh readings after the source settled. Sourcing "
+                "current this is the READBACK of the source."),
         _p("current_std", "Current std. dev.", "indicator", "float", unit="A",
            group="Sample", order=21, decimals=10,
-           read_path=["sample", "current_std_A"], acquire=acquire),
+           read_path=["sample", "current_std_A"], acquire=acquire,
+           help="Standard deviation of the readings behind the Current value "
+                "(fresh, from the same acquisition)."),
         _p("resistance", "Resistance V/I", "indicator", "float", unit="ohm",
            group="Sample", order=30, decimals=4,
            read_path=["sample", "resistance_ohm"], acquire=acquire,
            help="Mean V / mean I. In 2-wire it includes the leads."),
         _p("resistance_std", "Resistance std. dev.", "indicator", "float", unit="ohm",
            group="Sample", order=31, decimals=4,
-           read_path=["sample", "resistance_std_ohm"], acquire=acquire),
+           read_path=["sample", "resistance_std_ohm"], acquire=acquire,
+           help="Spread of V/I over the readings of the same fresh acquisition."),
         _p("sample_tripped", "In compliance (sample)", "indicator", "bool",
            group="Sample", order=40, read_path=["sample", "tripped"], acquire=acquire,
            help="True if ANY reading of the acquisition was in compliance."),
         _p("acquire", "Acquire sample", "action", "action", group="Sample", order=1,
            help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Sample", order=2,
-           read_path=["acquiring"]),
+           read_path=["acquiring"],
+           help="True while an acquisition is still collecting readings."),
         # A counter from 0 that only goes up: min=0 is a promise the code
         # keeps (scan-core picks the storage from it, developer notes 4b). No
         # max: it is unbounded in principle.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Sample", order=3,
-           min=0, read_path=["acq_id"]),
+           min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; a scan waits for its own number."),
 
         # -- live (panels, not scans) -----------------------------------------------------
         _p("live_voltage", "Voltage (live)", "indicator", "float", unit="V",
            group="Live", order=10, decimals=7, plottable=True, read_path=["voltage_V"],
            # every poll reading, for fly scans (one group: one start/read/stop)
-           stream={"group": "read", "channel": "voltage"}),
+           stream={"group": "read", "channel": "voltage"},
+           help="Last status value, for panels and fly scans, not for scan "
+                "points (use Voltage for a fresh, settled reading)."),
         _p("live_current", "Current (live)", "indicator", "float", unit="A",
            group="Live", order=20, decimals=10, plottable=True, read_path=["current_A"],
-           stream={"group": "read", "channel": "current"}),
+           stream={"group": "read", "channel": "current"},
+           help="Last status value, for panels and fly scans, not for scan "
+                "points (use Current for a fresh, settled reading)."),
         _p("ramping", "Sweeping", "indicator", "bool", group="Source", order=70,
            read_path=["ramping"],
            help="True while a level sweep (ramp_voltage / ramp_current) runs."),
@@ -347,17 +368,22 @@ def build_manifest(smu) -> dict:
            help="End a level sweep where it is. Allowed for anyone, also a viewer."),
         _p("live_resistance", "Resistance (live)", "indicator", "float", unit="ohm",
            group="Live", order=30, decimals=4, plottable=True,
-           read_path=["resistance_ohm"]),
+           read_path=["resistance_ohm"],
+           help="Last status value of V/I, for panels, not for scan points "
+                "(use Resistance V/I for a fresh reading)."),
         _p("flag", "Reading flag", "indicator", "string", group="Live", order=40,
            read_path=["flag"], help="'compliance' or 'overflow'."),
 
         # -- status -------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the instrument."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
     ]
 
     for d in params:

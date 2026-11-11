@@ -115,9 +115,11 @@ def build_manifest(brain) -> dict:
                 "it is told. Out-of-range requests are CLAMPED, not refused."),
 
         _p("target", "Target voltage", "indicator", "float", unit="V",
-           group="Focus", order=20, decimals=3, read_path=["target"]),
+           group="Focus", order=20, decimals=3, read_path=["target"],
+           help="The drive voltage last commanded (after clamping). Status value, not a fresh measurement."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has an open connection to the KCube."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
            order=2, read_path=["hw_error"],
            help="Empty while the KCube answers; the error text while its reads "

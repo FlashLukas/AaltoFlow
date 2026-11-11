@@ -154,11 +154,15 @@ def build_manifest(gen) -> dict:
            help="The TG44A cannot be silenced: OFF parks it at the park frequency "
                 "and minimum level (see park_Hz / park_dBm)."),
         _p("parked", "Parked (RF off)", "indicator", "bool", group="Output",
-           order=11, read_path=["parked"]),
+           order=11, read_path=["parked"],
+           help="True while the CW is off, i.e. the generator sits at the park "
+                "frequency and level."),
         _p("park_Hz", "Park frequency", "indicator", "float", unit="MHz",
-           group="Output", order=12, decimals=6, scale=1e6, read_path=["park_Hz"]),
+           group="Output", order=12, decimals=6, scale=1e6, read_path=["park_Hz"],
+           help="Frequency the generator is parked at when CW output is off."),
         _p("park_dBm", "Park level", "indicator", "float", unit="dBm",
-           group="Output", order=13, decimals=2, read_path=["park_dBm"]),
+           group="Output", order=13, decimals=2, read_path=["park_dBm"],
+           help="Level the generator is parked at when CW output is off."),
 
         # Scanned in MHz, commanded and published in Hz. `scale` is on the
         # descriptor rather than inside `set`, so reading and setting cannot
@@ -171,7 +175,9 @@ def build_manifest(gen) -> dict:
            set={"verb": "set_frequency", "arg": "frequency_Hz"},
            settle=_echo_while_free("frequency_Hz", float(hw.echo_tol_Hz)),
            ramp=sweep_block(gen, "frequency", wire_arg="frequency_Hz",
-                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6)),
+                            rate_arg="rate_Hz_per_s", rate_unit="MHz/s", scale=1e6),
+           help="CW frequency of the tracking generator, as applied by the "
+                "analyser service. Range = your limits."),
 
         _p("power", "Level", "control", "float", unit="dBm", group="Signal",
            order=30, decimals=2, plottable=True,
@@ -198,13 +204,18 @@ def build_manifest(gen) -> dict:
            help="The analyser cannot read the TG's state -- it may be emitting. "
                 "Set frequency, level and CW on/off explicitly."),
         _p("tg_ready", "TG ready", "indicator", "bool", group="Status",
-           order=3, read_path=["tg_ready"]),
+           order=3, read_path=["tg_ready"],
+           help="True when the generator is connected, error-free, not held by "
+                "an analyser sweep and its state is known; a scan waits for it."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=4, read_path=["connected"]),
+           order=4, read_path=["connected"],
+           help="True while the service has a working link to the generator."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=5, read_path=["hw_error"]),
+           order=5, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=6,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("rf_off", "RF off (park)", "action", "action", group="Signal", order=90,

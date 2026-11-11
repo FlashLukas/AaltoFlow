@@ -104,3 +104,54 @@ def test_unprefixed_registry_is_one_simulator_branch(app):
         assert win.set_tree.topLevelItem(0).text(0).startswith(SIM_GROUP)
     finally:
         win.close()
+
+
+def test_the_tooltip_shows_the_modules_description_and_fresh_or_live(app):
+    """Lukas, 2026-11-11: the tooltip showed only usb6001.ai0; "Vacuum (mbar)",
+    "Vacuum (V)" and "Vacuum (live)" could not be told apart. Now the
+    module's `help` is kept on the Parameter, and the palette shows it plus
+    fresh (measured at every point) or live (status value)."""
+    from PySide6.QtCore import Qt
+    from apps.scan_builder import ScanBuilder
+    from scan_core.manifest import register_manifest
+
+    class Inst:                                  # registration never talks to it
+        alias = name = "usb6001"
+        def status(self): return {}
+        def command(self, *a, **k): return {"ok": True}
+
+    acquire = {"group": "sample", "trigger_verb": "acquire", "target_key": "acq_id",
+               "ready": {"policy": "adopt_then_flag", "setpoint_key": "acq_id",
+                         "flag_key": "acquiring", "invert": True}}
+    manifest = {"module": "usb6001", "revision": 1, "parameters": [
+        {"id": "ai0", "label": "Vacuum", "kind": "indicator", "type": "float",
+         "unit": "mbar", "read_path": ["sample", "ai", 0], "acquire": acquire,
+         "help": "AI0 (RSE): mean of 500 samples, as pressure p = 10^(U - 5) mbar."},
+        {"id": "ai0_live", "label": "Vacuum (live)", "kind": "indicator", "type": "float",
+         "unit": "mbar", "read_path": ["ai_live", 0],
+         "help": "Latest poll-thread reading: for a panel, not for a scan point."},
+        {"id": "ao0", "label": "AO 0", "kind": "control", "type": "float", "unit": "V",
+         "min": -10, "max": 10, "read_path": ["ao_V", 0],
+         "set": {"verb": "set_ao", "arg": "volts"},
+         "settle": {"policy": "echoes", "key": "ao_V", "index": 0}},
+    ]}
+    reg = Registry()
+    register_manifest(reg, Inst(), manifest, prefix=True)
+    fresh, live, ao = reg.get("usb6001.ai0"), reg.get("usb6001.ai0_live"), reg.get("usb6001.ao0")
+    assert fresh.reading == "fresh" and live.reading == "live"
+    assert fresh.help.startswith("AI0 (RSE)") and ao.help == ""
+
+    win = ScanBuilder(reg)
+    try:
+        items = {it.data(0, Qt.UserRole): it for it in win._det_items()}
+        tip = items["usb6001.ai0"].toolTip(0)
+        assert "Vacuum" in tip and "usb6001.ai0" in tip and "10^(U - 5) mbar" in tip
+        assert "fresh" in tip
+        assert items["usb6001.ai0"].text(1) == "0D"
+        assert "live" in items["usb6001.ai0_live"].toolTip(0)
+        assert items["usb6001.ai0_live"].text(1) == "live"
+        ctl = win.set_tree.topLevelItem(0).child(0)
+        assert "control, unit V, -10 .. 10" in ctl.toolTip(0)
+        assert "no description" in ctl.toolTip(0)
+    finally:
+        win.close()

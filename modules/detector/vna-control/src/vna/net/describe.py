@@ -233,9 +233,15 @@ def build_manifest(vna) -> dict:
     params = [
         # -- sweep -------------------------------------------------------------------
         sweep_ctrl("start", "Start", "GHz", "start_Hz", "set_start", "start_Hz", 10,
-                   slo / 1e9, shi / 1e9, scale=1e9, decimals=6, step=0.1, tol=1.0),
+                   slo / 1e9, shi / 1e9, scale=1e9, decimals=6, step=0.1, tol=1.0,
+                   help="First frequency of the sweep. Its maximum follows Stop (minus "
+                        "the minimum span). Changing it restarts a running acquisition, "
+                        "and a reference taken on another band no longer matches (u "
+                        "is refused)."),
         sweep_ctrl("stop", "Stop", "GHz", "stop_Hz", "set_stop", "stop_Hz", 20,
-                   plo / 1e9, phi / 1e9, scale=1e9, decimals=6, step=0.1, tol=1.0),
+                   plo / 1e9, phi / 1e9, scale=1e9, decimals=6, step=0.1, tol=1.0,
+                   help="Last frequency of the sweep. Its minimum follows Start (plus "
+                        "the minimum span). Same effects as Start."),
         sweep_ctrl("points", "Points", "", "points", "set_points", "points", 30,
                    lim.points_min, lim.points_max, type="int", step=1, tol=0.5,
                    help="Changing it between scan points is refused by the scan engine: "
@@ -244,7 +250,9 @@ def build_manifest(vna) -> dict:
                    lim.ifbw_min_Hz / 1e3, lim.ifbw_max_Hz / 1e3, scale=1e3, decimals=3,
                    tol=1e-3, help="Narrower = less noise (as sqrt) and a slower sweep."),
         sweep_ctrl("power", "Source power", "dBm", "power_dBm", "set_power", "power_dBm", 50,
-                   lim.power_min_dBm, lim.power_max_dBm, decimals=1, step=1.0),
+                   lim.power_min_dBm, lim.power_max_dBm, decimals=1, step=1.0,
+                   help="Source power at the port. Higher = less noise, until the "
+                        "sample or an amplifier is driven out of its linear range."),
         sweep_ctrl("averages", "Averages", "", "averages", "set_averages", "averages", 60,
                    lim.averages_min, lim.averages_max, type="int", step=1, tol=0.5,
                    help="Sweeps averaged (coherently) per acquisition."),
@@ -252,7 +260,8 @@ def build_manifest(vna) -> dict:
            options=list(SPARAMS), read_path=["sparam"],
            set={"verb": "set_sparam", "arg": "sparam"},
            settle={"policy": "echoes", "key": "sparam"},
-           help="What is measured (the detectors s, u, ln_ratio). A reference "
+           help="The primary S-parameter: what is measured (detectors s_<sp>, u_<sp>, "
+                "ln_ratio_<sp>; the primary also streams in a fly scan). A reference "
                 "without it no longer matches (u is refused)."),
         *([_p("extra_sparams", "Also measure", "control", "string", group="Sweep", order=66,
               read_path=["extra_sparams"],
@@ -274,7 +283,10 @@ def build_manifest(vna) -> dict:
                    "module never change it.")]
           if vna.can_switch_rf else []),
         _p("sweep_time", "Sweep time", "indicator", "float", unit="s", group="Sweep",
-           order=70, decimals=3, read_path=["sweep_time_s"]),
+           order=70, decimals=3, read_path=["sweep_time_s"],
+           help="Predicted time of ONE sweep with the current points and IF bandwidth "
+                "(twice that when S12/S22 and S11/S21 are measured together). An "
+                "acquisition takes this x averages, plus a little."),
         _p("continuous", "Continuous sweep", "control", "bool", group="Sweep", order=80,
            read_path=["continuous"], set={"verb": "set_continuous", "arg": "on"},
            settle={"policy": "echoes", "key": "continuous"},
@@ -294,7 +306,9 @@ def build_manifest(vna) -> dict:
                 "than the line."),
         _p("dip_depth", "Dip depth", "indicator", "float", unit="dB",
            group="Measurement", order=21, decimals=3,
-           read_path=["sample", "dip_dB"], acquire=acquire),
+           read_path=["sample", "dip_dB"], acquire=acquire,
+           help="How deep the dip goes below the fitted baseline in the latched "
+                "acquisition (fresh at every scan point), in dB."),
         _p("sweep_field", "Field during sweep", "indicator", "float", unit="mT",
            group="Measurement", order=22, decimals=3,
            read_path=["sample", "field_mT"], acquire=acquire,
@@ -305,16 +319,24 @@ def build_manifest(vna) -> dict:
            read_path=["sample", "angle_deg"], acquire=acquire,
            help="The in-plane field angle the sample saw, averaged on the circle."),
         _p("sweep_field_ok", "Field was live", "indicator", "bool",
-           group="Measurement", order=24, read_path=["sample", "field_ok"], acquire=acquire),
+           group="Measurement", order=24, read_path=["sample", "field_ok"], acquire=acquire,
+           help="True when the field filed with this acquisition was heard from the "
+                "magnet service during every sweep; False = a stale or manual value."),
         _p("acquire", "Acquire trace", "action", "action", group="Measurement", order=1,
            help="Average the next fresh sweeps and latch the result."),
-        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
+        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2,
+           help="Cancel the running acquisition. It is latched as aborted (a scan "
+                "waiting for it fails instead of reading an older trace); aborting a "
+                "Take reference also clears the old reference."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=3, read_path=["acquiring"]),
+           order=3, read_path=["acquiring"],
+           help="An acquisition (or a reference) is being measured now."),
         # A counter from 0 that only counts up: min 0 is the promise
         # scan-core stores it by (an int is stored by its declared range).
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, min=0, read_path=["acq_id"]),
+           order=4, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition started; it counts up from 0. A scan "
+                "waits until THIS number has finished, so it never reads an older one."),
 
         # -- reference -----------------------------------------------------------------
         _p("take_reference", "Take reference", "action", "action", group="Reference",
@@ -326,20 +348,31 @@ def build_manifest(vna) -> dict:
            help="Acquire like `acquire` and keep the result as the reference for u. "
                 "Take it where the sample does not resonate in the band."),
         _p("clear_reference", "Clear reference", "action", "action", group="Reference",
-           order=2, wait={"ready": {"policy": "immediate"}}),
+           order=2, wait={"ready": {"policy": "immediate"}},
+           help="Forget the reference. u and ln_ratio are refused until a new one is "
+                "taken."),
         _p("reference_present", "Reference present", "indicator", "bool",
-           group="Reference", order=10, read_path=["reference", "present"]),
+           group="Reference", order=10, read_path=["reference", "present"],
+           help="A reference is stored (u and ln_ratio need one that matches the "
+                "sweep)."),
         _p("reference_field", "Reference field", "indicator", "float", unit="mT",
-           group="Reference", order=11, decimals=3, read_path=["reference", "field_mT"]),
+           group="Reference", order=11, decimals=3, read_path=["reference", "field_mT"],
+           help="The field the stored reference was taken at, as the field source "
+                "reported it."),
         _p("reference_angle", "Reference angle", "indicator", "float", unit="deg",
-           group="Reference", order=12, decimals=2, read_path=["reference", "angle_deg"]),
+           group="Reference", order=12, decimals=2, read_path=["reference", "angle_deg"],
+           help="The in-plane field angle the stored reference was taken at."),
 
         # -- live ------------------------------------------------------------------------
         _p("live_dip_freq", "Dip frequency (live)", "indicator", "float", unit="GHz",
            group="Live", order=10, decimals=6, scale=1e9, plottable=True,
-           read_path=["dip_Hz"]),
+           read_path=["dip_Hz"],
+           help="Dip in the LATEST sweep of any kind (live status value, for panels "
+                "and plots, not for scan points; use Dip frequency for those)."),
         _p("live_dip_depth", "Dip depth (live)", "indicator", "float", unit="dB",
-           group="Live", order=11, decimals=3, plottable=True, read_path=["dip_dB"]),
+           group="Live", order=11, decimals=3, plottable=True, read_path=["dip_dB"],
+           help="Depth of the dip in the latest sweep (live status value, not for "
+                "scan points; use Dip depth for those)."),
         _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=12,
            min=0, read_path=["sweeps"], help="Completed sweeps since start."),
 
@@ -362,23 +395,37 @@ def build_manifest(vna) -> dict:
            group="Field", order=21, decimals=2, min=-ANGLE_LIMIT_DEG, max=ANGLE_LIMIT_DEG,
            read_path=["manual_angle_deg"],
            set={"verb": "set_manual_angle", "arg": "angle_deg"},
-           settle={"policy": "echoes", "key": "manual_angle_deg", "tol": 1e-9}),
+           settle={"policy": "echoes", "key": "manual_angle_deg", "tol": 1e-9},
+           help="In-plane field angle used when the source is manual (0 deg = the "
+                "x axis of the magnet)."),
         _p("field", "Field", "indicator", "float", unit="mT", group="Field",
-           order=30, decimals=3, plottable=True, read_path=["field_mT"]),
+           order=30, decimals=3, plottable=True, read_path=["field_mT"],
+           help="The field the sample sits in now, from the field source (live "
+                "status value). Scans record Field during sweep instead."),
         _p("field_angle", "Field angle", "indicator", "float", unit="deg", group="Field",
-           order=31, decimals=2, plottable=True, read_path=["angle_deg"]),
+           order=31, decimals=2, plottable=True, read_path=["angle_deg"],
+           help="The in-plane field angle now, from the field source (live status "
+                "value)."),
         _p("field_ok", "Field is live", "indicator", "bool", group="Field",
-           order=32, read_path=["field_ok"]),
+           order=32, read_path=["field_ok"],
+           help="The field source is being heard now; False = its last value is "
+                "stale, or the manual value stands in."),
         _p("field_in_use", "Field in use", "indicator", "string",
-           group="Field", order=33, read_path=["field_source"]),
+           group="Field", order=33, read_path=["field_source"],
+           help="Which source the field really comes from, with its health, e.g. "
+                "'manual' or 'mag2d (stale 3.2 s)'."),
 
         # -- status ------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="The service is connected to the analyser (or the simulator)."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="What the analyser reports about itself (*IDN?)."),
         _p("hw_error", "Error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="The last hardware error; empty while everything works. A sweep "
+                "with an error is not used."),
     ]
 
     if simulated:
@@ -403,7 +450,9 @@ def build_manifest(vna) -> dict:
             _p("geometry", "Geometry", "control", "enum", group="Sample (simulation)", order=70,
                options=list(GEOMETRIES), read_path=["geometry"],
                set={"verb": "set_geometry", "arg": "geometry"},
-               settle={"policy": "echoes", "key": "geometry"}),
+               settle={"policy": "echoes", "key": "geometry"},
+               help="Simulator only: field in the film plane (in_plane) or normal to "
+                    "it (out_of_plane); picks the Kittel formula."),
         ]
 
     # Bounds that are not known must not appear as NaN.

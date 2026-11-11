@@ -209,7 +209,10 @@ def build_manifest(meter) -> dict:
            help="Standard deviation of the readings in that acquisition."),
         _p(f"live_{word}", f"{Word} (live)", "indicator", "float", unit=su,
            group="Live", order=20, decimals=6, scale=1e-3, plottable=True,
-           read_path=["value"]),
+           read_path=["value"],
+           help=f"Latest single {word} reading from the status stream. LIVE value, "
+                f"for panels, not for scan points; use the {word} in Measurement "
+                "(fresh acquisition) in a scan."),
         # the fixed flag vocabulary ("" = a good reading), so an enum
         _p("flag", "Reading flag", "indicator", "enum", group="Live", order=21,
            options=list(READING_FLAGS), read_path=["flag"], help="'overrange' when the manual range is too small."),
@@ -217,10 +220,12 @@ def build_manifest(meter) -> dict:
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1, help="Average the next fresh readings and latch the result."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=2, read_path=["acquiring"]),
+           order=2, read_path=["acquiring"],
+           help="True while an acquisition is settling and collecting readings. Scans wait for it to clear."),
         # counters that start at 0 and only count up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, min=0, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; counts up. A scan waits for the number it triggered."),
     ]
 
     # -- zero (photodiode and thermal heads only) ----------------------------------
@@ -242,26 +247,34 @@ def build_manifest(meter) -> dict:
                help="Stop a running zero adjustment; the previous zero stays. "
                     "Allowed for anyone, also a viewer."),
             _p("zeroing", "Zeroing", "indicator", "bool", group="Zero", order=3,
-               read_path=["zeroing"]),
+               read_path=["zeroing"],
+               help="True while a zero (dark) adjustment is running."),
             _p("zero_id", "Zero #", "indicator", "int", group="Zero", order=4,
-               min=0, read_path=["zero_id"]),
+               min=0, read_path=["zero_id"],
+               help="Number of the latest zero adjustment; counts up. A scan routine waits for the number it started."),
             _p("dark_offset", "Zero offset", "indicator", "float",
-               unit=st.dark_unit, group="Zero", order=5, read_path=["dark_offset"]),
+               unit=st.dark_unit, group="Zero", order=5, read_path=["dark_offset"],
+               help="Offset the console keeps from the last zero adjustment, in the head's own unit."),
         ]
 
     # -- status -------------------------------------------------------------------
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the console (or its simulator) is connected."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string reported by the instrument."),
         # the backends' head vocabulary (an unknown sensor type is "other")
         _p("head", "Head type", "indicator", "enum", group="Status", order=3,
-           options=list(HEAD_KINDS), read_path=["head"]),
+           options=list(HEAD_KINDS), read_path=["head"],
+           help="Kind of measuring head the console reports (photodiode, thermal, pyroelectric ...). Decides which settings exist."),
         _p("sensor", "Sensor head", "indicator", "string", group="Status", order=4,
-           read_path=["sensor"]),
+           read_path=["sensor"],
+           help="Sensor head description as reported by the console."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=5, read_path=["hw_error"]),
+           order=5, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     # Bounds that are not known (no device yet) must not appear as NaN.

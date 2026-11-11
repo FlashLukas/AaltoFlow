@@ -129,9 +129,11 @@ def build_manifest(mono) -> dict:
            help="Centre wavelength at the exit slit. The range is the current "
                 "grating's; it changes with the grating."),
         _p("target_nm", "Wavelength target", "indicator", "float", unit="nm",
-           group="Wavelength", order=11, decimals=3, read_path=["target_nm"]),
+           group="Wavelength", order=11, decimals=3, read_path=["target_nm"],
+           help="The wavelength last commanded (target of the current or last move). Status value, not a fresh measurement."),
         _p("moving", "Moving", "indicator", "bool", group="Wavelength", order=12,
-           read_path=["moving"]),
+           read_path=["moving"],
+           help="True while the wavelength drive is travelling. Last status value; scans use it as their settle flag."),
         _p("bandpass", "Bandpass", "indicator", "float", unit="nm",
            group="Wavelength", order=13, decimals=3, plottable=True,
            read_path=["bandpass_nm"],
@@ -150,14 +152,17 @@ def build_manifest(mono) -> dict:
            help="Swap gratings. The shutter closes during the swap (the drive "
                 "sweeps past zero order) and the wavelength is restored after."),
         _p("grating_lines", "Grating lines", "indicator", "int", unit="l/mm",
-           group="Grating", order=21, read_path=["grating_lines"]),
+           group="Grating", order=21, read_path=["grating_lines"],
+           help="Line density of the grating now in use, in lines/mm."),
         _p("grating_label", "Grating label", "indicator", "string",
-           group="Grating", order=22, read_path=["grating_label"]),
+           group="Grating", order=22, read_path=["grating_label"],
+           help="Name of the grating now in use, as configured for this instrument."),
 
         _p("shutter", "Shutter open", "control", "bool", group="Shutter", order=30,
            read_path=["shutter_open"],
            set={"verb": "set_shutter", "arg": "open"},
-           settle={"policy": "echoes", "key": "shutter_open"}),
+           settle={"policy": "echoes", "key": "shutter_open"},
+           help="Opens or closes the shutter. The reply is immediate; the shutter state is read back."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("close_shutter", "Close shutter", "action", "action", group="Shutter", order=31,
@@ -173,7 +178,8 @@ def build_manifest(mono) -> dict:
                settle=moving_settle("filter_target", 0.5),
                help="Filter wheel position (order-sorting filters)."),
             _p("filter_label", "Filter label", "indicator", "string",
-               group="Filter", order=41, read_path=["filter_label"]),
+               group="Filter", order=41, read_path=["filter_label"],
+           help="Name of the filter at the current filter wheel position, as configured."),
         ]
     if acc.dual_port:
         params.append(
@@ -184,13 +190,17 @@ def build_manifest(mono) -> dict:
                help="1 = axial, 2 = lateral (motorised flip mirror)."))
     params += [
         _p("step_position", "Drive position", "indicator", "int", unit="steps",
-           group="Status", order=60, read_path=["step_position"]),
+           group="Status", order=60, read_path=["step_position"],
+           help="Raw position of the wavelength drive in motor steps. Last status value, for panels."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=61, read_path=["connected"]),
+           order=61, read_path=["connected"],
+           help="True while the service has an open connection to the monochromator."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=62,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="The instrument's identification string, read when it was opened."),
         _p("error_text", "Last error", "indicator", "string", group="Status",
-           order=63, read_path=["error_text"]),
+           order=63, read_path=["error_text"],
+           help="Text of the last error reported by the instrument or the driver; empty when none."),
 
         _p("abort", "Abort motion", "action", "action", group="Wavelength",
            order=90, help="Stop the wavelength drive and drop queued moves."),

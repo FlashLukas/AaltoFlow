@@ -142,9 +142,11 @@ def build_manifest(sa) -> dict:
     params = [
         # -- frequency -------------------------------------------------------------------
         ctrl("start", "Start", "MHz", "start_Hz", "set_start", "start_Hz", "Frequency", 10,
-             slo / 1e6, shi / 1e6, scale=1e6, decimals=6, step=1.0, tol=1.0),
+             slo / 1e6, shi / 1e6, scale=1e6, decimals=6, step=1.0, tol=1.0,
+           help="Start frequency of the sweep (MHz). It must stay below stop by at least the minimum span."),
         ctrl("stop", "Stop", "MHz", "stop_Hz", "set_stop", "stop_Hz", "Frequency", 20,
-             plo / 1e6, phi / 1e6, scale=1e6, decimals=6, step=1.0, tol=1.0),
+             plo / 1e6, phi / 1e6, scale=1e6, decimals=6, step=1.0, tol=1.0,
+           help="Stop frequency of the sweep (MHz). It must stay above start by at least the minimum span."),
         ctrl("center", "Center", "MHz", "center_Hz", "set_center", "center_Hz", "Frequency", 30,
              clo / 1e6, chi / 1e6, scale=1e6, decimals=6, step=1.0, tol=1.0,
              help="Moves start and stop together. The span stays unless it no longer "
@@ -169,7 +171,8 @@ def build_manifest(sa) -> dict:
              lim.vbw_min_Hz / 1e3, lim.vbw_max_Hz / 1e3, scale=1e3, decimals=3, tol=1e-3,
              read_key="vbw_Hz",
              help="Video bandwidth: VBW << RBW smooths the noise (not its mean)."),
-        switch("vbw_auto", "VBW auto", "vbw_auto", "set_vbw_auto", "Bandwidth", 21),
+        switch("vbw_auto", "VBW auto", "vbw_auto", "set_vbw_auto", "Bandwidth", 21,
+           help="VBW follows the RBW automatically."),
         ctrl("ref_level", "Reference level", "dBm", "ref_level_dBm", "set_ref_level",
              "ref_level_dBm", "Amplitude", 10, lim.ref_level_min_dBm, lim.ref_level_max_dBm,
              decimals=2, step=1.0, tol=1e-6,
@@ -179,7 +182,8 @@ def build_manifest(sa) -> dict:
              read_key="atten_dB",
              help="Whole dB. Each dB lifts the noise floor by a dB; too little "
                   "overloads the mixer (see Overload)."),
-        switch("atten_auto", "Attenuation auto", "atten_auto", "set_atten_auto", "Amplitude", 21),
+        switch("atten_auto", "Attenuation auto", "atten_auto", "set_atten_auto", "Amplitude", 21,
+           help="Input attenuation follows the reference level automatically."),
         switch("preamp", "Preamplifier", "preamp", "set_preamp", "Amplitude", 30,
                "20 dB front-end gain: noise floor ~20 dB lower, overloads 20 dB earlier."),
         ctrl("sweep_time", "Sweep time", "s", "sweep_time_set_s", "set_sweep_time",
@@ -188,7 +192,8 @@ def build_manifest(sa) -> dict:
              help="Setting it switches sweep-time auto off. Faster than auto = "
                   "amplitude errors (the RBW filter has no time to settle)."),
         switch("sweep_time_auto", "Sweep time auto", "sweep_time_auto",
-               "set_sweep_time_auto", "Sweep", 11),
+               "set_sweep_time_auto", "Sweep", 11,
+           help="Sweep time is chosen by the analyser from span, RBW and VBW."),
         _p("detector", "Detector", "control", "enum", group="Sweep", order=20,
            options=list(DETECTORS), read_path=["detector"],
            set={"verb": "set_detector", "arg": "detector"},
@@ -236,7 +241,8 @@ def build_manifest(sa) -> dict:
            help="The highest point of the averaged trace (peak-search marker)."),
         _p("peak_level", "Peak level", "indicator", "float", unit="dBm",
            group="Measurement", order=21, decimals=2,
-           read_path=["sample", "peak_dBm"], acquire=acquire),
+           read_path=["sample", "peak_dBm"], acquire=acquire,
+           help="Level of the highest point of the averaged trace, dBm. FRESH: taken from the acquisition the scan triggers at each point."),
         _p("noise_floor", "Noise floor (median)", "indicator", "float", unit="dBm",
            group="Measurement", order=22, decimals=2,
            read_path=["sample", "floor_dBm"], acquire=acquire,
@@ -252,11 +258,13 @@ def build_manifest(sa) -> dict:
            help="Cancel a running acquisition or reference. Allowed for anyone, "
                 "also a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=3, read_path=["acquiring"]),
+           order=3, read_path=["acquiring"],
+           help="True while an acquisition (or a reference) is running. Scans wait for it to clear."),
         # min 0: a counter the brain starts at 0 and only increments (no max:
         # it has none). scan-core stores an int in the type its bounds allow.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, read_path=["acq_id"], min=0),
+           order=4, read_path=["acq_id"], min=0,
+           help="Number of the latest acquisition; counts up. A scan waits for the number it triggered, so it never reads a stale trace."),
 
         # -- reference ------------------------------------------------------------------------
         _p("take_reference", "Take thru reference", "action", "action", group="Reference",
@@ -268,38 +276,50 @@ def build_manifest(sa) -> dict:
            help="Acquire like `acquire` and keep the result as the reference for "
                 "norm. Tracking generator on, a THRU where the device goes."),
         _p("clear_reference", "Clear reference", "action", "action", group="Reference",
-           order=2, wait={"ready": {"policy": "immediate"}}),
+           order=2, wait={"ready": {"policy": "immediate"}},
+           help="Forget the stored thru reference (takes effect at once). The Transmission detector is refused until a new one is taken."),
         _p("reference_present", "Reference present", "indicator", "bool",
-           group="Reference", order=10, read_path=["reference", "present"]),
+           group="Reference", order=10, read_path=["reference", "present"],
+           help="True if a thru reference trace is stored (needed for the Transmission detector)."),
         _p("reference_tg_level", "Reference TG level", "indicator", "float", unit="dBm",
-           group="Reference", order=11, decimals=1, read_path=["reference", "tg_level_dBm"]),
+           group="Reference", order=11, decimals=1, read_path=["reference", "tg_level_dBm"],
+           help="Tracking-generator level at which the stored reference was taken."),
 
         # -- live ---------------------------------------------------------------------------
         _p("live_peak_freq", "Peak frequency (live)", "indicator", "float", unit="MHz",
            group="Live", order=10, decimals=6, scale=1e6, plottable=True,
-           read_path=["peak_Hz"]),
+           read_path=["peak_Hz"],
+           help="Peak frequency of the most recent continuous sweep. LIVE status value, for panels, not for scan points; use 'Peak frequency' (fresh acquisition) in a scan."),
         _p("live_peak_level", "Peak level (live)", "indicator", "float", unit="dBm",
-           group="Live", order=11, decimals=2, plottable=True, read_path=["peak_dBm"]),
+           group="Live", order=11, decimals=2, plottable=True, read_path=["peak_dBm"],
+           help="Peak level of the most recent continuous sweep. LIVE status value, for panels, not for scan points; use 'Peak level' in a scan."),
         _p("live_floor", "Noise floor (live)", "indicator", "float", unit="dBm",
-           group="Live", order=12, decimals=2, plottable=True, read_path=["floor_dBm"]),
+           group="Live", order=12, decimals=2, plottable=True, read_path=["floor_dBm"],
+           help="Median noise floor of the most recent continuous sweep. LIVE status value, for panels, not for scan points; use 'Noise floor (median)' in a scan."),
         _p("live_overload", "Overload (live)", "indicator", "bool", group="Live", order=13,
-           read_path=["overload"]),
+           read_path=["overload"],
+           help="Input overload seen in the most recent continuous sweep. LIVE status value, for panels, not for scan points."),
         # min 0: completed sweeps since start, a counter that only counts up
         _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=14,
-           read_path=["sweeps"], min=0),
+           read_path=["sweeps"], min=0,
+           help="Completed sweeps since the service started (a counter)."),
         # an enum: what "auto" resolves to (model.effective_detector) can only
         # be one of the concrete detectors -- never "auto" itself
         _p("detector_in_use", "Detector in use", "indicator", "enum", group="Live",
            order=15, options=list(EFFECTIVE_DETECTORS),
-           read_path=["detector_in_use"]),
+           read_path=["detector_in_use"],
+           help="The concrete detector actually applied; shows what 'auto' resolved to."),
 
         # -- status ------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the analyser (or its simulator) is connected."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string reported by the instrument."),
         _p("hw_error", "Error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     if simulated:

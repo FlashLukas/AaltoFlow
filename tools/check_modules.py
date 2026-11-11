@@ -937,6 +937,21 @@ def types_check(rep: Report, m, py: Path, cmd: int, manifest: dict):
             (f" (+{len(problems) - 6} more)" if len(problems) > 6 else ""))
 
 
+def help_check(rep: Report, m, manifest: dict):
+    """Every variable a module shares must say what it is (2026-11-11, Lukas).
+
+    The measurement suite shows `help` in the tooltip of every parameter; an
+    id like usb6001.ai0 alone does not tell "Vacuum (mbar)" from "Vacuum (V)"
+    from "Vacuum (live)". INSTRUMENT_MODULE_GUIDE.md section 6b, "Describe
+    every variable"."""
+    missing = [d.get("id", "?") for d in manifest.get("parameters", [])
+               if not str(d.get("help") or "").strip()]
+    rep.add(m.key, "live: every parameter has a help text",
+            "FAIL" if missing else "PASS",
+            (f"{len(missing)} without: " + ", ".join(missing[:8])
+             + (" ..." if len(missing) > 8 else "")) if missing else "")
+
+
 def live_check(rep: Report, m, py: Path):
     cmd, pub = free_port_pair()
     proc = subprocess.Popen([str(py), m.service, "--cmd-port", str(cmd), "--pub-port", str(pub)],
@@ -967,6 +982,7 @@ def live_check(rep: Report, m, py: Path):
                 "PASS" if got == m.key else "FAIL", "" if got == m.key else f"says {got!r}")
         n = len(manifest.get("parameters", []))
         rep.add(m.key, "live: describe has parameters", "PASS" if n else "FAIL", f"{n}")
+        help_check(rep, m, manifest)
         stream_check(rep, m, py, cmd, manifest)
         ramp_check(rep, m, py, cmd, manifest)
         binary_check(rep, m, py, cmd, manifest)

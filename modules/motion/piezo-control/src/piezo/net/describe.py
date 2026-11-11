@@ -137,7 +137,7 @@ def build_manifest(brain) -> dict:
                # with the new target never carries a pre-move `moving`.
                settle={"policy": "adopt_then_flag", "setpoint_key": "target_um",
                        "flag_key": "moving", "invert": True, "index": i},
-               help=f"Travel ceiling is {hi:g} um in "
+               help=f"Axis position in um (readback). Travel ceiling is {hi:g} um in "
                     f"{'closed' if (i < len(closed) and closed[i]) else 'open'}"
                     f" loop; it changes when the loop mode changes."),
 
@@ -154,13 +154,17 @@ def build_manifest(brain) -> dict:
                min=0.0, max=lim.max_velocity, read_path=["velocity", i],
                set={"verb": "set_velocity", "arg": "value",
                     "extra": {"axis": ax}},
-               settle={"policy": "immediate"}),
+               settle={"policy": "immediate"},
+               help="Speed of position moves; how it is enforced depends on the "
+                    "ramp mode. A fly scan sets its row speed here."),
 
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
-               group="Status", order=20 + i, read_path=["moving", i]),
+               group="Status", order=20 + i, read_path=["moving", i],
+               help=f"True while axis {ax} is moving to a target."),
             _p(f"relative_{low}", f"Relative {ax}", "indicator", "float",
                unit="um", group="Position", order=70 + i, decimals=3,
-               read_path=["relative", i]),
+               read_path=["relative", i],
+               help="Position relative to the origin set by 'Zero here'."),
         ]
 
     params += [
@@ -176,13 +180,14 @@ def build_manifest(brain) -> dict:
            help="In `software` mode the hardware slew rate must be 0, or the "
                 "two limiters stack and the stage lags the ramp."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has the piezo controller open."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
            order=2, read_path=["hw_error"],
            help="Empty while the controller answers; the error text while its "
                 "position reads fail (the read-out shown is the last good one)."),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
-           danger=True),
+           danger=True, help="Stops motion and forgets the targets."),
         _p("set_zero", "Zero here", "action", "action", group="Routines",
            order=110,
            help="Captures the current position as the relative origin."),

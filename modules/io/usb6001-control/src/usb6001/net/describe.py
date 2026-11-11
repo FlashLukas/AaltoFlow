@@ -189,7 +189,8 @@ def build_manifest(daq) -> dict:
             help=f"Line {DIO_LINES[line]} read AFTER the trigger (scan-safe)."))
         params.append(_p(
             f"di_{line_id(line)}_live", f"{label} (live)", "indicator", "bool",
-            group="Live", order=500 + line, read_path=["dio", line]))
+            group="Live", order=500 + line, read_path=["dio", line],
+            help="Latest poll-thread state of the line: for a panel, not for a scan point."))
 
     # -- resistance (AO + R_ref + sense AI; config group `resistance`) -------------------------
     rc = cfg.resistance
@@ -214,10 +215,14 @@ def build_manifest(daq) -> dict:
                help="Standard error from the scatter of the readings."),
             _p("resistance_current", f"{name} current", "indicator", "float",
                unit="mA", group="Resistance", order=602, decimals=3,
-               read_path=["resistance", "current_mA"], acquire=r_acquire),
+               read_path=["resistance", "current_mA"], acquire=r_acquire,
+               help="Excitation current through the reference resistor during the "
+                    "reading, taken in the same fresh measurement as the resistance."),
             _p("resistance_leads", "Leads (subtracted)", "indicator", "float",
                unit="ohm", group="Resistance", order=603, decimals=4,
-               read_path=["resistance", "r_leads_ohm"]),
+               read_path=["resistance", "r_leads_ohm"],
+               help="Stored resistance of the bias tee and cable, subtracted from every "
+                    "resistance reading. Set by 'Zero leads'."),
             _p("measure_resistance", f"Measure {name.lower()}", "action", "action",
                group="Resistance", order=604,
                wait={"target_key": "res_id", "ready": r_ready, "timeout_s": r_timeout},
@@ -229,7 +234,8 @@ def build_manifest(daq) -> dict:
                     "then run this: the measured bias tee + cable resistance is "
                     "stored and subtracted from every later reading."),
             _p("res_running", "Measuring resistance", "indicator", "bool",
-               group="Resistance", order=606, read_path=["res_running"]),
+               group="Resistance", order=606, read_path=["res_running"],
+               help="True while a resistance measurement is in progress."),
         ]
 
     # -- actions ---------------------------------------------------------------------------------
@@ -251,18 +257,23 @@ def build_manifest(daq) -> dict:
                   "default": ""}],
            help="A fresh reading of the input lines."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=4, read_path=["acquiring"]),
+           order=4, read_path=["acquiring"],
+           help="True while an acquisition (fresh sample of all inputs) is running."),
         # a counter that starts at 0 and only counts up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=5, min=0, read_path=["acq_id"]),
+           order=5, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; a scan waits for the number its "
+                "trigger returned, so it never reads an older sample."),
 
         # -- status ------------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service holds the USB-6001 open."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"], help="Identification string of the DAQ device."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
         _p("restart_pending", "Restart pending", "indicator", "bool", group="Status",
            order=4, read_path=["restart_pending"],
            help="The saved layout (AI channels, line directions) differs from the "

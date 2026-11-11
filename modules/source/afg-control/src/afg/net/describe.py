@@ -230,7 +230,10 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
     else:
         out.append(_p(f"{ch}_phase", f"{C} phase", "indicator", "float", unit="deg",
                       group=grp, order=base_order + 6, decimals=2,
-                      read_path=[f"{ch}_phase_deg"]))
+                      read_path=[f"{ch}_phase_deg"],
+                      help="Start phase of this channel in deg. Read-only here: "
+                           "the waveform has no phase, or CH2 follows CH1 and "
+                           "its phase is set through the phase offset."))
     if wf == "pulse":
         out.append(_p(f"{ch}_duty", f"{C} duty cycle", "control", "float", unit="%",
                       group=grp, order=base_order + 7, decimals=2, step=1.0,
@@ -238,7 +241,8 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                       read_path=[f"{ch}_duty_pct"],
                       set={"verb": "set_duty", "arg": "duty_pct", "extra": extra},
                       settle=settle(f"{ch}_duty_pct"), timeout_s=10.0,
-                      help=NRB.strip() if "duty_pct" in nrb else ""))
+                      help="Pulse duty cycle: the high time as a percentage of the period."
+                           + (NRB if "duty_pct" in nrb else "")))
     if wf == "ramp" and gen.caps.get("ramp_symmetry", True):
         out.append(_p(f"{ch}_symmetry", f"{C} ramp symmetry", "control", "float", unit="%",
                       group=grp, order=base_order + 7, decimals=2, step=1.0,
@@ -263,7 +267,10 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
            order=base_order + 9, decimals=3, read_path=[f"{ch}_peak_V"],
            help="|offset| + amplitude/2: the highest voltage the output reaches."),
         _p(f"{ch}_settled", f"{C} settled", "indicator", "bool", group=grp,
-           order=base_order + 10, read_path=[f"{ch}_settled"]),
+           order=base_order + 10, read_path=[f"{ch}_settled"],
+           help="True once the last request for this channel has been sent and "
+                "the instrument's read-back agrees with it. Last status value; "
+                "scans use it as their settle flag."),
         _p(f"{ch}_mismatch", f"{C} not as asked", "indicator", "string", group=grp,
            order=base_order + 11, read_path=[f"{ch}_mismatch"],
            help="Empty when the instrument's read-back agrees with the request."),
@@ -278,7 +285,9 @@ def _channel_params(gen, ch: str, base_order: int) -> list:
                 "this module leaves those modes alone)."),
         _p(f"{ch}_frequency_actual", f"{C} frequency (read back)", "indicator", "float",
            unit="Hz", group=grp, order=base_order + 13, decimals=6, plottable=True,
-           read_path=[f"{ch}_frequency_actual_Hz"]),
+           read_path=[f"{ch}_frequency_actual_Hz"],
+           help="Frequency as read back from the instrument, which may differ "
+                "slightly from the requested one. Last status value, for panels."),
     ]
     return out
 
@@ -329,7 +338,9 @@ def build_manifest(gen) -> dict:
             params.append(
                 _p("phase_offset", "CH2 phase offset (unused)", "indicator", "float",
                    unit="deg", group="Coupling", order=3, decimals=2,
-                   read_path=["phase_offset_deg"]))
+                   read_path=["phase_offset_deg"],
+                   help="Not in use: CH2 does not follow CH1's phase, so its "
+                        "phase is set directly on the CH2 phase control."))
         if gen.caps.get("phase_align"):
             params.append(
                 _p("align_phase", "Align phase", "action", "action", group="Coupling",
@@ -343,7 +354,8 @@ def build_manifest(gen) -> dict:
            help="Switch every output off. Usable as a scan routine step, and by a "
                 "viewer (the safety action)."),
         _p("all_off", "All outputs off (state)", "indicator", "bool",
-           group="Output", order=2, read_path=["all_off"]),
+           group="Output", order=2, read_path=["all_off"],
+           help="True while every output channel is off (live status value)."),
         _p("ramping", "Sweeping", "indicator", "bool", group="Output", order=3,
            read_path=["ramping"],
            help="True while a sweep (ramp_start) walks a knob; ramp_knob says which."),
@@ -351,11 +363,14 @@ def build_manifest(gen) -> dict:
            wait={"ready": {"policy": "immediate"}},
            help="End a running sweep where it is. Allowed for anyone, also a viewer."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="The service is connected to the instrument (or its simulator)."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="What the instrument reports about itself (*IDN?)."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="The last hardware error; empty while everything works."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "afg",
                 "label": f"Function generator ({gen.caps.get('model', 'AFG')})",

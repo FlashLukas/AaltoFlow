@@ -114,7 +114,8 @@ def build_manifest(brain) -> dict:
            help="Absolute encoder position on the referenced scale; the "
                 "readback is the MEASURED position." + ref_note),
         _p("target", "Target", "indicator", "float", unit="mm",
-           group="Position", order=11, decimals=4, read_path=["target_mm"]),
+           group="Position", order=11, decimals=4, read_path=["target_mm"],
+           help="The position the stage was last commanded to (target of the current or last move). Status value, not a fresh measurement."),
         _p("relative", "Relative", "indicator", "float", unit="mm",
            group="Position", order=12, decimals=4, plottable=True,
            read_path=["relative_mm"],
@@ -140,29 +141,35 @@ def build_manifest(brain) -> dict:
                 "(0 = let go at once). Applies from the next move."),
         _p("speed", "Measured speed", "indicator", "float", unit="mm/s",
            group="Motion", order=22, decimals=3, plottable=True,
-           read_path=["speed_mm_s"]),
+           read_path=["speed_mm_s"],
+           help="Speed of the carriage derived from the encoder. Last status value, for panels, not for scan points."),
         # read from the SCU as an unsigned int (SA_GetClosedLoopMaxFrequency_S
         # into a c_uint), so it cannot be negative: min 0 is a promise. No
         # max: the controller's own ceiling (18.5 kHz) is not confirmed for
         # an ADOPTED value, and int32 holds anything a SCU can report.
         _p("max_frequency", "Step frequency limit", "indicator", "int",
-           unit="Hz", group="Motion", order=23, min=0, read_path=["max_frequency_hz"]),
+           unit="Hz", group="Motion", order=23, min=0, read_path=["max_frequency_hz"],
+           help="Closed-loop step frequency limit currently set in the controller, in Hz. Read back from the controller."),
 
         # -- state -------------------------------------------------------- #
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has an open connection to the controller."),
         _p("referenced", "Referenced", "indicator", "bool", group="Status",
            order=2, read_path=["referenced"],
            help="The controller knows the absolute position (reference marks found)."),
         _p("moving", "Moving", "indicator", "bool", group="Status", order=3,
-           read_path=["moving"]),
+           read_path=["moving"],
+           help="True while the carriage is travelling to a target. Last status value."),
         # a STRING, not an enum: backends/scu.py reports "code_<n>" for a
         # status number outside the known CHANNEL_STATES list, so the set of
         # values is open (an enum would lose those as "not measured").
         _p("channel_state", "Controller state", "indicator", "string",
-           group="Status", order=4, read_path=["channel_state"]),
+           group="Status", order=4, read_path=["channel_state"],
+           help="The controller's own state name for this channel (for example stopped, holding or moving). An unknown code is shown as code_<n>."),
         _p("hw_error", "Hardware error", "indicator", "string",
-           group="Status", order=5, read_path=["hw_error"]),
+           group="Status", order=5, read_path=["hw_error"],
+           help="Text of the last failed hardware read; empty when communication is fine."),
 
         # -- routines ----------------------------------------------------- #
         _p("find_reference", "Find reference", "action", "action",
@@ -183,7 +190,8 @@ def build_manifest(brain) -> dict:
            help="Makes the current position the relative origin. It lives in "
                 "the `relative` config group, so a set_config push overwrites it."),
         _p("clear_zero", "Clear zero", "action", "action", group="Routines",
-           order=93, wait={"ready": {"policy": "immediate"}}),
+           order=93, wait={"ready": {"policy": "immediate"}},
+           help="Removes the 'zero here' origin so the relative readout equals the absolute position again."),
         _p("move_by", "Step", "action", "action", group="Routines", order=94,
            args=[{"name": "delta", "label": "Step", "type": "float", "unit": "mm",
                   "default": mot.jog_step_mm,

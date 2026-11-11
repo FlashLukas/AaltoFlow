@@ -133,17 +133,24 @@ def build_manifest(brain) -> dict:
                # brain's ordering rule (Stage.status) makes sure a frame with
                # the new target never carries a pre-move `moving`.
                settle={"policy": "adopt_then_flag", "setpoint_key": "target_mm",
-                       "flag_key": "moving", "invert": True, "index": i}),
+                       "flag_key": "moving", "invert": True, "index": i},
+               help=f"Absolute position of the {ax} axis in device mm; the "
+                    "readback is the stage's own reported position. Waits "
+                    "until the move has finished."),
 
             _p(f"velocity_{low}", f"Velocity {ax}", "control", "float",
                unit="mm/s", group="Motion", order=40 + i, decimals=3,
                min=0.0, max=lim.max_velocity, read_path=["velocity", i],
                set={"verb": "set_velocity", "arg": "value",
                     "extra": {"axis": ax}},
-               settle={"policy": "immediate"}),
+               settle={"policy": "immediate"},
+               help=f"Travel speed of the {ax} axis for later moves, in mm/s. "
+                    "Clamped to the velocity limit; takes effect at once."),
 
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
-               group="Status", order=20 + i, read_path=["moving", i]),
+               group="Status", order=20 + i, read_path=["moving", i],
+               help=f"True while the {ax} axis is travelling. Last status "
+                    "value, for panels."),
             _p(f"target_{low}", f"Target {ax}", "indicator", "float",
                unit="mm", group="Position", order=60 + i, decimals=4,
                read_path=["target_mm", i],
@@ -151,7 +158,9 @@ def build_manifest(brain) -> dict:
                     "empty after Home."),
             _p(f"relative_{low}", f"Relative {ax}", "indicator", "float",
                unit="mm", group="Position", order=70 + i, decimals=4,
-               read_path=["relative", i]),
+               read_path=["relative", i],
+               help=f"Position of the {ax} axis measured from the 'zero here' "
+                    "origin (and the relative offset/matrix), in mm."),
             _p(f"home_{low}", f"Home {ax}", "action", "action",
                group="Routines", order=100 + i, danger=True,
                settle={"policy": "flag_only", "key": "moving", "invert": True,
@@ -161,7 +170,8 @@ def build_manifest(brain) -> dict:
 
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has an open connection to the controller."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
            order=2, read_path=["hw_error"],
            help="Empty while the controller answers; the error text while its "

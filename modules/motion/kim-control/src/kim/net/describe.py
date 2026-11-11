@@ -156,17 +156,21 @@ def build_manifest(brain) -> dict:
                # a fly scan records the counter position continuously and
                # bins its detectors by it (stream_start / _read / _stop)
                stream={"group": "position", "channel": low},
-               help=("Bounds are the LEASH box around the datum."
-                     if leashed else
-                     "Bounds are the full symmetric travel; arming the leash "
-                     "narrows them.")),
+               help=("Open-loop position in um, from the step counter times the "
+                     "step size (no encoder). "
+                     + ("Bounds are the LEASH box around the datum."
+                        if leashed else
+                        "Bounds are the full symmetric travel; arming the leash "
+                        "narrows them."))),
 
             _p(f"velocity_{low}", f"Velocity {ax}", "control", "float",
                unit="um/s", group="Motion", order=40 + i, decimals=3,
                min=0.0, max=lim.max_step_rate * k, read_path=["velocity_um", i],
                set={"verb": "set_velocity_um", "arg": "value",
                     "extra": {"axis": ax}},
-               settle={"policy": "immediate"}),
+               settle={"policy": "immediate"},
+               help="Speed of position moves, converted to step rate with the step "
+                    "size; a fly scan sets its row speed here."),
 
             _p(f"voltage_{low}", f"Drive voltage {ax}", "control", "float",
                unit="V", group="Drive", order=60 + i, decimals=1, step=1.0,
@@ -179,14 +183,16 @@ def build_manifest(brain) -> dict:
                     "um_per_step calibration for this axis."),
 
             _p(f"moving_{low}", f"Moving {ax}", "indicator", "bool",
-               group="Status", order=20 + i, read_path=["moving", i]),
+               group="Status", order=20 + i, read_path=["moving", i],
+               help=f"True while axis {ax} is executing a move."),
             # NO min/max on purpose: the counter is the KIM101's signed 32-bit
             # position (Kinesis piezo-motor counter). The datum is arbitrary
             # and the actuator can be moved beyond our limits by hand or by
             # another program, so any int32 may be read -- and int32 is what
             # scan-core stores an int without bounds as.
             _p(f"steps_{low}", f"Step counter {ax}", "indicator", "int",
-               group="Position", order=80 + i, read_path=["position_steps", i]),
+               group="Position", order=80 + i, read_path=["position_steps", i],
+               help=f"Signed step count of axis {ax} since the datum, as the KIM101 counts it."),
             _p(f"datum_{low}", f"Datum {ax}", "action", "action",
                group="Routines", order=100 + i, danger=True,
                help="HARDWARE reset of the step counter -- the closest thing "
@@ -210,17 +216,21 @@ def build_manifest(brain) -> dict:
            help="When armed, a symmetric box around the datum REPLACES the "
                 "absolute travel limits -- so the position bounds above change."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has the KIM101 open."),
         # "" while the KIM101 answers; the error text while reads fail. The
         # positions then repeat the last good reading, so this is the field
         # that says they are stale (scan-core pauses a scan on it).
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=2, read_path=["hw_error"]),
+           order=2, read_path=["hw_error"],
+           help="Empty while the controller answers; the error text while reads "
+                "fail, in which case the positions are the last good reading."),
         _p("stop", "STOP", "action", "action", group="Routines", order=90,
-           danger=True),
+           danger=True, help="Stops all axes at once; each axis's target becomes where it stopped (a scan waiting for the old target times out instead of taking a short point)."),
         # a SAFETY verb (control.py): a viewer may always abort a calibration
         _p("abort_px_calibration", "Abort camera calibration", "action", "action",
-           group="Routines", order=91),
+           group="Routines", order=91,
+           help="Aborts a running camera step-size calibration."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "kim",
                 "label": "3D inertia stage", "parameters": params}

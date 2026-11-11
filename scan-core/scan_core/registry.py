@@ -53,6 +53,15 @@ class Parameter:
     #: `focus_sensitive: true`): a reflectivity, a camera image. The scout
     #: pass warns when no autofocus runs before it (scout.autofocus_warning).
     focus_sensitive = False
+    #: The module's own description of this parameter (describe `help`,
+    #: required since 2026-11-11): what it physically is, its unit, fresh or
+    #: live. The Scan tab shows it in the tooltip. "" = none given.
+    help = ""
+    #: For a detector: "fresh" = a NEW value is measured for every scan point
+    #: (an acquire step, or read by command); "live" = the last value from the
+    #: module's status stream (for panels, not for scan points). None = not
+    #: known (the simulator registry).
+    reading = None
     #: The id of the settable that sets how FAST this knob moves (describe
     #: `speed_param`): a fly scan sets its speed there (flyscan.find_speed_param).
     #: None = the module does not say (a same-module rate unit is guessed).

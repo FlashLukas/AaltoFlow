@@ -150,7 +150,8 @@ def build_manifest(lockin) -> dict:
                          read_path=["ref_freq_Hz"],
                          help="Measured from the external reference."))
         params.append(_p("unlocked", "Reference unlocked", "indicator", "bool", group=G,
-                         order=11, read_path=["unlocked"]))
+                         order=11, read_path=["unlocked"],
+                         help="True while the lock-in has not locked to the signal on REF IN."))
     else:
         params.append(_p("freq", "Reference frequency", "control", "float", unit="Hz",
                          group=G, order=10, decimals=4, plottable=True,
@@ -164,12 +165,14 @@ def build_manifest(lockin) -> dict:
     params.append(_p("harmonic", "Harmonic", "control", "int", group=G, order=20,
                      min=1, max=lockin._harmonic_max(), step=1, read_path=["harmonic"],
                      set={"verb": "set_harmonic", "arg": "harmonic"},
-                     settle={"policy": "echoes", "key": "harmonic_set", "tol": 0.5}))
+                     settle={"policy": "echoes", "key": "harmonic_set", "tol": 0.5},
+                     help="Detect at n x the reference frequency (2f, 3f ...)."))
     params.append(_p("phase", "Reference phase", "control", "float", unit="deg",
                      group=G, order=30, min=-180.0, max=180.0, decimals=2,
                      read_path=["phase_deg"],
                      set={"verb": "set_phase", "arg": "phase_deg"},
-                     settle={"policy": "echoes", "key": "phase_set_deg", "tol": 0.006}))
+                     settle={"policy": "echoes", "key": "phase_set_deg", "tol": 0.006},
+                     help="Phase shift applied to the reference before detection; X and Y rotate with it. Auto phase sets it for you."))
     params.append(_enum("trigger", "External trigger", G, 40, tables.TRIGGERS, "trigger",
                         "set_trigger", "trigger",
                         help="How REF IN is read in external mode. Below 1 Hz use TTL."))
@@ -186,11 +189,14 @@ def build_manifest(lockin) -> dict:
               "set_input_source", "source",
               help="A, A-B, or a current input (1 Mohm / 100 Mohm gain): X, Y, R in A."),
         _enum("input_ground", "Shield", G, 2, tables.GROUNDS, "input_ground",
-              "set_input_ground", "ground"),
+              "set_input_ground", "ground",
+              help="Input shield grounding: float or ground."),
         _enum("input_coupling", "Coupling", G, 3, tables.COUPLINGS, "input_coupling",
-              "set_input_coupling", "coupling"),
+              "set_input_coupling", "coupling",
+              help="Input coupling: AC blocks DC at the signal input, DC passes it."),
         _enum("line_filter", "Line notch", G, 4, tables.LINE_FILTERS, "line_filter",
-              "set_line_filter", "line_filter"),
+              "set_line_filter", "line_filter",
+              help="Notch filter(s) at the mains frequency (1f, 2f or both) in the input amplifier."),
     ]
 
     G = "Gain and filter"
@@ -200,7 +206,8 @@ def build_manifest(lockin) -> dict:
               help="Full scale. Too small overloads the output; too large wastes "
                    "resolution. Auto Gain picks one."),
         _p("full_scale", "Full scale", "indicator", "float", unit=unit, group=G,
-           order=2, read_path=["full_scale"]),
+           order=2, read_path=["full_scale"],
+           help="Value (in the input unit) that the selected sensitivity reads as 100 %."),
         _enum("reserve", "Dynamic reserve", G, 3, tables.RESERVES, "reserve",
               "set_reserve", "reserve",
               help="How much larger than full scale an interfering signal may be "
@@ -209,7 +216,8 @@ def build_manifest(lockin) -> dict:
               "set_time_constant", "time_constant",
               help="A scan point waits several of these (see settle time)."),
         _p("tc_s", "Time constant (s)", "indicator", "float", unit="s", group=G,
-           order=11, read_path=["tc_s"]),
+           order=11, read_path=["tc_s"],
+           help="The time constant in seconds (the Time constant control is a table entry)."),
         _enum("slope", "Filter slope", G, 12, tables.SLOPES, "slope", "set_slope", "slope",
               help="6 dB/oct per RC stage. Steeper rejects noise better but settles "
                    "more slowly (99 %: 5 / 7 / 9 / 10 time constants)."),
@@ -223,11 +231,14 @@ def build_manifest(lockin) -> dict:
            help=f"Time to reach {acq.settle_percent:g} % of a step with the APPLIED "
                 f"time constant and slope."),
         _p("ovl_input", "Input overload", "indicator", "bool", group=G, order=30,
-           read_path=["overload", "input"]),
+           read_path=["overload", "input"],
+           help="True if the signal input is overloaded (too large for the sensitivity and reserve)."),
         _p("ovl_filter", "Filter overload", "indicator", "bool", group=G, order=31,
-           read_path=["overload", "filter"]),
+           read_path=["overload", "filter"],
+           help="True if the filter stage is overloaded."),
         _p("ovl_output", "Output overload", "indicator", "bool", group=G, order=32,
-           read_path=["overload", "output"]),
+           read_path=["overload", "output"],
+           help="True if the output stage is overloaded (reading beyond full scale)."),
     ]
 
     G = "Aux out"
@@ -255,7 +266,9 @@ def build_manifest(lockin) -> dict:
         params.append(_p(
             f"live_{pid}", f"{label} (live, unsettled)", "indicator", "float", unit=u,
             group="Live", order=200 + j, decimals=dec, plottable=True,
-            read_path=["live", key]))
+            read_path=["live", key],
+            help=f"LIVE value from the status stream: {label} as the lock-in shows it now, "
+                 "not waited for the filter to settle. For panels, not for scan points."))
     for k in range(4):
         params.append(_p(
             f"aux{k + 1}", f"AUX IN {k + 1}", "indicator", "float", unit="V", group=G,
@@ -265,7 +278,8 @@ def build_manifest(lockin) -> dict:
         params.append(_p(
             f"live_aux{k + 1}", f"AUX IN {k + 1} (live)", "indicator", "float", unit="V",
             group="Live", order=250 + k, decimals=4, plottable=True,
-            read_path=["live", "aux_in", k]))
+            read_path=["live", "aux_in", k],
+            help="LIVE value from the status stream of the rear-panel AUX input. For panels, not for scan points."))
     params += [
         _p("sample_freq", "Reference frequency (sample)", "indicator", "float", unit="Hz",
            group=G, order=160, decimals=4, read_path=["sample", "freq_Hz"],
@@ -287,10 +301,12 @@ def build_manifest(lockin) -> dict:
         _p("acquire", "Acquire sample", "action", "action", group=G, order=1,
            help="Wait the settle time, average, and latch one sample."),
         _p("acquiring", "Acquiring", "indicator", "bool", group=G, order=2,
-           read_path=["acquiring"]),
+           read_path=["acquiring"],
+           help="True while an acquisition (settle + averaging) is running."),
         # counters that start at 0 and only count up: min=0 is a promise
         _p("acq_id", "Acquisition #", "indicator", "int", group=G, order=3,
-           min=0, read_path=["acq_id"]),
+           min=0, read_path=["acq_id"],
+           help="Running number of the latest acquisition; a scan waits for the number it triggered."),
         _p("auto_gain", "Auto gain", "action", "action", group="Auto", order=1,
            wait=auto_wait,
            help="The SR830 picks the sensitivity. Does nothing above a 1 s time constant."),
@@ -301,22 +317,27 @@ def build_manifest(lockin) -> dict:
            help="Rotates the reference phase so the signal is on X (theta -> 0). "
                 "Finished once the outputs have settled on the new phase."),
         _p("auto_busy", "Auto running", "indicator", "bool", group="Auto", order=10,
-           read_path=["auto_busy"]),
+           read_path=["auto_busy"],
+           help="True while an auto gain / reserve / phase operation is running."),
         _p("auto_id", "Auto run #", "indicator", "int", group="Auto", order=11,
-           min=0, read_path=["auto_id"]),
+           min=0, read_path=["auto_id"],
+           help="Running number of the latest auto operation; a scan waits for the number it triggered."),
         _p("auto_note", "Last auto result", "indicator", "string", group="Auto",
-           order=12, read_path=["auto_note"]),
+           order=12, read_path=["auto_note"],
+           help="Text result of the last auto operation (for example why it did nothing)."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("output_off", "Outputs off", "action", "action", group="Reference", order=90,
            help="SINE OUT to its 4 mV minimum (an SR830 cannot switch it off) and "
                 "every AUX OUT to 0 V. Allowed for anyone, also a viewer."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True if the lock-in is open and answering."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"], help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     manifest = {"schema": SCHEMA_VERSION, "module": "sr830",

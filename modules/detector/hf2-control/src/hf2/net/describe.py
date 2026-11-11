@@ -182,7 +182,8 @@ def build_manifest(lockin) -> dict:
                 help="Measured by the PLL on the external reference."))
             params.append(_p(
                 f"locked{n}", f"Ch{n} PLL locked", "indicator", "bool",
-                group=grp, order=31, read_path=["pll_locked", i]))
+                group=grp, order=31, read_path=["pll_locked", i],
+                help="True while the PLL is locked to the external reference."))
         else:
             params.append(_p(
                 f"freq{n}", f"Ch{n} reference frequency", "control", "float",
@@ -192,7 +193,10 @@ def build_manifest(lockin) -> dict:
                 set={"verb": "set_frequency", "arg": "frequency_Hz",
                      "extra": {"channel": n}},
                 settle={"policy": "echoes", "key": "freq_set_Hz", "index": i,
-                        "tol": 1e-6}))
+                        "tol": 1e-6},
+                help="Frequency of the internal oscillator driving this channel's "
+                     "demodulator. Changing it is a settable scan axis; the lock-in "
+                     "then needs the settle time before a reading is valid."))
 
         params.append(_p(
             f"follow{n}", f"Ch{n} frequency follows", "control", "bool",
@@ -222,7 +226,10 @@ def build_manifest(lockin) -> dict:
             params.append(_p(
                 f"live_{stem}{n}", f"Ch{n} {label} (live, unsettled)", "indicator",
                 "float", unit=unit, group="Live", order=200 + 10 * i + j,
-                decimals=dec, plottable=True, read_path=["live", key, i]))
+                decimals=dec, plottable=True, read_path=["live", key, i],
+                help="Current demodulator value from the status stream, not "
+                     "settled or averaged. For panels, not for scan points; "
+                     "use the latched value in Measurement in a scan."))
 
     for k in range(2):
         params.append(_p(
@@ -234,24 +241,30 @@ def build_manifest(lockin) -> dict:
         params.append(_p(
             f"live_aux{k + 1}", f"AUX IN {k + 1} (live)", "indicator", "float",
             unit="V", group="Live", order=250 + k, decimals=4, plottable=True,
-            read_path=["live", "aux_in", k]))
+            read_path=["live", "aux_in", k],
+            help="Current AUX input voltage from the status stream. For panels, "
+                 "not for scan points; use the latched AUX IN in a scan."))
 
     params += [
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1,
            help="Wait the settle time, average, and latch one sample."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=2, read_path=["acquiring"]),
+           order=2, read_path=["acquiring"],
+           help="True while an acquisition is settling/averaging. Scans wait for it to clear."),
         # A counter that starts at 0 and only counts up: it cannot be negative,
         # so min=0 is a promise the brain keeps (scan-core stores by it).
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, min=0, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; counts up. A scan waits for the number it triggered."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the lock-in (or its simulator) is connected."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"], help="Identification string reported by the instrument."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     manifest = {"schema": SCHEMA_VERSION, "module": "hf2",

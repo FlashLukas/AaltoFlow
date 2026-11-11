@@ -201,12 +201,16 @@ def build_manifest(supply) -> dict:
            unit="A/s", group="Ramp", order=10, decimals=4, step=0.01,
            min=1e-6, max=lim.rate_max_A_per_s, read_path=["ramp_rate_A_per_s"],
            set={"verb": "set_ramp", "arg": "rate_A_per_s"},
-           settle={"policy": "echoes", "key": "ramp_rate_A_per_s", "tol": 1e-9}),
+           settle={"policy": "echoes", "key": "ramp_rate_A_per_s", "tol": 1e-9},
+           help="How fast the current setpoint (and the output on/off) is "
+                "walked to its new value, in current mode."),
         _p("ramp_rate_voltage", "Ramp rate (voltage mode)", "control", "float",
            unit="V/s", group="Ramp", order=20, decimals=4, step=0.1,
            min=1e-6, max=lim.rate_max_V_per_s, read_path=["ramp_rate_V_per_s"],
            set={"verb": "set_ramp", "arg": "rate_V_per_s"},
-           settle={"policy": "echoes", "key": "ramp_rate_V_per_s", "tol": 1e-9}),
+           settle={"policy": "echoes", "key": "ramp_rate_V_per_s", "tol": 1e-9},
+           help="How fast the voltage setpoint (and the output on/off) is "
+                "walked to its new value, in voltage mode."),
         _p("ramp_enabled", "Ramp enabled", "control", "bool", group="Ramp",
            order=30, read_path=["ramp_enabled"],
            set={"verb": "set_ramp", "arg": "enabled"},
@@ -217,7 +221,9 @@ def build_manifest(supply) -> dict:
            decimals=4, plottable=True, read_path=["programmed"],
            help="Where the ramp is: the value on the main channel right now."),
         _p("ramping", "Ramping", "indicator", "bool", group="Ramp", order=50,
-           read_path=["ramping"]),
+           read_path=["ramping"],
+           help="True while the setpoint is still being walked to its target "
+                "(a scan waits for this to end)."),
 
         # ---- measurement: latched (scan) and live (panel) ----------------------
         _p("measured_voltage", "Measured voltage", "indicator", "float", unit="V",
@@ -226,38 +232,50 @@ def build_manifest(supply) -> dict:
            help="Mean of fresh readings latched by `acquire`: safe in a scan."),
         _p("measured_current", "Measured current", "indicator", "float", unit="A",
            group="Measurement", order=11, decimals=5,
-           read_path=["sample", "current_A"], acquire=acquire),
+           read_path=["sample", "current_A"], acquire=acquire,
+           help="Mean of fresh readings latched by `acquire`: safe in a scan."),
         _p("measured_voltage_std", "Measured voltage std. dev.", "indicator",
            "float", unit="V", group="Measurement", order=12, decimals=5,
-           read_path=["sample", "voltage_std_V"], acquire=acquire),
+           read_path=["sample", "voltage_std_V"], acquire=acquire,
+           help="Standard deviation of the readings behind Measured voltage "
+                "(fresh, same acquisition)."),
         _p("measured_current_std", "Measured current std. dev.", "indicator",
            "float", unit="A", group="Measurement", order=13, decimals=6,
-           read_path=["sample", "current_std_A"], acquire=acquire),
+           read_path=["sample", "current_std_A"], acquire=acquire,
+           help="Standard deviation of the readings behind Measured current "
+                "(fresh, same acquisition)."),
         _p("acq_readings", "Readings per acquisition", "control", "int",
            group="Measurement", order=5, step=1, min=1, max=1000,
            read_path=["acq_readings"],
            set={"verb": "set_acquisition", "arg": "readings"},
-           settle={"policy": "echoes", "key": "acq_readings", "tol": 0.5}),
+           settle={"policy": "echoes", "key": "acq_readings", "tol": 0.5},
+           help="How many fresh readings one Acquire averages."),
         _p("acquire", "Acquire sample", "action", "action", group="Measurement",
            order=1, wait={"target_key": "acq_id", "ready": acquire["ready"],
                           "timeout_s": acquire["timeout_s"]},
            help="Wait the settle time, average fresh readings, latch them."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=2, read_path=["acquiring"]),
+           order=2, read_path=["acquiring"],
+           help="True while an acquisition is still collecting readings."),
         # A counter from 0 that only goes up: min=0 is a promise the code
         # keeps (scan-core picks the storage from it, developer notes 4b). No
         # max: it is unbounded in principle.
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=3, min=0, read_path=["acq_id"]),
+           order=3, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; a scan waits for its own number."),
         _p("live_voltage", "Voltage (live)", "indicator", "float", unit="V",
            group="Live", order=10, decimals=4, plottable=True,
            read_path=["voltage_V"],
            # every measurement, for fly scans (one group: one start/read/stop)
-           stream={"group": "measure", "channel": "voltage"}),
+           stream={"group": "measure", "channel": "voltage"},
+           help="Last status value, for panels and fly scans, not for scan "
+                "points (use Measured voltage for a fresh reading)."),
         _p("live_current", "Current (live)", "indicator", "float", unit="A",
            group="Live", order=11, decimals=5, plottable=True,
            read_path=["current_A"],
-           stream={"group": "measure", "channel": "current"}),
+           stream={"group": "measure", "channel": "current"},
+           help="Last status value, for panels and fly scans, not for scan "
+                "points (use Measured current for a fresh reading)."),
         _p("sweeping", "Sweeping", "indicator", "bool", group="Ramp", order=55,
            read_path=["sweeping"],
            help="True while a current sweep (ramp_current) walks the setpoint."),
@@ -284,15 +302,20 @@ def build_manifest(supply) -> dict:
            help="End a current sweep (ramp_current) where it is. Allowed for "
                 "anyone, also a viewer: it only stops something moving."),
         _p("output_state", "Output switch", "indicator", "bool", group="Safety",
-           order=2, read_path=["output"]),
+           order=2, read_path=["output"],
+           help="The output switch as the supply reports it (the Output control "
+                "is the request; this is the actual state)."),
 
         # ---- status ---------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the supply."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "kepco",
                 "label": "Bipolar power supply", "parameters": params}

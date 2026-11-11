@@ -162,7 +162,9 @@ def build_manifest(ch) -> dict:
         # a fixed vocabulary (chopper.py status()), so an enum: one byte per
         # point in a scan file instead of a text string
         _p("lock_source", "Lock judged by", "indicator", "enum", group="Run",
-           order=14, options=list(LOCK_SOURCES), read_path=["lock_source"]),
+           order=14, options=list(LOCK_SOURCES), read_path=["lock_source"],
+           help="How 'Locked' is decided: from the measured wheel frequency, or by a "
+                "timer when REF OUT is on 'target' and the wheel cannot be seen."),
     ]
 
     # ---- frequency: a control on internal reference, an indicator on external
@@ -200,10 +202,13 @@ def build_manifest(ch) -> dict:
            help="End a frequency sweep where it is. Allowed for anyone, also a viewer."),
         _p("freq_error", "Frequency error", "indicator", "float", unit="Hz",
            group="Frequency", order=22, decimals=3, plottable=True,
-           read_path=["freq_error_Hz"]),
+           read_path=["freq_error_Hz"],
+           help="Measured minus target wheel frequency, in Hz (live status value)."),
         _p("refout_frequency", "REF OUT frequency", "indicator", "float", unit="Hz",
            group="Frequency", order=23, decimals=max(dec, 2), plottable=True,
-           read_path=["refout_frequency_Hz"]),
+           read_path=["refout_frequency_Hz"],
+           help="Frequency counted on the controller's REF OUT, in Hz (live status "
+                "value, for panels, not for scan points)."),
 
         # ---- phase ---------------------------------------------------------
         _p("phase", "Phase", "control", "float", unit="deg", group="Frequency",
@@ -242,17 +247,22 @@ def build_manifest(ch) -> dict:
         _p("dharmonic", "Harmonic divider D", "control", "int", group="External",
            order=51, min=1, max=15, step=1, read_path=["dharmonic"],
            set={"verb": "set_harmonics", "arg": "d"},
-           settle={"policy": "echoes", "key": "dharmonic", "tol": 0.5}),
+           settle={"policy": "echoes", "key": "dharmonic", "tol": 0.5},
+           help="Standby only. External reference: wheel = EXT REF IN x N / D."),
         _p("input_frequency", "EXT REF IN frequency", "indicator", "float", unit="Hz",
-           group="External", order=52, decimals=2, read_path=["input_frequency_Hz"]),
+           group="External", order=52, decimals=2, read_path=["input_frequency_Hz"],
+           help="Frequency of the signal on EXT REF IN, in Hz (live status value)."),
 
         # ---- status ------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="The service is connected to the instrument (or its simulator)."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="What the instrument reports about itself (*IDN?)."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="The last hardware error; empty while everything works."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "chopper",
                 "label": "Optical chopper", "parameters": params}

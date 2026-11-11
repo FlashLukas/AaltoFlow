@@ -159,9 +159,11 @@ def build_manifest(shsna) -> dict:
     params = [
         # -- sweep -------------------------------------------------------------------
         sweep_ctrl("start", "Start", "MHz", "start_Hz", "set_start", "start_Hz", 10,
-                   slo / 1e6, shi / 1e6, scale=1e6, decimals=6, step=10.0, tol=1.0),
+                   slo / 1e6, shi / 1e6, scale=1e6, decimals=6, step=10.0, tol=1.0,
+           help="Start frequency of the sweep (MHz). It must stay below stop."),
         sweep_ctrl("stop", "Stop", "MHz", "stop_Hz", "set_stop", "stop_Hz", 20,
-                   plo / 1e6, phi / 1e6, scale=1e6, decimals=6, step=10.0, tol=1.0),
+                   plo / 1e6, phi / 1e6, scale=1e6, decimals=6, step=10.0, tol=1.0,
+           help="Stop frequency of the sweep (MHz). It must stay above start."),
         sweep_ctrl("points", "Points", "", "points", "set_points", "points", 30,
                    lim.points_min, lim.points_max, type="int", step=1, tol=0.5,
                    help="Asked for; the analyser has the last word on its grid (the SA "
@@ -175,7 +177,8 @@ def build_manifest(shsna) -> dict:
                    lim.averages_min, lim.averages_max, type="int", step=1, tol=0.5,
                    help="Sweeps averaged in linear power per acquisition."),
         _p("sweep_time", "Sweep time (estimate)", "indicator", "float", unit="s",
-           group="Sweep", order=60, decimals=3, read_path=["sweep_time_s"]),
+           group="Sweep", order=60, decimals=3, read_path=["sweep_time_s"],
+           help="Estimated time of one TG sweep at the present RBW and points. Read-only."),
         _p("continuous", "Continuous sweep", "control", "bool", group="Sweep", order=70,
            read_path=["continuous"], set={"verb": "set_continuous", "arg": "on"},
            settle={"policy": "echoes", "key": "continuous"},
@@ -196,8 +199,10 @@ def build_manifest(shsna) -> dict:
            read={"verb": "get_trace", "key": "raw", "args": {"which": "raw", "source": "sample"}},
            help="What the analyser measured, in dB relative to the TG output, "
                 "before the reference (TG ripple, cables and the pad included)."),
-        result("peak_transmission", "Peak transmission", "dB", "peak_transmission_db", 20),
-        result("peak_freq", "Peak frequency", "MHz", "peak_freq_hz", 21, scale=1e6, decimals=4),
+        result("peak_transmission", "Peak transmission", "dB", "peak_transmission_db", 20,
+           help="Highest transmission in the swept band, dB relative to the thru reference. FRESH: from the acquisition the scan triggers at each point; refused without a reference."),
+        result("peak_freq", "Peak frequency", "MHz", "peak_freq_hz", 21, scale=1e6, decimals=4,
+           help="Frequency at which the transmission peaks. FRESH: from the acquisition the scan triggers at each point; refused without a reference."),
         result("mean_transmission", "Mean transmission", "dB", "mean_transmission_db", 22,
                help="Band-averaged POWER transmission, 10 log10 of the mean ratio."),
         result("bw3", "-3 dB bandwidth", "MHz", "bw3_hz", 23, scale=1e6, decimals=4,
@@ -207,13 +212,16 @@ def build_manifest(shsna) -> dict:
                help="Needs no reference."),
         _p("acquire", "Acquire", "action", "action", group="Measurement", order=1,
            help="Run one TG acquisition and latch it."),
-        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2),
+        _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2,
+           help="Cancel a running acquisition or reference."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement",
-           order=3, read_path=["acquiring"]),
+           order=3, read_path=["acquiring"],
+           help="True while an acquisition (or a reference) is running. Scans wait for it to clear."),
         # A counter that starts at 0 and only counts up: min 0 is a promise
         # the brain keeps (scan-core stores an int by its declared range).
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement",
-           order=4, min=0, read_path=["acq_id"]),
+           order=4, min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; counts up. A scan waits for the number it triggered."),
         _p("acq_error", "Acquisition error", "indicator", "string", group="Measurement",
            order=5, read_path=["acq_error"],
            help="Empty when the last acquisition is a measurement; else why not."),
@@ -229,12 +237,15 @@ def build_manifest(shsna) -> dict:
            help="Acquire like `acquire` with the DUT replaced by a thru, and keep "
                 "the result as the reference for transmission."),
         _p("clear_reference", "Clear reference", "action", "action", group="Reference",
-           order=2, wait={"ready": {"policy": "immediate"}}),
+           order=2, wait={"ready": {"policy": "immediate"}},
+           help="Forget the stored thru reference (takes effect at once). Transmission detectors are refused until a new one is taken."),
         _p("reference_present", "Reference present", "indicator", "bool",
-           group="Reference", order=10, read_path=["reference", "present"]),
+           group="Reference", order=10, read_path=["reference", "present"],
+           help="True if a thru reference is stored (needed for the transmission detectors)."),
         # 0 while there is no reference, else the bins of the trace it holds
         _p("reference_points", "Reference points", "indicator", "int",
-           group="Reference", order=12, min=0, read_path=["reference", "points"]),
+           group="Reference", order=12, min=0, read_path=["reference", "points"],
+           help="Number of frequency bins in the stored reference; 0 when there is none. It must match the sweep's points."),
 
         # -- live ------------------------------------------------------------------------
         _p("live_peak", "Peak measured (live)", "indicator", "float", unit="dB",
@@ -242,7 +253,8 @@ def build_manifest(shsna) -> dict:
            help="Relative to the TG output, before the reference."),
         _p("live_peak_transmission", "Peak transmission (live)", "indicator", "float",
            unit="dB", group="Live", order=11, decimals=2, plottable=True,
-           read_path=["last_peak_transmission_db"]),
+           read_path=["last_peak_transmission_db"],
+           help="Peak transmission of the most recent sweep, dB relative to the thru reference. LIVE status value, for panels, not for scan points; use 'Peak transmission' in a scan."),
         _p("sweeps", "Sweeps", "indicator", "int", group="Live", order=12,
            min=0, read_path=["sweeps"], help="Completed sweeps since start."),
 
@@ -251,21 +263,27 @@ def build_manifest(shsna) -> dict:
            read_path=["owner", "address"],
            help="The signalhound service this module sends its TG sweeps to."),
         _p("owner_reachable", "Service reachable", "indicator", "bool", group="Analyser",
-           order=2, read_path=["owner", "reachable"]),
+           order=2, read_path=["owner", "reachable"],
+           help="True while the signalhound service that owns the analyser answers."),
         _p("tg_attached", "TG attached", "indicator", "bool", group="Analyser",
-           order=3, read_path=["owner", "tg_attached"]),
+           order=3, read_path=["owner", "tg_attached"],
+           help="True if the owning service reports a tracking generator attached."),
         # An ENUM of the owner's TG modes (scan-core stores it as a code); the
         # brain reports None, never "", while the owner has not said one.
         _p("tg_mode", "TG mode", "indicator", "enum", group="Analyser", order=4,
-           options=list(TG_MODES), read_path=["owner", "tg_mode"]),
+           options=list(TG_MODES), read_path=["owner", "tg_mode"],
+           help="Tracking-generator mode reported by the owning service."),
 
         # -- status ------------------------------------------------------------------------
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while this module's link to the analyser (or its simulator) is up."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string reported by the instrument."),
         _p("hw_error", "Error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
 
     if simulated:
@@ -278,7 +296,8 @@ def build_manifest(shsna) -> dict:
             _p("sim_tg_attached", "TG attached (sim)", "control", "bool", group="Simulation",
                order=11, read_path=["sim_tg_attached"],
                set={"verb": "set_sim", "arg": "value", "extra": {"name": "tg_attached"}},
-               settle={"policy": "echoes", "key": "sim_tg_attached"}),
+               settle={"policy": "echoes", "key": "sim_tg_attached"},
+               help="Simulation only: pretend a tracking generator is (or is not) attached."),
             _p("pad", "Attenuator", "control", "float", unit="dB", group="Simulation",
                order=12, min=0.0, max=80.0, decimals=1, read_path=["sim_pad_dB"],
                set={"verb": "set_sim", "arg": "value", "extra": {"name": "pad_dB"}},
@@ -306,20 +325,24 @@ def build_manifest(shsna) -> dict:
                    group="Simulation", order=22, min=-360.0, max=360.0, decimals=2,
                    read_path=["sim_manual_angle_deg"],
                    set={"verb": "set_sim", "arg": "value", "extra": {"name": "manual_angle_deg"}},
-                   settle={"policy": "echoes", "key": "sim_manual_angle_deg", "tol": 1e-9}),
+                   settle={"policy": "echoes", "key": "sim_manual_angle_deg", "tol": 1e-9},
+                   help="Simulation only: field angle used when the field source is 'manual'."),
                 _p("sim_field_in_use", "Film field (in use)", "indicator", "float", unit="mT",
                    group="Simulation", order=23, decimals=3, plottable=True,
-                   read_path=["sim_field_mT"]),
+                   read_path=["sim_field_mT"],
+                   help="Simulation only: the film field the simulated film currently sits in (from a magnet or the manual value)."),
                 _p("sim_angle_in_use", "Film field angle (in use)", "indicator", "float",
                    unit="deg", group="Simulation", order=24, decimals=2,
-                   read_path=["sim_angle_deg"]),
+                   read_path=["sim_angle_deg"],
+                   help="Simulation only: the field angle the simulated film currently sees."),
                 _p("sim_fres", "Kittel frequency (sim)", "indicator", "float", unit="MHz",
                    group="Simulation", order=25, scale=1e6, decimals=3, plottable=True,
                    read_path=["sim_fres_Hz"],
                    help="Where the simulated film absorbs now; empty when there is no "
                         "line (out-of-plane below saturation)."),
                 _p("sim_field_source", "Film field from", "indicator", "string",
-                   group="Simulation", order=26, read_path=["sim_field_source"]),
+                   group="Simulation", order=26, read_path=["sim_field_source"],
+                   help="Simulation only: where the film field comes from (a heard magnet or manual)."),
             ]
 
     # Bounds that are not known must not appear as NaN.

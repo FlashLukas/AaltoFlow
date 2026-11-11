@@ -159,18 +159,22 @@ def build_manifest(scope) -> dict:
         base = 10 * (n + 1)
         params += [
             scope_setting(f"{ch}_enabled", f"{C} on", "bool", f"{ch}_enabled",
-                          "set_channel_enabled", "on", g, base + 1, ex),
+                          "set_channel_enabled", "on", g, base + 1, ex,
+               help="Switch this input channel on or off. A channel that is off gives no trace."),
             scope_setting(f"{ch}_vdiv", f"{C} V/div", "float", f"{ch}_vdiv_V", "set_vdiv",
                           "vdiv_V", g, base + 2, ex, unit="V", decimals=4, min=1e-3, max=10.0,
                           help="At the probe tip. The scope snaps to its 1-2-5 steps; "
                                "the screen is +-4 divisions around the offset, and a "
                                "trace beyond it is CLIPPED (an acquisition warns)."),
             scope_setting(f"{ch}_offset", f"{C} offset", "float", f"{ch}_offset_V",
-                          "set_offset", "offset_V", g, base + 3, ex, unit="V", decimals=4),
+                          "set_offset", "offset_V", g, base + 3, ex, unit="V", decimals=4,
+               help="Vertical offset of this channel's display window, in volts. Together with V/div it sets which voltages fit on the screen; traces beyond it are clipped."),
             scope_setting(f"{ch}_coupling", f"{C} coupling", "enum", f"{ch}_coupling",
-                          "set_coupling", "coupling", g, base + 4, ex, options=scope.couplings()),
+                          "set_coupling", "coupling", g, base + 4, ex, options=scope.couplings(),
+               help="Input coupling of this channel (e.g. DC or AC, as the instrument offers)."),
             scope_setting(f"{ch}_probe", f"{C} probe", "float", f"{ch}_probe", "set_probe",
-                          "probe", g, base + 5, ex, unit="x", decimals=0, min=1.0, max=1000.0),
+                          "probe", g, base + 5, ex, unit="x", decimals=0, min=1.0, max=1000.0,
+               help="Probe attenuation factor (x). It must match the probe actually used, or voltages come out wrong."),
             _p(f"{ch}_phys_scale", f"{C} {unit[ch]} per volt", "control", "float",
                unit=f"{unit[ch]}/V", group=f"{C} quantity", order=base + 6, decimals=6,
                read_path=[f"{ch}_phys_scale"],
@@ -183,7 +187,8 @@ def build_manifest(scope) -> dict:
                unit=unit[ch], group=f"{C} quantity", order=base + 7, decimals=6,
                read_path=[f"{ch}_phys_offset"],
                set={"verb": "set_physical", "arg": "offset", "extra": ex},
-               settle={"policy": "echoes", "key": f"{ch}_phys_offset", "tol": 1e-12}),
+               settle={"policy": "echoes", "key": f"{ch}_phys_offset", "tol": 1e-12},
+               help="Quantity value at 0 V: quantity = scale x volts + offset. Changing it restarts the average."),
         ]
     # -- timebase and trigger -----------------------------------------------------
     params += [
@@ -196,7 +201,8 @@ def build_manifest(scope) -> dict:
                       help="Positive moves the window later (more after the trigger); "
                            "the trigger stays at t = 0."),
         _p("sample_rate", "Sample rate", "indicator", "float", unit="Sa/s",
-           group="Timebase", order=3, read_path=["sample_rate_Hz"]),
+           group="Timebase", order=3, read_path=["sample_rate_Hz"],
+           help="Sample rate the scope runs at for the present time base. Read-only."),
         scope_setting("trigger_source", "Trigger source", "enum", "trigger_source",
                       "set_trigger_source", "source", "Trigger", 1,
                       options=scope.trigger_sources(),
@@ -210,11 +216,13 @@ def build_manifest(scope) -> dict:
     if topt.get("level", True):
         params.append(scope_setting("trigger_level", "Trigger level", "float",
                                     "trigger_level_V", "set_trigger_level", "level_V",
-                                    "Trigger", 2, unit="V", decimals=4))
+                                    "Trigger", 2, unit="V", decimals=4,
+           help="Voltage the trigger source must cross to start a record."))
     if topt.get("slope", True):
         params.append(scope_setting("trigger_slope", "Trigger slope", "enum", "trigger_slope",
                                     "set_trigger_slope", "slope", "Trigger", 3,
-                                    options=list(TRIGGER_SLOPES)))
+                                    options=list(TRIGGER_SLOPES),
+           help="Edge direction (rising/falling) on which the trigger fires."))
     params += [
         scope_setting("trigger_mode", "Trigger mode", "enum", "trigger_mode",
                       "set_trigger_mode", "mode", "Trigger", 4, options=list(TRIGGER_MODES),
@@ -222,7 +230,8 @@ def build_manifest(scope) -> dict:
                            "traces: an acquisition is refused."),
         _p("trigger_rate", "Trigger rate", "indicator", "float", unit="Hz",
            group="Trigger", order=5, decimals=2, plottable=True,
-           read_path=["trigger_rate_Hz"]),
+           read_path=["trigger_rate_Hz"],
+           help="Triggered records per second actually arriving. Read-only; a slow rate makes averaging slow."),
         _p("rolling", "Rolling (AUTO at a slow time base)", "indicator", "bool",
            group="Timebase", order=4, read_path=["rolling"],
            help="AUTO trigger mode at a slow time base: the scope free-runs and makes "
@@ -232,7 +241,8 @@ def build_manifest(scope) -> dict:
            help="How long one record lasts at this time/div (the memory holds more "
                 "than the screen): a triggered record cannot come faster."),
         _p("settings_settled", "Scope settings applied", "indicator", "bool",
-           group="Trigger", order=6, read_path=["settings_settled"]),
+           group="Trigger", order=6, read_path=["settings_settled"],
+           help="True once the instrument has confirmed the last scope setting (V/div, offset, time/div, trigger ...). Scans wait for it."),
     ]
     # -- acquisition and filter: the module's own ------------------------------------
     params += [
@@ -251,11 +261,14 @@ def build_manifest(scope) -> dict:
                 "Must not change during a scan."),
         _p("keep_raw", "Record raw traces too", "control", "bool", group="Acquisition",
            order=3, read_path=["keep_raw"], set={"verb": "set_keep_raw", "arg": "on"},
-           settle={"policy": "echoes", "key": "keep_raw"}),
+           settle={"policy": "echoes", "key": "keep_raw"},
+           help="Also keep the unfiltered average of each channel, as extra '(unfiltered)' traces. Changes which detectors exist."),
         _p("running_n", "Traces in the average", "indicator", "int", group="Acquisition",
-           order=4, min=0, read_path=["running_n"]),
+           order=4, min=0, read_path=["running_n"],
+           help="Number of fresh traces in the running average right now (it resets on a setting change)."),
         _p("restart_average", "Restart average", "action", "action", group="Acquisition",
-           order=5, wait={"ready": {"policy": "immediate"}}),
+           order=5, wait={"ready": {"policy": "immediate"}},
+           help="Throw away the running average and start averaging afresh."),
         _p("lowpass", "Low-pass", "control", "float", unit="Hz", group="Filter", order=1,
            min=0.0, decimals=3, read_path=["lowpass_Hz"],
            set={"verb": "set_filter", "arg": "lowpass_Hz"},
@@ -269,7 +282,8 @@ def build_manifest(scope) -> dict:
         _p("filter_order", "Filter order", "control", "int", group="Filter", order=3,
            min=1, max=8, step=1, read_path=["filter_order"],
            set={"verb": "set_filter", "arg": "order"},
-           settle={"policy": "echoes", "key": "filter_order", "tol": 0.5}),
+           settle={"policy": "echoes", "key": "filter_order", "tol": 0.5},
+           help="Order of the low/high-pass filters (steeper at higher order)."),
     ]
     # -- the measurement ------------------------------------------------------------------
     params += [
@@ -278,9 +292,11 @@ def build_manifest(scope) -> dict:
         _p("abort", "Abort acquisition", "action", "action", group="Measurement", order=2,
            help="Allowed for anyone, also a viewer."),
         _p("acquiring", "Acquiring", "indicator", "bool", group="Measurement", order=3,
-           read_path=["acquiring"]),
+           read_path=["acquiring"],
+           help="True while an acquisition is collecting traces. Scans wait for it to clear."),
         _p("acq_id", "Acquisition #", "indicator", "int", group="Measurement", order=4,
-           min=0, read_path=["acq_id"]),
+           min=0, read_path=["acq_id"],
+           help="Number of the latest acquisition; counts up. A scan waits for the number it triggered."),
     ]
     order = 10
     for ch in chans:
@@ -311,7 +327,11 @@ def build_manifest(scope) -> dict:
             params.append(_p(f"{ch}_{key}", f"{ch.upper()} {what}", "indicator", "float",
                              unit=u or unit[ch], group="Measurement", order=order,
                              read_path=["sample", ch, key], acquire=acquire,
-                             stream=stream(f"{ch}_{key}"), help=fly_help.strip()))
+                             stream=stream(f"{ch}_{key}"),
+                             help=f"The {what} of this channel's averaged trace "
+                                  f"(volts converted to the channel's quantity). "
+                                  f"FRESH: from the acquisition a scan triggers at "
+                                  f"each point." + fly_help))
             order += 1
     if len(chans) > 1:
         params.append(_p("phase_21", "Phase CH2 - CH1", "indicator", "float", unit="deg",
@@ -324,23 +344,34 @@ def build_manifest(scope) -> dict:
     for ch in chans:
         params.append(_p(f"live_{ch}_amplitude", f"{ch.upper()} amplitude (live)",
                          "indicator", "float", unit=unit[ch], group="Live", order=order,
-                         plottable=True, read_path=["live", ch, "amplitude"]))
+                         plottable=True, read_path=["live", ch, "amplitude"],
+                         help="Amplitude of the running average now. LIVE value, for "
+                              "panels, not for scan points; use the channel's "
+                              "amplitude in Measurement in a scan."))
         order += 1
     if len(chans) > 1:
         params.append(_p("live_phase_21", "Phase CH2 - CH1 (live)", "indicator", "float",
                          unit="deg", group="Live", order=order, decimals=2, plottable=True,
-                         read_path=["live", "phase_21_deg"]))
+                         read_path=["live", "phase_21_deg"],
+                         help="Phase of the running average now. LIVE value, for "
+                              "panels, not for scan points; use 'Phase CH2 - CH1' "
+                              "in Measurement in a scan."))
         params.append(_p("live_phase_21_reason", "Phase CH2 - CH1: why none", "indicator",
                          "string", group="Live", order=order + 1,
-                         read_path=["live", "phase_21_reason"]))
+                         read_path=["live", "phase_21_reason"],
+                         help="Empty when the live phase is valid; otherwise says "
+                              "why no phase could be computed."))
     # -- status ----------------------------------------------------------------------------
     params += [
         _p("connected", "Connected", "indicator", "bool", group="Status", order=1,
-           read_path=["connected"]),
+           read_path=["connected"],
+           help="True while the oscilloscope (or its simulator) is connected."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string reported by the instrument."),
         _p("hw_error", "Error", "indicator", "string", group="Status", order=3,
-           read_path=["hw_error"]),
+           read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
     ]
     # -- power supplies (an instrument that has them: the Analog Discovery) -----------------
     if scope.has_supplies():
@@ -378,7 +409,8 @@ def build_manifest(scope) -> dict:
                                                   for ch in name.lower()).strip("_"),
                              name, "indicator", "float", unit=unit, group="Supplies",
                              order=40 + i, decimals=3, plottable=True,
-                             read_path=["monitors", name]))
+                             read_path=["monitors", name],
+                             help="The device's own monitor reading (read-only)."))
         params.append(_p("supplies_off", "All supplies off", "action", "action",
                          group="Supplies", order=30, wait={"ready": {"policy": "immediate"}},
                          help="Switch V+ and V- off. Allowed for anyone, also a viewer."))
@@ -397,7 +429,9 @@ def build_manifest(scope) -> dict:
                              unit=u, group="Simulated bench", order=i + 1,
                              read_path=[f"sim_{name}"],
                              set={"verb": "set_sim", "arg": "value", "extra": {"name": name}},
-                             settle={"policy": "echoes", "key": f"sim_{name}", "tol": 1e-9}))
+                             settle={"policy": "echoes", "key": f"sim_{name}", "tol": 1e-9},
+                             help="Simulation only: a knob of the simulated input "
+                                  "signal; it does not exist on a real instrument."))
     for d in params:                      # unknown bounds must not appear as NaN
         for k in ("min", "max"):
             if k in d and not (isinstance(d[k], (int, float)) and math.isfinite(d[k])):

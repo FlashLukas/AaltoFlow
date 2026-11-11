@@ -199,7 +199,9 @@ def _channel_params(ch: str, synth, base_order: int) -> list:
                 "when both run at the same frequency."),
 
         _p(f"{ch}_locked", f"{C} PLL locked", "indicator", "bool", group=grp,
-           order=base_order + 5, read_path=[f"{ch}_locked"]),
+           order=base_order + 5, read_path=[f"{ch}_locked"],
+           help=f"True when the PLL of channel {C} reports lock. While the output "
+                "is on, a scan waits for it."),
         _p(f"{ch}_leveled", f"{C} power leveled", "indicator", "bool", group=grp,
            order=base_order + 6, read_path=[f"{ch}_leveled"],
            help="False when the requested power is outside what the instrument "
@@ -242,10 +244,14 @@ def build_manifest(synth) -> dict:
         params.append(
             _p("ext_ref", "External reference (unused)", "indicator", "float",
                unit="MHz", group="Reference", order=2, decimals=3,
-               read_path=["ext_ref_MHz"]))
+               read_path=["ext_ref_MHz"],
+               help="Declared external reference frequency; ignored while the "
+                    "reference is internal."))
     params += [
         _p("ref_settled", "All PLLs locked", "indicator", "bool",
-           group="Reference", order=3, read_path=["ref_settled"]),
+           group="Reference", order=3, read_path=["ref_settled"],
+           help="True when every PLL whose output is on reports lock on the "
+                "chosen reference."),
         _p("all_rf_off", "All RF off", "action", "action", group="Output",
            order=1,
            # The reply only means ACCEPTED; the worker switches the outputs a
@@ -256,20 +262,26 @@ def build_manifest(synth) -> dict:
                  "timeout_s": 10.0},
            help="Switch both outputs off. Usable as a scan routine step."),
         _p("rf_all_off", "Both outputs off", "indicator", "bool",
-           group="Output", order=2, read_path=["rf_all_off"]),
+           group="Output", order=2, read_path=["rf_all_off"],
+           help="True when both outputs are off in the instrument and no change "
+                "is pending."),
         _p("ramping", "Sweeping", "indicator", "bool", group="Output", order=3,
            read_path=["ramping"],
            help="True while a sweep (ramp_frequency / ramp_power / ramp_phase) "
                 "walks a knob of either channel."),
         _p("temperature", "Temperature", "indicator", "float", unit="degC",
            group="Status", order=1, decimals=1, plottable=True,
-           read_path=["temperature_C"]),
+           read_path=["temperature_C"],
+           help="Instrument temperature reported by the synthesizer, in deg C."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=2, read_path=["connected"]),
+           order=2, read_path=["connected"],
+           help="True while the service has a working link to the synthesizer."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=3,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=4, read_path=["hw_error"]),
+           order=4, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "windfreak",
                 "label": "Windfreak SynthHD PRO v2 (2-channel RF synthesizer)",

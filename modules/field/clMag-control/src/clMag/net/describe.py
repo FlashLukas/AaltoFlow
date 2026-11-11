@@ -115,7 +115,10 @@ def build_manifest(ctrl) -> dict:
 
         _p("locked", "Lock output", "control", "bool", group="Safety", order=30,
            read_path=["locked"], set={"verb": "set_lock", "arg": "locked"},
-           settle={"policy": "echoes", "key": "locked"}),
+           settle={"policy": "echoes", "key": "locked"},
+           help="An 'external lock' flag any client can set and read. In this "
+                "version the controller only stores and reports it: it does not "
+                "hold the current or refuse commands."),
 
         _p("stabilizer", "Long-term stabilizer", "control", "bool",
            group="Field", order=40,
@@ -132,19 +135,23 @@ def build_manifest(ctrl) -> dict:
         # from the controller's own State enum, so a state added there can
         # never be missing here.
         _p("state", "State", "indicator", "enum", group="Status", order=1,
-           read_path=["state"], options=[s.value for s in State]),
+           read_path=["state"], options=[s.value for s in State],
+           help="What the control loop is doing: IDLE, RAMPING, SEEK, STABLE, HOLD, DEMAG or CALIBRATE."),
         _p("setpoint_field", "Field setpoint", "indicator", "float", unit="mT",
-           group="Status", order=2, decimals=3, read_path=["setpoint_field_mT"]),
+           group="Status", order=2, decimals=3, read_path=["setpoint_field_mT"],
+           help="The field last commanded (the target of the loop), as opposed to what the Hall probe measures."),
         _p("measured_field", "Measured field", "indicator", "float", unit="mT",
            group="Status", order=3, decimals=3, plottable=True,
            read_path=["measured_field_mT"],
            # every Hall-probe reading, stamped at the middle of its window
-           stream={"group": "field", "channel": "field"}),
+           stream={"group": "field", "channel": "field"},
+           help="Field from the Hall probe (last status value). Use it as the detector; it is also streamed during a field sweep."),
         _p("ramping", "Sweeping", "indicator", "bool", group="Status", order=9,
            read_path=["ramping"],
            help="True while a field sweep (ramp_field) moves the setpoint."),
         _p("field_stable", "Field stable", "indicator", "bool",
-           group="Status", order=4, read_path=["field_stable"]),
+           group="Status", order=4, read_path=["field_stable"],
+           help="True once the measured field has held within tolerance of the setpoint for the hold time; a scan waits for it."),
         _p("hw_error", "Hardware error", "indicator", "string",
            group="Status", order=6, read_path=["hw_error"],
            help="Empty when the Hall probe and the supply answer. Otherwise "
@@ -261,7 +268,8 @@ def _aux_params(cfg) -> list:
                       read_path=["aux", "do", line],
                       set={"verb": "aux_set_do", "arg": "state",
                            "extra": {"line": line}},
-                      settle={"policy": "immediate"}))
+                      settle={"policy": "immediate"},
+                      help="Digital output line on the same card, set high or low. Not read back: shows the value last commanded."))
     return out
 
 

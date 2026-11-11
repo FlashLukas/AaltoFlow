@@ -23,7 +23,7 @@ are newer).
 ```
 python tools/new_module.py <key> --like smb --category <category>   # or --like clMag / hf2
 cd modules\<category>\<key>-control; uv sync --extra gui; uv run pytest -q
-python tools/check_modules.py <key> --live           # the contract check
+python tools/check_modules.py <key> --live           # the contract check (incl. a help text on every variable)
 python tools/render_all.py <key>                     # offscreen front panel
 ```
 The generator copies a working module, renames it and takes the next free port
@@ -41,6 +41,11 @@ after pulling the move on another checkout run `python tools/migrate_layout.py`
 - **`describe` tells the truth**: live limits, units, and a settle policy a
   scan can wait on. A detector that is slow declares an `acquire` block; an
   action a scan may run declares a `wait` block.
+- **Every variable is described**: each descriptor in `describe` (control,
+  indicator, action) has a `help` text saying what it physically is, its unit,
+  and for a detector whether it is a fresh reading or a live status value
+  (guide section 6b, "Describe every variable"). The suite shows it in its
+  tooltips; `check_modules.py --live` fails a variable without one.
 - **Simulation first**: every module runs without hardware. The real driver is
   the ONLY file that imports the vendor library, lazily inside `open()`, and
   every unverified hardware call is marked `# VERIFY`.

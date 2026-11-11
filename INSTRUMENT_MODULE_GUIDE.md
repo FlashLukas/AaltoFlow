@@ -490,9 +490,36 @@ constantly and mean nothing.
   "settle":    {"policy": "adopt_then_flag", ...},  # controls only
   "args":      [{"name","label","type","unit","default","min","max"}],  # actions
   "danger":    True,               # confirm before firing
-  "help":      "one or two sentences",
+  "help":      "one or two sentences",   # REQUIRED on every descriptor (below)
 }
 ```
+
+### Describe every variable -- `help` is required (2026-11-11)
+
+Every descriptor -- control, indicator AND action -- carries a `help` text.
+The measurement suite shows it in the tooltip of every parameter in the Scan
+and Control tabs, next to the label, id, unit and kind. Without it a user sees
+only an id like `usb6001.ai0` and cannot tell "Vacuum (mbar)" from "Vacuum (V)"
+from "Vacuum (live)". `python tools/check_modules.py <key> --live` FAILS a
+module whose describe has a parameter without one.
+
+What a good `help` says, in one or two plain sentences for a physicist who
+knows the instrument but not the code (ASCII: `+-`, `deg`, `u` for micro):
+
+- **what it physically is**, and the meaning of its unit or scaling
+  ("AI0 (RSE): mean of 500 samples at 4 kS/s, as pressure p = 10^(U - 5) mbar");
+- for a **detector**: whether it is a FRESH reading taken at each scan point
+  (it has an `acquire` block or is read by command) or a LIVE value from the
+  status stream ("latest poll reading: for a panel, not for a scan point").
+  When one quantity comes in several variants (scaled / volts / live), each
+  help says which one it is;
+- for a **control**: what changing it does and any side effect (restarts an
+  acquisition, applies only at the next service start, is clamped, needs the
+  RF output on ...);
+- for an **action**: what pressing it does and how long it takes, if long.
+
+Never invent hardware facts in a help text: if the code does not know it, say
+less. No serial numbers, PC names or personal names (tracked files).
 
 `read_path` is a **list**, not a dotted string: AUX channel names contain `/` and
 ids may contain `.`, so a dotted path could not be split back apart.
@@ -1075,6 +1102,8 @@ Example, the camera's "Save camera picture": `folder` = `"{data_dir}"`, `name` =
    follows); `revision` changes on a bound change and **not** on a value change;
    `read_path` resolves; every control has a `set` block; every indicator has a
    `read_path`.
+5. Every descriptor has a `help` text ("Describe every variable" above);
+   `check_modules.py <key> --live` fails without it.
 
 ---
 
@@ -1197,7 +1226,10 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
 6. Trim/extend the brain: set-and-forget → strip loop/PID/state; closed-loop →
    keep and retune.
 7. `net/protocol.py` `*_to_dict` helpers; `service.py` `_dispatch` verbs;
-   `client.py` facade + `RemoteStatus`; `net/describe.py` for X's variables.
+   `client.py` facade + `RemoteStatus`; `net/describe.py` for X's variables --
+   **every one with a `help` text** saying what it is (§6b, "Describe every
+   variable"; the suite shows it in its tooltips, and `check_modules --live`
+   fails a variable without one).
    **Control (§6, "Control — one controller, many viewers"):** if the template
    did not bring `control.py` + `apps/control_bar.py`, copy them from
    suite-common and wire them in; decide which of X's verbs are SAFETY verbs
@@ -1211,8 +1243,9 @@ Verify in the cloud sandbox before delivering: `pip install pyzmq pytest` (and
    indicator widget for X; `settings_dialog.py` tabs = config groups. Draw a real
    `icon.svg`. Remote mode gets the control bar; `mark_always` X's safety
    buttons.
-10. Tests (§9), then `python tools/check_modules.py x --live`, then an offscreen
-    render (`python tools/render_all.py x`).
+10. Tests (§9), then `python tools/check_modules.py x --live` (it also fails any
+    variable without a `help` text), then an offscreen render
+    (`python tools/render_all.py x`).
 11. Update the module's README (and `docs/DEVELOPER_NOTES.md` if a shared rule changed); commit.
 
 ## 11. The module contract: how the suite finds a module (added 2026-09-15)

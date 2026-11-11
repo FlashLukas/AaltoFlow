@@ -265,27 +265,43 @@ def build_manifest() -> dict:
     never builds parameters from this (suite_common COORDINATOR_KEYS)."""
     params = [
         _p("state", "State", "indicator", "enum", ["state"], order=1,
-           options=list(STATES)),
-        _p("scan", "Scan", "indicator", "string", ["scan"], order=2),
-        _p("done", "Points done", "indicator", "int", ["done"], order=3, min=0),
-        _p("total", "Points in the scan", "indicator", "int", ["total"], order=4, min=0),
+           options=list(STATES),
+           help="What the scan server is doing: idle, running, paused ... (live status)."),
+        _p("scan", "Scan", "indicator", "string", ["scan"], order=2,
+           help="Name of the scan running (or last run)."),
+        _p("done", "Points done", "indicator", "int", ["done"], order=3, min=0,
+           help="Scan points measured so far in the running scan."),
+        _p("total", "Points in the scan", "indicator", "int", ["total"], order=4, min=0,
+           help="Scan points the running scan will measure in all."),
         _p("progress", "Progress", "indicator", "float", ["progress"], order=5,
-           unit="%", plottable=True),
-        _p("eta_s", "Time left (scan)", "indicator", "float", ["eta_s"], order=6, unit="s"),
-        _p("elapsed_s", "Elapsed", "indicator", "float", ["elapsed_s"], order=7, unit="s"),
-        _p("where", "Where", "indicator", "string", ["where"], order=8),
-        _p("queue_pos", "Scan of the queue", "indicator", "int", ["queue", "pos"], order=9),
-        _p("queue_n", "Scans in the queue", "indicator", "int", ["queue", "n"], order=10, min=0),
+           unit="%", plottable=True,
+           help="Share of the running scan done, in percent."),
+        _p("eta_s", "Time left (scan)", "indicator", "float", ["eta_s"], order=6, unit="s",
+           help="Estimated seconds until the running scan ends, from the points so far."),
+        _p("elapsed_s", "Elapsed", "indicator", "float", ["elapsed_s"], order=7, unit="s",
+           help="Seconds since the running scan started."),
+        _p("where", "Where", "indicator", "string", ["where"], order=8,
+           help="The point being measured, as the axes' values, or the routine step "
+                "running now."),
+        _p("queue_pos", "Scan of the queue", "indicator", "int", ["queue", "pos"], order=9,
+           help="Which scan of the queue is running (1 = the first)."),
+        _p("queue_n", "Scans in the queue", "indicator", "int", ["queue", "n"], order=10, min=0,
+           help="How many scans the queue holds in all."),
         _p("pause_message", "Waiting for the operator", "indicator", "string",
-           ["pause_message"], order=11),
+           ["pause_message"], order=11,
+           help="Why the scan is waiting for the operator (a fault, a question); "
+                "empty while it is not."),
         _p("save_path", "Saving to", "indicator", "string", ["save_path"], order=12,
-           group="Files"),
+           group="Files", help="The data file the running scan writes, on the server PC."),
         _p("data_dir", "Data folder (server PC)", "indicator", "string", ["data_dir"],
-           order=13, group="Files"),
+           order=13, group="Files",
+           help="Folder on the server PC where scans are saved (dated subfolders)."),
         _p("live_rev", "Live data revision", "indicator", "int", ["live_rev"], order=14,
-           min=0),
+           min=0, help="Counts up whenever new data arrives; a viewer fetches the live "
+                       "data only when it moves."),
         _p("user_paused", "Paused by the operator", "indicator", "bool", ["user_paused"],
-           order=15),
+           order=15,
+           help="The operator pressed Pause; the scan holds until Resume."),
         # PAUSE is a SAFETY verb like abort (anyone who sees a scan going wrong
         # may hold it); RESUME needs control like submit: carrying on with a
         # measurement is a decision for whoever runs it (2026-10-07)
@@ -304,9 +320,13 @@ def build_manifest() -> dict:
         _p("answer_pause", "Answer the operator pause", "action", "action", order=92,
            group="Run", args=[{"name": "answer", "type": "enum",
                                "options": ["continue", "abort", "all"],
-                               "default": "continue"}]),
+                               "default": "continue"}],
+           help="Answer a scan waiting for the operator: continue, abort this scan, "
+                "or abort all (the rest of the queue too)."),
         _p("clear_fault", "Clear a module's fault", "action", "action", order=93,
-           group="Run", args=[{"name": "module", "type": "string", "default": ""}]),
+           group="Run", args=[{"name": "module", "type": "string", "default": ""}],
+           help="Ask a module to clear its latched fault (e.g. after fixing the cause), "
+                "so a paused scan can go on."),
         # phase 2: editing the running queue (control, not safety: changing
         # what runs next is a decision for whoever runs the measurement)
         _p("queue_remove", "Remove a waiting scan from the queue", "action", "action",
@@ -320,7 +340,8 @@ def build_manifest() -> dict:
                  {"name": "to", "type": "int", "default": 0}],
            help="To position `to` (0-based), among the scans that have not started."),
         _p("queue_rev", "Queue revision", "indicator", "int", ["queue_rev"], order=16,
-           min=0),
+           min=0, help="Counts up whenever the queue changes; a client re-reads the "
+                       "queue only when it moves."),
     ]
     manifest = {"schema": 1, "module": SERVER_KEY, "label": "Scan server",
                 "parameters": params}

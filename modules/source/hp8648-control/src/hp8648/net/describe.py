@@ -173,21 +173,30 @@ def build_manifest(src) -> dict:
 
         _p("power_ceiling", "Power ceiling", "indicator", "float", unit="dBm",
            group="Signal", order=35, decimals=1,
-           read_path=["power_ceiling_dBm"]),
+           read_path=["power_ceiling_dBm"],
+           help="Highest output level the instrument specifies at the current "
+                "frequency (never above your envelope). Same number as the "
+                "Power control's maximum."),
         _p("rpp_tripped", "Reverse power tripped", "indicator", "bool",
            group="Status", order=3, read_path=["rpp_tripped"],
            help="The instrument's reverse-power protection fired and turned "
                 "the RF off. Remove the source, then switch RF on to re-arm."),
         _p("level_unspecified", "Level outside spec", "indicator", "bool",
-           group="Status", order=4, read_path=["level_unspecified"]),
+           group="Status", order=4, read_path=["level_unspecified"],
+           help="True when the output level is in a range the instrument does "
+                "not specify (accuracy not guaranteed)."),
         _p("modulation_off", "All modulation off", "indicator", "bool",
-           group="Status", order=5, read_path=["modulation_off"]),
+           group="Status", order=5, read_path=["modulation_off"],
+           help="True when AM, FM and pulse/phase modulation are all off (plain CW)."),
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the instrument."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=6, read_path=["hw_error"]),
+           order=6, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
         # the SAFETY verb as a button (control.py: a viewer may always send
         # it), so the suite's Control tab offers it to a viewer too
         _p("rf_off", "RF off", "action", "action", group="Output", order=90,

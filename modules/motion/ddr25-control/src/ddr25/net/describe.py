@@ -141,20 +141,24 @@ def build_manifest(brain) -> dict:
            read_path=["raw_deg"],
            help="The K-Cube's own count, continuous over turns; 0 = encoder index."),
         _p("target", "Target", "indicator", "float", unit="deg", group="Position",
-           order=30, decimals=4, read_path=["target_deg"]),
+           order=30, decimals=4, read_path=["target_deg"],
+           help="Angle of the last move command, as commanded (the angle control's setpoint echo)."),
         _p("zero", "Display zero", "indicator", "float", unit="deg",
-           group="Position", order=40, decimals=4, read_path=["zero_deg"]),
+           group="Position", order=40, decimals=4, read_path=["zero_deg"],
+           help="Orientation (controller position) that currently reads 0 deg; set by 'Zero here'."),
 
         # -- motion profile ------------------------------------------------ #
         _p("velocity", "Velocity", "control", "float", unit="deg/s",
            group="Motion", order=10, min=MIN_VELOCITY, max=lim.max_velocity,
            decimals=3, read_path=["velocity"],
+           help="Maximum speed of the rotation, read back from the controller. A fly scan sets its sweep speed here.",
            set={"verb": "set_velocity", "arg": "value"},
            # the brain reads the value back from the controller before replying
            settle={"policy": "echoes", "key": "velocity", "tol": 1e-3}),
         _p("acceleration", "Acceleration", "control", "float", unit="deg/s^2",
            group="Motion", order=20, min=MIN_ACCELERATION, max=lim.max_acceleration,
            decimals=2, read_path=["acceleration"],
+           help="Acceleration of the rotation, read back from the controller (it is rounded to the controller's own grid).",
            set={"verb": "set_acceleration", "arg": "value"},
            # tol 0.5: the K-Cube stores acceleration as an integer whose unit
            # is ~0.36 deg/s^2 with the DDR25 scale (pylablib's KBD101 time
@@ -170,15 +174,18 @@ def build_manifest(brain) -> dict:
 
         # -- status -------------------------------------------------------- #
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has the K-Cube controller open."),
         _p("moving", "Moving", "indicator", "bool", group="Status", order=2,
-           read_path=["moving"]),
+           read_path=["moving"], help="True while the stage is turning."),
         _p("homed", "Homed", "indicator", "bool", group="Status", order=3,
-           read_path=["homed"]),
+           read_path=["homed"],
+           help="True once the stage has been homed since power-up; absolute moves are refused until then."),
         _p("homing", "Homing", "indicator", "bool", group="Status", order=4,
-           read_path=["homing"]),
+           read_path=["homing"], help="True while a homing run is in progress."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=5, read_path=["hw_error"]),
+           order=5, read_path=["hw_error"],
+           help="Last hardware error message; empty when all is well."),
 
         # -- actions (id = verb) ------------------------------------------- #
         _p("home", "Home", "action", "action", group="Routines", order=10,
@@ -208,14 +215,16 @@ def build_manifest(brain) -> dict:
            args=[{"name": "slot", "label": "Slot", "type": "int", "default": 0,
                   "min": 0, "max": len(brain.angles.slots) - 1}],
            wait={"target_key": "move_id", "ready": move_done,
-                 "timeout_s": move_timeout}),
+                 "timeout_s": move_timeout},
+           help="Moves to one of the stored angles (by slot number); wrap policy applies as for the angle control."),
         _p("set_zero", "Zero here", "action", "action", group="Routines", order=40,
            wait={"ready": {"policy": "immediate"}},
            help="The current orientation reads 0 deg from now on. Lives in the "
                 "`frame` config group, so a set_config push of that group "
                 "overwrites it."),
         _p("clear_zero", "Clear zero", "action", "action", group="Routines",
-           order=41, wait={"ready": {"policy": "immediate"}}),
+           order=41, wait={"ready": {"policy": "immediate"}},
+           help="Removes the display zero: angles read as the controller's own position again."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "ddr25",
                 "label": "DDR25 rotation stage", "parameters": params}

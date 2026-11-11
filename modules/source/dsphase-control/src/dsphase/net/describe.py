@@ -139,18 +139,22 @@ def build_manifest(brain) -> dict:
 
         _p("phase_device", "Phase (device, -180..180)", "indicator", "float",
            unit="deg", group="Phase", order=30, decimals=decimals_for(ph_step),
-           read_path=["phase_device_deg"]),
+           read_path=["phase_device_deg"],
+           help="The phase as the unit holds it, wrapped into -180..+180 deg (read back from the unit)."),
         _p("accuracy", "Datasheet phase accuracy", "indicator", "float",
            unit="deg", group="Phase", order=40, decimals=1,
            read_path=["accuracy_deg"],
            help="PS6000L datasheet +- band for this carrier and setting."),
 
         _p("connected", "Connected", "indicator", "bool", group="Status",
-           order=1, read_path=["connected"]),
+           order=1, read_path=["connected"],
+           help="True while the service has a working link to the phase shifter."),
         _p("idn", "Instrument", "indicator", "string", group="Status", order=2,
-           read_path=["idn"]),
+           read_path=["idn"],
+           help="Identification string the instrument reports."),
         _p("hw_error", "Hardware error", "indicator", "string", group="Status",
-           order=3, read_path=["hw_error"]),
+           order=3, read_path=["hw_error"],
+           help="Last hardware error text; empty when all is well."),
     ]
     manifest = {"schema": SCHEMA_VERSION, "module": "dsphase",
                 "label": "RF phase shifter", "parameters": params}
