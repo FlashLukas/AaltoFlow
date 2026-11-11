@@ -108,9 +108,7 @@ class KimService:
                 f"cannot listen on {cmd_addr} / {pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
         # Route brain events into our queue (they get PUBlished as b"event").
-        self.brain._on_event = lambda level, msg: self._events.put(
-            {"level": level, "msg": msg}
-        )
+        self.brain._on_event = self._event
         try:
             self.brain.start()
         except BaseException:
@@ -141,6 +139,17 @@ class KimService:
             self.brain.shutdown(keep_outputs=self._keep_outputs)
         except Exception:
             pass
+
+    def _event(self, level: str, msg: str) -> None:
+        """An event from the instrument: published to every subscriber, and a
+        warning or error ALSO printed, so it lands in the launcher's log pane
+        and its daily log file -- a warning raised while the service starts
+        reaches no GUI (none has subscribed yet). Blue Box, 2026-11-11. ASCII
+        only (gotcha #14: the launcher reads stdout through a cp1252 pipe)."""
+        self._events.put({"level": level, "msg": msg})
+        if level in ("warn", "error"):
+            text = str(msg).encode("ascii", "replace").decode("ascii")
+            print(f"kim {level.upper()}: {text}", flush=True)
 
     def serve_forever(self) -> None:
         """Convenience: start and block until Ctrl-C."""

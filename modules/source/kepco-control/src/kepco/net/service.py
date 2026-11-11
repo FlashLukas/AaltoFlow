@@ -117,7 +117,7 @@ class KepcoService:
                 f"cannot listen on {self.cmd_addr} / {self.pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
         # route brain events into the publisher queue
-        self.supply._on_event = lambda lvl, msg: self._events.put({"level": lvl, "msg": msg})
+        self.supply._on_event = self._event
         try:
             self.supply.start()
         except BaseException:
@@ -131,6 +131,17 @@ class KepcoService:
         self._cmd_t = threading.Thread(target=self._commander, name="svc-cmd", daemon=True)
         self._pub_t.start()
         self._cmd_t.start()
+
+    def _event(self, level: str, msg: str) -> None:
+        """An event from the instrument: published to every subscriber, and a
+        warning or error ALSO printed, so it lands in the launcher's log pane
+        and its daily log file -- a warning raised while the service starts
+        reaches no GUI (none has subscribed yet). Blue Box, 2026-11-11. ASCII
+        only (gotcha #14: the launcher reads stdout through a cp1252 pipe)."""
+        self._events.put({"level": level, "msg": msg})
+        if level in ("warn", "error"):
+            text = str(msg).encode("ascii", "replace").decode("ascii")
+            print(f"kepco {level.upper()}: {text}", flush=True)
 
     def serve_forever(self) -> None:
         self.start()

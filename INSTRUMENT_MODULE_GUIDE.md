@@ -269,7 +269,10 @@ remember the launcher can override both per PC.
 `PortInUse` (a `RuntimeError`) if a port is taken -- BEFORE the instrument is
 opened, so a clash never leaves a deaf process holding the hardware;
 `run_service.py` turns it into one line on stderr and exit code 2. Then it
-routes `brain._on_event` into an event queue, calls `brain.start()` (closing
+routes `brain._on_event` to its `_event` method -- which puts the event on the
+queue AND prints every `warn` / `error` as one ASCII line `<key> WARN: <msg>`
+(flushed), because a warning raised while the service starts reaches no GUI and
+only the launcher's log pane and daily log file see stdout -- calls `brain.start()` (closing
 both sockets again if that raises), and spawns two daemon threads, each handed
 its already-bound socket: **publisher** (owns the PUB socket — one socket per
 thread — sends status every `1/status_hz` and drains the event queue) and
