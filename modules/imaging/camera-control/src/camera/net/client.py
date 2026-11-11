@@ -366,6 +366,11 @@ class CameraClient(ControlClient):
     def calibrate_xy_map(self, distance_um: float | None = None) -> int:
         return int(self._rpc(cmd="calibrate_xy_map", distance_um=distance_um)["xycal_id"])
 
+    def write_xy_step_sizes(self) -> dict:
+        r = self._rpc(cmd="write_xy_step_sizes")
+        return {"written": r.get("written", {}), "saved": r.get("saved", ""),
+                "note": r.get("note", "")}
+
     def get_xycal(self) -> dict:
         return self._rpc(cmd="get_xycal")["xycal"]
 

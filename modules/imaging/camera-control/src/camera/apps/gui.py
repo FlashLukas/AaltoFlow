@@ -46,7 +46,7 @@ from .spot_tab import SAVE_CONFIG_TIP, SpotTab, sizes_summary
 from .. import vision as V
 from ..config import (AF_POSITIONS, AF_ROUTINES, AF_SIDES, CALIB_MODES, CLIP_MODES, DRIVERS,
                       FOCUS_MECHANISMS, LOCATE_MODES, MOTIONS, RECORD_ROIS, SIM_SPOTS,
-                      LAYOUTS, SIZE_METHODS, SYMMETRIES, THEMES, XY_STAGES, XY_UNITS,
+                      LAYOUTS, LIMIT_SWITCH_ACTIONS, SIZE_METHODS, SYMMETRIES, THEMES, XY_STAGES, XY_UNITS,
                       Z_STAGES)
 
 # What a QSpinBox (a C++ int) can hold.
@@ -71,6 +71,7 @@ _ENUMS = {
     "calib_mode": CALIB_MODES,
     "motion": MOTIONS,
     "xy_stage": XY_STAGES,
+    "limit_switch_action": LIMIT_SWITCH_ACTIONS,
     "z_stage": Z_STAGES,
     "record_roi": RECORD_ROIS,
 }
@@ -268,6 +269,7 @@ POSITIONER_LAYOUT = [
      # motion = split (the vacuum setup): XY and Z from two services, and the
      # axis map for every XY stage without its own camera calibration
      ("Split rig (XY + Z services)", [(_H, "xy_stage"), (_H, "z_stage"), (_H, "xy_map"),
+                                      (_H, "limit_switch_action"),
                                       (_H, "agilis_host"), (_H, "agilis_cmd_port"),
                                       (_H, "agilis_pub_port"), (_H, "kim001_host"),
                                       (_H, "kim001_cmd_port"), (_H, "kim001_pub_port")])],
@@ -1862,6 +1864,7 @@ class MainWindow(QMainWindow):
         if new.upper() == (old or "").upper():
             QMessageBox.information(self, "Calibrate stage",
                                     f"xy_map {old} is right.\n\n{text}")
+            self._offer_step_sizes(res)
             return
         ans = QMessageBox.question(
             self, "Calibrate stage",
@@ -1877,6 +1880,38 @@ class MainWindow(QMainWindow):
             self._log_event("info", f"xy_map set to {new} (Save config to keep it)")
         except Exception as exc:
             self._log_event("error", f"setting xy_map: {exc}")
+            return
+        self._offer_step_sizes(res)
+
+    def _offer_step_sizes(self, res: dict) -> None:
+        """After the map: offer to write the measured um/step into the stage
+        service (Lukas, 2026-11-11: "Camera writes it")."""
+        now, new = res.get("steps_now") or {}, res.get("steps_new") or {}
+        if not new:
+            return
+        from PySide6.QtWidgets import QMessageBox
+        rows = "\n".join(f"  {k}:  {now.get(k, 0) * 1000:.1f}  ->  {v * 1000:.1f} nm/step"
+                         for k, v in new.items())
+        spread = res.get("spread") or {}
+        wide = [k for k, s in spread.items() if s > 0.3]
+        warn = ("\n\nThe repeats scattered by more than 30 % on " + ", ".join(wide)
+                + ": the step size changes from move to move.") if wide else ""
+        ans = QMessageBox.question(
+            self, "Calibrate stage",
+            f"Write the measured step sizes to the stage service (and save them "
+            f"there)?\n\n{rows}{warn}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if ans != QMessageBox.Yes:
+            return
+        try:
+            out = self.ctrl.write_xy_step_sizes()
+        except Exception as exc:
+            self._log_event("error", f"writing step sizes: {exc}")
+            return
+        self._log_event("warn" if out.get("note") else "info",
+                        "stage step sizes written" + (f", saved to {out['saved']}"
+                                                      if out.get("saved") else "")
+                        + (f"; {out['note']}" if out.get("note") else ""))
 
     def _auto_exposure(self):
         try:

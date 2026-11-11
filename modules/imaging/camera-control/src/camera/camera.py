@@ -1667,19 +1667,19 @@ class Camera:
         self._emit("error", "stabiliser STOPPED: " + why)
 
     def _stage_stuck(self, avg, gain, move_x, move_y) -> bool:
-        """Two more ways the stabiliser gives up instead of pushing on (Blue
-        Box, 2026-11-11, the Agilis rig):
-          * the stage reports a LIMIT SWITCH active on an axis this correction
-            needs -- its steps are counted but nothing moves;
-          * two corrections in a row moved the IMAGE less than a quarter of
-            what they asked for -- the counter moves, the sample does not
-            (a limit, a stalled actuator, a wrong pixel size).
-        True = stopped."""
+        """The stabiliser gives up instead of pushing on (Blue Box,
+        2026-11-11, the Agilis rig) when two corrections in a row moved the
+        IMAGE less than a quarter of what they asked for -- the counter moves,
+        the sample does not (a limit, a stalled actuator, a wrong pixel size).
+        And when the stage reports its LIMIT SWITCH active on an axis this
+        correction needs: hardware.limit_switch_action "stop" (default) stops
+        the stabiliser, "warn" carries on and logs it (Lukas, 2026-11-11: the
+        Blue Box Agilis reports X's switch active all the time while X moves
+        freely). True = stopped."""
         from .config import image_um_to_stage
         a = np.asarray(avg, dtype=float)
         if not (move_x or move_y):
             return False
-        # which stage axes this correction will drive
         dX, dY = image_um_to_stage(-a[0] if move_x else 0.0, -a[1] if move_y else 0.0,
                                    self.cfg.hardware.xy_map)
         limits = getattr(self.xy, "limit_switches", None)
@@ -1688,14 +1688,18 @@ class Camera:
                 ls = limits()
             except Exception:
                 ls = None
-            if ls:
-                hit = [ax for ax, d, on in (("X", dX, ls[0]), ("Y", dY, ls[1]))
-                       if on and abs(d) > 0]
-                if hit:
+            hit = [ax for ax, d, on in zip("XY", (dX, dY), ls or ()) if on and abs(d) > 0]
+            if hit:
+                where = " and ".join(hit)
+                if self.cfg.hardware.limit_switch_action == "warn":
+                    self._warn_limited(
+                        "limit_switch", f"stage reports its limit switch active on {where} "
+                        f"-- continuing (limit_switch_action = warn)", every_s=30.0)
+                else:
                     self._stop_stabiliser(
-                        f"the stage reports its limit switch active on {' and '.join(hit)} "
-                        f"-- it cannot move there. Move the stage off the limit (stage "
-                        f"window), then switch Stabilise on again")
+                        f"the stage reports its limit switch active on {where} -- it may "
+                        f"not move there. Move it off the limit (stage window), or set "
+                        f"limit_switch_action = warn (Positioner tab) if the flag is wrong")
                     return True
         prev, asked = self._stab_last_avg, self._stab_asked_px
         self._stab_last_avg = a.copy()
@@ -1706,10 +1710,20 @@ class Camera:
         moved = float(np.hypot(*(a - prev)))
         self._stab_stalled = self._stab_stalled + 1 if moved < 0.25 * asked else 0
         if self._stab_stalled >= 2:
+            ls = None
+            limits = getattr(self.xy, "limit_switches", None)
+            if limits is not None:
+                try:
+                    ls = limits()
+                except Exception:
+                    ls = None
+            flagged = [ax for ax, on in zip("XY", ls or ()) if on]
             self._stop_stabiliser(
                 f"two corrections in a row moved the image only {moved:.1f} px of the "
                 f"{asked:.1f} px asked -- the stage counts steps but the sample does not "
-                f"move (limit switch? stalled actuator? wrong pixel size?)")
+                f"move (limit switch? stalled actuator? wrong pixel size?)"
+                + (f"; the stage reports its limit switch on {' and '.join(flagged)}"
+                   if flagged else ""))
             return True
         return False
 
@@ -1814,12 +1828,20 @@ class Camera:
 
     def _xycal_go(self, x: float, y: float) -> None:
         self.xy.move_xy(x, y)
-        t_end = time.monotonic() + 60.0
-        time.sleep(0.05)
-        while self.xy.moving():
-            if time.monotonic() > t_end:
-                raise RuntimeError("the stage did not stop within 60 s")
-            time.sleep(0.02)
+        arrived = getattr(self.xy, "wait_arrived", None)
+        if arrived is not None:
+            # the stage's own "arrived" (step counters at the target): a status
+            # cache that still shows the frame before the command, or a paced
+            # move between two chunks, says "not moving" too early (Blue Box,
+            # 2026-11-11: 4 of 60 steps measured)
+            arrived(60.0)
+        else:
+            t_end = time.monotonic() + 60.0
+            time.sleep(0.05)
+            while self.xy.moving():
+                if time.monotonic() > t_end:
+                    raise RuntimeError("the stage did not stop within 60 s")
+                time.sleep(0.02)
         time.sleep(max(0.2, float(self.cfg.stabilizer.settle_s)))
 
     def _xycal_measure(self, d: float) -> dict:
@@ -1840,22 +1862,22 @@ class Camera:
         x0, y0 = self.xy.read_xy()
         steps = getattr(self.xy, "read_steps", None)
         moves = []
+        reps = max(1, int(self.cfg.stabilizer.xycal_repeats))
         try:
-            for axis in (0, 1):
-                for sign in (1, -1):
-                    a0 = self._xycal_anchor()
-                    s0 = steps() if steps else None
-                    tx, ty = (x0 + sign * d, y0) if axis == 0 else (x0, y0 + sign * d)
-                    self._xycal_go(*self._clamp_xy(tx, ty))
-                    a1 = self._xycal_anchor()
-                    s1 = steps() if steps else None
-                    self._xycal_go(x0, y0)
-                    a2 = self._xycal_anchor()
-                    moves.append({"axis": "XY"[axis], "sign": sign, "um": sign * d,
-                                  "shift_px": [float(a1[0] - a0[0]), float(a1[1] - a0[1])],
-                                  "return_px": [float(a2[0] - a0[0]), float(a2[1] - a0[1])],
-                                  "steps": (int(s1[axis] - s0[axis])
-                                            if s0 is not None and s1 is not None else None)})
+            for axis, sign in [(a, s) for a in (0, 1) for s in (1, -1)] * reps:  # all four moves, repeated
+                a0 = self._xycal_anchor()
+                s0 = steps() if steps else None
+                tx, ty = (x0 + sign * d, y0) if axis == 0 else (x0, y0 + sign * d)
+                self._xycal_go(*self._clamp_xy(tx, ty))
+                a1 = self._xycal_anchor()
+                s1 = steps() if steps else None
+                self._xycal_go(x0, y0)
+                a2 = self._xycal_anchor()
+                moves.append({"axis": "XY"[axis], "sign": sign, "um": sign * d,
+                              "shift_px": [float(a1[0] - a0[0]), float(a1[1] - a0[1])],
+                              "return_px": [float(a2[0] - a0[0]), float(a2[1] - a0[1])],
+                              "steps": (int(s1[axis] - s0[axis])
+                                        if s0 is not None and s1 is not None else None)})
         finally:
             try:
                 self._xycal_go(x0, y0)
@@ -1865,8 +1887,12 @@ class Camera:
         # mirrored - move; they must agree in direction
         v, notes = {}, []
         for axis in "XY":
-            p = next(m for m in moves if m["axis"] == axis and m["sign"] > 0)
-            m = next(m for m in moves if m["axis"] == axis and m["sign"] < 0)
+            # the MEAN shift of each direction's repeats (one move, if repeats 1)
+            def mean_move(sgn):
+                mvs = [m for m in moves if m["axis"] == axis and m["sign"] == sgn]
+                return {"sign": sgn, "shift_px": np.mean([m["shift_px"] for m in mvs],
+                                                         axis=0).tolist()}
+            p, m = mean_move(1), mean_move(-1)
             vp = np.asarray(p["shift_px"]) / d
             vm = -np.asarray(m["shift_px"]) / d
             comp = int(np.argmax(np.abs(vp + vm)))
@@ -1889,12 +1915,31 @@ class Camera:
             raise RuntimeError("stage X and Y both move the image along the same direction: "
                                f"X {v['X'].round(2).tolist()} px/um, Y "
                                f"{v['Y'].round(2).tolist()} px/um -- check the pattern match")
-        # how far the IMAGE really moved per commanded um, per axis and direction
-        scale = {}
+        # how far the IMAGE really moved per commanded um, per axis and
+        # direction: the MEDIAN over the repeats, and how much they scatter
+        per = {}
         for mv in moves:
             comp = 0 if abs(v[mv["axis"]][0]) >= abs(v[mv["axis"]][1]) else 1
             real_um = abs(mv["shift_px"][comp]) * px[comp]
-            scale[f"{'+' if mv['sign'] > 0 else '-'}{mv['axis']}"] = real_um / d
+            per.setdefault(f"{'+' if mv['sign'] > 0 else '-'}{mv['axis']}", []).append(
+                real_um / d)
+        scale = {k: float(np.median(vals)) for k, vals in per.items()}
+        spread = {k: (float((max(vals) - min(vals)) / np.median(vals))
+                      if len(vals) > 1 and np.median(vals) > 0 else 0.0)
+                  for k, vals in per.items()}
+        wide = [f"{k} {s:.0%}" for k, s in spread.items() if s > 0.3]
+        if wide:
+            notes.append("the repeats scatter (" + ", ".join(wide) + "): the step size "
+                         "changes from move to move -- keep the correction % low")
+        # what the stage's um/step should be: today's value x what really moved
+        sizes = getattr(self.xy, "step_sizes", None)
+        steps_now = steps_new = None
+        if sizes is not None:
+            try:
+                steps_now = sizes()
+                steps_new = {k: steps_now[k] * scale[k] for k in scale if k in steps_now}
+            except Exception:
+                steps_now = steps_new = None
         ret = max(float(np.hypot(*mv["return_px"])) for mv in moves)
         if ret > 5.0:
             notes.append(f"returning to the start missed by up to {ret:.0f} px (backlash / "
@@ -1904,10 +1949,36 @@ class Camera:
                    + (", the SAME" if new_map.replace(" ", "") == old.replace(" ", "").upper()
                       else ", DIFFERENT -- apply it") + "); the image moved "
                    + ", ".join(f"{k} {s:.2f}x" for k, s in scale.items())
-                   + f" the commanded {d:g} um" + ("; " + "; ".join(notes) if notes else ""))
-        return {"xy_map": new_map, "current": old, "distance_um": d, "moves": moves,
-                "px_per_um": {k: vv.tolist() for k, vv in v.items()}, "scale": scale,
-                "notes": notes, "summary": summary}
+                   + f" the commanded {d:g} um ({reps} x each)"
+                   + (("; um/step " + ", ".join(f"{k} {steps_now[k] * 1000:.0f} -> "
+                                                 f"{steps_new[k] * 1000:.0f} nm"
+                                                 for k in steps_new)) if steps_new else "")
+                   + ("; " + "; ".join(notes) if notes else ""))
+        return {"xy_map": new_map, "current": old, "distance_um": d, "repeats": reps,
+                "moves": moves, "px_per_um": {k: vv.tolist() for k, vv in v.items()},
+                "scale": scale, "spread": spread, "steps_now": steps_now,
+                "steps_new": steps_new, "notes": notes, "summary": summary}
+
+    def write_xy_step_sizes(self) -> dict:
+        """Write the um/step the last Calibrate stage measured into the XY stage
+        service and have it saved there (Lukas, 2026-11-11: "Camera writes
+        it"). Only after a successful run on THIS stage; the stabiliser and
+        every um move then use the real step size."""
+        with self._lock:
+            res, state = dict(self._xycal_result), self._xycal_state
+        if state != "OK" or not res.get("steps_new"):
+            raise RuntimeError("no measured step sizes: run Calibrate stage first "
+                               "(and it needs a stage that publishes its step sizes)")
+        write = getattr(self.xy, "write_step_sizes", None)
+        if write is None:
+            raise RuntimeError("this XY stage cannot take step sizes from the camera")
+        out = write(res["steps_new"])
+        self._emit("info" if not out.get("note") else "warn",
+                   "stage step sizes written: " + ", ".join(
+                       f"{k} {v * 1000:.0f} nm/step" for k, v in out["written"].items())
+                   + (f"; saved by the stage service to {out['saved']}" if out.get("saved")
+                      else "") + (f"; {out['note']}" if out.get("note") else ""))
+        return out
 
     def _laser_step(self, anchor, px_x, px_y, st) -> None:
         """One cycle of PLACING THE LASER at the target (set_laser_target).

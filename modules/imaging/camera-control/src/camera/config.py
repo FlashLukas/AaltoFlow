@@ -63,6 +63,9 @@ LAYOUTS = ("classic", "cockpit", "workflow", "hud", "split", "image_first")
 MOTIONS = ("kim", "piezo", "split")
 # With motion = "split": what moves the sample in XY, and what focuses.
 XY_STAGES = ("agilis", "kim", "piezo")
+#: what the stabiliser does when the XY stage reports a limit switch active
+#: on an axis a correction needs (hardware.limit_switch_action)
+LIMIT_SWITCH_ACTIONS = ("stop", "warn")
 Z_STAGES = ("kim001", "kim", "zpiezo", "kcube", "none")
 # Spot search region shape (Spot.search_shape).
 SEARCH_SHAPES = ("rect", "circle")
@@ -572,6 +575,10 @@ class Stabilizer:
     # Calibrate stage (Positioner tab): how far each axis is moved both ways to
     # see which way the image goes (xy_map) and how far (in the stage's own um)
     xycal_move_um: float = 3.0
+    # ... and how many times each of the four moves is made: the Agilis step is
+    # irregular (Blue Box: 20 steps went about as far as 100), so the step
+    # sizes it proposes are the MEDIAN of these
+    xycal_repeats: int = 3
 
 
 @dataclass
@@ -615,6 +622,13 @@ class Hardware:
     xy_stage: str = "agilis"           # motion = split: "agilis" | "kim" | "piezo"
     z_stage: str = "kim001"            # motion = split: "kim001" | "kim" | "zpiezo" | "kcube" | "none"
     xy_map: str = "+X+Y"               # stage axis -> image direction (see above)
+    # The XY stage reports a LIMIT SWITCH active on an axis a stabiliser
+    # correction needs: "stop" = switch the stabiliser off and say why;
+    # "warn" = carry on and log it (at most every 30 s). Lukas, 2026-11-11:
+    # the Blue Box Agilis reports X's switch active all the time while X moves
+    # freely, so that rig runs "warn". A stage that really cannot move is
+    # still caught: two corrections that do not move the image stop it.
+    limit_switch_action: str = "stop"
     agilis_host: str = "127.0.0.1"     # agilis-control (AG-UC2 XY)
     agilis_cmd_port: int = 5595
     agilis_pub_port: int = 5596
@@ -805,6 +819,8 @@ def load_config(path: str) -> Config:
     cfg.ui.layout = cfg.ui.layout.lower()
     if cfg.hardware.motion not in MOTIONS:
         cfg.hardware.motion = "kim"
+    if cfg.hardware.limit_switch_action not in LIMIT_SWITCH_ACTIONS:
+        cfg.hardware.limit_switch_action = "stop"
     if cfg.hardware.xy_stage not in XY_STAGES:
         cfg.hardware.xy_stage = "agilis"
     if cfg.hardware.z_stage not in Z_STAGES:

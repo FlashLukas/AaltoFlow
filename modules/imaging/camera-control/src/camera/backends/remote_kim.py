@@ -308,6 +308,40 @@ class StepXYStage:
         all; a safety verb there, allowed even while another client holds it)."""
         self.link.rpc(cmd="stop")
 
+    def step_sizes(self) -> dict:
+        """The stage's um per step for "+X", "-X", "+Y", "-Y" (forward =
+        positive um), as its status publishes them; a missing backward value
+        falls back to the forward one, then to the mean."""
+        st = self.link.status()
+        mean = st.get("um_per_step") or [0.0, 0.0, 0.0]
+        fwd = st.get("um_per_step_fwd") or mean
+        bwd = st.get("um_per_step_bwd") or fwd
+        out = {}
+        for i, ax in enumerate("XY"):
+            f = float(fwd[i]) or float(mean[i])
+            out["+" + ax] = f
+            out["-" + ax] = float(bwd[i]) or f
+        return out
+
+    def write_step_sizes(self, sizes: dict) -> dict:
+        """Store measured um/step per direction in the stage service
+        (set_calibration axis/value/direction), then ask it to save its
+        calibration so a restart keeps them. Returns {"written": {...},
+        "saved": path or "", "note": text}."""
+        written = {}
+        for key, val in sizes.items():
+            sign, ax = key[0], key[1]
+            self.link.rpc(cmd="set_calibration", axis=ax, value=float(val),
+                          direction=1 if sign == "+" else -1)
+            written[key] = float(val)
+        saved, note = "", ""
+        try:
+            saved = str(self.link.rpc(cmd="save_calibration").get("path", ""))
+        except Exception as exc:
+            note = (f"written, but NOT saved by the stage service ({exc}) -- "
+                    f"lost on its restart; update the stage module")
+        return {"written": written, "saved": saved, "note": note}
+
     def limit_switches(self):
         """[X, Y] True where the stage reports its limit switch active (agilis
         status `limit_switch`), or None when the service does not say."""
@@ -335,8 +369,49 @@ class StepXYStage:
     def move_xy(self, x_um: float, y_um: float) -> None:
         # kim has no two-axis verb: two fire-and-forget moves, back to back.
         # The KIM101 drives one channel at a time anyway.
-        self.link.rpc(cmd="move_to_um", axis="X", position=float(x_um))
-        self.link.rpc(cmd="move_to_um", axis="Y", position=float(y_um))
+        rx = self.link.rpc(cmd="move_to_um", axis="X", position=float(x_um))
+        ry = self.link.rpc(cmd="move_to_um", axis="Y", position=float(y_um))
+        # agilis replies the TARGET STEP COUNT: wait_arrived() waits for the
+        # counters to reach it (kim replies otherwise: then None, and
+        # wait_arrived falls back to the moving flag)
+        tx, ty = rx.get("target"), ry.get("target")
+        self._targets = ((tx, ty) if isinstance(tx, int) and isinstance(ty, int)
+                         and not isinstance(tx, bool) else None)
+
+    def wait_arrived(self, timeout_s: float = 60.0, poll_s: float = 0.05) -> None:
+        """Block until the last move_xy has ARRIVED: the step counters equal
+        the targets the service replied, the stage does not say moving, and
+        that holds on two polls in a row. Why not just "not moving" (Blue
+        Box, 2026-11-11): right after a command the status cache still shows
+        the frame from before it (gotcha #2), and a software-paced Agilis
+        move is issued in chunks -- Calibrate stage measured 4 of 60 steps.
+        Without targets (kim): first wait up to 1 s for "moving", then for
+        not moving."""
+        import time as _t
+        end = _t.monotonic() + timeout_s
+        targets = getattr(self, "_targets", None)
+        if targets is None:
+            t_start = _t.monotonic() + 1.0
+            while not self.moving() and _t.monotonic() < t_start:
+                _t.sleep(poll_s)
+            while self.moving():
+                if _t.monotonic() > end:
+                    raise RuntimeError(f"the stage did not stop within {timeout_s:g} s")
+                _t.sleep(poll_s)
+            return
+        ok_in_a_row = 0
+        while ok_in_a_row < 2:
+            if _t.monotonic() > end:
+                pos = self.read_steps()
+                raise RuntimeError(f"the stage did not reach steps {targets} within "
+                                   f"{timeout_s:g} s (at {pos})")
+            st = self.link.status()
+            pos = st.get("position_steps") or [None, None]
+            mv = st.get("moving") or [False, False]
+            here = (int(pos[0]) == targets[0] and int(pos[1]) == targets[1]
+                    if pos[0] is not None and pos[1] is not None else False)
+            ok_in_a_row = ok_in_a_row + 1 if here and not (mv[0] or mv[1]) else 0
+            _t.sleep(poll_s)
 
     def moving(self) -> bool:
         mv = self.link.status()["moving"]

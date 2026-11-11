@@ -496,6 +496,8 @@ class CameraService:
             d = req.get("distance_um")
             return {"ok": True, "xycal_id": b.calibrate_xy_map(
                 None if d is None else float(d))}
+        if cmd == "write_xy_step_sizes":
+            return {"ok": True, **b.write_xy_step_sizes()}
         if cmd == "get_xycal":
             return {"ok": True, "xycal": b.get_xycal()}
         if cmd == "calibrate_spot":

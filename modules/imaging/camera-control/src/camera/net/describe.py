@@ -402,6 +402,12 @@ def build_manifest(brain) -> dict:
                 "way) and how far the image really moves per commanded um. Changes no "
                 "setting -- set hardware.xy_map to the result. Needs a tracked pattern "
                 "and the stabiliser off; not for kim (it calibrates itself)."),
+        _p("write_xy_step_sizes", "Write stage step sizes", "action", "action",
+           group="Loops", order=95,
+           wait={"ready": {"policy": "immediate"}},
+           help="Write the um/step per direction that the last Calibrate stage "
+                "measured into the XY stage service (set_calibration) and have it "
+                "saved there. Refused without a successful calibration."),
         _p("xycal_state", "Stage calibration state", "indicator", "string", group="Loops",
            order=96, read_path=["xycal_state"],
            help="Outcome of the latest Calibrate stage: 'OK', or why it failed."),
