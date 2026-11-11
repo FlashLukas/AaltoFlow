@@ -349,3 +349,24 @@ def test_set_config_amplitude_is_clamped_in_the_config_too(fast_brain):
     brain.apply_config()
     assert brain.cfg.motion.amp_fwd_x == 50
     assert sim.read_amplitude(brain._hw(0), +1) == 50
+
+
+def test_save_calibration_writes_only_the_calibration_and_keeps_the_rest(fast_brain, tmp_path):
+    """The camera's Calibrate stage writes measured step sizes with
+    set_calibration and then save_calibration (Blue Box, 2026-11-11): before,
+    a camera-written step size was lost on the next agilis start."""
+    import configparser
+    from agilis.config import load_config
+    ini = tmp_path / "agilis.ini"
+    ini.write_text("[Hardware]\nport = COM9\n", encoding="utf-8")
+    brain, _ = fast_brain
+    brain.config_path = ini
+    brain.set_calibration(0, 0.21, +1)
+    brain.set_calibration(0, 0.15, -1)
+    assert brain.save_calibration() == str(ini)
+    cfg = load_config(str(ini))
+    assert cfg.calibration.um_per_step_x == 0.21 and cfg.calibration.um_per_step_x_bwd == 0.15
+    assert cfg.hardware.port == "COM9"                       # kept
+    p = configparser.ConfigParser()
+    p.read(ini, encoding="utf-8")
+    assert set(p.sections()) == {"Hardware", "Calibration"}  # nothing else frozen in

@@ -966,6 +966,19 @@ class AgilisStage:
                            f"(at amplitude {axis_amplitude(self.cfg, axis, direction or 1)})")
         return v
 
+    def save_calibration(self, path=None) -> str:
+        """Persist the CALIBRATION group (the per-axis, per-direction step sizes
+        and the amplitudes they were measured at) into the service's .ini,
+        keeping the file's other sections. Separate from everything else so a
+        calibration save freezes nothing else that happens to be live. The
+        camera's Calibrate stage calls it after writing the measured step
+        sizes with set_calibration (Blue Box, 2026-11-11)."""
+        from .config import default_config_path, save_sections
+        target = path or getattr(self, "config_path", None) or default_config_path()
+        p = save_sections(self.cfg, target, ["Calibration"])
+        self._emit("info", f"calibration saved to {p}")
+        return str(p)
+
     def set_leash(self, enabled=None, leash_steps=None) -> dict:
         """Configure the travel LEASH -- a symmetric box around the datum.
 

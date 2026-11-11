@@ -46,6 +46,8 @@ def main() -> int:
     if args.com:
         cfg.hardware.port = args.com
     brain, _backend = (build_real_system if args.real else build_sim_system)(cfg)
+    # save_calibration writes where the next start reads (--config or agilis.ini)
+    brain.config_path = cfg_path
 
     service = AgilisService(
         brain, host=args.host, cmd_port=args.cmd_port,

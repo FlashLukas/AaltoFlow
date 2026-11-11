@@ -373,6 +373,8 @@ class AgilisService:
             return {"ok": True, "rate": b.set_step_rate(float(req["rate"]))}
         if cmd == "set_step_size":
             return {"ok": True, "step": b.set_step_size(bool(req["large"]))}
+        if cmd == "save_calibration":
+            return {"ok": True, "path": b.save_calibration()}
         if cmd == "set_calibration":
             # direction: 0/absent = both ways, +1 forward only, -1 backward only
             v = b.set_calibration(P.parse_axis(req["axis"]), req["value"],

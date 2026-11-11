@@ -410,6 +410,40 @@ def load_config(path: str) -> Config:
     return cfg
 
 
+def save_sections(cfg: Config, path, sections=None) -> Path:
+    """Write the named INI sections of ``cfg`` into ``path``, MERGING: sections
+    already in the file that were not asked for are kept (saving the step
+    sizes must not wipe a [Hardware] COM port set up by hand). Atomic: a temp
+    file in the same folder, then os.replace(), so a crash mid-write leaves the
+    old file intact. (Same as kim-control's.)"""
+    import os
+    import tempfile
+    path = Path(path)
+    groups = _sections(cfg)
+    names = list(groups) if sections is None else list(sections)
+    for name in names:
+        if name not in groups:
+            raise ValueError(f"unknown config section {name!r}")
+    cp = configparser.ConfigParser()
+    if path.is_file():
+        cp.read(path, encoding="utf-8")
+    for name in names:
+        cp[name] = {key: str(val) for key, val in asdict(groups[name]).items()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            cp.write(fh)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 #: The per-PC settings file next to module.toml (gitignored).
 DEFAULT_INI_NAME = "agilis.ini"
 
