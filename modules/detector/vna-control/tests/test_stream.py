@@ -217,7 +217,7 @@ def service_and_client():
 def test_describe_declares_the_streams_and_the_points(service_and_client):
     svc, cli = service_and_client
     m = {d["id"]: d for d in cli.describe()["parameters"]}
-    for pid, ch in (("s", "s"), ("u", "u"), ("ln_ratio", "ln"),
+    for pid, ch in (("s_s21", "s"), ("u_s21", "u"), ("ln_ratio_s21", "ln"),
                     ("point_1", "p1"), ("point_2", "p2")):
         assert m[pid]["stream"] == {"group": "trace", "channel": ch}
     assert m["point_1"]["dtype"] == "complex" and "dims" not in m["point_1"]

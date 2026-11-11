@@ -5,7 +5,7 @@ comment: >
   ones) and a reference trace is stored; every point then records S21 and
   u = (S21 - ref)/ref. After the scan (also after an Abort) the field goes to 0.
   The lab version is the same file with module ids: mag2d.field, mag2d.angle,
-  vna.take_reference, vna.u, vna.s.
+  vna.take_reference, vna.u_s21, vna.s_s21.
 fixed: {rf_power: -10}
 axes:
   - {type: linear, param: field, start: 70, stop: 0, num: 36}   # down from 70 mT

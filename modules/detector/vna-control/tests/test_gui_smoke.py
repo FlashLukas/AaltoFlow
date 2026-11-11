@@ -220,7 +220,7 @@ def test_fly_points_box_sets_the_stream_points_in_ghz(app):
 def test_ticking_s_parameters_measures_them_together_one_tab_each(app):
     """The checklist (Lukas, 2026-11-10): tick several S-parameters and ONE
     sweep measures them all; each gets its own tab of plots. The primary (the
-    scan detectors s, u, ln_ratio) stays while it is ticked; with one
+    scan detectors s_/u_/ln_ratio_<sp>) stays while it is ticked; with one
     parameter there is no tab bar."""
     from vna.apps.gui import MainWindow
     cfg = Config()

@@ -113,7 +113,7 @@ def main() -> int:
             axis = {"type": "linear", "param": "mag2d.angle", "start": lo, "stop": hi,
                     "num": args.n}
 
-        detectors = ["vna.u", "vna.s", "vna.sweep_field", "vna.sweep_angle",
+        detectors = ["vna.u_s21", "vna.s_s21", "vna.sweep_field", "vna.sweep_angle",
                      "vna.sweep_field_ok", "mag2d.measured_magnitude", "mag2d.measured_angle"]
         simulated = reg.get("vna.f_res_model") is not None
         if simulated:
@@ -158,7 +158,7 @@ def main() -> int:
 
     # ---- read the file back, as anyone analysing it later would -------------
     back = load(str(nc))
-    u = as_complex(back, "vna.u").values
+    u = as_complex(back, "vna.u_s21").values
     f = back.coords["vna.freq"].values                       # GHz
     x_name = "mag2d.field" if args.mode == "field" else "mag2d.angle"
     x = back.coords[x_name].values

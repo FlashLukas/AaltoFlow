@@ -26,7 +26,7 @@ if SIMULATE:
 else:
     TEMPERATURE, STABLE, FIELD, FREQ, SIGNAL = (
         "ppms.temperature", "ppms.temperature_stable", "ppms.field",
-        "vna.frequency", "vna.s")       # check these with print(lab.summary())
+        "vna.frequency", "vna.s_s21")       # check these with print(lab.summary())
     HOLD_S = 600          # ten minutes
 
 TEMPERATURES_K = [5, 10, 20, 50]

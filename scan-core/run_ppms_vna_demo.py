@@ -96,7 +96,7 @@ def main() -> int:
             fixed["ppms.temperature"] = args.temperature
         axis = {"type": "linear", "param": "ppms.field", "start": args.lo, "stop": args.hi,
                 "num": args.n}
-        detectors = ["vna.u", "vna.s", "vna.sweep_field", "vna.sweep_field_ok",
+        detectors = ["vna.u_s21", "vna.s_s21", "vna.sweep_field", "vna.sweep_field_ok",
                      "ppms.measured_field", "ppms.measured_temperature"]
         simulated = reg.get("vna.f_res_model") is not None
         if simulated:
@@ -139,7 +139,7 @@ def main() -> int:
 
     # ---- read the file back, as anyone analysing it later would -------------
     back = load(str(nc))
-    u = as_complex(back, "vna.u").values
+    u = as_complex(back, "vna.u_s21").values
     f = back.coords["vna.freq"].values                       # GHz
     x = back.coords["ppms.field"].values
     ratio_dB = 20 * np.log10(np.abs(1 + u))                  # |S / S_ref|

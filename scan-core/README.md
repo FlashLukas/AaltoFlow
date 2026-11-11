@@ -922,12 +922,12 @@ completed sweep as ONE sample. Two ways to record it:
 
 | detector | what one sample is | time stamp | in the file |
 |----------|--------------------|------------|-------------|
-| `vna.s` (also `u`, `ln_ratio`) | the whole complex trace | the MIDDLE of its sweep | `(..., pixel, freq)`; `_n` per pixel |
+| `vna.s_s21` (also `u_s21`, `ln_ratio_s21`; the primary S-parameter) | the whole complex trace | the MIDDLE of its sweep | `(..., pixel, freq)`; `_n` per pixel |
 | `vna.point_1`, `point_2`, ... | S at ONE frequency of the sweep | the moment THAT point was measured | `(..., pixel)`, a scalar |
 
     axes:
       - {type: fly, param: clMag.field, start: 20, stop: 90, num: 36, speed: 5}
-    detectors: [vna.s, vna.point_1, vna.point_2]
+    detectors: [vna.s_s21, vna.point_1, vna.point_2]
 
 * **Traces** are binned pixel by pixel as the element-wise COHERENT mean of the
   traces whose time stamp fell into the pixel; `<det>_n` counts traces (one

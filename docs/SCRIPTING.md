@@ -124,7 +124,7 @@ gives a numpy array.
 
 ```python
 r = lab.get("hf2.r1")          # triggers an acquisition, waits for it, reads
-trace = lab.get("vna.s")       # a complex array, one value per frequency
+trace = lab.get("vna.s_s21")   # a complex array, one value per frequency
 ```
 
 ### `lab.read(pid)`

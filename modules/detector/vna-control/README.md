@@ -149,12 +149,17 @@ routine can run before the scan, and the detectors are:
 
 | detector | what |
 |---|---|
-| `vna.s` | the complex S-parameter (`s_real`/`s_imag`), dim `vna.freq` in GHz |
-| `vna.u` | u against the reference, same dim |
+| `vna.s_s21` | the complex S-parameter, named by it (`s_s21_real`/`_imag`), dim `vna.freq` in GHz |
+| `vna.u_s21` | u against the reference, same dim |
+| `vna.ln_ratio_s21` | ln(S21 / S21_ref), same dim |
 | `vna.dip_freq`, `vna.dip_depth` | the dip in the averaged trace |
 | `vna.sweep_field`, `vna.sweep_angle`, `vna.sweep_field_ok` | the field the sweep saw |
 
-All from ONE sweep per scan point (one acquire group).
+All from ONE sweep per scan point (one acquire group). Every trace id names
+its S-parameter (`s_s11`, `u_s12` ...); measuring S11 gives `vna.s_s11`. Until
+2026-11-11 the primary was plain `vna.s` / `vna.u` / `vna.ln_ratio`: a saved
+scan definition that ticked those needs its detectors ticked again (the data
+files open as before).
 
 ### Several S-parameters from one sweep (2026-11-10)
 
@@ -165,7 +170,7 @@ one acquisition returns both:
 
 | detector | what |
 |---|---|
-| `vna.s`, `vna.u`, `vna.ln_ratio` | the primary (`sparam`), as before |
+| `vna.s_s21`, `vna.u_s21`, `vna.ln_ratio_s21` | the primary (`sparam`) |
 | `vna.s_s11`, `vna.u_s11`, `vna.ln_ratio_s11` | S11 from the same sweep (`get_trace{sparam: "S11"}`) |
 
 - S11 and S21 both come from the forward sweep, so the second one costs no
@@ -201,7 +206,7 @@ sweep back to back, and every completed sweep is one sample.
 
 | detector | streamed as | time stamp |
 |---|---|---|
-| `vna.s`, `vna.u`, `vna.ln_ratio` | the whole complex trace | the MIDDLE of its sweep |
+| the primary's `vna.s_<sp>`, `vna.u_<sp>`, `vna.ln_ratio_<sp>` | the whole complex trace | the MIDDLE of its sweep |
 | `vna.point_1`, `vna.point_2`, ... | the S-parameter at ONE frequency, complex | the moment that point was measured |
 
 - **Point channels** are the frequencies in `stream.points_Hz` (GUI: the

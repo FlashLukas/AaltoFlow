@@ -15,7 +15,7 @@ then, here:
     uv run python run_vna_demo.py                         # -90 .. 90 mT, 37 fields
     uv run python run_vna_demo.py --from 0 --to 90 --fields 19 --points 1601
 
-Writes out/vna_fmr_map.nc (open it in the Data tab / viewer: pick vna.s,
+Writes out/vna_fmr_map.nc (open it in the Data tab / viewer: pick vna.s_s21,
 |z|, X = clMag.field, Y = vna.freq) and out/vna_fmr_map.png, which shows the
 raw |S21| next to |S21| divided by the trace at the field nearest zero -- the
 usual way to strip the cables' loss and ripple from VNA-FMR data.
@@ -87,7 +87,7 @@ def main() -> int:
         recipe = Recipe(name="vna_fmr_map",
                         axes=[{"type": "array", "param": "clMag.field",
                                "values": fields.tolist()}],
-                        detectors=["vna.s", "vna.dip_freq", "vna.dip_depth", "vna.sweep_field",
+                        detectors=["vna.s_s21", "vna.dip_freq", "vna.dip_depth", "vna.sweep_field",
                                    "vna.sweep_field_ok", "clMag.measured_field"])
         recipe.validate(reg)
         t0 = time.monotonic()
@@ -106,7 +106,7 @@ def main() -> int:
     print(f"wrote {nc}")
 
     back = load(str(nc))
-    z = as_complex(back, "vna.s").values
+    z = as_complex(back, "vna.s_s21").values
     f = back.coords["vna.freq"].values
     H = back["vna.sweep_field"].values
     if not np.all(back["vna.sweep_field_ok"].values == 1):

@@ -278,10 +278,14 @@ def test_describe_lists_one_detector_triple_per_extra_parameter(vna):
         assert d["read"] == {"verb": "get_trace", "key": quantity,
                              "args": {"which": "sample", "quantity": quantity, "sparam": "S11"}}
         # the same acquisition as the primary's detectors: one trigger, one wait
-        assert d["acquire"] == p["s"]["acquire"]
-        assert d["dims"] == p["s"]["dims"] and d["dtype"] == "complex"
+        assert d["acquire"] == p["s_s21"]["acquire"]
+        assert d["dims"] == p["s_s21"]["dims"] and d["dtype"] == "complex"
         assert "stream" not in d, "extras are acquired, not streamed"
-    assert p["s"]["label"] == "S-parameter (S21)"
+    assert p["s_s21"]["label"] == "S-parameter S21" and p["s_s11"]["label"] == "S-parameter S11"
+    # the primary listed first, and only its three stream
+    order = [k for k in p if k.startswith(("s_s", "u_s", "ln_ratio_s"))]
+    assert order[:3] == ["s_s21", "u_s21", "ln_ratio_s21"]
+    assert "stream" in p["s_s21"]
 
 
 # ---- over the wire ----------------------------------------------------------------------

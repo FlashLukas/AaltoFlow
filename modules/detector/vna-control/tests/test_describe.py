@@ -47,31 +47,33 @@ def test_every_read_path_resolves_in_status(vna):
 
 def test_s_and_u_are_complex_array_detectors_read_by_command(vna):
     params = _params(vna)
-    assert "s21" not in params                      # renamed to `s` (contract, 2026-09-16)
-    s, u, ln = params["s"], params["u"], params["ln_ratio"]
+    # every trace is named by its S-parameter (2026-11-11), the primary too
+    assert not {"s", "u", "ln_ratio", "s21"} & set(params)
+    s, u, ln = params["s_s21"], params["u_s21"], params["ln_ratio_s21"]
     for d in (s, u, ln):
         assert d["dtype"] == "complex" and d["shape"] == ["freq"]
         dim = d["dims"][0]
         assert dim["coord_verb"] == "get_frequencies" and dim["unit"] == "GHz"
         assert dim["length"] == vna.cfg.sweep.points
         assert d["acquire"]["target_key"] == "acq_id"
-    assert s["dims"] == u["dims"]                   # one shared frequency coordinate
-    assert s["label"] == "S-parameter (S21)"
+    assert s["dims"] == u["dims"] == ln["dims"]       # one shared frequency coordinate
+    assert s["label"] == "S-parameter S21"
     assert s["read"] == {"verb": "get_trace", "key": "s",
-                         "args": {"which": "sample", "quantity": "s"}}
+                         "args": {"which": "sample", "quantity": "s", "sparam": "S21"}}
     assert u["read"] == {"verb": "get_trace", "key": "u",
-                         "args": {"which": "sample", "quantity": "u"}}
-    assert u["label"] == "Permeability u = (S - S_ref)/S_ref"
+                         "args": {"which": "sample", "quantity": "u", "sparam": "S21"}}
+    assert u["label"] == "Permeability u = (S21 - S21_ref)/S21_ref"
     assert ln["read"] == {"verb": "get_trace", "key": "ln",
-                          "args": {"which": "sample", "quantity": "ln"}}
-    assert ln["label"] == "ln(S / S_ref)"
-    assert s["dims"] == ln["dims"]                  # the same frequency coordinate again
+                          "args": {"which": "sample", "quantity": "ln", "sparam": "S21"}}
+    assert ln["label"] == "ln(S21 / S21_ref)"
+    # the primary streams (fly scans), on the same channels as before
+    assert [d["stream"]["channel"] for d in (s, u, ln)] == ["s", "u", "ln"]
 
 
 def test_scalar_detectors_share_the_one_sweep(vna):
     params = _params(vna)
-    ids = ("s", "u", "ln_ratio", "dip_freq", "dip_depth", "sweep_field", "sweep_angle",
-           "sweep_field_ok")
+    ids = ("s_s21", "u_s21", "ln_ratio_s21", "dip_freq", "dip_depth", "sweep_field",
+           "sweep_angle", "sweep_field_ok")
     assert {params[k]["acquire"]["group"] for k in ids} == {"sweep"}
     assert params["sweep_angle"]["unit"] == "deg"
     assert params["sweep_angle"]["read_path"] == ["sample", "angle_deg"]
@@ -113,8 +115,9 @@ def test_sparam_is_an_enum_control_and_names_the_s_label(vna):
     assert sp["set"] == {"verb": "set_sparam", "arg": "sparam"}
     r0 = build_manifest(vna)["revision"]
     vna.set_sparam("S12")
-    assert _params(vna)["s"]["label"] == "S-parameter (S12)"
-    assert build_manifest(vna)["revision"] != r0     # clients re-fetch the label
+    params = _params(vna)
+    assert "s_s21" not in params and params["s_s12"]["label"] == "S-parameter S12"
+    assert build_manifest(vna)["revision"] != r0     # clients re-fetch the ids
 
 
 def test_field_source_options_default_to_mag2d():
@@ -167,7 +170,7 @@ def test_the_simulated_sample_group_is_absent_on_a_real_analyser():
     cfg = Config()
     real = Analyzer(PnaVna(cfg), cfg)               # never opened: describe needs no hardware
     ids = {p["id"] for p in build_manifest(real)["parameters"]}
-    assert {"s", "u", "take_reference", "sweep_angle", "field_source"} <= ids
+    assert {"s_s21", "u_s21", "take_reference", "sweep_angle", "field_source"} <= ids
     assert not ids & {"ms_mT", "alpha", "hk_mT", "geometry", "f_res_model"}
     assert build_manifest(real)["label"] == "Keysight PNA-X N5222A"
 

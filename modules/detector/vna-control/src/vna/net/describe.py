@@ -5,11 +5,11 @@ that lives somewhere else; every bound is read from the Analyzer when the
 manifest is built.
 
 What makes this manifest different from the others: its main detectors are
-ARRAYS. `s` (the selected S-parameter) and `u` = (S - S_ref)/S_ref are complex
-traces with their own hardware-swept dimension, `freq`:
+ARRAYS. `s_<sp>` (an S-parameter, e.g. s_s21) and `u_<sp>` = (S - S_ref)/S_ref
+are complex traces with their own hardware-swept dimension, `freq`:
 
   * `dims` names that dimension; its coordinate comes from `get_frequencies`
-    (in GHz), read ONCE per scan, not per point. `s` and `u` declare the SAME
+    (in GHz), read ONCE per scan, not per point. Every trace declares the SAME
     dim name, so the engine gives them one shared coordinate.
   * `read` says how to fetch the value: a COMMAND (`get_trace`), because a
     trace is too big for the status stream. Complex arrives as {"re", "im"}.
@@ -20,7 +20,7 @@ traces with their own hardware-swept dimension, `freq`:
 Scalar detectors in the same acquire group (dip frequency, dip depth, the field
 and angle the sweep saw) cost no extra sweep: one trigger, one wait, several reads.
 
-STREAMS (fly scans, 2026-10-09). `s`, `u` and `ln_ratio` also carry a `stream`
+STREAMS (fly scans, 2026-10-09). The primary's s / u / ln_ratio carry a `stream`
 block (group "trace"): in a fly scan every completed sweep is one sample, the
 whole trace, stamped at the sweep's middle (delay 0). The `point_<k>` detectors
 -- one per frequency in cfg.stream.points_Hz -- are SCALAR complex channels of
@@ -28,13 +28,15 @@ the same stream, each stamped at the moment its point was measured. The point
 detectors come and go with that list (and their labels with the grid), so the
 manifest revision moves when either changes.
 
-SEVERAL S-PARAMETERS FROM ONE SWEEP (2026-11-10). `s`, `u` and `ln_ratio`
-are the PRIMARY S-parameter (`sparam`) -- unchanged ids, so a saved recipe
-keeps recording what it always did. Each entry of `extra_sparams` ("S11")
-adds `s_s11`, `u_s11` and `ln_ratio_s11`: the same freq dim, the same acquire
-group (one trigger fills them all), read with get_trace's `sparam` argument.
-They are acquired, not streamed (a fly scan streams the primary). The
-`extra_sparams` control is only listed when the backend can do it.
+SEVERAL S-PARAMETERS FROM ONE SWEEP (2026-11-10), EVERY TRACE NAMED BY ITS
+S-PARAMETER (2026-11-11). Each S-parameter one sweep measures -- `sparam`
+first, then every entry of `extra_sparams` -- has `s_<sp>`, `u_<sp>` and
+`ln_ratio_<sp>` (lower case: s_s21, u_s11): the same freq dim, the same
+acquire group (one trigger fills them all), read with get_trace's `sparam`
+argument. Until 2026-11-11 the primary was plain s / u / ln_ratio (Lukas:
+name them all "like s11 and s21"). The primary's three also stream in a fly
+scan; the extras are acquired only. The `extra_sparams` control is only
+listed when the backend can do it.
 
 ACTIONS WITH A `wait` BLOCK. `take_reference` is safe to run from a scan routine
 ("go to 150 mT at 45 deg, take the reference, then sweep"), and the `wait` block
@@ -45,7 +47,7 @@ rule as an acquisition, for the same stale-status reason (gotcha #17).
 front-panel buttons, and a scan acquires through the detectors' `acquire` block.
 
 What is dynamic: `start`'s maximum is `stop` minus the minimum span, and vice
-versa; the `s` label names the S-parameter. Changing any of those changes
+versa; the trace ids name their S-parameters. Changing any of those changes
 `revision`, and every status frame carries it as `describe_rev`, so clients
 re-fetch. The simulated-sample group is only present when the backend IS the
 simulator: on the real analyser those knobs would change nothing.
@@ -143,30 +145,52 @@ def _point_channels(vna, acquire, sparam) -> list[dict]:
     return out
 
 
-def _extra_channels(vna, acquire, freq_dim) -> list[dict]:
-    """s / u / ln_ratio of every EXTRA S-parameter (cfg.sweep.extra_sparams):
-    ids s_<sp>, u_<sp>, ln_ratio_<sp> in lower case, e.g. u_s11. They come from
-    the same sweep as the primary -- one acquire group, no extra trigger."""
+def _trace_channels(vna, acquire, freq_dim) -> list[dict]:
+    """s / u / ln_ratio of EVERY S-parameter one sweep measures, each named by
+    its S-parameter: s_s21, u_s21, ln_ratio_s21, then s_s11 ... for the extras
+    (cfg.sweep.extra_sparams). One acquire group: one trigger fills them all.
+
+    Why every id carries its S-parameter (Blue Box, 2026-11-11, Lukas: "like
+    s11 and s21"): the primary used to be plain s / u / ln_ratio, so a
+    detector list showed which S-parameter only for the extras. Now the id IS
+    the quantity, and it stays the same whichever one is the primary. The
+    primary (listed first) also streams in a fly scan; the extras are
+    acquired, not streamed."""
     out = []
-    for sp in vna.extra_sparams():
-        key = sp.lower()
-        for qid, quantity, label, order, help in (
-                ("s", "s", f"S-parameter ({sp})", 14,
-                 f"Complex {sp} as measured, from the SAME sweep as the primary "
-                 f"S-parameter. Stored as s_{key}_real / _imag."),
-                ("u", "u", f"Permeability u = ({sp} - {sp}_ref)/{sp}_ref", 15,
-                 f"{sp} relative to the reference's {sp} (the reference keeps every "
-                 f"S-parameter of its sweep). Refused when the reference has no {sp}."),
-                ("ln_ratio", "ln", f"ln({sp} / {sp}_ref)", 16,
-                 f"Complex logarithm of {sp} over the reference's {sp}; refused, "
-                 f"like u, with no matching reference.")):
+    for n, sp in enumerate(vna.measured_sparams()):
+        key, primary = sp.lower(), n == 0
+        same = "" if primary else ", from the SAME sweep as " + vna.measured_sparams()[0]
+        base = 10 if primary else 14 + 3 * n
+        for qid, quantity, label, help in (
+                ("s", "s", f"S-parameter {sp}",
+                 f"Complex {sp} as measured (raw: line loss and delay included){same}. "
+                 f"Stored as s_{key}_real / _imag."),
+                # "Permeability": the word the old LabVIEW program used. The
+                # detector an FMR measurement is after has to be findable by the
+                # name it is known by, not only by its definition.
+                ("u", "u", f"Permeability u = ({sp} - {sp}_ref)/{sp}_ref",
+                 f"{sp} relative to the brain's reference: the cables cancel and only "
+                 f"the sample remains. Refused (the scan stops) with no reference, one "
+                 f"taken on another sweep, or one without {sp}."),
+                # The logarithmic form: S = A exp(i eta chi) through a line with a
+                # film on it, so ln(S/S_ref) IS the susceptibility up to the
+                # constant eta, at any line depth (u is the small-signal limit).
+                # No prefactor: eta belongs to the waveguide and the film.
+                ("ln_ratio", "ln", f"ln({sp} / {sp}_ref)",
+                 f"Complex logarithm of {sp} over the reference's {sp}: proportional "
+                 f"to the susceptibility at any line depth (u is its small-signal "
+                 f"limit). Principal branch: the imaginary part wraps at +-pi. "
+                 f"Refused, like u, with no matching reference.")):
+            extra = {}
+            if primary:
+                extra["stream"] = {"group": "trace", "channel": quantity}
             out.append(_p(
                 f"{qid}_{key}", label, "indicator", "array", group="Measurement",
-                order=order, acquire=acquire, dtype="complex", shape=["freq"],
-                dims=freq_dim,
+                order=base + ("s", "u", "ln_ratio").index(qid), acquire=acquire,
+                dtype="complex", shape=["freq"], dims=freq_dim,
                 read={"verb": "get_trace", "key": quantity,
                       "args": {"which": "sample", "quantity": quantity, "sparam": sp}},
-                help=help))
+                help=help, **extra))
     return out
 
 
@@ -257,40 +281,7 @@ def build_manifest(vna) -> dict:
            help="Sweep on its own between acquisitions, like a front panel."),
 
         # -- measurement: the scan detectors (one acquisition feeds all of them) ------
-        _p("s", f"S-parameter ({sparam})", "indicator", "array", group="Measurement",
-           order=10, acquire=acquire, dtype="complex", shape=["freq"], dims=freq_dim,
-           read={"verb": "get_trace", "key": "s",
-                 "args": {"which": "sample", "quantity": "s"}},
-           stream={"group": "trace", "channel": "s"},
-           help="Complex S-parameter as measured (raw: line loss and delay included). "
-                "Stored as s_real / s_imag."),
-        # The label carries the word the old LabVIEW program used ("Permeability,
-        # Real/Imag") as well as the formula: this is the detector an FMR
-        # measurement is actually after, and it has to be findable by the name
-        # it is known by, not only by its definition.
-        _p("u", "Permeability u = (S - S_ref)/S_ref", "indicator", "array", group="Measurement",
-           order=11, acquire=acquire, dtype="complex", shape=["freq"], dims=freq_dim,
-           read={"verb": "get_trace", "key": "u",
-                 "args": {"which": "sample", "quantity": "u"}},
-           stream={"group": "trace", "channel": "u"},
-           help="The trace relative to the brain's reference: the cables cancel and "
-                "only the sample remains. Refused (the scan stops) with no reference "
-                "or one taken with another S-parameter or sweep."),
-        # The logarithmic form of the same measurement. S = A exp(i eta chi)
-        # through a line with a film on it, so ln(S/S_ref) IS the susceptibility
-        # up to the constant eta -- exactly, not only for a shallow line, where
-        # u ~ ln(1 + u). No prefactor: eta belongs to the waveguide and the
-        # film, and a made-up one would produce confident numbers in no units.
-        _p("ln_ratio", "ln(S / S_ref)", "indicator", "array", group="Measurement",
-           order=12, acquire=acquire, dtype="complex", shape=["freq"], dims=freq_dim,
-           read={"verb": "get_trace", "key": "ln",
-                 "args": {"which": "sample", "quantity": "ln"}},
-           stream={"group": "trace", "channel": "ln"},
-           help="Complex logarithm of the trace over the reference: proportional "
-                "to the susceptibility at any line depth (u is its small-signal "
-                "limit). Principal branch, so the imaginary part wraps at +-pi. "
-                "Refused, like u, with no matching reference."),
-        *_extra_channels(vna, acquire, freq_dim),
+        *_trace_channels(vna, acquire, freq_dim),
         *_point_channels(vna, acquire, sparam),
         _p("streaming", "Streaming (fly scan)", "indicator", "bool", group="Measurement",
            order=19, read_path=["streaming"],
