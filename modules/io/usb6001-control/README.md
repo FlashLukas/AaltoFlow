@@ -42,6 +42,11 @@ a photodiode (differential), ai2 a Hall probe in mT, ai3 a second photodiode,
 and p0.0 the magnet's polarity relay as an output. Copy it to `usb6001.ini`
 next to `module.toml` and restart the service.
 
+It also measures an antenna's DC resistance through a bias tee (`[resistance]`):
+AO0 drives it through a reference resistor, AI4 reads the node in between, and
+both polarities cancel the offset. Wiring:
+[docs/antenna_resistance_wiring.svg](docs/antenna_resistance_wiring.svg).
+
 ## Run
 
 ```powershell

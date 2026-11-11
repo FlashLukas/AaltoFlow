@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="360" viewBox="0 0 680 360" role="img">
+<style>
+svg { background: #ffffff; font-family: "Segoe UI", Arial, sans-serif; }
+.th { font-size: 14px; font-weight: 600; fill: #222222; }
+.ts { font-size: 12px; fill: #444444; }
+.box > rect { fill: #f4f4f2; stroke: #888780; }
+.c-purple > rect { fill: #EEEDFE; stroke: #534AB7; }
+.c-purple > text { fill: #3C3489; }
+.c-amber > rect { fill: #FAEEDA; stroke: #854F0B; }
+</style>
+
+<title>Antenna resistance wiring on the USB-6001</title>
+<desc>AO0 drives the antenna through a 2.2 kilohm reference resistor and the DC port of a bias tee. AI4 measures the voltage at the node between the resistor and the bias tee. The bias tee's capacitor passes RF to the VNA, and the antenna returns to ground.</desc>
+<g class="box"><rect x="30" y="50" width="120" height="230" rx="8" stroke-width="0.5"/></g>
+<text class="th" x="90" y="72" text-anchor="middle" dominant-baseline="central">USB-6001</text>
+<text class="ts" x="142" y="100" text-anchor="end" dominant-baseline="central">AO0 ±9 V</text>
+<text class="ts" x="142" y="170" text-anchor="end" dominant-baseline="central">AI4 (RSE)</text>
+<text class="ts" x="142" y="250" text-anchor="end" dominant-baseline="central">GND</text>
+<path d="M150 100 H200" stroke="#333333" stroke-width="1.2" fill="none"/>
+<g class="box"><rect x="200" y="90" width="70" height="20" rx="3" stroke-width="0.8"/></g>
+<text class="ts" x="235" y="78" text-anchor="middle" dominant-baseline="central">R_ref 2.2 kΩ</text>
+<text class="ts" x="235" y="126" text-anchor="middle" dominant-baseline="central">I ≈ ±4 mA</text>
+<path d="M270 100 H400" stroke="#333333" stroke-width="1.2" fill="none"/>
+<circle cx="330" cy="100" r="3.5" fill="#333333"/>
+<text class="ts" x="330" y="84" text-anchor="middle" dominant-baseline="central">sense</text>
+<path d="M150 170 H330 V104" stroke="#BA7517" stroke-width="1.2" fill="none"/>
+<rect x="400" y="56" width="140" height="174" rx="8" fill="none" stroke="#333333" stroke-width="0.8" stroke-dasharray="4 3"/>
+<text class="th" x="470" y="74" text-anchor="middle" dominant-baseline="central">Bias tee</text>
+<text class="ts" x="408" y="116" dominant-baseline="central">DC</text>
+<path d="M400 100 H420 a7.5 7.5 0 0 1 15 0 a7.5 7.5 0 0 1 15 0 a7.5 7.5 0 0 1 15 0 a7.5 7.5 0 0 1 15 0 H510 V190" stroke="#333333" stroke-width="1.2" fill="none"/>
+<text class="ts" x="450" y="118" text-anchor="middle" dominant-baseline="central">L</text>
+<circle cx="510" cy="190" r="3.5" fill="#333333"/>
+<path d="M510 190 H470 V200" stroke="#333333" stroke-width="1.2" fill="none"/>
+<path d="M456 200 H484 M456 208 H484" stroke="#333333" stroke-width="2" fill="none"/>
+<text class="ts" x="494" y="205" dominant-baseline="central">C</text>
+<path d="M470 208 V250" stroke="#333333" stroke-width="1.2" fill="none"/>
+<g class="c-purple"><rect x="420" y="250" width="100" height="34" rx="6" stroke-width="0.5"/>
+<text class="th" x="470" y="267" text-anchor="middle" dominant-baseline="central">To VNA</text></g>
+<path d="M510 190 H585 V205" stroke="#333333" stroke-width="1.2" fill="none"/>
+<text class="ts" x="557" y="178" text-anchor="middle" dominant-baseline="central">RF+DC</text>
+<g class="c-amber"><rect x="575" y="205" width="20" height="55" rx="3" stroke-width="0.8"/></g>
+<text class="ts" x="604" y="226" dominant-baseline="central">Antenna</text>
+<text class="ts" x="604" y="242" dominant-baseline="central">~15 Ω</text>
+<path d="M585 260 V320 H175 V250 H150" stroke="#333333" stroke-width="1.2" fill="none"/>
+<path d="M380 320 V330 M368 330 H392 M372 335 H388 M376 340 H384" stroke="#333333" stroke-width="1.2" fill="none"/>
+</svg>
