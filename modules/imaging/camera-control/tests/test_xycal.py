@@ -271,3 +271,58 @@ def test_wait_arrived_waits_for_the_step_counters_not_a_stale_moving_flag():
     st.wait_arrived(timeout_s=5)
     assert link.pos == [60, 0], "returned before the stage got there"
     assert time.monotonic() - t0 > 0.03
+
+
+def test_a_correction_below_half_a_step_is_not_a_stall(tracked):
+    """Blue Box 2026-11-11 (issue A): 0.44 um Agilis steps; near the target a
+    correction rounds to 0 steps, nothing moves, and the stall guard stopped
+    the stabiliser. A move below half a step is now 'as close as it gets'."""
+    brain = tracked
+    step = 1.0                                           # um per step, coarse
+    real_move = brain.xy.move_xy
+    x0, y0 = brain.xy.read_xy()
+    brain.xy.move_xy = lambda x, y: real_move(x0 + round((x - x0) / step) * step,
+                                              y0 + round((y - y0) / step) * step)
+    brain.xy.step_sizes = lambda: {"+X": step, "-X": step, "+Y": step, "-Y": step}
+    # the point ends 1 um away on the 1 um grid: each correction asks for
+    # 0.45 x 1 um = 0.45 steps (> 1 px, so the old guard counted it) -> 0 steps
+    brain.cfg.stabilizer.gain = 0.45
+    brain.cfg.stabilizer.stable_radius_um = 0.3
+    sc = brain.cfg.scanning
+    brain.set_selected_index(sc.points_x - 1, sc.points_y - 1)
+    brain.set_stabilize(True)
+    assert _wait(lambda: brain.status().stabilize_on)
+    time.sleep(4.0)                                      # many 0-step corrections
+    assert brain._stab_asked_steps is not None and brain._stab_asked_steps < 0.5
+    assert brain.status().stabilize_on
+    assert not any("STOPPED" in msg for _lvl, msg in brain.events)
+
+
+def test_a_slow_walk_away_stops_the_stabiliser(tracked):
+    """Blue Box 2026-11-11 (issue B): a wrong map at 10 % correction grew the
+    distance only 10-15 % per correction (3.95 -> 12.5 um) and the >20 %
+    rule never fired. Three growths in a row now stop it."""
+    brain = tracked
+    brain.cfg.hardware.xy_map = "-X-Y"
+    brain.cfg.stabilizer.gain = 0.1
+    sc = brain.cfg.scanning
+    brain.set_selected_index(sc.points_x - 1, sc.points_y - 1)
+    brain.set_stabilize(True)
+    assert _wait(lambda: brain.status().stabilize_on)
+    assert _wait(lambda: not brain.status().stabilize_on, timeout=40), \
+        "the stabiliser kept walking the sample away"
+    assert any("STOPPED" in msg and "away from the laser" in msg for _l, msg in brain.events)
+
+
+def test_the_camera_service_prints_its_warnings(capsys):
+    """Blue Box 2026-11-11: 'stabiliser STOPPED' and the limit-switch warning
+    never reached the launcher log; warn/error events are printed now."""
+    from camera.net.service import CameraService
+    cfg = Config()
+    brain, *_ = build_sim_system(cfg)
+    svc = CameraService(brain, host="127.0.0.1", cmd_port=15796, pub_port=15797)
+    svc._event("warn", "test warning µ")
+    svc._event("info", "not printed")
+    out = capsys.readouterr().out
+    assert "camera WARN: test warning ?" in out and "not printed" not in out
+    assert out.isascii()

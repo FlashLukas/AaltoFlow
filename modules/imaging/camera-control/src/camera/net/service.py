@@ -108,9 +108,7 @@ class CameraService:
             raise PortInUse(
                 f"cannot listen on {cmd_addr} / {pub_addr} ({exc}); "
                 f"is another service already using these ports?") from exc
-        self.brain._on_event = lambda level, msg: self._events.put(
-            {"level": level, "msg": msg}
-        )
+        self.brain._on_event = self._event
         try:
             self.brain.start()
         except BaseException:
@@ -140,6 +138,17 @@ class CameraService:
             self.brain.shutdown(keep_outputs=self._keep_outputs)
         except Exception:
             pass
+
+    def _event(self, level: str, msg: str) -> None:
+        """An event from the brain: published to every subscriber, and a
+        warning or error ALSO printed, so it lands in the launcher's log pane
+        and its daily file (Blue Box, 2026-11-11: "stabiliser STOPPED: ..."
+        and the limit-switch warning were invisible there). ASCII only
+        (gotcha #14: the launcher reads stdout through a cp1252 pipe)."""
+        self._events.put({"level": level, "msg": msg})
+        if level in ("warn", "error"):
+            text = str(msg).encode("ascii", "replace").decode("ascii")
+            print(f"camera {level.upper()}: {text}", flush=True)
 
     def serve_forever(self) -> None:
         self.start()

@@ -496,7 +496,12 @@ class Camera:
         # moved the image < 25 % of that
         self._stab_last_avg = None
         self._stab_asked_px = 0.0
+        self._stab_asked_steps = None     # the last correction in stage steps
         self._stab_stalled = 0
+        # the slow walk-away: corrections in a row that grew the distance at
+        # all, and the distance when this target was first corrected
+        self._stab_grow = 0
+        self._stab_start_dist: float | None = None
         self._objectives = OBJ.load_objectives(self.cfg.image.objectives_file)
         self._apply_objective(self.cfg.image.objective_name, quiet=True)
         self._last_frame: np.ndarray | None = None    # processed grayscale
@@ -1649,13 +1654,33 @@ class Camera:
             self._stab_away += 1
         else:
             self._stab_away = 0
+        # ... and a SLOW walk-away (Blue Box, 2026-11-11: at 10 % correction a
+        # wrong map grew the distance only 10-15 % per correction, 3.95 -> 12.5
+        # um, and the >20 % rule never fired): three growths in a row of any
+        # size, or 1.5x the distance this target started at -- counted only
+        # outside twice the stable radius, where noise does not decide
+        if self._stab_start_dist is None:
+            self._stab_start_dist = dist
+        far = dist > 2.0 * radius
+        if prev is not None and far and dist > 1.02 * prev:
+            self._stab_grow += 1
+        elif prev is not None and dist <= prev:
+            self._stab_grow = 0
         self._stab_last_dist = dist
-        if self._stab_away < 2:
+        start = self._stab_start_dist
+        if self._stab_away >= 2:
+            how = f"twice in a row by more than 20 % (now {dist:.2f} um, was {prev:.2f} um)"
+        elif self._stab_grow >= 3:
+            how = (f"for 3 corrections in a row (now {dist:.2f} um, "
+                   f"{start:.2f} um when it started)")
+        elif far and dist > 1.5 * start and dist > start + 2.0 * radius:
+            how = f"to {dist:.2f} um, 1.5x the {start:.2f} um it started from"
+        else:
             return False
-        self._stop_stabiliser(f"it moved the sample away from the laser twice in a row "
-                              f"(now {dist:.2f} um, was {prev:.2f} um). hardware.xy_map "
-                              f"({self.cfg.hardware.xy_map}) looks wrong -- run Calibrate "
-                              f"stage (Positioner tab)")
+        self._stop_stabiliser(f"it moved the sample away from the laser {how}. "
+                              f"hardware.xy_map ({self.cfg.hardware.xy_map}) looks wrong "
+                              f"-- run Calibrate stage (Positioner tab) -- or the sample "
+                              f"drifts faster than the correction")
         return True
 
     def _stop_stabiliser(self, why: str) -> None:
@@ -1663,6 +1688,7 @@ class Camera:
         self._stabilize_on = False
         self._stab_last_dist, self._stab_away = None, 0
         self._stab_last_avg, self._stab_stalled = None, 0
+        self._stab_grow, self._stab_start_dist = 0, None
         self._avg_buf.clear()
         self._emit("error", "stabiliser STOPPED: " + why)
 
@@ -1702,9 +1728,15 @@ class Camera:
                         f"limit_switch_action = warn (Positioner tab) if the flag is wrong")
                     return True
         prev, asked = self._stab_last_avg, self._stab_asked_px
+        prev_steps = self._stab_asked_steps
         self._stab_last_avg = a.copy()
         self._stab_asked_px = float(np.hypot(*(gain * a)))
-        if prev is None or asked < 1.0:         # below a pixel: noise decides
+        self._stab_asked_steps = self._correction_in_steps(a, gain, move_x, move_y)
+        # Below a pixel noise decides; below HALF A STEP of the stage the move
+        # rounds to 0 steps and nothing moves by design -- as close as this
+        # stage gets, not a stall (Blue Box, 2026-11-11: 0.44 um Agilis steps,
+        # a 0.15 um correction near the target stopped the stabiliser)
+        if prev is None or asked < 1.0 or (prev_steps is not None and prev_steps < 0.5):
             self._stab_stalled = 0
             return False
         moved = float(np.hypot(*(a - prev)))
@@ -1726,6 +1758,29 @@ class Camera:
                    if flagged else ""))
             return True
         return False
+
+    def _correction_in_steps(self, avg_px, gain, move_x, move_y):
+        """The largest per-axis stage move this correction asks for, in the
+        stage's own STEPS (by the step size of the direction it goes), or
+        None when the stage does not publish step sizes (piezo)."""
+        from .config import image_um_to_stage
+        sizes = getattr(self.xy, "step_sizes", None)
+        if sizes is None:
+            return None
+        try:
+            ss = sizes()
+        except Exception:
+            return None
+        px = (float(self.cfg.image.pixel_size_x_um), float(self.cfg.image.pixel_size_y_um))
+        dux = -gain * avg_px[0] * px[0] if move_x else 0.0
+        duy = -gain * avg_px[1] * px[1] if move_y else 0.0
+        dX, dY = image_um_to_stage(dux, duy, self.cfg.hardware.xy_map)
+        steps = []
+        for ax, d in (("X", dX), ("Y", dY)):
+            size = ss.get(("+" if d >= 0 else "-") + ax) or 0.0
+            if size > 0:
+                steps.append(abs(d) / size)
+        return max(steps) if steps else None
 
     def stop_motion(self) -> dict:
         """ONE stop for everything the camera moves (Blue Box, 2026-11-11):
@@ -4583,6 +4638,7 @@ class Camera:
         self._settled_for = None
         self._stab_last_dist, self._stab_away = None, 0
         self._stab_last_avg, self._stab_stalled = None, 0
+        self._stab_grow, self._stab_start_dist = 0, None
         return bool(on)
 
     def set_continuous_focus(self, on: bool) -> bool:
@@ -4605,6 +4661,7 @@ class Camera:
         self._settled_for = None
         self._stab_last_dist, self._stab_away = None, 0    # a new target: new distance
         self._stab_last_avg, self._stab_stalled = None, 0
+        self._stab_grow, self._stab_start_dist = 0, None
         return (sc.selected_index_x, sc.selected_index_y)
 
     def set_laser_target(self, x: float | None = None, y: float | None = None) -> list:
