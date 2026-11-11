@@ -291,6 +291,10 @@ class Analyzer:
         self._reference: dict | None = None  # a latched sample trace + "taken_at"
         self._instrument: dict = {}          # what the analyser held at start (read_state)
         self._rf_on = None                   # RF output as last read (None = cannot say)
+        # The .ini that remembers this module's own choices (S-parameter,
+        # extra S-parameters, averages; config.CHOICES). None = not remembered
+        # (tests, the GUI's private simulator); run_service sets it.
+        self.choices_path = None
         self._stream: dict | None = None     # the fly-scan stream while it runs (stream_start)
         self._stream_id = 0
 
@@ -396,6 +400,7 @@ class Analyzer:
         v, clamped = _clamp(int(round(_finite(n, "averages"))), lim.averages_min, lim.averages_max)
         self.cfg.sweep.averages = int(v)
         self._changed(f"{int(v)} averages per acquisition", clamped)
+        self._remember_choices()
 
     def set_sparam(self, sparam: str) -> None:
         """Which S-parameter is measured. A change makes every later trace a
@@ -410,6 +415,7 @@ class Analyzer:
             # it is the primary now; measuring it twice would mean nothing
             self.cfg.sweep.extra_sparams = ",".join(sp for sp in extras if sp != sparam)
         self._changed(f"measuring {', '.join(self.measured_sparams())}", False)
+        self._remember_choices()
 
     def set_extra_sparams(self, sparams) -> None:
         """More S-parameters from the SAME sweep as `sparam` ("S11", "S11,S22"
@@ -423,6 +429,7 @@ class Analyzer:
                              "extra S-parameters need the simulator or a Copper Mountain")
         self.cfg.sweep.extra_sparams = ",".join(extras)
         self._changed(f"measuring {', '.join(self.measured_sparams())} in one sweep", False)
+        self._remember_choices()
 
     @property
     def multi_sparams(self) -> bool:
@@ -948,6 +955,7 @@ class Analyzer:
             self._build_field()
             self._refresh_live()
         self._changed("settings applied", False)
+        self._remember_choices()
 
     # ---- the sweep thread -------------------------------------------------------------------
 
@@ -1263,7 +1271,10 @@ class Analyzer:
             setattr(sw, attr, v)
             read[attr] = v
         sp = state.get("sparam")
-        if isinstance(sp, str) and sp.upper() in SPARAMS:
+        remembered = "sparam" in self._saved_choices()
+        if remembered:
+            pass    # this module's own choice (vna.ini) wins over S2VNA's screen
+        elif isinstance(sp, str) and sp.upper() in SPARAMS:
             sw.sparam = sp.upper()
         elif "sparam" in state:
             self._emit("warn", "the analyser's active measurement is not an S-parameter; "
@@ -1335,6 +1346,25 @@ class Analyzer:
         if not (math.isfinite(float(self.cfg.line.point_dwell_ifbw))
                 and float(self.cfg.line.point_dwell_ifbw) > 0):
             self.cfg.line.point_dwell_ifbw = 1.2
+
+    def _saved_choices(self) -> set:
+        if not self.choices_path:
+            return set()
+        from .config import saved_choices
+        return saved_choices(self.choices_path)
+
+    def _remember_choices(self) -> None:
+        """Keep sparam / extra_sparams / averages in the .ini (config.CHOICES):
+        a restart starts with them instead of the analyser's screen. A failed
+        write is reported, never raised: the setting itself took effect."""
+        if not self.choices_path:
+            return
+        from .config import save_choices
+        try:
+            save_choices(self.choices_path, self.cfg.sweep)
+        except OSError as exc:
+            self._emit("warn", f"could not remember the measurement choices in "
+                               f"{self.choices_path}: {exc}")
 
     def _report_new_backend_warnings(self) -> None:
         """A backend notes things as it goes (`warnings`, e.g. "S2VNA was

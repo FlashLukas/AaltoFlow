@@ -24,6 +24,7 @@ are:
 from __future__ import annotations
 
 import configparser
+import os
 from dataclasses import dataclass, asdict, fields
 
 
@@ -321,6 +322,47 @@ class Config:
                 values[f.name] = _cast(section[f.name], f.type)
             kwargs[name] = klass(**values)
         return cls(**kwargs)
+
+
+# ---- the module's OWN measurement choices, remembered between runs ------------
+#
+# Blue Box, 2026-11-11: after a restart IFBW was kept (S2VNA holds it and the
+# brain adopts it) but the S-parameter went back to what S2VNA's screen showed
+# (the stop hands S2VNA its old traces back), "also measure" to empty and
+# averages to 1. Lukas: remember my choices. These three belong to THIS
+# module, not to the analyser, so they are kept in the module's own .ini and
+# win over the analyser's screen at start. Nothing is written to the analyser
+# at start: they apply at the first sweep, as every setting does.
+
+CHOICES = ("sparam", "extra_sparams", "averages")
+
+
+def saved_choices(path) -> set:
+    """Which of CHOICES the .ini at `path` holds (in [sweep])."""
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(path, encoding="utf-8")
+    except (OSError, configparser.Error):
+        return set()
+    if "sweep" not in parser:
+        return set()
+    return {k for k in CHOICES if k in parser["sweep"]}
+
+
+def save_choices(path, sweep) -> None:
+    """Write CHOICES of `sweep` into [sweep] of the .ini at `path`, keeping every
+    other key and section of the file (created if it does not exist)."""
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding="utf-8")
+    if "sweep" not in parser:
+        parser["sweep"] = {}
+    for k in CHOICES:
+        parser["sweep"][k] = str(getattr(sweep, k))
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("# vna-control configuration -- edit values, keep keys.\n")
+        parser.write(fh)
+    os.replace(tmp, path)               # never a half-written file
 
 
 def _cast(raw: str, type_name):

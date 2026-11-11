@@ -178,6 +178,9 @@ def main() -> int:
         cfg.hardware.cal_set = args.cal_set
 
     vna = build_analyzer(cfg, args.real)
+    # remember S-parameter, extra S-parameters and averages between runs, in
+    # the .ini this service reads (Blue Box, 2026-11-11; config.CHOICES)
+    vna.choices_path = config or str(default_ini)
     f = cfg.field
     where = {"mag2d": f"mag2d at {f.mag2d_host}:{f.mag2d_pub_port}",
              "mag2dcal": f"mag2dcal at {f.mag2dcal_host}:{f.mag2dcal_pub_port}",
