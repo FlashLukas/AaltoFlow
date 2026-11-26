@@ -66,6 +66,7 @@ import ssl
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -119,6 +120,36 @@ def normalise_base_url(url: str) -> str:
     return u.rstrip("/")
 
 
+def openable_url(url, base_url: str) -> str | None:
+    """`url` if it is a page of the configured eLabFTW instance, else None.
+
+    The "Open in eLabFTW" menu opens the URL stored in eln_uploads.json, a
+    file inside the DATA folder -- and data folders are shared. A link there
+    could name anything (a program on a share, a local file), and handing it
+    to the desktop would run it (security review 2026-11-26). So: http(s)
+    only, and only under the instance this PC is set up for."""
+    try:
+        base = normalise_base_url(base_url)
+    except ElabError:
+        return None
+    u = str(url or "")
+    p = urllib.parse.urlparse(u)
+    if p.scheme.lower() not in ("http", "https"):
+        return None
+    if not (u == base or u.startswith(base + "/")):
+        return None
+    return u
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: urllib's default handler re-sends the request's
+    headers -- the API key -- to the new address, even on another host. A
+    redirect then surfaces as an HTTPError (3xx) with a plain explanation."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class ElabClient:
     """A minimal eLabFTW API v2 client (urllib only).
 
@@ -134,6 +165,13 @@ class ElabClient:
         self._key = str(api_key).strip()
         self.verify_tls = bool(verify_tls)
         self.timeout = float(timeout)
+        # The key travels in a header with EVERY request, so (security review
+        # 2026-11-26): never over plain http to another PC -- anyone on the
+        # network path would read it -- (this PC is fine: the tests' server).
+        host = (urllib.parse.urlparse(self.base_url).hostname or "").lower()
+        if self.base_url.startswith("http://") and host not in ("localhost", "127.0.0.1", "::1"):
+            raise ElabError(f"refused {self.base_url}: the API key would travel unencrypted "
+                            f"over plain http -- use the https:// address of the instance")
         self._ctx = None
         if self.base_url.startswith("https://") and not self.verify_tls:
             # a self-signed certificate on an in-house server: the operator
@@ -141,6 +179,11 @@ class ElabClient:
             self._ctx = ssl.create_default_context()
             self._ctx.check_hostname = False
             self._ctx.verify_mode = ssl.CERT_NONE
+        # ... and never FOLLOW a redirect: urllib would re-send the header
+        # (the key) to wherever the server points, another host included.
+        # A redirect is reported instead (_NoRedirect).
+        self._opener = urllib.request.build_opener(
+            _NoRedirect(), urllib.request.HTTPSHandler(context=self._ctx))
 
     def __repr__(self) -> str:                 # never show the key
         return f"ElabClient({self.base_url!r}, api_key=<hidden>)"
@@ -166,7 +209,7 @@ class ElabClient:
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ctx) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 body = resp.read()
                 return resp.status, dict(resp.headers.items()), body
         except urllib.error.HTTPError as exc:
@@ -261,6 +304,10 @@ def _http_message(code: int, method: str, url: str, detail: str) -> str:
     elif code == 413:
         msg = "eLabFTW: the file is too large for the server (413)"
         hint = "the server's upload limit is lower than this file; do not attach the data file"
+    elif 300 <= code < 400:
+        msg = f"eLabFTW redirected the request ({code})"
+        hint = ("the address is not the instance's final one (http -> https, or a moved "
+                "server): put the address the browser ends up at into the Settings tab")
     elif code >= 500:
         msg = f"eLabFTW server error ({code})"
         hint = "try again later, or ask the instance's admin"

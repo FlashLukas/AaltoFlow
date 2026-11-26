@@ -17,6 +17,7 @@ a blocking `set` still blocks correctly -- the module states its own rule for
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 
@@ -766,16 +767,20 @@ def fill_placeholders(args: dict, context: dict | None) -> dict:
     when the action runs as a routine. Outside a scan (no context) they become
     "" and the module falls back to its own folder.
     """
+    # A plain {name} substitution, NOT str.format_map: format would also run
+    # "{data_dir.__class__}" (attribute lookup) and "{moment:>999999999}" (a
+    # gigabyte string) from a recipe someone sent you (security review
+    # 2026-11-26). Anything else in braces is sent as written.
     ctx = _Blank(context or {})
     out = {}
     for k, v in (args or {}).items():
         if isinstance(v, str) and "{" in v:
-            try:
-                v = v.format_map(ctx)
-            except (ValueError, IndexError):      # a stray brace: send it as it is
-                pass
+            v = _NAME_PLACEHOLDER.sub(lambda m: str(ctx[m.group(1)]), v)
         out[k] = v
     return out
+
+
+_NAME_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _action_from(d: dict, inst: Instrument, aid: str, on_warn) -> Action:

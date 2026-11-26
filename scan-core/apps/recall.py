@@ -33,6 +33,8 @@ from scan_core import run_info
 from scan_core.snapshot import (MISSING, all_settings, diff_config,
                                 partial_config, path_text, read_snapshot,
                                 recallable, same_value, value_text)
+from suite_common.control import is_safety_setting
+
 from apps.theme import C
 
 #: Shown in the dialog: what a recall can and cannot promise.
@@ -253,6 +255,12 @@ class RecallDialog(QtWidgets.QDialog):
                         it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
                         it.setCheckState(0, QtCore.Qt.Checked if (slug, path) in self.ticked
                                          else QtCore.Qt.Unchecked)
+                        if is_safety_setting(path):
+                            # limits / hardware / file names: tick by hand only
+                            it.setForeground(0, QtGui.QBrush(QtGui.QColor(C["danger"])))
+                            it.setToolTip(0, "a SAFETY setting (limits, hardware address, "
+                                             "file names): not ticked by 'select all'; "
+                                             "check the value before you send it")
                     else:
                         it.setFlags(it.flags() & ~QtCore.Qt.ItemIsUserCheckable)
                         for col in range(3):
@@ -327,8 +335,15 @@ class RecallDialog(QtWidgets.QDialog):
         self.select_all(slug)
 
     def select_all(self, slug: str) -> None:
+        # Never the SAFETY settings (security review 2026-11-26): a measurement
+        # file from someone else could carry wider limits or another hardware
+        # address, and one "select all" + Apply would send them. They stay
+        # tickable one by one, marked in red.
         for it in self.setting_items(slug):
             if it.flags() & QtCore.Qt.ItemIsUserCheckable:
+                key = it.data(0, ROLE_KEY)
+                if key and is_safety_setting(key[1]):
+                    continue
                 it.setCheckState(0, QtCore.Qt.Checked)
 
     def clear_ticks(self) -> None:
@@ -362,8 +377,13 @@ class RecallDialog(QtWidgets.QDialog):
             flat_d = {p: (a, b) for p, a, b in all_settings(saved, current)}
             for p in paths:
                 a, b = flat_d.get(p, (MISSING, MISSING))
-                lines.append(f"    {path_text(p)}: {value_text(b, 30)} -> {value_text(a, 30)}")
+                mark = "!! " if is_safety_setting(p) else "   "
+                lines.append(f" {mark}{path_text(p)}: {value_text(b, 30)} -> {value_text(a, 30)}")
+        safety = any(is_safety_setting(p) for ps in self._ticked_by_slug().values() for p in ps)
         text = ("These settings will be sent:\n\n" + "\n".join(lines)
+                + ("\n\n!! = a SAFETY setting (limits, hardware address, file names). "
+                   "Check each one: they decide what the instrument may do."
+                   if safety else "")
                 + "\n\n" + HELP_TEXT + "\n\nApply?")
         if not self.confirm("Recall settings", text):
             return self.results

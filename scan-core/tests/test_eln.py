@@ -320,3 +320,23 @@ def test_cli_upload(fake, run_file, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(eln.KEY_ENV, "bad")
     rc = eln.main(["--url", fake.url, "test"])
     assert rc == 2 and "401" in capsys.readouterr().err
+
+
+# ------------------------------------------- security review 2026-11-26 ----
+
+def test_the_key_never_goes_over_plain_http_to_another_pc():
+    with pytest.raises(eln.ElabError, match="unencrypted"):
+        eln.ElabClient("http://eln.example.org", "key")
+    eln.ElabClient("http://127.0.0.1:9", "key")          # this PC: the tests' server
+    eln.ElabClient("https://eln.example.org", "key")
+
+
+def test_only_pages_of_the_instance_are_opened():
+    base = "https://eln.example.org"
+    good = base + "/experiments.php?mode=view&id=7"
+    assert eln.openable_url(good, base) == good
+    for bad in ("file://evil/share/x.exe", "C:/Windows/System32/calc.exe",
+                "https://eln.example.org.evil.com/x", "https://other.org/experiments.php",
+                "javascript:alert(1)", ""):
+        assert eln.openable_url(bad, base) is None, bad
+    assert eln.openable_url(good, "") is None                # no instance configured

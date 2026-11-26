@@ -382,10 +382,36 @@ def _entries_list(entries) -> list[dict]:
 
 
 def _recipe_dict(recipe) -> dict:
-    """A Recipe (or a dict) as plain JSON data (numbers, not numpy)."""
+    """A Recipe (or a dict) as plain JSON data (numbers, not numpy), with
+    every file axis's values put in (inline_files)."""
     if isinstance(recipe, dict):
-        return json.loads(json.dumps(recipe, default=float))
-    return json.loads(recipe.to_json())
+        d = json.loads(json.dumps(recipe, default=float))
+    else:
+        d = json.loads(recipe.to_json())
+    return inline_files(d)
+
+
+def inline_files(d):
+    """`d` with every `path` spec (a file axis, a zip member, a raster side)
+    replaced by the `values` it holds, read HERE. The server runs the scan on
+    ANOTHER PC: there the path would name a different file, or none -- and it
+    refuses a definition from another PC that reads files on its disk
+    (scan_server.recipe_file_refs)."""
+    from .recipe import _values_from_spec
+
+    def walk(x):
+        if isinstance(x, dict):
+            if isinstance(x.get("path"), str) and x["path"].strip():
+                vals = _values_from_spec({"path": x["path"]})
+                x = {k: v for k, v in x.items() if k != "path"}
+                x["values"] = [v.item() if hasattr(v, "item") else v for v in vals]
+                if x.get("type") == "file":
+                    x["type"] = "array"
+            return {k: walk(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [walk(v) for v in x]
+        return x
+    return walk(d)
 
 
 __all__ = ["ScanServerClient", "ScanServerError", "ControlRefused"]

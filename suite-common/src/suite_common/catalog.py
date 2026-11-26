@@ -31,6 +31,7 @@ import fnmatch
 import json
 import os
 import hashlib
+import re
 import shutil
 import tempfile
 import tomllib
@@ -526,7 +527,8 @@ def write_pack_json(dest: Path, modules: list[ModuleSpec], commit: str,
 #: Where the suite's modules are published: the catalog of the newest GitHub
 #: release. "releases/latest/download/<file>" always points at the newest
 #: release, so this address never changes. A lab can mirror a release on a
-#: share and point the setting `catalog_url` there instead (file:// or http://).
+#: share and point the setting `catalog_url` there instead (a folder or https://;
+#: plain http is refused, see _check_scheme).
 DEFAULT_CATALOG_URL = ("https://github.com/FlashLukas/AaltoFlow/releases/latest/"
                        "download/catalog.json")
 
@@ -548,7 +550,25 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+def _check_scheme(url: str) -> None:
+    """https and file (a mirror on a share) only; plain http only to this PC
+    (the tests' local server). Why (security review 2026-11-26): over plain
+    http anyone on the way can swap BOTH the catalog and the packs, and the
+    SHA-256 in that catalog then vouches for the swapped pack -- a module is a
+    program, so that is code running here."""
+    p = urllib.parse.urlparse(url)
+    scheme = (p.scheme or "").lower()
+    if scheme in ("https", "file"):
+        return
+    if scheme == "http" and (p.hostname or "").lower() in ("localhost", "127.0.0.1", "::1"):
+        return
+    raise CatalogError(f"refused {url}: only https:// or a folder (a share) is accepted "
+                       "for modules -- over plain http anyone on the network path could "
+                       "swap the files")
+
+
 def _open(url: str, timeout: float):
+    _check_scheme(url)
     req = urllib.request.Request(url, headers={"User-Agent": f"{PRODUCT}-module-installer"})
     try:
         return urllib.request.urlopen(req, timeout=timeout)
@@ -583,8 +603,22 @@ def fetch_catalog(url: str = DEFAULT_CATALOG_URL, timeout: float = 20) -> dict:
 
 def asset_url(catalog: dict, file: str) -> str:
     """A download's address, RELATIVE to the catalog -- so a mirrored folder
-    works without editing the catalog."""
-    return urllib.parse.urljoin(catalog["_url"], file)
+    works without editing the catalog.
+
+    `file` must be a plain file NAME next to the catalog: it is also used as
+    the local file name, and "../x" or "C:/..." there would have written the
+    download anywhere on this PC; an absolute URL would have fetched it from
+    any host (security review 2026-11-26)."""
+    name = str(file or "")
+    if (not name or name != Path(name).name or "/" in name or "\\" in name
+            or ":" in name or name in (".", "..")):
+        raise CatalogError(f"the catalog names a download {file!r}: not a plain file "
+                           "name next to the catalog -- refused")
+    url = urllib.parse.urljoin(catalog["_url"], name)
+    a, b = urllib.parse.urlparse(catalog["_url"]), urllib.parse.urlparse(url)
+    if (a.scheme, a.netloc) != (b.scheme, b.netloc):
+        raise CatalogError(f"the catalog names a download on another host ({url}) -- refused")
+    return url
 
 
 def spec_from_entry(entry: dict) -> ModuleSpec:
@@ -614,6 +648,11 @@ def download(url: str, dest: Path, sha256: str | None = None, size: int | None =
     is called per chunk; `cancelled()` returning True stops it.
     """
     dest = Path(dest)
+    # A missing or empty hash used to SKIP the check (and the dialog still
+    # said "verified"): now every download must name its 64-hex SHA-256.
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(sha256 or "")):
+        raise CatalogError(f"{dest.name}: the catalog gives no valid SHA-256 for it, "
+                           "so it cannot be checked -- refused")
     part = dest.with_name(dest.name + ".part")
     h = hashlib.sha256()
     done = 0
@@ -629,6 +668,9 @@ def download(url: str, dest: Path, sha256: str | None = None, size: int | None =
                 fh.write(chunk)
                 h.update(chunk)
                 done += len(chunk)
+                if size and done > int(size):          # the catalog's size is exact
+                    raise CatalogError(f"{dest.name}: larger than the catalog says "
+                                       f"({int(size)} bytes) -- refused")
                 if progress is not None:
                     progress(done, total)
         if sha256 and h.hexdigest() != sha256.lower():

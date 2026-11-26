@@ -1319,6 +1319,14 @@ class AddModuleDialog(QtWidgets.QDialog):
         self.build_lbl = QtWidgets.QLabel(); self.build_lbl.setObjectName("meta")
         self.build_lbl.setWordWrap(True)
         v.addWidget(self.build_lbl)
+        # Security review 2026-11-26: a module is a PROGRAM -- installing it
+        # (building its environment) already runs code from it. Say so here.
+        trust = QtWidgets.QLabel(
+            "A module is a program: building its environment and starting it run "
+            "its code on this PC. Install modules only from a source you trust (the "
+            "official release, or a pack from a colleague you know).")
+        trust.setObjectName("meta"); trust.setWordWrap(True)
+        v.addWidget(trust)
 
         self.logbox = QtWidgets.QPlainTextEdit(); self.logbox.setReadOnly(True)
         v.addWidget(self.logbox, 2)
@@ -1568,7 +1576,13 @@ class AddModuleDialog(QtWidgets.QDialog):
         for k in keys:
             kind = self._kind(k)
             dl = self._entry(k)["downloads"][kind]
-            jobs.append((k, asset_url(self.catalog, dl["file"]), dl))
+            try:
+                # asset_url refuses a file name that is a path or another host
+                jobs.append((k, asset_url(self.catalog, dl["file"]), dl))
+            except CatalogError as exc:
+                self._dl_note.emit(f"{k}: {exc}")
+        if not jobs:
+            return
         self._dl_tmp = tempfile.TemporaryDirectory(prefix="aaltoflow_dl_")
         tmp = Path(self._dl_tmp.name)
         self._busy_net, self._cancel = True, False
@@ -1587,7 +1601,7 @@ class AddModuleDialog(QtWidgets.QDialog):
                             last[0] = pct
                             self._dl_note.emit(f"   {pct} %")
                 try:
-                    got.append((key, download(url, tmp / dl["file"], dl["sha256"],
+                    got.append((key, download(url, tmp / Path(dl["file"]).name, dl["sha256"],
                                               dl["size"], progress,
                                               cancelled=lambda: self._cancel)))
                     self._dl_note.emit(f"   verified (SHA-256)")

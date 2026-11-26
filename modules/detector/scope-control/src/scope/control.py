@@ -102,6 +102,10 @@ KINDS = ("gui", "script", "machine")
 #   names a file. Change them at the instrument. Sending the SAME values is
 #   fine, so a remote Settings dialog that sends the whole config still works
 #   as long as it leaves these alone.
+# * an ADDRESS of another program (camera_host, a follow endpoint): from
+#   another PC it would point the instrument at a fake camera or source.
+# * ``shutdown`` with keep_outputs, and from a PC that does not hold control
+#   a plain ``shutdown`` (shutdown_refusal).
 #
 # "Own PC" is decided by the KEY that sent the message (secure.Guard.check
 # stamps req["_origin"]), so it needs encryption on. A service that is not
@@ -111,6 +115,12 @@ KINDS = ("gui", "script", "machine")
 ORIGIN_KEY = "_origin"
 #: request arguments that name a file or folder on the service's PC
 PATH_ARGS = ("path", "folder", "file", "filename", "dir", "directory")
+#: request arguments that point the service at ANOTHER program on the network
+#: (kim's start_px_calibration{camera_host}, hf2's set_follow{endpoint}): from
+#: another PC they would let it substitute a fake camera / source of its own
+ADDRESS_ARGS = ("endpoint", "host")
+#: argument-name endings treated the same way (camera_host, out_path...)
+ARG_SUFFIXES = ("_host", "_path", "_file", "_folder", "_dir")
 #: config groups that only the own PC may change (also "limits_1", "limits_2"...)
 PROTECTED_GROUPS = ("limits", "hardware", "interlock", "safety")
 #: config keys (in any group) that name a file or folder
@@ -125,8 +135,8 @@ def from_other_pc(req) -> bool:
 def _own_pc_only(what: str) -> dict:
     return {"ok": False, "refused": "own_pc",
             "error": f"refused: {what} is only accepted from the instrument's own PC "
-                     f"(security: a file path or a safety setting from another PC "
-                     f"could overwrite files or widen the limits). Do it on the PC "
+                     f"(security: from another PC it could overwrite files, widen "
+                     f"the limits or leave an output unsupervised). Do it on the PC "
                      f"the service runs on."}
 
 
@@ -135,10 +145,28 @@ def path_refusal(req) -> dict | None:
     An EMPTY path/folder is fine: it means "the service's own default"."""
     if not from_other_pc(req):
         return None
-    for k in PATH_ARGS:
-        v = req.get(k)
+    for k, v in req.items():
+        if not (k in PATH_ARGS or k in ADDRESS_ARGS or str(k).endswith(ARG_SUFFIXES)):
+            continue
         if v not in (None, "") and not (isinstance(v, str) and not v.strip()):
-            return _own_pc_only(f"{req.get('cmd')!r} with a file path ({k})")
+            what = "an address" if (k in ADDRESS_ARGS or str(k).endswith("_host")) \
+                else "a file path"
+            return _own_pc_only(f"{req.get('cmd')!r} with {what} ({k})")
+    return None
+
+
+def shutdown_refusal(req, holds_control: bool) -> dict | None:
+    """``shutdown`` is always allowed -- from the instrument's own PC (the
+    launcher's clean stop, gotcha #25). From ANOTHER PC only the holder of
+    control may stop a service, and never with ``keep_outputs``: that stops
+    the program that supervises a magnet's current or a laser's emission
+    while leaving the output on, with nothing watching it any more."""
+    if not from_other_pc(req):
+        return None
+    if req.get("keep_outputs") not in (None, False, "", "false", "False", 0):
+        return _own_pc_only("'shutdown' with keep_outputs (output left on, unsupervised)")
+    if not holds_control:
+        return _own_pc_only("'shutdown' from a PC that does not hold control")
     return None
 
 
@@ -146,6 +174,14 @@ def _protected(group: str, key: str) -> bool:
     g = str(group).lower()
     return (g in PROTECTED_GROUPS or g.startswith(tuple(p + "_" for p in PROTECTED_GROUPS))
             or str(key).lower().endswith(PATH_SUFFIXES))
+
+
+def is_safety_setting(path) -> bool:
+    """True for a config setting (a path like ("limits", "current_max_A")) in
+    the safety part that only the own PC may change -- also used to keep such
+    settings out of "select all" in scan-core's settings recall."""
+    path = tuple(path or ())
+    return bool(path) and _protected(path[0], path[-1])
 
 
 def _same(a, b) -> bool:
@@ -332,6 +368,10 @@ class ControlLease:
         with self._lock:
             self._expire(now)
             self._seen(ident, now)
+            if cmd == "shutdown":
+                refused = shutdown_refusal(req, self._holds(ident))
+                if refused is not None:
+                    return refused
 
             if cmd == "heartbeat":
                 return {"ok": True, "control": self._status_locked(now)}

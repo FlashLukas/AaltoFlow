@@ -471,6 +471,23 @@ still assumes piezo/zpiezo.
     every setter clamps to. A service that is not encrypted cannot tell who
     sent anything and behaves as before. A NEW module: call config_refusal in
     its set_config (the template modules do).
+    Also own-PC only (same day): an ADDRESS argument (`host`, `endpoint`,
+    any `*_host` -- kim's camera_host, hf2's follow endpoint: from another PC
+    they would point the instrument at a fake camera / source), and
+    `shutdown{keep_outputs}` (it would stop the program supervising a magnet's
+    current or a laser while the output stays on). A plain `shutdown` from
+    another PC needs control (`shutdown_refusal`); from the own PC (the
+    launcher) it is always allowed, as gotcha #25 needs.
+  - **No fallback to plain under "enforce" (2026-11-26).** `no_answer` /
+    `secure_client` still switch plain -> encrypted (a service started before
+    the policy went off), but never encrypted -> plain while the policy says
+    enforce: one delayed reply would otherwise make a client send its commands
+    in clear and believe an impostor. A service still plain from before
+    "enforce" must be restarted (keys.py policy lists them).
+  - **Message size (2026-11-26).** `secure_server` (called by every service,
+    secured or not) sets `maxmsgsize` = `MAX_MSG_BYTES` (64 MB) on the REP
+    socket: one huge message could otherwise exhaust memory and kill a service
+    whose instrument is energised -- before any key is checked.
   - Generic clients: scan-core's `Instrument` and mission-control's
     `fetch_describe` / `request_shutdown` use `suite_common.secure` with the
     instance name ("kim", "kim_pc-a", "kim@pc-a:5567" all count as kim).
@@ -2157,6 +2174,9 @@ zpiezo has no GUI.
     nothing calls `secure.no_answer(host, module)` and retries ONCE in the
     other mode (it remembers the switch; the next silence switches back).
     Resending is safe: a request in the wrong mode never reaches the service.
+    Since 2026-11-26 NOT from encrypted to plain while the policy says
+    "enforce" (a downgrade anyone who can delay a reply could trigger);
+    a service left plain from before "enforce" must be restarted.
     Only a PC with a key switches; one never set up behaves as before. SUB
     loops rebuild when `secure.flip_generation()` changes. Second trap found
     on the way: a plain REQ socket whose handshake a CurveZMQ server refused

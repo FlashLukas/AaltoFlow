@@ -463,6 +463,14 @@ def no_answer(host: str, module: str) -> bool:
     except SecurityError:
         return False
     k = _flip_key(host, module)
+    # NEVER from encrypted to plain under "enforce" (security review
+    # 2026-11-26): anyone able to delay one reply -- or to answer on the port
+    # while the service is down -- would otherwise make the client talk plain,
+    # i.e. send its commands in clear and believe an impostor's replies. A
+    # service still running plain from before "enforce" must be restarted.
+    pol = policy()
+    if pol["mode"] == "enforce" and module_secured(module, pol) and not _flipped.get(k):
+        return False
     with _flip_lock:
         if _flipped.pop(k, False):
             pass                               # back to the policy's mode
@@ -490,7 +498,7 @@ def secure_client(sock, host: str, module: str) -> bool:
     pol = policy()
     want = module_secured(module, pol)
     with _flip_lock:
-        if _flipped.get(_flip_key(host, module)):
+        if _flipped.get(_flip_key(host, module)) and not (want and pol["mode"] == "enforce"):
             want = not want
     if not want:
         return False
@@ -724,11 +732,30 @@ _auth_lock = threading.Lock()
 _auths: dict = {}                              # id(context) -> [ZapHandler, n]
 
 
-def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
+#: the largest command a service accepts (bytes); see secure_server
+MAX_MSG_BYTES = 64 * 1024 * 1024
+
+
+def secure_server(ctx, sockets, module: str, on_event=None,
+                  max_msg_bytes: int = MAX_MSG_BYTES) -> Guard | None:
     """Make `sockets` (REP, PUB; not yet bound) CurveZMQ servers for `module`,
     when the lab's policy secures it. Returns the Guard (pass every request
     through ``guard.check(req, frame.get("User-Id"))``), or None: plain, as
-    before. Undo with ``release_server(guard)`` when the service stops."""
+    before. Undo with ``release_server(guard)`` when the service stops.
+
+    Every REP socket also gets a size limit (``max_msg_bytes``, in every
+    mode): without one, a single multi-gigabyte message -- before any key is
+    checked -- fills the memory and kills the service, leaving its instrument
+    unsupervised (security review 2026-11-26). Commands are small; the scan
+    server, which receives recipes and design files, passes a larger limit
+    if it needs one."""
+    import zmq
+    for s in sockets:
+        try:
+            if s.type == zmq.REP:
+                s.maxmsgsize = int(max_msg_bytes)
+        except (AttributeError, zmq.ZMQError):
+            pass
     pol = policy()
     if not module_secured(module, pol):
         # a plain service on a PC that HAS a keyring leaves a marker too, so

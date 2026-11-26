@@ -86,7 +86,7 @@ import numpy as np
 import zmq
 
 from suite_common import secure
-from suite_common.control import ControlLease, describe_holder, pc_of
+from suite_common.control import ControlLease, describe_holder, from_other_pc, pc_of
 
 from . import autosave
 from .engine import run
@@ -353,6 +353,32 @@ def build_manifest() -> dict:
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
 #: the largest Navigator design file a suite may share through the server
 DESIGN_MAX_BYTES = 32 * 2**20
+
+
+def recipe_file_refs(d) -> list[str]:
+    """Every file a scan definition would READ on the PC that runs it: an
+    axis's (or a zip member's, a raster side's) `path`, a scout mask's
+    `from`. A definition submitted from ANOTHER PC must not name one
+    (security review 2026-11-26): a `file` axis turns each line of any text
+    file on this PC into a setpoint, readable back through the live data and
+    the saved .nc. scan_server_client.inline_files puts the values in
+    instead before submitting."""
+    out: list[str] = []
+
+    def walk(x, key=""):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if k == "path" and isinstance(v, str) and v.strip():
+                    out.append(f"{key or 'axis'} path {v!r}")
+                elif k == "from" and key in ("scout", "mask") and v:
+                    out.append(f"{key} from {v!r}")
+                else:
+                    walk(v, k if k in ("scout", "mask") else key)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, key)
+    walk(d)
+    return out
 #: bytes per get_file reply: a big measurement comes in pieces, so no single
 #: request holds the server's command thread (and an Abort) for long
 FILE_CHUNK = 4 * 2**20
@@ -1264,7 +1290,7 @@ class ScanServer:
         return None
 
     @staticmethod
-    def _parse_entries(raw_entries, common_attrs, added_by: str = ""):
+    def _parse_entries(raw_entries, common_attrs, added_by: str = "", remote: bool = False):
         """[_Entry] from the wire, or an error reply. The run info (sample,
         operator, ...) is what the SUBMITTING PC sent: its Run info card."""
         if not isinstance(raw_entries, list) or not raw_entries:
@@ -1274,6 +1300,13 @@ class ScanServer:
             if not isinstance(item, dict) or not isinstance(item.get("recipe"), dict):
                 return {"ok": False, "error": f"entry {k + 1}: 'recipe' must be a scan "
                                               f"definition (a JSON object)"}
+            refs = recipe_file_refs(item["recipe"]) if remote else []
+            if refs:
+                return {"ok": False, "refused": "own_pc",
+                        "error": f"entry {k + 1}: a scan definition from another PC may not "
+                                 f"read files on this PC ({', '.join(refs[:3])}): put the "
+                                 f"values into it (the measurement suite does that for "
+                                 f"file axes), or submit it on this PC"}
             try:
                 recipe = Recipe.from_dict(item["recipe"])
             except Exception as exc:
@@ -1294,7 +1327,8 @@ class ScanServer:
                         "error": f"a scan is already running on this server ('{name}'); "
                                  f"wait for it to end, abort it, or add yours to the "
                                  f"running queue (queue_add)"}
-        entries = self._parse_entries(raw_entries, common_attrs)
+        entries = self._parse_entries(raw_entries, common_attrs,
+                                      remote=from_other_pc(req))
         if isinstance(entries, dict):
             return entries
 
@@ -1440,7 +1474,7 @@ class ScanServer:
         if raw_entries is None and isinstance(req.get("recipe"), dict):
             raw_entries = [{"name": req.get("name"), "recipe": req["recipe"]}]
         entries = self._parse_entries(raw_entries, req.get("attrs"),
-                                      added_by=self._who(req))
+                                      added_by=self._who(req), remote=from_other_pc(req))
         if isinstance(entries, dict):
             return entries
         with self._lock:

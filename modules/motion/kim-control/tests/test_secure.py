@@ -315,7 +315,11 @@ def test_policy_switched_on_while_kim_runs_plain(start_kim, client, lab):
     assert svc._guard is None
     lab.policy("enforce")
     b = client("b", start=False)
-    assert b.take_control()                 # one timeout, then plain, as the service
+    # Under "enforce" a client never falls back to PLAIN (security review
+    # 2026-11-26: a delayed reply must not talk it out of encryption). A
+    # service still plain from before the policy changed must be restarted.
+    with pytest.raises(TimeoutError):
+        b.take_control()
 
 
 def test_telemetry_follows_the_mode_a_request_found(start_kim, client, lab):

@@ -176,3 +176,62 @@ def test_the_own_pc_may_change_everything():
     assert control.config_refusal(req, CURRENT) is None
     req.pop("_origin")                            # not encrypted: as before
     assert control.config_refusal(req, CURRENT) is None
+
+
+# ---------------------------------------------------- second tier (same day) --
+
+def test_an_address_from_another_pc_is_refused():
+    lease = control.ControlLease()
+    for req in ({"cmd": "start_px_calibration", "camera_host": "10.0.0.66"},
+                {"cmd": "set_follow", "channel": 1, "enabled": True, "endpoint": "x:5567"}):
+        r = lease.handle({**req, "_origin": "other"})
+        assert r and r["refused"] == "own_pc" and "address" in r["error"], req
+        assert lease.handle({**req, "_origin": "own"}) is None
+
+
+def test_shutdown_from_another_pc_needs_control_and_never_keeps_outputs():
+    lease = control.ControlLease()
+    holder = {"id": "h", "kind": "gui", "host": "u@pc-b"}
+    other = {"id": "o", "kind": "gui", "host": "u@pc-c"}
+    assert lease.handle({"cmd": "take_control", "client": holder})["ok"]
+    r = lease.handle({"cmd": "shutdown", "client": other, "_origin": "other"})
+    assert r and r["refused"] == "own_pc"
+    r = lease.handle({"cmd": "shutdown", "keep_outputs": True, "client": holder,
+                      "_origin": "other"})
+    assert r and "keep_outputs" in r["error"]
+    assert lease.handle({"cmd": "shutdown", "client": holder, "_origin": "other"}) is None
+    # the own PC (the launcher's clean stop), with or without keep_outputs
+    assert lease.handle({"cmd": "shutdown", "keep_outputs": True, "_origin": "own"}) is None
+    assert lease.handle({"cmd": "shutdown"}) is None          # not encrypted: as before
+
+
+def test_safety_settings_are_recognised_by_path():
+    assert control.is_safety_setting(("limits", "current_max_A"))
+    assert control.is_safety_setting(("calibration", "px_file"))
+    assert not control.is_safety_setting(("motion", "speed"))
+    assert not control.is_safety_setting(())
+
+
+def test_under_enforce_a_client_never_falls_back_to_plain(pc, monkeypatch):
+    d, kr = pc
+    secure.write_cert(d / secure.OWN_PUBLIC, _key("a"), meta={"pc": "me"})
+    secure.write_cert(d / secure.OWN_SECRET, _key("a"), _key("s"), meta={"pc": "me"})
+    monkeypatch.setattr(secure, "_flipped", {})
+    _policy(kr, "enforce", ["*"])
+    assert secure.no_answer("lab-pc", "kim") is False        # no flip to plain
+    assert not secure._flipped
+    # "off": a service still encrypted from before may be reached encrypted
+    _policy(kr, "off", ["*"])
+    assert secure.no_answer("lab-pc", "kim") is True
+
+
+def test_a_service_command_socket_has_a_size_limit(tmp_path, monkeypatch):
+    zmq = pytest.importorskip("zmq")
+    monkeypatch.setenv("AALTOFLOW_SECURITY_DIR", str(tmp_path / "nothing"))
+    ctx = zmq.Context()
+    rep, pub = ctx.socket(zmq.REP), ctx.socket(zmq.PUB)
+    try:
+        assert secure.secure_server(ctx, [rep, pub], "kim") is None     # plain, but:
+        assert rep.maxmsgsize == secure.MAX_MSG_BYTES
+    finally:
+        rep.close(0); pub.close(0); ctx.term()

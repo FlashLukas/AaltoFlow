@@ -29,6 +29,7 @@ is rebuilt from the files -- deleting it loses nothing.
 
 from __future__ import annotations
 
+import html
 import threading
 from datetime import date
 from pathlib import Path
@@ -38,6 +39,14 @@ from PySide6 import QtCore, QtWidgets
 from scan_core import catalogue as cat
 from scan_core import eln, run_info
 from apps.theme import C
+
+
+def _plain(text: str) -> str:
+    """Text from a data file, safe for a Qt tooltip. Qt shows a tooltip as HTML
+    when it looks like HTML, and an <img src=//host/x> in a shared file's
+    error text or ledger would make this PC fetch it (security review
+    2026-11-26)."""
+    return html.escape(str(text))
 
 #: results columns: (header, row key). The order is the order a run is
 #: thought of in (Lukas, 2026-10-06): when, on which setup, by whom, which
@@ -471,11 +480,11 @@ class CatalogueWidget(QtWidgets.QWidget):
             if r.get("error"):
                 for i in range(len(self.columns)):
                     item.setForeground(i, QtGui.QBrush(QtGui.QColor(C["danger"])))
-                    item.setToolTip(i, f"could not be read: {r['error']}")
+                    item.setToolTip(i, _plain(f"could not be read: {r['error']}"))
             else:
-                item.setToolTip(self.name_col, r["path"])
+                item.setToolTip(self.name_col, _plain(str(r["path"])))
             if r.get("eln_url"):
-                item.setToolTip(self.eln_col, f"in eLabFTW: {r['eln_url']}")
+                item.setToolTip(self.eln_col, _plain(f"in eLabFTW: {r['eln_url']}"))
             self.table.addTopLevelItem(item)
         self.table.setSortingEnabled(True)
 
@@ -561,8 +570,18 @@ class CatalogueWidget(QtWidgets.QWidget):
 
     @staticmethod
     def _open_url(url):
+        # Only a page of THIS PC's eLabFTW instance: the URL comes from a file in
+        # the (shared) data folder, and the desktop would run whatever it names
+        # (eln.openable_url; security review 2026-11-26).
         from PySide6 import QtGui
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+        ok = eln.openable_url(url, eln.ElnSettings.load().url)
+        if ok is None:
+            QtWidgets.QMessageBox.warning(
+                None, "Open in eLabFTW",
+                f"Not opened: {url}\n\nIt is not a page of the eLabFTW instance this PC "
+                "is set up for (Settings tab, ELN section).")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(ok))
 
     def _ask_duplicates(self, already: list[dict]) -> str | None:
         """Some runs are in eLabFTW already: update / skip / new? None = cancel.

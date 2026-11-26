@@ -401,3 +401,29 @@ def test_run_info_card_extra_fields_and_this_pcs_list(tmp_path):
     assert list(again.edits) == ["sample", "thickness_nm", "comment"]
     assert run_info.fields(tmp_path) == ("sample", "thickness_nm", "comment")
     assert again.tag_btn is None                            # tags left the list
+
+
+def test_select_all_leaves_the_safety_settings_alone(qapp, fake_service, tmp_path):
+    """Security review 2026-11-26: a file from someone else may carry another
+    hardware address or wider limits; "select all" must not send them."""
+    from apps.recall import RecallDialog
+    a = fake_service(16736, manifest=DEMO_MANIFEST)
+    reg, lab = _lab((a, "alpha"))
+    try:
+        ds = _snapshot_of(reg, tmp_path)
+        a.config["motion"]["preset"] = "fast"
+        a.config["hardware"]["address"] = "COM3"
+        dlg = RecallDialog(read_snapshot(ds), lab=lab, attrs=dict(ds.attrs), file_label="s.nc")
+        dlg.select_all("alpha")
+        rows = {it.text(0): it for it in dlg.setting_items("alpha")}
+        assert rows["motion.preset"].checkState(0) == QtCore.Qt.Checked
+        assert rows["hardware.address"].checkState(0) == QtCore.Qt.Unchecked
+        # by hand it can still be ticked, and the confirmation marks it
+        rows["hardware.address"].setCheckState(0, QtCore.Qt.Checked)
+        asked = []
+        dlg.confirm = lambda title, text: asked.append(text) or False
+        dlg.apply_selected()
+        assert "!! hardware.address" in asked[0] and "SAFETY setting" in asked[0]
+        dlg.close()
+    finally:
+        lab.close()

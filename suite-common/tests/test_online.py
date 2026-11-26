@@ -131,3 +131,34 @@ def test_release_catalog_lists_downloads_and_drops_modules_without(release):
     for e in doc["modules"]:
         assert set(e["downloads"]) == {"code"}
         assert len(e["downloads"]["code"]["sha256"]) == 64
+
+
+# ------------------------------------------- security review 2026-11-26 ----
+
+def test_a_download_without_a_checksum_is_refused(server, tmp_path):
+    doc = K.fetch_catalog(server + "catalog.json")
+    dl = doc["modules"][0]["downloads"]["code"]
+    for bad in ("", None, "abc"):
+        with pytest.raises(K.CatalogError, match="no valid SHA-256"):
+            K.download(K.asset_url(doc, dl["file"]), tmp_path / "x.zip", bad)
+
+
+def test_a_download_name_must_be_a_plain_file_next_to_the_catalog(server):
+    doc = K.fetch_catalog(server + "catalog.json")
+    for bad in ("../x.zip", "C:/Users/Public/x.bat", "sub/x.zip", "a" + chr(92) + "b.zip",
+                "https://elsewhere.example/x.zip", "//elsewhere.example/x.zip", ".."):
+        with pytest.raises(K.CatalogError, match="refused"):
+            K.asset_url(doc, bad)
+
+
+def test_plain_http_is_refused_except_to_this_pc():
+    with pytest.raises(K.CatalogError, match="only https"):
+        K.fetch_catalog("http://mirror.example.org/catalog.json", timeout=2)
+
+
+def test_a_download_larger_than_promised_is_refused(server, tmp_path):
+    doc = K.fetch_catalog(server + "catalog.json")
+    dl = doc["modules"][0]["downloads"]["code"]
+    big = tmp_path / "x"
+    with pytest.raises(K.CatalogError, match="larger than the catalog says"):
+        K.download(K.asset_url(doc, dl["file"]), big, dl["sha256"], size=1)
