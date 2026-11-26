@@ -24,7 +24,7 @@ import zmq
 
 from ..chopper import Chopper
 from .. import secure
-from ..control import ControlLease
+from ..control import ControlLease, config_refusal
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
                        TOPIC_EVENT, status_to_dict, config_to_dict,
@@ -282,6 +282,11 @@ class ChopperService:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(self.ch.cfg)}
             elif cmd == "set_config":
+                # limits / hardware / file settings only from this PC
+                # (control.config_refusal; security review 2026-11-26)
+                refused = config_refusal(msg, config_to_dict(self.ch.cfg))
+                if refused is not None:
+                    return refused
                 apply_config_dict(self.ch.cfg, msg["config"])
                 self.ch.apply_config()
             elif cmd == "shutdown":

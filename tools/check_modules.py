@@ -443,6 +443,16 @@ def control_check(rep: Report, m):
                     f"{Path(rel).name}")
         else:
             rep.add(m.key, name, "PASS")
+    # Security review 2026-11-26: set_config must refuse a change to the
+    # limits / hardware / file settings from another PC (control.config_refusal;
+    # docs/DEVELOPER_NOTES.md, "The instrument's own PC").
+    services = [f for f in pkg.rglob("service.py") if ".venv" not in f.parts]
+    text = "".join(f.read_text(encoding="utf-8", errors="replace") for f in services)
+    if '"set_config"' in text:
+        ok = text.count("config_refusal(") >= text.count('== "set_config"')
+        rep.add(m.key, "set_config checks config_refusal", "PASS" if ok else "FAIL",
+                "" if ok else "a set_config handler does not call control.config_refusal "
+                "before applying the config (see kim's net/service.py)")
 
 
 def hwlock_check(rep: Report, m, master: bytes | None):

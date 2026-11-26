@@ -22,7 +22,7 @@ import time
 import zmq
 
 from .. import secure
-from ..control import ControlLease
+from ..control import ControlLease, config_refusal
 from ..piezo import Piezo
 from .describe import build_manifest
 from . import protocol as P
@@ -317,6 +317,11 @@ class PiezoService:
         if cmd == "get_config":
             return {"ok": True, "config": P.config_to_dict(b.cfg)}
         if cmd == "set_config":
+            # limits / hardware / file settings only from this PC
+            # (control.config_refusal; security review 2026-11-26)
+            refused = config_refusal(req, P.config_to_dict(b.cfg))
+            if refused is not None:
+                return refused
             P.apply_config_dict(b.cfg, req.get("config", {}))
             b.apply_config()
             return {"ok": True}

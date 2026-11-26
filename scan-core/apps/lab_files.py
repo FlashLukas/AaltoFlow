@@ -24,10 +24,31 @@ from apps.theme import C
 
 
 def cache_path(pc: str, rel: str) -> Path:
-    """Where a copy of the server PC's file `rel` is kept on this PC."""
-    safe_pc = "".join(ch for ch in (pc or "lab") if ch.isalnum() or ch in "-_.") or "lab"
-    parts = [p for p in Path(rel).parts if p not in ("..", ".", "/", "\\")]
-    return Path(tempfile.gettempdir()) / "aaltoflow-lab-data" / safe_pc / Path(*parts)
+    """Where a copy of the server PC's file `rel` is kept on this PC.
+
+    `pc` and `rel` come from the scan server's replies, i.e. from another PC,
+    so they are checked, not trusted (security review 2026-11-26): the old
+    version dropped ".." but let a drive path ("C:" + a folder) through, and joining an absolute
+    path REPLACES the folder in front of it -- a server could have written a
+    file anywhere on this PC, e.g. into a folder whose Python files are run
+    at start. Now the result must lie inside the cache folder and be a .nc
+    measurement; anything else raises ValueError."""
+    safe_pc = "".join(ch for ch in (pc or "lab") if ch.isalnum() or ch in "-_.")
+    if not safe_pc.strip("."):
+        safe_pc = "lab"                      # "", "." or ".." would leave the folder
+    r = Path(str(rel or ""))
+    if r.is_absolute() or r.drive or r.anchor or ".." in r.parts:
+        raise ValueError(f"refused a file path from the server: {rel!r} "
+                         f"(not inside its data folder)")
+    if r.suffix.lower() != ".nc":
+        raise ValueError(f"refused a file from the server that is not a .nc measurement: {rel!r}")
+    root = (Path(tempfile.gettempdir()) / "aaltoflow-lab-data").resolve()
+    dest = (root / safe_pc / r).resolve()
+    try:
+        dest.relative_to(root / safe_pc)
+    except ValueError:
+        raise ValueError(f"refused a file path from the server: {rel!r}") from None
+    return dest
 
 
 def _fmt_bytes(n) -> str:
@@ -67,7 +88,11 @@ class FileFetcher(QtCore.QObject):
         if self.busy or not rel:
             return None
         pc = str((watch.last or {}).get("pc") or watch.host)
-        dest = cache_path(pc, rel)
+        try:
+            dest = cache_path(pc, rel)
+        except ValueError as exc:
+            self.done.emit(None, str(exc))
+            return None
         self.busy = True
         host, cmd, pub = watch.host, watch.cmd_port, watch.pub_port
 
@@ -208,7 +233,11 @@ class LabFilesDialog(QtWidgets.QDialog):
         rel = f.get("path")
         if not rel:
             return
-        dest = cache_path(self.pc, rel)
+        try:
+            dest = cache_path(self.pc, rel)
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
         self._busy = True
         self.open_btn.setEnabled(False)
         self.bar.setRange(0, 0); self.bar.show()

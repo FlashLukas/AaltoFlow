@@ -16,7 +16,7 @@ import time
 
 import zmq
 
-from ..control import ControlLease
+from ..control import ControlLease, config_refusal
 from .. import secure
 from ..instruments import TG_RANGE_HZ
 from ..spectrum import SpectrumAnalyzer
@@ -321,6 +321,11 @@ class SignalhoundService:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(v.cfg)}
             elif cmd == "set_config":
+                # limits / hardware / file settings only from this PC
+                # (control.config_refusal; security review 2026-11-26)
+                refused = config_refusal(msg, config_to_dict(v.cfg))
+                if refused is not None:
+                    return refused
                 apply_config_dict(v.cfg, msg["config"])
                 v.apply_config()
             elif cmd == "shutdown":

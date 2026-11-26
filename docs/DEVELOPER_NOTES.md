@@ -422,7 +422,15 @@ still assumes piezo/zpiezo.
     `this_pc.key` / `this_pc.key_secret` (the zmq certificate text format,
     metadata `pc`, `host`, `machine`, `addresses`). Per lab, the keyring
     folder: one `<pc>.key` per trusted PC and `policy.json` {"mode": off |
-    warn | enforce, "modules": [...] or ["*"]}. Missing anything = "off".
+    warn | enforce, "modules": [...] or ["*"]}. A PC with no keyring set up
+    is "off". **A PC WITH a keyring fails closed (2026-11-26):** when the
+    keyring folder cannot be read (the network drive not mapped yet at boot,
+    a blip, a broken policy.json) it uses its last copy
+    (`security_dir()/policy_cache.json`, `keyring_cache/*.key`, refreshed on
+    every successful read; a retired key leaves the copy too), and with no
+    copy `FALLBACK_POLICY` = enforce everything, trusting only its own key.
+    Before, an unreadable keyring meant "off" and the service started plain.
+    A readable keyring with no policy.json is still "off" (the lab chose it).
   - Service: `self._guard = secure.secure_server(ctx, [rep, pub], "<key>",
     on_event=...)` between creating the sockets and binding them (it sets
     `curve_server`, a ZAP domain of its own, and starts one
@@ -444,6 +452,25 @@ still assumes piezo/zpiezo.
     keyring says no). `warn` logs each problem once and lets it through.
     Refusal: `{"ok": false, "refused": "security", "error": "refused
     (security): ..."}`. The keyring is re-read at most every 2 s.
+  - **The instrument's own PC (2026-11-26).** `Guard.check` stamps every
+    request `req["_origin"] = "own" | "other"` from the KEY that sent it
+    (a client's own `_origin` is overwritten). control.py then accepts two
+    things only from the own PC, whoever holds control:
+    a FILE PATH argument (`path`, `folder`, `file`, `filename`, `dir`,
+    `directory`; empty = the service's default, fine) -- checked in
+    `ControlLease.handle` for every verb, except the verbs a service lists in
+    `ControlLease(path_ok=...)` because it confines the path itself (the scan
+    server's `get_file`); and a CHANGE to the safety part of the config --
+    groups `limits*`, `hardware`, `interlock`, `safety` and any key ending
+    `_path` / `_file` / `_dir` / `_folder` -- checked by
+    `config_refusal(req, config_to_dict(cfg))` at the top of every service's
+    `set_config` (sending the SAME values is fine, so a remote Settings dialog
+    still works). Refusal: `{"ok": false, "refused": "own_pc", ...}`. Why: a
+    path from another PC could overwrite any file the service can write (its
+    .ini, a startup script); a remote set_config could widen the envelope
+    every setter clamps to. A service that is not encrypted cannot tell who
+    sent anything and behaves as before. A NEW module: call config_refusal in
+    its set_config (the template modules do).
   - Generic clients: scan-core's `Instrument` and mission-control's
     `fetch_describe` / `request_shutdown` use `suite_common.secure` with the
     instance name ("kim", "kim_pc-a", "kim@pc-a:5567" all count as kim).

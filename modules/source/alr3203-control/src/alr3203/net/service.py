@@ -27,7 +27,7 @@ import time
 import zmq
 
 from .. import secure
-from ..control import ControlLease
+from ..control import ControlLease, config_refusal
 from ..supply import BipolarSupply
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -296,6 +296,11 @@ class Alr3203Service:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(s.cfg)}
             elif cmd == "set_config":
+                # limits / hardware / file settings only from this PC
+                # (control.config_refusal; security review 2026-11-26)
+                refused = config_refusal(msg, config_to_dict(s.cfg))
+                if refused is not None:
+                    return refused
                 apply_config_dict(s.cfg, msg["config"])
                 s.apply_config()
             elif cmd == "shutdown":

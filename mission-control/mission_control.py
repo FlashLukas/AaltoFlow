@@ -3024,9 +3024,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.information(self, "Import settings",
                                                   settings_summary(plan))
             return plan
-        if confirm and not self._confirm_import(plan):
-            self.log("settings import cancelled.")
-            return None
+        if confirm:
+            plan = self._confirm_import(plan)
+            if plan is None:
+                self.log("settings import cancelled.")
+                return None
+            if not plan.to_write:
+                self.log("settings import: nothing left to change.")
+                return plan
         try:
             backup = apply_import(plan, ROOT)
         except OSError as e:
@@ -3044,7 +3049,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rescan(force=True)
         return plan
 
-    def _confirm_import(self, plan: ImportPlan) -> bool:
+    def _confirm_import(self, plan: ImportPlan) -> ImportPlan | None:
+        """Ask before importing. Returns the plan to apply (possibly without
+        its Python files), or None when the user cancelled.
+
+        Security review 2026-11-26: what a bundle would switch on (real
+        hardware, extra service arguments, remote hosts, another module
+        catalog...) and any Python code in it are said in the dialog TEXT --
+        they used to be only under "Show details", which nobody opens -- and
+        the code is a second, separate question that defaults to No."""
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle("Import settings")
         box.setIcon(QtWidgets.QMessageBox.Warning if plan.overwrite
@@ -3058,11 +3071,31 @@ class MainWindow(QtWidgets.QMainWindow):
             text += (f"\n\n{LOCAL_FILE} is included: it holds this PC's ports, "
                      "real-hardware flags and remote hosts, and will be replaced by "
                      "those of the PC the bundle came from.")
+            warns = plan.local_warnings()
+            if warns:
+                text += ("\n\nIt would set:\n" + "\n".join("  - " + w for w in warns[:12])
+                         + ("\n  - ..." if len(warns) > 12 else ""))
+        if plan.code_entries:
+            text += (f"\n\nThe bundle also contains {len(plan.code_entries)} Python "
+                     "file(s); you will be asked about them separately.")
         box.setText(text)
         box.setDetailedText(settings_summary(plan))
         box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
         box.setDefaultButton(QtWidgets.QMessageBox.Cancel)
-        return box.exec() == QtWidgets.QMessageBox.Yes
+        if box.exec() != QtWidgets.QMessageBox.Yes:
+            return None
+        if plan.code_entries:
+            names = "\n".join("  " + e.path for e in plan.code_entries)
+            ans = QtWidgets.QMessageBox.warning(
+                self, "Import settings: Python code",
+                "These files are PROGRAMS, not settings. The measurement suite runs "
+                f"them every time it starts:\n\n{names}\n\nImport them only if you "
+                "know who wrote them and trust them. Import the code too?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if ans != QtWidgets.QMessageBox.Yes:
+                plan = plan.without_code()
+        return plan
 
     # ---- helpers ----------------------------------------------------------
 

@@ -44,7 +44,7 @@ import time
 
 import zmq
 
-from ..control import ControlLease
+from ..control import ControlLease, config_refusal
 from .. import secure
 from ..scope import Scope
 from .describe import build_manifest
@@ -345,6 +345,11 @@ class ScopeService:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(v.cfg)}
             elif cmd == "set_config":
+                # limits / hardware / file settings only from this PC
+                # (control.config_refusal; security review 2026-11-26)
+                refused = config_refusal(msg, config_to_dict(v.cfg))
+                if refused is not None:
+                    return refused
                 apply_config_dict(v.cfg, msg["config"])
                 v.apply_config()
                 self._rev_at = 0.0          # shapes may have moved: recompute now
@@ -421,6 +426,11 @@ class ScopeService:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(g.cfg)}
             elif cmd == "set_config":
+                # limits / hardware / file settings only from this PC
+                # (control.config_refusal; security review 2026-11-26)
+                refused = config_refusal(msg, config_to_dict(g.cfg))
+                if refused is not None:
+                    return refused
                 apply_config_dict(g.cfg, msg["config"])
                 g.apply_config()
                 self._rev_at = 0.0

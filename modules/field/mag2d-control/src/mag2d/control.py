@@ -85,6 +85,104 @@ ALWAYS_VERBS = frozenset({"shutdown"})
 KINDS = ("gui", "script", "machine")
 
 
+# ------------------------------------------------- the instrument's own PC ---
+#
+# Security review 2026-11-26. Two kinds of request are accepted only from a
+# program running on the instrument's OWN PC, never from another PC on the
+# network, whoever holds control:
+#
+# * a FILE PATH (save_positions{path}, load_pattern{path}, save_picture
+#   {folder}...). A path names a file on the service's PC; from another PC it
+#   would let that PC overwrite or read any file the service can reach (its
+#   own .ini, a startup script...). On the own PC it gives nothing away: that
+#   user can write those files anyway.
+# * a CHANGE to the SAFETY part of the config: the limits (the envelope every
+#   setter clamps to -- a magnet's maximum current, a laser's maximum power),
+#   the hardware address and driver files, the interlock, and any setting that
+#   names a file. Change them at the instrument. Sending the SAME values is
+#   fine, so a remote Settings dialog that sends the whole config still works
+#   as long as it leaves these alone.
+#
+# "Own PC" is decided by the KEY that sent the message (secure.Guard.check
+# stamps req["_origin"]), so it needs encryption on. A service that is not
+# encrypted has no way to know who sent anything and behaves as before.
+
+#: set by secure.Guard.check on every request: "own" or "other"
+ORIGIN_KEY = "_origin"
+#: request arguments that name a file or folder on the service's PC
+PATH_ARGS = ("path", "folder", "file", "filename", "dir", "directory")
+#: config groups that only the own PC may change (also "limits_1", "limits_2"...)
+PROTECTED_GROUPS = ("limits", "hardware", "interlock", "safety")
+#: config keys (in any group) that name a file or folder
+PATH_SUFFIXES = ("_path", "_file", "_dir", "_folder")
+
+
+def from_other_pc(req) -> bool:
+    """True when the key that sent `req` is not the instrument's own PC's."""
+    return isinstance(req, dict) and req.get(ORIGIN_KEY) == "other"
+
+
+def _own_pc_only(what: str) -> dict:
+    return {"ok": False, "refused": "own_pc",
+            "error": f"refused: {what} is only accepted from the instrument's own PC "
+                     f"(security: a file path or a safety setting from another PC "
+                     f"could overwrite files or widen the limits). Do it on the PC "
+                     f"the service runs on."}
+
+
+def path_refusal(req) -> dict | None:
+    """The refusal for a request from another PC that names a file; else None.
+    An EMPTY path/folder is fine: it means "the service's own default"."""
+    if not from_other_pc(req):
+        return None
+    for k in PATH_ARGS:
+        v = req.get(k)
+        if v not in (None, "") and not (isinstance(v, str) and not v.strip()):
+            return _own_pc_only(f"{req.get('cmd')!r} with a file path ({k})")
+    return None
+
+
+def _protected(group: str, key: str) -> bool:
+    g = str(group).lower()
+    return (g in PROTECTED_GROUPS or g.startswith(tuple(p + "_" for p in PROTECTED_GROUPS))
+            or str(key).lower().endswith(PATH_SUFFIXES))
+
+
+def _same(a, b) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b or str(a).strip().lower() == str(b).strip().lower()
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b or abs(a - b) <= 1e-9 * max(abs(a), abs(b), 1.0)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    return a == b or str(a) == str(b)
+
+
+def config_refusal(req, current: dict) -> dict | None:
+    """For ``set_config``: the refusal when a request from ANOTHER PC changes a
+    protected setting (see above); None when it may go on.
+
+    ``current`` = the service's config as ``get_config`` returns it
+    (``config_to_dict(cfg)``). Only keys that exist in it count -- the module
+    ignores the others anyway."""
+    if not from_other_pc(req):
+        return None
+    incoming = req.get("config") if isinstance(req, dict) else None
+    if not isinstance(incoming, dict) or not isinstance(current, dict):
+        return None
+    changed = []
+    for group, values in incoming.items():
+        have = current.get(group)
+        if not isinstance(values, dict) or not isinstance(have, dict):
+            continue
+        for k, v in values.items():
+            if k in have and _protected(group, k) and not _same(v, have[k]):
+                changed.append(f"{group}.{k}")
+    if not changed:
+        return None
+    return _own_pc_only("changing " + ", ".join(sorted(changed)))
+
+
 def make_identity(kind: str = "script", name: str = "", role: str = "") -> dict:
     """A fresh identity for one client object: random id + who and where.
 
@@ -141,12 +239,17 @@ class ControlLease:
     abort...); ``read`` = extra read-only verbs whose names do not start with
     get_/read_/list_ (e.g. ``stream_read``). ``on_event(level, msg)`` reports
     hand-overs into the service's event stream, so every GUI log shows them.
-    ``clock`` is injectable for tests.
+    ``clock`` is injectable for tests. ``path_ok`` = verbs whose path
+    argument the service CONFINES itself (the scan server's ``get_file`` only
+    serves files inside its data folder), so a request from another PC may
+    name one; every other verb with a path is refused from another PC
+    (path_refusal).
     """
 
     def __init__(self, safety=(), read=(), lease_s: float = LEASE_S,
-                 on_event=None, clock=time.monotonic):
+                 on_event=None, clock=time.monotonic, path_ok=()):
         self.safety = frozenset(safety)
+        self.path_ok = frozenset(path_ok)
         self.read = frozenset(read)
         self.lease_s = float(lease_s)
         self.on_event = on_event or (lambda level, msg: None)
@@ -221,6 +324,9 @@ class ControlLease:
         Call it first thing in ``_dispatch``.
         """
         cmd = req.get("cmd") if isinstance(req, dict) else None
+        refused = None if cmd in self.path_ok else path_refusal(req)
+        if refused is not None:
+            return refused
         ident = self._identity(req)
         now = self._clock()
         with self._lock:

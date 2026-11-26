@@ -385,3 +385,46 @@ def test_the_console_follows_a_policy_change(start_kim, lab):
                         "status"], capture_output=True, text=True, timeout=30,
                        env=dict(os.environ))
     assert '"ok": true' in r.stdout, r.stdout + r.stderr
+
+
+# ------------------------------------- the instrument's own PC (2026-11-26) --
+#
+# Security review: file paths and changes to the safety settings (limits,
+# hardware, file names in the config) are accepted only from the service's own
+# PC. The PC is known from the KEY, so a client cannot claim it.
+
+def test_another_pc_may_not_name_a_file(start_kim, client, tmp_path):
+    start_kim()
+    b = client("b")
+    assert b.take_control()                   # holding control does not change it
+    target = tmp_path / "written_by_pc_b.json"
+    with pytest.raises(RuntimeError, match="only accepted from the instrument's own PC"):
+        b.save_positions(str(target))
+    assert not target.exists()
+
+
+def test_another_pc_may_not_widen_the_limits(start_kim, client):
+    svc = start_kim()
+    b = client("b")
+    assert b.take_control()
+    before = svc.brain.cfg.limits.max_voltage
+    with pytest.raises(RuntimeError, match="limits.max_voltage"):
+        b.set_config({"limits": {"max_voltage": before + 50}})
+    assert svc.brain.cfg.limits.max_voltage == before
+    # the whole config sent back unchanged (a remote Settings dialog) is fine,
+    # and so is a change outside the protected groups
+    whole = b.get_config()
+    whole["ui"]["theme"] = "light"
+    b.set_config(whole)
+    assert svc.brain.cfg.ui.theme == "light"
+
+
+def test_the_own_pc_may_do_both(start_kim, client, tmp_path):
+    svc = start_kim()
+    a = client("a", host="127.0.0.1")
+    a.identity["host"] = "user@pc-a"
+    assert a.take_control()
+    target = tmp_path / "positions.json"
+    a.save_positions(str(target))
+    assert target.exists()
+    a.set_config({"limits": {"max_voltage": svc.brain.cfg.limits.max_voltage - 1}})

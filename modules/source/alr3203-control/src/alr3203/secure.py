@@ -74,6 +74,9 @@ OWN_SECRET = "this_pc.key_secret"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "*"}
 #: the keyring is re-read at most this often (it may be on a network share)
 RELOAD_S = 2.0
+#: the key Guard.check stamps on every request: "own" / "other" PC (the same
+#: name as control.ORIGIN_KEY; the two files do not import each other)
+ORIGIN_KEY = "_origin"
 
 
 class SecurityError(RuntimeError):
@@ -107,11 +110,78 @@ def keyring_dir() -> Path | None:
     return Path(k) if k else None
 
 
+#: this PC's copies of the last policy and keyring it could read (fail closed)
+POLICY_CACHE = "policy_cache.json"
+KEYRING_CACHE = "keyring_cache"
+#: what a PC uses when its keyring is unreachable and it has never read one:
+#: everything encrypted, only this PC's own key trusted
+FALLBACK_POLICY = {"mode": "enforce", "modules": ["*"]}
+
+_said: set = set()
+
+
+def _say_once(key: str, level: str, msg: str) -> None:
+    if key not in _said:
+        _said.add(key)
+        _to_console(level, f"security: {msg}")
+
+
+def _read_policy(kr: Path) -> dict | None:
+    """The policy file in the keyring folder: its dict, {} when the folder is
+    readable but holds no policy file (the lab chose "off"), or None when it
+    cannot be read -- the share is not mapped yet, a network blip, a broken
+    file. None must never be taken for "off" (see policy())."""
+    try:
+        if not kr.is_dir():
+            return None
+        p = kr / POLICY_FILE
+        if not p.exists():
+            return {}
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def policy() -> dict:
-    """The lab's policy: {"mode", "modules"}. Mode "off" when anything is
-    missing -- a PC that was never set up behaves exactly as before."""
+    """The lab's policy: {"mode", "modules"}. Mode "off" when this PC was
+    never set up (no keyring) -- it behaves exactly as before.
+
+    FAIL CLOSED (security review 2026-11-26): a PC that HAS a keyring but
+    cannot read it right now -- the lab PC at boot, before the network drive
+    is mapped -- used to read that as "off" and start its services PLAIN,
+    open to anyone on the network, even under an "enforce" policy. Now it
+    uses the last policy it read (a copy kept in security_dir()), and with no
+    copy either, encrypts everything (FALLBACK_POLICY)."""
     kr = keyring_dir()
-    data = _read_json(kr / POLICY_FILE) if kr else {}
+    if kr is None:
+        data = {}
+    else:
+        data = _read_policy(kr)
+        cache = security_dir() / POLICY_CACHE
+        if data is not None:
+            if _read_json(cache) != data or not cache.exists():
+                try:
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = cache.with_suffix(".tmp")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+                    os.replace(tmp, cache)
+                except OSError:
+                    pass                       # a cache problem must not stop anything
+        else:
+            cached = _read_json(cache) if cache.exists() else None
+            if cached is not None:
+                data = cached
+                _say_once("policy-cache", "warn",
+                          f"the keyring {kr} cannot be read; using the last policy "
+                          f"read from it (mode '{cached.get('mode', 'off')}')")
+            else:
+                data = dict(FALLBACK_POLICY)
+                _say_once("policy-fallback", "warn",
+                          f"the keyring {kr} cannot be read and no earlier copy "
+                          f"exists; encrypting everything and trusting only this PC")
     mode = str(data.get("mode", "off")).lower()
     if mode not in MODES:
         mode = "off"
@@ -262,8 +332,14 @@ class Keyring:
     """The trusted PCs, read from the keyring folder (re-read when it changes,
     at most every RELOAD_S -- deleting a PC's file locks it out)."""
 
-    def __init__(self, folder: Path | None):
+    def __init__(self, folder: Path | None, cache: Path | None = None):
         self.folder = Path(folder) if folder else None
+        #: this PC's copy of the keyring (security_dir()/KEYRING_CACHE): read
+        #: when the keyring folder cannot be, refreshed whenever it can.
+        #: Without it a network blip would lock every other PC out; with the
+        #: plain "missing folder = nobody" rule kept, it never lets in MORE
+        #: than the last keyring read did.
+        self.cache = Path(cache) if cache else None
         self._lock = threading.Lock()
         self._checked = -1e9
         self._stamp: tuple = ()
@@ -277,11 +353,27 @@ class Keyring:
         if now - self._checked < RELOAD_S:
             return
         self._checked = now
-        if self.folder is None or not self.folder.is_dir():
-            self._by_key, self._stamp = {}, ()
-            return
-        files = sorted(self.folder.glob("*.key"))
-        stamp = tuple((p.name, p.stat().st_mtime_ns) for p in files)
+        folder, live = self.folder, True
+        try:
+            if folder is None or not folder.is_dir():
+                raise OSError("no keyring folder")
+            files = sorted(folder.glob("*.key"))
+            stamp = tuple((p.name, p.stat().st_mtime_ns) for p in files)
+        except OSError:
+            live = False
+            folder = self.cache
+            try:
+                if folder is None or not folder.is_dir():
+                    self._by_key, self._stamp = {}, ()
+                    return
+                files = sorted(folder.glob("*.key"))
+                stamp = ("cache",) + tuple((p.name, p.stat().st_mtime_ns) for p in files)
+            except OSError:
+                self._by_key, self._stamp = {}, ()
+                return
+            _say_once("keyring-cache:" + str(self.folder), "warn",
+                      f"the keyring {self.folder} cannot be read; using this PC's "
+                      f"copy of it ({folder})")
         if stamp == self._stamp:
             return
         by_key, problems = {}, []
@@ -290,6 +382,32 @@ class Keyring:
             if e is not None:
                 by_key[e.public] = e
         self._by_key, self._stamp, self.problems = by_key, stamp, problems
+        if live and self.cache is not None:
+            self._mirror(files)
+
+    def _mirror(self, files: list) -> None:
+        """Copy the keyring's key files to the local cache (only what changed;
+        files no longer in the keyring are removed, so a RETIRED PC is not
+        resurrected by the copy)."""
+        try:
+            self.cache.mkdir(parents=True, exist_ok=True)
+            names = set()
+            for p in files:
+                names.add(p.name)
+                try:
+                    data = p.read_bytes()
+                except OSError:
+                    continue
+                dst = self.cache / p.name
+                if not dst.exists() or dst.read_bytes() != data:
+                    tmp = dst.with_suffix(".tmp")
+                    tmp.write_bytes(data)
+                    os.replace(tmp, dst)
+            for old in self.cache.glob("*.key"):
+                if old.name not in names:
+                    old.unlink()
+        except OSError:
+            pass                               # a cache problem must not stop anything
 
     def entries(self) -> list[Entry]:
         with self._lock:
@@ -381,7 +499,7 @@ def secure_client(sock, host: str, module: str) -> bool:
     if h in LOCAL_HOSTS or h == pc or h.split(".")[0] == pc or h == this_pc_name():
         server = public                       # a service on this PC uses our key
     else:
-        e = Keyring(keyring_dir()).by_host(h)
+        e = Keyring(keyring_dir(), security_dir() / KEYRING_CACHE).by_host(h)
         if e is None:
             raise SecurityError(
                 f"no key for '{host}' in the keyring ({keyring_dir()}): {module} "
@@ -444,8 +562,19 @@ class Guard:
         return False
 
     def check(self, req: dict, user_id: str | None) -> dict | None:
-        """None when `req` may go on; otherwise the refusal to send back."""
+        """None when `req` may go on; otherwise the refusal to send back.
+
+        Also STAMPS the request with where it came from: ``req["_origin"]`` =
+        "own" (a program on the service's own PC: same key) or "other". The
+        key proves it, so the client cannot choose it -- whatever "_origin" a
+        client sent is overwritten here. control.py reads it: file paths and
+        the safety groups of the config (limits, hardware...) are accepted
+        only from the instrument's own PC (security review 2026-11-26)."""
         e = self.entry(user_id or "")
+        if isinstance(req, dict):
+            own = bool(user_id) and (user_id == self.own_public
+                                     or (e is not None and e.pc == self.own_pc))
+            req[ORIGIN_KEY] = "own" if own else "other"
         if e is None and user_id:
             # The key was checked when the connection was made (ZAP), but a
             # connection stays open for hours: a PC RETIRED since then (its
@@ -611,7 +740,9 @@ def secure_server(ctx, sockets, module: str, on_event=None) -> Guard | None:
             _write_marker(module, "off")
         return None
     public, secret, pc = own_keys()
-    guard = Guard(module, pol["mode"], Keyring(keyring_dir()), public, pc, on_event)
+    guard = Guard(module, pol["mode"],
+                  Keyring(keyring_dir(), security_dir() / KEYRING_CACHE),
+                  public, pc, on_event)
     with _auth_lock:
         slot = _auths.get(id(ctx))
         if slot is not None and not slot[0].alive():

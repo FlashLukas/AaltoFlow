@@ -262,3 +262,56 @@ def test_an_unknown_nested_module_is_skipped_by_name(tmp_path):
     bundle = _handmade(tmp_path / "x.zip", {"modules/source/smb-control/smb.ini": "x"})
     (e,) = B.read_bundle(bundle, new).skipped
     assert e.reason == "modules/source/smb-control is not installed here"
+
+
+# ------------------------------------------- security review 2026-11-26 ----
+
+def test_a_program_in_a_calibrations_folder_is_skipped(old, tmp_path):
+    new = _suite(tmp_path / "new")
+    zp = _handmade(tmp_path / "b.zip", {
+        "clMag-control/Calibrations/x.dll": "MZ",
+        "clMag-control/Calibrations/run.bat": "echo",
+        "clMag-control/Calibrations/cal_new.json": "{}",
+    })
+    plan = B.read_bundle(zp, new)
+    act = {e.path: e.action for e in plan.entries}
+    assert act["clMag-control/Calibrations/x.dll"] == B.SKIP
+    assert act["clMag-control/Calibrations/run.bat"] == B.SKIP
+    assert act["clMag-control/Calibrations/cal_new.json"] == B.NEW
+
+
+def test_a_library_path_in_an_ini_is_never_taken_from_a_bundle(old, tmp_path):
+    new = _suite(tmp_path / "new")
+    (new / "kim-control" / "kim.ini").write_text(
+        "[hardware]\ndll_path = C:/Thorlabs/x.dll\nserial = 1\n", encoding="utf-8")
+    zp = _handmade(tmp_path / "b.zip", {"kim-control/kim.ini":
+                                        "[hardware]\ndll_path = //evil/share/x.dll\n"
+                                        "serial = 2\nvisa_library = C:/evil.dll\n"})
+    plan = B.read_bundle(zp, new)
+    e = next(e for e in plan.entries if e.path == "kim-control/kim.ini")
+    text = e.data.decode("utf-8")
+    assert "evil" not in text                      # neither library path came over
+    assert "C:/Thorlabs/x.dll" in text             # this PC's line is kept
+    assert "serial = 2" in text                    # the rest of the file is imported
+    assert "dll_path" in e.reason and "visa_library" in e.reason
+
+
+def test_python_code_and_local_switches_are_named(old, tmp_path):
+    new = _suite(tmp_path / "new")
+    (new / "scan-core" / "lab_predictors" / "dispersion.py").unlink()
+    zp = _handmade(tmp_path / "b.zip", {
+        "scan-core/lab_predictors/a.py": "import os\n",
+        "suite_local.json": json.dumps({
+            "modules": {"pm16": {"real": True, "instances": [
+                {"name": "x", "config": "C:/x.ini", "args": "--foo"}]}},
+            "remote": [{"host": "10.0.0.9", "cmd": 5555}],
+            "settings": {"catalog_url": "http://evil/catalog.json"}}),
+    })
+    plan = B.read_bundle(zp, new)
+    assert [e.path for e in plan.code_entries] == ["scan-core/lab_predictors/a.py"]
+    warns = "\n".join(plan.local_warnings())
+    for word in ("pm16: REAL hardware on", "--foo", "10.0.0.9", "catalog_url"):
+        assert word in warns, word
+    safe = plan.without_code()
+    assert not safe.code_entries
+    assert "suite_local.json" in [e.path for e in safe.to_write]

@@ -512,6 +512,9 @@ class ScanServer:
             # get_registry is a read like describe (the get_ prefix makes it
             # one anyway; named so the intent is written down)
             read={"set_view", "set_design", "get_registry"},
+            # get_file confines its path to the data folder itself (_get_file),
+            # so another PC may name one (control.path_refusal)
+            path_ok={"get_file"},
             on_event=lambda level, msg: self.log(msg, level))
 
     def _reset_scan_state(self):

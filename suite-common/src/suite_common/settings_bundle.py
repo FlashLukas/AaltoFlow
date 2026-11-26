@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import tempfile
 import zipfile
@@ -83,6 +84,21 @@ LAB_PREDICTORS = "scan-core/lab_predictors"
 
 #: Settings files that the folder rule would not catch, by exact path.
 NAMED_FILES = (LOCAL_FILE, "mission-control/profiles.json", "scan-core/suite_layouts.json")
+
+# Security review 2026-11-26: a bundle is DATA, but three things in it could
+# have made a module run a program from it -- so import checks them:
+#: the file types a Calibrations/ folder may receive (data, never a program:
+#: a .dll there plus a dll_path in an .ini would have been loaded by a service)
+CALIBRATION_SUFFIXES = (".json", ".csv", ".txt", ".ini", ".dat", ".npy", ".npz",
+                        ".png", ".tif", ".tiff", ".cal", ".yaml", ".yml", ".xml",
+                        ".h5", ".nc")
+#: .ini keys that name a program library a service loads (pm16 dll_path, the
+#: camera's thorlabs_dll_dir, a VISA library...). Import never takes their
+#: value from a bundle: it keeps this PC's line, or leaves the key out.
+LIBRARY_KEY = re.compile(r"(dll|sdk|librar)", re.I)
+#: suite_local.json keys whose import deserves to be named in the dialog
+LOCAL_RISKY = ("real", "instances", "remote", "catalog_url", "eln_url",
+               "eln_verify_tls", "eln_auto_upload", "data_dir")
 
 
 # ------------------------------------------------------------ what to save
@@ -254,6 +270,53 @@ class ImportPlan:
         return any(e.path.startswith(LAB_PREDICTORS + "/") for e in self.to_write)
 
     @property
+    def code_entries(self) -> list[BundleEntry]:
+        """The lab predictors (Python code) this import would write."""
+        return [e for e in self.to_write if e.path.startswith(LAB_PREDICTORS + "/")]
+
+    def without_code(self) -> "ImportPlan":
+        """The same plan with the Python files left out (marked SKIP)."""
+        out = []
+        for e in self.entries:
+            if e in self.code_entries:
+                e = BundleEntry(e.path, SKIP, "Python code, not imported")
+            out.append(e)
+        return ImportPlan(self.source, self.manifest, out)
+
+    def local_warnings(self) -> list[str]:
+        """What importing suite_local.json would switch on or point elsewhere
+        on THIS PC: real hardware, extra service arguments, remote hosts, the
+        module catalog, the ELN upload, the data folder. Shown in the dialog
+        itself, not only in the details."""
+        e = next((e for e in self.to_write if e.path == LOCAL_FILE), None)
+        if e is None:
+            return []
+        try:
+            new = json.loads(e.data.decode("utf-8-sig"))
+        except ValueError:
+            return ["suite_local.json in the bundle is not valid JSON"]
+        out = []
+        mods = new.get("modules") if isinstance(new, dict) else None
+        for key, m in (mods or {}).items() if isinstance(mods, dict) else ():
+            if not isinstance(m, dict):
+                continue
+            if m.get("real"):
+                out.append(f"{key}: REAL hardware on")
+            for inst in m.get("instances") or []:
+                if isinstance(inst, dict) and (inst.get("args") or inst.get("config")):
+                    out.append(f"{key}: an instance with extra arguments / config file "
+                               f"({inst.get('args') or ''} {inst.get('config') or ''})".rstrip())
+        if isinstance(new, dict) and new.get("remote"):
+            hosts = sorted({str(r.get("host")) for r in new["remote"] if isinstance(r, dict)})
+            out.append("remote services on " + ", ".join(hosts))
+        st = new.get("settings") if isinstance(new, dict) else None
+        if isinstance(st, dict):
+            for k in ("catalog_url", "eln_url", "eln_verify_tls", "eln_auto_upload", "data_dir"):
+                if k in st:
+                    out.append(f"{k} = {st[k]!r}")
+        return out
+
+    @property
     def touches_local_settings(self) -> bool:
         """True when suite_local.json would change -- worth a warning, because
         it holds THIS PC's ports, real-hardware flags and remote hosts."""
@@ -273,6 +336,56 @@ def _clean_member(name: str) -> str | None:
         return None
     parts = [p for p in parts if p not in ("", ".")]
     return "/".join(parts) if parts else None
+
+
+def _keep_library_keys(data: bytes, current: bytes) -> tuple[bytes, list[str]]:
+    """`data` (an .ini from a bundle) with every line that names a program
+    library (LIBRARY_KEY: dll_path, thorlabs_dll_dir, visa_library...) taken
+    from `current` (this PC's file) instead, or removed when this PC's file has
+    no such line. Returns the new bytes and the keys that differed.
+
+    Why: a module loads that library when it starts with --real. From a
+    bundle -- mailed around, attached to a bug report -- the path could name a
+    DLL anywhere, a network share included. It is a setting of THIS PC, set
+    by hand, like the COM port of a real instrument would be."""
+    line_re = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*[=:]\s*(.*?)\s*$")
+
+    def parse(b: bytes) -> tuple[list[str], dict]:
+        lines = b.decode("utf-8-sig", errors="replace").splitlines()
+        sec, found = "", {}
+        for ln in lines:
+            s = ln.strip()
+            if s.startswith("[") and s.endswith("]"):
+                sec = s[1:-1].strip().lower()
+                continue
+            m = line_re.match(ln)
+            if m and LIBRARY_KEY.search(m.group(1)):
+                found[(sec, m.group(1).lower())] = ln
+        return lines, found
+
+    lines, _ = parse(data)
+    _, mine = parse(current)
+    out, sec, changed = [], "", []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("[") and s.endswith("]"):
+            sec = s[1:-1].strip().lower()
+            out.append(ln)
+            continue
+        m = line_re.match(ln)
+        if m and LIBRARY_KEY.search(m.group(1)):
+            here = mine.get((sec, m.group(1).lower()))
+            here_val = line_re.match(here).group(2) if here else ""
+            if m.group(2) != here_val:
+                changed.append(m.group(1))
+            if here is not None:
+                out.append(here)
+            continue
+        out.append(ln)
+    if not changed:
+        return data, []
+    nl = "\r\n" if b"\r\n" in data else "\n"
+    return (nl.join(out) + nl).encode("utf-8"), changed
 
 
 def read_bundle(path: str | Path, root: Path | None = None) -> ImportPlan:
@@ -339,6 +452,18 @@ def read_bundle(path: str | Path, root: Path | None = None) -> ImportPlan:
                 entries.append(BundleEntry(rel, SKIP, f"{head} is not installed here"))
                 continue
             data = zf.read(info)
+            # A Calibrations/ folder takes data files only (see
+            # CALIBRATION_SUFFIXES): a program dropped there could be loaded
+            # through an .ini's dll_path.
+            if "/Calibrations/" in f"/{rel}" and not rel.lower().endswith(CALIBRATION_SUFFIXES):
+                entries.append(BundleEntry(rel, SKIP, "not a data file (a program?)"))
+                continue
+            if rel.lower().endswith(".ini"):
+                current = target.read_bytes() if target.is_file() else b""
+                data, kept = _keep_library_keys(data, current)
+                if kept:
+                    note = "; ".join(x for x in (note, "library setting(s) kept as on "
+                                                 "this PC: " + ", ".join(kept)) if x)
             if target.is_file():
                 action = SAME if target.read_bytes() == data else OVERWRITE
             else:

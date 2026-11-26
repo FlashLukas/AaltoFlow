@@ -24,7 +24,7 @@ import zmq
 
 from .. import spec
 from .. import secure
-from ..control import ControlLease
+from ..control import ControlLease, config_refusal
 from ..source import SignalSource
 from .describe import build_manifest
 from .protocol import (DEFAULT_CMD_PORT, DEFAULT_PUB_PORT, TOPIC_STATUS,
@@ -281,6 +281,11 @@ class Hp8648Service:
             elif cmd == "get_config":
                 return {"ok": True, "config": config_to_dict(self.src.cfg)}
             elif cmd == "set_config":
+                # limits / hardware / file settings only from this PC
+                # (control.config_refusal; security review 2026-11-26)
+                refused = config_refusal(msg, config_to_dict(self.src.cfg))
+                if refused is not None:
+                    return refused
                 apply_config_dict(self.src.cfg, msg["config"])
                 self.src.apply_config()
             elif cmd == "shutdown":
