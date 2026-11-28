@@ -54,7 +54,7 @@
         "NI DAQ"
       ],
       "folder": "clMag-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5555,
         "pub": 5556
@@ -75,7 +75,7 @@
         "Rohde & Schwarz"
       ],
       "folder": "smb-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5557,
         "pub": 5558
@@ -96,7 +96,7 @@
         "XYZ"
       ],
       "folder": "stage-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5559,
         "pub": 5560
@@ -117,7 +117,7 @@
         "piezosystem jena"
       ],
       "folder": "piezo-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5561,
         "pub": 5562
@@ -139,7 +139,7 @@
         "KCube"
       ],
       "folder": "zpiezo-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5565,
         "pub": 5566
@@ -160,7 +160,7 @@
         "XYZ"
       ],
       "folder": "kim-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5567,
         "pub": 5568
@@ -181,7 +181,7 @@
         "focus"
       ],
       "folder": "kim001-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5637,
         "pub": 5638
@@ -203,7 +203,7 @@
         "tracking"
       ],
       "folder": "camera-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5563,
         "pub": 5564
@@ -227,7 +227,7 @@
         "HF2LI"
       ],
       "folder": "hf2-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5569,
         "pub": 5570
@@ -248,7 +248,7 @@
         "laser power"
       ],
       "folder": "pm16-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5571,
         "pub": 5572
@@ -272,7 +272,7 @@
         "Harogic"
       ],
       "folder": "vna-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5573,
         "pub": 5574
@@ -293,7 +293,7 @@
         "rotation"
       ],
       "folder": "mag2d-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5575,
         "pub": 5576
@@ -314,7 +314,7 @@
         "calibrated"
       ],
       "folder": "mag2dcal-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5577,
         "pub": 5578
@@ -335,7 +335,7 @@
         "Quantum Design"
       ],
       "folder": "ppms-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5579,
         "pub": 5580
@@ -357,7 +357,7 @@
         "GPIB"
       ],
       "folder": "kepco-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5581,
         "pub": 5582
@@ -381,7 +381,7 @@
         "Windfreak"
       ],
       "folder": "windfreak-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5583,
         "pub": 5584
@@ -401,7 +401,7 @@
         "GW Instek"
       ],
       "folder": "gsp818-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5585,
         "pub": 5586
@@ -422,7 +422,7 @@
         "Signal Hound"
       ],
       "folder": "signalhound-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5587,
         "pub": 5588
@@ -444,7 +444,7 @@
         "USB serial"
       ],
       "folder": "dsphase-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5589,
         "pub": 5590
@@ -467,7 +467,7 @@
         "Ethernet"
       ],
       "folder": "dssg-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5591,
         "pub": 5592
@@ -489,7 +489,7 @@
         "USB serial"
       ],
       "folder": "dsamp-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5593,
         "pub": 5594
@@ -512,7 +512,7 @@
         "AG-UC2"
       ],
       "folder": "agilis-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5595,
         "pub": 5596
@@ -535,7 +535,7 @@
         "SmarAct"
       ],
       "folder": "smaract-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5597,
         "pub": 5598
@@ -556,7 +556,7 @@
         "detector"
       ],
       "folder": "sr830-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5599,
         "pub": 5600
@@ -580,7 +580,7 @@
         "GPIB"
       ],
       "folder": "cs260-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5601,
         "pub": 5602
@@ -602,7 +602,7 @@
         "Thorlabs"
       ],
       "folder": "ccs200-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5603,
         "pub": 5604
@@ -625,7 +625,7 @@
         "K-Cube"
       ],
       "folder": "ddr25-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5605,
         "pub": 5606
@@ -648,7 +648,7 @@
         "Thorlabs"
       ],
       "folder": "elliptec-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5607,
         "pub": 5608
@@ -671,7 +671,7 @@
         "MC2000B"
       ],
       "folder": "chopper-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5609,
         "pub": 5610
@@ -693,7 +693,7 @@
         "NKT"
       ],
       "folder": "superk-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5611,
         "pub": 5612
@@ -716,7 +716,7 @@
         "TC200"
       ],
       "folder": "tc200-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5613,
         "pub": 5614
@@ -739,7 +739,7 @@
         "RS-232"
       ],
       "folder": "ls455-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5615,
         "pub": 5616
@@ -761,7 +761,7 @@
         "Thorlabs"
       ],
       "folder": "pm400-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5617,
         "pub": 5618
@@ -784,7 +784,7 @@
         "GPIB"
       ],
       "folder": "hp8648-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5619,
         "pub": 5620
@@ -807,7 +807,7 @@
         "ethernet"
       ],
       "folder": "sr7230-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5621,
         "pub": 5622
@@ -829,7 +829,7 @@
         "Keithley"
       ],
       "folder": "k2450-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5623,
         "pub": 5624
@@ -872,7 +872,7 @@
         "Signal Hound"
       ],
       "folder": "shsna-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5627,
         "pub": 5628
@@ -895,7 +895,7 @@
         "digital"
       ],
       "folder": "usb6001-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5629,
         "pub": 5630
@@ -918,7 +918,7 @@
         "Tektronix"
       ],
       "folder": "afg-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5631,
         "pub": 5632
@@ -945,7 +945,7 @@
         "power supply"
       ],
       "folder": "scope-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5633,
         "pub": 5634
@@ -966,7 +966,7 @@
         "serial"
       ],
       "folder": "alr3203-control",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "ports": {
         "cmd": 5635,
         "pub": 5636

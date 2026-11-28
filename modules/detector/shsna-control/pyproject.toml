@@ -1,6 +1,6 @@
 [project]
 name = "shsna-control"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 description = "Scalar network analyser: Signal Hound USB-TG44A sweeps through a DUT, thru-normalised |S21| in dB (via the signalhound service, or simulated)"
 requires-python = ">=3.11"

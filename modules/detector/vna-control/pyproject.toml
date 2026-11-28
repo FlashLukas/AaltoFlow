@@ -1,6 +1,6 @@
 [project]
 name = "vna-control"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 description = "Vector network analyser -- Keysight PNA-X N5222A, Copper Mountain C1209, LibreVNA or Harogic PNB-60 (or a simulator): S-parameters, reference, u"
 requires-python = ">=3.11"

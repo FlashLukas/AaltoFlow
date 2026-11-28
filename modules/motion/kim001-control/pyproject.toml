@@ -1,6 +1,6 @@
 [project]
 name = "kim001-control"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 description = "Control module for an objective-focus piezo-inertia actuator (Thorlabs KIM001 + PIA13)"
 readme = "README.md"

@@ -1,6 +1,6 @@
 [project]
 name = "afg-control"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 description = "Tektronix AFG1062 two-channel function generator control (USB-TMC / SCPI), an AaltoFlow module"
 requires-python = ">=3.11"

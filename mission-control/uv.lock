@@ -129,7 +129,7 @@ wheels = [
 
 [[package]]
 name = "mission-control"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "psutil" },
@@ -409,7 +409,7 @@ wheels = [
 
 [[package]]
 name = "suite-common"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "../suite-common" }
 
 [package.metadata]
